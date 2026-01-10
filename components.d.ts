@@ -11,6 +11,8 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    ApiKeySettings: typeof import('./src/components/ApiKeySettings.vue')['default']
     GreetComponent: typeof import('./src/components/GreetComponent.vue')['default']
+    Settings: typeof import('./src/components/Settings.vue')['default']
   }
 }

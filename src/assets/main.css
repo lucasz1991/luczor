@@ -10,7 +10,7 @@
 }
 
 html {
-  @apply text-[14px] text-gray-200 bg-gray-800;
+  @apply text-[16px] text-gray-200 bg-gray-800;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;

@@ -16,8 +16,10 @@
     "check": "cargo check --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
+    "@openrouter/sdk": "^0.3.11",
     "@tauri-apps/api": "^2.9.0",
     "@tauri-apps/plugin-shell": "^2.3.3",
+    "@tauri-apps/plugin-store": "^2.4.1",
     "@vue/devtools": "^8.0.5",
     "pinia": "^3.0.4",
     "vue": "^3.5.25"

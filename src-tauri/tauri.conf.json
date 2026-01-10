@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tauri-app",
-  "version": "2.9.3",
+  "productName": "Luczor",
+  "version": "1.0.0",
   "identifier": "com.tauri-app.my",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -12,16 +12,18 @@
   "app": {
     "windows": [
       {
-        "title": "tauri-app",
+        "label": "main",
+        "title": "Luczor",
         "width": 800,
         "height": 600
       }
     ],
     "security": {
+      "capabilities": ["default"],
       "csp": {
         "default-src": "'self' customprotocol: asset:",
-        "connect-src": "ipc: http://ipc.localhost",
-        "font-src": "'self",
+        "connect-src": "ipc: http://ipc.localhost https://openrouter.ai wss://openrouter.ai",
+        "font-src": "'self'",
         "img-src": "'self' asset: http://asset.localhost blob: data:",
         "style-src": "'unsafe-inline' 'self'"
       }
