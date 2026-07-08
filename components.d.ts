@@ -11,9 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
-    ApiKeySettings: typeof import('./src/components/ApiKeySettings.vue')['default']
     ChatView: typeof import('./src/components/ChatView.vue')['default']
-    GreetComponent: typeof import('./src/components/GreetComponent.vue')['default']
     JarvisHud: typeof import('./src/components/JarvisHud.vue')['default']
     Settings: typeof import('./src/components/Settings.vue')['default']
   }

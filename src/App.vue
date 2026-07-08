@@ -15,7 +15,7 @@ import { VoiceEngine } from "@/services/voice/voiceEngine";
 import { getVoiceConfig, localStt, localSttReady } from "@/services/voice/localVoice";
 import { streamSpeak } from "@/services/voice/speak";
 import { luczorMemory, getMemoryPrefs } from "@/services/memory/luczorMemory";
-import { buildPromptContext } from "@/services/contextController";
+import { buildPromptContextDetails, inferTaskType, type PromptContextDetails } from "@/services/contextController";
 import { refreshStatus } from "@/services/status";
 import { appearance, loadAppearance } from "@/services/appearance";
 
@@ -596,6 +596,7 @@ async function send() {
   const pid = activeProjectId.value;
   const text = input.value.trim();
   if (!text || sending.value) return;
+  const taskType = inferTaskType(text);
 
   void playSfx("submit");
   await stopGenerating();
@@ -636,12 +637,13 @@ async function send() {
   ];
 
   // Inject relevant long-term memory (project scope) as an extra system note.
+  let promptContext: PromptContextDetails = { text: "", taskType };
   try {
     const prefs = await getMemoryPrefs();
     if (prefs.inject) {
       // Context Controller (server) ranks + budgets memory; local fallback.
-      const memCtx = await buildPromptContext(pid, text, prefs.injectCount);
-      if (memCtx) baseMessages.splice(1, 0, { role: "system", content: memCtx });
+      promptContext = await buildPromptContextDetails(pid, text, prefs.injectCount, taskType);
+      if (promptContext.text) baseMessages.splice(1, 0, { role: "system", content: promptContext.text });
     }
   } catch (e) {
     console.warn("[memory] context injection skipped:", e);
@@ -657,6 +659,11 @@ async function send() {
       model: "@preset/luczor",
       baseMessages,
       mode: mode.value,
+      taskType: promptContext.taskType,
+      contextId: promptContext.contextId,
+      repoId: promptContext.repoId,
+      branch: promptContext.branch,
+      commitSha: promptContext.commitSha,
       maxTokens: prj?.defaults?.maxOutputTokens,
       signal: abort.signal,
 

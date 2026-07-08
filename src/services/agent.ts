@@ -44,6 +44,11 @@ export type RunAgentOptions = {
   /** Conversation so far as wire messages (system + user/assistant history). */
   baseMessages: WireMessage[];
   mode: LuczorMode;
+  taskType?: string;
+  contextId?: string;
+  repoId?: string;
+  branch?: string;
+  commitSha?: string;
   temperature?: number;
   maxTokens?: number;
   maxRounds?: number;
@@ -106,6 +111,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
       model,
       messages,
       tools,
+      projectId,
+      taskType: opts.taskType,
+      contextId: opts.contextId,
+      repoId: opts.repoId,
+      branch: opts.branch,
+      commitSha: opts.commitSha,
       temperature,
       maxTokens,
       signal,

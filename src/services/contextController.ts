@@ -13,12 +13,36 @@ const SETTINGS_FILE = "luczor.settings.json";
 export type ContextPackage = {
   context_id: string;
   project_id?: string;
+  repo_id?: string;
+  branch?: string;
+  commit_sha?: string;
   task_type: string;
   feature_key?: string;
   budget: { max_input_tokens: number; estimated_tokens: number };
+  code?: Array<{ path: string; reason: string; score: number; tokens?: number }>;
   memory: Array<{ id?: string; content: string; type: string; staleness: string; score: number }>;
   instructions: string[];
 };
+
+export type PromptContextDetails = {
+  text: string;
+  contextId?: string;
+  repoId?: string;
+  branch?: string;
+  commitSha?: string;
+  taskType: string;
+};
+
+export function inferTaskType(text: string): string {
+  const t = text.toLowerCase();
+  if (/\b(fix|bug|fehler|exception|stack|kaputt|crash|test|lint|build)\b/.test(t)) return "coding.fix_bug";
+  if (/\b(refactor|umbau|aufräumen|vereinfachen|struktur)\b/.test(t)) return "coding.refactor";
+  if (/\b(review|prüf|pruef|code review|risiko)\b/.test(t)) return "coding.review";
+  if (/\b(plan|planung|architektur|roadmap|konzept|entwurf)\b/.test(t)) return "planning.architecture";
+  if (/\b(browser|seite|klick|formular|screenshot)\b/.test(t)) return "browser.automation";
+  if (/\b(server|deploy|log|ssh|docker|datenbank|db)\b/.test(t)) return "admin.server_debug";
+  return "chat.general";
+}
 
 async function serverTarget(): Promise<{ baseUrl: string; deviceKey: string } | null> {
   try {
@@ -51,7 +75,7 @@ export async function askContext(opts: {
     body: JSON.stringify({
       query: opts.query,
       project_id: opts.projectId,
-      task_type: opts.taskType ?? "chat.general",
+      task_type: opts.taskType ?? inferTaskType(opts.query),
       feature_key: opts.featureKey,
       budget: { max_input_tokens: opts.maxTokens ?? 800 },
     }),
@@ -64,17 +88,37 @@ export async function askContext(opts: {
  * Compact system note to inject. Prefers the server Context Controller
  * (ranked + budgeted), falls back to local memory recall.
  */
-export async function buildPromptContext(projectId: string, query: string, limit = 5): Promise<string> {
+export async function buildPromptContextDetails(
+  projectId: string,
+  query: string,
+  limit = 5,
+  taskType = inferTaskType(query)
+): Promise<PromptContextDetails> {
   try {
-    const pkg = await askContext({ projectId, query, maxTokens: 800 });
+    const pkg = await askContext({ projectId, query, taskType, maxTokens: 800 });
     if (pkg) {
-      if (!pkg.memory.length) return "";
-      const lines = pkg.memory.map((m) => `- ${m.content}`).join("\n");
+      const codeLines = (pkg.code ?? []).map((c) => `- Code: ${c.path} (${c.reason}, ${c.score})`);
+      const memoryLines = pkg.memory.map((m) => `- Memory: ${m.content}`);
+      const lines = [...codeLines, ...memoryLines].join("\n");
       const instr = pkg.instructions?.length ? `\n(${pkg.instructions.join(" ")})` : "";
-      return `Relevante Erinnerungen:\n${lines}${instr}`;
+      return {
+        text: lines ? `Relevanter Kontext:\n${lines}${instr}` : "",
+        contextId: pkg.context_id,
+        repoId: pkg.repo_id,
+        branch: pkg.branch,
+        commitSha: pkg.commit_sha,
+        taskType: pkg.task_type,
+      };
     }
   } catch (e) {
     console.warn("[context] server ask failed, using local:", e);
   }
-  return luczorMemory.getContextForPrompt(projectId, query, limit);
+  return {
+    text: await luczorMemory.getContextForPrompt(projectId, query, limit),
+    taskType,
+  };
+}
+
+export async function buildPromptContext(projectId: string, query: string, limit = 5): Promise<string> {
+  return (await buildPromptContextDetails(projectId, query, limit)).text;
 }

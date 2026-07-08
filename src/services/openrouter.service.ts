@@ -52,6 +52,12 @@ type ChatWithToolsArgs = {
   model: string;
   messages: WireMessage[];
   tools?: unknown[];
+  projectId?: string;
+  taskType?: string;
+  contextId?: string;
+  repoId?: string;
+  branch?: string;
+  commitSha?: string;
   temperature?: number;
   maxTokens?: number;
   signal?: AbortSignal;
@@ -86,7 +92,7 @@ async function getApiKey(): Promise<string> {
  * request is sent to the Laravel proxy (authenticated with the device key) and
  * the server injects the real OpenRouter key — so no provider key on the client.
  */
-async function getEndpoint(): Promise<{ url: string; headers: Record<string, string> }> {
+async function getEndpoint(): Promise<{ url: string; headers: Record<string, string>; proxied: boolean; clientId?: string }> {
   const store = await Store.load("luczor.settings.json");
   // Server proxy is the default: no OpenRouter key on the client.
   const useProxy = (await store.get<boolean>("use_server_proxy")) ?? true;
@@ -99,6 +105,8 @@ async function getEndpoint(): Promise<{ url: string; headers: Record<string, str
     return {
       url: `${cfg.baseUrl}/api/v1/proxy/chat`,
       headers: { Authorization: `Bearer ${cfg.deviceKey}`, "Content-Type": "application/json" },
+      proxied: true,
+      clientId: cfg.clientId,
     };
   }
 
@@ -112,7 +120,21 @@ async function getEndpoint(): Promise<{ url: string; headers: Record<string, str
       "HTTP-Referer": "https://luczor.local",
       "X-Title": "Luczor",
     },
+    proxied: false,
   };
+}
+
+function attachLuczorMeta(body: Record<string, unknown>, endpoint: Awaited<ReturnType<typeof getEndpoint>>, args: ChatWithToolsArgs) {
+  if (!endpoint.proxied) return;
+  body.client_id = endpoint.clientId;
+  body.project_id = args.projectId;
+  body.task_type = args.taskType ?? "chat.general";
+  body.context_id = args.contextId;
+  body.context_strategy_id = "context.memory_code_budgeted";
+  body.network_policy_id = "proxy.openrouter.default";
+  body.repo_id = args.repoId;
+  body.branch = args.branch;
+  body.commit_sha = args.commitSha;
 }
 
 export class OpenRouterService {
@@ -137,6 +159,7 @@ export class OpenRouterService {
     if (typeof args.maxTokens === "number") {
       body.max_tokens = args.maxTokens;
     }
+    attachLuczorMeta(body, endpoint, args);
 
     const res = await fetch(endpoint.url, {
       method: "POST",
@@ -204,6 +227,7 @@ export class OpenRouterService {
     if (typeof args.maxTokens === "number") {
       body.max_tokens = args.maxTokens;
     }
+    attachLuczorMeta(body, endpoint, args);
 
     const res = await fetch(endpoint.url, {
       method: "POST",
