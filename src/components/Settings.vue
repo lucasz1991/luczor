@@ -62,7 +62,7 @@ type AppSettings = {
   // Sync + Memory
   sync_auto: boolean;
   sync_auto_threshold: number;
-  cognee_base_url: string;
+  memory_use_server: boolean;
   memory_inject: boolean;
   memory_inject_count: number;
   memory_auto_remember: boolean;
@@ -108,7 +108,7 @@ const DEFAULTS: AppSettings = {
 
   sync_auto: false,
   sync_auto_threshold: 20,
-  cognee_base_url: "",
+  memory_use_server: true,
   memory_inject: true,
   memory_inject_count: 5,
   memory_auto_remember: true,
@@ -255,8 +255,8 @@ async function ensureStoreLoaded() {
   if (typeof sAuto === "boolean") settings.sync_auto = sAuto;
   const sThr = await settingsStore.get<number>("sync_auto_threshold");
   if (typeof sThr === "number" && !Number.isNaN(sThr)) settings.sync_auto_threshold = sThr;
-  const cog = await settingsStore.get<string>("cognee_base_url");
-  if (cog) settings.cognee_base_url = cog;
+  const memSrv = await settingsStore.get<boolean>("memory_use_server");
+  if (typeof memSrv === "boolean") settings.memory_use_server = memSrv;
   const mInj = await settingsStore.get<boolean>("memory_inject");
   if (typeof mInj === "boolean") settings.memory_inject = mInj;
   const mCnt = await settingsStore.get<number>("memory_inject_count");
@@ -339,7 +339,7 @@ async function saveAll() {
   // Sync + Memory
   await settingsStore.set("sync_auto", settings.sync_auto);
   await settingsStore.set("sync_auto_threshold", clamp(Math.round(settings.sync_auto_threshold), 1, 500));
-  await settingsStore.set("cognee_base_url", settings.cognee_base_url.trim().replace(/\/+$/, ""));
+  await settingsStore.set("memory_use_server", settings.memory_use_server);
   await settingsStore.set("memory_inject", settings.memory_inject);
   await settingsStore.set("memory_inject_count", clamp(Math.round(settings.memory_inject_count), 0, 20));
   await settingsStore.set("memory_auto_remember", settings.memory_auto_remember);
@@ -699,9 +699,11 @@ function iconPath(kind: string) {
                     </div>
                   </div>
 
-                  <label class="lz-label">Cognee URL (Memory-Engine)</label>
-                  <input v-model="settings.cognee_base_url" class="lz-input" placeholder="http://localhost:8765" />
-                  <p class="lz-hint">Leer = lokaler Memory-Puffer. Mit URL nutzt Luczor Cognee für semantische Erinnerungen.</p>
+                  <div class="lz-row">
+                    <span class="lz-rowlabel">Server-Memory (Cognee) nutzen</span>
+                    <button type="button" class="lz-switch" :class="{ 'is-on': settings.memory_use_server }" @click="settings.memory_use_server = !settings.memory_use_server"><span /></button>
+                  </div>
+                  <p class="lz-hint">An = Erinnerungen laufen über den Server (Cognee bleibt intern, kein Endpoint/Key im Client). Aus = nur lokaler Memory-Puffer.</p>
 
                   <div class="lz-row">
                     <span class="lz-rowlabel">Erinnerungen in Prompt einblenden</span>

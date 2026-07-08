@@ -44,7 +44,7 @@ export async function refreshStatus(): Promise<void> {
 
     let cognee: ConnState = "disabled";
     try {
-      const ch = await luczorMemory.cogneeHealth();
+      const ch = await luczorMemory.memoryHealth();
       cognee = ch === null ? "disabled" : ch ? "online" : "offline";
     } catch {
       /* ignore */
