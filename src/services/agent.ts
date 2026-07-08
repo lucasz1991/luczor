@@ -21,6 +21,17 @@ import { getTool, toOpenAITools, type ToolCategory } from "@/services/tools/regi
 import { awaitApproval } from "@/services/approvals";
 import { mutations } from "@/state/store";
 import { hud, setStatus, pulse, setLastTool } from "@/state/hud";
+import { logAgentEvent } from "@/services/api/sync";
+
+/** Truncate a value for the server event payload (avoid huge uploads). */
+function clip(v: unknown, max = 500): unknown {
+  try {
+    const s = typeof v === "string" ? v : JSON.stringify(v);
+    return s.length > max ? s.slice(0, max) + "…" : s;
+  } catch {
+    return String(v);
+  }
+}
 
 function pulseForCategory(category: ToolCategory) {
   if (category === "os") pulse("os", 1);
@@ -60,6 +71,16 @@ function recordOutcome(
 ) {
   mutations.updateToolCallStatus(projectId, callId, status);
   mutations.addHiddenToolMessage(projectId, outcome, { toolCallId: callId, toolName: name });
+
+  // Append-only agent event to the server brain (best-effort, skipped offline).
+  void logAgentEvent(`tool.${status}`, {
+    project_id: projectId,
+    tool: name,
+    call_id: callId,
+    ok: outcome.ok,
+    error: outcome.error ?? null,
+    output: outcome.ok ? clip(outcome.output) : null,
+  });
 }
 
 export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: string }> {
@@ -200,7 +221,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
  * Build the system preamble that tells the model about its operating mode and
  * the tool-approval policy. Prepended to the wire history by the caller.
  */
-export function buildSystemPreamble(mode: LuczorMode, projectName: string): string {
+export function buildSystemPreamble(mode: LuczorMode, projectName: string, assistantName = "Luczor"): string {
   const modeLine =
     mode === "observe"
       ? "Modus: BEOBACHTEN. Datenverändernde Tools sind gesperrt. Schlage Änderungen sprachlich vor, führe sie aber nicht aus."
@@ -209,7 +230,7 @@ export function buildSystemPreamble(mode: LuczorMode, projectName: string): stri
         : "Modus: HANDELN. Datenverändernde Tools sind erlaubt, benötigen aber die Bestätigung des Nutzers.";
 
   return [
-    "Du bist Luczor, ein deutschsprachiger Assistent, der das Gerät wahrnehmen und steuern kann.",
+    `Du bist ${assistantName}, ein deutschsprachiger Assistent, der das Gerät wahrnehmen und steuern kann.`,
     `Aktuelles Projekt: "${projectName}".`,
     modeLine,
     "Verfügbare Fähigkeiten (über Tools): Bildschirm ansehen (Screenshot, Fensterliste, Zwischenablage) sowie Maus, Tastatur, Apps öffnen und erlaubte Programme starten.",

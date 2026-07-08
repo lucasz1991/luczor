@@ -2,6 +2,8 @@
 import { computed, onMounted, onBeforeUnmount, ref } from "vue";
 import { hud, setKillSwitch } from "@/state/hud";
 import { lastScreenshot } from "@/services/tools/registry";
+import { syncNow } from "@/services/status";
+import { appearance } from "@/services/appearance";
 
 /* -------------------------------------------------
  * Animation clock + smoothed telemetry
@@ -142,10 +144,45 @@ function arc(v: number) {
 }
 
 function toggleKill() { setKillSwitch(!hud.killSwitch); }
+
+const syncing = ref(false);
+async function doSync() {
+  if (syncing.value) return;
+  syncing.value = true;
+  try {
+    await syncNow();
+  } catch (e) {
+    console.warn("[hud] sync failed:", e);
+  } finally {
+    syncing.value = false;
+  }
+}
+
+function connColor(state: string): string {
+  switch (state) {
+    case "online": return "#34d399";
+    case "configured": return "#22d3ee";
+    case "offline": return "#f43f5e";
+    default: return "#4f7488";
+  }
+}
+
+/* HUD anchor from personalization (br/bl/tr/tl) */
+const posStyle = computed(() => {
+  const p = appearance.hudPosition;
+  const bottom = p[0] === "b";
+  const right = p[1] === "r";
+  return {
+    top: bottom ? "auto" : "16px",
+    bottom: bottom ? "16px" : "auto",
+    left: right ? "auto" : "16px",
+    right: right ? "16px" : "auto",
+  };
+});
 </script>
 
 <template>
-  <div class="jarvis" :class="{ collapsed }">
+  <div class="jarvis" :class="{ collapsed }" :style="posStyle">
     <button class="jarvis-toggle" @click="collapsed = !collapsed" :title="collapsed ? 'HUD zeigen' : 'HUD einklappen'">
       <span class="dot" :style="{ background: palette.main, boxShadow: `0 0 12px ${palette.glow}` }" />
     </button>
@@ -257,6 +294,26 @@ function toggleKill() { setKillSwitch(!hud.killSwitch); }
             <span class="track"><i :style="{ width: (sMic*100)+'%', background:'linear-gradient(90deg,#059669,#34d399)' }" /></span></div>
         </div>
 
+        <!-- sync / memory status -->
+        <div class="syncrow">
+          <button
+            type="button"
+            class="syncrow__item syncrow__btn"
+            :class="{ 'is-busy': syncing }"
+            :disabled="syncing || hud.sync.server !== 'online'"
+            :title="hud.sync.server === 'online' ? 'Jetzt synchronisieren' : 'Server nicht verbunden'"
+            @click="doSync"
+          >
+            <span class="syncrow__ico">⇅</span>{{ hud.sync.pending }}
+          </button>
+          <span class="syncrow__item" :title="`Server: ${hud.sync.server}`">
+            <span class="syncrow__dot" :style="{ background: connColor(hud.sync.server) }" />SRV
+          </span>
+          <span class="syncrow__item" :title="`Cognee: ${hud.sync.cognee}`">
+            <span class="syncrow__dot" :style="{ background: connColor(hud.sync.cognee) }" />MEM
+          </span>
+        </div>
+
         <div class="footer">
           <div class="ticker" :title="hud.lastTool"><span class="muted">tool</span> {{ hud.lastTool || "—" }}</div>
           <button class="kill" :class="{ on: hud.killSwitch }" @click="toggleKill">
@@ -358,6 +415,23 @@ function toggleKill() { setKillSwitch(!hud.killSwitch); }
   transition: width .18s ease-out;
   box-shadow: 0 0 8px rgba(255,255,255,.15);
 }
+
+.syncrow {
+  display: flex; align-items: center; gap: 12px;
+  margin: 2px 0 8px;
+  font-size: 10px; color: #7fb7cd; letter-spacing: .06em;
+}
+.syncrow__item { display: inline-flex; align-items: center; gap: 5px; }
+.syncrow__btn {
+  border: 1px solid transparent; background: transparent; color: inherit;
+  border-radius: var(--r-sm); padding: 2px 6px; cursor: pointer; font: inherit;
+  transition: all .2s ease;
+}
+.syncrow__btn:hover:not(:disabled) { border-color: var(--border-soft); background: var(--cy-08); color: var(--cy-soft); }
+.syncrow__btn:disabled { cursor: default; opacity: 0.8; }
+.syncrow__btn.is-busy { animation: pulse-soft 1s infinite; }
+.syncrow__ico { color: #67e8f9; font-size: 11px; }
+.syncrow__dot { width: 7px; height: 7px; border-radius: 50%; box-shadow: 0 0 6px currentColor; }
 
 .footer { display: flex; align-items: center; gap: 8px; }
 .ticker { flex: 1; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: #9fd3e6; }

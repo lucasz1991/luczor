@@ -20,6 +20,7 @@ export type HudStatus =
   | "error";
 
 export type ActivityChannel = "audio" | "network" | "file" | "os";
+export type ConnState = "unknown" | "online" | "offline" | "disabled" | "configured";
 
 export const hud = reactive({
   status: "idle" as HudStatus,
@@ -36,7 +37,19 @@ export const hud = reactive({
     file: 0,
     os: 0,
   } as Record<ActivityChannel, number>,
+  /** Memory / sync telemetry shown in the HUD. */
+  sync: {
+    pending: 0,
+    server: "disabled" as ConnState,
+    cognee: "disabled" as ConnState,
+  },
 });
+
+export function setSyncStatus(s: { pending: number; server: ConnState; cognee: ConnState }) {
+  hud.sync.pending = s.pending;
+  hud.sync.server = s.server;
+  hud.sync.cognee = s.cognee;
+}
 
 let rafId = 0;
 let running = false;

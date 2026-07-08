@@ -11,6 +11,12 @@ import { usePushToTalk } from "@/services/pushToTalk";
 import { Store } from "@tauri-apps/plugin-store";
 import { transcribeWithElevenLabs } from "@/services/stt";
 import { listen } from "@tauri-apps/api/event";
+import { VoiceEngine } from "@/services/voice/voiceEngine";
+import { getVoiceConfig, localStt, localSttReady } from "@/services/voice/localVoice";
+import { streamSpeak } from "@/services/voice/speak";
+import { luczorMemory, getMemoryPrefs } from "@/services/memory/luczorMemory";
+import { refreshStatus } from "@/services/status";
+import { appearance, loadAppearance } from "@/services/appearance";
 
 import { startHud, setStatus } from "@/state/hud";
 import { state, mutations } from "@/state/store";
@@ -60,6 +66,7 @@ let cancelCurrent: null | (() => Promise<void>) = null;
 onMounted(async () => {
   preloadSfx();
   startHud();
+  void loadAppearance();
 
   const loaded = await loadAppState();
   if (loaded) mutations.hydrate(loaded);
@@ -75,6 +82,10 @@ onMounted(async () => {
   } catch (e) {
     console.warn("[hotkey] listen failed:", e);
   }
+
+  // Sync/memory status heartbeat.
+  void refreshStatus();
+  window.setInterval(() => void refreshStatus(), 30000);
 });
 
 /* -------------------------------------------------
@@ -110,8 +121,6 @@ function shouldSpeakAssistant(m: ChatAutoSpeechMode) {
   return m === "assistant_only" || m === "all";
 }
 
-import { speak } from "@/services/tts";
-
 let _lastSpokenAssistantId: string | null = null;
 
 function speakMessage(m: any) {
@@ -120,7 +129,7 @@ function speakMessage(m: any) {
     const content = (m?.content ?? "").toString().trim();
     const text = (content + (q ? " " + q : "")).trim();
     if (!text) return;
-    void speak({ text });
+    void streamSpeak(text);
   } catch (e) {
     console.error("[speakMessage] error:", e);
   }
@@ -146,7 +155,7 @@ async function autoSpeakAssistantIfEnabled(pid: string, assistantId: string) {
   _lastSpokenAssistantId = assistantId;
 
   try {
-    await speak({ text, rate: s.rate, volume: s.volume });
+    await streamSpeak(text);
   } catch (e) {
     console.error("[AutoSpeech] speak() failed:", e);
   }
@@ -359,6 +368,73 @@ async function togglePushToTalk() {
 }
 
 /* -------------------------------------------------
+ * Continuous listening (VAD + wake word)
+ * ------------------------------------------------- */
+const voiceEngine = new VoiceEngine();
+const listening = ref(false);
+const lastHeard = ref("");
+const listenLabel = ref("Zuhören");
+
+async function transcribeUtterance(wavBase64: string): Promise<string> {
+  const cfg = await getVoiceConfig();
+  if (localSttReady(cfg)) {
+    return localStt(wavBase64, {
+      binary: cfg.localSttBinary,
+      model: cfg.localSttModel,
+      language: cfg.localSttLanguage,
+    });
+  }
+  // Cloud fallback (ElevenLabs).
+  const store = await Store.load("luczor.settings.json");
+  const elevenKey = ((await store.get<string>("elevenlabs_api_key")) ?? "").trim();
+  if (!elevenKey) {
+    throw new Error("Kein STT-Backend: ElevenLabs-Key fehlt und kein lokales Modell konfiguriert.");
+  }
+  const { text } = await transcribeWithElevenLabs({
+    api_key: elevenKey,
+    base64: wavBase64,
+    mime: "audio/wav",
+  });
+  return (text ?? "").trim();
+}
+
+async function toggleListening() {
+  if (listening.value) {
+    await voiceEngine.stop();
+    listening.value = false;
+    lastHeard.value = "";
+    return;
+  }
+  const cfg = await getVoiceConfig();
+  const wakeword = cfg.mode === "wakeword";
+  listenLabel.value = wakeword ? `Wake-Word „${cfg.wakeWord}"` : "Dauer-Zuhören";
+  lastHeard.value = "";
+  try {
+    await voiceEngine.start({
+      mode: wakeword ? "wakeword" : "continuous",
+      wakeWord: cfg.wakeWord,
+      transcribe: (wav) => transcribeUtterance(wav),
+      onUtterance: (text) => {
+        lastHeard.value = text;
+      },
+      onCommand: (text) => {
+        const t = text.trim();
+        if (!t || sending.value) return;
+        input.value = t;
+        void send();
+      },
+    });
+    listening.value = true;
+  } catch (e: any) {
+    listening.value = false;
+    setStatus("error");
+    mutations.addMessage(
+      mutations.makeMsg("assistant", `Zuhören fehlgeschlagen: ${e?.message ?? String(e)}`, activeProjectId.value)
+    );
+  }
+}
+
+/* -------------------------------------------------
  * Tool-call approvals (human-in-the-loop)
  * ------------------------------------------------- */
 const pendingApprovals = computed(() => {
@@ -473,12 +549,40 @@ function applyStreamedContent(pid: string, msgId: string, raw: string, done: boo
   });
 }
 
+/** Auto-grow the composer textarea up to a max height. */
+const composerRef = ref<HTMLTextAreaElement | null>(null);
+function autoGrow() {
+  const el = composerRef.value;
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = Math.min(el.scrollHeight, 160) + "px";
+}
+
 /** Click a suggestion chip -> send it as the next user message. */
 function sendSuggestion(text: string) {
   const t = safeTrim(text);
   if (!t || sending.value) return;
   input.value = t;
   void send();
+}
+
+/** Persist the exchange to long-term memory (project scope). */
+async function rememberExchange(pid: string, userText: string, assistantId: string) {
+  try {
+    const prefs = await getMemoryPrefs();
+    if (!prefs.autoRemember) return;
+    const msg = mutations.getProjectMessages(pid).find((m) => m.id === assistantId);
+    const summary = safeTrim(msg?.content);
+    if (userText) {
+      await luczorMemory.remember({ content: userText, scope: "project", projectId: pid, source: "user" });
+    }
+    if (summary && !summary.startsWith("[Fehler]") && summary !== "Fertig.") {
+      await luczorMemory.remember({ content: summary, scope: "project", projectId: pid, source: "chat" });
+    }
+    void refreshStatus();
+  } catch (e) {
+    console.warn("[memory] remember skipped:", e);
+  }
 }
 
 /* -------------------------------------------------
@@ -496,6 +600,7 @@ async function send() {
   mutations.addMessage(mutations.makeMsg("user", text, pid));
   await forceScroll("auto");
   input.value = "";
+  void nextTick(() => autoGrow());
   sending.value = true;
 
   // assistant placeholder
@@ -522,9 +627,20 @@ async function send() {
     .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
 
   const baseMessages: WireMessage[] = [
-    { role: "system", content: buildSystemPreamble(mode.value, prj?.name ?? pid) },
+    { role: "system", content: buildSystemPreamble(mode.value, prj?.name ?? pid, appearance.assistantName) },
     ...history,
   ];
+
+  // Inject relevant long-term memory (project scope) as an extra system note.
+  try {
+    const prefs = await getMemoryPrefs();
+    if (prefs.inject) {
+      const memCtx = await luczorMemory.getContextForPrompt(pid, text, prefs.injectCount);
+      if (memCtx) baseMessages.splice(1, 0, { role: "system", content: memCtx });
+    }
+  } catch (e) {
+    console.warn("[memory] context injection skipped:", e);
+  }
 
   let streamStarted = false;
 
@@ -561,6 +677,7 @@ async function send() {
 
     setStatus("idle");
     void autoSpeakAssistantIfEnabled(pid, assistant.id);
+    void rememberExchange(pid, text, assistant.id);
   } catch (e: any) {
     try {
       stopSfx("loading");
@@ -607,14 +724,14 @@ watch(
 
 <template>
   <Settings :open="showSettings" @update:open="showSettings = $event" />
-  <JarvisHud />
+  <JarvisHud v-if="appearance.hudVisible" />
 
   <div class="app-shell">
     <!-- ============ SIDEBAR ============ -->
     <aside class="sidebar">
       <div class="brand">
         <span class="brand__dot" />
-        <span>LUCZOR</span>
+        <span>{{ appearance.assistantName.toUpperCase() }}</span>
       </div>
       <div class="brand__project">Aktiv · {{ activeProject?.name }}</div>
 
@@ -739,7 +856,7 @@ watch(
           :class="m.role === 'user' ? 'msg--user' : 'msg--assistant'"
         >
           <div class="msg__meta">
-            <span class="msg__role">{{ m.role === 'user' ? 'Du' : 'Luczor' }}</span>
+            <span class="msg__role">{{ m.role === 'user' ? 'Du' : appearance.assistantName }}</span>
             <span class="msg__time">{{ fmtTime(m.ts) }}</span>
             <button
               v-if="m.role === 'assistant' && m.content && m.content.trim()"
@@ -813,15 +930,39 @@ watch(
         </div>
       </div>
 
+      <!-- Live listening bar -->
+      <div v-if="listening" class="listen-bar">
+        <span class="listen-bar__dot" />
+        <span class="listen-bar__label">{{ listenLabel }}</span>
+        <span class="listen-bar__text">{{ lastHeard || "…" }}</span>
+      </div>
+
       <!-- Composer -->
       <div class="composer">
         <textarea
+          ref="composerRef"
           class="composer__input"
           v-model="input"
           rows="1"
           placeholder="Nachricht an Luczor…"
+          @input="autoGrow"
           @keydown.enter.exact.prevent="send"
         />
+        <button
+          type="button"
+          class="mic-btn listen-btn"
+          :class="{ 'is-listening': listening }"
+          @click="toggleListening"
+          :title="listening ? 'Dauer-Zuhören stoppen' : 'Dauer-Zuhören / Wake-Word starten'"
+        >
+          <svg v-if="!listening" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12a9 9 0 0 1 18 0" /><path d="M7 12a5 5 0 0 1 10 0" /><circle cx="12" cy="12" r="1.6" />
+          </svg>
+          <svg v-else viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+            <rect x="6" y="6" width="12" height="12" rx="2" />
+          </svg>
+        </button>
         <button
           type="button"
           class="mic-btn"
@@ -1295,6 +1436,26 @@ watch(
 .btn-exec:hover { transform: translateY(-1px); filter: brightness(1.06); box-shadow: var(--glow-success), var(--glow-md); }
 .btn-exec:active { transform: translateY(0) scale(0.97); }
 
+/* ============ LISTEN BAR ============ */
+.listen-bar {
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 var(--s5) 0;
+  padding: 8px 14px;
+  font-family: var(--font-mono); font-size: var(--fs-sm);
+  color: var(--cy-soft);
+  background: linear-gradient(90deg, var(--glass-wash), transparent);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  border-bottom: none;
+}
+.listen-bar__dot {
+  width: 9px; height: 9px; border-radius: 50%; flex: none;
+  background: var(--cy-bright); box-shadow: 0 0 10px var(--cy-bright);
+  animation: pulse-dot 1.1s var(--ease-soft) infinite;
+}
+.listen-bar__label { color: var(--text-label); letter-spacing: 0.08em; text-transform: uppercase; font-size: var(--fs-label); flex: none; }
+.listen-bar__text { color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
 /* ============ COMPOSER ============ */
 .composer {
   display: flex; align-items: flex-end; gap: var(--s2);
@@ -1337,6 +1498,17 @@ watch(
 .mic-btn.is-recording::after {
   content: ""; position: absolute; inset: -4px; border-radius: var(--r-pill);
   border: 2px solid var(--danger); animation: mic-ping 1.4s var(--ease) infinite;
+}
+.listen-btn.is-listening {
+  color: var(--text-on-accent);
+  background: radial-gradient(circle, var(--cy-bright) 0%, var(--cy-deep) 100%);
+  border-color: var(--border-strong);
+  box-shadow: var(--glow-md);
+  animation: pulse-soft 1.4s var(--ease-soft) infinite;
+}
+.listen-btn.is-listening::after {
+  content: ""; position: absolute; inset: -4px; border-radius: var(--r-pill);
+  border: 2px solid var(--cy); animation: mic-ping 1.6s var(--ease) infinite;
 }
 
 .send-btn {

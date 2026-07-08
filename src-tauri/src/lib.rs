@@ -41,6 +41,8 @@ pub fn run() {
             commands::system::press_key,
             commands::system::open_path,
             commands::system::run_command,
+            commands::voice::local_stt,
+            commands::voice::local_tts,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

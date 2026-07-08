@@ -226,3 +226,13 @@ body {
   .stream-caret { opacity: 1; animation: none; }
   .app-shell::before { animation: none; }
 }
+
+/* Manual personalization toggles (Settings -> Appearance) */
+:root[data-reduce-motion="1"] *,
+:root[data-reduce-motion="1"] *::before,
+:root[data-reduce-motion="1"] *::after {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.08s !important;
+}
+:root[data-grid="0"] .app-shell::before { display: none; }
