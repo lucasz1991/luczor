@@ -1,7 +1,7 @@
 // src/services/openrouter.service.ts
 import { Store } from "@tauri-apps/plugin-store";
 
-export type LuczorMode = "observe" | "act";
+export type LuczorMode = "observe" | "act" | "unrestricted";
 
 /* =========================================================
  * Wire message shapes (OpenAI/OpenRouter chat format)

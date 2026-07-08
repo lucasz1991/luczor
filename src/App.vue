@@ -386,9 +386,42 @@ function toolArgsPreview(args: Record<string, unknown>): string {
   }
 }
 
+/**
+ * Cycle: Beobachten -> Handeln -> Vollzugriff -> Beobachten.
+ * Entering "unrestricted" requires an explicit confirmation, because it
+ * bypasses the approval gate entirely (only the Not-Aus still stops tools).
+ */
 function toggleMode() {
-  mode.value = mode.value === "observe" ? "act" : "observe";
+  const next: LuczorMode =
+    mode.value === "observe" ? "act" : mode.value === "act" ? "unrestricted" : "observe";
+
+  if (next === "unrestricted") {
+    const ok = window.confirm(
+      "VOLLZUGRIFF aktivieren?\n\n" +
+        "Luczor führt dann ALLE Tools (Maus, Tastatur, Programme, Dateien) OHNE Rückfrage aus. " +
+        "Nur der Not-Aus im HUD stoppt ihn noch.\n\nWirklich aktivieren?"
+    );
+    if (!ok) {
+      mode.value = "observe";
+      return;
+    }
+  }
+  mode.value = next;
 }
+
+const modeLabel = computed(() =>
+  mode.value === "unrestricted" ? "Vollzugriff" : mode.value === "act" ? "Handeln" : "Beobachten"
+);
+const modeTitle = computed(() => {
+  switch (mode.value) {
+    case "act":
+      return "Handeln: Tools mit Bestätigung. Klicken für Vollzugriff.";
+    case "unrestricted":
+      return "Vollzugriff: alle Tools OHNE Rückfrage. Klicken für Beobachten.";
+    default:
+      return "Beobachten: nur lesen. Klicken für Handeln.";
+  }
+});
 
 /* -------------------------------------------------
  * Tool audit log (from hidden tool messages)
@@ -631,14 +664,12 @@ watch(
         <button
           type="button"
           class="mode-toggle"
-          :class="mode === 'act' ? 'is-act' : 'is-observe'"
+          :class="`is-${mode}`"
           @click="toggleMode"
-          :title="mode === 'act'
-            ? 'Handeln-Modus: Tools mit Bestätigung erlaubt. Klicken für Beobachten.'
-            : 'Beobachten-Modus: nur lesen. Klicken für Handeln.'"
+          :title="modeTitle"
         >
           <span class="mode-toggle__dot" />
-          {{ mode === 'act' ? 'Handeln' : 'Beobachten' }}
+          {{ modeLabel }}
         </button>
 
         <button
@@ -662,6 +693,11 @@ watch(
             <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
           </svg>
         </button>
+      </div>
+
+      <!-- Unrestricted-mode warning -->
+      <div v-if="mode === 'unrestricted'" class="mode-warning">
+        ⚠ VOLLZUGRIFF AKTIV — Luczor führt Tools ohne Rückfrage aus. Not-Aus im HUD stoppt sofort.
       </div>
 
       <!-- Project info strip -->
@@ -980,6 +1016,21 @@ watch(
   box-shadow: var(--glow-success), inset 0 0 14px rgba(52,211,153,0.08);
 }
 .mode-toggle.is-act .mode-toggle__dot { background: var(--success); box-shadow: 0 0 10px var(--success); animation: pulse-dot 1.8s var(--ease-soft) infinite; }
+.mode-toggle.is-unrestricted {
+  background: var(--danger-wash); border-color: rgba(244,63,94,0.6); color: var(--danger-soft);
+  box-shadow: var(--glow-danger), inset 0 0 14px rgba(244,63,94,0.08);
+}
+.mode-toggle.is-unrestricted .mode-toggle__dot { background: var(--danger); box-shadow: 0 0 10px var(--danger); animation: pulse-dot 1.1s var(--ease-soft) infinite; }
+
+.mode-warning {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 7px var(--s5);
+  font-family: var(--font-mono); font-size: var(--fs-label); font-weight: 700; letter-spacing: 0.06em;
+  color: var(--danger-soft);
+  background: linear-gradient(90deg, transparent, var(--danger-wash), transparent);
+  border-bottom: 1px solid rgba(244,63,94,0.4);
+  animation: pulse-soft 1.6s var(--ease-soft) infinite;
+}
 
 .icon-btn {
   display: inline-grid; place-items: center;
