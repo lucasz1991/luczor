@@ -1,217 +1,239 @@
-/* =========================================================
- * Defaults: Data model + in-memory/local-file store
- * - Project == Conversation
- * - Global memory + per-project memory
- * - AI proposes todos/memory via actions; critical changes require user confirmation
- * - User can also set todos/memory via UI buttons
- * - No SQL: persist to local JSON file (or localStorage as fallback)
- * ========================================================= */
+// src/state/types.ts
 
-/* -----------------------------
- * Core Types
- * ----------------------------- */
 export type Id = string;
 
-export type ChatRole = "system" | "user" | "assistant" | "tool";
+/* =========================================================
+ * Core chat types
+ * ========================================================= */
+export type ChatRole = "user" | "assistant" | "tool";
+export type MessageVisibility = "visible" | "hidden";
+
+export type MessageMeta = {
+  kind?: "question" | "statement";
+  isLoading?: boolean;
+
+  // tool/backchannel linkage
+  toolCallId?: Id;
+  toolName?: string;
+};
 
 export type Message = {
   id: Id;
   projectId: Id;
+
   role: ChatRole;
   content: string;
+
+  ts: number;
   createdAt: number;
 
-  // Optional: raw model payloads, parsing results, etc.
-  meta?: {
-    model?: string;
-    latencyMs?: number;
-    tokensIn?: number;
-    tokensOut?: number;
-    // actions proposed/executed for traceability
-    proposedActions?: AiAction[];
-    executedActions?: ExecutedAction[];
-  };
+  // raw model output (optional; not necessarily shown)
+  raw?: string;
+
+  // parsed structured output (if any). Keep generic because schema can evolve.
+  parsed: unknown | null;
+
+  // whether UI should display it
+  visibility: MessageVisibility;
+
+  meta: MessageMeta;
+};
+
+/* =========================================================
+ * Project management
+ * ========================================================= */
+export type GoalStatus = "open" | "in_progress" | "done";
+export type GoalPriority = "low" | "normal" | "high";
+
+export type ProjectGoal = {
+  id: Id;
+  title: string;
+  description?: string;
+  status: GoalStatus;
+  priority?: GoalPriority;
+
+  createdAt: number;
+  updatedAt: number;
+  doneAt?: number | null;
+};
+
+export type ProjectFocus = {
+  activeTodoId: Id | null;
+  activeStepId: Id | null;
+};
+
+export type ProjectDefaults = {
+  maxOutputTokens: number;
 };
 
 export type Project = {
   id: Id;
   name: string;
+
+  /**
+   * Optional human-readable "overall goal" (high-level)
+   * Separate from structured goals[] list.
+   */
+  goal?: string;
+
+  /**
+   * Structured goals with status.
+   */
+  goals: ProjectGoal[];
+
+  /**
+   * Short project summary maintained over time.
+   */
+  summary: string;
+
+  defaults: ProjectDefaults;
+  focus: ProjectFocus;
+
+  archivedAt: number | null;
   createdAt: number;
   updatedAt: number;
-
-  defaults: {
-    maxOutputTokens: number;
-  };
-
-  // Active focus for step-by-step work
-  focus?: {
-    activeTodoId?: Id | null;
-    activeStepId?: Id | null;
-  };
-
-  archivedAt?: number | null;
 };
 
-/* -----------------------------
- * Todo Model
- * ----------------------------- */
-export type TodoStatus = "open" | "in_progress" | "done" | "blocked";
-export type StepStatus = "open" | "done";
+/* =========================================================
+ * Memories / Summaries (optional but supported)
+ * ========================================================= */
+export type MemoryKind =
+  | "rule"
+  | "todo_policy"
+  | "preference"
+  | "fact"
+  | "note";
 
-export type Todo = {
-  id: Id;
-  projectId: Id;
-
-  title: string;
-  description?: string;
-
-  status: TodoStatus;
-  priority: 1 | 2 | 3;
-
-  createdAt: number;
-  updatedAt: number;
-
-  // For traceability
-  source?: {
-    messageId?: Id;
-    by: "user" | "ai";
-  };
-
-  // Critical items require explicit confirmation before activation
-  flags?: {
-    critical?: boolean;
-  };
+export type MemorySource = {
+  by: "user" | "assistant" | "system";
 };
 
-export type TodoStep = {
+export type MemoryItem = {
   id: Id;
-  todoId: Id;
-
-  text: string;
-  status: StepStatus;
-  position: number;
-
-  updatedAt: number;
-
-  source?: {
-    messageId?: Id;
-    by: "user" | "ai";
-  };
-};
-
-/* -----------------------------
- * Memory Model (Global + Project)
- * ----------------------------- */
-export type MemoryKind = "preference" | "constraint" | "rule" | "decision" | "workflow" | "todo_policy";
-
-export type MemoryEntry = {
-  id: Id;
-
-  // If projectId is null => global memory
   projectId: Id | null;
 
   kind: MemoryKind;
-  key: string;    // e.g. "naming.projectName", "stack.frontend"
-  value: string;  // short, 1-2 sentences, or compact JSON string
+  key: string;
+  value: string;
 
-  priority: 1 | 2 | 3 | 4 | 5; // 5 is always included in prompt
+  priority: 1 | 2 | 3 | 4 | 5;
   active: boolean;
 
   createdAt: number;
   updatedAt: number;
-
-  source?: {
-    messageId?: Id;
-    by: "user" | "ai";
-  };
+  source: MemorySource;
 };
 
-/* -----------------------------
- * AI Action System
- * ----------------------------- */
-export type AiActionType =
-  | "todo.create"
-  | "todo.update"
-  | "todo.complete"
-  | "todo.step.add"
-  | "todo.step.update"
-  | "todo.step.complete"
-  | "focus.set"
-  | "memory.upsert"
-  | "memory.deactivate"
-  | "summary.create"; // optional: rolling summary
-
-// Classification for confirmation flow
-export type ActionRisk = "low" | "medium" | "high" | "critical";
-
-export type AiAction = {
-  id: Id;
-  type: AiActionType;
-
-  // used for "ask user to confirm" gating
-  risk: ActionRisk;
-
-  // short explanation for UI confirmation dialog
-  rationale: string;
-
-  // JSON payload depends on action type (validated client-side)
-  payload: Record<string, any>;
-};
-
-export type ExecutedAction = {
-  actionId: Id;
-  executedAt: number;
-  status: "applied" | "rejected" | "failed";
-  error?: string;
-};
-
-/* -----------------------------
- * Summaries (rolling compression)
- * ----------------------------- */
-export type Summary = {
+export type SummaryItem = {
   id: Id;
   projectId: Id;
-  rangeStartTs: number;
-  rangeEndTs: number;
-
-  // keep it short; hard cap enforced when storing
   text: string;
-
   createdAt: number;
 };
 
-/* -----------------------------
- * App State (single JSON file)
- * ----------------------------- */
+/* =========================================================
+ * Tool calling (pending approvals / results)
+ * ========================================================= */
+export type ToolCallStatus =
+  | "proposed"     // waiting for user approval/execution
+  | "approved"     // user approved, app may execute
+  | "executing"    // app is executing
+  | "executed"     // executed successfully
+  | "failed"       // executed with error
+  | "rejected"     // user rejected
+  | "canceled";    // aborted by user/app
+
+export type PendingToolCall = {
+  id: Id;
+  projectId: Id;
+
+  /**
+   * Tool name. Examples:
+   * - "os.bash"
+   * - "os.open_app"
+   * - "project.set_summary"
+   * - "project.upsert_goal"
+   */
+  name: string;
+
+  /**
+   * Optional category for grouping in UI
+   * (keeps "name" stable while UI can bucket tools).
+   */
+  category?: "os" | "project" | "app" | "custom";
+
+  /**
+   * Tool arguments as plain JSON.
+   */
+  args: Record<string, unknown>;
+
+  /**
+   * Whether user approval is required before execution.
+   */
+  requiresApproval: boolean;
+
+  status: ToolCallStatus;
+
+  createdAt: number;
+  updatedAt: number;
+
+  result?: ToolResult;
+};
+
+export type ToolResult = {
+  toolCallId: Id;
+  name: string;
+
+  ok: boolean;
+
+  /**
+   * Raw payload returned by the host app/tool executor.
+   */
+  output?: unknown;
+
+  /**
+   * Error info if ok=false
+   */
+  error?: string;
+
+  ts: number;
+};
+
+/* =========================================================
+ * Global app state
+ * ========================================================= */
+export type GlobalDefaults = {
+  maxOutputTokens: number;
+};
+
+export type GlobalUi = {
+  lastProjectId?: Id;
+};
+
+export type GlobalState = {
+  defaults: GlobalDefaults;
+  memories: MemoryItem[];
+  ui?: GlobalUi;
+};
+
+export type PendingState = {
+  toolCallsByProject: Record<Id, PendingToolCall[]>;
+};
+
 export type AppState = {
   version: 1;
 
-  // Global defaults (apply if project has no override)
-  global: {
-    defaults: {
-      maxOutputTokens: number;
-    };
-
-    // memory: only "basic" things, small
-    memories: MemoryEntry[];
-
-    // optional: global UI flags
-    ui?: {
-      lastProjectId?: Id | null;
-    };
-  };
+  global: GlobalState;
 
   projects: Project[];
   messages: Message[];
-  todos: Todo[];
-  todoSteps: TodoStep[];
-  projectMemories: MemoryEntry[]; // projectId != null
-  summaries: Summary[];
 
-  // Pending AI actions awaiting confirmation
-  pending: {
-    // keyed by projectId
-    actionsByProject: Record<Id, AiAction[]>;
-  };
+  // optional legacy / future features
+  todos: any[];
+  todoSteps: any[];
+  projectMemories: any[];
+
+  summaries: SummaryItem[];
+
+  pending: PendingState;
 };
-

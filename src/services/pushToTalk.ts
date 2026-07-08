@@ -1,4 +1,5 @@
 import { ref } from "vue";
+import { setMicLevel, pulse } from "@/state/hud";
 
 type WavResult = { base64: string; mime: string };
 
@@ -39,6 +40,14 @@ export function usePushToTalk() {
     processor.onaudioprocess = (e) => {
       const input = e.inputBuffer.getChannelData(0);
       chunks.push(new Float32Array(input)); // copy
+
+      // Live mic RMS -> HUD level + audio pulse.
+      let sum = 0;
+      for (let i = 0; i < input.length; i++) sum += input[i]! * input[i]!;
+      const rms = Math.sqrt(sum / input.length);
+      const level = Math.min(1, rms * 4); // scale up quiet speech
+      setMicLevel(level);
+      pulse("audio", level);
     };
 
     source.connect(processor);
@@ -70,6 +79,7 @@ export function usePushToTalk() {
       const wavBytes = encodeWavPCM16(chunks, sampleRate);
       const base64 = bytesToBase64(wavBytes);
 
+      setMicLevel(0);
       isRecording.value = false;
 
       return { base64, mime: "audio/wav" };
@@ -96,6 +106,7 @@ export function usePushToTalk() {
     audioCtx = null;
 
     chunks = [];
+    setMicLevel(0);
     isRecording.value = false;
   }
 

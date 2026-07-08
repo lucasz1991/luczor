@@ -38,7 +38,7 @@ Add-Type -AssemblyName System.Speech
 $s = New-Object System.Speech.Synthesis.SpeechSynthesizer
 $s.Rate = {rate}
 $s.Volume = {volume}
-if ("{voice}" -ne "") {{ $s.SelectVoice("{voice}") }}
+if ("{voice}" -ne "Microsoft Stefan Desktop") {{ $s.SelectVoice("{voice}") }}
 $s.SetOutputToWaveFile("{out_file}")
 $s.Speak(@"
 {text}

@@ -4,10 +4,15 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
     "store:default",
     "store:allow-load",
     "store:allow-save",
     "store:allow-get",
-    "store:allow-set"
+    "store:allow-set",
+    "global-shortcut:default",
+    "autostart:default"
   ]
 }

@@ -1,126 +1,52 @@
+<!-- App.vue -->
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import Settings from "./components/Settings.vue";
-import {
-  OpenRouterService,
-  type LuczorEnvelope,
-  type LuczorMode,
-  buildStructuredInstruction,
-} from "./services/openrouter.service";
+import JarvisHud from "./components/JarvisHud.vue";
+import { type LuczorMode, type WireMessage } from "./services/openrouter.service";
+import { runAgent, buildSystemPreamble } from "@/services/agent";
+import { parseEnvelope } from "@/services/envelope";
+import { resolveApproval, rejectAllApprovals } from "@/services/approvals";
 import { usePushToTalk } from "@/services/pushToTalk";
-import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
-import { speak } from "@/services/tts";
+import { transcribeWithElevenLabs } from "@/services/stt";
+import { listen } from "@tauri-apps/api/event";
 
-
-/* -------------------------------------------------
- * Types
- * ------------------------------------------------- */
-type ChatRole = "user" | "assistant";
-
-type ChatMessage = {
-  id: string;
-  role: ChatRole;
-  content: string;
-  raw?: string;
-  parsed?: LuczorEnvelope | null;
-  ts: number;
-};
-
-type Project = { id: string; name: string };
-type ChatsMap = Record<string, ChatMessage[]>;
+import { startHud, setStatus } from "@/state/hud";
+import { state, mutations } from "@/state/store";
+import { loadAppState, scheduleSave } from "@/services/persistence";
+import { playSfx, stopSfx, preloadSfx } from "@/services/sfx";
+import { useAutoScroll } from "@/composables/useAutoScroll";
 
 /* -------------------------------------------------
- * Utils
+ * Helpers
  * ------------------------------------------------- */
-const uid = () =>
-  crypto.randomUUID?.() ?? `m_${Math.random().toString(16).slice(2)}_${Date.now()}`;
+function safeString(x: unknown) {
+  return typeof x === "string" ? x : "";
+}
 
-const now = () => Date.now();
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
 
-const makeMsg = (role: ChatRole, content: string): ChatMessage => ({
-  id: uid(),
-  role,
-  content,
-  raw: undefined,
-  parsed: null,
-  ts: now(),
-});
+function safeTrim(v: unknown): string {
+  if (typeof v !== "string") return "";
+  return v.trim();
+}
 
-
-
-/* -------------------------------------------------
- * Render helper
- * ------------------------------------------------- */
-function renderLuczorEnvelopeToChat(env: LuczorEnvelope): string {
-  const lines: string[] = [];
-
-  /* if (env.summary?.trim()) lines.push(env.summary.trim());
-
-  if (env.bullets.length) {
-    lines.push("");
-    for (const b of env.bullets.slice(0, 5)) lines.push(`- ${b}`);
-  }
-
-  if (env.plan?.steps?.length) {
-    lines.push("");
-    lines.push("Plan:");
-    for (const s of env.plan.steps.slice(0, 6)) lines.push(`- ${s}`);
-  }
-
-  if (env.actions.length) {
-    lines.push("");
-    lines.push("Vorgeschlagene Actions (nur zur Prüfung, nicht ausgeführt):");
-    for (const a of env.actions.slice(0, 8)) {
-      lines.push(`- [${a.risk}] ${a.type}${a.requires_approval ? " (approval required)" : ""}`);
-    }
-  }*/
-
-  if (env.question.trim()) {
-    lines.push("");
-    lines.push(`${env.question.trim()}`);
-  }
-
-  return lines.join("\n").trim();
+function fmtTime(ts: number, seconds = false): string {
+  return new Date(ts).toLocaleTimeString(
+    [],
+    seconds
+      ? { hour: "2-digit", minute: "2-digit", second: "2-digit" }
+      : { hour: "2-digit", minute: "2-digit" }
+  );
 }
 
 /* -------------------------------------------------
- * State
+ * Local UI state
  * ------------------------------------------------- */
 const showSettings = ref(false);
-
-const projects = ref<Project[]>([
-  { id: "default", name: "Dev Test" },
-]);
-
-const activeProjectId = ref(projects.value[0]?.id ?? "default");
-
-const activeProject = computed(() =>
-  projects.value.find((p) => p.id === activeProjectId.value)
-);
-
-const chats = ref<ChatsMap>({
-  default: [makeMsg("assistant", "Willkommen. Wie kann ich dir helfen?")],
-});
-
-function ensureChat(projectId: string): ChatMessage[] {
-  const existing = chats.value[projectId];
-  if (existing) return existing;
-
-  const created = [makeMsg("assistant", "Willkommen. Wie kann ich dir helfen?")];
-  chats.value[projectId] = created;
-  return created;
-}
-
-ensureChat(activeProjectId.value);
-
-const messages = computed<ChatMessage[]>({
-  get: (): ChatMessage[] => ensureChat(activeProjectId.value),
-  set: (v: ChatMessage[]) => {
-    chats.value[activeProjectId.value] = v;
-  },
-});
-
 const input = ref("");
 const sending = ref(false);
 const mode = ref<LuczorMode>("observe");
@@ -129,434 +55,1255 @@ const abortController = ref<AbortController | null>(null);
 let cancelCurrent: null | (() => Promise<void>) = null;
 
 /* -------------------------------------------------
- * Actions
+ * Init
+ * ------------------------------------------------- */
+onMounted(async () => {
+  preloadSfx();
+  startHud();
+
+  const loaded = await loadAppState();
+  if (loaded) mutations.hydrate(loaded);
+
+  mutations.ensureDefaults();
+  openProject(activeProjectId.value);
+
+  // Global hotkey (Ctrl+Alt+Space) -> toggle push-to-talk.
+  try {
+    await listen("luczor://hotkey", () => {
+      void togglePushToTalk();
+    });
+  } catch (e) {
+    console.warn("[hotkey] listen failed:", e);
+  }
+});
+
+/* -------------------------------------------------
+ * Auto-Speech (Settings -> speak())
+ * ------------------------------------------------- */
+type ChatAutoSpeechMode = "off" | "assistant_only" | "all";
+
+async function getAutoSpeechSettings(): Promise<{
+  enabled: boolean;
+  mode: ChatAutoSpeechMode;
+  rate: number;
+  volume: number;
+}> {
+  const store = await Store.load("luczor.settings.json");
+
+  const enabled = (await store.get<boolean>("chat_auto_speech")) ?? false;
+  const mode = (await store.get<ChatAutoSpeechMode>("chat_auto_speech_mode")) ?? "assistant_only";
+  const rate = (await store.get<number>("chat_auto_speech_rate")) ?? 1.0;
+  const volume = (await store.get<number>("chat_auto_speech_volume")) ?? 90;
+
+  const safeMode: ChatAutoSpeechMode =
+    mode === "off" || mode === "assistant_only" || mode === "all" ? mode : "assistant_only";
+
+  return {
+    enabled: !!enabled,
+    mode: safeMode,
+    rate: clamp(Number(rate) || 1.0, 0.5, 2.0),
+    volume: clamp(Number(volume) || 90, 0, 100),
+  };
+}
+
+function shouldSpeakAssistant(m: ChatAutoSpeechMode) {
+  return m === "assistant_only" || m === "all";
+}
+
+import { speak } from "@/services/tts";
+
+let _lastSpokenAssistantId: string | null = null;
+
+function speakMessage(m: any) {
+  try {
+    const q = ((m?.meta as any)?.question ?? "").toString().trim();
+    const content = (m?.content ?? "").toString().trim();
+    const text = (content + (q ? " " + q : "")).trim();
+    if (!text) return;
+    void speak({ text });
+  } catch (e) {
+    console.error("[speakMessage] error:", e);
+  }
+}
+
+async function autoSpeakAssistantIfEnabled(pid: string, assistantId: string) {
+  if (_lastSpokenAssistantId === assistantId) return;
+
+  const msg = mutations.getProjectMessages(pid).find((m) => m.id === assistantId);
+  const parts = [
+    safeTrim(msg?.content),
+    safeTrim(((msg?.meta as any)?.question ?? (msg?.meta as any)?.content ?? "")),
+  ].filter(Boolean);
+  const text = parts.join(" ");
+
+  if (!text) return;
+  if (text.startsWith("[Fehler]")) return;
+
+  const s = await getAutoSpeechSettings();
+  if (!s.enabled) return;
+  if (!shouldSpeakAssistant(s.mode)) return;
+
+  _lastSpokenAssistantId = assistantId;
+
+  try {
+    await speak({ text, rate: s.rate, volume: s.volume });
+  } catch (e) {
+    console.error("[AutoSpeech] speak() failed:", e);
+  }
+}
+
+/* -------------------------------------------------
+ * Loading indicator (Assistant bubble)
+ * ------------------------------------------------- */
+const assistantLoadingTimer = ref<number | null>(null);
+const assistantLoadingId = ref<string | null>(null);
+
+function startAssistantLoading(pid: string, msgId: string) {
+  stopAssistantLoading();
+  assistantLoadingId.value = msgId;
+
+  // No placeholder text: the UI shows animated typing dots while
+  // meta.isLoading is true and there is no content yet.
+  const current = mutations.getProjectMessages(pid).find((m) => m.id === msgId);
+  mutations.patchMessage(pid, msgId, {
+    content: "",
+    meta: { ...(current?.meta ?? {}), isLoading: true } as any,
+  });
+}
+
+function stopAssistantLoading() {
+  if (assistantLoadingTimer.value) {
+    window.clearInterval(assistantLoadingTimer.value);
+    assistantLoadingTimer.value = null;
+  }
+  assistantLoadingId.value = null;
+}
+
+/* -------------------------------------------------
+ * Derived state from store
+ * ------------------------------------------------- */
+const projects = computed(() => state.projects);
+
+const activeProjectId = computed<string>({
+  get() {
+    state.global.ui ??= {};
+    return state.global.ui.lastProjectId ?? state.projects[0]?.id ?? "default";
+  },
+  set(id) {
+    mutations.setActiveProject(id);
+  },
+});
+
+const activeProject = computed(() => projects.value.find((p) => p.id === activeProjectId.value));
+const messages = computed(() => mutations.getProjectMessages(activeProjectId.value));
+
+const { forceScroll } = useAutoScroll(messages, {
+  selector: "#messages",
+  thresholdPx: 140,
+  behavior: "smooth",
+});
+
+/* -------------------------------------------------
+ * Project Info Panel (Goals + Summaries)
+ * ------------------------------------------------- */
+const projectGoals = computed<any[]>(() => {
+  const p: any = activeProject.value as any;
+  return Array.isArray(p?.goals) ? p.goals : [];
+});
+
+const goalStats = computed(() => {
+  const goals = projectGoals.value;
+  const total = goals.length;
+  const done = goals.filter((g) => g?.status === "done").length;
+  const inProgress = goals.filter((g) => g?.status === "in_progress").length;
+  const open = goals.filter((g) => g?.status === "open").length;
+  return { total, open, inProgress, done };
+});
+
+function goalStatusLabel(status: string) {
+  switch (status) {
+    case "done":
+      return "Done";
+    case "in_progress":
+      return "In Arbeit";
+    case "blocked":
+      return "Blockiert";
+    default:
+      return "Offen";
+  }
+}
+
+const projectSummaries = computed<any[]>(() => {
+  const pid = activeProjectId.value;
+  const p: any = activeProject.value as any;
+
+  const items: any[] = [];
+
+  const rolling = safeTrim(p?.summary);
+  if (rolling) {
+    items.push({
+      id: `rolling_${pid}`,
+      createdAt: p?.updatedAt ?? Date.now(),
+      text: rolling,
+    });
+  }
+
+  const history: any[] = Array.isArray((state as any).summaries) ? (state as any).summaries : [];
+  const last = history
+    .filter((s) => s?.projectId === pid)
+    .sort((a, b) => (a?.createdAt ?? 0) - (b?.createdAt ?? 0))
+    .slice(-3);
+
+  for (const s of last) {
+    items.push({
+      id: s.id ?? `sum_${s.createdAt ?? s.ts ?? Math.random()}`,
+      createdAt: s.createdAt ?? s.ts ?? Date.now(),
+      text: s.text ?? s.summary ?? s.content ?? "",
+    });
+  }
+
+  return items
+    .filter((x) => safeTrim(x.text).length)
+    .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0))
+    .slice(0, 3);
+});
+
+/* -------------------------------------------------
+ * Core actions
  * ------------------------------------------------- */
 async function stopGenerating() {
+  stopAssistantLoading();
+  _lastSpokenAssistantId = null;
+
+  // Unblock any tool call awaiting user approval (rejects them).
+  rejectAllApprovals();
+
+  try {
+    stopSfx("loading");
+  } catch {}
+
   if (cancelCurrent) {
     try {
       await cancelCurrent();
-    } catch {
-      /* ignore */
-    }
+    } catch {}
     cancelCurrent = null;
   }
 
   abortController.value?.abort();
   abortController.value = null;
-
   sending.value = false;
 }
 
 function openProject(id: string) {
-  stopGenerating();
+  void stopGenerating();
   activeProjectId.value = id;
-  ensureChat(id);
-}
-
-// DEBUG helper (oben im <script setup> platzieren)
-function debugMsg(m: ChatMessage) {
-  // Achtung: alert kann bei sehr langen Texten nerven. Für kurze Dumps ok.
-  alert(JSON.stringify(m, null, 2));
 }
 
 function newChat() {
-  stopGenerating();
-  messages.value = [makeMsg("assistant", "Neuer Chat. Was soll ich bauen?")];
+  void stopGenerating();
+  mutations.resetProjectChat(activeProjectId.value);
 }
 
 function addProject() {
-  stopGenerating();
-
+  void stopGenerating();
   const id = `p_${Math.random().toString(16).slice(2)}`;
   const name = `Projekt ${projects.value.length + 1}`;
-
-  projects.value.unshift({ id, name });
-  ensureChat(id);
+  mutations.addProject({ id, name });
   activeProjectId.value = id;
 }
 
-watch(activeProjectId, (id) => {
-  stopGenerating();
-  ensureChat(id);
-});
-
-
-
-const { isRecording, error: pttError, start: startPtt, stop: stopPtt, cancel: cancelPtt } = usePushToTalk();
+/* -------------------------------------------------
+ * Push-to-talk (ElevenLabs STT)
+ * ------------------------------------------------- */
+const { isRecording, start: startPtt, stop: stopPtt, cancel: cancelPtt } = usePushToTalk();
 
 async function togglePushToTalk() {
-  // Aufnahme starten
+  const pid = activeProjectId.value;
+
   if (!isRecording.value) {
     try {
       await startPtt();
+      setStatus("listening");
     } catch (e: any) {
-      // optional: in Chat ausgeben
-      messages.value.push(makeMsg("assistant", `Mikrofon-Fehler: ${e?.message ?? String(e)}`));
+      setStatus("error");
+      mutations.addMessage(
+        mutations.makeMsg("assistant", `Mikrofon-Fehler: ${e?.message ?? String(e)}`, pid)
+      );
     }
     return;
-  } 
-
-  const settingsStore = await Store.load("luczor.settings.json");
-  const openaiKey = await settingsStore.get<string>("openrouter_api_key");
+  }
 
   const audio = await stopPtt();
+  setStatus("idle");
   if (!audio) return;
 
-const result = await invoke<{ text: string }>("speech_transcribe", {
-  payload: {
-    base64: audio.base64,
-    mime: audio.mime,
-    api_key: openaiKey,
-    model: "openai/gpt-4o-audio-preview",
-  },
+  const store = await Store.load("luczor.settings.json");
+  const elevenKey = (await store.get<string>("elevenlabs_api_key")) ?? "";
+
+  if (!elevenKey.trim()) {
+    mutations.addMessage(mutations.makeMsg("assistant", "ElevenLabs API Key fehlt (Settings).", pid));
+    return;
+  }
+
+  try {
+    const { text } = await transcribeWithElevenLabs({
+      api_key: elevenKey,
+      base64: audio.base64,
+      mime: audio.mime,
+    });
+
+    input.value = (text ?? "").trim();
+  } catch (e: any) {
+    mutations.addMessage(mutations.makeMsg("assistant", `STT Fehler: ${e?.message ?? String(e)}`, pid));
+  }
+}
+
+/* -------------------------------------------------
+ * Tool-call approvals (human-in-the-loop)
+ * ------------------------------------------------- */
+const pendingApprovals = computed(() => {
+  const pid = activeProjectId.value;
+  const bucket = state.pending?.toolCallsByProject?.[pid] ?? [];
+  return bucket.filter((c) => c.status === "proposed" && c.requiresApproval);
 });
 
-
-input.value = result.text;
-
+function approveTool(id: string) {
+  mutations.updateToolCallStatus(activeProjectId.value, id, "approved");
+  resolveApproval(id, true);
 }
 
-async function stopAll() {
-  await stopGenerating();
-  if (isRecording.value) cancelPtt();
+function rejectTool(id: string) {
+  mutations.updateToolCallStatus(activeProjectId.value, id, "rejected");
+  resolveApproval(id, false);
 }
 
+function toolArgsPreview(args: Record<string, unknown>): string {
+  try {
+    const s = JSON.stringify(args, null, 1);
+    return s.length > 400 ? s.slice(0, 400) + "…" : s;
+  } catch {
+    return "";
+  }
+}
 
+function toggleMode() {
+  mode.value = mode.value === "observe" ? "act" : "observe";
+}
 
+/* -------------------------------------------------
+ * Tool audit log (from hidden tool messages)
+ * ------------------------------------------------- */
+const showAudit = ref(false);
 
+const toolAudit = computed(() => {
+  const pid = activeProjectId.value;
+  return mutations
+    .getProjectMessages(pid, { includeHidden: true })
+    .filter((m) => m.role === "tool")
+    .slice(-12)
+    .reverse()
+    .map((m) => ({
+      id: m.id,
+      name: (m.meta as any)?.toolName ?? "tool",
+      ok: !!(m.parsed as any)?.ok,
+      error: safeTrim((m.parsed as any)?.error),
+      ts: m.ts,
+    }));
+});
 
+/* -------------------------------------------------
+ * Streamed envelope -> message rendering
+ * ------------------------------------------------- */
+function applyStreamedContent(pid: string, msgId: string, raw: string, done: boolean) {
+  const env = parseEnvelope(raw);
+  if (env) {
+    mutations.patchMessage(pid, msgId, {
+      raw,
+      parsed: env as any,
+      content: env.summary,
+      meta: {
+        isLoading: done ? false : !env.complete,
+        summary: env.summary,
+        question: env.question,
+        bullets: env.bullets,
+      } as any,
+    });
+    return;
+  }
 
+  // Plain (non-envelope) text.
+  const text = safeTrim(raw);
+  mutations.patchMessage(pid, msgId, {
+    raw,
+    content: text || (done ? "Fertig." : ""),
+    meta: { isLoading: !done } as any,
+  });
+}
+
+/** Click a suggestion chip -> send it as the next user message. */
+function sendSuggestion(text: string) {
+  const t = safeTrim(text);
+  if (!t || sending.value) return;
+  input.value = t;
+  void send();
+}
 
 /* -------------------------------------------------
  * Send
  * ------------------------------------------------- */
 async function send() {
+  const pid = activeProjectId.value;
   const text = input.value.trim();
   if (!text || sending.value) return;
 
+  void playSfx("submit");
   await stopGenerating();
 
-  messages.value.push(makeMsg("user", text));
+  // user message
+  mutations.addMessage(mutations.makeMsg("user", text, pid));
+  await forceScroll("auto");
   input.value = "";
   sending.value = true;
 
-  const assistantMsg: ChatMessage = {
-    ...makeMsg("assistant", ""),
-    raw: "", 
-    parsed: null,
-  };
-  messages.value.push(assistantMsg);
+  // assistant placeholder
+  const assistant = mutations.makeMsg("assistant", "", pid);
+  assistant.raw = "";
+  assistant.parsed = null;
+  mutations.addMessage(assistant);
+  await forceScroll("auto");
 
   await nextTick();
+  startAssistantLoading(pid, assistant.id);
 
   const abort = new AbortController();
   abortController.value = abort;
+  cancelCurrent = async () => abort.abort();
 
-  const baseMessages = messages.value
-    .filter((m) => m.id !== assistantMsg.id)
-    .map((m) => ({ role: m.role as any, content: m.content }));
+  // Build the wire history: system preamble + visible user/assistant text.
+  const prj = activeProject.value;
+  const history: WireMessage[] = mutations
+    .getProjectMessages(pid)
+    .filter((m) => m.id !== assistant.id)
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .filter((m) => safeTrim(m.content).length > 0)
+    .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
 
-  // optional; schema already enforces it, but helps model behave
-  const requestMessages = [
-    ...baseMessages,
-    { role: "user" as const, content: buildStructuredInstruction(mode.value) },
+  const baseMessages: WireMessage[] = [
+    { role: "system", content: buildSystemPreamble(mode.value, prj?.name ?? pid) },
+    ...history,
   ];
 
+  let streamStarted = false;
+
   try {
-    const { cancel } = await OpenRouterService.streamChat({
+    void playSfx("loading");
+
+    const { finalText } = await runAgent({
+      projectId: pid,
       model: "@preset/luczor",
-      messages: requestMessages as any,
+      baseMessages,
       mode: mode.value,
-
-      onToken: (tok) => {
-        assistantMsg.raw = tok;
-        assistantMsg.content = tok;
-      },
-
-      onStructured: (env) => {
-        assistantMsg.parsed = env;
-        assistantMsg.content = renderLuczorEnvelopeToChat(env);
-      },
-
-      onDone: (rawText) => {
-        if (!assistantMsg.parsed) {
-          assistantMsg.raw = rawText;
-          assistantMsg.content = rawText || assistantMsg.content;
-        }
-      },
-
-      onError: (msg) => {
-        assistantMsg.content = `[Fehler] ${msg}`;
-      },
-
+      maxTokens: prj?.defaults?.maxOutputTokens,
       signal: abort.signal,
+
+      // Live streaming: parse the envelope progressively and render it.
+      onToken: (raw) => {
+        if (!streamStarted) {
+          streamStarted = true;
+          stopAssistantLoading();
+          try {
+            stopSfx("loading");
+          } catch {}
+        }
+        applyStreamedContent(pid, assistant.id, raw, false);
+      },
     });
 
-    cancelCurrent = cancel;
+    try {
+      stopSfx("loading");
+    } catch {}
+    stopAssistantLoading();
+
+    applyStreamedContent(pid, assistant.id, finalText, true);
+
+    setStatus("idle");
+    void autoSpeakAssistantIfEnabled(pid, assistant.id);
   } catch (e: any) {
-    if (e?.name === "AbortError") return;
-    assistantMsg.content =
-      assistantMsg.content || `Fehler: ${e?.message ?? String(e)}`;
+    try {
+      stopSfx("loading");
+    } catch {}
+    stopAssistantLoading();
+
+    const current = mutations.getProjectMessages(pid).find((m) => m.id === assistant.id);
+    const currentContent = safeTrim(current?.content);
+
+    if (e?.name === "AbortError") {
+      setStatus("idle");
+      mutations.patchMessage(pid, assistant.id, {
+        content: currentContent || "Abgebrochen.",
+        meta: { ...(current?.meta ?? {}), isLoading: false } as any,
+      });
+      return;
+    }
+
+    setStatus("error");
+    mutations.patchMessage(pid, assistant.id, {
+      content: `[Fehler] ${e?.message ?? String(e)}`,
+      meta: { ...(current?.meta ?? {}), isLoading: false } as any,
+    });
   } finally {
+    try {
+      stopSfx("loading");
+    } catch {}
+
     if (abortController.value === abort) abortController.value = null;
     sending.value = false;
     cancelCurrent = null;
   }
 }
+
+/* -------------------------------------------------
+ * Persistence (autosave)
+ * ------------------------------------------------- */
+watch(
+  () => state,
+  () => scheduleSave(state),
+  { deep: true }
+);
 </script>
+
 <template>
   <Settings :open="showSettings" @update:open="showSettings = $event" />
-  <div class="min-h-screen max-h-screen w-full bg-gray-300 text-gray-900  overflow-hidden border-t border-gray-300">
-    <div class="w-full h-screen ">
-      <div class="grid grid-cols-12 h-full items-stretch min-h-0">
-        <!-- SIDEBAR -->
-        <aside class="col-span-12 md:col-span-4 lg:col-span-3 xl:col-span-2 h-full min-h-0">
-          <div class="sticky h-full ">
-            <div
-              class=" bg-white shadow-sm overflow-hidden flex items-stretch flex-col h-full pb-4 border-r border-gray-300"
-            >
-              <!-- Brand / Actions -->
-              <div class="px-4 py-4 border-b border-gray-100">
-                <div class="flex items-start justify-between gap-3">
-                  <div class="min-w-0">
-                    <div class="text-xs text-gray-500">Luczor</div>
-                    <div class="mt-1 text-[11px] text-gray-500">
-                      Aktiv:
-                      <span class="text-gray-800 font-medium">
-                        {{ activeProject?.name }}
-                      </span>
-                    </div>
-                  </div>
-                  <div class="flex flex-col gap-2">
-                    <button
-                      type="button"
-                      class="inline-flex items-center justify-center rounded-xl bg-blue-800 px-3 py-2 text-xs font-semibold text-white hover:bg-blue-900 transition"
-                      @click="newChat"
-                      title="Neuer Chat"
-                    >
-                      + New
-                    </button>
-                    <button
-                      type="button"
-                      class="inline-flex items-center justify-center rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 transition"
-                      @click="addProject"
-                      title="Neues Projekt"
-                    >
-                      + Projekt
-                    </button>
-                  </div>
-                </div>
-              </div>
-              <!-- Projects list -->
-              <div class="px-4 py-3">
-                <div class="flex items-center justify-between">
-                  <div class="text-xs font-semibold text-gray-600">Projekte</div>
-                  <div class="text-[11px] text-gray-500">{{ projects.length }}</div>
-                </div>
+  <JarvisHud />
 
-                <div class="mt-3 max-h-[52vh] overflow-y-auto pr-1 space-y-2">
-                  <button
-                    v-for="p in projects"
-                    :key="p.id"
-                    type="button"
-                    class="w-full rounded-xl border px-3 py-2 text-left transition"
-                    :class="p.id === activeProjectId
-                      ? 'border-blue-900 bg-blue-800 text-white'
-                      : 'border-gray-200 bg-white hover:bg-blue-100 text-gray-800'"
-                    @click="openProject(p.id)"
-                  >
-                    <div class="flex items-center justify-between gap-2">
-                      <div class="min-w-0">
-                        <div class="truncate text-sm font-semibold">
-                          {{ p.name }}
-                        </div>
-                        <div
-                          class="mt-0.5 text-[11px]"
-                          :class="p.id === activeProjectId ? 'text-white/70' : 'text-gray-500'"
-                        >
-                          {{ p.id }}
-                        </div>
-                      </div>
-                      <span
-                        v-if="p.id === activeProjectId"
-                        class="shrink-0 inline-flex items-center rounded-full bg-white/15 px-2 py-1 text-[10px] font-semibold"
-                      >
-                        aktiv
-                      </span>
-                    </div>
-                  </button>
-                </div>
-              </div>
-              <!-- Bottom settings button -->
-              <div class="px-4 bg-white flex items-end h-full">
-                <button
-                  type="button"
-                  class="w-full inline-flex items-center justify-between rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-semibold text-gray-800 hover:bg-gray-50 transition"
-                  @click="showSettings = true"
-                >
-                  <span class="inline-flex items-center gap-2">
-                    <span class="inline-flex h-6 w-6 items-center justify-center rounded-xl bg-gray-900 text-white">
-                      <svg
-                        xmlns="http://www.w3.org/2000/svg"
-                        class="h-4 w-4"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        stroke-width="2"
-                        stroke-linecap="round"
-                        stroke-linejoin="round"
-                      >
-                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-                        <path d="M10 12a2 2 0 1 1 4 0v1" />
-                        <path d="M9 13h6v4H9z" />
-                      </svg>
-                    </span>
-                    Settings
-                  </span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </aside>
-        <!-- MAIN CHAT -->
-        <main  class="col-span-12 md:col-span-8 lg:col-span-9 xl:col-span-10 h-full min-h-0">
-          <div class=" bg-white shadow-sm overflow-hidden flex flex-col h-full min-h-0 justify-stretch">
-            <!-- Header -->
-            <div class="shrink-0 flex items-center justify-between border-b border-gray-300 px-4 py-3">
-              <div class="min-w-0">
-                <div class="truncate text-sm font-semibold text-gray-900">
-                  {{ activeProject?.name }}
-                </div>
-              </div>
-              <div class="flex items-center gap-2">
-                <button
-                  type="button"
-                  class="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 transition"
-                  @click="showSettings = true"
-                >
-                  Settings
-                </button>
-                <button
-                  v-if="sending"
-                  type="button"
-                  class="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 transition"
-                  @click="stopGenerating"
-                >
-                  Stop
-                </button>
-
-                <button
-                  type="button"
-                  class="rounded-xl border border-gray-200 bg-white px-3 py-2 text-xs font-semibold text-gray-700 hover:bg-gray-50 transition"
-                  @click="newChat"
-                >
-                  Reset
-                </button>
-              </div>
-            </div>
-            <!-- Messages -->
-            <div class="flex-1 min-h-0 w-full overflow-y-auto overflow-x-hidden px-4 py-4 bg-gray-300 relative">
-              <div class="flex min-h-full flex-col gap-3 px-4 mx-auto container">
-                <div class="mt-auto flex flex-col gap-4">
-                  <div
-                    v-for="m in messages"
-                    :key="m.id"
-                    class="flex w-full"
-                    :class="m.role === 'user' ? 'justify-end' : 'justify-start'"
-                  >
-                    <div
-                      class="group relative isolate max-w-[85%] rounded-2xl px-4 py-3 text-sm leading-relaxed shadow-sm border backdrop-blur cursor-pointer"
-                      :class="m.role === 'user'
-                        ? 'bg-white border-gray-200 text-gray-900'
-                        : 'bg-blue-700 border-blue-800/60 text-white'"
-                      @click="debugMsg(m)"
-                      title="Klicken zum Debug-Dump"
-                    >
-                      <div
-                        class="pointer-events-none absolute inset-0 rounded-2xl opacity-0 group-hover:opacity-100 transition z-10"
-                        :class="m.role === 'user'
-                          ? 'bg-gradient-to-br from-white/0 via-white/0 to-gray-100/60'
-                          : 'bg-gradient-to-br from-white/0 via-white/0 to-white/10'"
-                      />
-                      <div
-                        class="pointer-events-none absolute bottom-3 h-3 w-3 rotate-45 z-20"
-                        :class="m.role === 'user'
-                          ? '-right-[6px] bg-white  border-gray-300  border-r'
-                          : '-left-[6px] bg-blue-700  border-blue-800/60  border-l'"
-                      />
-                      <div class="relative z-20">
-                        <div class="mb-1 flex items-center gap-2">
-                          <div
-                            class="text-[11px] font-semibold tracking-wide"
-                            :class="m.role === 'user' ? 'text-gray-500' : 'text-white'"
-                          >
-                            {{ m.role === "user" ? "Du" : "Luczor" }}
-                          </div>
-                          <span
-                            class="h-1 w-1 rounded-full"
-                            :class="m.role === 'user' ? 'bg-gray-300' : 'bg-white/60'"
-                          />
-                          <div
-                            class="text-[11px]"
-                            :class="m.role === 'user' ? 'text-gray-400' : 'text-white/80'"
-                            :title="new Date(m.ts).toLocaleString()"
-                          >
-                            {{ new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) }}
-                          </div>
-                        </div>
-                        <div class="whitespace-pre-wrap text-base" :class="m.role === 'user' ? 'text-gray-900' : 'text-white'">
-                          {{ m.content }}
-                        </div>
-                      </div>
-                    </div>
-                    <div class="flex items-center">
-                      <button
-                        v-if="m.role === 'assistant' && m.content?.trim()"
-                        type="button"
-                        class="ml-2 inline-flex items-center rounded-lg px-2 py-2 text-[11px] font-semibold text-white hover:bg-white/20"
-                        @click.stop="speak(m.content)"
-                        title="Vorlesen"
-                      >
-                        🔊
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <!-- Composer -->
-            <div class="flex-0 shrink-0  bg-gray-300 px-4 pt-4 pb-6">
-              <div class="flex items-end gap-2  mx-auto container">
-                <textarea
-                  v-model="input"
-                  rows="1"
-                  placeholder="Schreibe eine Nachricht…"
-                  class="flex-1 resize-none rounded-2xl border border-gray-200 bg-white px-4 py-3 text-base text-gray-900 outline-none focus:ring focus:ring-gray-200"
-                  @keydown.enter.exact.prevent="send"
-                />
-                <button
-                  type="button"
-                  class="py-3 rounded-2xl border border-gray-200 bg-white px-4 text-base font-semibold text-gray-700 hover:bg-gray-50 transition"
-                  :class="isRecording ? 'ring-2 ring-red-400 border-red-300 text-red-700' : ''"
-                  :disabled="sending"
-                  @click="togglePushToTalk"
-                >
-                  <span v-if="!isRecording">🎙️</span>
-                  <span v-else>⏹</span>
-                </button>
-                <button
-                  type="button"
-                  class="py-3 rounded-2xl bg-blue-900 px-4 text-base font-semibold text-white hover:bg-gray-800 disabled:opacity-60 transition"
-                  :disabled="sending || !input.trim()"
-                  @click="send"
-                >
-                  {{ sending ? "…" : "Senden" }}
-                </button>
-              </div>
-            </div>
-          </div>
-        </main>
+  <div class="app-shell">
+    <!-- ============ SIDEBAR ============ -->
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand__dot" />
+        <span>LUCZOR</span>
       </div>
-    </div>
+      <div class="brand__project">Aktiv · {{ activeProject?.name }}</div>
+
+      <div class="side-actions">
+        <button class="btn-ghost" type="button" @click="newChat" title="Neuer Chat">+ Chat</button>
+        <button class="btn-ghost" type="button" @click="addProject" title="Neues Projekt">+ Projekt</button>
+      </div>
+
+      <div class="side-listhead">
+        <span class="tac-label">Projekte</span>
+        <span class="side-count">{{ projects.length }}</span>
+      </div>
+
+      <div class="project-list">
+        <button
+          v-for="p in projects"
+          :key="p.id"
+          type="button"
+          class="project-item"
+          :class="{ 'is-active': p.id === activeProjectId }"
+          @click="openProject(p.id)"
+        >
+          <span class="project-item__name">{{ p.name }}</span>
+          <span class="project-item__id">{{ p.id }}</span>
+        </button>
+      </div>
+
+      <div class="side-settings">
+        <button class="settings-btn" type="button" @click="showSettings = true">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+            <path d="M10 12a2 2 0 1 1 4 0v1" />
+            <path d="M9 13h6v4H9z" />
+          </svg>
+          Settings
+        </button>
+      </div>
+    </aside>
+
+    <!-- ============ MAIN ============ -->
+    <main class="main-col">
+      <!-- Header -->
+      <div class="header">
+        <div class="header__title">{{ activeProject?.name }}</div>
+
+        <button
+          type="button"
+          class="mode-toggle"
+          :class="mode === 'act' ? 'is-act' : 'is-observe'"
+          @click="toggleMode"
+          :title="mode === 'act'
+            ? 'Handeln-Modus: Tools mit Bestätigung erlaubt. Klicken für Beobachten.'
+            : 'Beobachten-Modus: nur lesen. Klicken für Handeln.'"
+        >
+          <span class="mode-toggle__dot" />
+          {{ mode === 'act' ? 'Handeln' : 'Beobachten' }}
+        </button>
+
+        <button
+          type="button"
+          class="icon-btn"
+          :class="{ 'is-on': showAudit }"
+          @click="showAudit = !showAudit"
+          title="Tool-Protokoll"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="8" y1="6" x2="20" y2="6" /><line x1="8" y1="12" x2="20" y2="12" /><line x1="8" y1="18" x2="20" y2="18" />
+            <circle cx="3.5" cy="6" r="1" /><circle cx="3.5" cy="12" r="1" /><circle cx="3.5" cy="18" r="1" />
+          </svg>
+        </button>
+
+        <button type="button" class="icon-btn icon-btn--danger" @click="newChat" title="Neuer Chat / Reset">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="3 6 5 6 21 6" />
+            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+          </svg>
+        </button>
+      </div>
+
+      <!-- Project info strip -->
+      <div class="info-strip">
+        <div class="info-block">
+          <div class="info-head">
+            <span class="tac-label">Projektziele</span>
+            <span class="info-stat">
+              {{ goalStats.done }}/{{ goalStats.total }} erledigt · {{ goalStats.inProgress }} aktiv · {{ goalStats.open }} offen
+            </span>
+          </div>
+          <div v-if="projectGoals.length" class="goal-cards">
+            <div v-for="g in projectGoals.slice(0, 6)" :key="g.id" class="goal-card">
+              <span class="goal-card__text">{{ g.title }}</span>
+              <span class="badge" :class="g.status" :title="g.status">{{ goalStatusLabel(g.status) }}</span>
+            </div>
+          </div>
+          <div v-else class="empty">Noch keine Ziele im Projekt.</div>
+        </div>
+
+        <div class="info-block">
+          <span class="tac-label">Zusammenfassungen</span>
+          <div v-if="projectSummaries.length" class="summaries">
+            <div v-for="s in projectSummaries" :key="s.id ?? (s.createdAt ?? s.ts)" class="summary-row">
+              {{ s.text ?? s.summary ?? s.content ?? "" }}
+              <time>{{ fmtTime(s.createdAt ?? s.ts ?? Date.now()) }}</time>
+            </div>
+          </div>
+          <div v-else class="empty">Noch keine Summaries.</div>
+        </div>
+      </div>
+
+      <!-- Messages -->
+      <div id="messages" class="messages">
+        <div
+          v-for="m in messages"
+          :key="m.id"
+          class="msg"
+          :class="m.role === 'user' ? 'msg--user' : 'msg--assistant'"
+        >
+          <div class="msg__meta">
+            <span class="msg__role">{{ m.role === 'user' ? 'Du' : 'Luczor' }}</span>
+            <span class="msg__time">{{ fmtTime(m.ts) }}</span>
+            <button
+              v-if="m.role === 'assistant' && m.content && m.content.trim()"
+              type="button"
+              class="speak-btn"
+              @click.stop="speakMessage(m)"
+              title="Vorlesen"
+            >🔊</button>
+          </div>
+
+          <div class="bubble">
+            <template v-if="m.role === 'assistant'">
+              <div v-if="(m as any)?.meta?.isLoading && !(m.content && m.content.trim())" class="typing">
+                <i></i><i></i><i></i>
+              </div>
+              <p v-else class="answer__summary">{{ m.content
+                }}<span v-if="(m as any)?.meta?.isLoading" class="stream-caret"></span></p>
+
+              <div v-if="(m as any)?.meta?.question" class="answer__question">
+                {{ (m as any).meta.question }}
+              </div>
+
+              <div v-if="(m as any)?.meta?.bullets && (m as any).meta.bullets.length" class="chips">
+                <button
+                  v-for="(b, i) in (m as any).meta.bullets.slice(0, 10)"
+                  :key="i"
+                  type="button"
+                  class="chip"
+                  :title="b"
+                  @click="sendSuggestion(b)"
+                >{{ b }}</button>
+              </div>
+            </template>
+            <template v-else>{{ m.content }}</template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Tool audit log -->
+      <div v-if="showAudit" class="audit">
+        <span class="tac-label audit__title">Tool-Protokoll</span>
+        <div v-if="toolAudit.length" class="audit-list">
+          <div
+            v-for="a in toolAudit"
+            :key="a.id"
+            class="audit-row"
+            :class="a.ok ? 'is-ok' : 'is-fail'"
+          >
+            <span class="audit-row__status" />
+            <span class="audit-row__tool">{{ a.name }}<template v-if="a.error"> — {{ a.error }}</template></span>
+            <span class="audit-row__verdict">{{ a.ok ? 'OK' : 'FAIL' }}</span>
+            <span class="audit-row__time">{{ fmtTime(a.ts, true) }}</span>
+          </div>
+        </div>
+        <div v-else class="empty">Noch keine Tool-Ausführungen.</div>
+      </div>
+
+      <!-- Pending tool-call approvals -->
+      <div v-if="pendingApprovals.length" class="approvals">
+        <span class="tac-label approvals__title">Bestätigung erforderlich ({{ pendingApprovals.length }})</span>
+        <div v-for="call in pendingApprovals" :key="call.id" class="approval">
+          <div class="approval__head">
+            <span class="approval__cat">{{ call.category }}</span>
+            <span class="approval__tool">{{ call.name }}</span>
+          </div>
+          <pre class="approval__args">{{ toolArgsPreview(call.args) }}</pre>
+          <div class="approval__actions">
+            <button type="button" class="btn-reject" @click="rejectTool(call.id)">Ablehnen</button>
+            <button type="button" class="btn-exec" @click="approveTool(call.id)">Ausführen</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Composer -->
+      <div class="composer">
+        <textarea
+          class="composer__input"
+          v-model="input"
+          rows="1"
+          placeholder="Nachricht an Luczor…"
+          @keydown.enter.exact.prevent="send"
+        />
+        <button
+          type="button"
+          class="mic-btn"
+          :class="{ 'is-recording': isRecording }"
+          :disabled="sending"
+          @click="togglePushToTalk"
+          :title="isRecording ? 'Aufnahme stoppen' : 'Push-to-talk'"
+        >
+          <svg v-if="!isRecording" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="9" y="2" width="6" height="12" rx="3" />
+            <path d="M5 10a7 7 0 0 0 14 0" />
+            <line x1="12" y1="19" x2="12" y2="22" />
+          </svg>
+          <svg v-else viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+            <rect x="6" y="6" width="12" height="12" rx="2" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          class="send-btn"
+          :disabled="sending || !input.trim()"
+          @click="send"
+          title="Senden"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
+               stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="12" y1="19" x2="12" y2="5" />
+            <polyline points="6 11 12 5 18 11" />
+          </svg>
+        </button>
+      </div>
+    </main>
   </div>
 </template>
+
+<style scoped>
+/* ============ SIDEBAR ============ */
+.sidebar {
+  position: relative;
+  display: flex; flex-direction: column;
+  padding: var(--s4);
+  background: var(--surface-1);
+  backdrop-filter: blur(var(--blur)) saturate(130%);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+}
+.sidebar::before {
+  content: ""; position: absolute; top: 0; left: 12%; right: 12%; height: 1px;
+  background: linear-gradient(90deg, transparent, var(--cy), transparent);
+  opacity: 0.6;
+}
+.brand {
+  display: flex; align-items: center; gap: var(--s2);
+  font-family: var(--font-mono);
+  font-size: 18px; letter-spacing: 0.22em;
+  color: var(--text-primary); text-shadow: var(--glow-text);
+}
+.brand__dot {
+  width: 12px; height: 12px; border-radius: 50%;
+  background: radial-gradient(circle at 45% 40%, var(--cy-soft), var(--cy) 55%, transparent 72%);
+  box-shadow: var(--glow-md);
+  animation: pulse-core 3.2s var(--ease-soft) infinite;
+}
+.brand__project {
+  margin-top: var(--s1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-label); letter-spacing: var(--track-label);
+  text-transform: uppercase; color: var(--text-muted);
+}
+
+.side-actions { display: flex; gap: var(--s2); margin: var(--s4) 0; }
+.btn-ghost {
+  flex: 1;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  height: 38px; padding: 0 var(--s3);
+  font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 600; letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  background: var(--cy-08);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: color var(--dur) var(--ease), border-color var(--dur),
+              box-shadow var(--dur), background var(--dur), transform var(--dur-fast);
+}
+.btn-ghost:hover {
+  color: var(--text-primary); background: var(--cy-12);
+  border-color: var(--border-strong); box-shadow: var(--glow-xs);
+  transform: translateY(-1px);
+}
+.btn-ghost:active { transform: translateY(0); background: var(--cy-16); }
+
+.side-listhead {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: var(--s2);
+}
+.side-count { font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-faint); }
+
+.project-list {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 6px;
+  margin: 0 calc(-1 * var(--s2)); padding: 0 var(--s2);
+}
+.project-item {
+  position: relative;
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 10px 12px 10px 16px;
+  border-radius: var(--r-md);
+  border: 1px solid transparent;
+  background: transparent;
+  text-align: left; cursor: pointer;
+  transition: background var(--dur) var(--ease), border-color var(--dur), transform var(--dur-fast);
+}
+.project-item__name { font-size: 13.5px; font-weight: 600; color: var(--text-secondary); }
+.project-item__id   { font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-faint); }
+.project-item:hover {
+  background: var(--surface-2); border-color: var(--border-soft);
+  transform: translateX(2px);
+}
+.project-item:hover .project-item__name { color: var(--text-primary); }
+.project-item::before {
+  content: ""; position: absolute; left: 5px; top: 50%;
+  width: 3px; height: 0; transform: translateY(-50%);
+  border-radius: var(--r-pill);
+  background: linear-gradient(180deg, var(--cy-soft), var(--cy));
+  box-shadow: var(--glow-xs);
+  transition: height var(--dur) var(--ease);
+}
+.project-item.is-active {
+  background: linear-gradient(90deg, var(--cy-16), var(--cy-04) 65%);
+  border-color: var(--border);
+  box-shadow: var(--glow-sm), inset 0 0 20px rgba(34,211,238,0.06);
+}
+.project-item.is-active::before { height: 60%; }
+.project-item.is-active .project-item__name { color: var(--cy-soft); text-shadow: var(--glow-text); }
+
+.side-settings { margin-top: var(--s3); padding-top: var(--s3); border-top: 1px solid var(--border-hair); }
+.settings-btn {
+  width: 100%;
+  display: flex; align-items: center; gap: var(--s2);
+  padding: 10px 12px;
+  font-family: var(--font-mono); font-size: var(--fs-sm); letter-spacing: 0.04em;
+  color: var(--text-secondary);
+  background: transparent; border: 1px solid var(--border-hair); border-radius: var(--r-md);
+  cursor: pointer;
+  transition: color var(--dur), background var(--dur), border-color var(--dur);
+}
+.settings-btn:hover { color: var(--cy-soft); background: var(--surface-2); border-color: var(--border-soft); }
+
+/* ============ MAIN COLUMN ============ */
+.main-col {
+  display: flex; flex-direction: column; min-width: 0;
+  background: var(--surface-1);
+  backdrop-filter: blur(var(--blur)) saturate(130%);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-panel);
+  overflow: hidden;
+}
+.header {
+  display: flex; align-items: center; gap: var(--s3);
+  padding: var(--s4) var(--s5);
+  border-bottom: 1px solid var(--border-hair);
+  background: linear-gradient(180deg, var(--glass-wash), transparent);
+}
+.header__title {
+  flex: 1; min-width: 0;
+  font-size: var(--fs-title); font-weight: 700;
+  color: var(--text-primary);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  text-shadow: 0 0 12px rgba(56,189,248,0.20);
+}
+
+.mode-toggle {
+  display: inline-flex; align-items: center; gap: 8px;
+  height: 36px; padding: 0 14px 0 12px;
+  border-radius: var(--r-pill);
+  font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 600;
+  letter-spacing: 0.08em; text-transform: uppercase;
+  cursor: pointer; user-select: none;
+  border: 1px solid var(--border-soft);
+  transition: background var(--dur-morph) var(--ease), border-color var(--dur-morph),
+              color var(--dur-morph), box-shadow var(--dur-morph);
+}
+.mode-toggle__dot { width: 9px; height: 9px; border-radius: 50%; transition: background var(--dur-morph), box-shadow var(--dur-morph); }
+.mode-toggle.is-observe { background: rgba(120,150,168,0.10); border-color: rgba(150,180,196,0.26); color: var(--text-secondary); }
+.mode-toggle.is-observe .mode-toggle__dot { background: var(--text-muted); box-shadow: 0 0 0 3px rgba(107,142,166,0.14); }
+.mode-toggle.is-act {
+  background: var(--success-wash); border-color: rgba(52,211,153,0.5); color: var(--success-soft);
+  box-shadow: var(--glow-success), inset 0 0 14px rgba(52,211,153,0.08);
+}
+.mode-toggle.is-act .mode-toggle__dot { background: var(--success); box-shadow: 0 0 10px var(--success); animation: pulse-dot 1.8s var(--ease-soft) infinite; }
+
+.icon-btn {
+  display: inline-grid; place-items: center;
+  width: 36px; height: 36px;
+  color: var(--text-secondary);
+  background: var(--cy-08);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition: color var(--dur), background var(--dur), border-color var(--dur), box-shadow var(--dur), transform var(--dur-fast);
+}
+.icon-btn:hover { color: var(--cy-soft); background: var(--cy-12); border-color: var(--border-strong); box-shadow: var(--glow-xs); transform: translateY(-1px); }
+.icon-btn:active { transform: translateY(0); }
+.icon-btn.is-on { color: var(--cy-bright); background: var(--cy-16); border-color: var(--border-strong); box-shadow: var(--glow-sm), inset 0 0 12px rgba(56,189,248,0.15); }
+.icon-btn--danger:hover { color: var(--danger-soft); background: var(--danger-wash); border-color: rgba(244,63,94,0.5); box-shadow: var(--glow-danger); }
+
+/* ============ INFO STRIP ============ */
+.info-strip {
+  display: grid; grid-template-columns: 1.4fr 1fr; gap: var(--s4);
+  padding: var(--s4) var(--s5);
+  border-bottom: 1px solid var(--border-hair);
+}
+.info-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s2); margin-bottom: var(--s3); }
+.info-stat { font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-muted); }
+.goal-cards { display: flex; flex-wrap: wrap; gap: var(--s2); }
+.goal-card {
+  flex: 1 1 180px;
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s3);
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-md);
+  transition: border-color var(--dur), box-shadow var(--dur), transform var(--dur);
+}
+.goal-card:hover { border-color: var(--border); box-shadow: var(--glow-xs); transform: translateY(-1px); }
+.goal-card__text { font-size: var(--fs-sm); color: var(--text-secondary); line-height: 1.4; }
+
+.summaries { display: flex; flex-direction: column; gap: 6px; }
+.summary-row {
+  padding: 8px 11px; font-size: var(--fs-sm); line-height: 1.45; color: var(--text-secondary);
+  background: var(--bg-sunken);
+  border-left: 2px solid var(--border);
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+}
+.summary-row time { display: block; margin-top: 2px; font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-faint); }
+
+.empty {
+  padding: 10px 12px; font-size: var(--fs-sm); color: var(--text-muted);
+  border: 1px dashed var(--border-hair); border-radius: var(--r-md);
+}
+
+/* ---- badges ---- */
+.badge {
+  flex: none;
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 3px 9px;
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.09em; text-transform: uppercase;
+  border-radius: var(--r-pill); border: 1px solid transparent;
+}
+.badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; }
+.badge.open { color: var(--text-muted); background: rgba(150,180,196,0.08); border-color: rgba(150,180,196,0.22); }
+.badge.open::before { background: var(--text-muted); }
+.badge.in_progress { color: var(--energy-bright); background: var(--energy-wash); border-color: var(--energy-border); }
+.badge.in_progress::before { background: var(--energy-bright); box-shadow: 0 0 8px var(--energy); animation: pulse-dot 1.6s var(--ease-soft) infinite; }
+.badge.blocked { color: var(--danger-soft); background: var(--danger-wash); border-color: rgba(244,63,94,0.35); }
+.badge.blocked::before { background: var(--danger-soft); }
+.badge.done { color: var(--success-soft); background: var(--success-wash); border-color: rgba(52,211,153,0.4); }
+.badge.done::before { background: var(--success-soft); box-shadow: 0 0 8px var(--success); }
+
+/* ============ MESSAGES ============ */
+.messages {
+  flex: 1; min-height: 0; overflow-y: auto;
+  display: flex; flex-direction: column; gap: var(--s5);
+  padding: var(--s5) var(--s5) var(--s6);
+  scroll-behavior: smooth;
+}
+.messages::before { content: ""; margin-top: auto; } /* bottom-anchor */
+
+.msg { display: flex; flex-direction: column; max-width: 78%; animation: msg-enter var(--dur-slow) var(--ease) both; }
+.msg__meta { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-muted); }
+.msg__role { text-transform: uppercase; letter-spacing: 0.1em; }
+.msg__time { font-variant-numeric: tabular-nums; color: var(--text-faint); }
+
+.msg--user { align-self: flex-end; align-items: flex-end; }
+.msg--user .msg__meta { flex-direction: row-reverse; }
+.msg--user .bubble {
+  padding: 12px 16px;
+  font-size: var(--fs-body); line-height: 1.55; color: #eaf7ff;
+  white-space: pre-wrap; word-break: break-word;
+  background: linear-gradient(160deg, rgba(56,189,248,0.18), rgba(56,189,248,0.08));
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg);
+  box-shadow: var(--shadow-1), inset 0 1px 0 rgba(255,255,255,0.06);
+}
+
+.msg--assistant { align-self: flex-start; align-items: flex-start; }
+.msg--assistant .msg__role { color: var(--cy-soft); text-shadow: var(--glow-text); }
+.msg--assistant .bubble {
+  position: relative;
+  padding: 14px 18px 14px 20px;
+  font-size: var(--fs-body); line-height: var(--lh-body); color: var(--text-primary);
+  background:
+    radial-gradient(120% 100% at 0% 0%, rgba(34,211,238,0.07), transparent 55%),
+    var(--surface-glass);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-xs) var(--r-lg) var(--r-lg) var(--r-lg);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow-2), var(--glow-xs), inset 0 0 22px rgba(34,211,238,0.04);
+  animation: bubble-breathe 6s var(--ease-soft) 0.4s infinite;
+}
+.msg--assistant .bubble::before {
+  content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 2px;
+  border-radius: var(--r-pill);
+  background: linear-gradient(180deg, var(--cy-soft), var(--cy-deep));
+  box-shadow: var(--glow-xs);
+}
+
+.speak-btn {
+  display: inline-grid; place-items: center;
+  width: 24px; height: 24px;
+  font-size: 12px; line-height: 1;
+  color: var(--text-muted);
+  background: transparent; border: 1px solid transparent; border-radius: var(--r-sm);
+  cursor: pointer; transition: all var(--dur) var(--ease);
+}
+.speak-btn:hover { color: var(--cy-soft); border-color: var(--border-soft); box-shadow: var(--glow-xs); }
+
+/* ---- structured answer ---- */
+.answer__summary { color: var(--text-primary); white-space: pre-wrap; word-break: break-word; margin: 0; }
+.answer__question {
+  margin-top: var(--s3);
+  padding: 10px 14px 10px 16px;
+  font-size: var(--fs-body); font-weight: 600; color: var(--cy-soft);
+  background: linear-gradient(90deg, var(--glass-wash), transparent);
+  border: 1px solid var(--border-soft);
+  border-left: 2px solid var(--cy);
+  border-radius: var(--r-sm);
+  line-height: 1.5;
+}
+.answer__question::before {
+  content: "?"; margin-right: 8px;
+  font-family: var(--font-mono); color: var(--cy-bright); text-shadow: var(--glow-text);
+}
+
+.chips { display: flex; flex-wrap: wrap; gap: var(--s2); margin-top: var(--s3); }
+.chip {
+  position: relative; overflow: hidden;
+  display: inline-flex; align-items: center; gap: 7px;
+  padding: 7px 13px 7px 11px;
+  font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 500;
+  color: var(--cy-soft); text-align: left;
+  background: var(--cy-08);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  transition: color var(--dur), background var(--dur), border-color var(--dur), box-shadow var(--dur), transform var(--dur-fast) var(--ease);
+}
+.chip::before { content: "›"; font-family: var(--font-mono); color: var(--cy); font-weight: 700; transition: transform var(--dur) var(--ease), color var(--dur); }
+.chip::after {
+  content: ""; position: absolute; inset: 0;
+  background: linear-gradient(120deg, transparent 30%, rgba(103,232,249,0.22) 50%, transparent 70%);
+  transform: translateX(-120%); transition: transform var(--dur-slow) var(--ease);
+}
+.chip:hover { color: #eaf7ff; background: var(--cy-12); border-color: var(--border-strong); box-shadow: var(--glow-sm); transform: translateY(-2px); }
+.chip:hover::before { transform: translateX(2px); color: var(--cy-soft); }
+.chip:hover::after { transform: translateX(120%); }
+.chip:active { transform: translateY(0) scale(0.97); background: var(--cy-16); border-color: var(--cy-bright); box-shadow: inset 0 0 10px rgba(2,8,14,0.6), var(--glow-xs); }
+.chip:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+.stream-caret {
+  display: inline-block; width: 8px; height: 1.05em; margin-left: 2px; vertical-align: -2px;
+  background: var(--cy-bright); border-radius: 1px; box-shadow: var(--glow-text);
+  animation: caret-blink 1s steps(1) infinite;
+}
+.typing { display: inline-flex; gap: 5px; padding: 4px 0; }
+.typing i { width: 6px; height: 6px; border-radius: 50%; background: var(--cy-soft); box-shadow: var(--glow-xs); animation: typing-bounce 1.2s var(--ease-soft) infinite; }
+.typing i:nth-child(2) { animation-delay: 0.15s; }
+.typing i:nth-child(3) { animation-delay: 0.30s; }
+
+/* ============ AUDIT ============ */
+.audit {
+  margin: 0 var(--s5) var(--s3);
+  padding: var(--s3);
+  background: linear-gradient(160deg, var(--surface-1), rgba(4,10,16,0.72));
+  border: 1px solid var(--border-hair);
+  border-radius: var(--r-md);
+}
+.audit__title { display: block; margin-bottom: var(--s2); }
+.audit-list { display: flex; flex-direction: column; gap: 2px; max-height: 168px; overflow-y: auto; }
+.audit-row {
+  display: grid; grid-template-columns: 10px 1fr auto auto; align-items: center; gap: 10px;
+  padding: 7px 10px;
+  font-family: var(--font-mono); font-size: var(--fs-meta);
+  border-radius: var(--r-sm); border-left: 2px solid transparent;
+  transition: background var(--dur) var(--ease);
+}
+.audit-row:hover { background: var(--surface-2); }
+.audit-row__status { width: 8px; height: 8px; border-radius: 50%; }
+.audit-row__tool { color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.audit-row__verdict { font-size: 9.5px; letter-spacing: 0.1em; }
+.audit-row__time { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+.audit-row.is-ok { border-left-color: rgba(52,211,153,0.55); }
+.audit-row.is-ok .audit-row__status { background: var(--success); box-shadow: 0 0 8px var(--success); }
+.audit-row.is-ok .audit-row__verdict { color: var(--success-soft); }
+.audit-row.is-ok .audit-row__tool { color: var(--text-primary); }
+.audit-row.is-fail { border-left-color: rgba(244,63,94,0.55); background: rgba(244,63,94,0.05); }
+.audit-row.is-fail .audit-row__status { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+.audit-row.is-fail .audit-row__verdict { color: var(--danger-soft); }
+.audit-row.is-fail .audit-row__tool { color: var(--danger-soft); }
+
+/* ============ APPROVALS ============ */
+.approvals { margin: 0 var(--s5) var(--s3); display: flex; flex-direction: column; gap: var(--s2); }
+.approvals__title { display: block; color: var(--energy-bright); }
+.approval {
+  position: relative;
+  padding: var(--s4);
+  background:
+    radial-gradient(120% 80% at 100% 0%, rgba(245,158,11,0.07), transparent 55%),
+    var(--surface-glass);
+  border: 1px solid var(--energy-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--glow-energy), var(--shadow-2);
+  backdrop-filter: blur(12px);
+  animation: msg-enter var(--dur-slow) var(--ease) both;
+  overflow: hidden;
+}
+.approval::before {
+  content: ""; position: absolute; left: 0; right: 0; top: 0; height: 2px;
+  background: linear-gradient(90deg, transparent, var(--cy-bright), var(--cy-soft), transparent);
+  background-size: 200% 100%;
+  animation: edge-sweep 2.6s linear infinite;
+}
+.approval__head { display: flex; align-items: center; gap: 10px; margin-bottom: var(--s3); }
+.approval__tool { font-family: var(--font-mono); font-size: var(--fs-body); font-weight: 600; color: var(--energy-bright); text-shadow: 0 0 12px rgba(245,158,11,0.5); }
+.approval__cat {
+  padding: 2px 9px;
+  font-family: var(--font-mono); font-size: 10.5px; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--cy-soft); background: var(--cy-12);
+  border: 1px solid var(--border-soft); border-radius: var(--r-pill);
+}
+.approval__args {
+  padding: 12px 14px; margin: 0 0 var(--s4);
+  max-height: 200px; overflow: auto;
+  font-family: var(--font-mono); font-size: var(--fs-meta); line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-hair); border-radius: var(--r-md);
+  white-space: pre-wrap; word-break: break-word;
+  box-shadow: inset 0 0 16px rgba(0,0,0,0.4);
+}
+.approval__actions { display: flex; gap: var(--s2); justify-content: flex-end; }
+.btn-reject, .btn-exec {
+  height: 38px; padding: 0 18px;
+  font-family: var(--font-mono); font-size: var(--fs-sm); font-weight: 700; letter-spacing: 0.04em;
+  border-radius: var(--r-sm); cursor: pointer;
+  transition: all var(--dur) var(--ease);
+}
+.btn-reject { color: var(--danger-soft); background: var(--danger-wash); border: 1px solid rgba(244,63,94,0.4); }
+.btn-reject:hover { border-color: var(--danger); box-shadow: var(--glow-danger); transform: translateY(-1px); }
+.btn-reject:active { transform: translateY(0); }
+.btn-exec { color: var(--text-on-accent); background: linear-gradient(160deg, var(--success-soft), #1fae7f 75%); border: 1px solid rgba(52,211,153,0.6); box-shadow: var(--glow-success); }
+.btn-exec:hover { transform: translateY(-1px); filter: brightness(1.06); box-shadow: var(--glow-success), var(--glow-md); }
+.btn-exec:active { transform: translateY(0) scale(0.97); }
+
+/* ============ COMPOSER ============ */
+.composer {
+  display: flex; align-items: flex-end; gap: var(--s2);
+  padding: var(--s3);
+  margin: var(--s3) var(--s5) var(--s5);
+  background: var(--surface-2);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-2);
+  transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+}
+.composer:focus-within { border-color: var(--border-strong); box-shadow: var(--focus-ring), var(--shadow-2); }
+.composer__input {
+  flex: 1; min-height: 24px; max-height: 160px;
+  padding: 8px 6px; resize: none; border: none; outline: none; background: transparent;
+  color: var(--text-primary); font-family: var(--font-ui); font-size: var(--fs-body); line-height: 1.5;
+}
+.composer__input::placeholder { color: var(--text-faint); }
+
+.mic-btn {
+  position: relative; flex: none;
+  display: inline-grid; place-items: center;
+  width: 40px; height: 40px; border-radius: var(--r-pill);
+  color: var(--text-secondary);
+  background: var(--surface-3);
+  border: 1px solid var(--border-soft);
+  cursor: pointer;
+  transition: all var(--dur) var(--ease);
+}
+.mic-btn:hover { color: var(--cy-soft); border-color: var(--border); box-shadow: var(--glow-sm); }
+.mic-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.mic-btn.is-recording {
+  color: #fff;
+  background: radial-gradient(circle, var(--danger) 0%, #c8455c 100%);
+  border-color: rgba(244,63,94,0.7);
+  box-shadow: var(--glow-danger);
+  animation: mic-pulse 1.4s var(--ease-soft) infinite;
+}
+.mic-btn.is-recording::after {
+  content: ""; position: absolute; inset: -4px; border-radius: var(--r-pill);
+  border: 2px solid var(--danger); animation: mic-ping 1.4s var(--ease) infinite;
+}
+
+.send-btn {
+  flex: none;
+  display: inline-grid; place-items: center;
+  width: 40px; height: 40px; border-radius: var(--r-pill);
+  color: var(--text-on-accent);
+  background: radial-gradient(circle at 40% 35%, var(--cy-soft), var(--cy) 55%, var(--cy-deep));
+  border: 1px solid rgba(103,232,249,0.5);
+  box-shadow: var(--glow-md);
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease), box-shadow var(--dur), filter var(--dur);
+}
+.send-btn:hover { transform: translateY(-1px) scale(1.04); box-shadow: var(--glow-md), var(--glow-lg); }
+.send-btn:active { transform: scale(0.96); }
+.send-btn:disabled { cursor: not-allowed; filter: grayscale(0.6) brightness(0.6); box-shadow: none; color: var(--text-faint); background: var(--surface-3); border-color: var(--border-hair); }
+
+@media (max-width: 900px) {
+  .info-strip { grid-template-columns: 1fr; }
+}
+</style>

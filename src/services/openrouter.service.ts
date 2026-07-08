@@ -1,284 +1,271 @@
+// src/services/openrouter.service.ts
 import { Store } from "@tauri-apps/plugin-store";
 
-/* -------------------------------------------------
- * Types
- * ------------------------------------------------- */
-export type ORole = "system" | "user" | "assistant";
-export type OMessage = { role: ORole; content: string };
+export type LuczorMode = "observe" | "act";
 
-export type LuczorMode = "observe" | "plan" | "execute";
-
-/**
- * STRICT schema-friendly:
- * - All top-level keys are ALWAYS present
- * - "plan" can be null
- * - arrays default to []
- * - question default to ""
- */
-export type LuczorEnvelope = {
-  mode: LuczorMode;
-  summary: string;
-  bullets: string[];
-  plan: { steps: string[] } | null;
-  actions: Array<{
-    type: string;
-    risk: "low" | "medium" | "high";
-    requires_approval: boolean;
-  }>;
-  question: string;
+/* =========================================================
+ * Wire message shapes (OpenAI/OpenRouter chat format)
+ * ========================================================= */
+export type WireToolCall = {
+  id: string;
+  type: "function";
+  function: {
+    name: string;
+    /** JSON string of arguments (always complete here — non-streaming). */
+    arguments: string;
+  };
 };
 
-type StreamChatOptions = {
+export type WireMessage =
+  | { role: "system" | "user"; content: string }
+  | {
+      role: "assistant";
+      content: string;
+      tool_calls?: WireToolCall[];
+    }
+  | { role: "tool"; tool_call_id: string; content: string };
+
+/* =========================================================
+ * Parsed result of a single completion round
+ * ========================================================= */
+export type ParsedToolCall = {
+  id: string;
+  name: string;
+  /** Parsed arguments object; {} if the model produced invalid JSON. */
+  arguments: Record<string, unknown>;
+  /** Original argument string as returned by the model. */
+  rawArguments: string;
+};
+
+export type ChatResult = {
+  /** Assistant free-text content (may be "" when the model only calls tools). */
+  content: string;
+  /** Parsed tool calls (empty when the model returned a final answer). */
+  toolCalls: ParsedToolCall[];
+  /** Raw tool calls, to be echoed back into the assistant wire message. */
+  rawToolCalls: WireToolCall[];
+  finishReason: string;
+};
+
+type ChatWithToolsArgs = {
   model: string;
-  messages: OMessage[];
-  mode: LuczorMode;
-
-  onToken: (token: string) => void; // called once (non-stream)
-  onDone?: (rawText: string) => void;
-  onStructured?: (env: LuczorEnvelope) => void;
-  onError?: (msg: string) => void;
-
+  messages: WireMessage[];
+  tools?: unknown[];
+  temperature?: number;
+  maxTokens?: number;
   signal?: AbortSignal;
 };
 
-type OpenRouterSettings = {
-  apiKey: string;
-  apiBaseUrl: string;
-  referer: string;
-  title: string;
+type StreamChatArgs = ChatWithToolsArgs & {
+  /** Called with the full accumulated content each time a token arrives. */
+  onToken?: (content: string) => void;
 };
 
-function isObject(v: unknown): v is Record<string, any> {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
+const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
+
+function safeParseArgs(raw: string): Record<string, unknown> {
+  const s = (raw ?? "").trim();
+  if (!s) return {};
+  try {
+    const parsed = JSON.parse(s);
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
 }
 
-/* -------------------------------------------------
- * Service
- * ------------------------------------------------- */
+async function getApiKey(): Promise<string> {
+  const store = await Store.load("luczor.settings.json");
+  const key = (await store.get<string>("openrouter_api_key")) ?? "";
+  return key.trim();
+}
+
 export class OpenRouterService {
-  private static store: Store | null = null;
+  /**
+   * Single non-streaming chat completion with tool-calling enabled.
+   *
+   * Returns the assistant's text and/or the tool calls it wants to make.
+   * The caller (agent loop) executes tools, appends results, and calls again.
+   */
+  static async chatWithTools(args: ChatWithToolsArgs): Promise<ChatResult> {
+    const apiKey = await getApiKey();
+    if (!apiKey) {
+      throw new Error("Kein OpenRouter API Key gesetzt (Settings).");
+    }
 
-  private static async getStore() {
-    if (!this.store) this.store = await Store.load("luczor.settings.json");
-    return this.store;
-  }
+    const body: Record<string, unknown> = {
+      model: args.model,
+      messages: args.messages,
+      temperature: args.temperature ?? 0.2,
+    };
+    if (args.tools && args.tools.length) {
+      body.tools = args.tools;
+      body.tool_choice = "auto";
+    }
+    if (typeof args.maxTokens === "number") {
+      body.max_tokens = args.maxTokens;
+    }
 
-  private static async getSettings(): Promise<OpenRouterSettings> {
-    const store = await this.getStore();
+    const res = await fetch(OR_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://luczor.local",
+        "X-Title": "Luczor",
+      },
+      body: JSON.stringify(body),
+      signal: args.signal,
+    });
 
-    const apiKey = (await store.get<string>("openrouter_api_key"))?.trim();
-    if (!apiKey) throw new Error("OpenRouter API Key fehlt.");
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`OpenRouter HTTP ${res.status}: ${txt || res.statusText}`);
+    }
 
-    const apiBaseUrl =
-      (await store.get<string>("openrouter_api_base_url"))?.trim() ||
-      "https://openrouter.ai/api/v1";
+    const json: any = await res.json();
+    const choice = json?.choices?.[0];
+    const message = choice?.message ?? {};
 
-    const referer =
-      (await store.get<string>("openrouter_referer"))?.trim() || "http://localhost";
+    const content = typeof message.content === "string" ? message.content : "";
+    const finishReason = String(choice?.finish_reason ?? "stop");
 
-    const title =
-      (await store.get<string>("openrouter_title"))?.trim() || "Luczor";
+    const rawToolCalls: WireToolCall[] = Array.isArray(message.tool_calls)
+      ? message.tool_calls
+          .filter((tc: any) => tc?.function?.name)
+          .map((tc: any) => ({
+            id: String(tc.id ?? `call_${Math.random().toString(16).slice(2)}`),
+            type: "function" as const,
+            function: {
+              name: String(tc.function.name),
+              arguments:
+                typeof tc.function.arguments === "string" ? tc.function.arguments : "{}",
+            },
+          }))
+      : [];
 
-    return { apiKey, apiBaseUrl, referer, title };
+    const toolCalls: ParsedToolCall[] = rawToolCalls.map((tc) => ({
+      id: tc.id,
+      name: tc.function.name,
+      arguments: safeParseArgs(tc.function.arguments),
+      rawArguments: tc.function.arguments,
+    }));
+
+    return { content, toolCalls, rawToolCalls, finishReason };
   }
 
   /**
-   * Non-stream call, but keeps your callback contract.
-   * Uses chat/completions + response_format json_schema strict.
+   * Streaming chat completion with tool-calling.
+   *
+   * Streams `content` tokens (via onToken) while also accumulating any
+   * `tool_calls` deltas. Resolves with the same ChatResult shape once the
+   * stream ends, so the agent loop can treat it like chatWithTools.
    */
-  static async streamChat(opts: StreamChatOptions): Promise<{ cancel: () => Promise<void> }> {
-    const { apiKey, apiBaseUrl, referer, title } = await this.getSettings();
-
-    const controller = new AbortController();
-    const externalSignal = opts.signal;
-
-    if (externalSignal) {
-      if (externalSignal.aborted) controller.abort();
-      else externalSignal.addEventListener("abort", () => controller.abort(), { once: true });
+  static async streamChatWithTools(args: StreamChatArgs): Promise<ChatResult> {
+    const apiKey = await getApiKey();
+    if (!apiKey) {
+      throw new Error("Kein OpenRouter API Key gesetzt (Settings).");
     }
 
-    const cancel = async () => {
-      try {
-        controller.abort();
-      } catch {
-        /* ignore */
-      }
+    const body: Record<string, unknown> = {
+      model: args.model,
+      messages: args.messages,
+      temperature: args.temperature ?? 0.2,
+      stream: true,
     };
+    if (args.tools && args.tools.length) {
+      body.tools = args.tools;
+      body.tool_choice = "auto";
+    }
+    if (typeof args.maxTokens === "number") {
+      body.max_tokens = args.maxTokens;
+    }
 
-    const systemInstruction = buildStructuredInstruction(opts.mode);
-
-    const body = {
-      model: opts.model,
-      messages: [
-        { role: "system" as const, content: systemInstruction },
-        ...opts.messages,
-      ],
-      stream: false,
-
-      response_format: {
-        type: "json_schema",
-        json_schema: {
-          name: "LuczorEnvelope",
-          strict: true,
-          schema: luczorEnvelopeJsonSchemaStrict(opts.mode),
-        },
+    const res = await fetch(OR_URL, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://luczor.local",
+        "X-Title": "Luczor",
       },
-    };
+      body: JSON.stringify(body),
+      signal: args.signal,
+    });
 
-    let rawText = "";
-
-    try {
-      const res = await fetch(`${apiBaseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          "Content-Type": "application/json",
-          "HTTP-Referer": referer,
-          "X-Title": title,
-        },
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        opts.onError?.(text || `HTTP ${res.status}`);
-        throw new Error(text || `HTTP ${res.status}`);
-      }
-
-      const json = await res.json();
-      const content = json?.choices?.[0]?.message?.content;
-
-      if (typeof content === "string") rawText = content;
-      else if (isObject(content)) rawText = JSON.stringify(content);
-      else rawText = JSON.stringify(json);
-
-      opts.onToken(rawText);
-      opts.onDone?.(rawText);
-
-      const env = normalizeLuczorEnvelope(rawText, opts.mode);
-      if (env) opts.onStructured?.(env);
-
-      return { cancel };
-    } catch (e: any) {
-      if (e?.name === "AbortError") {
-        opts.onDone?.(rawText);
-        return { cancel };
-      }
-
-      opts.onError?.(e?.message ?? String(e));
-      throw e;
+    if (!res.ok || !res.body) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`OpenRouter HTTP ${res.status}: ${txt || res.statusText}`);
     }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+
+    let buffer = "";
+    let content = "";
+    let finishReason = "stop";
+    const toolAcc: Array<{ id: string; name: string; args: string }> = [];
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? ""; // keep the trailing partial line
+
+      for (const line of lines) {
+        const l = line.trim();
+        if (!l || l.startsWith(":")) continue; // skip keep-alive comments
+        if (!l.startsWith("data:")) continue;
+
+        const data = l.slice(5).trim();
+        if (!data || data === "[DONE]") continue;
+
+        let json: any;
+        try {
+          json = JSON.parse(data);
+        } catch {
+          continue;
+        }
+
+        const choice = json?.choices?.[0];
+        const delta = choice?.delta;
+        if (choice?.finish_reason) finishReason = String(choice.finish_reason);
+        if (!delta) continue;
+
+        if (typeof delta.content === "string" && delta.content) {
+          content += delta.content;
+          args.onToken?.(content);
+        }
+
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const idx = typeof tc?.index === "number" ? tc.index : 0;
+            const slot = (toolAcc[idx] ??= { id: "", name: "", args: "" });
+            if (tc?.id) slot.id = String(tc.id);
+            if (tc?.function?.name) slot.name = String(tc.function.name);
+            if (typeof tc?.function?.arguments === "string") slot.args += tc.function.arguments;
+          }
+        }
+      }
+    }
+
+    const rawToolCalls: WireToolCall[] = toolAcc
+      .filter((t) => t && t.name)
+      .map((t) => ({
+        id: t.id || `call_${Math.random().toString(16).slice(2)}`,
+        type: "function" as const,
+        function: { name: t.name, arguments: t.args || "{}" },
+      }));
+
+    const toolCalls: ParsedToolCall[] = rawToolCalls.map((tc) => ({
+      id: tc.id,
+      name: tc.function.name,
+      arguments: safeParseArgs(tc.function.arguments),
+      rawArguments: tc.function.arguments,
+    }));
+
+    return { content, toolCalls, rawToolCalls, finishReason };
   }
-}
-
-/* -------------------------------------------------
- * Strict Schema (ALL KEYS REQUIRED)
- * ------------------------------------------------- */
-function luczorEnvelopeJsonSchemaStrict(mode: LuczorMode) {
-  const actionItem = {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      type: { type: "string" },
-      risk: { type: "string", enum: ["low", "medium", "high"] },
-      requires_approval: { type: "boolean" },
-    },
-    required: ["type", "risk", "requires_approval"],
-  } as const;
-
-  const planObj = {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      steps: { type: "array", items: { type: "string" } },
-    },
-    required: ["steps"],
-  } as const;
-
-  return {
-    type: "object",
-    additionalProperties: false,
-    properties: {
-      mode: { type: "string", enum: ["observe", "plan", "execute"], default: mode },
-      summary: { type: "string" },
-
-      bullets: { type: "array", items: { type: "string" } },
-
-      // plan may be object OR null, but still required
-      plan: { anyOf: [planObj, { type: "null" }] },
-
-      actions: { type: "array", items: actionItem },
-
-      question: { type: "string" },
-    },
-
-    // REQUIRED MUST include ALL keys in properties
-    required: ["mode", "summary", "bullets", "plan", "actions", "question"],
-  } as const;
-}
-
-/* -------------------------------------------------
- * Normalize output (force defaults)
- * ------------------------------------------------- */
-function normalizeLuczorEnvelope(raw: string, fallbackMode: LuczorMode): LuczorEnvelope | null {
-  let parsed: any;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!isObject(parsed)) return null;
-
-  const mode: LuczorMode =
-    parsed.mode === "observe" || parsed.mode === "plan" || parsed.mode === "execute"
-      ? parsed.mode
-      : fallbackMode;
-
-  const summary = typeof parsed.summary === "string" ? parsed.summary : "";
-
-  const bullets = Array.isArray(parsed.bullets)
-    ? parsed.bullets.filter((x: any) => typeof x === "string").slice(0, 5)
-    : [];
-
-  const actions = Array.isArray(parsed.actions)
-    ? parsed.actions
-        .filter((a: any) => isObject(a) && typeof a.type === "string")
-        .map((a: any) => ({
-          type: String(a.type),
-          risk: a.risk === "low" || a.risk === "medium" || a.risk === "high" ? a.risk : "medium",
-          requires_approval: Boolean(a.requires_approval),
-        }))
-        .slice(0, 8)
-    : [];
-
-  let plan: { steps: string[] } | null = null;
-  if (parsed.plan === null) {
-    plan = null;
-  } else if (isObject(parsed.plan) && Array.isArray((parsed.plan as any).steps)) {
-    plan = {
-      steps: (parsed.plan as any).steps.filter((x: any) => typeof x === "string").slice(0, 6),
-    };
-  } else {
-    plan = null;
-  }
-
-  const question = typeof parsed.question === "string" ? parsed.question : "";
-
-  // Ensure required values exist (even if empty)
-  return {
-    mode,
-    summary,
-    bullets,
-    plan,
-    actions,
-    question,
-  };
-}
-
-/* -------------------------------------------------
- * Prompt helper
- * ------------------------------------------------- */
-export function buildStructuredInstruction(mode: LuczorMode): string {
-  return ``.trim();
 }
