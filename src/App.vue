@@ -9,7 +9,6 @@ import { parseEnvelope } from "@/services/envelope";
 import { resolveApproval, rejectAllApprovals } from "@/services/approvals";
 import { usePushToTalk } from "@/services/pushToTalk";
 import { Store } from "@tauri-apps/plugin-store";
-import { transcribeWithElevenLabs } from "@/services/stt";
 import { listen } from "@tauri-apps/api/event";
 import { VoiceEngine } from "@/services/voice/voiceEngine";
 import { getVoiceConfig, localStt, localSttReady } from "@/services/voice/localVoice";
@@ -18,6 +17,7 @@ import { luczorMemory, getMemoryPrefs } from "@/services/memory/luczorMemory";
 import { buildPromptContextDetails, inferTaskType, type PromptContextDetails } from "@/services/contextController";
 import { refreshStatus } from "@/services/status";
 import { appearance, loadAppearance } from "@/services/appearance";
+import { LuczorApi } from "@/services/api/luczorApi";
 
 import { startHud, setStatus } from "@/state/hud";
 import { state, mutations } from "@/state/store";
@@ -39,6 +39,24 @@ function clamp(n: number, min: number, max: number) {
 function safeTrim(v: unknown): string {
   if (typeof v !== "string") return "";
   return v.trim();
+}
+
+function fallbackModelForTask(taskType: string): string {
+  if (taskType.startsWith("coding.")) return "anthropic/claude-sonnet-5";
+  if (taskType.startsWith("planning.")) return "google/gemini-3-pro-preview";
+  if (taskType.startsWith("browser.")) return "google/gemini-3-flash-preview";
+  if (taskType.startsWith("admin.")) return "openai/gpt-5.1";
+  return "google/gemini-3-flash-preview";
+}
+
+async function chooseModel(taskType: string): Promise<string> {
+  try {
+    const route = await LuczorApi.llmRoute(taskType);
+    if (route?.provider === "openrouter" && route.model_id) return route.model_id;
+  } catch (e) {
+    console.warn("[llm] route fallback:", e);
+  }
+  return fallbackModelForTask(taskType);
 }
 
 function fmtTime(ts: number, seconds = false): string {
@@ -332,7 +350,7 @@ function addProject() {
 }
 
 /* -------------------------------------------------
- * Push-to-talk (ElevenLabs STT)
+ * Push-to-talk (local whisper.cpp STT)
  * ------------------------------------------------- */
 const { isRecording, start: startPtt, stop: stopPtt, cancel: cancelPtt } = usePushToTalk();
 
@@ -356,18 +374,8 @@ async function togglePushToTalk() {
   setStatus("idle");
   if (!audio) return;
 
-  // transcribeWithElevenLabs uses the server proxy by default (no local key).
-  const store = await Store.load("luczor.settings.json");
-  const elevenKey = (await store.get<string>("elevenlabs_api_key")) ?? "";
-
   try {
-    const { text } = await transcribeWithElevenLabs({
-      api_key: elevenKey,
-      base64: audio.base64,
-      mime: audio.mime,
-    });
-
-    input.value = (text ?? "").trim();
+    input.value = await transcribeLocal(audio.base64);
   } catch (e: any) {
     mutations.addMessage(mutations.makeMsg("assistant", `STT Fehler: ${e?.message ?? String(e)}`, pid));
   }
@@ -381,7 +389,7 @@ const listening = ref(false);
 const lastHeard = ref("");
 const listenLabel = ref("Zuhören");
 
-async function transcribeUtterance(wavBase64: string): Promise<string> {
+async function transcribeLocal(wavBase64: string): Promise<string> {
   const cfg = await getVoiceConfig();
   if (localSttReady(cfg)) {
     return localStt(wavBase64, {
@@ -390,16 +398,11 @@ async function transcribeUtterance(wavBase64: string): Promise<string> {
       language: cfg.localSttLanguage,
     });
   }
-  // Cloud/proxy (ElevenLabs). transcribeWithElevenLabs routes via the server
-  // proxy when enabled (default) — no local key needed.
-  const store = await Store.load("luczor.settings.json");
-  const elevenKey = ((await store.get<string>("elevenlabs_api_key")) ?? "").trim();
-  const { text } = await transcribeWithElevenLabs({
-    api_key: elevenKey,
-    base64: wavBase64,
-    mime: "audio/wav",
-  });
-  return (text ?? "").trim();
+  throw new Error("Lokale STT ist nicht konfiguriert: whisper.cpp Binary und Modell setzen.");
+}
+
+async function transcribeUtterance(wavBase64: string): Promise<string> {
+  return transcribeLocal(wavBase64);
 }
 
 async function toggleListening() {
@@ -653,10 +656,11 @@ async function send() {
 
   try {
     void playSfx("loading");
+    const model = await chooseModel(promptContext.taskType);
 
     const { finalText } = await runAgent({
       projectId: pid,
-      model: "@preset/luczor",
+      model,
       baseMessages,
       mode: mode.value,
       taskType: promptContext.taskType,
@@ -736,7 +740,6 @@ watch(
 
 <template>
   <Settings :open="showSettings" @update:open="showSettings = $event" />
-  <JarvisHud v-if="appearance.hudVisible" />
 
   <div class="app-shell">
     <!-- ============ SIDEBAR ============ -->
@@ -751,6 +754,8 @@ watch(
         <button class="btn-ghost" type="button" @click="newChat" title="Neuer Chat">+ Chat</button>
         <button class="btn-ghost" type="button" @click="addProject" title="Neues Projekt">+ Projekt</button>
       </div>
+
+      <JarvisHud v-if="appearance.hudVisible" embedded />
 
       <div class="side-listhead">
         <span class="tac-label">Projekte</span>
@@ -861,6 +866,12 @@ watch(
 
       <!-- Messages -->
       <div id="messages" class="messages">
+        <div v-if="!messages.length" class="chat-empty">
+          <div class="chat-empty__kicker">{{ appearance.assistantName }}</div>
+          <div class="chat-empty__title">Bereit für die nächste Aufgabe.</div>
+          <div class="chat-empty__text">Schreibe direkt los oder nutze Push-to-Talk. Kontext und Memory werden automatisch schlank in den Prompt gelegt.</div>
+        </div>
+
         <div
           v-for="m in messages"
           :key="m.id"
@@ -1257,12 +1268,43 @@ watch(
 .messages {
   flex: 1; min-height: 0; overflow-y: auto;
   display: flex; flex-direction: column; gap: var(--s5);
-  padding: var(--s5) var(--s5) var(--s6);
+  padding: var(--s5) clamp(18px, 3vw, 42px) var(--s6);
   scroll-behavior: smooth;
 }
 .messages::before { content: ""; margin-top: auto; } /* bottom-anchor */
 
-.msg { display: flex; flex-direction: column; max-width: 78%; animation: msg-enter var(--dur-slow) var(--ease) both; }
+.chat-empty {
+  width: min(620px, 92%);
+  align-self: center;
+  margin: auto 0;
+  padding: var(--s5);
+  text-align: center;
+  color: var(--text-secondary);
+  border: 1px dashed var(--border-soft);
+  border-radius: var(--r-lg);
+  background: linear-gradient(180deg, var(--surface-2), transparent);
+}
+.chat-empty__kicker {
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+  letter-spacing: var(--track-label);
+  text-transform: uppercase;
+  color: var(--cy-soft);
+}
+.chat-empty__title {
+  margin-top: 6px;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+.chat-empty__text {
+  margin-top: 8px;
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text-muted);
+}
+
+.msg { display: flex; flex-direction: column; max-width: min(78%, 880px); animation: msg-enter var(--dur-slow) var(--ease) both; }
 .msg__meta { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-muted); }
 .msg__role { text-transform: uppercase; letter-spacing: 0.1em; }
 .msg__time { font-variant-numeric: tabular-nums; color: var(--text-faint); }
@@ -1270,7 +1312,7 @@ watch(
 .msg--user { align-self: flex-end; align-items: flex-end; }
 .msg--user .msg__meta { flex-direction: row-reverse; }
 .msg--user .bubble {
-  padding: 12px 16px;
+  padding: 11px 15px;
   font-size: var(--fs-body); line-height: 1.55; color: #eaf7ff;
   white-space: pre-wrap; word-break: break-word;
   background: linear-gradient(160deg, rgba(56,189,248,0.18), rgba(56,189,248,0.08));
@@ -1283,7 +1325,7 @@ watch(
 .msg--assistant .msg__role { color: var(--cy-soft); text-shadow: var(--glow-text); }
 .msg--assistant .bubble {
   position: relative;
-  padding: 14px 18px 14px 20px;
+  padding: 13px 17px 13px 19px;
   font-size: var(--fs-body); line-height: var(--lh-body); color: var(--text-primary);
   background:
     radial-gradient(120% 100% at 0% 0%, rgba(34,211,238,0.07), transparent 55%),
@@ -1540,5 +1582,6 @@ watch(
 
 @media (max-width: 900px) {
   .info-strip { grid-template-columns: 1fr; }
+  .msg { max-width: 92%; }
 }
 </style>

@@ -5,6 +5,10 @@ import { lastScreenshot } from "@/services/tools/registry";
 import { syncNow } from "@/services/status";
 import { appearance } from "@/services/appearance";
 
+const props = withDefaults(defineProps<{ embedded?: boolean }>(), {
+  embedded: false,
+});
+
 /* -------------------------------------------------
  * Animation clock + smoothed telemetry
  * ------------------------------------------------- */
@@ -169,6 +173,7 @@ function connColor(state: string): string {
 
 /* HUD anchor from personalization (br/bl/tr/tl) */
 const posStyle = computed(() => {
+  if (props.embedded) return {};
   const p = appearance.hudPosition;
   const bottom = p[0] === "b";
   const right = p[1] === "r";
@@ -182,7 +187,7 @@ const posStyle = computed(() => {
 </script>
 
 <template>
-  <div class="jarvis" :class="{ collapsed }" :style="posStyle">
+  <div class="jarvis" :class="{ collapsed, embedded: props.embedded }" :style="posStyle">
     <button class="jarvis-toggle" @click="collapsed = !collapsed" :title="collapsed ? 'HUD zeigen' : 'HUD einklappen'">
       <span class="dot" :style="{ background: palette.main, boxShadow: `0 0 12px ${palette.glow}` }" />
     </button>
@@ -341,6 +346,30 @@ const posStyle = computed(() => {
   user-select: none;
 }
 .jarvis.collapsed { width: auto; }
+.jarvis.embedded {
+  position: relative;
+  inset: auto;
+  z-index: auto;
+  width: 100%;
+  margin: var(--s3) 0;
+}
+.jarvis.embedded.collapsed { width: 100%; }
+.jarvis.embedded .jarvis-toggle {
+  top: 8px;
+  right: 8px;
+}
+.jarvis.embedded .jarvis-body {
+  border-radius: var(--r-lg);
+  padding: 12px 11px 10px;
+}
+.jarvis.embedded .reactor svg {
+  width: 156px;
+  height: 156px;
+}
+.jarvis.embedded .wave {
+  height: 44px;
+  margin: 5px 2px 9px;
+}
 
 /* Smooth colour morphing on every tinted SVG element + labels */
 .tint { transition: stroke .55s ease, fill .55s ease; }

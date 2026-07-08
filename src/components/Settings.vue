@@ -77,8 +77,8 @@ const DEFAULTS: AppSettings = {
 
   voice_mode: "push_to_talk",
   voice_wake_word: "luczor",
-  voice_stt_backend: "cloud",
-  voice_tts_backend: "cloud",
+  voice_stt_backend: "local",
+  voice_tts_backend: "local",
   voice_local_stt_binary: "",
   voice_local_stt_model: "",
   voice_local_stt_language: "de",
@@ -181,9 +181,9 @@ async function ensureStoreLoaded() {
   const wake = await settingsStore.get<string>("voice_wake_word");
   if (wake) settings.voice_wake_word = wake;
   const sBack = await settingsStore.get<VoiceBackend>("voice_stt_backend");
-  if (sBack === "cloud" || sBack === "local") settings.voice_stt_backend = sBack;
+  settings.voice_stt_backend = sBack === "local" ? "local" : DEFAULTS.voice_stt_backend;
   const tBack = await settingsStore.get<VoiceBackend>("voice_tts_backend");
-  if (tBack === "cloud" || tBack === "local") settings.voice_tts_backend = tBack;
+  settings.voice_tts_backend = tBack === "local" ? "local" : DEFAULTS.voice_tts_backend;
   const sBin = await settingsStore.get<string>("voice_local_stt_binary");
   if (sBin) settings.voice_local_stt_binary = sBin;
   const sMod = await settingsStore.get<string>("voice_local_stt_model");
@@ -282,17 +282,6 @@ async function saveAll() {
       return;
     }
 
-    // ElevenLabs is optional; validate only if any xi field is filled
-    const xiAny =
-      settings.elevenlabs_api_key.trim() ||
-      settings.elevenlabs_voice_id.trim() ||
-      settings.elevenlabs_tts_model.trim() ||
-      settings.elevenlabs_stt_model.trim();
-
-    if (xiAny && !settings.elevenlabs_api_key.trim()) {
-      ui.error = "ElevenLabs: Bitte API Key setzen (oder alle ElevenLabs Felder leeren).";
-      return;
-    }
   }
 
   await settingsStore.set("openrouter_api_key", settings.openrouter_api_key.trim());
@@ -483,7 +472,7 @@ const tabs: Array<{
   desc: string;
   icon: string;
 }> = [
-  { id: "api", title: "API", desc: "OpenRouter + ElevenLabs", icon: "key" },
+  { id: "api", title: "API", desc: "OpenRouter", icon: "key" },
   { id: "server", title: "Server", desc: "Laravel Sync API", icon: "server" },
   { id: "voice", title: "Voice", desc: "Wake-Word + lokale Modelle", icon: "mic" },
   { id: "chat", title: "Chat", desc: "Auto Speech", icon: "chat" },
@@ -601,7 +590,7 @@ function iconPath(kind: string) {
                   <input v-model="settings.openrouter_api_key" type="text" autocomplete="off" placeholder="sk-or-..." class="lz-input" />
                 </div>
 
-                <div class="lz-card">
+                <div v-if="false" class="lz-card">
                   <div class="lz-card__head">
                     <div>
                       <div class="lz-card__title">ElevenLabs</div>
@@ -747,14 +736,12 @@ function iconPath(kind: string) {
                     <div>
                       <label class="lz-label">STT-Backend</label>
                       <select v-model="settings.voice_stt_backend" class="lz-input">
-                        <option value="cloud">Cloud (ElevenLabs)</option>
                         <option value="local">Lokal (whisper.cpp)</option>
                       </select>
                     </div>
                     <div>
                       <label class="lz-label">TTS-Backend</label>
                       <select v-model="settings.voice_tts_backend" class="lz-input">
-                        <option value="cloud">Cloud (ElevenLabs)</option>
                         <option value="local">Lokal (Piper)</option>
                       </select>
                     </div>
@@ -762,7 +749,7 @@ function iconPath(kind: string) {
                 </div>
                 <div class="lz-card">
                   <div class="lz-card__title">Lokale Modelle (offline)</div>
-                  <p class="lz-hint">Pfade zu selbst installierten Binaries/Modellen. Ohne diese nutzt Luczor automatisch Cloud.</p>
+                  <p class="lz-hint">Pfade zu selbst installierten Binaries/Modellen. Ohne diese ist Sprache deaktiviert, statt auf Cloud auszuweichen.</p>
                   <div class="lz-grid2">
                     <div>
                       <label class="lz-label">whisper.cpp Binary</label>

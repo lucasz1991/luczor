@@ -89,6 +89,15 @@ export type AgentEventInput = {
   occurred_at_client?: number | string;
 };
 
+export type LlmRouteResponse = {
+  task_type: string;
+  model_id: string;
+  provider: string;
+  source: string;
+  score?: number;
+  sample_count?: number;
+};
+
 export type LuczorApiConfig = {
   baseUrl: string;
   deviceKey: string;
@@ -222,5 +231,11 @@ export const LuczorApi = {
     request<{ ok: boolean; id: number }>("/agent-events", {
       method: "POST",
       body: { client_id: clientId, ...evt },
+    }),
+
+  llmRoute: (taskType: string) =>
+    request<LlmRouteResponse>("/llm/route", {
+      method: "POST",
+      body: { task_type: taskType },
     }),
 };

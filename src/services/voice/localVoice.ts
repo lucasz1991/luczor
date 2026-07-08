@@ -2,8 +2,8 @@
 //
 // Voice configuration + local (offline) STT/TTS backends.
 // Local backends call the Rust commands (whisper.cpp / Piper) that shell out
-// to user-installed binaries. When not configured, callers fall back to the
-// existing cloud (ElevenLabs) backend.
+// to user-installed binaries. Voice is local-first; cloud backends are legacy
+// and are not selected by default.
 
 import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
@@ -32,8 +32,8 @@ export async function getVoiceConfig(): Promise<VoiceConfig> {
   return {
     mode: mode === "continuous" || mode === "wakeword" ? mode : "push_to_talk",
     wakeWord: (await str("voice_wake_word", "luczor")) || "luczor",
-    sttBackend: ((await s.get<VoiceBackend>("voice_stt_backend")) ?? "cloud") === "local" ? "local" : "cloud",
-    ttsBackend: ((await s.get<VoiceBackend>("voice_tts_backend")) ?? "cloud") === "local" ? "local" : "cloud",
+    sttBackend: ((await s.get<VoiceBackend>("voice_stt_backend")) ?? "local") === "cloud" ? "cloud" : "local",
+    ttsBackend: ((await s.get<VoiceBackend>("voice_tts_backend")) ?? "local") === "cloud" ? "cloud" : "local",
     localSttBinary: await str("voice_local_stt_binary"),
     localSttModel: await str("voice_local_stt_model"),
     localSttLanguage: (await str("voice_local_stt_language", "de")) || "de",

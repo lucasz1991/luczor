@@ -63,6 +63,10 @@ export async function pullServerDefaults(): Promise<number> {
     sync_auto_threshold: "sync_auto_threshold",
     default_mode: "default_mode",
     allow_unrestricted: "allow_unrestricted",
+    voice_stt_backend: "voice_stt_backend",
+    voice_tts_backend: "voice_tts_backend",
+    voice_local_stt_language: "voice_local_stt_language",
+    chat_auto_speech: "chat_auto_speech",
   };
 
   const s = await Store.load("luczor.settings.json");

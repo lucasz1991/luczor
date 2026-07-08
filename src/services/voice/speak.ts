@@ -1,52 +1,21 @@
 // src/services/voice/speak.ts
 //
 // Unified, streaming text-to-speech. Splits text into sentences and plays them
-// back-to-back while synthesizing the next one — so audio starts after the
-// first sentence instead of the whole reply. Uses the local Piper backend when
-// configured, otherwise the cloud (ElevenLabs) backend.
+// back-to-back while synthesizing the next one. The active runtime backend is
+// local Piper; no ElevenLabs/cloud fallback is used for speech output.
 
-import { invoke } from "@tauri-apps/api/core";
-import { Store } from "@tauri-apps/plugin-store";
 import { setStatus } from "@/state/hud";
 import { getVoiceConfig, localTts, localTtsReady, type VoiceConfig } from "./localVoice";
-import { useVoiceProxy, proxyTts } from "./voiceProxy";
-
-const SETTINGS_FILE = "luczor.settings.json";
 
 let currentAudio: HTMLAudioElement | null = null;
 let cancelled = false;
 
 type Clip = { base64: string; mime: string };
 
-async function synthCloud(text: string): Promise<Clip> {
-  const s = await Store.load(SETTINGS_FILE);
-  const voiceId = ((await s.get<string>("elevenlabs_voice_id")) ?? "").trim();
-  const modelId = ((await s.get<string>("elevenlabs_tts_model")) ?? "").trim() || undefined;
-  const outputFormat = ((await s.get<string>("elevenlabs_tts_output_format")) ?? "").trim() || undefined;
-
-  // Server proxy (default): the ElevenLabs key stays on the server.
-  if (await useVoiceProxy()) {
-    if (!voiceId) throw new Error("Keine TTS Voice-ID gesetzt (Settings).");
-    return proxyTts(text, { voiceId, modelId, outputFormat });
-  }
-
-  const apiKey = ((await s.get<string>("elevenlabs_api_key")) ?? "").trim();
-  if (!apiKey) throw new Error("ElevenLabs API Key fehlt (Settings).");
-  const speed = await s.get<number>("elevenlabs_tts_speed");
-
-  return invoke<Clip>("eleven_tts", {
-    payload: {
-      api_key: apiKey,
-      text,
-      voice_id: voiceId,
-      model_id: modelId,
-      output_format: outputFormat,
-      speed: typeof speed === "number" ? speed : undefined,
-    },
-  });
-}
-
 async function synthLocal(text: string, cfg: VoiceConfig): Promise<Clip> {
+  if (!localTtsReady(cfg)) {
+    throw new Error("Lokale TTS ist nicht konfiguriert: Piper Binary und Piper Voice (.onnx) setzen.");
+  }
   return localTts(text, { binary: cfg.localTtsBinary, model: cfg.localTtsModel });
 }
 
@@ -60,11 +29,10 @@ function play(clip: Clip): Promise<void> {
   });
 }
 
-/** Split into speakable chunks; merge very short fragments into neighbours. */
 function splitSentences(text: string): string[] {
   const raw = text
     .replace(/\s+/g, " ")
-    .split(/(?<=[.!?…:])\s+/)
+    .split(/(?<=[.!?:])\s+/)
     .map((s) => s.trim())
     .filter(Boolean);
 
@@ -79,7 +47,6 @@ function splitSentences(text: string): string[] {
   return out.length ? out : [text.trim()];
 }
 
-/** Stream-speak text sentence-by-sentence with one-ahead prefetch. */
 export async function streamSpeak(text: string): Promise<void> {
   const clean = (text ?? "").trim();
   if (!clean) return;
@@ -87,15 +54,13 @@ export async function streamSpeak(text: string): Promise<void> {
   cancelled = false;
   const sentences = splitSentences(clean);
   const cfg = await getVoiceConfig();
-  const useLocal = localTtsReady(cfg);
-  const synth = (t: string) => (useLocal ? synthLocal(t, cfg) : synthCloud(t));
 
   try {
-    let next: Promise<Clip> | null = sentences.length ? synth(sentences[0]!) : null;
+    let next: Promise<Clip> | null = sentences.length ? synthLocal(sentences[0]!, cfg) : null;
     for (let i = 0; i < sentences.length; i++) {
       if (cancelled) break;
       const clip = await next;
-      next = i + 1 < sentences.length ? synth(sentences[i + 1]!) : null;
+      next = i + 1 < sentences.length ? synthLocal(sentences[i + 1]!, cfg) : null;
       if (cancelled || !clip) break;
       setStatus("speaking");
       await play(clip);
