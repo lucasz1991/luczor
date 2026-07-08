@@ -15,6 +15,7 @@ import { VoiceEngine } from "@/services/voice/voiceEngine";
 import { getVoiceConfig, localStt, localSttReady } from "@/services/voice/localVoice";
 import { streamSpeak } from "@/services/voice/speak";
 import { luczorMemory, getMemoryPrefs } from "@/services/memory/luczorMemory";
+import { buildPromptContext } from "@/services/contextController";
 import { refreshStatus } from "@/services/status";
 import { appearance, loadAppearance } from "@/services/appearance";
 
@@ -638,7 +639,8 @@ async function send() {
   try {
     const prefs = await getMemoryPrefs();
     if (prefs.inject) {
-      const memCtx = await luczorMemory.getContextForPrompt(pid, text, prefs.injectCount);
+      // Context Controller (server) ranks + budgets memory; local fallback.
+      const memCtx = await buildPromptContext(pid, text, prefs.injectCount);
       if (memCtx) baseMessages.splice(1, 0, { role: "system", content: memCtx });
     }
   } catch (e) {
