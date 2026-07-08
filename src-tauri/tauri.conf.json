@@ -22,7 +22,7 @@
       "capabilities": ["default"],
       "csp": {
         "default-src": "'self' customprotocol: asset:",
-        "connect-src": "ipc: http://ipc.localhost https://openrouter.ai wss://openrouter.ai http://localhost:* http://127.0.0.1:* https://localhost:* https://127.0.0.1:*",
+        "connect-src": "ipc: http://ipc.localhost https://openrouter.ai wss://openrouter.ai https://luczor.follow-flow.de https://*.follow-flow.de http://localhost:* http://127.0.0.1:* https://localhost:* https://127.0.0.1:*",
         "font-src": "'self'",
         "img-src": "'self' asset: http://asset.localhost blob: data:",
         "style-src": "'unsafe-inline' 'self'"

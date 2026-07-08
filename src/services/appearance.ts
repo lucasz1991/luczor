@@ -30,6 +30,7 @@ export const appearance = reactive({
   hudPosition: "br" as HudPosition,
   reduceMotion: false,
   showGrid: true,
+  uiScale: 1.0,
   assistantName: "Luczor",
 });
 
@@ -72,6 +73,8 @@ export function applyAppearance() {
   const root = document.documentElement;
   root.dataset.reduceMotion = appearance.reduceMotion ? "1" : "0";
   root.dataset.grid = appearance.showGrid ? "1" : "0";
+  // Chromium (WebView2) supports `zoom` to scale the whole UI.
+  (root.style as any).zoom = String(appearance.uiScale || 1);
 }
 
 export async function loadAppearance(): Promise<void> {
@@ -87,6 +90,8 @@ export async function loadAppearance(): Promise<void> {
     if (typeof rm === "boolean") appearance.reduceMotion = rm;
     const sg = await s.get<boolean>("ui_show_grid");
     if (typeof sg === "boolean") appearance.showGrid = sg;
+    const sc = await s.get<number>("ui_scale");
+    if (typeof sc === "number" && !Number.isNaN(sc)) appearance.uiScale = Math.max(0.8, Math.min(1.4, sc));
     const an = await s.get<string>("assistant_name");
     if (an && an.trim()) appearance.assistantName = an.trim();
   } catch {

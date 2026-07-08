@@ -1,5 +1,6 @@
 // src/services/openrouter.service.ts
 import { Store } from "@tauri-apps/plugin-store";
+import { getApiConfig } from "@/services/api/luczorApi";
 
 export type LuczorMode = "observe" | "act" | "unrestricted";
 
@@ -80,6 +81,40 @@ async function getApiKey(): Promise<string> {
   return key.trim();
 }
 
+/**
+ * Resolve the chat endpoint + headers. When the server proxy is enabled the
+ * request is sent to the Laravel proxy (authenticated with the device key) and
+ * the server injects the real OpenRouter key — so no provider key on the client.
+ */
+async function getEndpoint(): Promise<{ url: string; headers: Record<string, string> }> {
+  const store = await Store.load("luczor.settings.json");
+  // Server proxy is the default: no OpenRouter key on the client.
+  const useProxy = (await store.get<boolean>("use_server_proxy")) ?? true;
+
+  if (useProxy) {
+    const cfg = await getApiConfig(); // baseUrl defaults to the production domain
+    if (!cfg.deviceKey) {
+      throw new Error("Server-Proxy aktiv, aber Device-Key fehlt (Settings → Server).");
+    }
+    return {
+      url: `${cfg.baseUrl}/api/v1/proxy/chat`,
+      headers: { Authorization: `Bearer ${cfg.deviceKey}`, "Content-Type": "application/json" },
+    };
+  }
+
+  const apiKey = await getApiKey();
+  if (!apiKey) throw new Error("Kein OpenRouter API Key gesetzt (Settings).");
+  return {
+    url: OR_URL,
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      "HTTP-Referer": "https://luczor.local",
+      "X-Title": "Luczor",
+    },
+  };
+}
+
 export class OpenRouterService {
   /**
    * Single non-streaming chat completion with tool-calling enabled.
@@ -88,10 +123,7 @@ export class OpenRouterService {
    * The caller (agent loop) executes tools, appends results, and calls again.
    */
   static async chatWithTools(args: ChatWithToolsArgs): Promise<ChatResult> {
-    const apiKey = await getApiKey();
-    if (!apiKey) {
-      throw new Error("Kein OpenRouter API Key gesetzt (Settings).");
-    }
+    const endpoint = await getEndpoint();
 
     const body: Record<string, unknown> = {
       model: args.model,
@@ -106,14 +138,9 @@ export class OpenRouterService {
       body.max_tokens = args.maxTokens;
     }
 
-    const res = await fetch(OR_URL, {
+    const res = await fetch(endpoint.url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://luczor.local",
-        "X-Title": "Luczor",
-      },
+      headers: endpoint.headers,
       body: JSON.stringify(body),
       signal: args.signal,
     });
@@ -162,10 +189,7 @@ export class OpenRouterService {
    * stream ends, so the agent loop can treat it like chatWithTools.
    */
   static async streamChatWithTools(args: StreamChatArgs): Promise<ChatResult> {
-    const apiKey = await getApiKey();
-    if (!apiKey) {
-      throw new Error("Kein OpenRouter API Key gesetzt (Settings).");
-    }
+    const endpoint = await getEndpoint();
 
     const body: Record<string, unknown> = {
       model: args.model,
@@ -181,14 +205,9 @@ export class OpenRouterService {
       body.max_tokens = args.maxTokens;
     }
 
-    const res = await fetch(OR_URL, {
+    const res = await fetch(endpoint.url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://luczor.local",
-        "X-Title": "Luczor",
-      },
+      headers: endpoint.headers,
       body: JSON.stringify(body),
       signal: args.signal,
     });

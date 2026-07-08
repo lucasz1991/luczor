@@ -9,6 +9,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Store } from "@tauri-apps/plugin-store";
 import { setStatus } from "@/state/hud";
 import { getVoiceConfig, localTts, localTtsReady, type VoiceConfig } from "./localVoice";
+import { useVoiceProxy, proxyTts } from "./voiceProxy";
 
 const SETTINGS_FILE = "luczor.settings.json";
 
@@ -19,11 +20,18 @@ type Clip = { base64: string; mime: string };
 
 async function synthCloud(text: string): Promise<Clip> {
   const s = await Store.load(SETTINGS_FILE);
-  const apiKey = ((await s.get<string>("elevenlabs_api_key")) ?? "").trim();
-  if (!apiKey) throw new Error("ElevenLabs API Key fehlt (Settings).");
   const voiceId = ((await s.get<string>("elevenlabs_voice_id")) ?? "").trim();
   const modelId = ((await s.get<string>("elevenlabs_tts_model")) ?? "").trim() || undefined;
   const outputFormat = ((await s.get<string>("elevenlabs_tts_output_format")) ?? "").trim() || undefined;
+
+  // Server proxy (default): the ElevenLabs key stays on the server.
+  if (await useVoiceProxy()) {
+    if (!voiceId) throw new Error("Keine TTS Voice-ID gesetzt (Settings).");
+    return proxyTts(text, { voiceId, modelId, outputFormat });
+  }
+
+  const apiKey = ((await s.get<string>("elevenlabs_api_key")) ?? "").trim();
+  if (!apiKey) throw new Error("ElevenLabs API Key fehlt (Settings).");
   const speed = await s.get<number>("elevenlabs_tts_speed");
 
   return invoke<Clip>("eleven_tts", {

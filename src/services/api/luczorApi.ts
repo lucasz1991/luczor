@@ -20,6 +20,9 @@ import { Store } from "@tauri-apps/plugin-store";
 const SETTINGS_FILE = "luczor.settings.json";
 const API_PREFIX = "/api/v1";
 
+/** Production API. Always used when the user has not set a custom URL. */
+export const DEFAULT_BASE_URL = "https://luczor.follow-flow.de";
+
 /* =========================================================
  * Response/request types (match admin_api_app controllers)
  * ========================================================= */
@@ -106,7 +109,8 @@ async function store() {
 /** Load config, minting a stable client_id on first use. */
 export async function getApiConfig(): Promise<LuczorApiConfig> {
   const s = await store();
-  const baseUrl = ((await s.get<string>("luczor_api_base_url")) ?? "").trim().replace(/\/+$/, "");
+  const stored = ((await s.get<string>("luczor_api_base_url")) ?? "").trim().replace(/\/+$/, "");
+  const baseUrl = stored || DEFAULT_BASE_URL; // default always applies
   const deviceKey = ((await s.get<string>("luczor_device_key")) ?? "").trim();
 
   let clientId = ((await s.get<string>("luczor_client_id")) ?? "").trim();

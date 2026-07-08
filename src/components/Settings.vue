@@ -2,8 +2,8 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, watch } from "vue";
 import { Store } from "@tauri-apps/plugin-store";
-import { testConnection, pushAllToServer } from "@/services/api/sync";
-import { getApiConfig } from "@/services/api/luczorApi";
+import { testConnection, pushAllToServer, pullServerDefaults } from "@/services/api/sync";
+import { getApiConfig, DEFAULT_BASE_URL } from "@/services/api/luczorApi";
 import { loadAppearance, ACCENT_NAMES, type HudPosition } from "@/services/appearance";
 
 const props = defineProps<{ open: boolean }>();
@@ -56,6 +56,7 @@ type AppSettings = {
   ui_hud_position: HudPosition;
   ui_reduce_motion: boolean;
   ui_show_grid: boolean;
+  ui_scale: number;
   assistant_name: string;
 
   // Sync + Memory
@@ -65,12 +66,13 @@ type AppSettings = {
   memory_inject: boolean;
   memory_inject_count: number;
   memory_auto_remember: boolean;
+  use_server_proxy: boolean;
 };
 
 const DEFAULTS: AppSettings = {
   openrouter_api_key: "",
 
-  luczor_api_base_url: "",
+  luczor_api_base_url: DEFAULT_BASE_URL,
   luczor_device_key: "",
 
   voice_mode: "push_to_talk",
@@ -101,6 +103,7 @@ const DEFAULTS: AppSettings = {
   ui_hud_position: "br",
   ui_reduce_motion: false,
   ui_show_grid: true,
+  ui_scale: 1.0,
   assistant_name: "Luczor",
 
   sync_auto: false,
@@ -109,6 +112,7 @@ const DEFAULTS: AppSettings = {
   memory_inject: true,
   memory_inject_count: 5,
   memory_auto_remember: true,
+  use_server_proxy: true,
 };
 
 const ui = reactive({
@@ -241,6 +245,8 @@ async function ensureStoreLoaded() {
   if (typeof rm === "boolean") settings.ui_reduce_motion = rm;
   const grid = await settingsStore.get<boolean>("ui_show_grid");
   if (typeof grid === "boolean") settings.ui_show_grid = grid;
+  const uiScale = await settingsStore.get<number>("ui_scale");
+  if (typeof uiScale === "number" && !Number.isNaN(uiScale)) settings.ui_scale = clamp(uiScale, 0.8, 1.4);
   const aName = await settingsStore.get<string>("assistant_name");
   if (aName) settings.assistant_name = aName;
 
@@ -257,6 +263,8 @@ async function ensureStoreLoaded() {
   if (typeof mCnt === "number" && !Number.isNaN(mCnt)) settings.memory_inject_count = mCnt;
   const mRem = await settingsStore.get<boolean>("memory_auto_remember");
   if (typeof mRem === "boolean") settings.memory_auto_remember = mRem;
+  const proxy = await settingsStore.get<boolean>("use_server_proxy");
+  if (typeof proxy === "boolean") settings.use_server_proxy = proxy;
 
   ui.loaded = true;
 }
@@ -266,11 +274,11 @@ async function saveAll() {
 
   ui.error = null;
 
-  // Minimal validation only when API tab is open
-  if (ui.tab === "api") {
+  // Minimal validation only when API tab is open (skipped when using the server proxy)
+  if (ui.tab === "api" && !settings.use_server_proxy) {
     const or = settings.openrouter_api_key.trim();
     if (!or) {
-      ui.error = "Bitte OpenRouter API Key eingeben (oder wechsle zu einem anderen Tab).";
+      ui.error = "Bitte OpenRouter API Key eingeben (oder Server-Proxy nutzen / anderen Tab wählen).";
       return;
     }
 
@@ -325,6 +333,7 @@ async function saveAll() {
   await settingsStore.set("ui_hud_position", settings.ui_hud_position);
   await settingsStore.set("ui_reduce_motion", settings.ui_reduce_motion);
   await settingsStore.set("ui_show_grid", settings.ui_show_grid);
+  await settingsStore.set("ui_scale", clamp(settings.ui_scale, 0.8, 1.4));
   await settingsStore.set("assistant_name", settings.assistant_name.trim() || "Luczor");
 
   // Sync + Memory
@@ -334,6 +343,7 @@ async function saveAll() {
   await settingsStore.set("memory_inject", settings.memory_inject);
   await settingsStore.set("memory_inject_count", clamp(Math.round(settings.memory_inject_count), 0, 20));
   await settingsStore.set("memory_auto_remember", settings.memory_auto_remember);
+  await settingsStore.set("use_server_proxy", settings.use_server_proxy);
 
   await settingsStore.save();
   await loadAppearance(); // re-apply theme/HUD/name live
@@ -394,6 +404,23 @@ async function testServer() {
   try {
     await persistServerConfig();
     ui.serverResult = await testConnection();
+  } catch (e: any) {
+    ui.serverResult = { ok: false, message: e?.message ?? String(e) };
+  } finally {
+    ui.serverBusy = false;
+  }
+}
+
+async function pullDefaults() {
+  ui.serverResult = null;
+  ui.serverBusy = true;
+  try {
+    await persistServerConfig();
+    const n = await pullServerDefaults();
+    ui.loaded = false;
+    await ensureStoreLoaded();
+    await loadAppearance();
+    ui.serverResult = { ok: true, message: `${n} Server-Einstellungen übernommen.` };
   } catch (e: any) {
     ui.serverResult = { ok: false, message: e?.message ?? String(e) };
   } finally {
@@ -558,8 +585,8 @@ function iconPath(kind: string) {
               <!-- API -->
               <div v-if="ui.tab === 'api'" class="lz-section">
                 <div class="lz-section__head">
-                  <h3>API-Schlüssel</h3>
-                  <p>OpenRouter für Chat/LLM, ElevenLabs für Cloud-STT/TTS.</p>
+                  <h3>API-Schlüssel <span class="lz-optbadge">optional</span></h3>
+                  <p>Nur nötig, wenn der <b>Server-Proxy</b> (Server-Tab) ausgeschaltet ist. Standardmäßig liegen alle Provider-Keys verschlüsselt auf dem Server.</p>
                 </div>
 
                 <div class="lz-card">
@@ -627,9 +654,9 @@ function iconPath(kind: string) {
                   <p>Optionales Sync-/Archiv-Backend. Die App arbeitet auch ohne Server voll offline.</p>
                 </div>
                 <div class="lz-card">
-                  <label class="lz-label">Server URL</label>
-                  <input v-model="settings.luczor_api_base_url" type="text" autocomplete="off" placeholder="http://localhost:8000" class="lz-input" />
-                  <p class="lz-hint">Basis-URL ohne <span class="mono">/api/v1</span>. Fremde Hosts brauchen einen CSP-Eintrag in <span class="mono">tauri.conf.json</span>.</p>
+                  <label class="lz-label">Server URL (optional)</label>
+                  <input v-model="settings.luczor_api_base_url" type="text" autocomplete="off" :placeholder="DEFAULT_BASE_URL" class="lz-input" />
+                  <p class="lz-hint">Leer = Standard <span class="mono">{{ DEFAULT_BASE_URL }}</span>. Eigene URL nur bei Bedarf. Provider-Keys liegen verschlüsselt auf dem Server.</p>
 
                   <label class="lz-label">Device Key</label>
                   <input v-model="settings.luczor_device_key" type="text" autocomplete="off" placeholder="Device API Key aus dem Admin-Dashboard" class="lz-input" />
@@ -644,6 +671,9 @@ function iconPath(kind: string) {
                     <button type="button" class="lz-btn lz-btn--primary" :disabled="ui.serverBusy" @click="syncNow">
                       {{ ui.serverBusy ? "…" : "Jetzt synchronisieren" }}
                     </button>
+                    <button type="button" class="lz-btn lz-btn--ghost" :disabled="ui.serverBusy" @click="pullDefaults">
+                      Server-Defaults übernehmen
+                    </button>
                   </div>
                   <p v-if="ui.serverResult" class="lz-result" :class="ui.serverResult.ok ? 'is-ok' : 'is-fail'">
                     {{ ui.serverResult.message }}
@@ -651,7 +681,12 @@ function iconPath(kind: string) {
                 </div>
 
                 <div class="lz-card">
-                  <div class="lz-card__title">Auto-Sync & Memory</div>
+                  <div class="lz-card__title">Provider-Proxy & Sync</div>
+                  <div class="lz-row">
+                    <span class="lz-rowlabel">Provider-Proxy (Keys auf dem Server)</span>
+                    <button type="button" class="lz-switch" :class="{ 'is-on': settings.use_server_proxy }" @click="settings.use_server_proxy = !settings.use_server_proxy"><span /></button>
+                  </div>
+                  <p class="lz-hint">An = Chat läuft über den Server, der den OpenRouter-Key injiziert. Dann ist lokal kein OpenRouter-Key nötig.</p>
                   <div class="lz-row">
                     <span class="lz-rowlabel">Auto-Sync im Hintergrund</span>
                     <button type="button" class="lz-switch" :class="{ 'is-on': settings.sync_auto }" @click="settings.sync_auto = !settings.sync_auto"><span /></button>
@@ -834,7 +869,13 @@ function iconPath(kind: string) {
                         <option value="tl">Oben links</option>
                       </select>
                     </div>
-                    <div></div>
+                    <div>
+                      <label class="lz-label">UI-Skalierung</label>
+                      <div class="lz-range">
+                        <input v-model.number="settings.ui_scale" type="range" min="0.8" max="1.4" step="0.05" />
+                        <span class="lz-range__val">{{ Math.round(settings.ui_scale * 100) }}%</span>
+                      </div>
+                    </div>
                   </div>
 
                   <div class="lz-row">
@@ -957,6 +998,12 @@ function iconPath(kind: string) {
 .lz-scroll { flex: 1; overflow-y: auto; padding: var(--s5); }
 .lz-section { display: flex; flex-direction: column; gap: var(--s4); }
 .lz-section__head h3 { margin: 0; font-size: var(--fs-title); font-weight: 700; color: var(--text-primary); }
+.lz-optbadge {
+  margin-left: 8px; padding: 2px 8px; vertical-align: middle;
+  font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+  color: var(--text-muted); background: rgba(150,180,196,0.1);
+  border: 1px solid var(--border-hair); border-radius: var(--r-pill);
+}
 .lz-section__head p { margin: 4px 0 0; font-size: var(--fs-sm); color: var(--text-muted); }
 
 .lz-card {

@@ -74,6 +74,15 @@ onMounted(async () => {
   mutations.ensureDefaults();
   openProject(activeProjectId.value);
 
+  // Apply admin/server-provided default mode, if configured.
+  try {
+    const st = await Store.load("luczor.settings.json");
+    const dm = await st.get<string>("default_mode");
+    if (dm === "observe" || dm === "act" || dm === "unrestricted") mode.value = dm;
+  } catch {
+    /* ignore */
+  }
+
   // Global hotkey (Ctrl+Alt+Space) -> toggle push-to-talk.
   try {
     await listen("luczor://hotkey", () => {
@@ -346,13 +355,9 @@ async function togglePushToTalk() {
   setStatus("idle");
   if (!audio) return;
 
+  // transcribeWithElevenLabs uses the server proxy by default (no local key).
   const store = await Store.load("luczor.settings.json");
   const elevenKey = (await store.get<string>("elevenlabs_api_key")) ?? "";
-
-  if (!elevenKey.trim()) {
-    mutations.addMessage(mutations.makeMsg("assistant", "ElevenLabs API Key fehlt (Settings).", pid));
-    return;
-  }
 
   try {
     const { text } = await transcribeWithElevenLabs({
@@ -384,12 +389,10 @@ async function transcribeUtterance(wavBase64: string): Promise<string> {
       language: cfg.localSttLanguage,
     });
   }
-  // Cloud fallback (ElevenLabs).
+  // Cloud/proxy (ElevenLabs). transcribeWithElevenLabs routes via the server
+  // proxy when enabled (default) — no local key needed.
   const store = await Store.load("luczor.settings.json");
   const elevenKey = ((await store.get<string>("elevenlabs_api_key")) ?? "").trim();
-  if (!elevenKey) {
-    throw new Error("Kein STT-Backend: ElevenLabs-Key fehlt und kein lokales Modell konfiguriert.");
-  }
   const { text } = await transcribeWithElevenLabs({
     api_key: elevenKey,
     base64: wavBase64,

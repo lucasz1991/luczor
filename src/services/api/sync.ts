@@ -7,6 +7,7 @@
 // Laravel is the v1 "sync/archive" backend — the desktop app remains the
 // source of truth and works fully offline; this just mirrors state upstream.
 
+import { Store } from "@tauri-apps/plugin-store";
 import { LuczorApi, type SyncPushResponse } from "./luczorApi";
 import { state } from "@/state/store";
 
@@ -42,6 +43,38 @@ export async function pushAllToServer(): Promise<SyncPushResponse> {
     memories: plain(state.global?.memories ?? []),
     summaries: plain(state.summaries ?? []),
   });
+}
+
+/**
+ * Pull the admin-managed client defaults (runtime_settings.settings) and write
+ * the matching keys into the local settings store. Returns how many applied.
+ */
+export async function pullServerDefaults(): Promise<number> {
+  const boot = await LuczorApi.bootstrap();
+  const server = ((boot.runtime_settings as any)?.settings ?? {}) as Record<string, unknown>;
+
+  // server key -> local settings-store key
+  const map: Record<string, string> = {
+    assistant_name: "assistant_name",
+    ui_accent: "ui_accent",
+    memory_inject: "memory_inject",
+    memory_inject_count: "memory_inject_count",
+    sync_auto: "sync_auto",
+    sync_auto_threshold: "sync_auto_threshold",
+    default_mode: "default_mode",
+    allow_unrestricted: "allow_unrestricted",
+  };
+
+  const s = await Store.load("luczor.settings.json");
+  let applied = 0;
+  for (const [serverKey, localKey] of Object.entries(map)) {
+    if (serverKey in server && server[serverKey] != null) {
+      await s.set(localKey, server[serverKey]);
+      applied++;
+    }
+  }
+  await s.save();
+  return applied;
 }
 
 /**

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { useVoiceProxy, proxyStt } from "@/services/voice/voiceProxy";
 
 export type ElevenSttPayload = {
   api_key: string;
@@ -11,5 +12,14 @@ export type ElevenSttPayload = {
 };
 
 export async function transcribeWithElevenLabs(payload: ElevenSttPayload) {
+  // Server proxy (default): the ElevenLabs key stays on the server.
+  if (await useVoiceProxy()) {
+    return proxyStt(payload.base64, {
+      mime: payload.mime,
+      modelId: payload.model_id,
+      language: payload.language_code,
+    });
+  }
+  // Direct (local key) fallback via the Rust command.
   return invoke<{ text: string; language_code?: string }>("eleven_stt", { payload });
 }
