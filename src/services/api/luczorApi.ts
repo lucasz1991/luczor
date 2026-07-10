@@ -26,39 +26,7 @@ export const DEFAULT_BASE_URL = "https://luczor.follow-flow.de";
 /* =========================================================
  * Response/request types (match admin_api_app controllers)
  * ========================================================= */
-export type ModelProfile = {
-  id: number;
-  name: string;
-  slug: string;
-  provider: string;
-  model_id: string;
-  temperature: number;
-  max_tokens: number;
-  purpose: string | null;
-  active: boolean;
-};
-
-export type ModelUseCaseFallback = {
-  order: number;
-  model_profile: {
-    slug: string;
-    name: string;
-    provider: string;
-    model_id: string;
-    temperature: number;
-    max_tokens: number;
-  };
-};
-
-export type ModelUseCase = {
-  name: string;
-  slug: string;
-  description: string | null;
-  fallbacks: ModelUseCaseFallback[];
-};
-
 export type RuntimeSettings = {
-  default_model_profile: string;
   api_prefix: string;
   registration_enabled: boolean;
 };
@@ -67,8 +35,7 @@ export type BootstrapResponse = {
   device: { id: string | null; name: string | null; abilities: string[] };
   user: { id: number | null; name: string | null; email: string | null };
   runtime_settings: RuntimeSettings;
-  model_profiles: ModelProfile[];
-  model_use_cases: ModelUseCase[];
+  routing: { managed_by: "server"; client_model_selection: false };
   realtime?: { key: string | null; host: string | null; port: number; scheme: string | null };
 };
 
@@ -88,15 +55,6 @@ export type AgentEventInput = {
   event_type?: string;
   payload: Record<string, unknown>;
   occurred_at_client?: number | string;
-};
-
-export type LlmRouteResponse = {
-  task_type: string;
-  model_id: string;
-  provider: string;
-  source: string;
-  score?: number;
-  sample_count?: number;
 };
 
 export type LuczorApiConfig = {
@@ -240,9 +198,8 @@ export const LuczorApi = {
 
   health: () => request<{ status?: string; time?: string }>("/health", { auth: false }),
   bootstrap: (signal?: AbortSignal) => request<BootstrapResponse>("/bootstrap", { signal }),
-  modelProfiles: () => request<{ data: ModelProfile[] }>("/model-profiles"),
   runtimeSettings: () =>
-    request<{ data: RuntimeSettings; model_use_cases: ModelUseCase[] }>("/runtime-settings"),
+    request<{ data: RuntimeSettings; routing: { managed_by: "server"; client_model_selection: false } }>("/runtime-settings"),
   voiceManifest: () => request<VoiceManifestResponse>("/voice/manifest"),
 
   registerDevice: (clientId: string, name: string) =>
@@ -278,9 +235,10 @@ export const LuczorApi = {
       body: { client_id: clientId, ...evt },
     }),
 
-  llmRoute: (taskType: string) =>
-    request<LlmRouteResponse>("/llm/route", {
+  evaluateLlmRun: (requestId: string, evaluation: Record<string, unknown>) =>
+    request<{ data: unknown }>(`/llm/runs/request/${encodeURIComponent(requestId)}/evaluate`, {
       method: "POST",
-      body: { task_type: taskType },
+      body: evaluation,
     }),
+
 };

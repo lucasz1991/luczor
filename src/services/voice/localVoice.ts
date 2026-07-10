@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { LuczorApi } from "@/services/api/luczorApi";
+import { Store } from "@tauri-apps/plugin-store";
 
 export type VoiceMode = "push_to_talk" | "continuous" | "wakeword";
 export type VoiceConfig = { mode: VoiceMode; wakeWord: string; localSttLanguage: string };
@@ -14,8 +15,14 @@ export type VoiceRuntimeStatus = {
 let installPromise: Promise<VoiceRuntimeStatus> | null = null;
 
 export async function getVoiceConfig(): Promise<VoiceConfig> {
-  // Runtime and language are release-managed and do not use user settings.
-  return { mode: "push_to_talk", wakeWord: "luczor", localSttLanguage: "de" };
+  const settings = await Store.load("luczor.settings.json");
+  const storedMode = await settings.get<VoiceMode>("voice_mode");
+  const mode = storedMode === "continuous" || storedMode === "wakeword" || storedMode === "push_to_talk" ? storedMode : "wakeword";
+  return {
+    mode,
+    wakeWord: ((await settings.get<string>("voice_wake_word")) ?? "luczor").trim().toLowerCase() || "luczor",
+    localSttLanguage: ((await settings.get<string>("voice_local_stt_language")) ?? "de").trim().toLowerCase() || "de",
+  };
 }
 
 function parseVoiceError(error: unknown): Error {

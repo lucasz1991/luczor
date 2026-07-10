@@ -45,10 +45,10 @@ export type ChatResult = {
   /** Raw tool calls, to be echoed back into the assistant wire message. */
   rawToolCalls: WireToolCall[];
   finishReason: string;
+  requestId?: string;
 };
 
 type ChatWithToolsArgs = {
-  model: string;
   messages: WireMessage[];
   tools?: unknown[];
   projectId?: string;
@@ -57,8 +57,6 @@ type ChatWithToolsArgs = {
   repoId?: string;
   branch?: string;
   commitSha?: string;
-  temperature?: number;
-  maxTokens?: number;
   signal?: AbortSignal;
 };
 
@@ -102,8 +100,6 @@ function attachLuczorMeta(body: Record<string, unknown>, endpoint: Awaited<Retur
   body.project_id = args.projectId;
   body.task_type = args.taskType ?? "chat.general";
   body.context_id = args.contextId;
-  body.context_strategy_id = "context.memory_code_budgeted";
-  body.network_policy_id = "proxy.openrouter.default";
   body.repo_id = args.repoId;
   body.branch = args.branch;
   body.commit_sha = args.commitSha;
@@ -120,16 +116,11 @@ export class OpenRouterService {
     const endpoint = await getEndpoint();
 
     const body: Record<string, unknown> = {
-      model: args.model,
       messages: args.messages,
-      temperature: args.temperature ?? 0.2,
     };
     if (args.tools && args.tools.length) {
       body.tools = args.tools;
       body.tool_choice = "auto";
-    }
-    if (typeof args.maxTokens === "number") {
-      body.max_tokens = args.maxTokens;
     }
     attachLuczorMeta(body, endpoint, args);
 
@@ -173,7 +164,7 @@ export class OpenRouterService {
       rawArguments: tc.function.arguments,
     }));
 
-    return { content, toolCalls, rawToolCalls, finishReason };
+    return { content, toolCalls, rawToolCalls, finishReason, requestId: res.headers.get("X-Luczor-Request-Id") ?? undefined };
   }
 
   /**
@@ -187,17 +178,12 @@ export class OpenRouterService {
     const endpoint = await getEndpoint();
 
     const body: Record<string, unknown> = {
-      model: args.model,
       messages: args.messages,
-      temperature: args.temperature ?? 0.2,
       stream: true,
     };
     if (args.tools && args.tools.length) {
       body.tools = args.tools;
       body.tool_choice = "auto";
-    }
-    if (typeof args.maxTokens === "number") {
-      body.max_tokens = args.maxTokens;
     }
     attachLuczorMeta(body, endpoint, args);
 
@@ -281,6 +267,6 @@ export class OpenRouterService {
       rawArguments: tc.function.arguments,
     }));
 
-    return { content, toolCalls, rawToolCalls, finishReason };
+    return { content, toolCalls, rawToolCalls, finishReason, requestId: res.headers.get("X-Luczor-Request-Id") ?? undefined };
   }
 }

@@ -15,9 +15,9 @@ import { getVoiceConfig, localStt } from "@/services/voice/localVoice";
 import { streamSpeak } from "@/services/voice/speak";
 import { luczorMemory, getMemoryPrefs } from "@/services/memory/luczorMemory";
 import { buildPromptContextDetails, inferTaskType, type PromptContextDetails } from "@/services/contextController";
+import { LuczorApi } from "@/services/api/luczorApi";
 import { refreshStatus } from "@/services/status";
 import { appearance, loadAppearance } from "@/services/appearance";
-import { LuczorApi } from "@/services/api/luczorApi";
 import { startDeviceJobChannel } from "@/services/deviceJobs";
 
 import { startHud, setStatus } from "@/state/hud";
@@ -42,22 +42,19 @@ function safeTrim(v: unknown): string {
   return v.trim();
 }
 
-function fallbackModelForTask(taskType: string): string {
-  if (taskType.startsWith("coding.")) return "anthropic/claude-sonnet-5";
-  if (taskType.startsWith("planning.")) return "google/gemini-3-pro-preview";
-  if (taskType.startsWith("browser.")) return "google/gemini-3-flash-preview";
-  if (taskType.startsWith("admin.")) return "openai/gpt-5.1";
-  return "google/gemini-3-flash-preview";
-}
-
-async function chooseModel(taskType: string): Promise<string> {
-  try {
-    const route = await LuczorApi.llmRoute(taskType);
-    if (route?.provider === "openrouter" && route.model_id) return route.model_id;
-  } catch (e) {
-    console.warn("[llm] route fallback:", e);
+function compactHistory(messages: WireMessage[], maxTokens: number): WireMessage[] {
+  let used = 0;
+  const selected: WireMessage[] = [];
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i];
+    if (!message) continue;
+    const content = "content" in message ? String(message.content ?? "") : "";
+    const estimated = Math.max(1, Math.ceil(content.length / 4));
+    if (selected.length && used + estimated > maxTokens) break;
+    selected.unshift(message);
+    used += estimated;
   }
-  return fallbackModelForTask(taskType);
+  return selected;
 }
 
 function fmtTime(ts: number, seconds = false): string {
@@ -163,6 +160,26 @@ function speakMessage(m: any) {
     void streamSpeak(text);
   } catch (e) {
     console.error("[speakMessage] error:", e);
+  }
+}
+
+async function rateAssistantMessage(m: any, rating: 1 | -1) {
+  const requestId = String(m?.meta?.llmRequestId ?? "");
+  if (!requestId) return;
+  const current = mutations.getProjectMessages(m.projectId ?? activeProjectId.value).find((x) => x.id === m.id);
+  mutations.patchMessage(m.projectId ?? activeProjectId.value, m.id, {
+    meta: { ...(current?.meta ?? {}), userFeedback: rating } as any,
+  });
+  try {
+    await LuczorApi.evaluateLlmRun(requestId, {
+      evaluator_id: "luczor.user.feedback.v1",
+      status: rating > 0 ? "passed" : "failed",
+      success_score: rating > 0 ? 1 : 0,
+      quality_score: rating > 0 ? 1 : 0,
+      user_feedback: rating,
+    });
+  } catch (e) {
+    console.warn("[evaluation] feedback sync failed:", e);
   }
 }
 
@@ -623,15 +640,19 @@ async function send() {
 
   // Build the wire history: system preamble + visible user/assistant text.
   const prj = activeProject.value;
-  const history: WireMessage[] = mutations
+  const fullHistory: WireMessage[] = mutations
     .getProjectMessages(pid)
     .filter((m) => m.id !== assistant.id)
     .filter((m) => m.role === "user" || m.role === "assistant")
     .filter((m) => safeTrim(m.content).length > 0)
     .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+  const settingsStore = await Store.load("luczor.settings.json");
+  const historyBudget = clamp((await settingsStore.get<number>("client_history_token_budget")) ?? 2400, 400, 12000);
+  const history = compactHistory(fullHistory, historyBudget);
 
   const baseMessages: WireMessage[] = [
     { role: "system", content: buildSystemPreamble(mode.value, prj?.name ?? pid, appearance.assistantName) },
+    ...(safeTrim((prj as any)?.summary) ? [{ role: "system" as const, content: `Projektzusammenfassung: ${safeTrim((prj as any).summary)}` }] : []),
     ...history,
   ];
 
@@ -652,11 +673,8 @@ async function send() {
 
   try {
     void playSfx("loading");
-    const model = await chooseModel(promptContext.taskType);
-
-    const { finalText } = await runAgent({
+    const { finalText, requestId, toolFailures, toolSuccesses } = await runAgent({
       projectId: pid,
-      model,
       baseMessages,
       mode: mode.value,
       taskType: promptContext.taskType,
@@ -664,7 +682,6 @@ async function send() {
       repoId: promptContext.repoId,
       branch: promptContext.branch,
       commitSha: promptContext.commitSha,
-      maxTokens: prj?.defaults?.maxOutputTokens,
       signal: abort.signal,
 
       // Live streaming: parse the envelope progressively and render it.
@@ -686,6 +703,18 @@ async function send() {
     stopAssistantLoading();
 
     applyStreamedContent(pid, assistant.id, finalText, true);
+    if (requestId) {
+      const current = mutations.getProjectMessages(pid).find((m) => m.id === assistant.id);
+      mutations.patchMessage(pid, assistant.id, {
+        meta: { ...(current?.meta ?? {}), llmRequestId: requestId, userFeedback: null } as any,
+      });
+      void LuczorApi.evaluateLlmRun(requestId, {
+        evaluator_id: "luczor.client.outcome.v1",
+        status: toolFailures > 0 ? "needs_review" : "unverified",
+        success_score: toolFailures > 0 ? 0.25 : (toolSuccesses > 0 ? 0.75 : 0.5),
+        payload: { tool_failures: toolFailures, tool_successes: toolSuccesses, finish: "assistant_response" },
+      }).catch((e) => console.warn("[evaluation] deferred:", e));
+    }
 
     setStatus("idle");
     void autoSpeakAssistantIfEnabled(pid, assistant.id);
@@ -884,6 +913,8 @@ watch(
               @click.stop="speakMessage(m)"
               title="Vorlesen"
             >🔊</button>
+            <button v-if="m.role === 'assistant' && (m as any)?.meta?.llmRequestId" type="button" class="feedback-btn" :class="{ 'is-on': (m as any)?.meta?.userFeedback === 1 }" @click.stop="rateAssistantMessage(m, 1)" title="Hilfreich">↑</button>
+            <button v-if="m.role === 'assistant' && (m as any)?.meta?.llmRequestId" type="button" class="feedback-btn" :class="{ 'is-on is-negative': (m as any)?.meta?.userFeedback === -1 }" @click.stop="rateAssistantMessage(m, -1)" title="Nicht hilfreich">↓</button>
           </div>
 
           <div class="bubble">
@@ -1348,6 +1379,9 @@ watch(
   cursor: pointer; transition: all var(--dur) var(--ease);
 }
 .speak-btn:hover { color: var(--cy-soft); border-color: var(--border-soft); box-shadow: var(--glow-xs); }
+.feedback-btn { width: 24px; height: 24px; border-radius: var(--r-xs); border: 1px solid var(--border-hair); color: var(--text-muted); font-family: var(--font-mono); transition: all var(--dur-fast); }
+.feedback-btn:hover, .feedback-btn.is-on { color: var(--success); border-color: rgba(52,211,153,.4); background: var(--success-wash); }
+.feedback-btn.is-negative { color: var(--danger); border-color: rgba(244,63,94,.4); background: var(--danger-wash); }
 
 /* ---- structured answer ---- */
 .answer__summary { color: var(--text-primary); white-space: pre-wrap; word-break: break-word; margin: 0; }

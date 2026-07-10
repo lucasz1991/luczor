@@ -5,6 +5,7 @@ import { Store } from "@tauri-apps/plugin-store";
 import { testConnection, pushAllToServer, pullServerDefaults } from "@/services/api/sync";
 import { getApiConfig, DEFAULT_BASE_URL } from "@/services/api/luczorApi";
 import { loadAppearance, ACCENT_NAMES, type HudPosition } from "@/services/appearance";
+import type { VoiceMode } from "@/services/voice/localVoice";
 
 const props = defineProps<{ open: boolean }>();
 const emit = defineEmits<{ (e: "update:open", v: boolean): void }>();
@@ -12,7 +13,7 @@ const emit = defineEmits<{ (e: "update:open", v: boolean): void }>();
 /* ---------------------------
  * Store / State
  * --------------------------- */
-type SettingsTab = "server" | "chat" | "appearance" | "privacy";
+type SettingsTab = "server" | "voice" | "chat" | "appearance" | "privacy";
 type ChatAutoSpeechMode = "off" | "assistant_only" | "all";
 
 type AppSettings = {
@@ -23,6 +24,12 @@ type AppSettings = {
   // Chat
   chat_auto_speech: boolean;
   chat_auto_speech_mode: ChatAutoSpeechMode;
+  client_history_token_budget: number;
+
+  // Local voice runtime (model binaries stay release-managed)
+  voice_mode: VoiceMode;
+  voice_wake_word: string;
+  voice_local_stt_language: string;
 
   // Personalization
   ui_accent: string;
@@ -49,6 +56,10 @@ const DEFAULTS: AppSettings = {
 
   chat_auto_speech: false,
   chat_auto_speech_mode: "assistant_only",
+  client_history_token_budget: 2400,
+  voice_mode: "wakeword",
+  voice_wake_word: "luczor",
+  voice_local_stt_language: "de",
 
   ui_accent: "cyan",
   ui_hud_visible: true,
@@ -119,6 +130,14 @@ async function ensureStoreLoaded() {
   const mode = await settingsStore.get<ChatAutoSpeechMode>("chat_auto_speech_mode");
   if (mode === "off" || mode === "assistant_only" || mode === "all")
     settings.chat_auto_speech_mode = mode;
+  const historyBudget = await settingsStore.get<number>("client_history_token_budget");
+  if (typeof historyBudget === "number" && !Number.isNaN(historyBudget)) settings.client_history_token_budget = clamp(historyBudget, 400, 12000);
+  const voiceMode = await settingsStore.get<VoiceMode>("voice_mode");
+  if (voiceMode === "push_to_talk" || voiceMode === "continuous" || voiceMode === "wakeword") settings.voice_mode = voiceMode;
+  const wakeWord = await settingsStore.get<string>("voice_wake_word");
+  if (wakeWord) settings.voice_wake_word = wakeWord;
+  const sttLanguage = await settingsStore.get<string>("voice_local_stt_language");
+  if (sttLanguage) settings.voice_local_stt_language = sttLanguage;
 
   // Personalization
   const accent = await settingsStore.get<string>("ui_accent");
@@ -155,9 +174,9 @@ async function ensureStoreLoaded() {
   for (const key of [
     "openrouter_api_key", "elevenlabs_api_key", "elevenlabs_voice_id",
     "elevenlabs_tts_model", "elevenlabs_tts_output_format", "elevenlabs_tts_speed",
-    "elevenlabs_stt_model", "elevenlabs_stt_language_code", "voice_mode",
-    "voice_wake_word", "voice_stt_backend", "voice_tts_backend",
-    "voice_local_stt_binary", "voice_local_stt_model", "voice_local_stt_language",
+    "elevenlabs_stt_model", "elevenlabs_stt_language_code",
+    "voice_stt_backend", "voice_tts_backend",
+    "voice_local_stt_binary", "voice_local_stt_model",
     "voice_local_tts_binary", "voice_local_tts_model", "chat_auto_speech_rate",
     "chat_auto_speech_volume",
   ]) await settingsStore.delete(key);
@@ -188,6 +207,10 @@ async function saveAll() {
   // Chat
   await settingsStore.set("chat_auto_speech", settings.chat_auto_speech);
   await settingsStore.set("chat_auto_speech_mode", settings.chat_auto_speech_mode);
+  await settingsStore.set("client_history_token_budget", clamp(Math.round(settings.client_history_token_budget), 400, 12000));
+  await settingsStore.set("voice_mode", settings.voice_mode);
+  await settingsStore.set("voice_wake_word", settings.voice_wake_word.trim().toLowerCase() || "luczor");
+  await settingsStore.set("voice_local_stt_language", settings.voice_local_stt_language.trim().toLowerCase() || "de");
 
   // Personalization
   await settingsStore.set("ui_accent", settings.ui_accent);
@@ -316,6 +339,7 @@ const tabs: Array<{
   icon: string;
 }> = [
   { id: "server", title: "Server", desc: "Laravel Sync API", icon: "server" },
+  { id: "voice", title: "Voice", desc: "Lokal · Wake-Word", icon: "mic" },
   { id: "chat", title: "Chat", desc: "Auto Speech", icon: "chat" },
   { id: "appearance", title: "Appearance", desc: "UI (später)", icon: "palette" },
   { id: "privacy", title: "Privacy", desc: "Storage (später)", icon: "shield" },
@@ -412,88 +436,8 @@ function iconPath(kind: string) {
           <!-- Main -->
           <section class="lz-main">
             <div class="lz-scroll">
-              <!-- API -->
-              <div v-if="false" class="lz-section">
-                <div class="lz-section__head">
-                  <h3>Provider-Schluessel</h3>
-                  <p>Die Tauri-App speichert keine Provider-API-Keys. Modelle, OpenRouter und Sprachbackends werden ueber die Luczor Admin API verwaltet.</p>
-                </div>
-                <div v-if="false" class="lz-section__head">
-                  <h3>API-Schlüssel <span class="lz-optbadge">optional</span></h3>
-                  <p>Nur nötig, wenn der <b>Server-Proxy</b> (Server-Tab) ausgeschaltet ist. Standardmäßig liegen alle Provider-Keys verschlüsselt auf dem Server.</p>
-                </div>
-
-                <div class="lz-card">
-                  <div class="lz-card__head">
-                    <div>
-                      <div class="lz-card__title">Server-Routing aktiv</div>
-                      <div class="lz-card__meta">Lokale Provider-Keys: deaktiviert</div>
-                    </div>
-                    <span class="lz-optbadge">kein Key lokal</span>
-                  </div>
-                  <p class="lz-hint">Die Desktop-App nutzt den Server-Proxy. Provider-Keys und Modellprofile liegen im Admin-Bereich, nicht in der lokalen App.</p>
-                </div>
-
-                <div v-if="false" class="lz-card">
-                  <div class="lz-card__head">
-                    <div>
-                      <div class="lz-card__title">OpenRouter</div>
-                      <div class="lz-card__meta">Lokale Provider-Konfiguration entfernt</div>
-                    </div>
-                    <button type="button" class="lz-btn lz-btn--ghost" disabled>Server verwaltet Keys</button>
-                  </div>
-                  <label class="lz-label">OpenRouter API Key</label>
-                  <input value="Server-Proxy" type="text" disabled class="lz-input" />
-                </div>
-
-                <div v-if="false" class="lz-card">
-                  <div class="lz-card__head">
-                    <div>
-                      <div class="lz-card__title">ElevenLabs</div>
-                      <div class="lz-card__meta">Nicht als Client-Integration verfügbar</div>
-                    </div>
-                    <button type="button" class="lz-btn lz-btn--ghost" disabled>Nicht verfügbar</button>
-                  </div>
-
-                  <label class="lz-label">ElevenLabs API Key</label>
-                  <input value="Lokale Piper-Ausgabe" type="text" disabled class="lz-input" />
-                  <p class="lz-hint">Benötigt für Cloud-STT (scribe_v2) und Cloud-TTS (voice_id).</p>
-
-                  <div class="lz-grid2">
-                    <div>
-                      <label class="lz-label">TTS Voice ID</label>
-                      <input value="Nicht verfügbar" type="text" disabled class="lz-input" />
-                    </div>
-                    <div>
-                      <label class="lz-label">TTS Model</label>
-                      <input value="Piper" type="text" disabled class="lz-input" />
-                    </div>
-                    <div>
-                      <label class="lz-label">TTS Output Format</label>
-                      <input value="WAV" type="text" disabled class="lz-input" />
-                    </div>
-                    <div>
-                      <label class="lz-label">TTS Speed</label>
-                      <div class="lz-range">
-                        <input value="1" type="range" min="1" max="1" disabled />
-                        <span class="lz-range__val">automatisch</span>
-                      </div>
-                    </div>
-                    <div>
-                      <label class="lz-label">STT Model</label>
-                      <input value="whisper.cpp" type="text" disabled class="lz-input" />
-                    </div>
-                    <div>
-                      <label class="lz-label">STT Language Code</label>
-                      <input value="de" type="text" disabled class="lz-input" />
-                    </div>
-                  </div>
-                  <p v-if="ui.error" class="lz-error">{{ ui.error }}</p>
-                </div>
-              </div>
-
               <!-- SERVER -->
-              <div v-else-if="ui.tab === 'server'" class="lz-section">
+              <div v-if="ui.tab === 'server'" class="lz-section">
                 <div class="lz-section__head">
                   <h3>Luczor Server (Admin API)</h3>
                   <p>Optionales Sync-/Archiv-Backend. Die App arbeitet auch ohne Server voll offline.</p>
@@ -569,10 +513,10 @@ function iconPath(kind: string) {
               </div>
 
               <!-- VOICE -->
-              <div v-else-if="false" class="lz-section">
+              <div v-else-if="ui.tab === 'voice'" class="lz-section">
                 <div class="lz-section__head">
                   <h3>Voice</h3>
-                  <p>Lokale Sprache ist fest auf whisper.cpp fuer STT und Piper fuer TTS ausgelegt. Keine ElevenLabs-Konfiguration, kein Voice-API-Key, keine Backend-Auswahl im Client.</p>
+                  <p>Lokale Sprache nutzt whisper.cpp für STT und Piper für TTS. Keine Cloud-Audio-Keys und keine versteckten Fallbacks.</p>
                 </div>
                 <div v-if="false" class="lz-section__head">
                   <h3>Voice</h3>
@@ -586,14 +530,20 @@ function iconPath(kind: string) {
                   <div class="lz-grid2">
                     <div>
                       <label class="lz-label">Eingabe-Modus</label>
-                      <select value="push_to_talk" class="lz-input" disabled>
+                      <select v-model="settings.voice_mode" class="lz-input">
                         <option value="push_to_talk">Push-to-Talk</option>
+                        <option value="continuous">Dauer-Zuhören</option>
+                        <option value="wakeword">Wake-Word</option>
                       </select>
                     </div>
                     <div>
                       <label class="lz-label">Wake-Word</label>
-                      <input value="luczor" type="text" disabled class="lz-input" />
+                      <input v-model="settings.voice_wake_word" type="text" class="lz-input" :disabled="settings.voice_mode !== 'wakeword'" />
                       <p class="lz-hint">Erkennung über das Transkript.</p>
+                    </div>
+                    <div>
+                      <label class="lz-label">STT-Sprache</label>
+                      <input v-model="settings.voice_local_stt_language" type="text" class="lz-input" placeholder="de" />
                     </div>
                     <div v-if="false">
                       <label class="lz-label">STT-Backend</label>
@@ -623,7 +573,7 @@ function iconPath(kind: string) {
                     </div>
                     <div>
                       <label class="lz-label">STT Sprache</label>
-                      <input value="de" type="text" disabled class="lz-input" />
+                      <input v-model="settings.voice_local_stt_language" type="text" class="lz-input" />
                     </div>
                     <div></div>
                     <div>
@@ -682,6 +632,15 @@ function iconPath(kind: string) {
                         <span class="lz-range__val">Systemlautstärke</span>
                       </div>
                     </div>
+                  </div>
+
+                  <div>
+                    <label class="lz-label">Lokales Chat-Historienbudget</label>
+                    <div class="lz-range">
+                      <input v-model.number="settings.client_history_token_budget" type="range" min="400" max="12000" step="200" />
+                      <span class="lz-range__val">{{ settings.client_history_token_budget }} Tokens</span>
+                    </div>
+                    <p class="lz-hint">Begrenzt den Verlauf vor jeder Anfrage. Niedriger spart Kosten und Kontext, höher bewahrt mehr Gesprächsdetails.</p>
                   </div>
 
                   <div class="lz-actions">

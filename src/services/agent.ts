@@ -40,7 +40,6 @@ function pulseForCategory(category: ToolCategory) {
 
 export type RunAgentOptions = {
   projectId: string;
-  model: string;
   /** Conversation so far as wire messages (system + user/assistant history). */
   baseMessages: WireMessage[];
   mode: LuczorMode;
@@ -49,8 +48,6 @@ export type RunAgentOptions = {
   repoId?: string;
   branch?: string;
   commitSha?: string;
-  temperature?: number;
-  maxTokens?: number;
   maxRounds?: number;
   signal?: AbortSignal;
   /** Streamed content of the current round (full accumulated text). */
@@ -60,10 +57,13 @@ export type RunAgentOptions = {
 type Outcome = { ok: boolean; output?: unknown; error?: string };
 
 function outcomeMessage(toolCallId: string, outcome: Outcome): WireMessage {
+  const compactOutcome = outcome.ok
+    ? { ok: true, output: clip(outcome.output, 8000) }
+    : { ok: false, error: clip(outcome.error ?? "Tool fehlgeschlagen.", 2000) };
   return {
     role: "tool",
     tool_call_id: toolCallId,
-    content: JSON.stringify(outcome),
+    content: JSON.stringify(compactOutcome),
   };
 }
 
@@ -72,7 +72,9 @@ function recordOutcome(
   callId: string,
   name: string,
   status: "executed" | "failed" | "rejected",
-  outcome: Outcome
+  outcome: Outcome,
+  requestId?: string,
+  durationMs?: number
 ) {
   mutations.updateToolCallStatus(projectId, callId, status);
   mutations.addHiddenToolMessage(projectId, outcome, { toolCallId: callId, toolName: name });
@@ -85,22 +87,24 @@ function recordOutcome(
     ok: outcome.ok,
     error: outcome.error ?? null,
     output: outcome.ok ? clip(outcome.output) : null,
+    llm_request_id: requestId ?? null,
+    duration_ms: durationMs == null ? null : Math.round(durationMs),
   });
 }
 
-export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: string }> {
+export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: string; requestId?: string; toolFailures: number; toolSuccesses: number }> {
   const {
     projectId,
-    model,
     mode,
-    temperature = 0.2,
-    maxTokens,
     maxRounds = 6,
     signal,
   } = opts;
 
   const messages: WireMessage[] = [...opts.baseMessages];
   const tools = toOpenAITools();
+  let lastRequestId: string | undefined;
+  let toolFailures = 0;
+  let toolSuccesses = 0;
 
   for (let round = 0; round < maxRounds; round++) {
     if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
@@ -108,7 +112,6 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
     setStatus("thinking");
     pulse("network", 1);
     const res = await OpenRouterService.streamChatWithTools({
-      model,
       messages,
       tools,
       projectId,
@@ -117,15 +120,14 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
       repoId: opts.repoId,
       branch: opts.branch,
       commitSha: opts.commitSha,
-      temperature,
-      maxTokens,
       signal,
       onToken: opts.onToken,
     });
+    lastRequestId = res.requestId ?? lastRequestId;
 
     // No tool calls -> this is the final answer.
     if (!res.toolCalls.length) {
-      return { finalText: res.content.trim() || "Fertig." };
+      return { finalText: res.content.trim() || "Fertig.", requestId: lastRequestId, toolFailures, toolSuccesses };
     }
 
     // Echo the assistant's tool-call turn back into the transcript.
@@ -153,31 +155,34 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
 
       // Unknown tool.
       if (!tool) {
+        toolFailures++;
         const outcome: Outcome = { ok: false, error: `Unbekanntes Tool: ${call.name}` };
-        recordOutcome(projectId, call.id, call.name, "failed", outcome);
+        recordOutcome(projectId, call.id, call.name, "failed", outcome, res.requestId);
         messages.push(outcomeMessage(call.id, outcome));
         continue;
       }
 
       // Global kill switch: hard-stop ALL tool execution.
       if (hud.killSwitch) {
+        toolFailures++;
         const outcome: Outcome = {
           ok: false,
           error: "Not-Aus aktiv: Alle Tool-Ausführungen sind gesperrt.",
         };
-        recordOutcome(projectId, call.id, call.name, "rejected", outcome);
+        recordOutcome(projectId, call.id, call.name, "rejected", outcome, res.requestId);
         messages.push(outcomeMessage(call.id, outcome));
         continue;
       }
 
       // Mode enforcement: mutating tools are locked in observe mode.
       if (mode === "observe" && tool.mutating) {
+        toolFailures++;
         const outcome: Outcome = {
           ok: false,
           error:
             "Gesperrt: Dieses Tool verändert Daten und ist im Beobachten-Modus deaktiviert. Wechsle in den Handeln-Modus.",
         };
-        recordOutcome(projectId, call.id, call.name, "rejected", outcome);
+        recordOutcome(projectId, call.id, call.name, "rejected", outcome, res.requestId);
         messages.push(outcomeMessage(call.id, outcome));
         continue;
       }
@@ -191,14 +196,15 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
 
         if (signal?.aborted) {
           const outcome: Outcome = { ok: false, error: "Abgebrochen." };
-          recordOutcome(projectId, call.id, call.name, "rejected", outcome);
+          recordOutcome(projectId, call.id, call.name, "rejected", outcome, res.requestId);
           messages.push(outcomeMessage(call.id, outcome));
           throw new DOMException("Aborted", "AbortError");
         }
 
         if (!approved) {
+          toolFailures++;
           const outcome: Outcome = { ok: false, error: "Vom Nutzer abgelehnt." };
-          recordOutcome(projectId, call.id, call.name, "rejected", outcome);
+          recordOutcome(projectId, call.id, call.name, "rejected", outcome, res.requestId);
           messages.push(outcomeMessage(call.id, outcome));
           continue;
         }
@@ -209,14 +215,17 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
       setStatus("executing");
       setLastTool(call.name);
       pulseForCategory(tool.category);
+      const toolStarted = performance.now();
       try {
         const output = await tool.execute(call.arguments, { projectId });
         const outcome: Outcome = { ok: true, output };
-        recordOutcome(projectId, call.id, call.name, "executed", outcome);
+        toolSuccesses++;
+        recordOutcome(projectId, call.id, call.name, "executed", outcome, res.requestId, performance.now() - toolStarted);
         messages.push(outcomeMessage(call.id, outcome));
       } catch (e: any) {
         const outcome: Outcome = { ok: false, error: e?.message ?? String(e) };
-        recordOutcome(projectId, call.id, call.name, "failed", outcome);
+        toolFailures++;
+        recordOutcome(projectId, call.id, call.name, "failed", outcome, res.requestId, performance.now() - toolStarted);
         messages.push(outcomeMessage(call.id, outcome));
       }
     }
@@ -225,6 +234,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
   return {
     finalText:
       "Maximale Anzahl an Tool-Runden erreicht. Bitte präzisiere die Aufgabe oder führe sie in kleineren Schritten aus.",
+    requestId: lastRequestId,
+    toolFailures,
+    toolSuccesses,
   };
 }
 

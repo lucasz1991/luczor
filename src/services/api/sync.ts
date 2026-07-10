@@ -26,7 +26,7 @@ export async function testConnection(): Promise<ConnectionResult> {
     const who = boot.user?.name ?? boot.device?.name ?? "Gerät";
     return {
       ok: true,
-      message: `Verbunden als ${who} · ${boot.model_profiles.length} Modellprofile · ${boot.model_use_cases.length} Use-Cases.`,
+      message: `Verbunden als ${who} · Modellrouting wird zentral vom Server verwaltet.`,
     };
   } catch (e: any) {
     return { ok: false, message: e?.message ?? String(e) };
@@ -59,11 +59,15 @@ export async function pullServerDefaults(): Promise<number> {
     ui_accent: "ui_accent",
     memory_inject: "memory_inject",
     memory_inject_count: "memory_inject_count",
+    client_history_token_budget: "client_history_token_budget",
     sync_auto: "sync_auto",
     sync_auto_threshold: "sync_auto_threshold",
     default_mode: "default_mode",
     allow_unrestricted: "allow_unrestricted",
     chat_auto_speech: "chat_auto_speech",
+    voice_mode: "voice_mode",
+    voice_wake_word: "voice_wake_word",
+    voice_local_stt_language: "voice_local_stt_language",
   };
 
   const s = await Store.load("luczor.settings.json");

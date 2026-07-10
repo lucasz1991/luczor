@@ -144,7 +144,9 @@ class OfflineBackend {
     const all = await this.load();
     const q = query.toLowerCase();
     return all
-      .filter((r) => r.dataset === ctx.dataset && r.visibility !== "private")
+      // Private memories are deliberately local-only, but must remain
+      // recallable by their owner from the matching local dataset.
+      .filter((r) => r.dataset === ctx.dataset)
       .map((r) => ({ r, hit: q && r.content.toLowerCase().includes(q) ? 1 : 0 }))
       .sort((a, b) => b.hit - a.hit || b.r.importance - a.r.importance || b.r.createdAt - a.r.createdAt)
       .slice(0, limit)
