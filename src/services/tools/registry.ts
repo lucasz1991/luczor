@@ -304,46 +304,20 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
-    name: "os_open",
+    name: "os_open_url",
     category: "os",
-    description: "Open a file, folder, URL, or app with the OS default handler.",
+    description: "Open an http(s) URL with the operating system's default browser.",
     mutating: true,
     requiresApproval: true,
     parameters: {
       type: "object",
       additionalProperties: false,
-      properties: { target: { type: "string" } },
-      required: ["target"],
+      properties: { url: { type: "string" } },
+      required: ["url"],
     },
     async execute(args) {
-      await invoke("open_path", { payload: { target: asString(args.target) } });
+      await invoke("open_url", { payload: { url: asString(args.url) } });
       return { ok: true };
-    },
-  },
-  {
-    name: "os_run",
-    category: "os",
-    description:
-      "Run an allow-listed program (e.g. notepad, calc, explorer, ipconfig, tasklist) and return its output.",
-    mutating: true,
-    requiresApproval: true,
-    parameters: {
-      type: "object",
-      additionalProperties: false,
-      properties: {
-        program: { type: "string" },
-        args: { type: "array", items: { type: "string" } },
-      },
-      required: ["program"],
-    },
-    async execute(args) {
-      const result = await invoke("run_command", {
-        payload: {
-          program: asString(args.program),
-          args: Array.isArray(args.args) ? args.args.map((a) => String(a)) : [],
-        },
-      });
-      return result;
     },
   },
 ];

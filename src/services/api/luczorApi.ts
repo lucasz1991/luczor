@@ -69,6 +69,7 @@ export type BootstrapResponse = {
   runtime_settings: RuntimeSettings;
   model_profiles: ModelProfile[];
   model_use_cases: ModelUseCase[];
+  realtime?: { key: string | null; host: string | null; port: number; scheme: string | null };
 };
 
 export type SyncBatch = {
@@ -102,6 +103,25 @@ export type LuczorApiConfig = {
   baseUrl: string;
   deviceKey: string;
   clientId: string;
+};
+
+export type VoiceManifestResponse = {
+  algorithm: "RSA-SHA256";
+  payload_json: string;
+  signature: string;
+};
+
+export type DeviceSession = { token: string; nonce: string; expires_at: string };
+export type DeviceJob = {
+  id: string;
+  tool_profile: string;
+  status: "approval_required" | "queued" | "running" | string;
+  risk_level: string;
+  requires_local_approval: boolean;
+  payload: Record<string, unknown>;
+  payload_hash: string;
+  signature: string;
+  expires_at: string | null;
 };
 
 /* =========================================================
@@ -161,6 +181,7 @@ type RequestOptions = {
   auth?: boolean;
   query?: Record<string, string | undefined>;
   signal?: AbortSignal;
+  headers?: Record<string, string>;
 };
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
@@ -181,6 +202,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     if (!cfg.deviceKey) throw new LuczorApiError(0, "Kein Device-Key konfiguriert (Settings → Server).");
     headers["Authorization"] = `Bearer ${cfg.deviceKey}`;
   }
+  Object.assign(headers, opts.headers ?? {});
 
   let res: Response;
   try {
@@ -221,6 +243,29 @@ export const LuczorApi = {
   modelProfiles: () => request<{ data: ModelProfile[] }>("/model-profiles"),
   runtimeSettings: () =>
     request<{ data: RuntimeSettings; model_use_cases: ModelUseCase[] }>("/runtime-settings"),
+  voiceManifest: () => request<VoiceManifestResponse>("/voice/manifest"),
+
+  registerDevice: (clientId: string, name: string) =>
+    request<{ data: unknown; session: DeviceSession }>("/devices/register", {
+      method: "POST",
+      body: { client_id: clientId, name },
+    }),
+  nextDeviceJob: (clientId: string) => request<{ data: DeviceJob | null }>("/devices/jobs/next", { query: { client_id: clientId } }),
+  approveDeviceJob: (id: string, clientId: string, approved: boolean, reason?: string) =>
+    request<{ data: DeviceJob }>(`/devices/jobs/${encodeURIComponent(id)}/approve`, {
+      method: "POST", body: { client_id: clientId, approved, reason },
+    }),
+  startDeviceJob: (id: string, clientId: string) =>
+    request<{ data: DeviceJob }>(`/devices/jobs/${encodeURIComponent(id)}/start`, { method: "POST", body: { client_id: clientId } }),
+  completeDeviceJob: (id: string, clientId: string, ok: boolean, result?: Record<string, unknown>, error?: string) =>
+    request<{ data: DeviceJob }>(`/devices/jobs/${encodeURIComponent(id)}/complete`, {
+      method: "POST", body: { client_id: clientId, ok, result, error },
+    }),
+  reverbAuth: (socketId: string, channelName: string, clientId: string, sessionToken: string) =>
+    request<{ auth: string }>("/reverb/auth", {
+      method: "POST", body: { socket_id: socketId, channel_name: channelName, client_id: clientId },
+      headers: { "X-Device-Session": sessionToken },
+    }),
 
   syncPush: (batch: SyncBatch) =>
     request<SyncPushResponse>("/sync/push", { method: "POST", body: batch }),

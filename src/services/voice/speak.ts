@@ -5,18 +5,15 @@
 // local Piper; no ElevenLabs/cloud fallback is used for speech output.
 
 import { setStatus } from "@/state/hud";
-import { getVoiceConfig, localTts, localTtsReady, type VoiceConfig } from "./localVoice";
+import { localTts } from "./localVoice";
 
 let currentAudio: HTMLAudioElement | null = null;
 let cancelled = false;
 
 type Clip = { base64: string; mime: string };
 
-async function synthLocal(text: string, cfg: VoiceConfig): Promise<Clip> {
-  if (!localTtsReady(cfg)) {
-    throw new Error("Lokale TTS ist nicht konfiguriert: Piper Binary und Piper Voice (.onnx) setzen.");
-  }
-  return localTts(text, { binary: cfg.localTtsBinary, model: cfg.localTtsModel });
+async function synthLocal(text: string): Promise<Clip> {
+  return localTts(text);
 }
 
 function play(clip: Clip): Promise<void> {
@@ -53,14 +50,12 @@ export async function streamSpeak(text: string): Promise<void> {
 
   cancelled = false;
   const sentences = splitSentences(clean);
-  const cfg = await getVoiceConfig();
-
   try {
-    let next: Promise<Clip> | null = sentences.length ? synthLocal(sentences[0]!, cfg) : null;
+    let next: Promise<Clip> | null = sentences.length ? synthLocal(sentences[0]!) : null;
     for (let i = 0; i < sentences.length; i++) {
       if (cancelled) break;
       const clip = await next;
-      next = i + 1 < sentences.length ? synthLocal(sentences[i + 1]!, cfg) : null;
+      next = i + 1 < sentences.length ? synthLocal(sentences[i + 1]!) : null;
       if (cancelled || !clip) break;
       setStatus("speaking");
       await play(clip);

@@ -12,43 +12,17 @@ const emit = defineEmits<{ (e: "update:open", v: boolean): void }>();
 /* ---------------------------
  * Store / State
  * --------------------------- */
-type SettingsTab = "api" | "server" | "voice" | "chat" | "appearance" | "privacy";
+type SettingsTab = "server" | "chat" | "appearance" | "privacy";
 type ChatAutoSpeechMode = "off" | "assistant_only" | "all";
-type VoiceMode = "push_to_talk" | "continuous" | "wakeword";
-type VoiceBackend = "cloud" | "local";
 
 type AppSettings = {
-  openrouter_api_key: string;
-
   // Luczor Admin API (Laravel sync backend)
   luczor_api_base_url: string;
   luczor_device_key: string;
 
-  // Voice (continuous listening + local models)
-  voice_mode: VoiceMode;
-  voice_wake_word: string;
-  voice_stt_backend: VoiceBackend;
-  voice_tts_backend: VoiceBackend;
-  voice_local_stt_binary: string;
-  voice_local_stt_model: string;
-  voice_local_stt_language: string;
-  voice_local_tts_binary: string;
-  voice_local_tts_model: string;
-
-  // ElevenLabs
-  elevenlabs_api_key: string;
-  elevenlabs_voice_id: string; // required for TTS
-  elevenlabs_tts_model: string; // e.g. "eleven_multilingual_v2"
-  elevenlabs_tts_output_format: string; // e.g. "mp3_44100_128"
-  elevenlabs_tts_speed: number; // e.g. 0.7 .. 1.3
-  elevenlabs_stt_model: string; // e.g. "scribe_v2"
-  elevenlabs_stt_language_code: string; // e.g. "deu"
-
   // Chat
   chat_auto_speech: boolean;
   chat_auto_speech_mode: ChatAutoSpeechMode;
-  chat_auto_speech_rate: number; // 0.5 .. 2.0 (legacy slider, can map to eleven speed later)
-  chat_auto_speech_volume: number; // 0 .. 100
 
   // Personalization
   ui_accent: string;
@@ -70,33 +44,11 @@ type AppSettings = {
 };
 
 const DEFAULTS: AppSettings = {
-  openrouter_api_key: "",
-
   luczor_api_base_url: DEFAULT_BASE_URL,
   luczor_device_key: "",
 
-  voice_mode: "push_to_talk",
-  voice_wake_word: "luczor",
-  voice_stt_backend: "local",
-  voice_tts_backend: "local",
-  voice_local_stt_binary: "",
-  voice_local_stt_model: "",
-  voice_local_stt_language: "de",
-  voice_local_tts_binary: "",
-  voice_local_tts_model: "",
-
-  elevenlabs_api_key: "",
-  elevenlabs_voice_id: "",
-  elevenlabs_tts_model: "eleven_multilingual_v2",
-  elevenlabs_tts_output_format: "mp3_44100_128",
-  elevenlabs_tts_speed: 1.05,
-  elevenlabs_stt_model: "scribe_v2",
-  elevenlabs_stt_language_code: "deu",
-
   chat_auto_speech: false,
   chat_auto_speech_mode: "assistant_only",
-  chat_auto_speech_rate: 1.0,
-  chat_auto_speech_volume: 90,
 
   ui_accent: "cyan",
   ui_hud_visible: true,
@@ -116,7 +68,7 @@ const DEFAULTS: AppSettings = {
 };
 
 const ui = reactive({
-  tab: "api" as SettingsTab,
+  tab: "server" as SettingsTab,
   saved: false,
   error: null as string | null,
   loaded: false,
@@ -130,16 +82,6 @@ const ui = reactive({
 const settings = reactive<AppSettings>({ ...DEFAULTS });
 
 let settingsStore: Store | null = null;
-
-const maskedOrKey = computed(() => maskKey(settings.openrouter_api_key));
-const maskedXiKey = computed(() => maskKey(settings.elevenlabs_api_key));
-
-function maskKey(v: string) {
-  const t = v.trim();
-  if (!t) return "";
-  if (t.length <= 10) return "•".repeat(t.length);
-  return `${t.slice(0, 6)}…${t.slice(-4)}`;
-}
 
 const canSave = computed(() => true);
 
@@ -163,60 +105,12 @@ async function ensureStoreLoaded() {
 
   settingsStore = await Store.load("luczor.settings.json");
 
-  // OpenRouter
-  const orKey = await settingsStore.get<string>("openrouter_api_key");
-  if (orKey) settings.openrouter_api_key = orKey;
-
   // Luczor Admin API
   const apiBase = await settingsStore.get<string>("luczor_api_base_url");
   if (apiBase) settings.luczor_api_base_url = apiBase;
   const devKey = await settingsStore.get<string>("luczor_device_key");
   if (devKey) settings.luczor_device_key = devKey;
   ui.clientId = (await getApiConfig()).clientId;
-
-  // Voice
-  const vMode = await settingsStore.get<VoiceMode>("voice_mode");
-  if (vMode === "push_to_talk" || vMode === "continuous" || vMode === "wakeword")
-    settings.voice_mode = vMode;
-  const wake = await settingsStore.get<string>("voice_wake_word");
-  if (wake) settings.voice_wake_word = wake;
-  const sBack = await settingsStore.get<VoiceBackend>("voice_stt_backend");
-  settings.voice_stt_backend = sBack === "local" ? "local" : DEFAULTS.voice_stt_backend;
-  const tBack = await settingsStore.get<VoiceBackend>("voice_tts_backend");
-  settings.voice_tts_backend = tBack === "local" ? "local" : DEFAULTS.voice_tts_backend;
-  const sBin = await settingsStore.get<string>("voice_local_stt_binary");
-  if (sBin) settings.voice_local_stt_binary = sBin;
-  const sMod = await settingsStore.get<string>("voice_local_stt_model");
-  if (sMod) settings.voice_local_stt_model = sMod;
-  const sLang = await settingsStore.get<string>("voice_local_stt_language");
-  if (sLang) settings.voice_local_stt_language = sLang;
-  const tBin = await settingsStore.get<string>("voice_local_tts_binary");
-  if (tBin) settings.voice_local_tts_binary = tBin;
-  const tMod = await settingsStore.get<string>("voice_local_tts_model");
-  if (tMod) settings.voice_local_tts_model = tMod;
-
-  // ElevenLabs
-  const xiKey = await settingsStore.get<string>("elevenlabs_api_key");
-  if (xiKey) settings.elevenlabs_api_key = xiKey;
-
-  const voiceId = await settingsStore.get<string>("elevenlabs_voice_id");
-  if (voiceId) settings.elevenlabs_voice_id = voiceId;
-
-  const ttsModel = await settingsStore.get<string>("elevenlabs_tts_model");
-  if (ttsModel) settings.elevenlabs_tts_model = ttsModel;
-
-  const outFmt = await settingsStore.get<string>("elevenlabs_tts_output_format");
-  if (outFmt) settings.elevenlabs_tts_output_format = outFmt;
-
-  const speed = await settingsStore.get<number>("elevenlabs_tts_speed");
-  if (typeof speed === "number" && !Number.isNaN(speed))
-    settings.elevenlabs_tts_speed = clamp(speed, 0.7, 1.3);
-
-  const sttModel = await settingsStore.get<string>("elevenlabs_stt_model");
-  if (sttModel) settings.elevenlabs_stt_model = sttModel;
-
-  const lang = await settingsStore.get<string>("elevenlabs_stt_language_code");
-  if (lang) settings.elevenlabs_stt_language_code = lang;
 
   // Chat
   const autoSpeech = await settingsStore.get<boolean>("chat_auto_speech");
@@ -226,19 +120,10 @@ async function ensureStoreLoaded() {
   if (mode === "off" || mode === "assistant_only" || mode === "all")
     settings.chat_auto_speech_mode = mode;
 
-  const rate = await settingsStore.get<number>("chat_auto_speech_rate");
-  if (typeof rate === "number" && !Number.isNaN(rate))
-    settings.chat_auto_speech_rate = clamp(rate, 0.5, 2.0);
-
-  const volume = await settingsStore.get<number>("chat_auto_speech_volume");
-  if (typeof volume === "number" && !Number.isNaN(volume))
-    settings.chat_auto_speech_volume = clamp(volume, 0, 100);
-
   // Personalization
   const accent = await settingsStore.get<string>("ui_accent");
   if (accent) settings.ui_accent = accent;
-  const hudVis = await settingsStore.get<boolean>("ui_hud_visible");
-  if (typeof hudVis === "boolean") settings.ui_hud_visible = hudVis;
+  settings.ui_hud_visible = true;
   const hudPos = await settingsStore.get<HudPosition>("ui_hud_position");
   if (hudPos === "br" || hudPos === "bl" || hudPos === "tr" || hudPos === "tl") settings.ui_hud_position = hudPos;
   const rm = await settingsStore.get<boolean>("ui_reduce_motion");
@@ -263,8 +148,20 @@ async function ensureStoreLoaded() {
   if (typeof mCnt === "number" && !Number.isNaN(mCnt)) settings.memory_inject_count = mCnt;
   const mRem = await settingsStore.get<boolean>("memory_auto_remember");
   if (typeof mRem === "boolean") settings.memory_auto_remember = mRem;
-  const proxy = await settingsStore.get<boolean>("use_server_proxy");
-  if (typeof proxy === "boolean") settings.use_server_proxy = proxy;
+  settings.use_server_proxy = true;
+
+  // One-way migration: local provider credentials and voice paths must not
+  // remain in the desktop settings store.
+  for (const key of [
+    "openrouter_api_key", "elevenlabs_api_key", "elevenlabs_voice_id",
+    "elevenlabs_tts_model", "elevenlabs_tts_output_format", "elevenlabs_tts_speed",
+    "elevenlabs_stt_model", "elevenlabs_stt_language_code", "voice_mode",
+    "voice_wake_word", "voice_stt_backend", "voice_tts_backend",
+    "voice_local_stt_binary", "voice_local_stt_model", "voice_local_stt_language",
+    "voice_local_tts_binary", "voice_local_tts_model", "chat_auto_speech_rate",
+    "chat_auto_speech_volume",
+  ]) await settingsStore.delete(key);
+  await settingsStore.save();
 
   ui.loaded = true;
 }
@@ -275,8 +172,8 @@ async function saveAll() {
   ui.error = null;
 
   // Minimal validation only when API tab is open (skipped when using the server proxy)
-  if (ui.tab === "api" && !settings.use_server_proxy) {
-    const or = settings.openrouter_api_key.trim();
+  if (false) {
+    const or = "server-managed";
     if (!or) {
       ui.error = "Bitte OpenRouter API Key eingeben (oder Server-Proxy nutzen / anderen Tab wählen).";
       return;
@@ -284,41 +181,18 @@ async function saveAll() {
 
   }
 
-  await settingsStore.set("openrouter_api_key", settings.openrouter_api_key.trim());
-
   // Luczor Admin API
   await settingsStore.set("luczor_api_base_url", settings.luczor_api_base_url.trim().replace(/\/+$/, ""));
   await settingsStore.set("luczor_device_key", settings.luczor_device_key.trim());
 
-  // Voice
-  await settingsStore.set("voice_mode", settings.voice_mode);
-  await settingsStore.set("voice_wake_word", settings.voice_wake_word.trim() || "luczor");
-  await settingsStore.set("voice_stt_backend", settings.voice_stt_backend);
-  await settingsStore.set("voice_tts_backend", settings.voice_tts_backend);
-  await settingsStore.set("voice_local_stt_binary", settings.voice_local_stt_binary.trim());
-  await settingsStore.set("voice_local_stt_model", settings.voice_local_stt_model.trim());
-  await settingsStore.set("voice_local_stt_language", settings.voice_local_stt_language.trim() || "de");
-  await settingsStore.set("voice_local_tts_binary", settings.voice_local_tts_binary.trim());
-  await settingsStore.set("voice_local_tts_model", settings.voice_local_tts_model.trim());
-
-  // ElevenLabs
-  await settingsStore.set("elevenlabs_api_key", settings.elevenlabs_api_key.trim());
-  await settingsStore.set("elevenlabs_voice_id", settings.elevenlabs_voice_id.trim());
-  await settingsStore.set("elevenlabs_tts_model", settings.elevenlabs_tts_model.trim());
-  await settingsStore.set("elevenlabs_tts_output_format", settings.elevenlabs_tts_output_format.trim());
-  await settingsStore.set("elevenlabs_tts_speed", clamp(settings.elevenlabs_tts_speed, 0.7, 1.3));
-  await settingsStore.set("elevenlabs_stt_model", settings.elevenlabs_stt_model.trim());
-  await settingsStore.set("elevenlabs_stt_language_code", settings.elevenlabs_stt_language_code.trim());
-
   // Chat
   await settingsStore.set("chat_auto_speech", settings.chat_auto_speech);
   await settingsStore.set("chat_auto_speech_mode", settings.chat_auto_speech_mode);
-  await settingsStore.set("chat_auto_speech_rate", clamp(settings.chat_auto_speech_rate, 0.5, 2.0));
-  await settingsStore.set("chat_auto_speech_volume", clamp(settings.chat_auto_speech_volume, 0, 100));
 
   // Personalization
   await settingsStore.set("ui_accent", settings.ui_accent);
-  await settingsStore.set("ui_hud_visible", settings.ui_hud_visible);
+  settings.ui_hud_visible = true;
+  await settingsStore.set("ui_hud_visible", true);
   await settingsStore.set("ui_hud_position", settings.ui_hud_position);
   await settingsStore.set("ui_reduce_motion", settings.ui_reduce_motion);
   await settingsStore.set("ui_show_grid", settings.ui_show_grid);
@@ -332,48 +206,17 @@ async function saveAll() {
   await settingsStore.set("memory_inject", settings.memory_inject);
   await settingsStore.set("memory_inject_count", clamp(Math.round(settings.memory_inject_count), 0, 20));
   await settingsStore.set("memory_auto_remember", settings.memory_auto_remember);
-  await settingsStore.set("use_server_proxy", settings.use_server_proxy);
+  settings.use_server_proxy = true;
+  await settingsStore.set("use_server_proxy", true);
 
   await settingsStore.save();
   await loadAppearance(); // re-apply theme/HUD/name live
   setSavedPulse();
 }
 
-async function clearApiKey(which: "openrouter" | "elevenlabs") {
-  if (!settingsStore) return;
-
-  ui.error = null;
-
-  if (which === "openrouter") {
-    await settingsStore.delete("openrouter_api_key");
-    settings.openrouter_api_key = "";
-  } else {
-    await settingsStore.delete("elevenlabs_api_key");
-    await settingsStore.delete("elevenlabs_voice_id");
-    await settingsStore.delete("elevenlabs_tts_model");
-    await settingsStore.delete("elevenlabs_tts_output_format");
-    await settingsStore.delete("elevenlabs_tts_speed");
-    await settingsStore.delete("elevenlabs_stt_model");
-    await settingsStore.delete("elevenlabs_stt_language_code");
-
-    settings.elevenlabs_api_key = "";
-    settings.elevenlabs_voice_id = "";
-    settings.elevenlabs_tts_model = DEFAULTS.elevenlabs_tts_model;
-    settings.elevenlabs_tts_output_format = DEFAULTS.elevenlabs_tts_output_format;
-    settings.elevenlabs_tts_speed = DEFAULTS.elevenlabs_tts_speed;
-    settings.elevenlabs_stt_model = DEFAULTS.elevenlabs_stt_model;
-    settings.elevenlabs_stt_language_code = DEFAULTS.elevenlabs_stt_language_code;
-  }
-
-  await settingsStore.save();
-  setSavedPulse();
-}
-
 async function resetChatSettings() {
   settings.chat_auto_speech = DEFAULTS.chat_auto_speech;
   settings.chat_auto_speech_mode = DEFAULTS.chat_auto_speech_mode;
-  settings.chat_auto_speech_rate = DEFAULTS.chat_auto_speech_rate;
-  settings.chat_auto_speech_volume = DEFAULTS.chat_auto_speech_volume;
   await saveAll();
 }
 
@@ -472,9 +315,7 @@ const tabs: Array<{
   desc: string;
   icon: string;
 }> = [
-  { id: "api", title: "API", desc: "OpenRouter", icon: "key" },
   { id: "server", title: "Server", desc: "Laravel Sync API", icon: "server" },
-  { id: "voice", title: "Voice", desc: "Wake-Word + lokale Modelle", icon: "mic" },
   { id: "chat", title: "Chat", desc: "Auto Speech", icon: "chat" },
   { id: "appearance", title: "Appearance", desc: "UI (später)", icon: "palette" },
   { id: "privacy", title: "Privacy", desc: "Storage (später)", icon: "shield" },
@@ -572,8 +413,12 @@ function iconPath(kind: string) {
           <section class="lz-main">
             <div class="lz-scroll">
               <!-- API -->
-              <div v-if="ui.tab === 'api'" class="lz-section">
+              <div v-if="false" class="lz-section">
                 <div class="lz-section__head">
+                  <h3>Provider-Schluessel</h3>
+                  <p>Die Tauri-App speichert keine Provider-API-Keys. Modelle, OpenRouter und Sprachbackends werden ueber die Luczor Admin API verwaltet.</p>
+                </div>
+                <div v-if="false" class="lz-section__head">
                   <h3>API-Schlüssel <span class="lz-optbadge">optional</span></h3>
                   <p>Nur nötig, wenn der <b>Server-Proxy</b> (Server-Tab) ausgeschaltet ist. Standardmäßig liegen alle Provider-Keys verschlüsselt auf dem Server.</p>
                 </div>
@@ -581,55 +426,66 @@ function iconPath(kind: string) {
                 <div class="lz-card">
                   <div class="lz-card__head">
                     <div>
-                      <div class="lz-card__title">OpenRouter</div>
-                      <div class="lz-card__meta">Key: <span class="mono">{{ maskedOrKey || "—" }}</span></div>
+                      <div class="lz-card__title">Server-Routing aktiv</div>
+                      <div class="lz-card__meta">Lokale Provider-Keys: deaktiviert</div>
                     </div>
-                    <button type="button" class="lz-btn lz-btn--ghost" @click="clearApiKey('openrouter')">Key löschen</button>
+                    <span class="lz-optbadge">kein Key lokal</span>
+                  </div>
+                  <p class="lz-hint">Die Desktop-App nutzt den Server-Proxy. Provider-Keys und Modellprofile liegen im Admin-Bereich, nicht in der lokalen App.</p>
+                </div>
+
+                <div v-if="false" class="lz-card">
+                  <div class="lz-card__head">
+                    <div>
+                      <div class="lz-card__title">OpenRouter</div>
+                      <div class="lz-card__meta">Lokale Provider-Konfiguration entfernt</div>
+                    </div>
+                    <button type="button" class="lz-btn lz-btn--ghost" disabled>Server verwaltet Keys</button>
                   </div>
                   <label class="lz-label">OpenRouter API Key</label>
-                  <input v-model="settings.openrouter_api_key" type="text" autocomplete="off" placeholder="sk-or-..." class="lz-input" />
+                  <input value="Server-Proxy" type="text" disabled class="lz-input" />
                 </div>
 
                 <div v-if="false" class="lz-card">
                   <div class="lz-card__head">
                     <div>
                       <div class="lz-card__title">ElevenLabs</div>
-                      <div class="lz-card__meta">Key: <span class="mono">{{ maskedXiKey || "—" }}</span></div>
+                      <div class="lz-card__meta">Nicht als Client-Integration verfügbar</div>
                     </div>
-                    <button type="button" class="lz-btn lz-btn--ghost" @click="clearApiKey('elevenlabs')">ElevenLabs löschen</button>
+                    <button type="button" class="lz-btn lz-btn--ghost" disabled>Nicht verfügbar</button>
                   </div>
 
                   <label class="lz-label">ElevenLabs API Key</label>
-                  <input v-model="settings.elevenlabs_api_key" type="text" autocomplete="off" placeholder="xi-..." class="lz-input" />
+                  <input value="Lokale Piper-Ausgabe" type="text" disabled class="lz-input" />
                   <p class="lz-hint">Benötigt für Cloud-STT (scribe_v2) und Cloud-TTS (voice_id).</p>
 
                   <div class="lz-grid2">
                     <div>
                       <label class="lz-label">TTS Voice ID</label>
-                      <input v-model="settings.elevenlabs_voice_id" type="text" autocomplete="off" placeholder="21m00Tcm4TlvDq8ikWAM" class="lz-input" />
+                      <input value="Nicht verfügbar" type="text" disabled class="lz-input" />
                     </div>
                     <div>
                       <label class="lz-label">TTS Model</label>
-                      <input v-model="settings.elevenlabs_tts_model" type="text" autocomplete="off" placeholder="eleven_multilingual_v2" class="lz-input" />
+                      <input value="Piper" type="text" disabled class="lz-input" />
                     </div>
                     <div>
                       <label class="lz-label">TTS Output Format</label>
-                      <input v-model="settings.elevenlabs_tts_output_format" type="text" autocomplete="off" placeholder="mp3_44100_128" class="lz-input" />
+                      <input value="WAV" type="text" disabled class="lz-input" />
                     </div>
                     <div>
                       <label class="lz-label">TTS Speed</label>
                       <div class="lz-range">
-                        <input v-model.number="settings.elevenlabs_tts_speed" type="range" min="0.7" max="1.3" step="0.05" />
-                        <span class="lz-range__val">{{ settings.elevenlabs_tts_speed.toFixed(2) }}</span>
+                        <input value="1" type="range" min="1" max="1" disabled />
+                        <span class="lz-range__val">automatisch</span>
                       </div>
                     </div>
                     <div>
                       <label class="lz-label">STT Model</label>
-                      <input v-model="settings.elevenlabs_stt_model" type="text" autocomplete="off" placeholder="scribe_v2" class="lz-input" />
+                      <input value="whisper.cpp" type="text" disabled class="lz-input" />
                     </div>
                     <div>
                       <label class="lz-label">STT Language Code</label>
-                      <input v-model="settings.elevenlabs_stt_language_code" type="text" autocomplete="off" placeholder="deu" class="lz-input" />
+                      <input value="de" type="text" disabled class="lz-input" />
                     </div>
                   </div>
                   <p v-if="ui.error" class="lz-error">{{ ui.error }}</p>
@@ -673,7 +529,7 @@ function iconPath(kind: string) {
                   <div class="lz-card__title">Provider-Proxy & Sync</div>
                   <div class="lz-row">
                     <span class="lz-rowlabel">Provider-Proxy (Keys auf dem Server)</span>
-                    <button type="button" class="lz-switch" :class="{ 'is-on': settings.use_server_proxy }" @click="settings.use_server_proxy = !settings.use_server_proxy"><span /></button>
+                    <button type="button" class="lz-switch is-on" disabled><span /></button>
                   </div>
                   <p class="lz-hint">An = Chat läuft über den Server, der den OpenRouter-Key injiziert. Dann ist lokal kein OpenRouter-Key nötig.</p>
                   <div class="lz-row">
@@ -713,64 +569,70 @@ function iconPath(kind: string) {
               </div>
 
               <!-- VOICE -->
-              <div v-else-if="ui.tab === 'voice'" class="lz-section">
+              <div v-else-if="false" class="lz-section">
                 <div class="lz-section__head">
                   <h3>Voice</h3>
+                  <p>Lokale Sprache ist fest auf whisper.cpp fuer STT und Piper fuer TTS ausgelegt. Keine ElevenLabs-Konfiguration, kein Voice-API-Key, keine Backend-Auswahl im Client.</p>
+                </div>
+                <div v-if="false" class="lz-section__head">
+                  <h3>Voice</h3>
+                  <div class="lz-card">
+                    <div class="lz-card__title">Lokale Sprache fest verdrahtet</div>
+                    <p class="lz-hint">STT nutzt whisper.cpp, TTS nutzt Piper. Es gibt keine ElevenLabs-Konfiguration, keinen Voice-API-Key und keine Backend-Auswahl im Client.</p>
+                  </div>
                   <p>Dauer-Zuhören mit Wake-Word und optional lokale Sprachmodelle (offline).</p>
                 </div>
                 <div class="lz-card">
                   <div class="lz-grid2">
                     <div>
                       <label class="lz-label">Eingabe-Modus</label>
-                      <select v-model="settings.voice_mode" class="lz-input">
-                        <option value="push_to_talk">Push-to-Talk (Knopf)</option>
-                        <option value="continuous">Dauerhaft zuhören</option>
-                        <option value="wakeword">Wake-Word</option>
+                      <select value="push_to_talk" class="lz-input" disabled>
+                        <option value="push_to_talk">Push-to-Talk</option>
                       </select>
                     </div>
                     <div>
                       <label class="lz-label">Wake-Word</label>
-                      <input v-model="settings.voice_wake_word" type="text" placeholder="luczor" class="lz-input" />
+                      <input value="luczor" type="text" disabled class="lz-input" />
                       <p class="lz-hint">Erkennung über das Transkript.</p>
                     </div>
-                    <div>
+                    <div v-if="false">
                       <label class="lz-label">STT-Backend</label>
-                      <select v-model="settings.voice_stt_backend" class="lz-input">
+                      <select value="local" class="lz-input" disabled>
                         <option value="local">Lokal (whisper.cpp)</option>
                       </select>
                     </div>
-                    <div>
+                    <div v-if="false">
                       <label class="lz-label">TTS-Backend</label>
-                      <select v-model="settings.voice_tts_backend" class="lz-input">
+                      <select value="local" class="lz-input" disabled>
                         <option value="local">Lokal (Piper)</option>
                       </select>
                     </div>
                   </div>
                 </div>
-                <div class="lz-card">
+                <div v-if="false" class="lz-card">
                   <div class="lz-card__title">Lokale Modelle (offline)</div>
                   <p class="lz-hint">Pfade zu selbst installierten Binaries/Modellen. Ohne diese ist Sprache deaktiviert, statt auf Cloud auszuweichen.</p>
                   <div class="lz-grid2">
                     <div>
                       <label class="lz-label">whisper.cpp Binary</label>
-                      <input v-model="settings.voice_local_stt_binary" type="text" placeholder="C:\tools\whisper-cli.exe" class="lz-input" />
+                      <input value="automatisch verwaltet" type="text" disabled class="lz-input" />
                     </div>
                     <div>
                       <label class="lz-label">whisper Modell</label>
-                      <input v-model="settings.voice_local_stt_model" type="text" placeholder="ggml-medium.bin" class="lz-input" />
+                      <input value="automatisch verwaltet" type="text" disabled class="lz-input" />
                     </div>
                     <div>
                       <label class="lz-label">STT Sprache</label>
-                      <input v-model="settings.voice_local_stt_language" type="text" placeholder="de" class="lz-input" />
+                      <input value="de" type="text" disabled class="lz-input" />
                     </div>
                     <div></div>
                     <div>
                       <label class="lz-label">Piper Binary</label>
-                      <input v-model="settings.voice_local_tts_binary" type="text" placeholder="C:\tools\piper.exe" class="lz-input" />
+                      <input value="automatisch verwaltet" type="text" disabled class="lz-input" />
                     </div>
                     <div>
                       <label class="lz-label">Piper Voice (.onnx)</label>
-                      <input v-model="settings.voice_local_tts_model" type="text" placeholder="de_DE-thorsten-medium.onnx" class="lz-input" />
+                      <input value="automatisch verwaltet" type="text" disabled class="lz-input" />
                     </div>
                   </div>
                 </div>
@@ -809,15 +671,15 @@ function iconPath(kind: string) {
                     <div>
                       <label class="lz-label">Rate</label>
                       <div class="lz-range">
-                        <input v-model.number="settings.chat_auto_speech_rate" type="range" min="0.5" max="2" step="0.1" />
-                        <span class="lz-range__val">{{ settings.chat_auto_speech_rate.toFixed(1) }}</span>
+                        <input value="1" type="range" min="1" max="1" disabled />
+                        <span class="lz-range__val">automatisch</span>
                       </div>
                     </div>
                     <div>
                       <label class="lz-label">Volume</label>
                       <div class="lz-range">
-                        <input v-model.number="settings.chat_auto_speech_volume" type="range" min="0" max="100" step="1" />
-                        <span class="lz-range__val">{{ settings.chat_auto_speech_volume }}</span>
+                        <input value="100" type="range" min="100" max="100" disabled />
+                        <span class="lz-range__val">Systemlautstärke</span>
                       </div>
                     </div>
                   </div>
@@ -867,7 +729,7 @@ function iconPath(kind: string) {
                     </div>
                   </div>
 
-                  <div class="lz-row">
+                  <div v-if="false" class="lz-row">
                     <span class="lz-rowlabel">HUD anzeigen</span>
                     <button type="button" class="lz-switch" :class="{ 'is-on': settings.ui_hud_visible }" @click="settings.ui_hud_visible = !settings.ui_hud_visible"><span /></button>
                   </div>

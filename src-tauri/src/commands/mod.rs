@@ -1,4 +1,3 @@
-pub mod speech;
+pub mod device_jobs;
 pub mod system;
-pub mod tts;
 pub mod voice;

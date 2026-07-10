@@ -10,7 +10,11 @@ use base64::Engine;
 use enigo::{
     Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
 };
+use nvml_wrapper::{enum_wrappers::device::TemperatureSensor, Nvml};
 use serde::{Deserialize, Serialize};
+use sysinfo::{Components, System, MINIMUM_CPU_UPDATE_INTERVAL};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /* =========================================================
  * Perception
@@ -91,6 +95,142 @@ pub async fn list_windows() -> Result<Vec<WindowInfo>, String> {
         });
     }
     Ok(out)
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SystemMetrics {
+    pub cpu_percent: f32,
+    pub ram_percent: f32,
+    pub ram_used_mb: u64,
+    pub ram_total_mb: u64,
+    pub gpu_percent: Option<f32>,
+    pub cpu_temp_c: Option<f32>,
+    pub gpu_temp_c: Option<f32>,
+}
+
+static METRICS_CACHE: OnceLock<Mutex<Option<(Instant, SystemMetrics)>>> = OnceLock::new();
+
+#[tauri::command]
+pub async fn system_metrics() -> Result<SystemMetrics, String> {
+    let cache = METRICS_CACHE.get_or_init(|| Mutex::new(None));
+    if let Some((updated_at, metrics)) = cache.lock().map_err(|_| "System metrics cache unavailable" )?.as_ref() {
+        if updated_at.elapsed() < Duration::from_secs(2) {
+            return Ok(metrics.clone());
+        }
+    }
+
+    let mut system = System::new();
+    system.refresh_memory();
+    system.refresh_cpu_usage();
+    std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
+    system.refresh_cpu_usage();
+
+    let total_memory = system.total_memory();
+    let used_memory = system.used_memory();
+    let ram_percent = if total_memory > 0 {
+        (used_memory as f32 / total_memory as f32) * 100.0
+    } else {
+        0.0
+    };
+
+    let (cpu_temp_c, sensor_gpu_temp_c) = component_temperatures();
+    let (gpu_percent, nvml_gpu_temp_c) = gpu_telemetry();
+
+    let metrics = SystemMetrics {
+        cpu_percent: clamp_percent(system.global_cpu_usage()),
+        ram_percent: clamp_percent(ram_percent),
+        ram_used_mb: used_memory / 1024 / 1024,
+        ram_total_mb: total_memory / 1024 / 1024,
+        gpu_percent: gpu_percent.map(clamp_percent),
+        cpu_temp_c,
+        gpu_temp_c: nvml_gpu_temp_c.or(sensor_gpu_temp_c),
+    };
+    *cache.lock().map_err(|_| "System metrics cache unavailable" )? = Some((Instant::now(), metrics.clone()));
+    Ok(metrics)
+}
+
+fn clamp_percent(v: f32) -> f32 {
+    if v.is_finite() {
+        v.clamp(0.0, 100.0)
+    } else {
+        0.0
+    }
+}
+
+fn clean_temp(v: f32) -> Option<f32> {
+    if v.is_finite() && v > 0.0 && v < 130.0 {
+        Some((v * 10.0).round() / 10.0)
+    } else {
+        None
+    }
+}
+
+fn hotter(current: Option<f32>, next: f32) -> Option<f32> {
+    match current {
+        Some(v) if v >= next => Some(v),
+        _ => Some(next),
+    }
+}
+
+fn component_temperatures() -> (Option<f32>, Option<f32>) {
+    let components = Components::new_with_refreshed_list();
+    let mut cpu_temp = None;
+    let mut gpu_temp = None;
+    let mut fallback_temp = None;
+
+    for component in &components {
+        let Some(temp) = clean_temp(component.temperature()) else {
+            continue;
+        };
+
+        let label = component.label().to_lowercase();
+        fallback_temp = hotter(fallback_temp, temp);
+
+        if label.contains("gpu")
+            || label.contains("nvidia")
+            || label.contains("geforce")
+            || label.contains("radeon")
+            || label.contains("amd graphics")
+        {
+            gpu_temp = hotter(gpu_temp, temp);
+        } else if label.contains("cpu")
+            || label.contains("package")
+            || label.contains("core")
+            || label.contains("tctl")
+            || label.contains("tdie")
+        {
+            cpu_temp = hotter(cpu_temp, temp);
+        }
+    }
+
+    (cpu_temp.or(fallback_temp), gpu_temp)
+}
+
+fn gpu_telemetry() -> (Option<f32>, Option<f32>) {
+    // NVML is loaded dynamically by the wrapper. If no compatible NVIDIA
+    // driver exists, metrics remain unavailable without spawning a process.
+    let Ok(nvml) = Nvml::init() else {
+        return (None, None);
+    };
+    let Ok(count) = nvml.device_count() else {
+        return (None, None);
+    };
+
+    let mut busiest = None;
+    let mut hottest = None;
+    for index in 0..count {
+        let Ok(device) = nvml.device_by_index(index) else {
+            continue;
+        };
+        if let Ok(utilization) = device.utilization_rates() {
+            busiest = hotter(busiest, utilization.gpu as f32);
+        }
+        if let Ok(temp) = device.temperature(TemperatureSensor::Gpu) {
+            hottest = hotter(hottest, temp as f32);
+        }
+    }
+
+    (busiest, hottest)
 }
 
 /* =========================================================
@@ -205,88 +345,20 @@ pub async fn press_key(payload: PressKeyPayload) -> Result<(), String> {
 }
 
 /* =========================================================
- * Apps / shell
+ * Browser
  * ========================================================= */
 
 #[derive(Debug, Deserialize)]
-pub struct OpenPathPayload {
-    /// A file path, folder, URL, or app that the OS knows how to open.
-    pub target: String,
+pub struct OpenUrlPayload {
+    pub url: String,
 }
 
-/// Open a path/URL with the OS default handler (Windows: `cmd /C start`).
 #[tauri::command]
-pub async fn open_path(payload: OpenPathPayload) -> Result<(), String> {
-    let target = payload.target.trim();
-    if target.is_empty() {
-        return Err("Empty target".into());
+pub async fn open_url(payload: OpenUrlPayload) -> Result<(), String> {
+    let url = payload.url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://")) || url.chars().any(char::is_control) {
+        return Err("Only valid http(s) URLs may be opened.".into());
     }
-
-    #[cfg(target_os = "windows")]
-    {
-        std::process::Command::new("cmd")
-            .args(["/C", "start", "", target])
-            .spawn()
-            .map_err(|e| format!("open_path failed: {e}"))?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        std::process::Command::new("open")
-            .arg(target)
-            .spawn()
-            .map_err(|e| format!("open_path failed: {e}"))?;
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        std::process::Command::new("xdg-open")
-            .arg(target)
-            .spawn()
-            .map_err(|e| format!("open_path failed: {e}"))?;
-    }
+    webbrowser::open(url).map_err(|error| format!("open_url failed: {error}"))?;
     Ok(())
-}
-
-#[derive(Debug, Deserialize)]
-pub struct RunCommandPayload {
-    /// Program name. Only allow-listed programs are permitted.
-    pub program: String,
-    pub args: Option<Vec<String>>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct RunCommandResult {
-    pub ok: bool,
-    pub code: Option<i32>,
-    pub stdout: String,
-    pub stderr: String,
-}
-
-/// A conservative allow-list of programs the assistant may run.
-const ALLOWED_PROGRAMS: &[&str] = &[
-    "notepad", "calc", "explorer", "mspaint", "cmd", "powershell", "where", "whoami", "hostname",
-    "ipconfig", "tasklist",
-];
-
-#[tauri::command]
-pub async fn run_command(payload: RunCommandPayload) -> Result<RunCommandResult, String> {
-    let program = payload.program.trim().to_lowercase();
-    let base = program.trim_end_matches(".exe");
-    if !ALLOWED_PROGRAMS.contains(&base) {
-        return Err(format!(
-            "Programm '{program}' ist nicht in der Allow-Liste. Erlaubt: {}",
-            ALLOWED_PROGRAMS.join(", ")
-        ));
-    }
-
-    let output = std::process::Command::new(&program)
-        .args(payload.args.unwrap_or_default())
-        .output()
-        .map_err(|e| format!("run_command failed: {e}"))?;
-
-    Ok(RunCommandResult {
-        ok: output.status.success(),
-        code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-    })
 }

@@ -11,13 +11,14 @@ import { usePushToTalk } from "@/services/pushToTalk";
 import { Store } from "@tauri-apps/plugin-store";
 import { listen } from "@tauri-apps/api/event";
 import { VoiceEngine } from "@/services/voice/voiceEngine";
-import { getVoiceConfig, localStt, localSttReady } from "@/services/voice/localVoice";
+import { getVoiceConfig, localStt } from "@/services/voice/localVoice";
 import { streamSpeak } from "@/services/voice/speak";
 import { luczorMemory, getMemoryPrefs } from "@/services/memory/luczorMemory";
 import { buildPromptContextDetails, inferTaskType, type PromptContextDetails } from "@/services/contextController";
 import { refreshStatus } from "@/services/status";
 import { appearance, loadAppearance } from "@/services/appearance";
 import { LuczorApi } from "@/services/api/luczorApi";
+import { startDeviceJobChannel } from "@/services/deviceJobs";
 
 import { startHud, setStatus } from "@/state/hud";
 import { state, mutations } from "@/state/store";
@@ -114,6 +115,8 @@ onMounted(async () => {
   // Sync/memory status heartbeat.
   void refreshStatus();
   window.setInterval(() => void refreshStatus(), 30000);
+
+  void startDeviceJobChannel().catch((error) => console.warn("[device-jobs] unavailable", error));
 });
 
 /* -------------------------------------------------
@@ -391,14 +394,7 @@ const listenLabel = ref("Zuhören");
 
 async function transcribeLocal(wavBase64: string): Promise<string> {
   const cfg = await getVoiceConfig();
-  if (localSttReady(cfg)) {
-    return localStt(wavBase64, {
-      binary: cfg.localSttBinary,
-      model: cfg.localSttModel,
-      language: cfg.localSttLanguage,
-    });
-  }
-  throw new Error("Lokale STT ist nicht konfiguriert: whisper.cpp Binary und Modell setzen.");
+  return localStt(wavBase64, cfg.localSttLanguage);
 }
 
 async function transcribeUtterance(wavBase64: string): Promise<string> {
@@ -755,7 +751,7 @@ watch(
         <button class="btn-ghost" type="button" @click="addProject" title="Neues Projekt">+ Projekt</button>
       </div>
 
-      <JarvisHud v-if="appearance.hudVisible" embedded />
+      <JarvisHud embedded />
 
       <div class="side-listhead">
         <span class="tac-label">Projekte</span>

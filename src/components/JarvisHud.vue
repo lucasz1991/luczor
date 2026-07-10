@@ -4,6 +4,7 @@ import { hud, setKillSwitch } from "@/state/hud";
 import { lastScreenshot } from "@/services/tools/registry";
 import { syncNow } from "@/services/status";
 import { appearance } from "@/services/appearance";
+import { readSystemMetrics, type SystemMetrics } from "@/services/systemMetrics";
 
 const props = withDefaults(defineProps<{ embedded?: boolean }>(), {
   embedded: false,
@@ -14,6 +15,7 @@ const props = withDefaults(defineProps<{ embedded?: boolean }>(), {
  * ------------------------------------------------- */
 const frame = ref(0);
 let raf = 0;
+let metricsTimer: number | undefined;
 
 // Smoothed scalars (ease toward live values so nothing jitters).
 const sEnergy = ref(0);
@@ -21,6 +23,8 @@ const sMic = ref(0);
 const sNet = ref(0);
 const sFile = ref(0);
 const sOs = ref(0);
+const sysMetrics = ref<SystemMetrics | null>(null);
+const sysMetricsError = ref(false);
 
 // Circular spectrum + linear waveform smoothing buffers.
 const SPECTRUM = 64;
@@ -67,8 +71,15 @@ function loop() {
 
   raf = requestAnimationFrame(loop);
 }
-onMounted(() => { raf = requestAnimationFrame(loop); });
-onBeforeUnmount(() => cancelAnimationFrame(raf));
+onMounted(() => {
+  raf = requestAnimationFrame(loop);
+  void refreshSystemMetrics();
+  metricsTimer = window.setInterval(() => void refreshSystemMetrics(), 3500);
+});
+onBeforeUnmount(() => {
+  cancelAnimationFrame(raf);
+  if (metricsTimer) window.clearInterval(metricsTimer);
+});
 
 const collapsed = ref(false);
 
@@ -147,6 +158,62 @@ function arc(v: number) {
   return { opacity: 0.2 + v * 0.8, width: 2 + v * 5 };
 }
 
+async function refreshSystemMetrics() {
+  try {
+    sysMetrics.value = await readSystemMetrics();
+    sysMetricsError.value = false;
+  } catch (e) {
+    sysMetricsError.value = true;
+    console.warn("[hud] system metrics failed:", e);
+  }
+}
+
+function pct(v: number | null | undefined) {
+  return typeof v === "number" && Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : null;
+}
+
+function temp(v: number | null | undefined) {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+function loadColor(load: number | null, tempC?: number | null) {
+  const hot = tempC != null && tempC >= 85;
+  const warm = tempC != null && tempC >= 75;
+  if (hot || (load != null && load >= 90)) return "#fb7185";
+  if (warm || (load != null && load >= 72)) return "#f59e0b";
+  if (load != null && load >= 45) return "#22d3ee";
+  return "#34d399";
+}
+
+function fmtPct(v: number | null) {
+  return v == null ? "n/a" : `${Math.round(v)}%`;
+}
+
+function fmtTemp(v: number | null) {
+  return v == null ? "n/a" : `${Math.round(v)}C`;
+}
+
+const hardwareMeters = computed(() => {
+  const m = sysMetrics.value;
+  const cpu = pct(m?.cpu_percent);
+  const ram = pct(m?.ram_percent);
+  const gpu = pct(m?.gpu_percent);
+  const cpuTemp = temp(m?.cpu_temp_c);
+  const gpuTemp = temp(m?.gpu_temp_c);
+
+  return [
+    { tag: "CPU", value: cpu, temp: cpuTemp, color: loadColor(cpu, cpuTemp), detail: fmtTemp(cpuTemp) },
+    {
+      tag: "RAM",
+      value: ram,
+      temp: null,
+      color: loadColor(ram, null),
+      detail: m ? `${Math.round(m.ram_used_mb / 1024)}/${Math.round(m.ram_total_mb / 1024)}G` : "n/a",
+    },
+    { tag: "GPU", value: gpu, temp: gpuTemp, color: loadColor(gpu, gpuTemp), detail: fmtTemp(gpuTemp) },
+  ];
+});
+
 function toggleKill() { setKillSwitch(!hud.killSwitch); }
 
 const syncing = ref(false);
@@ -188,7 +255,7 @@ const posStyle = computed(() => {
 
 <template>
   <div class="jarvis" :class="{ collapsed, embedded: props.embedded }" :style="posStyle">
-    <button class="jarvis-toggle" @click="collapsed = !collapsed" :title="collapsed ? 'HUD zeigen' : 'HUD einklappen'">
+    <button v-if="!props.embedded" class="jarvis-toggle" @click="collapsed = !collapsed" :title="collapsed ? 'HUD zeigen' : 'HUD einklappen'">
       <span class="dot" :style="{ background: palette.main, boxShadow: `0 0 12px ${palette.glow}` }" />
     </button>
 
@@ -297,6 +364,19 @@ const posStyle = computed(() => {
             <span class="track"><i :style="{ width: (sOs*100)+'%', background:'linear-gradient(90deg,#d97706,#f59e0b)' }" /></span></div>
           <div class="meter"><span class="tag">MIC</span>
             <span class="track"><i :style="{ width: (sMic*100)+'%', background:'linear-gradient(90deg,#059669,#34d399)' }" /></span></div>
+        </div>
+
+        <div class="hardware" :class="{ 'is-stale': sysMetricsError }">
+          <div v-for="m in hardwareMeters" :key="m.tag" class="hw">
+            <div class="hw__head">
+              <span class="tag">{{ m.tag }}</span>
+              <span class="hw__value">{{ fmtPct(m.value) }}</span>
+              <span class="hw__temp">{{ m.detail }}</span>
+            </div>
+            <span class="track">
+              <i :style="{ width: ((m.value ?? 0) + '%'), background: `linear-gradient(90deg, ${m.color}88, ${m.color})`, boxShadow: `0 0 9px ${m.color}77` }" />
+            </span>
+          </div>
         </div>
 
         <!-- sync / memory status -->
@@ -443,6 +523,40 @@ const posStyle = computed(() => {
   display: block; height: 100%; border-radius: 5px;
   transition: width .18s ease-out;
   box-shadow: 0 0 8px rgba(255,255,255,.15);
+}
+
+.hardware {
+  display: grid;
+  gap: 7px;
+  margin: 0 0 10px;
+  padding: 8px;
+  border: 1px solid rgba(56,189,248,.12);
+  border-radius: 10px;
+  background: rgba(2,8,14,.38);
+}
+.hardware.is-stale { opacity: .72; }
+.hw { display: grid; gap: 4px; }
+.hw__head {
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+}
+.hw__value { color: #d8f7ff; text-align: right; }
+.hw__temp { color: #86bfd6; min-width: 34px; text-align: right; }
+.hw .track {
+  height: 6px;
+  border-radius: 5px;
+  background: rgba(255,255,255,.07);
+  overflow: hidden;
+  box-shadow: inset 0 0 4px rgba(0,0,0,.45);
+}
+.hw .track i {
+  display: block;
+  height: 100%;
+  border-radius: 5px;
+  transition: width .25s ease-out, background .25s ease-out;
 }
 
 .syncrow {

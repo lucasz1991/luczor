@@ -5,7 +5,6 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_prevent_default::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -30,19 +29,20 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::speech::eleven_stt,
-            commands::tts::eleven_tts,
             commands::system::capture_screen,
             commands::system::read_clipboard,
             commands::system::list_windows,
+            commands::system::system_metrics,
             commands::system::move_mouse,
             commands::system::mouse_click,
             commands::system::type_text,
             commands::system::press_key,
-            commands::system::open_path,
-            commands::system::run_command,
+            commands::system::open_url,
             commands::voice::local_stt,
             commands::voice::local_tts,
+            commands::voice::voice_runtime_status,
+            commands::voice::install_voice_runtime,
+            commands::device_jobs::verify_device_job,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

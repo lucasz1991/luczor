@@ -1,5 +1,4 @@
 // src/services/openrouter.service.ts
-import { Store } from "@tauri-apps/plugin-store";
 import { getApiConfig } from "@/services/api/luczorApi";
 
 export type LuczorMode = "observe" | "act" | "unrestricted";
@@ -68,8 +67,6 @@ type StreamChatArgs = ChatWithToolsArgs & {
   onToken?: (content: string) => void;
 };
 
-const OR_URL = "https://openrouter.ai/api/v1/chat/completions";
-
 function safeParseArgs(raw: string): Record<string, unknown> {
   const s = (raw ?? "").trim();
   if (!s) return {};
@@ -81,24 +78,13 @@ function safeParseArgs(raw: string): Record<string, unknown> {
   }
 }
 
-async function getApiKey(): Promise<string> {
-  const store = await Store.load("luczor.settings.json");
-  const key = (await store.get<string>("openrouter_api_key")) ?? "";
-  return key.trim();
-}
-
 /**
  * Resolve the chat endpoint + headers. When the server proxy is enabled the
  * request is sent to the Laravel proxy (authenticated with the device key) and
  * the server injects the real OpenRouter key — so no provider key on the client.
  */
 async function getEndpoint(): Promise<{ url: string; headers: Record<string, string>; proxied: boolean; clientId?: string }> {
-  const store = await Store.load("luczor.settings.json");
-  // Server proxy is the default: no OpenRouter key on the client.
-  const useProxy = (await store.get<boolean>("use_server_proxy")) ?? true;
-
-  if (useProxy) {
-    const cfg = await getApiConfig(); // baseUrl defaults to the production domain
+  const cfg = await getApiConfig();
     if (!cfg.deviceKey) {
       throw new Error("Server-Proxy aktiv, aber Device-Key fehlt (Settings → Server).");
     }
@@ -108,20 +94,6 @@ async function getEndpoint(): Promise<{ url: string; headers: Record<string, str
       proxied: true,
       clientId: cfg.clientId,
     };
-  }
-
-  const apiKey = await getApiKey();
-  if (!apiKey) throw new Error("Kein OpenRouter API Key gesetzt (Settings).");
-  return {
-    url: OR_URL,
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
-      "HTTP-Referer": "https://luczor.local",
-      "X-Title": "Luczor",
-    },
-    proxied: false,
-  };
 }
 
 function attachLuczorMeta(body: Record<string, unknown>, endpoint: Awaited<ReturnType<typeof getEndpoint>>, args: ChatWithToolsArgs) {

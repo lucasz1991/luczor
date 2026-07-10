@@ -1,45 +1,60 @@
-// src-tauri/src/commands/voice.rs
-//
-// Local (offline) speech backends, invoked as external binaries the user
-// installs and points at via settings:
-//   - STT: whisper.cpp CLI (e.g. `whisper-cli`)
-//   - TTS: Piper (`piper`)
-//
-// These are optional: the app also has cloud STT/TTS (ElevenLabs). When the
-// binaries/models are not configured, the frontend simply uses the cloud
-// backend. Nothing here downloads or bundles models — paths come from the user.
-
 use base64::Engine;
+use rsa::pkcs1v15::{Signature, VerifyingKey};
+use rsa::pkcs8::DecodePublicKey;
+use rsa::signature::Verifier;
+use rsa::RsaPublicKey;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use tauri::{AppHandle, Manager};
 
-fn write_temp(bytes: &[u8], ext: &str) -> Result<std::path::PathBuf, String> {
-    let mut p = std::env::temp_dir();
-    p.push(format!("luczor_voice_{}.{ext}", uuid::Uuid::new_v4()));
-    std::fs::write(&p, bytes).map_err(|e| format!("temp write failed: {e}"))?;
-    Ok(p)
+const MANIFEST_PUBLIC_KEY_B64: Option<&str> = option_env!("LUCZOR_VOICE_MANIFEST_PUBLIC_KEY_B64");
+
+#[derive(Debug, Deserialize)]
+pub struct VoiceManifestInstallPayload {
+    pub payload_json: String,
+    pub signature: String,
 }
 
-fn normalize_base64(b64: &str) -> &str {
-    match b64.split_once(',') {
-        Some((_, rest)) => rest,
-        None => b64,
-    }
+#[derive(Debug, Deserialize)]
+struct VoiceManifest {
+    version: String,
+    assets: Vec<VoiceAsset>,
 }
 
-/* =========================================================
- * Local STT (whisper.cpp CLI)
- * ========================================================= */
+#[derive(Debug, Deserialize)]
+struct VoiceAsset {
+    id: String,
+    kind: String,
+    platform: String,
+    url: String,
+    sha256: String,
+    file_name: String,
+    #[serde(default)]
+    executable: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct VoiceRuntimeStatus {
+    pub state: String,
+    pub version: Option<String>,
+    pub stt_ready: bool,
+    pub tts_ready: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RuntimeState {
+    version: String,
+    paths: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct LocalSttPayload {
-    /// Path to the whisper.cpp CLI binary (e.g. whisper-cli / main).
-    pub binary_path: String,
-    /// Path to the GGML/GGUF model file.
-    pub model_path: String,
-    /// Input audio as base64 (wav recommended).
     pub base64: String,
-    /// e.g. "de", "en". Optional.
     pub language: Option<String>,
 }
 
@@ -48,63 +63,8 @@ pub struct LocalSttResponse {
     pub text: String,
 }
 
-/// Transcribe audio with a local whisper.cpp binary. Captures stdout as text.
-#[tauri::command]
-pub async fn local_stt(payload: LocalSttPayload) -> Result<LocalSttResponse, String> {
-    if payload.binary_path.trim().is_empty() {
-        return Err("Kein STT-Binary konfiguriert.".into());
-    }
-    if payload.model_path.trim().is_empty() {
-        return Err("Kein STT-Modell konfiguriert.".into());
-    }
-
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(normalize_base64(&payload.base64))
-        .map_err(|e| format!("Base64 decode failed: {e}"))?;
-    let wav = write_temp(&bytes, "wav")?;
-
-    let mut args: Vec<String> = vec![
-        "-m".into(),
-        payload.model_path.clone(),
-        "-f".into(),
-        wav.to_string_lossy().to_string(),
-        "-nt".into(), // no timestamps -> clean text on stdout
-    ];
-    if let Some(lang) = payload.language.as_ref() {
-        if !lang.trim().is_empty() {
-            args.push("-l".into());
-            args.push(lang.trim().to_string());
-        }
-    }
-
-    let output = Command::new(&payload.binary_path)
-        .args(&args)
-        .output()
-        .map_err(|e| format!("whisper start failed: {e}"))?;
-
-    let _ = std::fs::remove_file(&wav);
-
-    if !output.status.success() {
-        return Err(format!(
-            "whisper error ({}): {}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    Ok(LocalSttResponse { text })
-}
-
-/* =========================================================
- * Local TTS (Piper)
- * ========================================================= */
 #[derive(Debug, Deserialize)]
 pub struct LocalTtsPayload {
-    /// Path to the Piper binary.
-    pub binary_path: String,
-    /// Path to the Piper voice model (.onnx).
-    pub model_path: String,
     pub text: String,
 }
 
@@ -114,53 +74,219 @@ pub struct LocalTtsResponse {
     pub mime: String,
 }
 
-/// Synthesize speech with a local Piper binary. Returns a WAV (base64).
 #[tauri::command]
-pub async fn local_tts(payload: LocalTtsPayload) -> Result<LocalTtsResponse, String> {
-    if payload.binary_path.trim().is_empty() {
-        return Err("Kein TTS-Binary konfiguriert.".into());
+pub async fn voice_runtime_status(app: AppHandle) -> Result<VoiceRuntimeStatus, String> {
+    Ok(status(&app))
+}
+
+#[tauri::command]
+pub async fn install_voice_runtime(
+    app: AppHandle,
+    payload: VoiceManifestInstallPayload,
+) -> Result<VoiceRuntimeStatus, String> {
+    verify_manifest(&payload.payload_json, &payload.signature)?;
+    let manifest: VoiceManifest = serde_json::from_str(&payload.payload_json)
+        .map_err(|error| structured_error("invalid_manifest", &error.to_string()))?;
+    if manifest.version.trim().is_empty() || manifest.assets.is_empty() {
+        return Err(structured_error("invalid_manifest", "Version oder Assets fehlen."));
     }
-    if payload.model_path.trim().is_empty() {
-        return Err("Kein TTS-Modell konfiguriert.".into());
+
+    let platform = current_platform();
+    let required = ["stt_binary", "stt_model", "tts_binary", "tts_model"];
+    let mut selected = Vec::new();
+    for kind in required {
+        let asset = manifest
+            .assets
+            .iter()
+            .find(|asset| asset.kind == kind && (asset.platform == platform || asset.platform == "any"))
+            .ok_or_else(|| structured_error("asset_missing", &format!("Release enthält kein Asset für {kind} auf {platform}.")))?;
+        validate_asset(asset)?;
+        selected.push(asset);
     }
+
+    let root = runtime_root(&app)?;
+    let target = root.join(&manifest.version);
+    std::fs::create_dir_all(&target).map_err(|error| structured_error("install_directory", &error.to_string()))?;
+    let mut paths = BTreeMap::new();
+
+    for asset in selected {
+        let path = target.join(&asset.file_name);
+        if ! valid_file_hash(&path, &asset.sha256)? {
+            download(asset, &path)?;
+        }
+        if asset.executable {
+            make_executable(&path)?;
+        }
+        paths.insert(asset.kind.clone(), path.to_string_lossy().to_string());
+    }
+
+    let state = RuntimeState { version: manifest.version, paths };
+    write_state(&app, &state)?;
+    Ok(status(&app))
+}
+
+#[tauri::command]
+pub async fn local_stt(app: AppHandle, payload: LocalSttPayload) -> Result<LocalSttResponse, String> {
+    let runtime = ready_runtime(&app, "stt_binary", "stt_model")?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(normalize_base64(&payload.base64))
+        .map_err(|error| structured_error("audio_decode", &error.to_string()))?;
+    let wav = write_temp(&bytes, "wav")?;
+    let mut args = vec![
+        "-m".to_string(),
+        runtime.paths["stt_model"].clone(),
+        "-f".to_string(),
+        wav.to_string_lossy().to_string(),
+        "-nt".to_string(),
+    ];
+    if let Some(language) = payload.language.filter(|value| !value.trim().is_empty()) {
+        args.push("-l".to_string());
+        args.push(language.trim().to_string());
+    }
+    let output = Command::new(&runtime.paths["stt_binary"])
+        .args(args)
+        .output()
+        .map_err(|error| structured_error("stt_start", &error.to_string()))?;
+    let _ = std::fs::remove_file(wav);
+    if !output.status.success() {
+        return Err(structured_error("stt_runtime", &String::from_utf8_lossy(&output.stderr)));
+    }
+    Ok(LocalSttResponse { text: String::from_utf8_lossy(&output.stdout).trim().to_string() })
+}
+
+#[tauri::command]
+pub async fn local_tts(app: AppHandle, payload: LocalTtsPayload) -> Result<LocalTtsResponse, String> {
     let text = payload.text.trim();
     if text.is_empty() {
-        return Err("Kein Text.".into());
+        return Err(structured_error("tts_input", "Kein Text."));
     }
-
+    let runtime = ready_runtime(&app, "tts_binary", "tts_model")?;
     let mut out = std::env::temp_dir();
     out.push(format!("luczor_tts_{}.wav", uuid::Uuid::new_v4()));
-
-    let mut child = Command::new(&payload.binary_path)
-        .args([
-            "--model",
-            &payload.model_path,
-            "--output_file",
-            &out.to_string_lossy(),
-        ])
+    let mut child = Command::new(&runtime.paths["tts_binary"])
+        .args(["--model", &runtime.paths["tts_model"], "--output_file", &out.to_string_lossy()])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("piper start failed: {e}"))?;
-
+        .map_err(|error| structured_error("tts_start", &error.to_string()))?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|e| format!("piper stdin failed: {e}"))?;
+        stdin.write_all(text.as_bytes()).map_err(|error| structured_error("tts_input", &error.to_string()))?;
     }
-
-    let status = child.wait().map_err(|e| format!("piper wait failed: {e}"))?;
-    if !status.success() {
-        return Err(format!("piper error ({status})"));
+    let output = child.wait_with_output().map_err(|error| structured_error("tts_runtime", &error.to_string()))?;
+    if !output.status.success() {
+        return Err(structured_error("tts_runtime", &String::from_utf8_lossy(&output.stderr)));
     }
-
-    let bytes = std::fs::read(&out).map_err(|e| format!("read wav failed: {e}"))?;
-    let _ = std::fs::remove_file(&out);
-
-    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(LocalTtsResponse {
-        base64: b64,
-        mime: "audio/wav".to_string(),
-    })
+    let bytes = std::fs::read(&out).map_err(|error| structured_error("tts_output", &error.to_string()))?;
+    let _ = std::fs::remove_file(out);
+    Ok(LocalTtsResponse { base64: base64::engine::general_purpose::STANDARD.encode(bytes), mime: "audio/wav".to_string() })
 }
+
+fn ready_runtime(app: &AppHandle, first: &str, second: &str) -> Result<RuntimeState, String> {
+    let state = read_state(app)?.ok_or_else(|| structured_error("runtime_missing", "Lokale Sprachkomponenten werden automatisch vorbereitet. Bitte erneut versuchen."))?;
+    for key in [first, second] {
+        let path = state.paths.get(key).ok_or_else(|| structured_error("runtime_incomplete", &format!("Komponente {key} fehlt.")))?;
+        if !Path::new(path).is_file() {
+            return Err(structured_error("runtime_incomplete", &format!("Komponente {key} ist nicht verfügbar.")));
+        }
+    }
+    Ok(state)
+}
+
+fn status(app: &AppHandle) -> VoiceRuntimeStatus {
+    match read_state(app) {
+        Ok(Some(state)) => {
+            let stt_ready = state.paths.get("stt_binary").is_some_and(|path| Path::new(path).is_file())
+                && state.paths.get("stt_model").is_some_and(|path| Path::new(path).is_file());
+            let tts_ready = state.paths.get("tts_binary").is_some_and(|path| Path::new(path).is_file())
+                && state.paths.get("tts_model").is_some_and(|path| Path::new(path).is_file());
+            VoiceRuntimeStatus { state: if stt_ready && tts_ready { "ready".into() } else { "incomplete".into() }, version: Some(state.version), stt_ready, tts_ready, error: None }
+        }
+        Ok(None) => VoiceRuntimeStatus { state: "missing".into(), version: None, stt_ready: false, tts_ready: false, error: None },
+        Err(error) => VoiceRuntimeStatus { state: "error".into(), version: None, stt_ready: false, tts_ready: false, error: Some(error) },
+    }
+}
+
+fn verify_manifest(payload: &str, signature: &str) -> Result<(), String> {
+    let key_b64 = MANIFEST_PUBLIC_KEY_B64.ok_or_else(|| structured_error("manifest_key_missing", "Diese App-Version enthält keinen Voice-Release-Schlüssel."))?;
+    let pem = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(key_b64).map_err(|error| structured_error("manifest_key", &error.to_string()))?)
+        .map_err(|error| structured_error("manifest_key", &error.to_string()))?;
+    let key = RsaPublicKey::from_public_key_pem(&pem).map_err(|error| structured_error("manifest_key", &error.to_string()))?;
+    let signature = Signature::try_from(base64::engine::general_purpose::STANDARD.decode(signature).map_err(|error| structured_error("manifest_signature", &error.to_string()))?.as_slice())
+        .map_err(|error| structured_error("manifest_signature", &error.to_string()))?;
+    VerifyingKey::<Sha256>::new(key).verify(payload.as_bytes(), &signature)
+        .map_err(|_| structured_error("manifest_signature", "Die Voice-Manifest-Signatur ist ungültig."))
+}
+
+fn validate_asset(asset: &VoiceAsset) -> Result<(), String> {
+    if !asset.url.starts_with("https://") || asset.file_name.is_empty() || asset.file_name.contains('/') || asset.file_name.contains('\\') || asset.sha256.len() != 64 {
+        return Err(structured_error("asset_invalid", &format!("Ungültiges Asset {}.", asset.id)));
+    }
+    Ok(())
+}
+
+fn download(asset: &VoiceAsset, target: &Path) -> Result<(), String> {
+    let response = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build().map_err(|error| structured_error("download_client", &error.to_string()))?
+        .get(&asset.url).send().map_err(|error| structured_error("download_failed", &error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(structured_error("download_failed", &format!("HTTP {} für {}", response.status(), asset.id)));
+    }
+    let bytes = response.bytes().map_err(|error| structured_error("download_failed", &error.to_string()))?;
+    let hash = hex_sha256(&bytes);
+    if !hash.eq_ignore_ascii_case(&asset.sha256) {
+        return Err(structured_error("checksum_failed", &format!("Prüfsumme für {} stimmt nicht.", asset.id)));
+    }
+    let partial = target.with_extension("part");
+    std::fs::write(&partial, bytes).map_err(|error| structured_error("download_write", &error.to_string()))?;
+    std::fs::rename(&partial, target).map_err(|error| structured_error("download_write", &error.to_string()))
+}
+
+fn valid_file_hash(path: &Path, expected: &str) -> Result<bool, String> {
+    if !path.is_file() { return Ok(false); }
+    let bytes = std::fs::read(path).map_err(|error| structured_error("runtime_read", &error.to_string()))?;
+    Ok(hex_sha256(&bytes).eq_ignore_ascii_case(expected))
+}
+
+fn hex_sha256(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+
+fn runtime_root(app: &AppHandle) -> Result<PathBuf, String> {
+    let root = app.path().app_data_dir().map_err(|error| structured_error("runtime_directory", &error.to_string()))?.join("voice");
+    std::fs::create_dir_all(&root).map_err(|error| structured_error("runtime_directory", &error.to_string()))?;
+    Ok(root)
+}
+
+fn state_path(app: &AppHandle) -> Result<PathBuf, String> { Ok(runtime_root(app)?.join("runtime.json")) }
+fn read_state(app: &AppHandle) -> Result<Option<RuntimeState>, String> {
+    let path = state_path(app)?;
+    if !path.is_file() { return Ok(None); }
+    let data = std::fs::read_to_string(path).map_err(|error| structured_error("runtime_read", &error.to_string()))?;
+    serde_json::from_str(&data).map(Some).map_err(|error| structured_error("runtime_state", &error.to_string()))
+}
+fn write_state(app: &AppHandle, state: &RuntimeState) -> Result<(), String> {
+    let path = state_path(app)?;
+    let partial = path.with_extension("part");
+    std::fs::write(&partial, serde_json::to_vec(state).map_err(|error| structured_error("runtime_state", &error.to_string()))?)
+        .map_err(|error| structured_error("runtime_state", &error.to_string()))?;
+    std::fs::rename(partial, path).map_err(|error| structured_error("runtime_state", &error.to_string()))
+}
+
+fn write_temp(bytes: &[u8], ext: &str) -> Result<PathBuf, String> {
+    let path = std::env::temp_dir().join(format!("luczor_voice_{}.{}", uuid::Uuid::new_v4(), ext));
+    std::fs::write(&path, bytes).map_err(|error| structured_error("audio_temp", &error.to_string()))?;
+    Ok(path)
+}
+fn normalize_base64(value: &str) -> &str { value.split_once(',').map(|(_, rest)| rest).unwrap_or(value) }
+fn current_platform() -> String { format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH) }
+fn structured_error(code: &str, message: &str) -> String { serde_json::json!({"code": code, "message": message}).to_string() }
+
+#[cfg(unix)]
+fn make_executable(path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = std::fs::metadata(path).map_err(|error| structured_error("runtime_permissions", &error.to_string()))?.permissions();
+    permissions.set_mode(0o700);
+    std::fs::set_permissions(path, permissions).map_err(|error| structured_error("runtime_permissions", &error.to_string()))
+}
+#[cfg(not(unix))]
+fn make_executable(_path: &Path) -> Result<(), String> { Ok(()) }

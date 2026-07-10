@@ -1,6 +1,6 @@
 // src/services/appearance.ts
 //
-// Client-side personalization: accent theme, HUD visibility/position,
+// Client-side personalization: accent theme, HUD position,
 // reduced motion, background grid and the assistant's display name.
 // Applied by writing CSS custom properties / data-attributes on <html>.
 
@@ -82,8 +82,7 @@ export async function loadAppearance(): Promise<void> {
     const s = await Store.load(FILE);
     const acc = await s.get<string>("ui_accent");
     if (acc && (ACCENT_NAMES as string[]).includes(acc)) appearance.accent = acc as AccentName;
-    const hv = await s.get<boolean>("ui_hud_visible");
-    if (typeof hv === "boolean") appearance.hudVisible = hv;
+    appearance.hudVisible = true;
     const hp = await s.get<string>("ui_hud_position");
     if (hp === "br" || hp === "bl" || hp === "tr" || hp === "tl") appearance.hudPosition = hp;
     const rm = await s.get<boolean>("ui_reduce_motion");
