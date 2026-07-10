@@ -250,9 +250,7 @@ fn validate_asset(asset: &VoiceAsset) -> Result<(), String> {
 }
 
 fn safe_asset_url(url: &str) -> bool {
-    if url.starts_with("https://") { return true; }
-    // A local HTTP Laravel server is allowed only for development. Production releases still require HTTPS.
-    cfg!(debug_assertions) && (url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost"))
+    url.starts_with("https://")
 }
 
 fn extract_zip(archive_path: &Path, target: &Path) -> Result<(), String> {

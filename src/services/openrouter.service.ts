@@ -23,7 +23,7 @@ export type WireMessage =
       content: string;
       tool_calls?: WireToolCall[];
     }
-  | { role: "tool"; tool_call_id: string; content: string };
+  | { role: "tool"; tool_call_id: string; name?: string; content: string };
 
 /* =========================================================
  * Parsed result of a single completion round

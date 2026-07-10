@@ -56,13 +56,14 @@ export type RunAgentOptions = {
 
 type Outcome = { ok: boolean; output?: unknown; error?: string };
 
-function outcomeMessage(toolCallId: string, outcome: Outcome): WireMessage {
+function outcomeMessage(toolCallId: string, toolName: string, outcome: Outcome): WireMessage {
   const compactOutcome = outcome.ok
     ? { ok: true, output: clip(outcome.output, 8000) }
     : { ok: false, error: clip(outcome.error ?? "Tool fehlgeschlagen.", 2000) };
   return {
     role: "tool",
     tool_call_id: toolCallId,
+    name: toolName,
     content: JSON.stringify(compactOutcome),
   };
 }
@@ -158,7 +159,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
         toolFailures++;
         const outcome: Outcome = { ok: false, error: `Unbekanntes Tool: ${call.name}` };
         recordOutcome(projectId, call.id, call.name, "failed", outcome, res.requestId);
-        messages.push(outcomeMessage(call.id, outcome));
+        messages.push(outcomeMessage(call.id, call.name, outcome));
         continue;
       }
 
@@ -170,7 +171,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
           error: "Not-Aus aktiv: Alle Tool-Ausführungen sind gesperrt.",
         };
         recordOutcome(projectId, call.id, call.name, "rejected", outcome, res.requestId);
-        messages.push(outcomeMessage(call.id, outcome));
+        messages.push(outcomeMessage(call.id, call.name, outcome));
         continue;
       }
 
@@ -183,7 +184,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
             "Gesperrt: Dieses Tool verändert Daten und ist im Beobachten-Modus deaktiviert. Wechsle in den Handeln-Modus.",
         };
         recordOutcome(projectId, call.id, call.name, "rejected", outcome, res.requestId);
-        messages.push(outcomeMessage(call.id, outcome));
+        messages.push(outcomeMessage(call.id, call.name, outcome));
         continue;
       }
 
@@ -197,7 +198,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
         if (signal?.aborted) {
           const outcome: Outcome = { ok: false, error: "Abgebrochen." };
           recordOutcome(projectId, call.id, call.name, "rejected", outcome, res.requestId);
-          messages.push(outcomeMessage(call.id, outcome));
+          messages.push(outcomeMessage(call.id, call.name, outcome));
           throw new DOMException("Aborted", "AbortError");
         }
 
@@ -205,7 +206,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
           toolFailures++;
           const outcome: Outcome = { ok: false, error: "Vom Nutzer abgelehnt." };
           recordOutcome(projectId, call.id, call.name, "rejected", outcome, res.requestId);
-          messages.push(outcomeMessage(call.id, outcome));
+          messages.push(outcomeMessage(call.id, call.name, outcome));
           continue;
         }
       }
@@ -221,12 +222,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
         const outcome: Outcome = { ok: true, output };
         toolSuccesses++;
         recordOutcome(projectId, call.id, call.name, "executed", outcome, res.requestId, performance.now() - toolStarted);
-        messages.push(outcomeMessage(call.id, outcome));
+        messages.push(outcomeMessage(call.id, call.name, outcome));
       } catch (e: any) {
         const outcome: Outcome = { ok: false, error: e?.message ?? String(e) };
         toolFailures++;
         recordOutcome(projectId, call.id, call.name, "failed", outcome, res.requestId, performance.now() - toolStarted);
-        messages.push(outcomeMessage(call.id, outcome));
+        messages.push(outcomeMessage(call.id, call.name, outcome));
       }
     }
   }
