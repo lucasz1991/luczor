@@ -14,6 +14,11 @@ export type VoiceRuntimeStatus = {
 
 let installPromise: Promise<VoiceRuntimeStatus> | null = null;
 
+function reportVoiceEvent(level: "warn" | "error", event: string, detail: unknown): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("luczor:debug", { detail: { level, event, detail } }));
+}
+
 export async function getVoiceConfig(): Promise<VoiceConfig> {
   const settings = await Store.load("luczor.settings.json");
   const storedMode = await settings.get<VoiceMode>("voice_mode");
@@ -49,11 +54,13 @@ export async function ensureVoiceRuntime(): Promise<VoiceRuntimeStatus> {
   const existing = await voiceRuntimeStatus();
   if (existing.stt_ready && existing.tts_ready) return existing;
   installPromise ??= (async () => {
-    const manifest = await LuczorApi.voiceManifest();
     try {
+      const manifest = await LuczorApi.voiceManifest();
       return await invoke<VoiceRuntimeStatus>("install_voice_runtime", { payload: manifest });
     } catch (error) {
-      throw parseVoiceError(error);
+      const parsed = parseVoiceError(error);
+      reportVoiceEvent("error", "voice_runtime_install_failed", { message: parsed.message, code: (parsed as Error & { code?: string }).code });
+      throw parsed;
     } finally {
       installPromise = null;
     }
@@ -67,7 +74,9 @@ export async function localStt(base64: string, language?: string): Promise<strin
     const response = await invoke<{ text: string }>("local_stt", { payload: { base64, language: language ?? "de" } });
     return (response?.text ?? "").trim();
   } catch (error) {
-    throw parseVoiceError(error);
+    const parsed = parseVoiceError(error);
+    reportVoiceEvent("error", "local_stt_failed", { message: parsed.message, code: (parsed as Error & { code?: string }).code });
+    throw parsed;
   }
 }
 
@@ -76,6 +85,8 @@ export async function localTts(text: string): Promise<{ base64: string; mime: st
   try {
     return await invoke<{ base64: string; mime: string }>("local_tts", { payload: { text } });
   } catch (error) {
-    throw parseVoiceError(error);
+    const parsed = parseVoiceError(error);
+    reportVoiceEvent("error", "local_tts_failed", { message: parsed.message, code: (parsed as Error & { code?: string }).code });
+    throw parsed;
   }
 }

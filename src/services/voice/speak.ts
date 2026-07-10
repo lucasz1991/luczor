@@ -10,6 +10,13 @@ import { localTts } from "./localVoice";
 let currentAudio: HTMLAudioElement | null = null;
 let cancelled = false;
 
+function reportPlaybackError(error: unknown): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("luczor:debug", {
+    detail: { level: "error", event: "local_tts_playback_failed", detail: { message: error instanceof Error ? error.message : String(error) } },
+  }));
+}
+
 type Clip = { base64: string; mime: string };
 
 async function synthLocal(text: string): Promise<Clip> {
@@ -60,6 +67,9 @@ export async function streamSpeak(text: string): Promise<void> {
       setStatus("speaking");
       await play(clip);
     }
+  } catch (error) {
+    reportPlaybackError(error);
+    throw error;
   } finally {
     if (!cancelled) setStatus("idle");
   }

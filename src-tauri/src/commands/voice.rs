@@ -6,6 +6,7 @@ use rsa::RsaPublicKey;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -35,6 +36,10 @@ struct VoiceAsset {
     file_name: String,
     #[serde(default)]
     executable: bool,
+    #[serde(default)]
+    archive: bool,
+    #[serde(default)]
+    runtime_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -109,15 +114,25 @@ pub async fn install_voice_runtime(
     std::fs::create_dir_all(&target).map_err(|error| structured_error("install_directory", &error.to_string()))?;
     let mut paths = BTreeMap::new();
 
+    if let Some(config) = manifest.assets.iter().find(|asset| asset.kind == "tts_config" && (asset.platform == platform || asset.platform == "any")) {
+        validate_asset(config)?;
+        selected.push(config);
+    }
+
     for asset in selected {
         let path = target.join(&asset.file_name);
         if ! valid_file_hash(&path, &asset.sha256)? {
             download(asset, &path)?;
         }
-        if asset.executable {
-            make_executable(&path)?;
-        }
-        paths.insert(asset.kind.clone(), path.to_string_lossy().to_string());
+        let runtime_path = if asset.archive {
+            let relative = asset.runtime_path.as_deref().ok_or_else(|| structured_error("archive_runtime_path", &format!("Runtime-Pfad für {} fehlt.", asset.id)))?;
+            let extracted = target.join(relative);
+            if ! extracted.is_file() { extract_zip(&path, &target)?; }
+            if ! extracted.is_file() { return Err(structured_error("archive_runtime_missing", &format!("{} wurde nicht im Runtime-Archiv gefunden.", relative))); }
+            extracted
+        } else { path };
+        if asset.executable { make_executable(&runtime_path)?; }
+        paths.insert(asset.kind.clone(), runtime_path.to_string_lossy().to_string());
     }
 
     let state = RuntimeState { version: manifest.version, paths };
@@ -200,9 +215,12 @@ fn status(app: &AppHandle) -> VoiceRuntimeStatus {
                 && state.paths.get("stt_model").is_some_and(|path| Path::new(path).is_file());
             let tts_ready = state.paths.get("tts_binary").is_some_and(|path| Path::new(path).is_file())
                 && state.paths.get("tts_model").is_some_and(|path| Path::new(path).is_file());
-            VoiceRuntimeStatus { state: if stt_ready && tts_ready { "ready".into() } else { "incomplete".into() }, version: Some(state.version), stt_ready, tts_ready, error: None }
+            let error = if !(stt_ready && tts_ready) && MANIFEST_PUBLIC_KEY_B64.is_none() {
+                Some(structured_error("manifest_key_missing", "Die Tauri-App wurde ohne Voice-Manifest-Public-Key gebaut."))
+            } else { None };
+            VoiceRuntimeStatus { state: if stt_ready && tts_ready { "ready".into() } else { "incomplete".into() }, version: Some(state.version), stt_ready, tts_ready, error }
         }
-        Ok(None) => VoiceRuntimeStatus { state: "missing".into(), version: None, stt_ready: false, tts_ready: false, error: None },
+        Ok(None) => VoiceRuntimeStatus { state: "missing".into(), version: None, stt_ready: false, tts_ready: false, error: MANIFEST_PUBLIC_KEY_B64.is_none().then(|| structured_error("manifest_key_missing", "Die Tauri-App wurde ohne Voice-Manifest-Public-Key gebaut.")) },
         Err(error) => VoiceRuntimeStatus { state: "error".into(), version: None, stt_ready: false, tts_ready: false, error: Some(error) },
     }
 }
@@ -219,8 +237,40 @@ fn verify_manifest(payload: &str, signature: &str) -> Result<(), String> {
 }
 
 fn validate_asset(asset: &VoiceAsset) -> Result<(), String> {
-    if !asset.url.starts_with("https://") || asset.file_name.is_empty() || asset.file_name.contains('/') || asset.file_name.contains('\\') || asset.sha256.len() != 64 {
+    if !safe_asset_url(&asset.url) || asset.file_name.is_empty() || asset.file_name.contains('/') || asset.file_name.contains('\\') || asset.sha256.len() != 64 {
         return Err(structured_error("asset_invalid", &format!("Ungültiges Asset {}.", asset.id)));
+    }
+    if asset.archive {
+        let runtime = asset.runtime_path.as_deref().unwrap_or("");
+        if !asset.file_name.to_ascii_lowercase().ends_with(".zip") || runtime.is_empty() || runtime.starts_with('/') || runtime.contains("..") || runtime.contains('\\') {
+            return Err(structured_error("asset_invalid", &format!("Ungültiges Runtime-Archiv {}.", asset.id)));
+        }
+    }
+    Ok(())
+}
+
+fn safe_asset_url(url: &str) -> bool {
+    if url.starts_with("https://") { return true; }
+    // A local HTTP Laravel server is allowed only for development. Production releases still require HTTPS.
+    cfg!(debug_assertions) && (url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost"))
+}
+
+fn extract_zip(archive_path: &Path, target: &Path) -> Result<(), String> {
+    let file = File::open(archive_path).map_err(|error| structured_error("archive_read", &error.to_string()))?;
+    let mut archive = zip::ZipArchive::new(file).map_err(|error| structured_error("archive_read", &error.to_string()))?;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).map_err(|error| structured_error("archive_read", &error.to_string()))?;
+        let Some(relative) = entry.enclosed_name().map(|path| path.to_owned()) else { continue; };
+        let destination = target.join(relative);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&destination).map_err(|error| structured_error("archive_extract", &error.to_string()))?;
+            continue;
+        }
+        if let Some(parent) = destination.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| structured_error("archive_extract", &error.to_string()))?;
+        }
+        let mut output = File::create(&destination).map_err(|error| structured_error("archive_extract", &error.to_string()))?;
+        std::io::copy(&mut entry, &mut output).map_err(|error| structured_error("archive_extract", &error.to_string()))?;
     }
     Ok(())
 }

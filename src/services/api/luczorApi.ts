@@ -132,6 +132,11 @@ export class LuczorApiError extends Error {
   }
 }
 
+function emitDebug(level: "warn" | "error", event: string, detail: unknown): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent("luczor:debug", { detail: { level, event, detail } }));
+}
+
 type RequestOptions = {
   method?: string;
   body?: unknown;
@@ -144,7 +149,10 @@ type RequestOptions = {
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const cfg = await getApiConfig();
-  if (!cfg.baseUrl) throw new LuczorApiError(0, "Keine Server-URL konfiguriert (Settings → Server).");
+  if (!cfg.baseUrl) {
+    emitDebug("error", "api_config_missing", { path });
+    throw new LuczorApiError(0, "Keine Server-URL konfiguriert (Settings → Server).");
+  }
 
   const qs = opts.query
     ? Object.entries(opts.query)
@@ -157,7 +165,10 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (opts.body != null) headers["Content-Type"] = "application/json";
   if (opts.auth !== false) {
-    if (!cfg.deviceKey) throw new LuczorApiError(0, "Kein Device-Key konfiguriert (Settings → Server).");
+    if (!cfg.deviceKey) {
+      emitDebug("error", "device_key_missing", { path });
+      throw new LuczorApiError(0, "Kein Device-Key konfiguriert (Settings → Server).");
+    }
     headers["Authorization"] = `Bearer ${cfg.deviceKey}`;
   }
   Object.assign(headers, opts.headers ?? {});
@@ -171,6 +182,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
       signal: opts.signal,
     });
   } catch (e: any) {
+    emitDebug("error", "api_network_error", { path, message: e?.message ?? String(e) });
     throw new LuczorApiError(0, `Verbindung fehlgeschlagen: ${e?.message ?? String(e)}`);
   }
 
@@ -183,6 +195,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
   }
 
   if (!res.ok) {
+    emitDebug(res.status >= 500 ? "error" : "warn", "api_http_error", { path, status: res.status, message: json?.message ?? (text || res.statusText) });
     throw new LuczorApiError(res.status, json?.message ?? `HTTP ${res.status}: ${text || res.statusText}`);
   }
   return json as T;
@@ -201,6 +214,14 @@ export const LuczorApi = {
   runtimeSettings: () =>
     request<{ data: RuntimeSettings; routing: { managed_by: "server"; client_model_selection: false } }>("/runtime-settings"),
   voiceManifest: () => request<VoiceManifestResponse>("/voice/manifest"),
+  pollDebugRequest: async () => {
+    const cfg = await getApiConfig();
+    return request<{ data: { id: string; requested_at: string } | null }>("/devices/debug/poll", { query: { client_id: cfg.clientId } });
+  },
+  completeDebugRequest: async (id: string, report: Record<string, unknown>) => {
+    const cfg = await getApiConfig();
+    return request<{ ok: boolean }>(`/devices/debug/${encodeURIComponent(id)}/complete`, { method: "POST", body: { client_id: cfg.clientId, report } });
+  },
 
   registerDevice: (clientId: string, name: string) =>
     request<{ data: unknown; session: DeviceSession }>("/devices/register", {

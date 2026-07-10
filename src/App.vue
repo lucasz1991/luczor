@@ -19,6 +19,7 @@ import { LuczorApi } from "@/services/api/luczorApi";
 import { refreshStatus } from "@/services/status";
 import { appearance, loadAppearance } from "@/services/appearance";
 import { startDeviceJobChannel } from "@/services/deviceJobs";
+import { installDebugCapture, startDebugCollector, recordDebugEvent } from "@/services/debug";
 
 import { startHud, setStatus } from "@/state/hud";
 import { state, mutations } from "@/state/store";
@@ -81,6 +82,8 @@ let cancelCurrent: null | (() => Promise<void>) = null;
  * Init
  * ------------------------------------------------- */
 onMounted(async () => {
+  installDebugCapture();
+  void startDebugCollector();
   preloadSfx();
   startHud();
   void loadAppearance();
@@ -157,7 +160,9 @@ function speakMessage(m: any) {
     const content = (m?.content ?? "").toString().trim();
     const text = (content + (q ? " " + q : "")).trim();
     if (!text) return;
-    void streamSpeak(text);
+    void streamSpeak(text).catch((error) => {
+      void recordDebugEvent("error", "manual_tts_failed", { message: error instanceof Error ? error.message : String(error) });
+    });
   } catch (e) {
     console.error("[speakMessage] error:", e);
   }
@@ -206,6 +211,7 @@ async function autoSpeakAssistantIfEnabled(pid: string, assistantId: string) {
     await streamSpeak(text);
   } catch (e) {
     console.error("[AutoSpeech] speak() failed:", e);
+    void recordDebugEvent("error", "auto_tts_failed", { message: e instanceof Error ? e.message : String(e) });
   }
 }
 
@@ -397,6 +403,7 @@ async function togglePushToTalk() {
   try {
     input.value = await transcribeLocal(audio.base64);
   } catch (e: any) {
+    void recordDebugEvent("error", "assistant_request_failed", { message: e?.message ?? String(e), status: e?.status ?? null });
     mutations.addMessage(mutations.makeMsg("assistant", `STT Fehler: ${e?.message ?? String(e)}`, pid));
   }
 }
@@ -436,6 +443,9 @@ async function toggleListening() {
       transcribe: (wav) => transcribeUtterance(wav),
       onUtterance: (text) => {
         lastHeard.value = text;
+      },
+      onError: (error) => {
+        void recordDebugEvent("error", "continuous_stt_failed", { message: error.message });
       },
       onCommand: (text) => {
         const t = text.trim();

@@ -29,6 +29,8 @@ export type VoiceEngineOptions = {
   onCommand: (text: string) => void;
   /** Optional: raw transcript of every utterance (for debugging/HUD). */
   onUtterance?: (text: string) => void;
+  /** Runtime or transcription failures; callers can expose a concise state and retain diagnostics. */
+  onError?: (error: Error) => void;
 };
 
 // VAD tuning (frames are ~85ms at 48kHz / 4096 samples).
@@ -190,6 +192,7 @@ export class VoiceEngine {
       }
     } catch (e) {
       console.error("[VoiceEngine] segment failed:", e);
+      opts.onError?.(e instanceof Error ? e : new Error(String(e)));
     } finally {
       this.busy = false;
       if (this.running) setStatus("listening");

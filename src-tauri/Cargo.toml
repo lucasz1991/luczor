@@ -38,6 +38,7 @@ sysinfo = "0.32.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 rsa = { version = "0.9", features = ["sha2", "pem"] }
 sha2 = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 webbrowser = "1.0"
 nvml-wrapper = "0.11"
 
