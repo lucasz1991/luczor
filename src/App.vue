@@ -550,6 +550,8 @@ const modeTitle = computed(() => {
  * Tool audit log (from hidden tool messages)
  * ------------------------------------------------- */
 const showAudit = ref(false);
+// Context panel (goals + summaries) is collapsed by default for a chat-first UI.
+const showContext = ref(false);
 
 const toolAudit = computed(() => {
   const pid = activeProjectId.value;
@@ -878,6 +880,19 @@ watch(
         <button
           type="button"
           class="icon-btn"
+          :class="{ 'is-on': showContext }"
+          @click="showContext = !showContext"
+          title="Projektziele & Zusammenfassungen"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+          </svg>
+        </button>
+
+        <button
+          type="button"
+          class="icon-btn"
           :class="{ 'is-on': showAudit }"
           @click="showAudit = !showAudit"
           title="Tool-Protokoll"
@@ -903,8 +918,8 @@ watch(
         ⚠ VOLLZUGRIFF AKTIV — Luczor führt Tools ohne Rückfrage aus. Not-Aus im HUD stoppt sofort.
       </div>
 
-      <!-- Project info strip -->
-      <div class="info-strip">
+      <!-- Project info strip (collapsible) -->
+      <div v-if="showContext" class="info-strip">
         <div class="info-block">
           <div class="info-head">
             <span class="tac-label">Projektziele</span>
@@ -935,7 +950,9 @@ watch(
 
       <!-- Messages -->
       <div id="messages" class="messages">
+       <div class="thread">
         <div v-if="!messages.length" class="chat-empty">
+          <div class="chat-empty__orb"></div>
           <div class="chat-empty__kicker">{{ appearance.assistantName }}</div>
           <div class="chat-empty__title">Bereit für die nächste Aufgabe.</div>
           <div class="chat-empty__text">Schreibe direkt los oder nutze Push-to-Talk. Kontext und Memory werden automatisch schlank in den Prompt gelegt.</div>
@@ -997,6 +1014,7 @@ watch(
             <template v-else>{{ m.content }}</template>
           </div>
         </div>
+       </div>
       </div>
 
       <!-- Tool audit log -->
@@ -1348,22 +1366,29 @@ watch(
 /* ============ MESSAGES ============ */
 .messages {
   flex: 1; min-height: 0; overflow-y: auto;
-  display: flex; flex-direction: column; gap: var(--s5);
-  padding: var(--s5) clamp(18px, 3vw, 42px) var(--s6);
+  display: flex; flex-direction: column;
+  padding: var(--s5) clamp(16px, 4vw, 40px) var(--s4);
   scroll-behavior: smooth;
 }
-.messages::before { content: ""; margin-top: auto; } /* bottom-anchor */
+.messages::before { content: ""; margin-top: auto; } /* bottom-anchor short threads */
+
+/* Centered reading column keeps long answers legible on wide panels. */
+.thread {
+  width: 100%; max-width: 780px; margin-inline: auto;
+  display: flex; flex-direction: column; gap: var(--s6);
+}
 
 .chat-empty {
-  width: min(620px, 92%);
-  align-self: center;
-  margin: auto 0;
-  padding: var(--s5);
+  width: 100%; max-width: 520px;
+  align-self: center; margin: auto 0;
+  padding: var(--s6) var(--s5);
   text-align: center;
-  color: var(--text-secondary);
-  border: 1px dashed var(--border-soft);
-  border-radius: var(--r-lg);
-  background: linear-gradient(180deg, var(--surface-2), transparent);
+}
+.chat-empty__orb {
+  width: 60px; height: 60px; margin: 0 auto var(--s4); border-radius: 50%;
+  background: radial-gradient(circle at 42% 38%, var(--cy-soft), var(--cy) 52%, transparent 72%);
+  box-shadow: var(--glow-md);
+  animation: pulse-core 3.6s var(--ease-soft) infinite;
 }
 .chat-empty__kicker {
   font-family: var(--font-mono);
@@ -1373,69 +1398,62 @@ watch(
   color: var(--cy-soft);
 }
 .chat-empty__title {
-  margin-top: 6px;
-  font-size: 20px;
-  font-weight: 700;
+  margin-top: 8px;
+  font-size: 22px; font-weight: 700; letter-spacing: -0.01em;
   color: var(--text-primary);
 }
 .chat-empty__text {
-  margin-top: 8px;
+  margin-top: 10px;
   font-size: var(--fs-sm);
-  line-height: 1.5;
+  line-height: 1.6;
   color: var(--text-muted);
 }
 
-.msg { display: flex; flex-direction: column; max-width: min(78%, 880px); animation: msg-enter var(--dur-slow) var(--ease) both; }
-.msg__meta { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-muted); }
-.msg__role { text-transform: uppercase; letter-spacing: 0.1em; }
-.msg__badge { padding: 1px 6px; border-radius: 999px; border: 1px solid var(--cy-dim, rgba(80,200,255,.3)); color: var(--cy-soft); font-size: 0.7em; letter-spacing: 0.04em; }
-.msg__model { color: var(--text-muted); font-size: 0.72em; opacity: 0.8; text-transform: none; letter-spacing: 0; }
+.msg { display: flex; flex-direction: column; max-width: 100%; animation: msg-enter var(--dur) var(--ease) both; }
+.msg__meta { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-muted); }
+.msg__role { text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; }
+.msg__badge { padding: 1px 7px; border-radius: 999px; border: 1px solid var(--border-soft); background: var(--cy-08); color: var(--cy-soft); font-size: 0.72em; letter-spacing: 0.04em; }
+.msg__model { color: var(--text-faint); font-size: 0.74em; text-transform: none; letter-spacing: 0; }
 .msg__time { font-variant-numeric: tabular-nums; color: var(--text-faint); }
 
-.msg--user { align-self: flex-end; align-items: flex-end; }
+.msg--user { align-self: flex-end; align-items: flex-end; max-width: 82%; }
 .msg--user .msg__meta { flex-direction: row-reverse; }
 .msg--user .bubble {
-  padding: 11px 15px;
+  padding: 10px 15px;
   font-size: var(--fs-body); line-height: 1.55; color: #eaf7ff;
   white-space: pre-wrap; word-break: break-word;
-  background: linear-gradient(160deg, rgba(56,189,248,0.18), rgba(56,189,248,0.08));
-  border: 1px solid var(--border);
-  border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg);
-  box-shadow: var(--shadow-1), inset 0 1px 0 rgba(255,255,255,0.06);
-}
-
-.msg--assistant { align-self: flex-start; align-items: flex-start; }
-.msg--assistant .msg__role { color: var(--cy-soft); text-shadow: var(--glow-text); }
-.msg--assistant .bubble {
-  position: relative;
-  padding: 13px 17px 13px 19px;
-  font-size: var(--fs-body); line-height: var(--lh-body); color: var(--text-primary);
-  background:
-    radial-gradient(120% 100% at 0% 0%, rgba(34,211,238,0.07), transparent 55%),
-    var(--surface-glass);
+  background: linear-gradient(160deg, rgba(56,189,248,0.16), rgba(56,189,248,0.07));
   border: 1px solid var(--border-soft);
-  border-radius: var(--r-xs) var(--r-lg) var(--r-lg) var(--r-lg);
-  backdrop-filter: blur(12px);
-  box-shadow: var(--shadow-2), var(--glow-xs), inset 0 0 22px rgba(34,211,238,0.04);
-  animation: bubble-breathe 6s var(--ease-soft) 0.4s infinite;
-}
-.msg--assistant .bubble::before {
-  content: ""; position: absolute; left: 0; top: 14px; bottom: 14px; width: 2px;
-  border-radius: var(--r-pill);
-  background: linear-gradient(180deg, var(--cy-soft), var(--cy-deep));
-  box-shadow: var(--glow-xs);
+  border-radius: var(--r-lg) var(--r-lg) var(--r-xs) var(--r-lg);
+  box-shadow: var(--shadow-1);
 }
 
+/* Assistant answers read as open, calm text in a light card — no idle motion. */
+.msg--assistant { align-self: stretch; align-items: flex-start; }
+.msg--assistant .msg__role { color: var(--cy-soft); }
+.msg--assistant .bubble {
+  padding: 13px 18px;
+  font-size: var(--fs-body); line-height: var(--lh-body); color: var(--text-primary);
+  background: var(--surface-1);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--r-xs) var(--r-lg) var(--r-lg) var(--r-lg);
+  box-shadow: var(--shadow-1);
+}
+
+/* Per-message actions stay hidden until hover to keep the thread quiet. */
+.speak-btn, .feedback-btn { opacity: 0; }
+.msg:hover .speak-btn, .msg:hover .feedback-btn,
+.feedback-btn.is-on, .feedback-btn.is-negative { opacity: 1; }
 .speak-btn {
   display: inline-grid; place-items: center;
   width: 24px; height: 24px;
   font-size: 12px; line-height: 1;
   color: var(--text-muted);
   background: transparent; border: 1px solid transparent; border-radius: var(--r-sm);
-  cursor: pointer; transition: all var(--dur) var(--ease);
+  cursor: pointer; transition: opacity var(--dur), color var(--dur), border-color var(--dur), background var(--dur);
 }
-.speak-btn:hover { color: var(--cy-soft); border-color: var(--border-soft); box-shadow: var(--glow-xs); }
-.feedback-btn { width: 24px; height: 24px; border-radius: var(--r-xs); border: 1px solid var(--border-hair); color: var(--text-muted); font-family: var(--font-mono); transition: all var(--dur-fast); }
+.speak-btn:hover { color: var(--cy-soft); border-color: var(--border-soft); background: var(--cy-08); }
+.feedback-btn { width: 24px; height: 24px; border-radius: var(--r-xs); border: 1px solid var(--border-hair); color: var(--text-muted); font-family: var(--font-mono); transition: opacity var(--dur), color var(--dur-fast), border-color var(--dur-fast), background var(--dur-fast); }
 .feedback-btn:hover, .feedback-btn.is-on { color: var(--success); border-color: rgba(52,211,153,.4); background: var(--success-wash); }
 .feedback-btn.is-negative { color: var(--danger); border-color: rgba(244,63,94,.4); background: var(--danger-wash); }
 
@@ -1579,7 +1597,8 @@ watch(
 /* ============ LISTEN BAR ============ */
 .listen-bar {
   display: flex; align-items: center; gap: 10px;
-  margin: 0 var(--s5) 0;
+  margin: 0 auto;
+  width: min(812px, calc(100% - 2 * var(--s5)));
   padding: 8px 14px;
   font-family: var(--font-mono); font-size: var(--fs-sm);
   color: var(--cy-soft);
@@ -1599,8 +1618,9 @@ watch(
 /* ============ COMPOSER ============ */
 .composer {
   display: flex; align-items: flex-end; gap: var(--s2);
-  padding: var(--s3);
-  margin: var(--s3) var(--s5) var(--s5);
+  padding: var(--s2) var(--s2) var(--s2) var(--s4);
+  margin: var(--s3) auto var(--s5);
+  width: min(812px, calc(100% - 2 * var(--s5)));
   background: var(--surface-2);
   backdrop-filter: blur(12px);
   border: 1px solid var(--border-soft);
@@ -1608,7 +1628,7 @@ watch(
   box-shadow: var(--shadow-2);
   transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
 }
-.composer:focus-within { border-color: var(--border-strong); box-shadow: var(--focus-ring), var(--shadow-2); }
+.composer:focus-within { border-color: var(--border); box-shadow: var(--focus-ring), var(--shadow-2); }
 .composer__input {
   flex: 1; min-height: 24px; max-height: 160px;
   padding: 8px 6px; resize: none; border: none; outline: none; background: transparent;
