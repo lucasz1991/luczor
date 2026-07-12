@@ -2,6 +2,7 @@
 import { getApiConfig } from "@/services/api/luczorApi";
 
 export type LuczorMode = "observe" | "act" | "unrestricted";
+export type ToolChoice = "auto" | "required" | "none";
 
 /* =========================================================
  * Wire message shapes (OpenAI/OpenRouter chat format)
@@ -55,6 +56,8 @@ export type ChatResult = {
 type ChatWithToolsArgs = {
   messages: WireMessage[];
   tools?: unknown[];
+  /** Provider-level tool policy for this round. Defaults to auto. */
+  toolChoice?: ToolChoice;
   projectId?: string;
   taskType?: string;
   contextId?: string;
@@ -137,7 +140,7 @@ export class OpenRouterService {
     };
     if (args.tools && args.tools.length) {
       body.tools = args.tools;
-      body.tool_choice = "auto";
+      body.tool_choice = args.toolChoice ?? "auto";
     }
     attachLuczorMeta(body, endpoint, args);
 
@@ -200,7 +203,7 @@ export class OpenRouterService {
     };
     if (args.tools && args.tools.length) {
       body.tools = args.tools;
-      body.tool_choice = "auto";
+      body.tool_choice = args.toolChoice ?? "auto";
     }
     attachLuczorMeta(body, endpoint, args);
 

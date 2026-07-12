@@ -5,6 +5,10 @@ import { Store } from "@tauri-apps/plugin-store";
 import { testConnection, pushAllToServer, pullServerDefaults } from "@/services/api/sync";
 import { getApiConfig, DEFAULT_BASE_URL } from "@/services/api/luczorApi";
 import { loadAppearance, ACCENT_NAMES, type HudPosition } from "@/services/appearance";
+import {
+  AUTO_EXECUTE_MUTATING_TOOLS_KEY,
+  DEFAULT_EXECUTION_POLICY,
+} from "@/services/executionPolicy";
 import type { VoiceMode } from "@/services/voice/localVoice";
 
 const props = defineProps<{ open: boolean }>();
@@ -13,7 +17,7 @@ const emit = defineEmits<{ (e: "update:open", v: boolean): void }>();
 /* ---------------------------
  * Store / State
  * --------------------------- */
-type SettingsTab = "server" | "voice" | "chat" | "appearance" | "privacy";
+type SettingsTab = "server" | "execution" | "voice" | "chat" | "appearance" | "privacy";
 type ChatAutoSpeechMode = "off" | "assistant_only" | "all";
 
 type AppSettings = {
@@ -25,6 +29,9 @@ type AppSettings = {
   chat_auto_speech: boolean;
   chat_auto_speech_mode: ChatAutoSpeechMode;
   client_history_token_budget: number;
+
+  // Tool execution
+  auto_execute_mutating_tools: boolean;
 
   // Local voice runtime (model binaries stay release-managed)
   voice_mode: VoiceMode;
@@ -57,6 +64,7 @@ const DEFAULTS: AppSettings = {
   chat_auto_speech: true,
   chat_auto_speech_mode: "assistant_only",
   client_history_token_budget: 2400,
+  auto_execute_mutating_tools: DEFAULT_EXECUTION_POLICY.autoExecuteMutatingTools,
   voice_mode: "wakeword",
   voice_wake_word: "luczor",
   voice_local_stt_language: "de",
@@ -132,6 +140,8 @@ async function ensureStoreLoaded() {
     settings.chat_auto_speech_mode = mode;
   const historyBudget = await settingsStore.get<number>("client_history_token_budget");
   if (typeof historyBudget === "number" && !Number.isNaN(historyBudget)) settings.client_history_token_budget = clamp(historyBudget, 400, 12000);
+  const autoExecuteMutatingTools = await settingsStore.get<unknown>(AUTO_EXECUTE_MUTATING_TOOLS_KEY);
+  settings.auto_execute_mutating_tools = autoExecuteMutatingTools === true;
   const voiceMode = await settingsStore.get<VoiceMode>("voice_mode");
   if (voiceMode === "push_to_talk" || voiceMode === "continuous" || voiceMode === "wakeword") settings.voice_mode = voiceMode;
   const wakeWord = await settingsStore.get<string>("voice_wake_word");
@@ -208,6 +218,7 @@ async function saveAll() {
   await settingsStore.set("chat_auto_speech", settings.chat_auto_speech);
   await settingsStore.set("chat_auto_speech_mode", settings.chat_auto_speech_mode);
   await settingsStore.set("client_history_token_budget", clamp(Math.round(settings.client_history_token_budget), 400, 12000));
+  await settingsStore.set(AUTO_EXECUTE_MUTATING_TOOLS_KEY, settings.auto_execute_mutating_tools);
   await settingsStore.set("voice_mode", settings.voice_mode);
   await settingsStore.set("voice_wake_word", settings.voice_wake_word.trim().toLowerCase() || "luczor");
   await settingsStore.set("voice_local_stt_language", settings.voice_local_stt_language.trim().toLowerCase() || "de");
@@ -339,6 +350,7 @@ const tabs: Array<{
   icon: string;
 }> = [
   { id: "server", title: "Server", desc: "Laravel Sync API", icon: "server" },
+  { id: "execution", title: "Ausführung", desc: "Freigaben & Sicherheit", icon: "shield" },
   { id: "voice", title: "Voice", desc: "Lokal · Wake-Word", icon: "mic" },
   { id: "chat", title: "Chat", desc: "Auto Speech", icon: "chat" },
   { id: "appearance", title: "Appearance", desc: "UI (später)", icon: "palette" },
@@ -509,6 +521,34 @@ function iconPath(kind: string) {
                     <span class="lz-rowlabel">Antworten automatisch merken</span>
                     <button type="button" class="lz-switch" :class="{ 'is-on': settings.memory_auto_remember }" @click="settings.memory_auto_remember = !settings.memory_auto_remember"><span /></button>
                   </div>
+                </div>
+              </div>
+
+              <!-- EXECUTION -->
+              <div v-else-if="ui.tab === 'execution'" class="lz-section">
+                <div class="lz-section__head">
+                  <h3>Ausführung & Freigaben</h3>
+                  <p>Steuert, ob erlaubte datenverändernde Tools einzeln bestätigt werden müssen.</p>
+                </div>
+                <div class="lz-card">
+                  <div class="lz-card__head">
+                    <div>
+                      <div class="lz-card__title">Datenverändernde Tools automatisch ausführen</div>
+                      <div class="lz-card__meta">Überspringt die Einzelbestätigung nur im Modus „Handeln“.</div>
+                    </div>
+                    <button
+                      type="button"
+                      class="lz-switch"
+                      :class="{ 'is-on': settings.auto_execute_mutating_tools }"
+                      :aria-pressed="settings.auto_execute_mutating_tools"
+                      aria-label="Datenverändernde Tools automatisch ausführen"
+                      @click="settings.auto_execute_mutating_tools = !settings.auto_execute_mutating_tools"
+                    ><span /></button>
+                  </div>
+                  <p class="lz-hint">
+                    Beobachten bleibt strikt schreibgeschützt. Der Not-Aus sperrt weiterhin alle Tools.
+                    Nicht erlaubte oder unbekannte Aktionen werden durch diese Einstellung nicht freigegeben.
+                  </p>
                 </div>
               </div>
 

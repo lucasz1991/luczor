@@ -56,7 +56,8 @@ async function readSettings(): Promise<Record<string, unknown>> {
   const store = await Store.load("luczor.settings.json");
   const keys = [
     "luczor_api_base_url", "luczor_device_key", "luczor_client_id", "assistant_name",
-    "default_mode", "allow_unrestricted", "ui_accent", "ui_hud_visible", "ui_hud_position",
+    "default_mode", "allow_unrestricted", "auto_execute_mutating_tools",
+    "ui_accent", "ui_hud_visible", "ui_hud_position",
     "ui_reduce_motion", "ui_show_grid", "ui_scale", "chat_auto_speech", "chat_auto_speech_mode",
     "client_history_token_budget", "sync_auto", "sync_auto_threshold", "memory_use_server",
     "memory_inject", "memory_inject_count", "memory_auto_remember", "use_server_proxy",

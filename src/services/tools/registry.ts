@@ -66,27 +66,37 @@ const TOOLS: ToolDef[] = [
     name: "project_get_state",
     category: "project",
     description:
-      "Read the current project state (name, rolling summary, and the list of goals with their status). Use this before proposing changes.",
+      "Read the current active project state (name, rolling summary, and goals). Use before editing and again after project_set_summary/project_upsert_goal to report the verified result.",
     mutating: false,
     requiresApproval: false,
     parameters: {
       type: "object",
       additionalProperties: false,
-      properties: {},
+      // Keep at least one optional property: the active Nvidia/OpenRouter
+      // grammar rejects function schemas whose properties object is empty.
+      properties: {
+        include_goals: {
+          type: "boolean",
+          description: "Include project goals in the result. Defaults to true.",
+        },
+      },
       required: [],
     },
-    async execute(_args, ctx) {
+    async execute(args, ctx) {
       const prj = getProject(ctx.projectId);
+      const includeGoals = args.include_goals !== false;
       return {
         id: ctx.projectId,
         name: prj?.name ?? ctx.projectId,
         summary: prj?.summary ?? "",
-        goals: (prj?.goals ?? []).map((g) => ({
-          id: g.id,
-          title: g.title,
-          description: g.description ?? "",
-          status: g.status,
-        })),
+        goals: includeGoals
+          ? (prj?.goals ?? []).map((g) => ({
+              id: g.id,
+              title: g.title,
+              description: g.description ?? "",
+              status: g.status,
+            }))
+          : undefined,
       };
     },
   },
@@ -154,7 +164,7 @@ const TOOLS: ToolDef[] = [
         : undefined;
 
       const goal: ProjectGoal = {
-        id: existing?.id ?? existingId ?? uid(),
+        id: existing?.id ?? (existingId || uid()),
         title,
         description: asString(args.description).trim() || existing?.description,
         status: asGoalStatus(args.status),
@@ -179,10 +189,19 @@ const TOOLS: ToolDef[] = [
     description: "Read the current text content of the system clipboard.",
     mutating: false,
     requiresApproval: false,
-    parameters: { type: "object", additionalProperties: false, properties: {}, required: [] },
-    async execute() {
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        max_chars: { type: "integer", minimum: 1, maximum: 2000, description: "Maximum returned characters; defaults to 2000." },
+      },
+      required: [],
+    },
+    async execute(args) {
       const text = (await invoke<string>("read_clipboard")) ?? "";
-      const clipped = text.length > 2000 ? text.slice(0, 2000) + "…" : text;
+      const requested = Number(args.max_chars);
+      const maxChars = Number.isFinite(requested) ? Math.max(1, Math.min(2000, Math.round(requested))) : 2000;
+      const clipped = text.length > maxChars ? text.slice(0, maxChars) + "…" : text;
       return { text: clipped, length: text.length };
     },
   },
@@ -193,10 +212,21 @@ const TOOLS: ToolDef[] = [
       "List currently open windows with their title, owning app, and whether they are focused.",
     mutating: false,
     requiresApproval: false,
-    parameters: { type: "object", additionalProperties: false, properties: {}, required: [] },
-    async execute() {
-      const windows = await invoke<unknown[]>("list_windows");
-      return { windows };
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        focused_only: { type: "boolean", description: "Return only the focused window. Defaults to false." },
+      },
+      required: [],
+    },
+    async execute(args) {
+      const windows = await invoke<Array<Record<string, unknown>>>("list_windows");
+      return {
+        windows: args.focused_only === true
+          ? windows.filter((window) => window.focused === true)
+          : windows,
+      };
     },
   },
   {
@@ -206,7 +236,14 @@ const TOOLS: ToolDef[] = [
       "Capture a screenshot of the primary monitor. Returns image dimensions; the image itself is shown in the app.",
     mutating: false,
     requiresApproval: false,
-    parameters: { type: "object", additionalProperties: false, properties: {}, required: [] },
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        monitor: { type: "string", enum: ["primary"], description: "Monitor to capture; currently only primary is supported." },
+      },
+      required: [],
+    },
     async execute() {
       const shot = await invoke<{ base64: string; mime: string; width: number; height: number }>(
         "capture_screen"
@@ -329,7 +366,8 @@ const TOOLS: ToolDef[] = [
   {
     name: "project_create",
     category: "project",
-    description: "Create a new project. Returns its id. Use for organizing work into separate projects.",
+    description:
+      "Create a NEW, separate project only when the user explicitly asks for another/new project. Never use this to edit or save goals, summary, or tasks of the current project.",
     mutating: true,
     requiresApproval: true,
     parameters: {
@@ -350,7 +388,7 @@ const TOOLS: ToolDef[] = [
   {
     name: "chat_create",
     category: "app",
-    description: "Start a new chat/conversation, optionally inside a project. Returns the conversation id.",
+    description: "Start a new chat/conversation. When project_id is omitted, attach it to the current Luczor project. Returns the conversation id.",
     mutating: true,
     requiresApproval: true,
     parameters: {
@@ -362,10 +400,15 @@ const TOOLS: ToolDef[] = [
       },
       required: [],
     },
-    async execute(args) {
+    async execute(args, ctx) {
+      const requestedProjectId = asString(args.project_id).trim();
+      const projectId = requestedProjectId || ctx.projectId;
+      if (!requestedProjectId || requestedProjectId === ctx.projectId) {
+        await ensureCurrentProjectOnServer(ctx.projectId);
+      }
       const res = await LuczorApi.createConversation({
         title: asString(args.title) || undefined,
-        project_id: asString(args.project_id) || undefined,
+        project_id: projectId,
       });
       return { ok: true, conversation_id: res.data.external_id };
     },
@@ -374,7 +417,7 @@ const TOOLS: ToolDef[] = [
   {
     name: "task_create",
     category: "app",
-    description: "Create a task and optionally assign it to a project or chat. Returns the task id.",
+    description: "Create a task. When project_id is omitted, assign it to the current Luczor project. Returns the task id.",
     mutating: true,
     requiresApproval: true,
     parameters: {
@@ -390,14 +433,19 @@ const TOOLS: ToolDef[] = [
       },
       required: ["title"],
     },
-    async execute(args) {
+    async execute(args, ctx) {
       const title = asString(args.title).trim();
       if (!title) throw new Error("title is empty");
+      const requestedProjectId = asString(args.project_id).trim();
+      const projectId = requestedProjectId || ctx.projectId;
+      if (!requestedProjectId || requestedProjectId === ctx.projectId) {
+        await ensureCurrentProjectOnServer(ctx.projectId);
+      }
       const res = await LuczorApi.createTask({
         title,
         description: asString(args.description) || undefined,
         priority: asString(args.priority) || undefined,
-        project_id: asString(args.project_id) || undefined,
+        project_id: projectId,
         conversation_id: asString(args.conversation_id) || undefined,
         due_at: asString(args.due_at) || undefined,
       });
@@ -493,7 +541,14 @@ const TOOLS: ToolDef[] = [
     description: "Detect which local coding-agent CLIs (Claude Code, OpenAI Codex) are installed on this PC.",
     mutating: false,
     requiresApproval: false,
-    parameters: { type: "object", additionalProperties: false, properties: {}, required: [] },
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        refresh: { type: "boolean", description: "Refresh PATH detection. Defaults to true." },
+      },
+      required: [],
+    },
     async execute() {
       return { ok: true, agents: await detectAgents() };
     },
@@ -529,14 +584,14 @@ const TOOLS: ToolDef[] = [
     name: "agent_bridge_write",
     category: "app",
     description:
-      "Write/refresh the shared LUCZOR.md bridge file in a project directory so Claude and Codex get common project context. Omit 'content' to auto-generate it from the current project state.",
+      "Write/refresh LUCZOR.md only when the user explicitly requests the Claude/Codex bridge and a real existing local project directory is known. Never use it to save normal project goals/tasks/summary and never invent paths such as /workspace.",
     mutating: true,
     requiresApproval: true,
     parameters: {
       type: "object",
       additionalProperties: false,
       properties: {
-        project_dir: { type: "string", description: "Absolute path of the project directory." },
+        project_dir: { type: "string", description: "Real existing absolute local directory path supplied by the user or runtime; never guess a path." },
         content: { type: "string", description: "Optional explicit markdown; auto-generated from project state if omitted." },
       },
       required: ["project_dir"],
@@ -568,6 +623,16 @@ const TOOLS: ToolDef[] = [
  * ------------------------------------------------- */
 function getProject(projectId: string) {
   return state.projects.find((p) => p.id === projectId);
+}
+
+/**
+ * Project goals/summary live in the local desktop state, while tasks and
+ * conversations use the server tables. Keep the current external id aligned
+ * before attaching a server-side child record; createProject is idempotent.
+ */
+async function ensureCurrentProjectOnServer(projectId: string): Promise<void> {
+  const project = getProject(projectId);
+  await LuczorApi.createProject(projectId, project?.name ?? projectId);
 }
 
 /* -------------------------------------------------

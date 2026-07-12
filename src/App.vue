@@ -4,7 +4,7 @@ import { computed, nextTick, onMounted, ref, watch } from "vue";
 import Settings from "./components/Settings.vue";
 import JarvisHud from "./components/JarvisHud.vue";
 import { type LuczorMode, type WireMessage } from "./services/openrouter.service";
-import { runAgent, buildSystemPreamble } from "@/services/agent";
+import { runAgent, buildSystemPreamble, shouldRequireToolCall } from "@/services/agent";
 import { parseEnvelope } from "@/services/envelope";
 import { resolveApproval, rejectAllApprovals } from "@/services/approvals";
 import { usePushToTalk } from "@/services/pushToTalk";
@@ -20,6 +20,7 @@ import { refreshStatus } from "@/services/status";
 import { appearance, loadAppearance } from "@/services/appearance";
 import { startDeviceJobChannel } from "@/services/deviceJobs";
 import { installDebugCapture, startDebugCollector, recordDebugEvent } from "@/services/debug";
+import { buildRecentToolOutcomeContext, toolOutcomePreview } from "@/services/toolOutcomeContext";
 
 import { startHud, setStatus } from "@/state/hud";
 import { state, mutations } from "@/state/store";
@@ -76,6 +77,8 @@ const sending = ref(false);
 // How the pending composer content was produced; consumed + reset by send().
 const pendingInputSource = ref<"keyboard" | "push_to_talk" | "hands_free">("keyboard");
 const mode = ref<LuczorMode>("observe");
+const allowUnrestricted = ref(false);
+const ACTIVE_MODE_KEY = "active_mode";
 
 const abortController = ref<AbortController | null>(null);
 let cancelCurrent: null | (() => Promise<void>) = null;
@@ -96,11 +99,41 @@ onMounted(async () => {
   mutations.ensureDefaults();
   openProject(activeProjectId.value);
 
-  // Apply admin/server-provided default mode, if configured.
+  // Restore the local mode immediately. A slow/offline bootstrap must not
+  // leave the UI temporarily lying about being in observe mode.
   try {
     const st = await Store.load("luczor.settings.json");
     const dm = await st.get<string>("default_mode");
-    if (dm === "observe" || dm === "act" || dm === "unrestricted") mode.value = dm;
+    const persisted = await st.get<string>(ACTIVE_MODE_KEY);
+    allowUnrestricted.value = (await st.get<unknown>("allow_unrestricted")) === true;
+    const candidate =
+      persisted === "observe" || persisted === "act" || persisted === "unrestricted"
+        ? persisted
+        : dm;
+    if (candidate === "observe" || candidate === "act" || candidate === "unrestricted") {
+      mode.value = candidate === "unrestricted" && !allowUnrestricted.value ? "observe" : candidate;
+    }
+
+    // Refresh only the admin-managed unrestricted policy when online. Pulling
+    // every server default here would overwrite unrelated local preferences.
+    void (async () => {
+      try {
+        const boot = await LuczorApi.bootstrap();
+        const remoteAllow = (boot.runtime_settings?.settings as Record<string, unknown> | undefined)
+          ?.allow_unrestricted;
+        if (remoteAllow === true || remoteAllow === false) {
+          allowUnrestricted.value = remoteAllow;
+          await st.set("allow_unrestricted", remoteAllow);
+          if (!remoteAllow && mode.value === "unrestricted") {
+            mode.value = "observe";
+            await st.set(ACTIVE_MODE_KEY, "observe");
+          }
+          await st.save();
+        }
+      } catch {
+        /* offline: keep the last locally cached policy */
+      }
+    })();
   } catch {
     /* ignore */
   }
@@ -514,9 +547,23 @@ function toolArgsPreview(args: Record<string, unknown>): string {
  * Entering "unrestricted" requires an explicit confirmation, because it
  * bypasses the approval gate entirely (only the Not-Aus still stops tools).
  */
+async function persistActiveMode(value: LuczorMode) {
+  try {
+    const st = await Store.load("luczor.settings.json");
+    await st.set(ACTIVE_MODE_KEY, value);
+    await st.save();
+  } catch {
+    /* the in-memory selection still applies for this session */
+  }
+}
+
 function toggleMode() {
   const next: LuczorMode =
-    mode.value === "observe" ? "act" : mode.value === "act" ? "unrestricted" : "observe";
+    mode.value === "observe"
+      ? "act"
+      : mode.value === "act" && allowUnrestricted.value
+        ? "unrestricted"
+        : "observe";
 
   if (next === "unrestricted") {
     const ok = window.confirm(
@@ -525,11 +572,11 @@ function toggleMode() {
         "Nur der Not-Aus im HUD stoppt ihn noch.\n\nWirklich aktivieren?"
     );
     if (!ok) {
-      mode.value = "observe";
       return;
     }
   }
   mode.value = next;
+  void persistActiveMode(next);
 }
 
 const modeLabel = computed(() =>
@@ -538,7 +585,9 @@ const modeLabel = computed(() =>
 const modeTitle = computed(() => {
   switch (mode.value) {
     case "act":
-      return "Handeln: Tools mit Bestätigung. Klicken für Vollzugriff.";
+      return allowUnrestricted.value
+        ? "Handeln: Tools mit Bestätigung. Klicken für Vollzugriff."
+        : "Handeln: Tools mit Bestätigung. Vollzugriff ist administrativ deaktiviert; klicken für Beobachten.";
     case "unrestricted":
       return "Vollzugriff: alle Tools OHNE Rückfrage. Klicken für Beobachten.";
     default:
@@ -565,6 +614,7 @@ const toolAudit = computed(() => {
       name: (m.meta as any)?.toolName ?? "tool",
       ok: !!(m.parsed as any)?.ok,
       error: safeTrim((m.parsed as any)?.error),
+      result: toolOutcomePreview(m),
       ts: m.ts,
     }));
 });
@@ -693,6 +743,10 @@ async function send() {
     ...(safeTrim((prj as any)?.summary) ? [{ role: "system" as const, content: `Projektzusammenfassung: ${safeTrim((prj as any).summary)}` }] : []),
     ...history,
   ];
+  const recentToolContext = buildRecentToolOutcomeContext(
+    mutations.getProjectMessages(pid, { includeHidden: true })
+  );
+  if (recentToolContext) baseMessages.splice(1, 0, { role: "system", content: recentToolContext });
 
   // Inject relevant long-term memory (project scope) as an extra system note.
   let promptContext: PromptContextDetails = { text: "", taskType };
@@ -715,6 +769,8 @@ async function send() {
       projectId: pid,
       baseMessages,
       mode: mode.value,
+      getMode: () => mode.value,
+      toolChoice: shouldRequireToolCall(text) ? "required" : "auto",
       taskType: promptContext.taskType,
       contextId: promptContext.contextId,
       repoId: promptContext.repoId,
@@ -1028,7 +1084,7 @@ watch(
             :class="a.ok ? 'is-ok' : 'is-fail'"
           >
             <span class="audit-row__status" />
-            <span class="audit-row__tool">{{ a.name }}<template v-if="a.error"> — {{ a.error }}</template></span>
+            <span class="audit-row__tool">{{ a.name }}<template v-if="a.error"> — {{ a.error }}</template><template v-else-if="a.result"> — {{ a.result }}</template></span>
             <span class="audit-row__verdict">{{ a.ok ? 'OK' : 'FAIL' }}</span>
             <span class="audit-row__time">{{ fmtTime(a.ts, true) }}</span>
           </div>

@@ -51,6 +51,25 @@ fn detect_one(agent: &str) -> AgentInfo {
     }
 }
 
+/// Resolve a user-supplied project directory and reject filesystem roots.
+/// A bridge file or coding agent launched at `C:\`, `/`, etc. would escape
+/// every meaningful project boundary.
+fn validate_project_dir(raw: &str) -> Result<PathBuf, String> {
+    let dir = Path::new(raw);
+    if !dir.is_dir() {
+        return Err("project_dir is not a directory".into());
+    }
+
+    let canonical = dir
+        .canonicalize()
+        .map_err(|e| format!("project_dir cannot be resolved: {e}"))?;
+    if canonical.parent().is_none() {
+        return Err("project_dir must not be a filesystem root".into());
+    }
+
+    Ok(canonical)
+}
+
 /// Report which local coding-agent CLIs are installed (PATH-detected).
 #[tauri::command]
 pub async fn agent_cli_detect() -> Result<Vec<AgentInfo>, String> {
@@ -85,7 +104,8 @@ pub async fn agent_cli_run(payload: AgentRunPayload) -> Result<AgentRunResult, S
         return Err("Prompt too long".into());
     }
 
-    let names = candidates_for(&payload.agent).ok_or_else(|| format!("Unknown agent: {}", payload.agent))?;
+    let names = candidates_for(&payload.agent)
+        .ok_or_else(|| format!("Unknown agent: {}", payload.agent))?;
     // Headless invocation per CLI: claude uses `-p`, codex uses `exec`.
     let args: Vec<String> = match payload.agent.as_str() {
         "claude" => vec!["-p".into(), prompt.to_string()],
@@ -93,15 +113,13 @@ pub async fn agent_cli_run(payload: AgentRunPayload) -> Result<AgentRunResult, S
         other => return Err(format!("Unknown agent: {other}")),
     };
 
-    let exe = find_executable(names).ok_or_else(|| format!("{} CLI not found in PATH", payload.agent))?;
+    let exe =
+        find_executable(names).ok_or_else(|| format!("{} CLI not found in PATH", payload.agent))?;
     let mut command = Command::new(exe);
     command.args(&args);
     if let Some(dir) = payload.project_dir.as_ref() {
         if !dir.is_empty() {
-            if !Path::new(dir).is_dir() {
-                return Err("project_dir is not a directory".into());
-            }
-            command.current_dir(dir);
+            command.current_dir(validate_project_dir(dir)?);
         }
     }
 
@@ -123,11 +141,31 @@ pub struct BridgePayload {
 /// Write/refresh the shared `LUCZOR.md` bridge file in a project directory.
 #[tauri::command]
 pub async fn agent_write_bridge(payload: BridgePayload) -> Result<String, String> {
-    let dir = Path::new(&payload.project_dir);
-    if !dir.is_dir() {
-        return Err("project_dir is not a directory".into());
-    }
+    let dir = validate_project_dir(&payload.project_dir)?;
     let file = dir.join("LUCZOR.md");
     std::fs::write(&file, payload.content).map_err(|e| format!("write failed: {e}"))?;
     Ok(file.to_string_lossy().into_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_project_dir;
+
+    #[test]
+    fn project_directory_validation_rejects_the_filesystem_root() {
+        let current = std::env::current_dir().expect("current directory");
+        let root = current.ancestors().last().expect("filesystem root");
+
+        let error = validate_project_dir(root.to_string_lossy().as_ref())
+            .expect_err("filesystem root must be rejected");
+
+        assert!(error.contains("filesystem root"));
+    }
+
+    #[test]
+    fn project_directory_validation_accepts_a_real_project_directory() {
+        let current = std::env::current_dir().expect("current directory");
+
+        assert!(validate_project_dir(current.to_string_lossy().as_ref()).is_ok());
+    }
 }
