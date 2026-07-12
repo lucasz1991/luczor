@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { LuczorApi } from "@/services/api/luczorApi";
 import { Store } from "@tauri-apps/plugin-store";
+import { cleanSttTranscript } from "./transcript";
 
 export type VoiceMode = "push_to_talk" | "continuous" | "wakeword";
 export type VoiceConfig = { mode: VoiceMode; wakeWord: string; localSttLanguage: string };
@@ -72,7 +73,7 @@ export async function localStt(base64: string, language?: string): Promise<strin
   await ensureVoiceRuntime();
   try {
     const response = await invoke<{ text: string }>("local_stt", { payload: { base64, language: language ?? "de" } });
-    return (response?.text ?? "").trim();
+    return cleanSttTranscript(response?.text);
   } catch (error) {
     const parsed = parseVoiceError(error);
     reportVoiceEvent("error", "local_stt_failed", { message: parsed.message, code: (parsed as Error & { code?: string }).code });

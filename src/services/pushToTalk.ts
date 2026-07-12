@@ -1,5 +1,6 @@
 import { ref } from "vue";
 import { setMicLevel, pulse } from "@/state/hud";
+import { chunksToWavBase64 } from "@/services/voice/wav";
 
 type WavResult = { base64: string; mime: string };
 
@@ -75,9 +76,8 @@ export function usePushToTalk() {
       await audioCtx?.close();
       audioCtx = null;
 
-      // build WAV
-      const wavBytes = encodeWavPCM16(chunks, sampleRate);
-      const base64 = bytesToBase64(wavBytes);
+      // Build WAV through the shared voice encoder used by continuous listening.
+      const base64 = chunksToWavBase64(chunks, sampleRate);
 
       setMicLevel(0);
       isRecording.value = false;
@@ -111,77 +111,4 @@ export function usePushToTalk() {
   }
 
   return { isRecording, error, start, stop, cancel };
-}
-
-/* ---------- WAV encoding helpers ---------- */
-
-function encodeWavPCM16(chunks: Float32Array[], sampleRate: number): Uint8Array {
-  const samples = flattenFloat32(chunks);
-  const pcm16 = floatTo16BitPCM(samples);
-
-  const headerSize = 44;
-  const dataSize = pcm16.length * 2;
-  const buffer = new ArrayBuffer(headerSize + dataSize);
-  const view = new DataView(buffer);
-
-  // RIFF header
-  writeString(view, 0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(view, 8, "WAVE");
-
-  // fmt chunk
-  writeString(view, 12, "fmt ");
-  view.setUint32(16, 16, true); // PCM
-  view.setUint16(20, 1, true);  // AudioFormat = PCM
-  view.setUint16(22, 1, true);  // NumChannels = 1
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, sampleRate * 2, true); // ByteRate = sampleRate * numChannels * bytesPerSample
-  view.setUint16(32, 2, true); // BlockAlign = numChannels * bytesPerSample
-  view.setUint16(34, 16, true); // BitsPerSample
-
-  // data chunk
-  writeString(view, 36, "data");
-  view.setUint32(40, dataSize, true);
-
-  // PCM samples
-  let offset = 44;
-  for (let i = 0; i < pcm16.length; i++, offset += 2) {
-    view.setInt16(offset, pcm16[i]!, true);
-  }
-
-  return new Uint8Array(buffer);
-}
-
-function flattenFloat32(chunks: Float32Array[]): Float32Array {
-  const length = chunks.reduce((sum, c) => sum + c.length, 0);
-  const result = new Float32Array(length);
-  let offset = 0;
-  for (const c of chunks) {
-    result.set(c, offset);
-    offset += c.length;
-  }
-  return result;
-}
-
-function floatTo16BitPCM(input: Float32Array): Int16Array {
-  const output = new Int16Array(input.length);
-  for (let i = 0; i < input.length; i++) {
-    const v = input[i] ?? 0;
-    const s = Math.max(-1, Math.min(1, v));
-    output[i] = s < 0 ? (s * 0x8000) : (s * 0x7fff);
-  }
-  return output;
-}
-
-function writeString(view: DataView, offset: number, str: string) {
-  for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
-}
-
-function bytesToBase64(bytes: Uint8Array): string {
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
 }

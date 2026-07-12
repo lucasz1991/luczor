@@ -54,7 +54,7 @@ const DEFAULTS: AppSettings = {
   luczor_api_base_url: DEFAULT_BASE_URL,
   luczor_device_key: "",
 
-  chat_auto_speech: false,
+  chat_auto_speech: true,
   chat_auto_speech_mode: "assistant_only",
   client_history_token_budget: 2400,
   voice_mode: "wakeword",
@@ -518,6 +518,13 @@ function iconPath(kind: string) {
                   <h3>Voice</h3>
                   <p>Lokale Sprache nutzt whisper.cpp für STT und Piper für TTS. Keine Cloud-Audio-Keys und keine versteckten Fallbacks.</p>
                 </div>
+                <div v-if="!settings.luczor_device_key.trim()" class="lz-voice-warning" role="alert">
+                  <div>
+                    <div class="lz-card__title">Device-Key für die erste Voice-Installation fehlt</div>
+                    <p class="lz-hint">Der signierte lokale Voice-Runtime-Download benötigt einmalig einen Device-Key. Bereits installierte Sprachmodelle bleiben danach lokal nutzbar.</p>
+                  </div>
+                  <button type="button" class="lz-btn lz-btn--ghost" @click="selectTab('server')">Device-Key hinterlegen</button>
+                </div>
                 <div v-if="false" class="lz-section__head">
                   <h3>Voice</h3>
                   <div class="lz-card">
@@ -865,6 +872,12 @@ select.lz-input option { background: var(--bg-raised); color: var(--text-primary
 .lz-result.is-ok { color: var(--success-soft); }
 .lz-result.is-fail { color: var(--danger-soft); }
 .lz-error { font-size: var(--fs-sm); color: var(--danger-soft); margin: 0; }
+.lz-voice-warning {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s3);
+  padding: var(--s3) var(--s4); color: var(--text-secondary); background: var(--danger-wash);
+  border: 1px solid rgba(244, 63, 94, 0.42); border-radius: var(--r-lg);
+}
+.lz-voice-warning .lz-hint { max-width: 600px; }
 
 .lz-switch {
   position: relative; width: 46px; height: 26px; flex: none;

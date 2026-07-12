@@ -8,6 +8,7 @@ import { setStatus } from "@/state/hud";
 import { localTts } from "./localVoice";
 
 let currentAudio: HTMLAudioElement | null = null;
+let stopCurrentAudio: (() => void) | null = null;
 let cancelled = false;
 
 function reportPlaybackError(error: unknown): void {
@@ -26,10 +27,35 @@ async function synthLocal(text: string): Promise<Clip> {
 function play(clip: Clip): Promise<void> {
   return new Promise((resolve, reject) => {
     const audio = new Audio(`data:${clip.mime};base64,${clip.base64}`);
+    let settled = false;
+    let stop: () => void;
+
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      audio.onended = null;
+      audio.onerror = null;
+      if (currentAudio === audio) currentAudio = null;
+      if (stopCurrentAudio === stop) stopCurrentAudio = null;
+      if (error) reject(error);
+      else resolve();
+    };
+
+    stop = () => {
+      try {
+        audio.pause();
+      } finally {
+        finish();
+      }
+    };
+
     currentAudio = audio;
-    audio.onended = () => resolve();
-    audio.onerror = () => reject(new Error("Audio-Wiedergabe fehlgeschlagen"));
-    audio.play().catch(reject);
+    stopCurrentAudio = stop;
+    audio.onended = () => finish();
+    audio.onerror = () => finish(new Error("Audio-Wiedergabe fehlgeschlagen"));
+    void audio.play().catch((error: unknown) => {
+      finish(error instanceof Error ? error : new Error(String(error)));
+    });
   });
 }
 
@@ -77,9 +103,7 @@ export async function streamSpeak(text: string): Promise<void> {
 
 export function stopSpeak() {
   cancelled = true;
-  if (currentAudio) {
-    currentAudio.pause();
-    currentAudio = null;
-  }
+  stopCurrentAudio?.();
+  if (currentAudio) currentAudio.pause();
   setStatus("idle");
 }

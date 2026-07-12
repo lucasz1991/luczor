@@ -17,6 +17,7 @@
 
 import { setMicLevel, pulse, setStatus } from "@/state/hud";
 import { chunksToWavBase64 } from "./wav";
+import { cleanSttTranscript } from "./transcript";
 
 export type VoiceEngineMode = "continuous" | "wakeword";
 
@@ -40,6 +41,103 @@ const MIN_VOICE_FRAMES = 3; // ~0.25s of speech to count as an utterance
 const SILENCE_FRAMES = 9; // ~0.75s of silence ends a segment
 const MAX_SEGMENT_FRAMES = 240; // ~20s hard cap
 
+// Whisper commonly transcribes the product name as one of these near-homophones.
+// Keep aliases scoped to Luczor so a custom wake word keeps its exact semantics.
+const LUCZOR_WAKE_ALIASES = ["luczor", "luxor", "lucor", "lutzor", "lukzor", "luksor", "lutz or"];
+
+type WakeWordToken = { normalized: string; start: number; end: number };
+
+export type WakeWordMatch = { start: number; end: number; matched: string };
+
+function normalizeWakeText(value: string): string {
+  return value
+    .toLocaleLowerCase("de-DE")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .replace(/ß/g, "ss")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function tokenizeWakeText(text: string): WakeWordToken[] {
+  const tokens: WakeWordToken[] = [];
+  for (const match of text.matchAll(/[\p{L}\p{N}]+/gu)) {
+    const raw = match[0] ?? "";
+    const normalized = normalizeWakeText(raw);
+    const start = match.index;
+    if (normalized && start !== undefined) {
+      tokens.push({ normalized, start, end: start + raw.length });
+    }
+  }
+  return tokens;
+}
+
+function isAtMostOneEditAway(left: string, right: string): boolean {
+  if (Math.abs(left.length - right.length) > 1) return false;
+
+  let leftIndex = 0;
+  let rightIndex = 0;
+  let edits = 0;
+  while (leftIndex < left.length && rightIndex < right.length) {
+    if (left[leftIndex] === right[rightIndex]) {
+      leftIndex++;
+      rightIndex++;
+      continue;
+    }
+
+    edits++;
+    if (edits > 1) return false;
+    if (left.length > right.length) leftIndex++;
+    else if (right.length > left.length) rightIndex++;
+    else {
+      leftIndex++;
+      rightIndex++;
+    }
+  }
+
+  return edits + (left.length - leftIndex) + (right.length - rightIndex) <= 1;
+}
+
+function wakeTokensMatch(transcriptToken: string, candidateToken: string): boolean {
+  if (transcriptToken === candidateToken) return true;
+  // Avoid turning ordinary short words into wake words. The configured Luczor
+  // name is long enough that a single edit remains useful and predictable.
+  return transcriptToken.length >= 4 && candidateToken.length >= 5
+    && isAtMostOneEditAway(transcriptToken, candidateToken);
+}
+
+function wakeCandidates(wakeWord: string): string[][] {
+  const requested = normalizeWakeText(wakeWord);
+  if (!requested) return [];
+
+  const candidates = new Set([requested]);
+  if (requested === "luczor" || LUCZOR_WAKE_ALIASES.includes(requested)) {
+    for (const alias of LUCZOR_WAKE_ALIASES) candidates.add(normalizeWakeText(alias));
+  }
+
+  return [...candidates].map((candidate) => candidate.split(" "));
+}
+
+/** Finds a configured wake word (including Luczor STT aliases) in original-text offsets. */
+export function findWakeWord(text: string, wakeWord = "luczor"): WakeWordMatch | null {
+  const words = tokenizeWakeText(text);
+  const candidates = wakeCandidates(wakeWord);
+
+  for (let start = 0; start < words.length; start++) {
+    for (const candidate of candidates) {
+      if (start + candidate.length > words.length) continue;
+      if (!candidate.every((part, offset) => wakeTokensMatch(words[start + offset]!.normalized, part))) continue;
+
+      const first = words[start]!;
+      const last = words[start + candidate.length - 1]!;
+      return { start: first.start, end: last.end, matched: candidate.join(" ") };
+    }
+  }
+
+  return null;
+}
+
 export class VoiceEngine {
   private opts: VoiceEngineOptions | null = null;
   private stream: MediaStream | null = null;
@@ -50,6 +148,7 @@ export class VoiceEngine {
 
   private running = false;
   private busy = false; // transcription in flight
+  private muted = false;
   private speaking = false;
   private segment: Float32Array[] = [];
   private voiceFrames = 0;
@@ -58,6 +157,25 @@ export class VoiceEngine {
 
   get isRunning() {
     return this.running;
+  }
+
+  /** Temporarily discard microphone input, e.g. while local TTS is audible. */
+  setMuted(muted: boolean): void {
+    if (this.muted === muted) return;
+
+    this.muted = muted;
+    if (muted) {
+      // Never carry captured audio or a bare wake-word across TTS playback.
+      this.segment = [];
+      this.speaking = false;
+      this.voiceFrames = 0;
+      this.silenceCount = 0;
+      this.awaitingCommand = false;
+      setMicLevel(0);
+      return;
+    }
+
+    if (this.running && !this.busy) setStatus("listening");
   }
 
   async start(opts: VoiceEngineOptions): Promise<void> {
@@ -109,6 +227,10 @@ export class VoiceEngine {
 
   private onFrame(input: Float32Array) {
     if (!this.running) return;
+    if (this.muted) {
+      setMicLevel(0);
+      return;
+    }
 
     let sum = 0;
     for (let i = 0; i < input.length; i++) sum += input[i]! * input[i]!;
@@ -162,9 +284,11 @@ export class VoiceEngine {
     pulse("network", 0.6);
     try {
       const wav = chunksToWavBase64(seg, this.sampleRate);
-      const text = (await opts.transcribe(wav, "audio/wav")).trim();
-      if (!text) return;
+      const text = cleanSttTranscript(await opts.transcribe(wav, "audio/wav"));
+      // A request that began just before TTS must not yield an echo command.
+      if (!text || !this.running || this.muted) return;
       opts.onUtterance?.(text);
+      if (!this.running || this.muted) return;
 
       if (opts.mode === "continuous") {
         opts.onCommand(text);
@@ -172,18 +296,16 @@ export class VoiceEngine {
       }
 
       // wakeword mode
-      const wake = (opts.wakeWord ?? "luczor").toLowerCase();
       if (this.awaitingCommand) {
         this.awaitingCommand = false;
         opts.onCommand(text);
         return;
       }
 
-      const lower = text.toLowerCase();
-      const idx = lower.indexOf(wake);
-      if (idx === -1) return; // no wake word -> ignore
+      const wakeMatch = findWakeWord(text, opts.wakeWord ?? "luczor");
+      if (!wakeMatch) return; // no wake word -> ignore
 
-      const remainder = text.slice(idx + wake.length).replace(/^[\s,.:;!?-]+/, "").trim();
+      const remainder = text.slice(wakeMatch.end).replace(/^[\s,.:;!?-]+/, "").trim();
       if (remainder.length >= 2) {
         opts.onCommand(remainder);
       } else {

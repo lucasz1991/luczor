@@ -160,7 +160,7 @@ function speakMessage(m: any) {
     const content = (m?.content ?? "").toString().trim();
     const text = (content + (q ? " " + q : "")).trim();
     if (!text) return;
-    void streamSpeak(text).catch((error) => {
+    void speakWithVoiceMuted(text).catch((error) => {
       void recordDebugEvent("error", "manual_tts_failed", { message: error instanceof Error ? error.message : String(error) });
     });
   } catch (e) {
@@ -208,7 +208,7 @@ async function autoSpeakAssistantIfEnabled(pid: string, assistantId: string) {
   _lastSpokenAssistantId = assistantId;
 
   try {
-    await streamSpeak(text);
+    await speakWithVoiceMuted(text);
   } catch (e) {
     console.error("[AutoSpeech] speak() failed:", e);
     void recordDebugEvent("error", "auto_tts_failed", { message: e instanceof Error ? e.message : String(e) });
@@ -414,6 +414,19 @@ async function togglePushToTalk() {
 const voiceEngine = new VoiceEngine();
 const listening = ref(false);
 const lastHeard = ref("");
+let voiceMuteDepth = 0;
+
+/** Keep continuous STT from hearing Luczor's own local TTS output. */
+async function speakWithVoiceMuted(text: string): Promise<void> {
+  voiceMuteDepth += 1;
+  voiceEngine.setMuted(true);
+  try {
+    await streamSpeak(text);
+  } finally {
+    voiceMuteDepth = Math.max(0, voiceMuteDepth - 1);
+    voiceEngine.setMuted(voiceMuteDepth > 0);
+  }
+}
 const listenLabel = ref("Zuhören");
 
 async function transcribeLocal(wavBase64: string): Promise<string> {

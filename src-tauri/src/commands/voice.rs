@@ -89,6 +89,15 @@ pub async fn install_voice_runtime(
     app: AppHandle,
     payload: VoiceManifestInstallPayload,
 ) -> Result<VoiceRuntimeStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || install_voice_runtime_sync(&app, payload))
+        .await
+        .map_err(|error| structured_error("task_join", &error.to_string()))?
+}
+
+fn install_voice_runtime_sync(
+    app: &AppHandle,
+    payload: VoiceManifestInstallPayload,
+) -> Result<VoiceRuntimeStatus, String> {
     verify_manifest(&payload.payload_json, &payload.signature)?;
     let manifest: VoiceManifest = serde_json::from_str(&payload.payload_json)
         .map_err(|error| structured_error("invalid_manifest", &error.to_string()))?;
@@ -109,7 +118,7 @@ pub async fn install_voice_runtime(
         selected.push(asset);
     }
 
-    let root = runtime_root(&app)?;
+    let root = runtime_root(app)?;
     let target = root.join(&manifest.version);
     std::fs::create_dir_all(&target).map_err(|error| structured_error("install_directory", &error.to_string()))?;
     let mut paths = BTreeMap::new();
@@ -136,13 +145,19 @@ pub async fn install_voice_runtime(
     }
 
     let state = RuntimeState { version: manifest.version, paths };
-    write_state(&app, &state)?;
-    Ok(status(&app))
+    write_state(app, &state)?;
+    Ok(status(app))
 }
 
 #[tauri::command]
 pub async fn local_stt(app: AppHandle, payload: LocalSttPayload) -> Result<LocalSttResponse, String> {
-    let runtime = ready_runtime(&app, "stt_binary", "stt_model")?;
+    tauri::async_runtime::spawn_blocking(move || local_stt_sync(&app, payload))
+        .await
+        .map_err(|error| structured_error("task_join", &error.to_string()))?
+}
+
+fn local_stt_sync(app: &AppHandle, payload: LocalSttPayload) -> Result<LocalSttResponse, String> {
+    let runtime = ready_runtime(app, "stt_binary", "stt_model")?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(normalize_base64(&payload.base64))
         .map_err(|error| structured_error("audio_decode", &error.to_string()))?;
@@ -158,28 +173,52 @@ pub async fn local_stt(app: AppHandle, payload: LocalSttPayload) -> Result<Local
         args.push("-l".to_string());
         args.push(language.trim().to_string());
     }
-    let output = Command::new(&runtime.paths["stt_binary"])
+    let mut command = Command::new(&runtime.paths["stt_binary"]);
+    hide_console_window(&mut command);
+    let output = command
         .args(args)
-        .output()
-        .map_err(|error| structured_error("stt_start", &error.to_string()))?;
+        .output();
     let _ = std::fs::remove_file(wav);
+    let output = output.map_err(|error| structured_error("stt_start", &error.to_string()))?;
     if !output.status.success() {
         return Err(structured_error("stt_runtime", &String::from_utf8_lossy(&output.stderr)));
     }
-    Ok(LocalSttResponse { text: String::from_utf8_lossy(&output.stdout).trim().to_string() })
+    Ok(LocalSttResponse { text: filter_recognizer_output(&String::from_utf8_lossy(&output.stdout)) })
 }
 
 #[tauri::command]
 pub async fn local_tts(app: AppHandle, payload: LocalTtsPayload) -> Result<LocalTtsResponse, String> {
+    tauri::async_runtime::spawn_blocking(move || local_tts_sync(&app, payload))
+        .await
+        .map_err(|error| structured_error("task_join", &error.to_string()))?
+}
+
+fn local_tts_sync(app: &AppHandle, payload: LocalTtsPayload) -> Result<LocalTtsResponse, String> {
     let text = payload.text.trim();
     if text.is_empty() {
         return Err(structured_error("tts_input", "Kein Text."));
     }
-    let runtime = ready_runtime(&app, "tts_binary", "tts_model")?;
+    let runtime = ready_runtime(app, "tts_binary", "tts_model")?;
     let mut out = std::env::temp_dir();
     out.push(format!("luczor_tts_{}.wav", uuid::Uuid::new_v4()));
-    let mut child = Command::new(&runtime.paths["tts_binary"])
-        .args(["--model", &runtime.paths["tts_model"], "--output_file", &out.to_string_lossy()])
+    let mut args = vec![
+        "--model".to_string(),
+        runtime.paths["tts_model"].clone(),
+        "--output_file".to_string(),
+        out.to_string_lossy().into_owned(),
+    ];
+    if let Some(config) = runtime.paths.get("tts_config") {
+        if !Path::new(config).is_file() {
+            return Err(structured_error("runtime_incomplete", "Komponente tts_config ist nicht verfuegbar."));
+        }
+        args.push("--config".to_string());
+        args.push(config.clone());
+    }
+
+    let mut command = Command::new(&runtime.paths["tts_binary"]);
+    hide_console_window(&mut command);
+    let mut child = command
+        .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -190,12 +229,50 @@ pub async fn local_tts(app: AppHandle, payload: LocalTtsPayload) -> Result<Local
     }
     let output = child.wait_with_output().map_err(|error| structured_error("tts_runtime", &error.to_string()))?;
     if !output.status.success() {
+        let _ = std::fs::remove_file(&out);
         return Err(structured_error("tts_runtime", &String::from_utf8_lossy(&output.stderr)));
     }
-    let bytes = std::fs::read(&out).map_err(|error| structured_error("tts_output", &error.to_string()))?;
+    let bytes = std::fs::read(&out);
     let _ = std::fs::remove_file(out);
+    let bytes = bytes.map_err(|error| structured_error("tts_output", &error.to_string()))?;
     Ok(LocalTtsResponse { base64: base64::engine::general_purpose::STANDARD.encode(bytes), mime: "audio/wav".to_string() })
 }
+
+fn filter_recognizer_output(output: &str) -> String {
+    output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !is_non_speech_recognizer_marker(line))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_non_speech_recognizer_marker(value: &str) -> bool {
+    let value = value.trim();
+    let Some(marker) = value
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .or_else(|| value.strip_prefix('(').and_then(|value| value.strip_suffix(')')))
+    else {
+        return false;
+    };
+    let normalized = marker
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .flat_map(|character| character.to_lowercase())
+        .collect::<String>();
+    matches!(normalized.as_str(), "blankaudio" | "music" | "musik")
+}
+
+#[cfg(windows)]
+fn hide_console_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+
+    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+}
+
+#[cfg(not(windows))]
+fn hide_console_window(_command: &mut Command) {}
 
 fn ready_runtime(app: &AppHandle, first: &str, second: &str) -> Result<RuntimeState, String> {
     let state = read_state(app)?.ok_or_else(|| structured_error("runtime_missing", "Lokale Sprachkomponenten werden automatisch vorbereitet. Bitte erneut versuchen."))?;
@@ -214,7 +291,8 @@ fn status(app: &AppHandle) -> VoiceRuntimeStatus {
             let stt_ready = state.paths.get("stt_binary").is_some_and(|path| Path::new(path).is_file())
                 && state.paths.get("stt_model").is_some_and(|path| Path::new(path).is_file());
             let tts_ready = state.paths.get("tts_binary").is_some_and(|path| Path::new(path).is_file())
-                && state.paths.get("tts_model").is_some_and(|path| Path::new(path).is_file());
+                && state.paths.get("tts_model").is_some_and(|path| Path::new(path).is_file())
+                && state.paths.get("tts_config").map(|path| Path::new(path).is_file()).unwrap_or(true);
             let error = if !(stt_ready && tts_ready) && MANIFEST_PUBLIC_KEY_B64.is_none() {
                 Some(structured_error("manifest_key_missing", "Die Tauri-App wurde ohne Voice-Manifest-Public-Key gebaut."))
             } else { None };
@@ -338,3 +416,15 @@ fn make_executable(path: &Path) -> Result<(), String> {
 }
 #[cfg(not(unix))]
 fn make_executable(_path: &Path) -> Result<(), String> { Ok(()) }
+
+#[cfg(test)]
+mod tests {
+    use super::filter_recognizer_output;
+
+    #[test]
+    fn removes_whisper_non_speech_markers_without_discarding_commands() {
+        assert_eq!(filter_recognizer_output("[BLANK_AUDIO]"), "");
+        assert_eq!(filter_recognizer_output("[Musik]\nStarte einen Timer"), "Starte einen Timer");
+        assert_eq!(filter_recognizer_output("spiele Musik"), "spiele Musik");
+    }
+}
