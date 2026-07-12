@@ -15,6 +15,23 @@ export type MessageMeta = {
   // tool/backchannel linkage
   toolCallId?: Id;
   toolName?: string;
+
+  // streamed envelope fields (assistant)
+  summary?: string;
+  question?: string;
+  bullets?: string[];
+
+  // server routing metadata (from X-Luczor-* headers)
+  model?: string;
+  provider?: string;
+  useCase?: string;
+
+  // how a user turn was produced; drives the "Gesprochen" badge
+  inputSource?: "keyboard" | "push_to_talk" | "hands_free";
+
+  // LLM run evaluation linkage
+  llmRequestId?: string;
+  userFeedback?: "up" | "down" | null;
 };
 
 export type Message = {

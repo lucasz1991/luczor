@@ -60,7 +60,10 @@ async function pullPending(clientId: string): Promise<void> {
 }
 
 async function processJob(clientId: string, job: DeviceJob): Promise<void> {
-  if (inFlight.has(job.id) || new Date(job.expires_at ?? 0).getTime() < Date.now()) return;
+  // A null/absent expiry means "no expiry" — treat it as far in the future,
+  // not epoch 0 (which would silently drop every job without an expires_at).
+  const expiresAt = job.expires_at ? new Date(job.expires_at).getTime() : Number.POSITIVE_INFINITY;
+  if (inFlight.has(job.id) || expiresAt < Date.now()) return;
   inFlight.add(job.id);
   try {
     await invoke("verify_device_job", { payload: job });

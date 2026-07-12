@@ -51,7 +51,7 @@ export async function pushAllToServer(): Promise<SyncPushResponse> {
  */
 export async function pullServerDefaults(): Promise<number> {
   const boot = await LuczorApi.bootstrap();
-  const server = ((boot.runtime_settings as any)?.settings ?? {}) as Record<string, unknown>;
+  const server = (boot.runtime_settings?.settings ?? {}) as Record<string, unknown>;
 
   // server key -> local settings-store key
   const map: Record<string, string> = {

@@ -10,6 +10,10 @@ import { localTts } from "./localVoice";
 let currentAudio: HTMLAudioElement | null = null;
 let stopCurrentAudio: (() => void) | null = null;
 let cancelled = false;
+// Monotonic generation id. Every new streamSpeak()/stopSpeak() bumps it so a
+// second speak or a stop deterministically invalidates any in-flight run and
+// its pre-synthesized next sentence — no two clips can overlap.
+let generation = 0;
 
 function reportPlaybackError(error: unknown): void {
   if (typeof window === "undefined") return;
@@ -81,15 +85,16 @@ export async function streamSpeak(text: string): Promise<void> {
   const clean = (text ?? "").trim();
   if (!clean) return;
 
+  const myGen = ++generation;
   cancelled = false;
   const sentences = splitSentences(clean);
   try {
     let next: Promise<Clip> | null = sentences.length ? synthLocal(sentences[0]!) : null;
     for (let i = 0; i < sentences.length; i++) {
-      if (cancelled) break;
+      if (cancelled || myGen !== generation) break;
       const clip = await next;
       next = i + 1 < sentences.length ? synthLocal(sentences[i + 1]!) : null;
-      if (cancelled || !clip) break;
+      if (cancelled || myGen !== generation || !clip) break;
       setStatus("speaking");
       await play(clip);
     }
@@ -97,11 +102,12 @@ export async function streamSpeak(text: string): Promise<void> {
     reportPlaybackError(error);
     throw error;
   } finally {
-    if (!cancelled) setStatus("idle");
+    if (!cancelled && myGen === generation) setStatus("idle");
   }
 }
 
 export function stopSpeak() {
+  generation++;
   cancelled = true;
   stopCurrentAudio?.();
   if (currentAudio) currentAudio.pause();

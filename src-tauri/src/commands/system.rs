@@ -297,6 +297,11 @@ pub async fn type_text(payload: TypeTextPayload) -> Result<(), String> {
     if payload.text.is_empty() {
         return Err("Empty text".into());
     }
+    // Mirror the server-side DeviceToolPolicy cap so a runaway/injected request
+    // cannot inject an unbounded keystroke stream.
+    if payload.text.chars().count() > 10_000 {
+        return Err("Text too long".into());
+    }
     let mut enigo = new_enigo()?;
     enigo
         .text(&payload.text)

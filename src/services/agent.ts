@@ -50,6 +50,8 @@ export type RunAgentOptions = {
   commitSha?: string;
   maxRounds?: number;
   signal?: AbortSignal;
+  /** How this user turn was produced (marks spoken input server-side). */
+  inputSource?: "keyboard" | "push_to_talk" | "hands_free";
   /** Streamed content of the current round (full accumulated text). */
   onToken?: (content: string) => void;
 };
@@ -93,7 +95,7 @@ function recordOutcome(
   });
 }
 
-export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: string; requestId?: string; toolFailures: number; toolSuccesses: number }> {
+export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: string; requestId?: string; model?: string; provider?: string; useCase?: string; toolFailures: number; toolSuccesses: number }> {
   const {
     projectId,
     mode,
@@ -104,6 +106,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
   const messages: WireMessage[] = [...opts.baseMessages];
   const tools = toOpenAITools();
   let lastRequestId: string | undefined;
+  let lastModel: string | undefined;
+  let lastProvider: string | undefined;
+  let lastUseCase: string | undefined;
   let toolFailures = 0;
   let toolSuccesses = 0;
 
@@ -121,14 +126,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<{ finalText: stri
       repoId: opts.repoId,
       branch: opts.branch,
       commitSha: opts.commitSha,
+      inputSource: opts.inputSource,
       signal,
       onToken: opts.onToken,
     });
     lastRequestId = res.requestId ?? lastRequestId;
+    lastModel = res.model ?? lastModel;
+    lastProvider = res.provider ?? lastProvider;
+    lastUseCase = res.useCase ?? lastUseCase;
 
     // No tool calls -> this is the final answer.
     if (!res.toolCalls.length) {
-      return { finalText: res.content.trim() || "Fertig.", requestId: lastRequestId, toolFailures, toolSuccesses };
+      return { finalText: res.content.trim() || "Fertig.", requestId: lastRequestId, model: lastModel, provider: lastProvider, useCase: lastUseCase, toolFailures, toolSuccesses };
     }
 
     // Echo the assistant's tool-call turn back into the transcript.

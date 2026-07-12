@@ -29,6 +29,8 @@ export const DEFAULT_BASE_URL = "https://luczor.follow-flow.de";
 export type RuntimeSettings = {
   api_prefix: string;
   registration_enabled: boolean;
+  /** Admin-managed client defaults (Setting::asMap()); consumed by pullServerDefaults. */
+  settings?: Record<string, unknown>;
 };
 
 export type BootstrapResponse = {
@@ -249,6 +251,26 @@ export const LuczorApi = {
     request<SyncPushResponse>("/sync/push", { method: "POST", body: batch }),
   syncPull: (since?: string) =>
     request<SyncPullResponse>("/sync/pull", { query: { since } }),
+
+  getPreferences: () =>
+    request<{ preferences: Record<string, { value: unknown; updated_at: string | null }> }>("/preferences"),
+  putPreferences: (preferences: Array<{ key: string; value: unknown; updated_at?: string }>) =>
+    request<{ applied: string[]; skipped: string[] }>("/preferences", { method: "PUT", body: { preferences } }),
+
+  // Projects / conversations / tasks (agent-tool backing, server is SoR).
+  createProject: (externalId: string, name: string) =>
+    request<{ data: unknown }>("/projects", { method: "POST", body: { external_id: externalId, name } }),
+  listProjects: () => request<{ data: unknown[] }>("/projects"),
+  createConversation: (body: { title?: string; project_id?: string; client_id?: string }) =>
+    request<{ data: { external_id: string; title: string | null } }>("/conversations", { method: "POST", body }),
+  listConversations: (projectId?: string) =>
+    request<{ data: unknown[] }>("/conversations", { query: { project_id: projectId } }),
+  createTask: (body: { title: string; description?: string; priority?: string; project_id?: string; conversation_id?: string; due_at?: string; client_id?: string }) =>
+    request<{ data: { external_id: string } }>("/tasks", { method: "POST", body }),
+  listTasks: (query?: { status?: string; project_id?: string; conversation_id?: string }) =>
+    request<{ data: unknown[] }>("/tasks", { query }),
+  updateTask: (externalId: string, body: Record<string, unknown>) =>
+    request<{ data: unknown }>(`/tasks/${encodeURIComponent(externalId)}`, { method: "PATCH", body }),
 
   agentEvent: (evt: AgentEventInput, clientId: string) =>
     request<{ ok: boolean; id: number }>("/agent-events", {

@@ -43,6 +43,9 @@ pub fn run() {
             commands::voice::voice_runtime_status,
             commands::voice::install_voice_runtime,
             commands::device_jobs::verify_device_job,
+            commands::agent::agent_cli_detect,
+            commands::agent::agent_cli_run,
+            commands::agent::agent_write_bridge,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

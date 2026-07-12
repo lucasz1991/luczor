@@ -46,6 +46,10 @@ export type ChatResult = {
   rawToolCalls: WireToolCall[];
   finishReason: string;
   requestId?: string;
+  /** Server-reported routing metadata (X-Luczor-* headers). */
+  model?: string;
+  provider?: string;
+  useCase?: string;
 };
 
 type ChatWithToolsArgs = {
@@ -57,8 +61,20 @@ type ChatWithToolsArgs = {
   repoId?: string;
   branch?: string;
   commitSha?: string;
+  /** How the user produced this turn (marks spoken input server-side). */
+  inputSource?: "keyboard" | "push_to_talk" | "hands_free";
   signal?: AbortSignal;
 };
+
+/** Read the server routing metadata headers into a ChatResult fragment. */
+function readLuczorHeaders(headers: Headers): Pick<ChatResult, "requestId" | "model" | "provider" | "useCase"> {
+  return {
+    requestId: headers.get("X-Luczor-Request-Id") ?? undefined,
+    model: headers.get("X-Luczor-Model-Id") ?? undefined,
+    provider: headers.get("X-Luczor-Provider") ?? undefined,
+    useCase: headers.get("X-Luczor-Use-Case") ?? undefined,
+  };
+}
 
 type StreamChatArgs = ChatWithToolsArgs & {
   /** Called with the full accumulated content each time a token arrives. */
@@ -103,6 +119,7 @@ function attachLuczorMeta(body: Record<string, unknown>, endpoint: Awaited<Retur
   body.repo_id = args.repoId;
   body.branch = args.branch;
   body.commit_sha = args.commitSha;
+  body.input_source = args.inputSource ?? "keyboard";
 }
 
 export class OpenRouterService {
@@ -164,7 +181,7 @@ export class OpenRouterService {
       rawArguments: tc.function.arguments,
     }));
 
-    return { content, toolCalls, rawToolCalls, finishReason, requestId: res.headers.get("X-Luczor-Request-Id") ?? undefined };
+    return { content, toolCalls, rawToolCalls, finishReason, ...readLuczorHeaders(res.headers) };
   }
 
   /**
@@ -267,6 +284,6 @@ export class OpenRouterService {
       rawArguments: tc.function.arguments,
     }));
 
-    return { content, toolCalls, rawToolCalls, finishReason, requestId: res.headers.get("X-Luczor-Request-Id") ?? undefined };
+    return { content, toolCalls, rawToolCalls, finishReason, ...readLuczorHeaders(res.headers) };
   }
 }

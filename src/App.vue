@@ -73,6 +73,8 @@ function fmtTime(ts: number, seconds = false): string {
 const showSettings = ref(false);
 const input = ref("");
 const sending = ref(false);
+// How the pending composer content was produced; consumed + reset by send().
+const pendingInputSource = ref<"keyboard" | "push_to_talk" | "hands_free">("keyboard");
 const mode = ref<LuczorMode>("observe");
 
 const abortController = ref<AbortController | null>(null);
@@ -402,6 +404,7 @@ async function togglePushToTalk() {
 
   try {
     input.value = await transcribeLocal(audio.base64);
+    pendingInputSource.value = "push_to_talk";
   } catch (e: any) {
     void recordDebugEvent("error", "assistant_request_failed", { message: e?.message ?? String(e), status: e?.status ?? null });
     mutations.addMessage(mutations.makeMsg("assistant", `STT Fehler: ${e?.message ?? String(e)}`, pid));
@@ -464,6 +467,7 @@ async function toggleListening() {
         const t = text.trim();
         if (!t || sending.value) return;
         input.value = t;
+        pendingInputSource.value = "hands_free";
         void send();
       },
     });
@@ -583,12 +587,14 @@ function applyStreamedContent(pid: string, msgId: string, raw: string, done: boo
     return;
   }
 
-  // Plain (non-envelope) text.
+  // Plain (non-envelope) text. Reset any question/bullets/summary that a
+  // transient partial-envelope parse may have left behind, so stale suggestion
+  // chips don't linger when the final text is not a valid envelope.
   const text = safeTrim(raw);
   mutations.patchMessage(pid, msgId, {
     raw,
     content: text || (done ? "Fertig." : ""),
-    meta: { isLoading: !done } as any,
+    meta: { isLoading: !done, question: "", bullets: [], summary: "" } as any,
   });
 }
 
@@ -597,6 +603,8 @@ const composerRef = ref<HTMLTextAreaElement | null>(null);
 function autoGrow() {
   const el = composerRef.value;
   if (!el) return;
+  // Real typing (this fires on @input) means the turn is keyboard again.
+  pendingInputSource.value = "keyboard";
   el.style.height = "auto";
   el.style.height = Math.min(el.scrollHeight, 160) + "px";
 }
@@ -636,12 +644,17 @@ async function send() {
   const text = input.value.trim();
   if (!text || sending.value) return;
   const taskType = inferTaskType(text);
+  // Capture + reset how this turn was produced (spoken vs typed).
+  const inputSource = pendingInputSource.value;
+  pendingInputSource.value = "keyboard";
 
   void playSfx("submit");
   await stopGenerating();
 
-  // user message
-  mutations.addMessage(mutations.makeMsg("user", text, pid));
+  // user message (tag spoken input for the "Gesprochen" badge)
+  const userMsg = mutations.makeMsg("user", text, pid);
+  userMsg.meta = { ...(userMsg.meta ?? {}), inputSource };
+  mutations.addMessage(userMsg);
   await forceScroll("auto");
   input.value = "";
   void nextTick(() => autoGrow());
@@ -696,7 +709,7 @@ async function send() {
 
   try {
     void playSfx("loading");
-    const { finalText, requestId, toolFailures, toolSuccesses } = await runAgent({
+    const { finalText, requestId, model, provider, useCase, toolFailures, toolSuccesses } = await runAgent({
       projectId: pid,
       baseMessages,
       mode: mode.value,
@@ -705,6 +718,7 @@ async function send() {
       repoId: promptContext.repoId,
       branch: promptContext.branch,
       commitSha: promptContext.commitSha,
+      inputSource,
       signal: abort.signal,
 
       // Live streaming: parse the envelope progressively and render it.
@@ -726,6 +740,13 @@ async function send() {
     stopAssistantLoading();
 
     applyStreamedContent(pid, assistant.id, finalText, true);
+    // Attach the server-reported routing metadata to the assistant message.
+    {
+      const current = mutations.getProjectMessages(pid).find((m) => m.id === assistant.id);
+      mutations.patchMessage(pid, assistant.id, {
+        meta: { ...(current?.meta ?? {}), model, provider, useCase },
+      });
+    }
     if (requestId) {
       const current = mutations.getProjectMessages(pid).find((m) => m.id === assistant.id);
       mutations.patchMessage(pid, assistant.id, {
@@ -929,6 +950,16 @@ watch(
           <div class="msg__meta">
             <span class="msg__role">{{ m.role === 'user' ? 'Du' : appearance.assistantName }}</span>
             <span class="msg__time">{{ fmtTime(m.ts) }}</span>
+            <span
+              v-if="m.role === 'user' && (m as any)?.meta?.inputSource && (m as any).meta.inputSource !== 'keyboard'"
+              class="msg__badge"
+              :title="(m as any).meta.inputSource === 'hands_free' ? 'Freihändig diktiert' : 'Per Push-to-Talk gesprochen'"
+            >🎤 Gesprochen</span>
+            <span
+              v-if="m.role === 'assistant' && ((m as any)?.meta?.model || (m as any)?.meta?.provider)"
+              class="msg__model"
+              :title="'Use-Case: ' + ((m as any)?.meta?.useCase || '—')"
+            >{{ (m as any).meta.provider }}<template v-if="(m as any).meta.model"> · {{ (m as any).meta.model }}</template></span>
             <button
               v-if="m.role === 'assistant' && m.content && m.content.trim()"
               type="button"
@@ -1357,6 +1388,8 @@ watch(
 .msg { display: flex; flex-direction: column; max-width: min(78%, 880px); animation: msg-enter var(--dur-slow) var(--ease) both; }
 .msg__meta { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-family: var(--font-mono); font-size: var(--fs-label); color: var(--text-muted); }
 .msg__role { text-transform: uppercase; letter-spacing: 0.1em; }
+.msg__badge { padding: 1px 6px; border-radius: 999px; border: 1px solid var(--cy-dim, rgba(80,200,255,.3)); color: var(--cy-soft); font-size: 0.7em; letter-spacing: 0.04em; }
+.msg__model { color: var(--text-muted); font-size: 0.72em; opacity: 0.8; text-transform: none; letter-spacing: 0; }
 .msg__time { font-variant-numeric: tabular-nums; color: var(--text-faint); }
 
 .msg--user { align-self: flex-end; align-items: flex-end; }
