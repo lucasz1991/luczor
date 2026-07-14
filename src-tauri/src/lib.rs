@@ -47,6 +47,15 @@ pub fn run() {
             commands::agent::agent_cli_detect,
             commands::agent::agent_cli_run,
             commands::agent::agent_write_bridge,
+            commands::local_tasks::wf_file_read,
+            commands::local_tasks::wf_file_write,
+            commands::local_tasks::wf_run_script,
+            commands::browser::browser_open,
+            commands::browser::browser_navigate,
+            commands::browser::browser_close,
+            commands::browser::browser_click,
+            commands::browser::browser_read,
+            commands::browser::browser_report,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

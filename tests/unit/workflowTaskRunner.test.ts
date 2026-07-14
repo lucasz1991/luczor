@@ -17,6 +17,12 @@ function primitives(overrides: Partial<WorkflowTaskPrimitives> = {}): WorkflowTa
     openUrl: vi.fn(async () => {}),
     httpFetch: vi.fn(async () => ({ status: 200, ok: true, body: "{}" })),
     runAgent: vi.fn(async () => ({ ok: true, code: 0, stdout: "done", stderr: "" })),
+    fileRead: vi.fn(async () => ({ content: "hello", bytes: 5, truncated: false })),
+    fileWrite: vi.fn(async () => ({ path: "note.txt", bytes: 3 })),
+    runScript: vi.fn(async () => ({ ok: true, code: 0, stdout: "42", stderr: "", timed_out: false })),
+    browserOpen: vi.fn(async () => ({ ok: true })),
+    browserClick: vi.fn(async () => ({ ok: true })),
+    browserRead: vi.fn(async () => ({ ok: true, text: "page text", truncated: false })),
     ...overrides,
   };
 }
@@ -88,14 +94,67 @@ describe("agent.dispatch", () => {
   });
 });
 
-describe("tasks the device build cannot do yet fail honestly", () => {
-  it.each(["browser.click", "browser.read", "file.read", "file.write", "python.run", "node.run"])(
-    "throws an explanatory error for %s",
-    async (key) => {
-      await expect(runWorkflowTask(bundle(key), primitives())).rejects.toThrow();
-    },
-  );
+describe("browser tasks drive the in-app browser (SOLL P24)", () => {
+  it("opens the window then clicks the selector", async () => {
+    const p = primitives();
+    const result = await runWorkflowTask(bundle("browser.click", { selector: "#go", url: "https://example.org" }), p);
+    expect(p.browserOpen).toHaveBeenCalledWith("https://example.org");
+    expect(p.browserClick).toHaveBeenCalledWith("#go");
+    expect(result).toMatchObject({ ok: true, clicked: "#go" });
+  });
 
+  it("reads element text via the browser", async () => {
+    const p = primitives({ browserRead: vi.fn(async () => ({ ok: true, text: "headline", truncated: false })) });
+    const result = await runWorkflowTask(bundle("browser.read", { selector: "h1" }), p);
+    expect(p.browserRead).toHaveBeenCalledWith("h1");
+    expect(result).toMatchObject({ ok: true, text: "headline" });
+  });
+
+  it("browser.click requires a selector", async () => {
+    await expect(runWorkflowTask(bundle("browser.click", {}), primitives())).rejects.toThrow(/selector/i);
+  });
+});
+
+describe("filesystem tasks (SOLL P15b)", () => {
+  it("reads a confined file", async () => {
+    const p = primitives();
+    const result = await runWorkflowTask(bundle("file.read", { path: "notes/a.txt" }), p);
+    expect(p.fileRead).toHaveBeenCalledWith("notes/a.txt");
+    expect(result).toMatchObject({ ok: true, content: "hello", bytes: 5 });
+  });
+
+  it("writes a confined file", async () => {
+    const p = primitives();
+    const result = await runWorkflowTask(bundle("file.write", { path: "out.txt", content: "hi" }), p);
+    expect(p.fileWrite).toHaveBeenCalledWith("out.txt", "hi");
+    expect(result).toMatchObject({ ok: true });
+  });
+
+  it("file.read requires a path", async () => {
+    await expect(runWorkflowTask(bundle("file.read", {}), primitives())).rejects.toThrow(/path/i);
+  });
+});
+
+describe("local runtime tasks (SOLL P15b)", () => {
+  it("runs python code", async () => {
+    const p = primitives({ runScript: vi.fn(async () => ({ ok: true, code: 0, stdout: "42", stderr: "", timed_out: false })) });
+    const result = await runWorkflowTask(bundle("python.run", { code: "print(42)", timeout_seconds: 10 }), p);
+    expect(p.runScript).toHaveBeenCalledWith("python", "print(42)", 10);
+    expect(result).toMatchObject({ ok: true, stdout: "42", timed_out: false });
+  });
+
+  it("maps node.run to the node runtime", async () => {
+    const p = primitives();
+    await runWorkflowTask(bundle("node.run", { code: "console.log(1)" }), p);
+    expect(p.runScript).toHaveBeenCalledWith("node", "console.log(1)", undefined);
+  });
+
+  it("python.run requires code", async () => {
+    await expect(runWorkflowTask(bundle("python.run", {}), primitives())).rejects.toThrow(/code/i);
+  });
+});
+
+describe("unknown tasks fail honestly", () => {
   it("throws for an unknown task key", async () => {
     await expect(runWorkflowTask(bundle("shell.rm_rf"), primitives())).rejects.toThrow(/Unsupported/);
   });

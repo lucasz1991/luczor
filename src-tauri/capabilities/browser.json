@@ -1,0 +1,9 @@
+{
+  "identifier": "browser",
+  "description": "SOLL P24 — the in-app browser window may report read-back text via the browser_report IPC bridge, including from remote http(s) origins it navigates to.",
+  "windows": ["luczor-browser"],
+  "remote": {
+    "urls": ["http://*/*", "https://*/*"]
+  },
+  "permissions": ["core:default"]
+}

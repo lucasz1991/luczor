@@ -137,6 +137,13 @@ const WORKFLOW_TASK_PRIMITIVES: WorkflowTaskPrimitives = {
     return { status: response.status, ok: response.ok, body: text };
   },
   runAgent: (agent, prompt, projectDir) => runAgentCli(agent as "claude" | "codex", prompt, projectDir),
+  fileRead: (path) => invoke("wf_file_read", { payload: { path } }),
+  fileWrite: (path, content) => invoke("wf_file_write", { payload: { path, content } }),
+  runScript: (runtime, code, timeoutSeconds) =>
+    invoke("wf_run_script", { payload: { runtime, code, timeout_seconds: timeoutSeconds ?? null } }),
+  browserOpen: (url) => invoke("browser_open", { payload: { url: url ?? null } }),
+  browserClick: (selector) => invoke("browser_click", { payload: { selector } }),
+  browserRead: (selector) => invoke("browser_read", { payload: { selector: selector ?? null } }),
 };
 
 /** A human-readable approval line; workflow bundles name the concrete task. */
