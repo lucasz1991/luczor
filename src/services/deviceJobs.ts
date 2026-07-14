@@ -1,6 +1,8 @@
 import Pusher from "pusher-js";
 import { invoke } from "@tauri-apps/api/core";
 import { LuczorApi, getApiConfig, type DeviceJob } from "@/services/api/luczorApi";
+import { runAgentCli } from "@/services/agents";
+import { isWorkflowTaskBundle, runWorkflowTask, type WorkflowTaskPrimitives } from "@/services/workflowTaskRunner";
 
 let stop: (() => void) | null = null;
 const inFlight = new Set<string>();
@@ -68,7 +70,7 @@ async function processJob(clientId: string, job: DeviceJob): Promise<void> {
   try {
     await invoke("verify_device_job", { payload: job });
     if (job.status === "approval_required") {
-      const approved = window.confirm(`Remote action: ${job.tool_profile}`);
+      const approved = window.confirm(approvalPrompt(job));
       await LuczorApi.approveDeviceJob(job.id, clientId, approved, approved ? undefined : "Rejected on local device");
       if (!approved) return;
     }
@@ -114,9 +116,36 @@ async function executeProfile(job: DeviceJob): Promise<Record<string, unknown>> 
     case "desktop.open_url":
       await invoke("open_url", { payload: { url: String(payload.url ?? "") } });
       return { ok: true };
+    // SOLL §14 P15b — a workflow client task compiled into a bundle.
+    case "workflow.task": {
+      if (!isWorkflowTaskBundle(payload)) throw new Error("Malformed workflow.task bundle.");
+      return runWorkflowTask(payload, WORKFLOW_TASK_PRIMITIVES);
+    }
     default:
       throw new Error(`Unsupported signed tool profile: ${job.tool_profile}`);
   }
+}
+
+/** Real, Tauri-backed effects for workflow client tasks (see workflowTaskRunner). */
+const WORKFLOW_TASK_PRIMITIVES: WorkflowTaskPrimitives = {
+  openUrl: (url) => invoke("open_url", { payload: { url } }),
+  httpFetch: async (method, url, headers, body) => {
+    // The Tauri webview's fetch reaches the network directly; the request was
+    // vetted server-side (catalogued task) and re-checked for http(s) here.
+    const response = await fetch(url, { method, headers, body: body ?? undefined });
+    const text = await response.text();
+    return { status: response.status, ok: response.ok, body: text };
+  },
+  runAgent: (agent, prompt, projectDir) => runAgentCli(agent as "claude" | "codex", prompt, projectDir),
+};
+
+/** A human-readable approval line; workflow bundles name the concrete task. */
+function approvalPrompt(job: DeviceJob): string {
+  if (job.tool_profile === "workflow.task" && isWorkflowTaskBundle(job.payload)) {
+    const wf = job.payload.workflow;
+    return `Workflow-Aktion: ${job.payload.task_key}\nSchritt „${wf?.step_key ?? "?"}" · Lauf ${wf?.run ?? "?"}\n\nAusführen?`;
+  }
+  return `Remote action: ${job.tool_profile}`;
 }
 
 function deviceName(): string {
