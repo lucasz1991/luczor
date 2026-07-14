@@ -42,6 +42,16 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 webbrowser = "1.0"
 nvml-wrapper = "0.11"
 
+# Optional native STT engine (SOLL §14 P5, "whisper_rs"). It compiles whisper.cpp
+# from source and therefore requires CMake + a C/C++ toolchain at build time.
+# Default OFF so the normal build needs no CMake. Enable with:
+#   cargo build --features whisper_rs   (or set it in tauri.conf release build)
+whisper-rs = { version = "0.12", optional = true }
+hound = { version = "3", optional = true }
+
+[features]
+whisper_rs = ["dep:whisper-rs", "dep:hound"]
+
 [profile.dev]
 incremental = true # Compile your binary in smaller steps.
 

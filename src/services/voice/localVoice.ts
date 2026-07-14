@@ -31,6 +31,27 @@ export async function getVoiceConfig(): Promise<VoiceConfig> {
   };
 }
 
+export type HandsFreeStrategyConfig = {
+  strategy: "continuous" | "safeword";
+  triggerPhrase: string;
+  endPhrase: string;
+  continuousSilenceMs: number;
+};
+
+/** SOLL §5.3 — the hands-free dictation strategy chosen by the user (XOR). */
+export async function getHandsFreeConfig(): Promise<HandsFreeStrategyConfig> {
+  const settings = await Store.load("luczor.settings.json");
+  const raw = await settings.get<string>("hands_free_strategy");
+  const strategy = raw === "continuous" ? "continuous" : "safeword";
+  const silence = Number(await settings.get<number>("voice_continuous_silence_ms"));
+  return {
+    strategy,
+    triggerPhrase: ((await settings.get<string>("voice_trigger_phrase")) ?? "luczor start").trim(),
+    endPhrase: ((await settings.get<string>("voice_end_phrase")) ?? "luczor stopp").trim(),
+    continuousSilenceMs: Number.isFinite(silence) && silence >= 1000 ? silence : 5000,
+  };
+}
+
 function parseVoiceError(error: unknown): Error {
   const raw = error instanceof Error ? error.message : String(error);
   try {
@@ -69,11 +90,39 @@ export async function ensureVoiceRuntime(): Promise<VoiceRuntimeStatus> {
   return installPromise;
 }
 
+export type SttEngine = "whisper_local" | "whisper_rs";
+
+/** Admin-selectable STT engine (server default synced into the local store). */
+export async function getSttEngine(): Promise<SttEngine> {
+  const settings = await Store.load("luczor.settings.json");
+  const value = (await settings.get<string>("voice_stt_engine")) ?? "whisper_local";
+  return value === "whisper_rs" ? "whisper_rs" : "whisper_local";
+}
+
 export async function localStt(base64: string, language?: string): Promise<string> {
   await ensureVoiceRuntime();
-  try {
-    const response = await invoke<{ text: string }>("local_stt", { payload: { base64, language: language ?? "de" } });
+  const engine = await getSttEngine();
+  const language_ = language ?? "de";
+  const run = async (command: string): Promise<string> => {
+    const response = await invoke<{ text: string }>(command, { payload: { base64, language: language_ } });
     return cleanSttTranscript(response?.text);
+  };
+
+  try {
+    if (engine === "whisper_rs") {
+      try {
+        return await run("local_stt_rs");
+      } catch (error) {
+        const parsed = parseVoiceError(error);
+        // Build without whisper-rs -> transparently fall back to whisper.cpp.
+        if ((parsed as Error & { code?: string }).code === "whisper_rs_not_built") {
+          reportVoiceEvent("warn", "whisper_rs_fallback", { message: parsed.message });
+          return await run("local_stt");
+        }
+        throw parsed;
+      }
+    }
+    return await run("local_stt");
   } catch (error) {
     const parsed = parseVoiceError(error);
     reportVoiceEvent("error", "local_stt_failed", { message: parsed.message, code: (parsed as Error & { code?: string }).code });

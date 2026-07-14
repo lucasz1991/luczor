@@ -11,8 +11,8 @@ import { usePushToTalk } from "@/services/pushToTalk";
 import { Store } from "@tauri-apps/plugin-store";
 import { listen } from "@tauri-apps/api/event";
 import { VoiceEngine } from "@/services/voice/voiceEngine";
-import { getVoiceConfig, localStt } from "@/services/voice/localVoice";
-import { streamSpeak } from "@/services/voice/speak";
+import { getVoiceConfig, getHandsFreeConfig, localStt } from "@/services/voice/localVoice";
+import { streamSpeak, stopSpeak } from "@/services/voice/speak";
 import { luczorMemory, getMemoryPrefs } from "@/services/memory/luczorMemory";
 import { buildPromptContextDetails, inferTaskType, type PromptContextDetails } from "@/services/contextController";
 import { LuczorApi } from "@/services/api/luczorApi";
@@ -185,6 +185,20 @@ async function getAutoSpeechSettings(): Promise<{
 
 function shouldSpeakAssistant(m: ChatAutoSpeechMode) {
   return m === "assistant_only" || m === "all";
+}
+
+type InterruptMode = "on_speech" | "on_activation_phrase" | "off";
+/** SOLL §6 — TTS playback controls (rate 0.5–2, volume 0–1) + interrupt mode. */
+async function getTtsConfig(): Promise<{ rate: number; volume: number; interruptMode: InterruptMode }> {
+  const store = await Store.load("luczor.settings.json");
+  const rateRaw = Number((await store.get<number>("voice_tts_rate")) ?? (await store.get<number>("chat_auto_speech_rate")) ?? 1.0);
+  const volRaw = Number((await store.get<number>("voice_tts_volume")) ?? (await store.get<number>("chat_auto_speech_volume")) ?? 90);
+  const im = String((await store.get<string>("voice_interrupt_mode")) ?? "on_speech");
+  return {
+    rate: clamp(Number.isFinite(rateRaw) ? rateRaw : 1.0, 0.5, 2.0),
+    volume: clamp(Number.isFinite(volRaw) ? volRaw : 90, 0, 100) / 100,
+    interruptMode: im === "off" || im === "on_activation_phrase" ? (im as InterruptMode) : "on_speech",
+  };
 }
 
 let _lastSpokenAssistantId: string | null = null;
@@ -454,10 +468,11 @@ let voiceMuteDepth = 0;
 
 /** Keep continuous STT from hearing Luczor's own local TTS output. */
 async function speakWithVoiceMuted(text: string): Promise<void> {
+  const tts = await getTtsConfig();
   voiceMuteDepth += 1;
   voiceEngine.setMuted(true);
   try {
-    await streamSpeak(text);
+    await streamSpeak(text, { rate: tts.rate, volume: tts.volume });
   } finally {
     voiceMuteDepth = Math.max(0, voiceMuteDepth - 1);
     voiceEngine.setMuted(voiceMuteDepth > 0);
@@ -482,15 +497,26 @@ async function toggleListening() {
     return;
   }
   const cfg = await getVoiceConfig();
-  const wakeword = cfg.mode === "wakeword";
-  listenLabel.value = wakeword ? `Wake-Word „${cfg.wakeWord}"` : "Dauer-Zuhören";
+  const hf = await getHandsFreeConfig();
+  const tts = await getTtsConfig();
+  listenLabel.value = hf.strategy === "safeword"
+    ? `Aktivierungsphrase „${hf.triggerPhrase}"`
+    : "Dauerzuhören";
   lastHeard.value = "";
   try {
     await voiceEngine.start({
-      mode: wakeword ? "wakeword" : "continuous",
+      // SOLL §5.3 — the hands-free strategy (continuous XOR safeword) drives
+      // segmentation; the legacy mode field is kept only for type compatibility.
+      mode: "continuous",
       wakeWord: cfg.wakeWord,
+      handsFree: hf,
+      bargeIn: tts.interruptMode === "on_speech",
+      onInterrupt: () => stopSpeak(),
       transcribe: (wav) => transcribeUtterance(wav),
       onUtterance: (text) => {
+        lastHeard.value = text;
+      },
+      onPartial: (text) => {
         lastHeard.value = text;
       },
       onError: (error) => {

@@ -18,6 +18,8 @@
 import { setMicLevel, pulse, setStatus } from "@/state/hud";
 import { chunksToWavBase64 } from "./wav";
 import { cleanSttTranscript } from "./transcript";
+import { HandsFreeMachine, type StrategyConfig } from "./voiceStrategy";
+import { BargeInDetector } from "./bargeIn";
 
 export type VoiceEngineMode = "continuous" | "wakeword";
 
@@ -32,6 +34,17 @@ export type VoiceEngineOptions = {
   onUtterance?: (text: string) => void;
   /** Runtime or transcription failures; callers can expose a concise state and retain diagnostics. */
   onError?: (error: Error) => void;
+  /**
+   * SOLL §5.3 — hands-free strategy (continuous XOR safeword). When set, segment
+   * handling is driven by the HandsFreeMachine instead of the legacy mode logic.
+   */
+  handsFree?: StrategyConfig;
+  /** Live dictation partial (buffer so far) while a hands-free strategy runs. */
+  onPartial?: (text: string) => void;
+  /** SOLL §6 — barge-in: interrupt TTS when the user speaks over it. */
+  bargeIn?: boolean;
+  /** Fired once when sustained speech is detected during TTS playback. */
+  onInterrupt?: () => void;
 };
 
 // VAD tuning (frames are ~85ms at 48kHz / 4096 samples).
@@ -154,6 +167,9 @@ export class VoiceEngine {
   private voiceFrames = 0;
   private silenceCount = 0;
   private awaitingCommand = false; // wakeword mode: heard the wake word
+  private machine: HandsFreeMachine | null = null;
+  private tickTimer: ReturnType<typeof setInterval> | null = null;
+  private barge: BargeInDetector | null = null;
 
   get isRunning() {
     return this.running;
@@ -171,6 +187,8 @@ export class VoiceEngine {
       this.voiceFrames = 0;
       this.silenceCount = 0;
       this.awaitingCommand = false;
+      this.machine?.reset();
+      this.barge?.reset(); // fresh barge-in window each time TTS starts
       setMicLevel(0);
       return;
     }
@@ -197,10 +215,30 @@ export class VoiceEngine {
 
     this.running = true;
     setStatus("listening");
+
+    // SOLL §6 — barge-in detector (≈0.25s of speech over TTS -> interrupt).
+    if (opts.bargeIn && opts.onInterrupt) {
+      this.barge = new BargeInDetector(START_RMS, 3);
+    }
+
+    // SOLL §5.3 — drive continuous/safeword dictation via the state machine.
+    if (opts.handsFree) {
+      this.machine = new HandsFreeMachine(opts.handsFree, opts.onCommand, opts.onPartial);
+      this.tickTimer = setInterval(() => {
+        if (this.running && !this.muted) this.machine?.tick(Date.now());
+      }, 500);
+    }
   }
 
   async stop(): Promise<void> {
     this.running = false;
+    if (this.tickTimer) {
+      clearInterval(this.tickTimer);
+      this.tickTimer = null;
+    }
+    this.machine?.reset();
+    this.machine = null;
+    this.barge = null;
     try {
       this.processor?.disconnect();
       this.source?.disconnect();
@@ -228,6 +266,16 @@ export class VoiceEngine {
   private onFrame(input: Float32Array) {
     if (!this.running) return;
     if (this.muted) {
+      // While Luczor speaks: don't segment, but watch for barge-in.
+      if (this.barge) {
+        let sum = 0;
+        for (let i = 0; i < input.length; i++) sum += input[i]! * input[i]!;
+        const rms = Math.sqrt(sum / input.length);
+        if (this.barge.push(rms)) {
+          this.barge.reset();
+          this.opts?.onInterrupt?.();
+        }
+      }
       setMicLevel(0);
       return;
     }
@@ -289,6 +337,12 @@ export class VoiceEngine {
       if (!text || !this.running || this.muted) return;
       opts.onUtterance?.(text);
       if (!this.running || this.muted) return;
+
+      // SOLL §5.3 — hands-free strategy machine owns segment routing when set.
+      if (this.machine) {
+        this.machine.pushSegment(text, Date.now());
+        return;
+      }
 
       if (opts.mode === "continuous") {
         opts.onCommand(text);

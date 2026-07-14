@@ -39,6 +39,7 @@ pub fn run() {
             commands::system::press_key,
             commands::system::open_url,
             commands::voice::local_stt,
+            commands::voice::local_stt_rs,
             commands::voice::local_tts,
             commands::voice::voice_runtime_status,
             commands::voice::install_voice_runtime,

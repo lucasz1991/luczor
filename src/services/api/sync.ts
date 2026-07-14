@@ -68,6 +68,14 @@ export async function pullServerDefaults(): Promise<number> {
     voice_mode: "voice_mode",
     voice_wake_word: "voice_wake_word",
     voice_local_stt_language: "voice_local_stt_language",
+    voice_stt_engine: "voice_stt_engine",
+    hands_free_strategy: "hands_free_strategy",
+    voice_trigger_phrase: "voice_trigger_phrase",
+    voice_end_phrase: "voice_end_phrase",
+    voice_continuous_silence_ms: "voice_continuous_silence_ms",
+    voice_tts_rate: "voice_tts_rate",
+    voice_tts_volume: "voice_tts_volume",
+    voice_interrupt_mode: "voice_interrupt_mode",
   };
 
   const s = await Store.load("luczor.settings.json");

@@ -1,8 +1,16 @@
 // src/services/voice/speak.ts
 //
 // Unified, streaming text-to-speech. Splits text into sentences and plays them
-// back-to-back while synthesizing the next one. The active runtime backend is
-// local Piper; no ElevenLabs/cloud fallback is used for speech output.
+// back-to-back while synthesizing the next one.
+//
+// Backends, in preference order:
+//   1. local Piper runtime (high quality, but must be installed/ready), and
+//   2. the browser/OS speech-synthesis engine (Windows SAPI via WebView2) as a
+//      ZERO-SETUP local fallback so speech output ALWAYS works even before the
+//      Piper runtime is provisioned.
+//
+// The OS speech engine is local (no keys, no third-party service, no downloads),
+// so it does not violate the "no cloud STT/TTS fallback" rule.
 
 import { setStatus } from "@/state/hud";
 import { localTts } from "./localVoice";
@@ -14,6 +22,10 @@ let cancelled = false;
 // second speak or a stop deterministically invalidates any in-flight run and
 // its pre-synthesized next sentence — no two clips can overlap.
 let generation = 0;
+
+function clamp(n: number, lo: number, hi: number): number {
+  return Math.max(lo, Math.min(hi, n));
+}
 
 function reportPlaybackError(error: unknown): void {
   if (typeof window === "undefined") return;
@@ -28,9 +40,10 @@ async function synthLocal(text: string): Promise<Clip> {
   return localTts(text);
 }
 
-function play(clip: Clip): Promise<void> {
+function play(clip: Clip, volume: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const audio = new Audio(`data:${clip.mime};base64,${clip.base64}`);
+    audio.volume = clamp(volume, 0, 1);
     let settled = false;
     let stop: () => void;
 
@@ -63,6 +76,51 @@ function play(clip: Clip): Promise<void> {
   });
 }
 
+/* ---------------- OS speech-synthesis fallback ---------------- */
+
+function webSpeechAvailable(): boolean {
+  return typeof window !== "undefined"
+    && "speechSynthesis" in window
+    && typeof SpeechSynthesisUtterance !== "undefined";
+}
+
+function cancelWebSpeech(): void {
+  if (webSpeechAvailable()) {
+    try {
+      window.speechSynthesis.cancel();
+    } catch {
+      /* ignore */
+    }
+  }
+}
+
+function webSpeechSentence(text: string, rate: number, volume: number): Promise<void> {
+  return new Promise((resolve) => {
+    if (!webSpeechAvailable()) {
+      resolve();
+      return;
+    }
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.rate = clamp(rate, 0.5, 2);
+    utter.volume = clamp(volume, 0, 1);
+    utter.lang = "de-DE";
+    utter.onend = () => resolve();
+    utter.onerror = () => resolve();
+    window.speechSynthesis.speak(utter);
+  });
+}
+
+async function speakWithOs(sentences: string[], myGen: number, rate: number, volume: number): Promise<void> {
+  if (!webSpeechAvailable()) {
+    throw new Error("Keine lokale Sprachausgabe verfügbar (Piper-Runtime fehlt und Web-Speech wird nicht unterstützt).");
+  }
+  for (const sentence of sentences) {
+    if (cancelled || myGen !== generation) break;
+    setStatus("speaking");
+    await webSpeechSentence(sentence, rate, volume);
+  }
+}
+
 function splitSentences(text: string): string[] {
   const raw = text
     .replace(/\s+/g, " ")
@@ -81,22 +139,55 @@ function splitSentences(text: string): string[] {
   return out.length ? out : [text.trim()];
 }
 
-export async function streamSpeak(text: string): Promise<void> {
+export type SpeakOptions = { rate?: number; volume?: number };
+
+export async function streamSpeak(text: string, opts: SpeakOptions = {}): Promise<void> {
   const clean = (text ?? "").trim();
   if (!clean) return;
 
   const myGen = ++generation;
   cancelled = false;
+  cancelWebSpeech();
+  const rate = opts.rate ?? 1;
+  const volume = opts.volume ?? 0.9;
   const sentences = splitSentences(clean);
+
   try {
-    let next: Promise<Clip> | null = sentences.length ? synthLocal(sentences[0]!) : null;
-    for (let i = 0; i < sentences.length; i++) {
+    // Probe the local Piper runtime with the first sentence. If it isn't ready,
+    // speak the whole message via the OS fallback instead.
+    let firstClip: Clip | null = null;
+    try {
+      firstClip = await synthLocal(sentences[0]!);
+    } catch {
+      firstClip = null;
+    }
+    if (cancelled || myGen !== generation) return;
+
+    if (!firstClip) {
+      await speakWithOs(sentences, myGen, rate, volume);
+      return;
+    }
+
+    // Local path: play the first clip, then pipeline synth+play for the rest.
+    setStatus("speaking");
+    await play(firstClip, volume);
+    let next: Promise<Clip> | null = sentences.length > 1 ? synthLocal(sentences[1]!) : null;
+    for (let i = 1; i < sentences.length; i++) {
       if (cancelled || myGen !== generation) break;
-      const clip = await next;
-      next = i + 1 < sentences.length ? synthLocal(sentences[i + 1]!) : null;
-      if (cancelled || myGen !== generation || !clip) break;
+      let clip: Clip | null = null;
+      try {
+        clip = await next;
+      } catch {
+        clip = null; // local runtime failed mid-stream -> finish via OS fallback
+      }
+      next = i + 1 < sentences.length ? synthLocal(sentences[i + 1]!).catch(() => null) as Promise<Clip> : null;
+      if (cancelled || myGen !== generation) break;
+      if (!clip) {
+        await speakWithOs(sentences.slice(i), myGen, rate, volume);
+        break;
+      }
       setStatus("speaking");
-      await play(clip);
+      await play(clip, volume);
     }
   } catch (error) {
     reportPlaybackError(error);
@@ -111,5 +202,6 @@ export function stopSpeak() {
   cancelled = true;
   stopCurrentAudio?.();
   if (currentAudio) currentAudio.pause();
+  cancelWebSpeech();
   setStatus("idle");
 }

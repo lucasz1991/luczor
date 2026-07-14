@@ -186,6 +186,99 @@ fn local_stt_sync(app: &AppHandle, payload: LocalSttPayload) -> Result<LocalSttR
     Ok(LocalSttResponse { text: filter_recognizer_output(&String::from_utf8_lossy(&output.stdout)) })
 }
 
+/// SOLL §14 P5 — native whisper-rs STT with a long-lived context (selectable in
+/// the admin as engine `whisper_rs`). Only functional when the app is built with
+/// `--features whisper_rs` (needs CMake); otherwise it returns a clear error so
+/// the client can fall back to the `whisper_local` (whisper.cpp) engine.
+#[tauri::command]
+pub async fn local_stt_rs(app: AppHandle, payload: LocalSttPayload) -> Result<LocalSttResponse, String> {
+    #[cfg(feature = "whisper_rs")]
+    {
+        return tauri::async_runtime::spawn_blocking(move || whisper_rs_stt(&app, payload))
+            .await
+            .map_err(|error| structured_error("task_join", &error.to_string()))?;
+    }
+    #[cfg(not(feature = "whisper_rs"))]
+    {
+        let _ = (&app, &payload);
+        Err(structured_error(
+            "whisper_rs_not_built",
+            "Diese App-Version wurde ohne whisper-rs gebaut. Im Admin die Engine 'whisper_local' wählen oder mit `--features whisper_rs` (benötigt CMake) neu bauen.",
+        ))
+    }
+}
+
+/// Native whisper-rs transcription. The context is loaded once per model path and
+/// reused across segments (raw f32 PCM in). Feature-gated: unbuilt in CMake-less
+/// environments; validate the exact whisper-rs 0.12 API on the first native build.
+#[cfg(feature = "whisper_rs")]
+fn whisper_rs_stt(app: &AppHandle, payload: LocalSttPayload) -> Result<LocalSttResponse, String> {
+    use std::sync::{Arc, Mutex, OnceLock};
+    use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+    static CTX: OnceLock<Mutex<Option<(String, Arc<WhisperContext>)>>> = OnceLock::new();
+
+    let runtime = ready_runtime(app, "stt_binary", "stt_model")?;
+    let model_path = runtime.paths["stt_model"].clone();
+
+    // Decode the incoming 16 kHz mono PCM16 WAV to f32 samples.
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(normalize_base64(&payload.base64))
+        .map_err(|error| structured_error("audio_decode", &error.to_string()))?;
+    let wav_path = write_temp(&bytes, "wav")?;
+    let opened = hound::WavReader::open(&wav_path);
+    let _ = std::fs::remove_file(&wav_path);
+    let mut reader = opened.map_err(|error| structured_error("wav_open", &error.to_string()))?;
+    let samples: Vec<f32> = reader
+        .samples::<i16>()
+        .map(|sample| sample.map(|value| value as f32 / 32768.0).unwrap_or(0.0))
+        .collect();
+
+    // Long-lived context, reused unless the model path changes.
+    let cell = CTX.get_or_init(|| Mutex::new(None));
+    let context = {
+        let mut guard = cell.lock().map_err(|_| structured_error("ctx_lock", "Kontext-Mutex vergiftet."))?;
+        let needs_new = match guard.as_ref() {
+            Some((path, _)) => path != &model_path,
+            None => true,
+        };
+        if needs_new {
+            let loaded = WhisperContext::new_with_params(&model_path, WhisperContextParameters::default())
+                .map_err(|error| structured_error("whisper_load", &error.to_string()))?;
+            *guard = Some((model_path.clone(), Arc::new(loaded)));
+        }
+        guard.as_ref().map(|(_, ctx)| Arc::clone(ctx)).unwrap()
+    };
+
+    let mut state = context
+        .create_state()
+        .map_err(|error| structured_error("whisper_state", &error.to_string()))?;
+    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    params.set_print_progress(false);
+    params.set_print_special(false);
+    params.set_print_realtime(false);
+    params.set_no_timestamps(true);
+    if let Some(language) = payload.language.as_ref().filter(|value| !value.trim().is_empty()) {
+        params.set_language(Some(language.trim()));
+    }
+    state
+        .full(params, &samples)
+        .map_err(|error| structured_error("whisper_infer", &error.to_string()))?;
+
+    let segments = state
+        .full_n_segments()
+        .map_err(|error| structured_error("whisper_segments", &error.to_string()))?;
+    let mut text = String::new();
+    for index in 0..segments {
+        if let Ok(segment) = state.full_get_segment_text(index) {
+            text.push_str(&segment);
+            text.push(' ');
+        }
+    }
+
+    Ok(LocalSttResponse { text: filter_recognizer_output(text.trim()) })
+}
+
 #[tauri::command]
 pub async fn local_tts(app: AppHandle, payload: LocalTtsPayload) -> Result<LocalTtsResponse, String> {
     tauri::async_runtime::spawn_blocking(move || local_tts_sync(&app, payload))

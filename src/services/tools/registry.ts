@@ -360,6 +360,36 @@ const TOOLS: ToolDef[] = [
     },
   },
 
+  {
+    name: "os_environment",
+    category: "os",
+    description:
+      "Read a lightweight snapshot of the local environment (open windows, display size, basic system metrics) WITHOUT taking a screenshot. Use to orient before acting.",
+    mutating: false,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      // Keep one optional property: the Nvidia/OpenRouter grammar rejects
+      // function schemas whose properties object is empty.
+      properties: {
+        include_windows: { type: "boolean", description: "Include the open-window list. Defaults to true." },
+      },
+      required: [],
+    },
+    async execute(args) {
+      const includeWindows = (args as { include_windows?: boolean }).include_windows !== false;
+      const [windows, metrics] = await Promise.all([
+        includeWindows ? invoke("list_windows").catch(() => []) : Promise.resolve([]),
+        invoke("system_metrics").catch(() => null),
+      ]);
+      const screen = typeof window !== "undefined" && window.screen
+        ? { width: window.screen.width, height: window.screen.height, color_depth: window.screen.colorDepth }
+        : null;
+      return { ok: true, screenshot: false, windows, metrics, screen };
+    },
+  },
+
   /* -------------------------------------------------
    * Projekt-/Chat-/Aufgabenverwaltung (server = System-of-Record, SOLL §8)
    * ------------------------------------------------- */
