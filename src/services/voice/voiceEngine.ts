@@ -53,6 +53,11 @@ const END_RMS = 0.014;
 const MIN_VOICE_FRAMES = 3; // ~0.25s of speech to count as an utterance
 const SILENCE_FRAMES = 9; // ~0.75s of silence ends a segment
 const MAX_SEGMENT_FRAMES = 240; // ~20s hard cap
+// SOLL §5–§7 TTS-Preroll: rolling buffer of mic audio while TTS is audible so a
+// barge-in keeps the interrupting words (~0.5s before + everything after the
+// interrupt until unmute, capped at ~2s).
+const PREROLL_FRAMES = 6;
+const PREROLL_MAX_FRAMES = 24;
 
 // Whisper commonly transcribes the product name as one of these near-homophones.
 // Keep aliases scoped to Luczor so a custom wake word keeps its exact semantics.
@@ -170,6 +175,8 @@ export class VoiceEngine {
   private machine: HandsFreeMachine | null = null;
   private tickTimer: ReturnType<typeof setInterval> | null = null;
   private barge: BargeInDetector | null = null;
+  private preroll: Float32Array[] = [];
+  private prerollActive = false;
 
   get isRunning() {
     return this.running;
@@ -189,9 +196,22 @@ export class VoiceEngine {
       this.awaitingCommand = false;
       this.machine?.reset();
       this.barge?.reset(); // fresh barge-in window each time TTS starts
+      this.preroll = [];
+      this.prerollActive = false;
       setMicLevel(0);
       return;
     }
+
+    // TTS-Preroll: after a barge-in, seed the next segment with the speech that
+    // was captured while TTS was still audible so the first words are not lost.
+    if (this.prerollActive && this.preroll.length) {
+      this.segment = this.preroll;
+      this.speaking = true;
+      this.voiceFrames = Math.min(this.preroll.length, MIN_VOICE_FRAMES);
+      this.silenceCount = 0;
+    }
+    this.preroll = [];
+    this.prerollActive = false;
 
     if (this.running && !this.busy) setStatus("listening");
   }
@@ -259,6 +279,8 @@ export class VoiceEngine {
     this.speaking = false;
     this.voiceFrames = 0;
     this.silenceCount = 0;
+    this.preroll = [];
+    this.prerollActive = false;
     setMicLevel(0);
     setStatus("idle");
   }
@@ -266,13 +288,18 @@ export class VoiceEngine {
   private onFrame(input: Float32Array) {
     if (!this.running) return;
     if (this.muted) {
-      // While Luczor speaks: don't segment, but watch for barge-in.
+      // While Luczor speaks: don't segment, but watch for barge-in and keep a
+      // short preroll buffer so an interrupt doesn't swallow the first words.
       if (this.barge) {
         let sum = 0;
         for (let i = 0; i < input.length; i++) sum += input[i]! * input[i]!;
         const rms = Math.sqrt(sum / input.length);
+        this.preroll.push(new Float32Array(input));
+        const cap = this.prerollActive ? PREROLL_MAX_FRAMES : PREROLL_FRAMES;
+        while (this.preroll.length > cap) this.preroll.shift();
         if (this.barge.push(rms)) {
           this.barge.reset();
+          this.prerollActive = true;
           this.opts?.onInterrupt?.();
         }
       }

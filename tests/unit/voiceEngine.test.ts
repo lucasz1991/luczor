@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { findWakeWord } from "@/services/voice/voiceEngine";
+import { findWakeWord, VoiceEngine } from "@/services/voice/voiceEngine";
+import { BargeInDetector } from "@/services/voice/bargeIn";
 import { cleanSttTranscript, isSttPlaceholderTranscript } from "@/services/voice/transcript";
 import { encodeWavPCM16, resampleMono, STT_SAMPLE_RATE } from "@/services/voice/wav";
 
@@ -38,6 +39,64 @@ describe("STT placeholder filtering", () => {
   it("preserves actual commands", () => {
     expect(isSttPlaceholderTranscript("Musik starten")).toBe(false);
     expect(cleanSttTranscript("Musik starten")).toBe("Musik starten");
+  });
+});
+
+describe("TTS preroll after barge-in (SOLL §5–§7)", () => {
+  const frame = (value: number) => new Float32Array(4096).fill(value);
+
+  function mutedEngine(detector: BargeInDetector, onInterrupt: () => void) {
+    const engine = new VoiceEngine() as any;
+    engine.opts = {
+      mode: "continuous",
+      transcribe: async () => "",
+      onCommand: () => {},
+      bargeIn: true,
+      onInterrupt,
+    };
+    engine.running = true;
+    engine.muted = true;
+    engine.barge = detector;
+    return engine;
+  }
+
+  it("seeds the next segment with the speech captured during TTS", () => {
+    let interrupted = 0;
+    const engine = mutedEngine(new BargeInDetector(0.022, 3), () => interrupted++);
+
+    for (let i = 0; i < 4; i++) engine.onFrame(frame(0.5)); // loud speech over TTS
+    expect(interrupted).toBe(1);
+    expect(engine.prerollActive).toBe(true);
+    expect(engine.preroll.length).toBe(4);
+
+    engine.setMuted(false);
+    expect(engine.speaking).toBe(true); // segment seeded, VAD continues it
+    expect(engine.segment.length).toBe(4);
+    expect(engine.preroll.length).toBe(0);
+    expect(engine.prerollActive).toBe(false);
+  });
+
+  it("keeps only the rolling window without an interrupt and discards it on unmute", () => {
+    const engine = mutedEngine(new BargeInDetector(0.9, 3), () => {});
+
+    for (let i = 0; i < 10; i++) engine.onFrame(frame(0.5)); // below threshold -> no interrupt
+    expect(engine.preroll.length).toBe(6); // ~0.5s rolling cap
+
+    engine.setMuted(false);
+    expect(engine.speaking).toBe(false); // no barge-in -> nothing seeded
+    expect(engine.segment.length).toBe(0);
+    expect(engine.preroll.length).toBe(0);
+  });
+
+  it("drops the buffer when a new TTS playback starts", () => {
+    const engine = mutedEngine(new BargeInDetector(0.022, 3), () => {});
+    for (let i = 0; i < 4; i++) engine.onFrame(frame(0.5));
+    expect(engine.prerollActive).toBe(true);
+
+    engine.muted = false; // simulate unmuted gap without setMuted bookkeeping
+    engine.setMuted(true); // next TTS starts -> fresh window
+    expect(engine.preroll.length).toBe(0);
+    expect(engine.prerollActive).toBe(false);
   });
 });
 
