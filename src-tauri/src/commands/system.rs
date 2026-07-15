@@ -83,15 +83,19 @@ pub async fn list_windows() -> Result<Vec<WindowInfo>, String> {
     let windows = xcap::Window::all().map_err(|e| format!("Window::all failed: {e}"))?;
     let mut out = Vec::new();
     for w in windows {
-        let title = w.title().to_string();
+        let title = w.title().map_err(|e| format!("Window::title failed: {e}"))?;
         if title.trim().is_empty() {
             continue;
         }
         out.push(WindowInfo {
             title,
-            app_name: w.app_name().to_string(),
-            width: w.width(),
-            height: w.height(),
+            app_name: w
+                .app_name()
+                .map_err(|e| format!("Window::app_name failed: {e}"))?,
+            width: w.width().map_err(|e| format!("Window::width failed: {e}"))?,
+            height: w
+                .height()
+                .map_err(|e| format!("Window::height failed: {e}"))?,
         });
     }
     Ok(out)
