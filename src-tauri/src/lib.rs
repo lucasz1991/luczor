@@ -6,6 +6,7 @@ use tauri::Manager;
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_prevent_default::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
@@ -50,6 +51,7 @@ pub fn run() {
             commands::local_tasks::wf_file_read,
             commands::local_tasks::wf_file_write,
             commands::local_tasks::wf_run_script,
+            commands::notifications::show_native_notification,
             commands::browser::browser_open,
             commands::browser::browser_navigate,
             commands::browser::browser_close,
@@ -57,6 +59,15 @@ pub fn run() {
             commands::browser::browser_read,
             commands::browser::browser_report,
         ])
+        .on_window_event(|window, event| {
+            #[cfg(desktop)]
+            if window.label() == "main" {
+                if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -2,6 +2,11 @@ import Pusher from "pusher-js";
 import { invoke } from "@tauri-apps/api/core";
 import { LuczorApi, getApiConfig, type DeviceJob } from "@/services/api/luczorApi";
 import { runAgentCli } from "@/services/agents";
+import {
+  catchUpPushNotifications,
+  handleRealtimeNotification,
+  REALTIME_NOTIFICATION_EVENT,
+} from "@/services/notifications";
 import { isWorkflowTaskBundle, runWorkflowTask, type WorkflowTaskPrimitives } from "@/services/workflowTaskRunner";
 
 let stop: (() => void) | null = null;
@@ -12,8 +17,7 @@ export async function startDeviceJobChannel(): Promise<() => void> {
   const config = await getApiConfig();
   if (!config.deviceKey) throw new Error("Ein Device-Key ist für den Gerätekanal erforderlich.");
   const registration = await LuczorApi.registerDevice(config.clientId, deviceName());
-  const bootstrap = await LuczorApi.bootstrap();
-  const realtime = bootstrap.realtime;
+  const realtime = (await LuczorApi.realtimeConfig()).data;
   if (!realtime?.key) throw new Error("Der Reverb-Gerätekanal ist auf dem Server nicht konfiguriert.");
 
   const endpoint = new URL(config.baseUrl);
@@ -40,11 +44,31 @@ export async function startDeviceJobChannel(): Promise<() => void> {
     },
   });
   const channel = pusher.subscribe(channelName);
+
+  const syncNotifications = () => {
+    void catchUpPushNotifications().catch(error =>
+      console.warn("[notifications] catch-up failed", error)
+    );
+  };
+  const syncWhenVisible = () => {
+    if (document.visibilityState === "visible") syncNotifications();
+  };
   channel.bind("device.job.created", (job: DeviceJob) => void processJob(config.clientId, job));
+  channel.bind(REALTIME_NOTIFICATION_EVENT, (payload: unknown) => {
+    void handleRealtimeNotification(payload).finally(syncNotifications);
+  });
+  pusher.connection.bind("connected", syncNotifications);
+  window.addEventListener("online", syncNotifications);
+  document.addEventListener("visibilitychange", syncWhenVisible);
+
+  syncNotifications();
   void pullPending(config.clientId);
   const timer = window.setInterval(() => void pullPending(config.clientId), 20_000);
   stop = () => {
     window.clearInterval(timer);
+    pusher.connection.unbind("connected", syncNotifications);
+    window.removeEventListener("online", syncNotifications);
+    document.removeEventListener("visibilitychange", syncWhenVisible);
     pusher.unsubscribe(channelName);
     pusher.disconnect();
     stop = null;

@@ -3,21 +3,35 @@
 import { computed, onBeforeUnmount, onMounted, reactive, watch } from "vue";
 import { Store } from "@tauri-apps/plugin-store";
 import { testConnection, pushAllToServer, pullServerDefaults } from "@/services/api/sync";
-import { getApiConfig, DEFAULT_BASE_URL } from "@/services/api/luczorApi";
+import {
+  APP_NOTIFICATION_CATEGORIES,
+  getApiConfig,
+  DEFAULT_BASE_URL,
+  type AppNotificationCategory,
+  type NotificationCategoryPreferences,
+} from "@/services/api/luczorApi";
 import { loadAppearance, ACCENT_NAMES, type HudPosition } from "@/services/appearance";
+import {
+  getPushNotificationPreferences,
+  hasNativeNotificationPermission,
+  setPushNotificationPreferences,
+} from "@/services/notifications";
 import {
   AUTO_EXECUTE_MUTATING_TOOLS_KEY,
   DEFAULT_EXECUTION_POLICY,
 } from "@/services/executionPolicy";
 import type { VoiceMode } from "@/services/voice/localVoice";
 
-const props = defineProps<{ open: boolean }>();
+type SettingsTab = "server" | "notifications" | "execution" | "voice" | "chat" | "appearance" | "privacy";
+
+const props = withDefaults(defineProps<{ open: boolean; initialTab?: SettingsTab }>(), {
+  initialTab: "server",
+});
 const emit = defineEmits<{ (e: "update:open", v: boolean): void }>();
 
 /* ---------------------------
  * Store / State
  * --------------------------- */
-type SettingsTab = "server" | "execution" | "voice" | "chat" | "appearance" | "privacy";
 type ChatAutoSpeechMode = "off" | "assistant_only" | "all";
 
 type AppSettings = {
@@ -69,7 +83,7 @@ const DEFAULTS: AppSettings = {
   voice_wake_word: "luczor",
   voice_local_stt_language: "de",
 
-  ui_accent: "cyan",
+  ui_accent: "violet",
   ui_hud_visible: true,
   ui_hud_position: "br",
   ui_reduce_motion: false,
@@ -96,6 +110,29 @@ const ui = reactive({
   clientId: "",
   serverBusy: false,
   serverResult: null as { ok: boolean; message: string } | null,
+});
+
+const notificationCategoryLabels: Record<AppNotificationCategory, { title: string; desc: string }> = {
+  general: { title: "Allgemein", desc: "Hinweise und wichtige Neuigkeiten" },
+  agent: { title: "Agenten", desc: "Ergebnisse und Rückfragen laufender Agenten" },
+  workflow: { title: "Workflows", desc: "Status und Abschluss automatisierter Abläufe" },
+  device: { title: "Gerät", desc: "Desktop-Aufgaben und Geräteverbindung" },
+  security: { title: "Sicherheit", desc: "Freigaben und sicherheitskritische Ereignisse" },
+};
+
+const notificationUi = reactive({
+  loaded: false,
+  busy: false,
+  enabled: false,
+  permission: "unknown" as "unknown" | "granted" | "missing",
+  categories: {
+    general: true,
+    agent: true,
+    workflow: true,
+    device: true,
+    security: true,
+  } as NotificationCategoryPreferences,
+  message: null as { ok: boolean; text: string } | null,
 });
 
 const settings = reactive<AppSettings>({ ...DEFAULTS });
@@ -312,6 +349,76 @@ async function syncNow() {
   }
 }
 
+async function loadNotificationSettings(force = false) {
+  if (notificationUi.loaded && !force) return;
+  notificationUi.busy = true;
+  notificationUi.message = null;
+  try {
+    notificationUi.permission = (await hasNativeNotificationPermission()) ? "granted" : "missing";
+    const preferences = await getPushNotificationPreferences();
+    notificationUi.enabled = preferences.enabled;
+    Object.assign(notificationUi.categories, preferences.categories);
+    notificationUi.loaded = true;
+  } catch (error: any) {
+    notificationUi.message = {
+      ok: false,
+      text: error?.message ?? "Benachrichtigungseinstellungen konnten nicht geladen werden.",
+    };
+  } finally {
+    notificationUi.busy = false;
+  }
+}
+
+async function togglePushNotifications() {
+  if (notificationUi.busy) return;
+  notificationUi.busy = true;
+  notificationUi.message = null;
+  const nextEnabled = !notificationUi.enabled;
+  try {
+    const preferences = await setPushNotificationPreferences({ enabled: nextEnabled });
+    notificationUi.enabled = preferences.enabled;
+    Object.assign(notificationUi.categories, preferences.categories);
+    notificationUi.permission = (await hasNativeNotificationPermission()) ? "granted" : "missing";
+    notificationUi.loaded = true;
+    notificationUi.message = {
+      ok: true,
+      text: nextEnabled
+        ? "Push-Benachrichtigungen sind auf diesem Gerät aktiv."
+        : "Push-Benachrichtigungen sind auf diesem Gerät pausiert.",
+    };
+  } catch (error: any) {
+    notificationUi.permission = (await hasNativeNotificationPermission()) ? "granted" : "missing";
+    notificationUi.message = {
+      ok: false,
+      text: error?.message ?? "Push-Benachrichtigungen konnten nicht geändert werden.",
+    };
+  } finally {
+    notificationUi.busy = false;
+  }
+}
+
+async function toggleNotificationCategory(category: AppNotificationCategory) {
+  if (notificationUi.busy) return;
+  notificationUi.busy = true;
+  notificationUi.message = null;
+  const nextValue = !notificationUi.categories[category];
+  try {
+    const preferences = await setPushNotificationPreferences({
+      categories: { [category]: nextValue },
+    });
+    Object.assign(notificationUi.categories, preferences.categories);
+    notificationUi.enabled = preferences.enabled;
+    notificationUi.message = { ok: true, text: "Kategorie aktualisiert." };
+  } catch (error: any) {
+    notificationUi.message = {
+      ok: false,
+      text: error?.message ?? "Kategorie konnte nicht geändert werden.",
+    };
+  } finally {
+    notificationUi.busy = false;
+  }
+}
+
 function onKeydown(e: KeyboardEvent) {
   if (!props.open) return;
   if (e.key === "Escape") closeModal();
@@ -324,7 +431,9 @@ watch(
       document.body.style.overflow = "hidden";
       ui.saved = false;
       ui.error = null;
+      ui.tab = props.initialTab;
       await ensureStoreLoaded();
+      if (ui.tab === "notifications") await loadNotificationSettings(true);
     } else {
       document.body.style.overflow = "";
       ui.saved = false;
@@ -350,6 +459,7 @@ const tabs: Array<{
   icon: string;
 }> = [
   { id: "server", title: "Server", desc: "Laravel Sync API", icon: "server" },
+  { id: "notifications", title: "Benachrichtigungen", desc: "Native Pushs", icon: "bell" },
   { id: "execution", title: "Ausführung", desc: "Freigaben & Sicherheit", icon: "shield" },
   { id: "voice", title: "Voice", desc: "Lokal · Wake-Word", icon: "mic" },
   { id: "chat", title: "Chat", desc: "Auto Speech", icon: "chat" },
@@ -361,6 +471,7 @@ function selectTab(id: SettingsTab) {
   ui.tab = id;
   ui.error = null;
   ui.saved = false;
+  if (id === "notifications") void loadNotificationSettings();
 }
 
 function accentColor(name: string) {
@@ -383,6 +494,8 @@ function iconPath(kind: string) {
       return "M4 5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM4 16a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM8 6.5h.01M8 17.5h.01";
     case "mic":
       return "M9 4a3 3 0 0 1 6 0v6a3 3 0 0 1-6 0zM5 11a7 7 0 0 0 14 0M12 18v3";
+    case "bell":
+      return "M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4";
     case "palette":
       return "M12 22a10 10 0 1 0-10-10 3 3 0 0 0 3 3h1a2 2 0 0 1 2 2 3 3 0 0 0 3 3zm5.5-9.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0z";
     case "shield":
@@ -395,9 +508,9 @@ function iconPath(kind: string) {
 <template>
   <teleport to="body">
     <div v-if="open" class="lz-root">
-      <button type="button" class="lz-backdrop" aria-label="Close" @click="closeModal" />
+      <button type="button" class="lz-backdrop" aria-label="Einstellungen schließen" @click="closeModal" />
 
-      <div class="lz-modal" role="dialog" aria-modal="true">
+      <div class="lz-modal" role="dialog" aria-modal="true" aria-label="Luczor Einstellungen">
         <!-- Header -->
         <div class="lz-head">
           <div class="lz-head__brand">
@@ -422,7 +535,7 @@ function iconPath(kind: string) {
 
         <div class="lz-body">
           <!-- Sidebar -->
-          <aside class="lz-nav">
+          <aside class="lz-nav" role="tablist" aria-label="Einstellungsbereiche">
             <div class="tac-label lz-nav__label">Bereiche</div>
             <button
               v-for="t in tabs"
@@ -430,6 +543,9 @@ function iconPath(kind: string) {
               type="button"
               class="lz-tab"
               :class="{ 'is-active': ui.tab === t.id }"
+              role="tab"
+              :aria-selected="ui.tab === t.id"
+              :aria-current="ui.tab === t.id ? 'page' : undefined"
               @click="selectTab(t.id)"
             >
               <span class="lz-tab__icon">
@@ -446,7 +562,7 @@ function iconPath(kind: string) {
           </aside>
 
           <!-- Main -->
-          <section class="lz-main">
+          <section class="lz-main" role="tabpanel">
             <div class="lz-scroll">
               <!-- SERVER -->
               <div v-if="ui.tab === 'server'" class="lz-section">
@@ -521,6 +637,98 @@ function iconPath(kind: string) {
                     <span class="lz-rowlabel">Antworten automatisch merken</span>
                     <button type="button" class="lz-switch" :class="{ 'is-on': settings.memory_auto_remember }" @click="settings.memory_auto_remember = !settings.memory_auto_remember"><span /></button>
                   </div>
+                </div>
+              </div>
+
+              <!-- NOTIFICATIONS -->
+              <div v-else-if="ui.tab === 'notifications'" class="lz-section">
+                <div class="lz-section__head">
+                  <h3>Push-Benachrichtigungen</h3>
+                  <p>Native Desktop-Hinweise über den privaten Gerätekanal – auch wenn Luczor im Hintergrund läuft.</p>
+                </div>
+
+                <div class="lz-card lz-notification-hero">
+                  <div class="lz-card__head">
+                    <div>
+                      <div class="lz-card__title">Push auf diesem Gerät</div>
+                      <div class="lz-card__meta">
+                        {{
+                          notificationUi.permission === "granted"
+                            ? "Betriebssystem-Berechtigung erteilt"
+                            : "Betriebssystem-Berechtigung noch nicht erteilt"
+                        }}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      class="lz-switch"
+                      :class="{ 'is-on': notificationUi.enabled }"
+                      role="switch"
+                      :aria-checked="notificationUi.enabled"
+                      aria-label="Push-Benachrichtigungen auf diesem Gerät"
+                      :disabled="notificationUi.busy"
+                      @click="togglePushNotifications"
+                    ><span /></button>
+                  </div>
+
+                  <div class="lz-permission">
+                    <span
+                      class="lz-permission__badge"
+                      :class="notificationUi.permission === 'granted' ? 'is-ok' : 'is-waiting'"
+                    >
+                      <i />
+                      {{ notificationUi.permission === "granted" ? "OS-Zugriff aktiv" : "Freigabe erforderlich" }}
+                    </span>
+                    <span>Die Betriebssystemfreigabe wird erst beim bewussten Aktivieren geprüft.</span>
+                  </div>
+
+                  <p
+                    v-if="notificationUi.message"
+                    class="lz-result"
+                    :class="notificationUi.message.ok ? 'is-ok' : 'is-fail'"
+                    role="status"
+                  >
+                    {{ notificationUi.message.text }}
+                  </p>
+                </div>
+
+                <div class="lz-card">
+                  <div class="lz-card__title">Kategorien</div>
+                  <p class="lz-hint">
+                    Wähle, welche Ereignisse als native Hinweise zugestellt werden. Diese Kategorien gelten
+                    für alle verbundenen Geräte; der Hauptschalter oben gilt nur für diese Installation.
+                  </p>
+                  <div class="lz-notification-list">
+                    <div
+                      v-for="category in APP_NOTIFICATION_CATEGORIES"
+                      :key="category"
+                      class="lz-notification-row"
+                    >
+                      <div>
+                        <span class="lz-rowlabel">{{ notificationCategoryLabels[category].title }}</span>
+                        <span class="lz-card__meta">{{ notificationCategoryLabels[category].desc }}</span>
+                      </div>
+                      <button
+                        type="button"
+                        class="lz-switch"
+                        :class="{ 'is-on': notificationUi.categories[category] }"
+                        role="switch"
+                        :aria-checked="notificationUi.categories[category]"
+                        :aria-label="`${notificationCategoryLabels[category].title} Benachrichtigungen`"
+                        :disabled="notificationUi.busy"
+                        @click="toggleNotificationCategory(category)"
+                      ><span /></button>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="lz-callout">
+                  <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+                       stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                    <path d="M9 12l2 2 4-5" />
+                  </svg>
+                  <span>Die Zustellung nutzt denselben authentifizierten Reverb-Kanal wie Geräteaufgaben. Es werden keine Browser-Service-Worker oder VAPID-Schlüssel benötigt.</span>
                 </div>
               </div>
 
@@ -955,5 +1163,424 @@ select.lz-input option { background: var(--bg-raised); color: var(--text-primary
   .lz-body { grid-template-columns: 1fr; }
   .lz-nav { flex-direction: row; overflow-x: auto; border-right: none; border-bottom: 1px solid var(--border-hair); }
   .lz-grid2 { grid-template-columns: 1fr; }
+}
+
+/* Vengeance settings workspace */
+.lz-root {
+  padding: 12px;
+}
+
+.lz-backdrop {
+  background:
+    radial-gradient(circle at 68% 12%, var(--cy-08), transparent 38%),
+    rgba(5, 5, 9, 0.78);
+  backdrop-filter: blur(18px) saturate(115%);
+}
+
+.lz-modal {
+  max-width: 1040px;
+  max-height: calc(100vh - 24px);
+  background:
+    radial-gradient(70% 52% at 74% 0%, var(--cy-04), transparent 70%),
+    rgba(13, 14, 21, 0.96);
+  border-color: rgba(255, 255, 255, 0.085);
+  border-radius: 28px;
+  box-shadow:
+    0 44px 140px rgba(0, 0, 0, 0.62),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(28px) saturate(120%);
+}
+
+.lz-head {
+  min-height: 76px;
+  padding: 13px 18px;
+  background: rgba(255, 255, 255, 0.012);
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+
+.lz-dot {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 13px;
+  background:
+    radial-gradient(circle at 30% 22%, rgba(255, 255, 255, 0.28), transparent 28%),
+    linear-gradient(145deg, var(--cy-bright), var(--cy-deep));
+  box-shadow: var(--glow-sm);
+}
+
+.lz-title {
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 680;
+  letter-spacing: -0.02em;
+  text-transform: none;
+  text-shadow: none;
+}
+
+.lz-sub {
+  color: var(--text-faint);
+  font-size: 9px;
+  letter-spacing: 0.11em;
+}
+
+.lz-x {
+  width: 38px;
+  height: 38px;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.035);
+  border-color: rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+}
+
+.lz-x:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.065);
+  border-color: rgba(255, 255, 255, 0.09);
+  box-shadow: none;
+}
+
+.lz-body {
+  grid-template-columns: 234px minmax(0, 1fr);
+}
+
+.lz-nav {
+  gap: 4px;
+  padding: 18px 12px;
+  background: rgba(7, 8, 12, 0.38);
+  border-right-color: rgba(255, 255, 255, 0.055);
+}
+
+.lz-nav__label {
+  padding: 0 9px 8px;
+  color: var(--text-faint);
+}
+
+.lz-tab {
+  min-height: 54px;
+  padding: 8px 9px;
+  color: var(--text-muted);
+  background: transparent;
+  border-color: transparent;
+  border-radius: 14px;
+}
+
+.lz-tab:hover {
+  background: rgba(255, 255, 255, 0.035);
+  border-color: rgba(255, 255, 255, 0.055);
+  transform: none;
+}
+
+.lz-tab__icon {
+  width: 32px;
+  height: 32px;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.055);
+  border-radius: 10px;
+}
+
+.lz-tab__title {
+  color: var(--text-secondary);
+  font-size: 12.5px;
+}
+
+.lz-tab__desc {
+  color: var(--text-faint);
+  font-size: 9.5px;
+}
+
+.lz-tab.is-active {
+  background: linear-gradient(90deg, var(--cy-12), rgba(255, 255, 255, 0.025));
+  border-color: var(--border-soft);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+.lz-tab.is-active .lz-tab__icon {
+  color: var(--cy-soft);
+  background: var(--cy-12);
+  border-color: var(--border);
+}
+
+.lz-tab.is-active .lz-tab__title {
+  color: var(--text-primary);
+  text-shadow: none;
+}
+
+.lz-scroll {
+  min-height: 0;
+  padding: clamp(18px, 3vw, 30px);
+}
+
+.lz-main {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.lz-section {
+  gap: 14px;
+  max-width: 760px;
+}
+
+.lz-section__head {
+  margin-bottom: 6px;
+}
+
+.lz-section__head h3 {
+  color: #f7f5ff;
+  font-family: var(--font-display);
+  font-size: clamp(21px, 2.8vw, 30px);
+  font-weight: 650;
+  letter-spacing: -0.045em;
+}
+
+.lz-section__head p {
+  max-width: 620px;
+  margin-top: 6px;
+  color: var(--text-muted);
+  line-height: 1.65;
+}
+
+.lz-card {
+  gap: 13px;
+  padding: 18px;
+  background: rgba(255, 255, 255, 0.026);
+  border-color: rgba(255, 255, 255, 0.065);
+  border-radius: 18px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+}
+
+.lz-card__title {
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.lz-card__meta {
+  color: var(--text-faint);
+  font-size: 9.5px;
+}
+
+.lz-input {
+  margin: 0;
+  padding: 11px 12px;
+  background: rgba(5, 6, 10, 0.62);
+  border-color: rgba(255, 255, 255, 0.075);
+  border-radius: 12px;
+}
+
+.lz-btn {
+  height: 38px;
+  border-radius: 12px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  letter-spacing: 0;
+}
+
+.lz-btn--ghost {
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.035);
+  border-color: rgba(255, 255, 255, 0.07);
+}
+
+.lz-btn--primary {
+  color: #fff;
+  background: linear-gradient(145deg, var(--cy-bright), var(--cy-deep));
+  border-color: rgba(255, 255, 255, 0.11);
+  box-shadow: var(--glow-xs);
+}
+
+.lz-switch {
+  width: 44px;
+  height: 25px;
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+.lz-switch span {
+  width: 19px;
+  height: 19px;
+  background: #aaa7b4;
+}
+
+.lz-switch.is-on {
+  background: var(--cy-16);
+  border-color: var(--border);
+  box-shadow: none;
+}
+
+.lz-switch.is-on span {
+  transform: translateX(19px);
+  background: var(--cy-soft);
+  box-shadow: var(--glow-xs);
+}
+
+.lz-switch:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+.lz-notification-hero {
+  position: relative;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 96% 0%, var(--cy-16), transparent 38%),
+    rgba(255, 255, 255, 0.027);
+}
+
+.lz-notification-hero::before {
+  content: "";
+  position: absolute;
+  top: -42px;
+  right: -42px;
+  width: 122px;
+  height: 122px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  box-shadow: inset 0 0 40px var(--cy-08);
+  pointer-events: none;
+}
+
+.lz-permission {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.lz-permission__badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  color: var(--warn-soft);
+  background: var(--warn-wash);
+  border: 1px solid rgba(243, 183, 96, 0.24);
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.lz-permission__badge i {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--warn);
+}
+
+.lz-permission__badge.is-ok {
+  color: var(--success-soft);
+  background: var(--success-wash);
+  border-color: rgba(69, 214, 160, 0.24);
+}
+
+.lz-permission__badge.is-ok i {
+  background: var(--success);
+  box-shadow: var(--glow-success);
+}
+
+.lz-notification-list {
+  display: grid;
+  gap: 0;
+}
+
+.lz-notification-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 57px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.lz-notification-row:first-child {
+  border-top: 0;
+}
+
+.lz-notification-row > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.lz-callout {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 13px 15px;
+  color: var(--text-muted);
+  background: var(--cy-04);
+  border: 1px solid var(--border-soft);
+  border-radius: 15px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.lz-callout svg {
+  flex: none;
+  margin-top: 1px;
+  color: var(--cy-soft);
+}
+
+.lz-result {
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 10px;
+  font-size: 11px;
+}
+
+.lz-foot {
+  padding: 12px 18px;
+  background: rgba(7, 8, 12, 0.52);
+  border-top-color: rgba(255, 255, 255, 0.055);
+}
+
+.lz-tab:focus-visible,
+.lz-switch:focus-visible,
+.lz-btn:focus-visible,
+.lz-x:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+@media (max-width: 760px) {
+  .lz-modal {
+    border-radius: 22px;
+  }
+
+  .lz-body {
+    grid-template-columns: 1fr;
+  }
+
+  .lz-nav {
+    flex-direction: row;
+    padding: 8px 10px;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.055);
+  }
+
+  .lz-nav__label,
+  .lz-tab__desc {
+    display: none;
+  }
+
+  .lz-tab {
+    flex: 0 0 auto;
+    min-height: 44px;
+    padding: 5px 8px;
+  }
+
+  .lz-tab__icon {
+    width: 28px;
+    height: 28px;
+  }
 }
 </style>

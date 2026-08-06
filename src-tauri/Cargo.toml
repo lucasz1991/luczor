@@ -48,6 +48,8 @@ nvml-wrapper = "0.11"
 #   cargo build --features whisper_rs   (or set it in tauri.conf release build)
 whisper-rs = { version = "0.12", optional = true }
 hound = { version = "3", optional = true }
+tauri-plugin-notification = "2.3.3"
+notify-rust = "4.18.0"
 
 [features]
 whisper_rs = ["dep:whisper-rs", "dep:hound"]

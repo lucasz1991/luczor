@@ -25,7 +25,7 @@ const ACCENTS: Record<AccentName, Accent> = {
 export const ACCENT_NAMES = Object.keys(ACCENTS) as AccentName[];
 
 export const appearance = reactive({
-  accent: "cyan" as AccentName,
+  accent: "violet" as AccentName,
   hudVisible: true,
   hudPosition: "br" as HudPosition,
   reduceMotion: false,

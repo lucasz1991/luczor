@@ -11,6 +11,7 @@
 //   GET  /bootstrap                   (settings.read)
 //   GET  /model-profiles              (settings.read)
 //   GET  /runtime-settings            (settings.read)
+//   GET  /realtime/config             (device.connect)
 //   POST /sync/push                   (sync.write)
 //   GET  /sync/pull?since=ISO         (sync.read)
 //   POST /agent-events                (brain.write)
@@ -39,6 +40,13 @@ export type BootstrapResponse = {
   runtime_settings: RuntimeSettings;
   routing: { managed_by: "server"; client_model_selection: false };
   realtime?: { key: string | null; host: string | null; port: number; scheme: string | null };
+};
+
+export type RealtimeConfig = {
+  key: string | null;
+  host: string | null;
+  port: number;
+  scheme: string | null;
 };
 
 export type SyncBatch = {
@@ -82,6 +90,51 @@ export type DeviceJob = {
   payload_hash: string;
   signature: string;
   expires_at: string | null;
+};
+
+export const APP_NOTIFICATION_CATEGORIES = ["general", "agent", "workflow", "device", "security"] as const;
+export type AppNotificationCategory = (typeof APP_NOTIFICATION_CATEGORIES)[number];
+export type NotificationCategoryPreferences = Record<AppNotificationCategory, boolean>;
+export type NotificationPriority = "low" | "normal" | "high";
+
+export type AppNotification = {
+  id: string;
+  sequence: number;
+  category: AppNotificationCategory;
+  title: string;
+  body: string;
+  action_url: string | null;
+  data: Record<string, unknown>;
+  priority: NotificationPriority;
+  created_at: string;
+  expires_at: string | null;
+  read_at: string | null;
+};
+
+export type NotificationPreferences = {
+  enabled: boolean;
+  categories: NotificationCategoryPreferences;
+  effective_categories: NotificationCategoryPreferences;
+};
+
+export type NotificationPreferencesPatch = {
+  enabled?: boolean;
+  categories?: Partial<NotificationCategoryPreferences>;
+};
+
+export type NotificationListOptions = {
+  after?: number;
+  limit?: number;
+  unreadOnly?: boolean;
+};
+
+export type NotificationListResponse = {
+  data: AppNotification[];
+  meta: {
+    next_after: number;
+    has_more: boolean;
+    unread_count: number;
+  };
 };
 
 /* =========================================================
@@ -213,6 +266,7 @@ export const LuczorApi = {
 
   health: () => request<{ status?: string; time?: string }>("/health", { auth: false }),
   bootstrap: (signal?: AbortSignal) => request<BootstrapResponse>("/bootstrap", { signal }),
+  realtimeConfig: () => request<{ data: RealtimeConfig }>("/realtime/config"),
   runtimeSettings: () =>
     request<{ data: RuntimeSettings; routing: { managed_by: "server"; client_model_selection: false } }>("/runtime-settings"),
   voiceManifest: () => request<VoiceManifestResponse>("/voice/manifest"),
@@ -245,6 +299,31 @@ export const LuczorApi = {
     request<{ auth: string }>("/reverb/auth", {
       method: "POST", body: { socket_id: socketId, channel_name: channelName, client_id: clientId },
       headers: { "X-Device-Session": sessionToken },
+    }),
+
+  getNotificationPreferences: (clientId: string) =>
+    request<{ data: NotificationPreferences }>("/notification-preferences", {
+      query: { client_id: clientId },
+    }),
+  updateNotificationPreferences: (clientId: string, patch: NotificationPreferencesPatch) =>
+    request<{ data: NotificationPreferences }>("/notification-preferences", {
+      method: "PUT",
+      body: { client_id: clientId, ...patch },
+    }),
+  listNotifications: (clientId: string, options: NotificationListOptions = {}) =>
+    request<NotificationListResponse>("/notifications", {
+      query: {
+        client_id: clientId,
+        after: String(options.after ?? 0),
+        limit: String(options.limit ?? 50),
+        unread_only: options.unreadOnly ? "1" : "0",
+      },
+    }),
+  markNotificationRead: (id: string, clientId: string) => request<{ data: AppNotification; meta: { unread_count: number } }>(`/notifications/${encodeURIComponent(id)}/read`, { method: "POST", body: { client_id: clientId } }),
+  markAllNotificationsRead: (clientId: string, through?: number) =>
+    request<{ data: { updated: number; read_at: string }; meta: { unread_count: number } }>("/notifications/read-all", {
+      method: "POST",
+      body: { client_id: clientId, ...(through == null ? {} : { through }) },
     }),
 
   syncPush: (batch: SyncBatch) =>

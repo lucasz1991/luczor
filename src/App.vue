@@ -1,8 +1,10 @@
 <!-- App.vue -->
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Settings from "./components/Settings.vue";
 import JarvisHud from "./components/JarvisHud.vue";
+import AmbientBackdrop from "./components/vengeance/AmbientBackdrop.vue";
+import SpotlightSurface from "./components/vengeance/SpotlightSurface.vue";
 import { type LuczorMode, type WireMessage } from "./services/openrouter.service";
 import { runAgent, buildSystemPreamble, shouldRequireToolCall } from "@/services/agent";
 import { parseEnvelope } from "@/services/envelope";
@@ -19,6 +21,10 @@ import { LuczorApi } from "@/services/api/luczorApi";
 import { refreshStatus } from "@/services/status";
 import { appearance, loadAppearance } from "@/services/appearance";
 import { startDeviceJobChannel } from "@/services/deviceJobs";
+import {
+  NATIVE_NOTIFICATION_ACTION_EVENT,
+  startNativeNotificationActionListener,
+} from "@/services/notifications";
 import { installDebugCapture, startDebugCollector, recordDebugEvent } from "@/services/debug";
 import { buildRecentToolOutcomeContext, toolOutcomePreview } from "@/services/toolOutcomeContext";
 
@@ -71,7 +77,10 @@ function fmtTime(ts: number, seconds = false): string {
 /* -------------------------------------------------
  * Local UI state
  * ------------------------------------------------- */
+type SettingsStartTab = "server" | "notifications";
 const showSettings = ref(false);
+const settingsStartTab = ref<SettingsStartTab>("server");
+const showSystemPanel = ref(false);
 const input = ref("");
 const sending = ref(false);
 // How the pending composer content was produced; consumed + reset by send().
@@ -80,13 +89,32 @@ const mode = ref<LuczorMode>("observe");
 const allowUnrestricted = ref(false);
 const ACTIVE_MODE_KEY = "active_mode";
 
+function openSettings(tab: SettingsStartTab = "server") {
+  settingsStartTab.value = tab;
+  showSettings.value = true;
+}
+
 const abortController = ref<AbortController | null>(null);
 let cancelCurrent: null | (() => Promise<void>) = null;
+let stopDeviceJobs: (() => void) | null = null;
+let stopNativeNotificationActions: (() => Promise<void>) | null = null;
+let statusHeartbeat: number | null = null;
+
+function openNotificationCenter() {
+  openSettings("notifications");
+}
 
 /* -------------------------------------------------
  * Init
  * ------------------------------------------------- */
 onMounted(async () => {
+  window.addEventListener(NATIVE_NOTIFICATION_ACTION_EVENT, openNotificationCenter);
+  void startNativeNotificationActionListener()
+    .then(stopListener => {
+      stopNativeNotificationActions = stopListener;
+    })
+    .catch(error => console.warn("[notifications] native action listener unavailable", error));
+
   installDebugCapture();
   void startDebugCollector();
   preloadSfx();
@@ -149,9 +177,20 @@ onMounted(async () => {
 
   // Sync/memory status heartbeat.
   void refreshStatus();
-  window.setInterval(() => void refreshStatus(), 30000);
+  statusHeartbeat = window.setInterval(() => void refreshStatus(), 30000);
 
-  void startDeviceJobChannel().catch((error) => console.warn("[device-jobs] unavailable", error));
+  void startDeviceJobChannel()
+    .then(stopChannel => {
+      stopDeviceJobs = stopChannel;
+    })
+    .catch((error) => console.warn("[device-jobs] unavailable", error));
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener(NATIVE_NOTIFICATION_ACTION_EVENT, openNotificationCenter);
+  if (statusHeartbeat !== null) window.clearInterval(statusHeartbeat);
+  stopDeviceJobs?.();
+  void stopNativeNotificationActions?.();
 });
 
 /* -------------------------------------------------
@@ -892,23 +931,36 @@ watch(
 </script>
 
 <template>
-  <Settings :open="showSettings" @update:open="showSettings = $event" />
+  <Settings
+    :open="showSettings"
+    :initial-tab="settingsStartTab"
+    @update:open="showSettings = $event"
+  />
+  <AmbientBackdrop />
 
   <div class="app-shell">
-    <!-- ============ SIDEBAR ============ -->
-    <aside class="sidebar">
-      <div class="brand">
+    <aside class="sidebar" aria-label="Hauptnavigation">
+      <div class="brand" :title="appearance.assistantName">
         <span class="brand__dot" />
-        <span>{{ appearance.assistantName.toUpperCase() }}</span>
+        <span class="brand__word">{{ appearance.assistantName.slice(0, 1).toUpperCase() }}</span>
       </div>
-      <div class="brand__project">Aktiv · {{ activeProject?.name }}</div>
+      <div class="brand__project">Workspace</div>
 
       <div class="side-actions">
-        <button class="btn-ghost" type="button" @click="newChat" title="Neuer Chat">+ Chat</button>
-        <button class="btn-ghost" type="button" @click="addProject" title="Neues Projekt">+ Projekt</button>
+        <button class="btn-ghost" type="button" @click="newChat" title="Neuer Chat">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          <span class="dock-label">Neuer Chat</span>
+        </button>
+        <button class="btn-ghost" type="button" @click="addProject" title="Neues Projekt">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19V7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z" />
+            <path d="M12 11v6M9 14h6" />
+          </svg>
+          <span class="dock-label">Neues Projekt</span>
+        </button>
       </div>
-
-      <JarvisHud embedded />
 
       <div class="side-listhead">
         <span class="tac-label">Projekte</span>
@@ -923,30 +975,52 @@ watch(
           class="project-item"
           :class="{ 'is-active': p.id === activeProjectId }"
           @click="openProject(p.id)"
+          :title="p.name"
+          :aria-label="`Projekt ${p.name}`"
+          :aria-current="p.id === activeProjectId ? 'page' : undefined"
         >
-          <span class="project-item__name">{{ p.name }}</span>
-          <span class="project-item__id">{{ p.id }}</span>
+          <span class="project-item__glyph">{{ p.name.slice(0, 2).toUpperCase() }}</span>
+          <span class="project-item__copy">
+            <span class="project-item__name">{{ p.name }}</span>
+            <span class="project-item__id">{{ p.id }}</span>
+          </span>
         </button>
       </div>
 
       <div class="side-settings">
-        <button class="settings-btn" type="button" @click="showSettings = true">
+        <button
+          class="settings-btn system-panel-toggle"
+          type="button"
+          :aria-expanded="showSystemPanel"
+          aria-controls="system-panel"
+          @click="showSystemPanel = !showSystemPanel"
+          title="Systemstatus und Not-Aus"
+        >
+          <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="4" width="16" height="16" rx="4" />
+            <path d="M9 9h6v6H9zM9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3" />
+          </svg>
+          <span class="dock-label">Systemstatus</span>
+        </button>
+        <button class="settings-btn" type="button" @click="openSettings('server')">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
             <path d="M10 12a2 2 0 1 1 4 0v1" />
             <path d="M9 13h6v4H9z" />
           </svg>
-          Settings
+          <span class="dock-label">Einstellungen</span>
         </button>
       </div>
     </aside>
 
-    <!-- ============ MAIN ============ -->
     <main class="main-col">
-      <!-- Header -->
       <div class="header">
-        <div class="header__title">{{ activeProject?.name }}</div>
+        <div class="header__identity">
+          <span class="header__eyebrow">Aktiver Raum</span>
+          <div class="header__title">{{ activeProject?.name }}</div>
+        </div>
 
         <button
           type="button"
@@ -954,6 +1028,7 @@ watch(
           :class="`is-${mode}`"
           @click="toggleMode"
           :title="modeTitle"
+          :aria-label="modeTitle"
         >
           <span class="mode-toggle__dot" />
           {{ modeLabel }}
@@ -965,6 +1040,7 @@ watch(
           :class="{ 'is-on': showContext }"
           @click="showContext = !showContext"
           title="Projektziele & Zusammenfassungen"
+          :aria-expanded="showContext"
         >
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -978,6 +1054,7 @@ watch(
           :class="{ 'is-on': showAudit }"
           @click="showAudit = !showAudit"
           title="Tool-Protokoll"
+          :aria-expanded="showAudit"
         >
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -986,7 +1063,21 @@ watch(
           </svg>
         </button>
 
-        <button type="button" class="icon-btn icon-btn--danger" @click="newChat" title="Neuer Chat / Reset">
+        <button
+          type="button"
+          class="icon-btn notification-btn"
+          @click="openSettings('notifications')"
+          title="Push-Benachrichtigungen"
+          aria-label="Push-Benachrichtigungen"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
+            <path d="M10 21h4" />
+          </svg>
+        </button>
+
+        <button type="button" class="icon-btn icon-btn--danger" @click="newChat" title="Neuer Chat / Reset" aria-label="Neuer Chat / Reset">
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="3 6 5 6 21 6" />
@@ -1065,9 +1156,10 @@ watch(
               class="speak-btn"
               @click.stop="speakMessage(m)"
               title="Vorlesen"
+              aria-label="Nachricht vorlesen"
             >🔊</button>
-            <button v-if="m.role === 'assistant' && (m as any)?.meta?.llmRequestId" type="button" class="feedback-btn" :class="{ 'is-on': (m as any)?.meta?.userFeedback === 1 }" @click.stop="rateAssistantMessage(m, 1)" title="Hilfreich">↑</button>
-            <button v-if="m.role === 'assistant' && (m as any)?.meta?.llmRequestId" type="button" class="feedback-btn" :class="{ 'is-on is-negative': (m as any)?.meta?.userFeedback === -1 }" @click.stop="rateAssistantMessage(m, -1)" title="Nicht hilfreich">↓</button>
+            <button v-if="m.role === 'assistant' && (m as any)?.meta?.llmRequestId" type="button" class="feedback-btn" :class="{ 'is-on': (m as any)?.meta?.userFeedback === 1 }" @click.stop="rateAssistantMessage(m, 1)" title="Hilfreich" aria-label="Antwort als hilfreich bewerten">↑</button>
+            <button v-if="m.role === 'assistant' && (m as any)?.meta?.llmRequestId" type="button" class="feedback-btn" :class="{ 'is-on is-negative': (m as any)?.meta?.userFeedback === -1 }" @click.stop="rateAssistantMessage(m, -1)" title="Nicht hilfreich" aria-label="Antwort als nicht hilfreich bewerten">↓</button>
           </div>
 
           <div class="bubble">
@@ -1200,6 +1292,27 @@ watch(
         </button>
       </div>
     </main>
+
+    <SpotlightSurface id="system-panel" class="system-panel" :class="{ 'is-open': showSystemPanel }">
+      <div class="system-panel__head">
+        <div>
+          <span class="system-panel__eyebrow">Systemkern</span>
+          <strong>Live-Status</strong>
+        </div>
+        <span class="system-panel__state"><i /> Bereit</span>
+        <button
+          type="button"
+          class="system-panel__close"
+          aria-label="Systembereich schließen"
+          @click="showSystemPanel = false"
+        >×</button>
+      </div>
+      <JarvisHud embedded />
+      <div class="system-panel__foot">
+        <span>{{ activeProject?.name }}</span>
+        <span>Privater Gerätekanal</span>
+      </div>
+    </SpotlightSurface>
   </div>
 </template>
 
@@ -1771,5 +1884,702 @@ watch(
 @media (max-width: 900px) {
   .info-strip { grid-template-columns: 1fr; }
   .msg { max-width: 92%; }
+}
+
+/* ============ VENGEANCE WORKSPACE ============ */
+.sidebar {
+  position: relative;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  min-width: 0;
+  padding: 11px 8px;
+  overflow: visible;
+  background: linear-gradient(180deg, rgba(30, 30, 43, 0.82), rgba(14, 15, 22, 0.76));
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 24px;
+  box-shadow: var(--shadow-panel);
+  backdrop-filter: blur(24px) saturate(125%);
+}
+
+.sidebar::before {
+  display: none;
+}
+
+.brand {
+  display: grid;
+  place-items: center;
+  width: 50px;
+  height: 50px;
+  padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 17px;
+  background:
+    radial-gradient(circle at 28% 18%, rgba(255, 255, 255, 0.16), transparent 34%),
+    linear-gradient(145deg, var(--cy-bright), var(--cy-deep));
+  box-shadow: 0 13px 30px rgba(0, 0, 0, 0.3), var(--glow-sm);
+}
+
+.brand__dot {
+  position: absolute;
+  width: 6px;
+  height: 6px;
+  margin: 0;
+  transform: translate(17px, -17px);
+  border: 1px solid rgba(255, 255, 255, 0.72);
+  border-radius: 999px;
+  background: #fff;
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.66);
+  animation: none;
+}
+
+.brand__word {
+  color: #fff;
+  font-family: var(--font-display);
+  font-size: 21px;
+  font-weight: 720;
+  letter-spacing: -0.06em;
+}
+
+.brand__project {
+  margin-top: 8px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.side-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  margin-top: 20px;
+  padding: 0;
+}
+
+.btn-ghost,
+.settings-btn {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  margin-inline: auto;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 15px;
+  box-shadow: none;
+  transition:
+    color var(--dur) var(--ease),
+    background var(--dur) var(--ease),
+    border-color var(--dur) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.btn-ghost:hover,
+.settings-btn:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.055);
+  border-color: rgba(255, 255, 255, 0.075);
+  box-shadow: none;
+  transform: translateY(-1px);
+}
+
+.btn-ghost:active,
+.settings-btn:active {
+  transform: scale(0.96);
+}
+
+.dock-label,
+.project-item__copy {
+  position: absolute;
+  left: 60px;
+  top: 50%;
+  z-index: 50;
+  min-width: max-content;
+  padding: 8px 11px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-7px, -50%);
+  color: var(--text-primary);
+  background: rgba(18, 18, 27, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.38);
+  font-size: 12px;
+  transition: opacity var(--dur-fast), transform var(--dur-fast) var(--ease);
+}
+
+.btn-ghost:hover .dock-label,
+.settings-btn:hover .dock-label,
+.btn-ghost:focus-visible .dock-label,
+.settings-btn:focus-visible .dock-label,
+.project-item:hover .project-item__copy,
+.project-item:focus-visible .project-item__copy {
+  opacity: 1;
+  transform: translate(0, -50%);
+}
+
+.side-listhead {
+  justify-content: center;
+  width: 42px;
+  margin: 14px 0 7px;
+  padding-top: 13px;
+  border-top: 1px solid rgba(255, 255, 255, 0.065);
+}
+
+.side-listhead .tac-label {
+  display: none;
+}
+
+.side-count {
+  display: grid;
+  place-items: center;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  color: var(--text-faint);
+  background: rgba(255, 255, 255, 0.04);
+  border: 0;
+  border-radius: 999px;
+  font-size: 9px;
+}
+
+.project-list {
+  flex: 1;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: visible auto;
+  gap: 6px;
+}
+
+.project-item {
+  position: relative;
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 48px;
+  height: 48px;
+  margin-inline: auto;
+  padding: 0;
+  overflow: visible;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 15px;
+}
+
+.project-item::before {
+  left: -8px;
+  top: 50%;
+  width: 3px;
+  height: 0;
+  transform: translateY(-50%);
+  background: var(--cy-bright);
+  border-radius: 999px;
+  box-shadow: var(--glow-xs);
+}
+
+.project-item:hover {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.07);
+  transform: none;
+}
+
+.project-item.is-active {
+  color: #fff;
+  background: linear-gradient(145deg, var(--cy-16), rgba(255, 255, 255, 0.05));
+  border-color: var(--border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), var(--glow-xs);
+}
+
+.project-item.is-active::before {
+  height: 22px;
+}
+
+.project-item__glyph {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.project-item__copy {
+  display: none;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+}
+
+.project-item__name {
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.project-item__id {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 9px;
+}
+
+.side-settings {
+  display: grid;
+  gap: 5px;
+  width: 100%;
+  padding-top: 9px;
+  border-top: 1px solid rgba(255, 255, 255, 0.065);
+}
+
+.system-panel-toggle {
+  display: none;
+}
+
+.main-col {
+  position: relative;
+  min-width: 0;
+  background:
+    radial-gradient(80% 46% at 50% 0%, var(--cy-04), transparent 75%),
+    rgba(12, 13, 19, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 28px;
+  box-shadow: var(--shadow-panel);
+  backdrop-filter: blur(22px) saturate(112%);
+}
+
+.header {
+  min-height: 72px;
+  padding: 11px 15px 11px 22px;
+  gap: 7px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.header__identity {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  margin-right: auto;
+}
+
+.header__eyebrow {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  font-weight: 650;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.header__title {
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 680;
+  letter-spacing: -0.025em;
+  text-shadow: none;
+}
+
+.mode-toggle {
+  height: 38px;
+  padding: 0 13px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.035);
+  border-color: rgba(255, 255, 255, 0.07);
+  border-radius: 13px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  text-transform: none;
+  letter-spacing: 0.01em;
+}
+
+.mode-toggle.is-observe {
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.035);
+  border-color: rgba(255, 255, 255, 0.07);
+}
+
+.mode-toggle.is-act {
+  color: var(--success-soft);
+  background: var(--success-wash);
+  border-color: rgba(69, 214, 160, 0.28);
+  box-shadow: none;
+}
+
+.mode-toggle.is-unrestricted {
+  color: var(--danger-soft);
+  background: var(--danger-wash);
+  border-color: rgba(251, 113, 133, 0.32);
+  box-shadow: none;
+}
+
+.mode-toggle__dot {
+  width: 7px;
+  height: 7px;
+  box-shadow: none;
+}
+
+.icon-btn {
+  width: 38px;
+  height: 38px;
+  color: var(--text-muted);
+  background: transparent;
+  border-color: transparent;
+  border-radius: 12px;
+}
+
+.icon-btn:hover,
+.icon-btn.is-on {
+  color: var(--text-primary);
+  background: rgba(255, 255, 255, 0.05);
+  border-color: rgba(255, 255, 255, 0.07);
+  box-shadow: none;
+  transform: none;
+}
+
+.notification-btn {
+  position: relative;
+}
+
+.mode-warning {
+  margin: 0;
+  border-radius: 0;
+  border-width: 0 0 1px;
+  animation: none;
+}
+
+.info-strip {
+  padding: 15px 20px;
+  background: rgba(14, 15, 22, 0.92);
+  border-bottom-color: rgba(255, 255, 255, 0.06);
+}
+
+.messages {
+  padding: 34px clamp(18px, 4vw, 52px) 20px;
+}
+
+.thread {
+  width: min(760px, 100%);
+  gap: 30px;
+}
+
+.chat-empty {
+  max-width: 680px;
+  align-self: flex-start;
+  margin: auto 0;
+  padding: clamp(26px, 5vw, 58px) 0;
+  text-align: left;
+}
+
+.chat-empty__orb {
+  width: 78px;
+  height: 78px;
+  margin: 0 0 26px;
+  background:
+    radial-gradient(circle at 35% 30%, #fff 0 2%, var(--cy-soft) 4%, var(--cy) 28%, rgba(88, 62, 180, 0.36) 58%, transparent 72%);
+  box-shadow: var(--glow-lg);
+  animation: none;
+}
+
+.chat-empty__kicker {
+  margin-top: 0;
+  color: var(--cy-soft);
+}
+
+.chat-empty__title {
+  max-width: 570px;
+  margin-top: 12px;
+  color: #f7f5ff;
+  font-family: var(--font-display);
+  font-size: clamp(30px, 4.2vw, 52px);
+  font-weight: 650;
+  line-height: 1.02;
+  letter-spacing: -0.055em;
+}
+
+.chat-empty__text {
+  max-width: 550px;
+  margin-top: 18px;
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1.7;
+}
+
+.msg {
+  animation-duration: 340ms;
+}
+
+.msg--assistant .bubble {
+  padding: 16px 18px;
+  color: #dfdce8;
+  background: rgba(255, 255, 255, 0.026);
+  border-color: rgba(255, 255, 255, 0.065);
+  border-radius: 7px 19px 19px 19px;
+  box-shadow: none;
+}
+
+.msg--user .bubble {
+  color: #fff;
+  background: linear-gradient(145deg, var(--cy-16), rgba(255, 255, 255, 0.045));
+  border-color: var(--border-soft);
+  box-shadow: none;
+}
+
+.msg__meta {
+  color: var(--text-faint);
+}
+
+.msg:focus-within .speak-btn,
+.msg:focus-within .feedback-btn {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.composer {
+  width: min(760px, calc(100% - 36px));
+  margin: 11px auto 18px;
+  padding: 7px 7px 7px 17px;
+  background: rgba(27, 28, 40, 0.86);
+  border-color: rgba(255, 255, 255, 0.09);
+  border-radius: 21px;
+  box-shadow:
+    0 24px 70px rgba(0, 0, 0, 0.35),
+    inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  backdrop-filter: blur(26px);
+}
+
+.composer:focus-within {
+  border-color: var(--border);
+  box-shadow: var(--focus-ring), 0 24px 70px rgba(0, 0, 0, 0.35);
+}
+
+.composer__input {
+  padding-block: 10px;
+}
+
+.mic-btn,
+.send-btn {
+  width: 42px;
+  height: 42px;
+  border-radius: 14px;
+}
+
+.mic-btn {
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.035);
+  border-color: rgba(255, 255, 255, 0.06);
+}
+
+.send-btn {
+  color: #fff;
+  background: linear-gradient(145deg, var(--cy-bright), var(--cy-deep));
+  border-color: rgba(255, 255, 255, 0.12);
+  box-shadow: var(--glow-sm);
+}
+
+.listen-bar,
+.audit,
+.approvals {
+  width: min(760px, calc(100% - 36px));
+}
+
+.system-panel {
+  min-width: 0;
+  padding: 13px;
+  overflow: auto;
+  background: linear-gradient(160deg, rgba(23, 24, 35, 0.82), rgba(11, 12, 18, 0.84));
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 28px;
+  box-shadow: var(--shadow-panel);
+  backdrop-filter: blur(24px) saturate(120%);
+}
+
+.system-panel :deep(.vz-spotlight__content) {
+  display: flex;
+  flex-direction: column;
+}
+
+.system-panel__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 5px 5px 10px;
+}
+
+.system-panel__head > div {
+  display: flex;
+  flex-direction: column;
+}
+
+.system-panel__head strong {
+  color: var(--text-primary);
+  font-family: var(--font-display);
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+}
+
+.system-panel__eyebrow {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.system-panel__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--success-soft);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.06em;
+}
+
+.system-panel__state i {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--success);
+  box-shadow: var(--glow-success);
+}
+
+.system-panel__close {
+  display: none;
+}
+
+.system-panel :deep(.jarvis.embedded) {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+}
+
+.system-panel :deep(.jarvis.embedded .jarvis-body) {
+  height: 100%;
+  padding: 12px 9px 10px;
+  background: rgba(7, 8, 13, 0.3);
+  border-color: rgba(255, 255, 255, 0.055);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.system-panel :deep(.jarvis.embedded .reactor svg) {
+  width: 142px;
+  height: 142px;
+}
+
+.system-panel__foot {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 11px 5px 2px;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+@media (max-width: 1080px) {
+  .system-panel-toggle {
+    display: grid;
+  }
+
+  .system-panel {
+    position: fixed;
+    z-index: 35;
+    top: 9px;
+    right: 9px;
+    bottom: 9px;
+    display: none;
+    width: min(320px, calc(100vw - 96px));
+    box-shadow: 0 30px 100px rgba(0, 0, 0, 0.64);
+  }
+
+  .system-panel.is-open {
+    display: block;
+    animation: panel-enter 280ms var(--ease) both;
+  }
+
+  .system-panel__close {
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    padding: 0;
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.065);
+    border-radius: 10px;
+    font-size: 18px;
+  }
+}
+
+@media (max-width: 1080px) and (max-height: 680px) {
+  .system-panel :deep(.jarvis.embedded .reactor svg) {
+    width: 104px;
+    height: 104px;
+  }
+
+  .system-panel :deep(.jarvis.embedded .wave) {
+    height: 24px;
+    margin-block: 2px 5px;
+  }
+
+  .system-panel :deep(.jarvis.embedded .hardware) {
+    display: none;
+  }
+}
+
+@media (max-width: 700px) {
+  .header {
+    min-height: 64px;
+    padding-inline: 15px 10px;
+  }
+
+  .header__eyebrow {
+    display: none;
+  }
+
+  .header__title {
+    max-width: 150px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .mode-toggle {
+    width: 38px;
+    padding: 0;
+    overflow: hidden;
+    font-size: 0;
+  }
+
+  .mode-toggle__dot {
+    width: 8px;
+    height: 8px;
+  }
+
+  .messages {
+    padding: 22px 18px 14px;
+  }
+
+  .chat-empty__title {
+    font-size: clamp(27px, 8vw, 40px);
+  }
+}
+
+@keyframes panel-enter {
+  from { opacity: 0; transform: translateX(18px) scale(0.98); }
+  to { opacity: 1; transform: none; }
 }
 </style>
