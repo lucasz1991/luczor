@@ -1,4 +1,4 @@
-// src/services/tools/registry.ts
+﻿// src/services/tools/registry.ts
 //
 // Central tool registry for Luczor's agentic loop.
 //
@@ -17,6 +17,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { mutations, state } from "@/state/store";
 import { LuczorApi } from "@/services/api/luczorApi";
 import { detectAgents, runAgentCli, writeBridgeFile, buildBridgeMarkdown, type AgentName } from "@/services/agents";
+import { setPlan, getPlan, planProgress, currentPlanStep } from "@/services/plan";
 import type { ProjectGoal, GoalStatus } from "@/state/types";
 
 /** Last screenshot captured by os_screen_capture, as a data URL (for the UI). */
@@ -201,7 +202,7 @@ const TOOLS: ToolDef[] = [
       const text = (await invoke<string>("read_clipboard")) ?? "";
       const requested = Number(args.max_chars);
       const maxChars = Number.isFinite(requested) ? Math.max(1, Math.min(2000, Math.round(requested))) : 2000;
-      const clipped = text.length > maxChars ? text.slice(0, maxChars) + "…" : text;
+      const clipped = text.length > maxChars ? text.slice(0, maxChars) + "â€¦" : text;
       return { text: clipped, length: text.length };
     },
   },
@@ -391,7 +392,7 @@ const TOOLS: ToolDef[] = [
   },
 
   /* -------------------------------------------------
-   * Projekt-/Chat-/Aufgabenverwaltung (server = System-of-Record, SOLL §8)
+   * Projekt-/Chat-/Aufgabenverwaltung (server = System-of-Record, SOLL Â§8)
    * ------------------------------------------------- */
   {
     name: "project_create",
@@ -563,7 +564,7 @@ const TOOLS: ToolDef[] = [
   },
 
   /* -------------------------------------------------
-   * Externe Coding-Agenten: lokale Claude/Codex-CLI-Orchestrierung (SOLL §8b)
+   * Externe Coding-Agenten: lokale Claude/Codex-CLI-Orchestrierung (SOLL Â§8b)
    * ------------------------------------------------- */
   {
     name: "agent_detect",
@@ -644,6 +645,86 @@ const TOOLS: ToolDef[] = [
       }
       const path = await writeBridgeFile(dir, content);
       return { ok: true, path };
+    },
+  },
+  /* -------------------------------------------------
+   * Planung (Codex-Stil): sichtbare Schritt-Checkliste
+   * ------------------------------------------------- */
+  {
+    name: "plan_update",
+    category: "app",
+    description:
+      "Create or update the visible step plan for the current task. Use it BEFORE starting work that needs 3+ steps, then update it after finishing each step. Exactly one step may be in_progress. Display only - it changes no files, no system state and no project data.",
+    // Display-only: gating this behind an approval dialog would interrupt the
+    // user on every status tick without protecting anything.
+    mutating: false,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        steps: {
+          type: "array",
+          description: "The full plan, always sent complete (not a delta). Max 24 steps.",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              title: { type: "string", description: "Short imperative step title (German)." },
+              status: {
+                type: "string",
+                enum: ["pending", "in_progress", "done", "skipped"],
+                description: "Step status. At most ONE step may be in_progress.",
+              },
+            },
+            required: ["title", "status"],
+          },
+        },
+        note: { type: "string", description: "Optional one-line note about the current state." },
+      },
+      required: ["steps"],
+    },
+    async execute(args, ctx) {
+      const { plan, repairs } = setPlan(ctx.projectId, args.steps, args.note);
+      const progress = planProgress(plan);
+      return {
+        ok: true,
+        steps: plan.steps,
+        progress: `${progress.done}/${progress.total}`,
+        current_step: currentPlanStep(plan)?.title ?? null,
+        // Surfacing repairs lets the model correct itself next round.
+        corrections: repairs,
+      };
+    },
+  },
+
+  {
+    name: "plan_get",
+    category: "app",
+    description: "Read the current step plan for this project, including which step is in progress.",
+    mutating: false,
+    requiresApproval: false,
+    parameters: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        include_done: { type: "boolean", description: "Include finished steps. Defaults to true." },
+      },
+      required: [],
+    },
+    async execute(args, ctx) {
+      const plan = getPlan(ctx.projectId);
+      const progress = planProgress(plan);
+      const steps = args.include_done === false
+        ? plan.steps.filter((step) => step.status !== "done" && step.status !== "skipped")
+        : plan.steps;
+      return {
+        ok: true,
+        steps,
+        note: plan.note,
+        progress: `${progress.done}/${progress.total}`,
+        current_step: currentPlanStep(plan)?.title ?? null,
+      };
     },
   },
 ];

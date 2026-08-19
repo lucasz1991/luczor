@@ -1,10 +1,8 @@
-﻿<!-- App.vue -->
+<!-- App.vue -->
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import Settings from "./components/Settings.vue";
 import JarvisHud from "./components/JarvisHud.vue";
-import RichMessage from "./components/RichMessage.vue";
-import PlanPanel from "./components/PlanPanel.vue";
 import AmbientBackdrop from "./components/vengeance/AmbientBackdrop.vue";
 import SpotlightSurface from "./components/vengeance/SpotlightSurface.vue";
 import { type LuczorMode, type WireMessage } from "./services/openrouter.service";
@@ -29,7 +27,6 @@ import {
 } from "@/services/notifications";
 import { installDebugCapture, startDebugCollector, recordDebugEvent } from "@/services/debug";
 import { buildRecentToolOutcomeContext, toolOutcomePreview } from "@/services/toolOutcomeContext";
-import { buildPlanContext, loadPlans } from "@/services/plan";
 
 import { startHud, setStatus } from "@/state/hud";
 import { state, mutations } from "@/state/store";
@@ -124,7 +121,6 @@ onMounted(async () => {
   startHud();
   void loadAppearance();
 
-  void loadPlans();
   const loaded = await loadAppState();
   if (loaded) mutations.hydrate(loaded);
 
@@ -231,7 +227,7 @@ function shouldSpeakAssistant(m: ChatAutoSpeechMode) {
 }
 
 type InterruptMode = "on_speech" | "on_activation_phrase" | "off";
-/** SOLL Â§6 â€” TTS playback controls (rate 0.5â€“2, volume 0â€“1) + interrupt mode. */
+/** SOLL §6 — TTS playback controls (rate 0.5–2, volume 0–1) + interrupt mode. */
 async function getTtsConfig(): Promise<{ rate: number; volume: number; interruptMode: InterruptMode }> {
   const store = await Store.load("luczor.settings.json");
   const rateRaw = Number((await store.get<number>("voice_tts_rate")) ?? (await store.get<number>("chat_auto_speech_rate")) ?? 1.0);
@@ -521,7 +517,7 @@ async function speakWithVoiceMuted(text: string): Promise<void> {
     voiceEngine.setMuted(voiceMuteDepth > 0);
   }
 }
-const listenLabel = ref("ZuhÃ¶ren");
+const listenLabel = ref("Zuhören");
 
 async function transcribeLocal(wavBase64: string): Promise<string> {
   const cfg = await getVoiceConfig();
@@ -543,12 +539,12 @@ async function toggleListening() {
   const hf = await getHandsFreeConfig();
   const tts = await getTtsConfig();
   listenLabel.value = hf.strategy === "safeword"
-    ? `Aktivierungsphrase â€ž${hf.triggerPhrase}"`
-    : "DauerzuhÃ¶ren";
+    ? `Aktivierungsphrase „${hf.triggerPhrase}"`
+    : "Dauerzuhören";
   lastHeard.value = "";
   try {
     await voiceEngine.start({
-      // SOLL Â§5.3 â€” the hands-free strategy (continuous XOR safeword) drives
+      // SOLL §5.3 — the hands-free strategy (continuous XOR safeword) drives
       // segmentation; the legacy mode field is kept only for type compatibility.
       mode: "continuous",
       wakeWord: cfg.wakeWord,
@@ -578,7 +574,7 @@ async function toggleListening() {
     listening.value = false;
     setStatus("error");
     mutations.addMessage(
-      mutations.makeMsg("assistant", `ZuhÃ¶ren fehlgeschlagen: ${e?.message ?? String(e)}`, activeProjectId.value)
+      mutations.makeMsg("assistant", `Zuhören fehlgeschlagen: ${e?.message ?? String(e)}`, activeProjectId.value)
     );
   }
 }
@@ -605,7 +601,7 @@ function rejectTool(id: string) {
 function toolArgsPreview(args: Record<string, unknown>): string {
   try {
     const s = JSON.stringify(args, null, 1);
-    return s.length > 400 ? s.slice(0, 400) + "â€¦" : s;
+    return s.length > 400 ? s.slice(0, 400) + "…" : s;
   } catch {
     return "";
   }
@@ -637,7 +633,7 @@ function toggleMode() {
   if (next === "unrestricted") {
     const ok = window.confirm(
       "VOLLZUGRIFF aktivieren?\n\n" +
-        "Luczor fÃ¼hrt dann ALLE Tools (Maus, Tastatur, Programme, Dateien) OHNE RÃ¼ckfrage aus. " +
+        "Luczor führt dann ALLE Tools (Maus, Tastatur, Programme, Dateien) OHNE Rückfrage aus. " +
         "Nur der Not-Aus im HUD stoppt ihn noch.\n\nWirklich aktivieren?"
     );
     if (!ok) {
@@ -655,12 +651,12 @@ const modeTitle = computed(() => {
   switch (mode.value) {
     case "act":
       return allowUnrestricted.value
-        ? "Handeln: Tools mit BestÃ¤tigung. Klicken fÃ¼r Vollzugriff."
-        : "Handeln: Tools mit BestÃ¤tigung. Vollzugriff ist administrativ deaktiviert; klicken fÃ¼r Beobachten.";
+        ? "Handeln: Tools mit Bestätigung. Klicken für Vollzugriff."
+        : "Handeln: Tools mit Bestätigung. Vollzugriff ist administrativ deaktiviert; klicken für Beobachten.";
     case "unrestricted":
-      return "Vollzugriff: alle Tools OHNE RÃ¼ckfrage. Klicken fÃ¼r Beobachten.";
+      return "Vollzugriff: alle Tools OHNE Rückfrage. Klicken für Beobachten.";
     default:
-      return "Beobachten: nur lesen. Klicken fÃ¼r Handeln.";
+      return "Beobachten: nur lesen. Klicken für Handeln.";
   }
 });
 
@@ -670,8 +666,6 @@ const modeTitle = computed(() => {
 const showAudit = ref(false);
 // Context panel (goals + summaries) is collapsed by default for a chat-first UI.
 const showContext = ref(false);
-// Plan panel starts expanded: it only appears once the agent created a plan.
-const planCollapsed = ref(false);
 
 const toolAudit = computed(() => {
   const pid = activeProjectId.value;
@@ -818,10 +812,6 @@ async function send() {
     mutations.getProjectMessages(pid, { includeHidden: true })
   );
   if (recentToolContext) baseMessages.splice(1, 0, { role: "system", content: recentToolContext });
-
-  // Keep the active plan in front of the model across turns.
-  const planContext = buildPlanContext(pid);
-  if (planContext) baseMessages.splice(1, 0, { role: "system", content: planContext });
 
   // Inject relevant long-term memory (project scope) as an extra system note.
   let promptContext: PromptContextDetails = { text: "", taskType };
@@ -1098,7 +1088,7 @@ watch(
 
       <!-- Unrestricted-mode warning -->
       <div v-if="mode === 'unrestricted'" class="mode-warning">
-        âš  VOLLZUGRIFF AKTIV â€” Luczor fÃ¼hrt Tools ohne RÃ¼ckfrage aus. Not-Aus im HUD stoppt sofort.
+        ⚠ VOLLZUGRIFF AKTIV — Luczor führt Tools ohne Rückfrage aus. Not-Aus im HUD stoppt sofort.
       </div>
 
       <!-- Project info strip (collapsible) -->
@@ -1107,7 +1097,7 @@ watch(
           <div class="info-head">
             <span class="tac-label">Projektziele</span>
             <span class="info-stat">
-              {{ goalStats.done }}/{{ goalStats.total }} erledigt Â· {{ goalStats.inProgress }} aktiv Â· {{ goalStats.open }} offen
+              {{ goalStats.done }}/{{ goalStats.total }} erledigt · {{ goalStats.inProgress }} aktiv · {{ goalStats.open }} offen
             </span>
           </div>
           <div v-if="projectGoals.length" class="goal-cards">
@@ -1137,7 +1127,7 @@ watch(
         <div v-if="!messages.length" class="chat-empty">
           <div class="chat-empty__orb"></div>
           <div class="chat-empty__kicker">{{ appearance.assistantName }}</div>
-          <div class="chat-empty__title">Bereit fÃ¼r die nÃ¤chste Aufgabe.</div>
+          <div class="chat-empty__title">Bereit für die nächste Aufgabe.</div>
           <div class="chat-empty__text">Schreibe direkt los oder nutze Push-to-Talk. Kontext und Memory werden automatisch schlank in den Prompt gelegt.</div>
         </div>
 
@@ -1153,13 +1143,13 @@ watch(
             <span
               v-if="m.role === 'user' && (m as any)?.meta?.inputSource && (m as any).meta.inputSource !== 'keyboard'"
               class="msg__badge"
-              :title="(m as any).meta.inputSource === 'hands_free' ? 'FreihÃ¤ndig diktiert' : 'Per Push-to-Talk gesprochen'"
-            >ðŸŽ¤ Gesprochen</span>
+              :title="(m as any).meta.inputSource === 'hands_free' ? 'Freihändig diktiert' : 'Per Push-to-Talk gesprochen'"
+            >🎤 Gesprochen</span>
             <span
               v-if="m.role === 'assistant' && ((m as any)?.meta?.model || (m as any)?.meta?.provider)"
               class="msg__model"
-              :title="'Use-Case: ' + ((m as any)?.meta?.useCase || 'â€”')"
-            >{{ (m as any).meta.provider }}<template v-if="(m as any).meta.model"> Â· {{ (m as any).meta.model }}</template></span>
+              :title="'Use-Case: ' + ((m as any)?.meta?.useCase || '—')"
+            >{{ (m as any).meta.provider }}<template v-if="(m as any).meta.model"> · {{ (m as any).meta.model }}</template></span>
             <button
               v-if="m.role === 'assistant' && m.content && m.content.trim()"
               type="button"
@@ -1167,9 +1157,9 @@ watch(
               @click.stop="speakMessage(m)"
               title="Vorlesen"
               aria-label="Nachricht vorlesen"
-            >ðŸ”Š</button>
-            <button v-if="m.role === 'assistant' && (m as any)?.meta?.llmRequestId" type="button" class="feedback-btn" :class="{ 'is-on': (m as any)?.meta?.userFeedback === 1 }" @click.stop="rateAssistantMessage(m, 1)" title="Hilfreich" aria-label="Antwort als hilfreich bewerten">â†‘</button>
-            <button v-if="m.role === 'assistant' && (m as any)?.meta?.llmRequestId" type="button" class="feedback-btn" :class="{ 'is-on is-negative': (m as any)?.meta?.userFeedback === -1 }" @click.stop="rateAssistantMessage(m, -1)" title="Nicht hilfreich" aria-label="Antwort als nicht hilfreich bewerten">â†“</button>
+            >🔊</button>
+            <button v-if="m.role === 'assistant' && (m as any)?.meta?.llmRequestId" type="button" class="feedback-btn" :class="{ 'is-on': (m as any)?.meta?.userFeedback === 1 }" @click.stop="rateAssistantMessage(m, 1)" title="Hilfreich" aria-label="Antwort als hilfreich bewerten">↑</button>
+            <button v-if="m.role === 'assistant' && (m as any)?.meta?.llmRequestId" type="button" class="feedback-btn" :class="{ 'is-on is-negative': (m as any)?.meta?.userFeedback === -1 }" @click.stop="rateAssistantMessage(m, -1)" title="Nicht hilfreich" aria-label="Antwort als nicht hilfreich bewerten">↓</button>
           </div>
 
           <div class="bubble">
@@ -1212,17 +1202,17 @@ watch(
             :class="a.ok ? 'is-ok' : 'is-fail'"
           >
             <span class="audit-row__status" />
-            <span class="audit-row__tool">{{ a.name }}<template v-if="a.error"> â€” {{ a.error }}</template><template v-else-if="a.result"> â€” {{ a.result }}</template></span>
+            <span class="audit-row__tool">{{ a.name }}<template v-if="a.error"> — {{ a.error }}</template><template v-else-if="a.result"> — {{ a.result }}</template></span>
             <span class="audit-row__verdict">{{ a.ok ? 'OK' : 'FAIL' }}</span>
             <span class="audit-row__time">{{ fmtTime(a.ts, true) }}</span>
           </div>
         </div>
-        <div v-else class="empty">Noch keine Tool-AusfÃ¼hrungen.</div>
+        <div v-else class="empty">Noch keine Tool-Ausführungen.</div>
       </div>
 
       <!-- Pending tool-call approvals -->
       <div v-if="pendingApprovals.length" class="approvals">
-        <span class="tac-label approvals__title">BestÃ¤tigung erforderlich ({{ pendingApprovals.length }})</span>
+        <span class="tac-label approvals__title">Bestätigung erforderlich ({{ pendingApprovals.length }})</span>
         <div v-for="call in pendingApprovals" :key="call.id" class="approval">
           <div class="approval__head">
             <span class="approval__cat">{{ call.category }}</span>
@@ -1231,7 +1221,7 @@ watch(
           <pre class="approval__args">{{ toolArgsPreview(call.args) }}</pre>
           <div class="approval__actions">
             <button type="button" class="btn-reject" @click="rejectTool(call.id)">Ablehnen</button>
-            <button type="button" class="btn-exec" @click="approveTool(call.id)">AusfÃ¼hren</button>
+            <button type="button" class="btn-exec" @click="approveTool(call.id)">Ausführen</button>
           </div>
         </div>
       </div>
@@ -1240,7 +1230,7 @@ watch(
       <div v-if="listening" class="listen-bar">
         <span class="listen-bar__dot" />
         <span class="listen-bar__label">{{ listenLabel }}</span>
-        <span class="listen-bar__text">{{ lastHeard || "â€¦" }}</span>
+        <span class="listen-bar__text">{{ lastHeard || "…" }}</span>
       </div>
 
       <!-- Composer -->
@@ -1250,7 +1240,7 @@ watch(
           class="composer__input"
           v-model="input"
           rows="1"
-          placeholder="Nachricht an Luczorâ€¦"
+          placeholder="Nachricht an Luczor…"
           @input="autoGrow"
           @keydown.enter.exact.prevent="send"
         />
@@ -1259,7 +1249,7 @@ watch(
           class="mic-btn listen-btn"
           :class="{ 'is-listening': listening }"
           @click="toggleListening"
-          :title="listening ? 'Dauer-ZuhÃ¶ren stoppen' : 'Dauer-ZuhÃ¶ren / Wake-Word starten'"
+          :title="listening ? 'Dauer-Zuhören stoppen' : 'Dauer-Zuhören / Wake-Word starten'"
         >
           <svg v-if="!listening" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor"
                stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1313,14 +1303,14 @@ watch(
         <button
           type="button"
           class="system-panel__close"
-          aria-label="Systembereich schlieÃŸen"
+          aria-label="Systembereich schließen"
           @click="showSystemPanel = false"
-        >Ã—</button>
+        >×</button>
       </div>
       <JarvisHud embedded />
       <div class="system-panel__foot">
         <span>{{ activeProject?.name }}</span>
-        <span>Privater GerÃ¤tekanal</span>
+        <span>Privater Gerätekanal</span>
       </div>
     </SpotlightSurface>
   </div>
@@ -1633,7 +1623,7 @@ watch(
   box-shadow: var(--shadow-1);
 }
 
-/* Assistant answers read as open, calm text in a light card â€” no idle motion. */
+/* Assistant answers read as open, calm text in a light card — no idle motion. */
 .msg--assistant { align-self: stretch; align-items: flex-start; }
 .msg--assistant .msg__role { color: var(--cy-soft); }
 .msg--assistant .bubble {
@@ -1692,7 +1682,7 @@ watch(
   cursor: pointer;
   transition: color var(--dur), background var(--dur), border-color var(--dur), box-shadow var(--dur), transform var(--dur-fast) var(--ease);
 }
-.chip::before { content: "â€º"; font-family: var(--font-mono); color: var(--cy); font-weight: 700; transition: transform var(--dur) var(--ease), color var(--dur); }
+.chip::before { content: "›"; font-family: var(--font-mono); color: var(--cy); font-weight: 700; transition: transform var(--dur) var(--ease), color var(--dur); }
 .chip::after {
   content: ""; position: absolute; inset: 0;
   background: linear-gradient(120deg, transparent 30%, rgba(103,232,249,0.22) 50%, transparent 70%);
