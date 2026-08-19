@@ -13,6 +13,7 @@ declare module 'vue' {
   export interface GlobalComponents {
     AmbientBackdrop: typeof import('./src/components/vengeance/AmbientBackdrop.vue')['default']
     JarvisHud: typeof import('./src/components/JarvisHud.vue')['default']
+    PlanPanel: typeof import('./src/components/PlanPanel.vue')['default']
     RichMessage: typeof import('./src/components/RichMessage.vue')['default']
     Settings: typeof import('./src/components/Settings.vue')['default']
     SpotlightSurface: typeof import('./src/components/vengeance/SpotlightSurface.vue')['default']
