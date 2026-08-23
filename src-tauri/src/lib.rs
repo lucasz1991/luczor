@@ -62,6 +62,13 @@ pub fn run() {
             commands::device_key::device_key_get,
             commands::device_key::device_key_set,
             commands::device_key::device_key_delete,
+            commands::device_key::memory_key_get_or_create,
+            commands::repository_graph::local_graph_bind,
+            commands::repository_graph::local_graph_index,
+            commands::repository_graph::local_graph_status,
+            commands::repository_graph::local_graph_search,
+            commands::repository_graph::local_graph_read_snippets,
+            commands::repository_graph::local_graph_unbind,
         ])
         .on_window_event(|window, event| {
             #[cfg(desktop)]

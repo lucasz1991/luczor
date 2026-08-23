@@ -38,6 +38,14 @@ sysinfo = "0.32.1"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls"] }
 rsa = { version = "0.9", features = ["sha2", "pem"] }
 sha2 = "0.10"
+ignore = "0.4.33"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+tree-sitter = "0.26.12"
+tree-sitter-php = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-python = "0.25.0"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 webbrowser = "1.0"
 nvml-wrapper = "0.11"

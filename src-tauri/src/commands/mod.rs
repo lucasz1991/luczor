@@ -4,6 +4,7 @@ pub mod device_jobs;
 pub mod device_key;
 pub mod local_tasks;
 pub mod notifications;
+pub mod repository_graph;
 pub mod system;
 pub mod voice;
 pub mod workflow_http;
@@ -77,5 +78,19 @@ mod tests {
             config["app"]["security"]["capabilities"],
             serde_json::json!(["default", "browser"])
         );
+
+        let main_runtime = include_str!("../../permissions/main-runtime.toml");
+        for command in [
+            "memory_key_get_or_create",
+            "local_graph_bind",
+            "local_graph_index",
+            "local_graph_status",
+            "local_graph_search",
+            "local_graph_read_snippets",
+            "local_graph_unbind",
+        ] {
+            assert!(main_runtime.contains(command));
+            assert!(!capability.to_string().contains(command));
+        }
     }
 }

@@ -9,6 +9,7 @@ import { startDeviceJobChannel } from '@/services/deviceJobs'
 import { NATIVE_NOTIFICATION_ACTION_EVENT, startNativeNotificationActionListener } from '@/services/notifications'
 import { loadAppState } from '@/services/persistence'
 import { loadPlans } from '@/services/plan'
+import { luczorMemory } from '@/services/memory/luczorMemory'
 import { preloadSfx } from '@/services/sfx'
 import { refreshStatus } from '@/services/status'
 import { startHud } from '@/state/hud'
@@ -55,6 +56,7 @@ export type AppRuntimeLifecycleDependencies = {
   setStatusHeartbeat: (listener: () => void, intervalMs: number) => number
   clearStatusHeartbeat: (heartbeat: number) => void
   startDeviceJobChannel: () => Promise<StopDeviceJobs>
+  flushMemoryOutbox?: () => void | Promise<void>
   warn: (message: string, error: unknown) => void
 }
 
@@ -104,6 +106,7 @@ function createDefaultDependencies(): AppRuntimeLifecycleDependencies {
     setStatusHeartbeat: (listener, intervalMs) => window.setInterval(listener, intervalMs),
     clearStatusHeartbeat: heartbeat => window.clearInterval(heartbeat),
     startDeviceJobChannel,
+    flushMemoryOutbox: () => luczorMemory.flushPendingSync(),
     warn: (message, error) => console.warn(message, error),
   }
 }
@@ -178,7 +181,12 @@ export function createAppRuntimeLifecycle(
     }
 
     void dependencies.refreshStatus()
-    statusHeartbeat = dependencies.setStatusHeartbeat(() => void dependencies.refreshStatus(), 30_000)
+    void dependencies.flushMemoryOutbox?.()
+    statusHeartbeat = dependencies.setStatusHeartbeat(() => {
+      void dependencies.refreshStatus()
+      // Also drives retry deadlines without requiring a new write or restart.
+      void dependencies.flushMemoryOutbox?.()
+    }, 30_000)
 
     void dependencies
       .startDeviceJobChannel()

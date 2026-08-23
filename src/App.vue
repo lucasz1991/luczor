@@ -8,6 +8,7 @@ import PlanPanel from './components/PlanPanel.vue'
 import AmbientBackdrop from './components/vengeance/AmbientBackdrop.vue'
 import SpotlightSurface from './components/vengeance/SpotlightSurface.vue'
 import { type LuczorMode, type WireMessage } from './services/openrouter.service'
+import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { runAgent, buildSystemPreamble, shouldRequireToolCall } from '@/services/agent'
 import { parseEnvelope } from '@/services/envelope'
 import { resolveApproval, rejectAllApprovals } from '@/services/approvals'
@@ -16,7 +17,7 @@ import { Store } from '@tauri-apps/plugin-store'
 import { VoiceEngine } from '@/services/voice/voiceEngine'
 import { getVoiceConfig, getHandsFreeConfig, localStt } from '@/services/voice/localVoice'
 import { streamSpeak, stopSpeak } from '@/services/voice/speak'
-import { luczorMemory, getMemoryPrefs } from '@/services/memory/luczorMemory'
+import { luczorMemory, getMemoryPrefs, type MemoryRecord } from '@/services/memory/luczorMemory'
 import { buildPromptContextDetails, inferTaskType, type PromptContextDetails } from '@/services/contextController'
 import { LuczorApi } from '@/services/api/luczorApi'
 import { refreshStatus } from '@/services/status'
@@ -26,6 +27,15 @@ import { getSafeRecordValue } from '@/services/safeRecord'
 import { buildRecentToolOutcomeContext, toolOutcomePreview } from '@/services/toolOutcomeContext'
 import { buildPlanContext } from '@/services/plan'
 import { ACTIVE_MODE_KEY, createAppRuntimeLifecycle } from '@/services/appRuntimeLifecycle'
+import {
+  bindRepository,
+  getRepositoryExternalPolicy,
+  indexRepository,
+  repositoryGraphStatus,
+  unbindRepository,
+  type RepositoryExternalPolicy,
+  type RepositoryGraphStatus,
+} from '@/services/repositoryGraph'
 
 import { setStatus } from '@/state/hud'
 import { state, mutations } from '@/state/store'
@@ -531,6 +541,144 @@ const modeTitle = computed(() => {
 const showAudit = ref(false)
 // Context panel (goals + summaries) is collapsed by default for a chat-first UI.
 const showContext = ref(false)
+const repositoryRootInput = ref('')
+const localGraphStatus = ref<RepositoryGraphStatus>({
+  status: 'unbound',
+  files: 0,
+  symbols: 0,
+  edges: 0,
+  skipped: 0,
+})
+const localGraphBusy = ref(false)
+const localGraphMessage = ref('')
+const repositoryExternalPolicy = ref<RepositoryExternalPolicy>('deny')
+const memoryCandidates = ref<MemoryRecord[]>([])
+const memoryCandidateBusyId = ref('')
+
+async function requireRepositoryPrincipalId(): Promise<string> {
+  const account = await getVerifiedAccountSnapshot()
+  if (!account) {
+    throw new Error(
+      'Für einen accountgebundenen lokalen Repository-Graph muss zuerst ein Device-Key eingerichtet sein.'
+    )
+  }
+  return account.principalId
+}
+
+async function refreshMemoryCandidates() {
+  try {
+    memoryCandidates.value = await luczorMemory.listCandidates(activeProjectId.value)
+  } catch (error) {
+    console.warn('[memory] candidate list unavailable:', error)
+    memoryCandidates.value = []
+  }
+}
+
+async function acceptMemoryCandidate(record: MemoryRecord) {
+  if (memoryCandidateBusyId.value) return
+  memoryCandidateBusyId.value = record.id
+  try {
+    await luczorMemory.promote(record.id)
+    await refreshMemoryCandidates()
+    void refreshStatus()
+  } finally {
+    memoryCandidateBusyId.value = ''
+  }
+}
+
+async function rejectMemoryCandidate(record: MemoryRecord) {
+  if (memoryCandidateBusyId.value) return
+  memoryCandidateBusyId.value = record.id
+  try {
+    await luczorMemory.forget('project', record.id, { projectId: activeProjectId.value })
+    await refreshMemoryCandidates()
+    void refreshStatus()
+  } finally {
+    memoryCandidateBusyId.value = ''
+  }
+}
+
+async function refreshLocalGraphStatus() {
+  try {
+    const principalId = await requireRepositoryPrincipalId()
+    localGraphStatus.value = await repositoryGraphStatus(principalId, activeProjectId.value)
+  } catch (error) {
+    localGraphStatus.value = {
+      status: 'error',
+      files: 0,
+      symbols: 0,
+      edges: 0,
+      skipped: 0,
+      error: error instanceof Error ? error.message : String(error),
+    }
+  }
+}
+
+async function bindAndIndexRepository() {
+  const root = repositoryRootInput.value.trim()
+  if (!root || localGraphBusy.value) return
+  localGraphBusy.value = true
+  localGraphMessage.value = 'Repository wird lokal gebunden …'
+  try {
+    const principalId = await requireRepositoryPrincipalId()
+    await bindRepository(principalId, activeProjectId.value, root)
+    repositoryRootInput.value = ''
+    localGraphMessage.value = 'Lokaler Index wird aufgebaut …'
+    await indexRepository(principalId, activeProjectId.value)
+    localGraphMessage.value = 'Lokaler Repository-Graph ist bereit.'
+  } catch (error) {
+    localGraphMessage.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    localGraphBusy.value = false
+    await refreshLocalGraphStatus()
+  }
+}
+
+async function reindexRepository() {
+  if (localGraphBusy.value) return
+  localGraphBusy.value = true
+  localGraphMessage.value = 'Änderungen werden lokal indexiert …'
+  try {
+    const principalId = await requireRepositoryPrincipalId()
+    await indexRepository(principalId, activeProjectId.value)
+    localGraphMessage.value = 'Lokaler Repository-Graph ist aktuell.'
+  } catch (error) {
+    localGraphMessage.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    localGraphBusy.value = false
+    await refreshLocalGraphStatus()
+  }
+}
+
+async function removeRepositoryBinding() {
+  if (localGraphBusy.value) return
+  localGraphBusy.value = true
+  try {
+    const principalId = await requireRepositoryPrincipalId()
+    await unbindRepository(principalId, activeProjectId.value, true)
+    localGraphMessage.value = 'Lokale Repository-Bindung und Index wurden gelöscht.'
+  } finally {
+    localGraphBusy.value = false
+    await refreshLocalGraphStatus()
+  }
+}
+
+async function saveRepositoryPolicy() {
+  const settings = await Store.load('luczor.settings.json')
+  await settings.set('repository_external_policy', repositoryExternalPolicy.value)
+  await settings.save()
+}
+
+watch(
+  activeProjectId,
+  async () => {
+    repositoryRootInput.value = ''
+    localGraphMessage.value = ''
+    repositoryExternalPolicy.value = await getRepositoryExternalPolicy()
+    await Promise.all([refreshLocalGraphStatus(), refreshMemoryCandidates()])
+  },
+  { immediate: true }
+)
 // Plan panel starts expanded: it only appears once the agent created a plan.
 const planCollapsed = ref(false)
 
@@ -598,11 +746,24 @@ async function rememberExchange(pid: string, userText: string, assistantId: stri
     const msg = mutations.getProjectMessages(pid).find(m => m.id === assistantId)
     const summary = safeTrim(msg?.content)
     if (userText) {
-      await luczorMemory.remember({ content: userText, scope: 'project', projectId: pid, source: 'user' })
+      await luczorMemory.remember({
+        content: userText,
+        scope: 'project',
+        projectId: pid,
+        source: 'user',
+        writeIntent: 'automatic',
+      })
     }
     if (summary && !summary.startsWith('[Fehler]') && summary !== 'Fertig.') {
-      await luczorMemory.remember({ content: summary, scope: 'project', projectId: pid, source: 'chat' })
+      await luczorMemory.remember({
+        content: summary,
+        scope: 'project',
+        projectId: pid,
+        source: 'assistant',
+        writeIntent: 'automatic',
+      })
     }
+    await refreshMemoryCandidates()
     void refreshStatus()
   } catch (e) {
     console.warn('[memory] remember skipped:', e)
@@ -683,6 +844,15 @@ async function send() {
     if (prefs.inject) {
       // Context Controller (server) ranks + budgets memory; local fallback.
       promptContext = await buildPromptContextDetails(pid, text, prefs.injectCount, taskType)
+      if (promptContext.repositoryApprovalRequired) {
+        const approved = window.confirm(
+          'Für diese Codefrage wurden passende lokale Repository-Treffer gefunden.\n\n' +
+            'Dürfen ausschließlich die ausgewählten, begrenzten und redigierten Ausschnitte für diese eine Modellanfrage verwendet werden?'
+        )
+        if (approved) {
+          promptContext = await buildPromptContextDetails(pid, text, prefs.injectCount, taskType, true)
+        }
+      }
       if (promptContext.text) baseMessages.splice(1, 0, { role: 'system', content: promptContext.text })
     }
   } catch (e) {
@@ -1054,6 +1224,114 @@ watch(
             </div>
           </div>
           <div v-else class="empty">Noch keine Summaries.</div>
+        </div>
+
+        <div class="info-block repo-graph-block">
+          <div class="info-head">
+            <span class="tac-label">Lokaler Repository-Graph</span>
+            <span class="info-stat" :class="`is-${localGraphStatus.status}`">
+              {{ localGraphStatus.status === 'ready' ? 'bereit' : localGraphStatus.status }}
+            </span>
+          </div>
+
+          <div v-if="localGraphStatus.status === 'ready'" class="repo-graph-summary">
+            <strong>{{ localGraphStatus.display_name }}</strong>
+            <span>
+              {{ localGraphStatus.files }} Dateien · {{ localGraphStatus.symbols }} Symbole ·
+              {{ localGraphStatus.edges }} Beziehungen
+            </span>
+            <span v-if="localGraphStatus.branch || localGraphStatus.commit_sha" class="repo-graph-revision">
+              {{ localGraphStatus.branch || 'detached' }} · {{ localGraphStatus.commit_sha?.slice(0, 10) }}
+            </span>
+          </div>
+
+          <label class="repo-graph-field">
+            <span>Lokaler Git-Pfad</span>
+            <input
+              v-model="repositoryRootInput"
+              type="text"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="E:\\projekte\\mein-projekt"
+              :disabled="localGraphBusy"
+              @keydown.enter.prevent="bindAndIndexRepository"
+            />
+          </label>
+
+          <label class="repo-graph-field">
+            <span>Code an externe Modelle</span>
+            <select v-model="repositoryExternalPolicy" @change="saveRepositoryPolicy">
+              <option value="deny">Nie übertragen</option>
+              <option value="ask">Nur nach Freigabe</option>
+              <option value="allow_selected">Ausgewählte Treffer erlauben</option>
+            </select>
+          </label>
+
+          <div class="repo-graph-actions">
+            <button
+              type="button"
+              :disabled="localGraphBusy || !repositoryRootInput.trim()"
+              @click="bindAndIndexRepository"
+            >
+              {{ localGraphStatus.status === 'unbound' ? 'Binden & indexieren' : 'Anderen Pfad binden' }}
+            </button>
+            <button
+              v-if="localGraphStatus.status !== 'unbound'"
+              type="button"
+              :disabled="localGraphBusy"
+              @click="reindexRepository"
+            >
+              Aktualisieren
+            </button>
+            <button
+              v-if="localGraphStatus.status !== 'unbound'"
+              type="button"
+              class="is-danger"
+              :disabled="localGraphBusy"
+              @click="removeRepositoryBinding"
+            >
+              Lokal löschen
+            </button>
+          </div>
+          <p v-if="localGraphMessage || localGraphStatus.error" class="repo-graph-message">
+            {{ localGraphMessage || localGraphStatus.error }}
+          </p>
+          <p class="repo-graph-privacy">
+            Pfad, Index, Symbole und Graph bleiben im App-Datenverzeichnis dieses Geräts.
+          </p>
+        </div>
+
+        <div class="info-block memory-candidates-block">
+          <div class="info-head">
+            <span class="tac-label">Memory-Kandidaten</span>
+            <span class="info-stat">{{ memoryCandidates.length }} offen</span>
+          </div>
+          <p class="memory-candidates-help">
+            Automatisch erkannte Inhalte bleiben lokal und werden erst nach deiner Bestätigung dauerhaft übernommen.
+          </p>
+          <div v-if="memoryCandidates.length" class="memory-candidate-list">
+            <article v-for="candidate in memoryCandidates" :key="candidate.id" class="memory-candidate">
+              <p>{{ candidate.content }}</p>
+              <div class="memory-candidate-meta">
+                <span>{{ candidate.source === 'assistant' ? 'Assistent' : 'Du' }}</span>
+                <time>{{ formatChatTime(candidate.updatedAt) }}</time>
+              </div>
+              <div class="memory-candidate-actions">
+                <button type="button" :disabled="!!memoryCandidateBusyId" @click="acceptMemoryCandidate(candidate)">
+                  Übernehmen
+                </button>
+                <button
+                  type="button"
+                  class="is-danger"
+                  :disabled="!!memoryCandidateBusyId"
+                  @click="rejectMemoryCandidate(candidate)"
+                >
+                  Verwerfen
+                </button>
+              </div>
+            </article>
+          </div>
+          <div v-else class="empty">Keine ungeprüften Erinnerungen.</div>
         </div>
       </div>
 

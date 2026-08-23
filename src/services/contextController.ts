@@ -5,8 +5,10 @@
 // memory when the server isn't used/reachable.
 
 import { Store } from '@tauri-apps/plugin-store'
-import { getApiConfig } from '@/services/api/luczorApi'
+import { fetchWithTimeout, getApiConfig, type LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
+import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { luczorMemory } from '@/services/memory/luczorMemory'
+import { buildLocalRepositoryContext, type LocalRepositoryContext } from '@/services/repositoryGraph'
 
 const SETTINGS_FILE = 'luczor.settings.json'
 
@@ -31,6 +33,7 @@ export type PromptContextDetails = {
   branch?: string
   commitSha?: string
   taskType: string
+  repositoryApprovalRequired?: boolean
 }
 
 export function inferTaskType(text: string): string {
@@ -44,14 +47,16 @@ export function inferTaskType(text: string): string {
   return 'chat.general'
 }
 
-async function serverTarget(): Promise<{ baseUrl: string; deviceKey: string } | null> {
+async function serverTarget(
+  verifiedConfig?: LuczorApiConfigSnapshot
+): Promise<{ baseUrl: string; deviceKey: string } | null> {
   try {
     const s = await Store.load(SETTINGS_FILE)
     if (!((await s.get<boolean>('memory_use_server')) ?? true)) return null
   } catch {
     /* ignore */
   }
-  const cfg = await getApiConfig()
+  const cfg = verifiedConfig ?? (await getApiConfig())
   return cfg.deviceKey ? { baseUrl: cfg.baseUrl, deviceKey: cfg.deviceKey } : null
 }
 
@@ -61,11 +66,13 @@ export async function askContext(opts: {
   taskType?: string
   featureKey?: string
   maxTokens?: number
+  localRepository?: LocalRepositoryContext
+  account?: VerifiedAccountSnapshot | null
 }): Promise<ContextPackage | null> {
-  const srv = await serverTarget()
+  const srv = await serverTarget(opts.account?.config)
   if (!srv) return null
 
-  const res = await fetch(`${srv.baseUrl}/api/v1/context/ask`, {
+  const res = await fetchWithTimeout(`${srv.baseUrl}/api/v1/context/ask`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${srv.deviceKey}`,
@@ -78,6 +85,10 @@ export async function askContext(opts: {
       task_type: opts.taskType ?? inferTaskType(opts.query),
       feature_key: opts.featureKey,
       budget: { max_input_tokens: opts.maxTokens ?? 800 },
+      repo_id: opts.localRepository?.repositoryId,
+      branch: opts.localRepository?.branch,
+      commit_sha: opts.localRepository?.commitSha,
+      code: opts.localRepository?.hints ?? [],
     }),
   })
   if (!res.ok) throw new Error(`context/ask HTTP ${res.status}`)
@@ -92,30 +103,52 @@ export async function buildPromptContextDetails(
   projectId: string,
   query: string,
   limit = 5,
-  taskType = inferTaskType(query)
+  taskType = inferTaskType(query),
+  repositoryApprovedForTurn = false
 ): Promise<PromptContextDetails> {
+  const account = await getVerifiedAccountSnapshot()
+  const localRepository: LocalRepositoryContext = account
+    ? await buildLocalRepositoryContext(
+        account.principalId,
+        projectId,
+        query,
+        taskType,
+        Math.min(8, limit + 2),
+        repositoryApprovedForTurn
+      )
+    : {
+        text: '',
+        hints: [],
+        policy: 'deny',
+        requiresApproval: false,
+      }
   try {
-    const pkg = await askContext({ projectId, query, taskType, maxTokens: 800 })
+    const pkg = await askContext({ projectId, query, taskType, maxTokens: 800, localRepository, account })
     if (pkg) {
       const codeLines = (pkg.code ?? []).map(c => `- Code: ${c.path} (${c.reason}, ${c.score})`)
       const memoryLines = pkg.memory.map(m => `- Memory: ${m.content}`)
       const lines = [...codeLines, ...memoryLines].join('\n')
       const instr = pkg.instructions?.length ? `\n(${pkg.instructions.join(' ')})` : ''
+      const serverContext = lines ? `Relevanter Kontext:\n${lines}${instr}` : ''
       return {
-        text: lines ? `Relevanter Kontext:\n${lines}${instr}` : '',
+        text: [localRepository.text, serverContext].filter(Boolean).join('\n\n'),
         contextId: pkg.context_id,
-        repoId: pkg.repo_id,
-        branch: pkg.branch,
-        commitSha: pkg.commit_sha,
+        repoId: localRepository.repositoryId ?? pkg.repo_id,
+        branch: localRepository.branch ?? pkg.branch,
+        commitSha: localRepository.commitSha ?? pkg.commit_sha,
         taskType: pkg.task_type,
+        repositoryApprovalRequired: localRepository.requiresApproval,
       }
     }
   } catch (e) {
     console.warn('[context] server ask failed, using local:', e)
   }
   return {
-    text: await luczorMemory.getContextForPrompt(projectId, query, limit),
+    text: [localRepository.text, await luczorMemory.getContextForPrompt(projectId, query, limit)]
+      .filter(Boolean)
+      .join('\n\n'),
     taskType,
+    repositoryApprovalRequired: localRepository.requiresApproval,
   }
 }
 

@@ -22,6 +22,7 @@ import { loadDeviceKey, saveDeviceKey } from '@/services/secureDeviceKey'
 const SETTINGS_FILE = 'luczor.settings.json'
 const API_PREFIX = '/api/v1'
 const MAX_API_RESPONSE_BYTES = 5 * 1024 * 1024
+export const DEFAULT_FETCH_TIMEOUT_MS = 10_000
 
 /** Production API. Always used when the user has not set a custom URL. */
 export const DEFAULT_BASE_URL = 'https://luczor.follow-flow.de'
@@ -93,6 +94,8 @@ export type LuczorApiConfig = {
   deviceKey: string
   clientId: string
 }
+
+export type LuczorApiConfigSnapshot = Readonly<LuczorApiConfig>
 
 export type VoiceManifestResponse = {
   algorithm: 'RSA-SHA256'
@@ -185,6 +188,15 @@ export async function getApiConfig(): Promise<LuczorApiConfig> {
   return { baseUrl, deviceKey, clientId }
 }
 
+/**
+ * Capture the complete API identity once. Callers that combine authentication
+ * with account-scoped local state must keep using this exact immutable object
+ * for the whole operation.
+ */
+export async function getApiConfigSnapshot(): Promise<LuczorApiConfigSnapshot> {
+  return Object.freeze({ ...(await getApiConfig()) })
+}
+
 export async function saveApiConfig(baseUrl: string, deviceKey: string): Promise<void> {
   const s = await store()
   await s.set('luczor_api_base_url', baseUrl.trim().replace(/\/+$/, ''))
@@ -208,6 +220,55 @@ export class LuczorApiError extends Error {
     this.name = 'LuczorApiError'
     this.status = status
     this.correlationId = correlationId
+  }
+}
+
+function abortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error) return signal.reason
+  const error = new Error('Request aborted.')
+  error.name = 'AbortError'
+  return error
+}
+
+/**
+ * Execute a fetch with a hard deadline. The explicit rejection race is
+ * intentional: it also settles callers when a test double or non-conforming
+ * transport ignores AbortSignal entirely.
+ */
+export async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = DEFAULT_FETCH_TIMEOUT_MS
+): Promise<Response> {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('Fetch timeout must be greater than zero.')
+
+  const controller = new AbortController()
+  const callerSignal = init.signal
+  let rejectCancellation: (reason: Error) => void = () => undefined
+  const cancellation = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject
+  })
+
+  const cancelFromCaller = () => {
+    const reason = callerSignal ? abortError(callerSignal) : new Error('Request aborted.')
+    controller.abort(reason)
+    rejectCancellation(reason)
+  }
+  if (callerSignal?.aborted) cancelFromCaller()
+  else callerSignal?.addEventListener('abort', cancelFromCaller, { once: true })
+
+  const timeoutId = globalThis.setTimeout(() => {
+    const error = new Error(`Request timed out after ${timeoutMs} ms.`)
+    error.name = 'TimeoutError'
+    controller.abort(error)
+    rejectCancellation(error)
+  }, timeoutMs)
+
+  try {
+    return await Promise.race([fetch(input, { ...init, signal: controller.signal }), cancellation])
+  } finally {
+    globalThis.clearTimeout(timeoutId)
+    callerSignal?.removeEventListener('abort', cancelFromCaller)
   }
 }
 
@@ -437,8 +498,11 @@ export function syncPullAll(options: SyncPullAllOptions = {}): Promise<SyncPullA
 }
 
 async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
+  return requestWithConfig<T>(path, opts, await getApiConfigSnapshot())
+}
+
+async function requestWithConfig<T>(path: string, opts: RequestOptions, cfg: LuczorApiConfigSnapshot): Promise<T> {
   const requestCorrelationId = createCorrelationId()
-  const cfg = await getApiConfig()
   if (!cfg.baseUrl) {
     emitDebug('error', 'api_config_missing', { path })
     throw new LuczorApiError(0, 'Keine Server-URL konfiguriert (Settings → Server).')
@@ -468,7 +532,7 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
 
   let res: Response
   try {
-    res = await fetch(url, {
+    res = await fetchWithTimeout(url, {
       method: opts.method ?? 'GET',
       headers,
       body: opts.body != null ? JSON.stringify(opts.body) : undefined,
@@ -513,6 +577,14 @@ async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
     )
   }
   return json as T
+}
+
+/** Authenticate `/bootstrap` with the exact configuration snapshot supplied. */
+export function bootstrapWithApiConfig(
+  config: LuczorApiConfigSnapshot,
+  signal?: AbortSignal
+): Promise<BootstrapResponse> {
+  return requestWithConfig<BootstrapResponse>('/bootstrap', { signal }, config)
 }
 
 /* =========================================================

@@ -133,12 +133,6 @@
   "src/services/memory/luczorMemory.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 2
-    },
-    "id-length": {
-      "count": 25
-    },
-    "security/detect-object-injection": {
-      "count": 1
     }
   },
   "src/services/notifications.ts": {

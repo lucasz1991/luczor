@@ -18,6 +18,25 @@ function plain<T>(x: T): T {
 
 export type ConnectionResult = { ok: boolean; message: string }
 
+/** Explicit allowlist: native repository paths/graph metadata must never sync. */
+export function projectsForSync(projects: unknown[]): Array<Record<string, unknown>> {
+  return projects.map(project => {
+    const value = (project ?? {}) as Record<string, unknown>
+    return plain({
+      id: value.id,
+      name: value.name,
+      goal: value.goal,
+      goals: value.goals,
+      summary: value.summary,
+      defaults: value.defaults,
+      focus: value.focus,
+      archivedAt: value.archivedAt,
+      createdAt: value.createdAt,
+      updatedAt: value.updatedAt,
+    })
+  })
+}
+
 /** Verify the server is reachable and the device key is valid. */
 export async function testConnection(): Promise<ConnectionResult> {
   try {
@@ -38,7 +57,7 @@ export async function pushAllToServer(): Promise<SyncPushResponse> {
   const cfg = await LuczorApi.getConfig()
   return LuczorApi.syncPush({
     client_id: cfg.clientId,
-    projects: plain(state.projects ?? []),
+    projects: projectsForSync(state.projects ?? []),
     messages: plain(state.messages ?? []),
     memories: plain(state.global?.memories ?? []),
     summaries: plain(state.summaries ?? []),

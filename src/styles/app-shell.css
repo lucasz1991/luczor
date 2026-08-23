@@ -361,7 +361,7 @@
 /* ============ INFO STRIP ============ */
 .info-strip {
   display: grid;
-  grid-template-columns: 1.4fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--s4);
   padding: var(--s4) var(--s5);
   border-bottom: 1px solid var(--border-hair);
@@ -429,6 +429,182 @@
   font-family: var(--font-mono);
   font-size: var(--fs-label);
   color: var(--text-faint);
+}
+
+.repo-graph-block {
+  min-width: 0;
+}
+
+.repo-graph-summary {
+  display: grid;
+  gap: 4px;
+  margin-bottom: var(--s3);
+  color: var(--text-muted);
+  font-size: var(--fs-label);
+}
+
+.repo-graph-summary strong {
+  color: var(--text-primary);
+  font-weight: 620;
+}
+
+.repo-graph-revision {
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}
+
+.repo-graph-field {
+  display: grid;
+  gap: 6px;
+  margin-top: var(--s2);
+  color: var(--text-muted);
+  font-size: var(--fs-label);
+}
+
+.repo-graph-field input,
+.repo-graph-field select {
+  width: 100%;
+  min-height: 38px;
+  padding: 8px 10px;
+  color: var(--text-primary);
+  background: var(--surface-2);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--r-sm);
+  outline: none;
+}
+
+.repo-graph-field input:focus,
+.repo-graph-field select:focus {
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 2px rgba(123, 104, 238, 0.14);
+}
+
+.repo-graph-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: var(--s3);
+}
+
+.repo-graph-actions button {
+  min-height: 36px;
+  padding: 7px 11px;
+  color: var(--text-primary);
+  background: var(--surface-3);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.repo-graph-actions button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.repo-graph-actions button.is-danger {
+  color: var(--danger-soft);
+}
+
+.repo-graph-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.repo-graph-message,
+.repo-graph-privacy {
+  margin: var(--s2) 0 0;
+  color: var(--text-muted);
+  font-size: var(--fs-label);
+  line-height: 1.45;
+}
+
+.repo-graph-privacy {
+  color: var(--text-faint);
+}
+
+.info-stat.is-ready {
+  color: var(--success);
+}
+
+.info-stat.is-error {
+  color: var(--danger-soft);
+}
+
+.memory-candidates-block {
+  min-width: 0;
+}
+
+.memory-candidates-help {
+  margin: 0 0 var(--s3);
+  color: var(--text-faint);
+  font-size: var(--fs-label);
+  line-height: 1.45;
+}
+
+.memory-candidate-list {
+  display: grid;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.memory-candidate {
+  padding: 10px 11px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--r-sm);
+}
+
+.memory-candidate p {
+  display: -webkit-box;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.memory-candidate-meta,
+.memory-candidate-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.memory-candidate-meta {
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-label);
+}
+
+.memory-candidate-actions {
+  justify-content: flex-start;
+}
+
+.memory-candidate-actions button {
+  min-height: 34px;
+  padding: 6px 10px;
+  color: var(--text-primary);
+  background: var(--surface-3);
+  border: 1px solid var(--border-hair);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+}
+
+.memory-candidate-actions button:hover:not(:disabled) {
+  border-color: var(--border-strong);
+}
+
+.memory-candidate-actions button.is-danger {
+  color: var(--danger-soft);
+}
+
+.memory-candidate-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
 }
 
 .empty {

@@ -33,4 +33,11 @@ commands.allow = [
     "device_key_get",
     "device_key_set",
     "device_key_delete",
+    "memory_key_get_or_create",
+    "local_graph_bind",
+    "local_graph_index",
+    "local_graph_status",
+    "local_graph_search",
+    "local_graph_read_snippets",
+    "local_graph_unbind",
 ]
