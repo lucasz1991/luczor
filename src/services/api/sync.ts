@@ -7,42 +7,42 @@
 // Laravel is the v1 "sync/archive" backend — the desktop app remains the
 // source of truth and works fully offline; this just mirrors state upstream.
 
-import { Store } from "@tauri-apps/plugin-store";
-import { LuczorApi, type SyncPushResponse } from "./luczorApi";
-import { state } from "@/state/store";
+import { Store } from '@tauri-apps/plugin-store'
+import { LuczorApi, type SyncPushResponse } from './luczorApi'
+import { state } from '@/state/store'
 
 /** Strip Vue reactivity / proxies into a plain JSON-serializable value. */
 function plain<T>(x: T): T {
-  return JSON.parse(JSON.stringify(x)) as T;
+  return JSON.parse(JSON.stringify(x)) as T
 }
 
-export type ConnectionResult = { ok: boolean; message: string };
+export type ConnectionResult = { ok: boolean; message: string }
 
 /** Verify the server is reachable and the device key is valid. */
 export async function testConnection(): Promise<ConnectionResult> {
   try {
-    await LuczorApi.health();
-    const boot = await LuczorApi.bootstrap();
-    const who = boot.user?.name ?? boot.device?.name ?? "Gerät";
+    await LuczorApi.health()
+    const boot = await LuczorApi.bootstrap()
+    const who = boot.user?.name ?? boot.device?.name ?? 'Gerät'
     return {
       ok: true,
       message: `Verbunden als ${who} · Modellrouting wird zentral vom Server verwaltet.`,
-    };
+    }
   } catch (e: any) {
-    return { ok: false, message: e?.message ?? String(e) };
+    return { ok: false, message: e?.message ?? String(e) }
   }
 }
 
 /** Push the entire local state as an idempotent batch. */
 export async function pushAllToServer(): Promise<SyncPushResponse> {
-  const cfg = await LuczorApi.getConfig();
+  const cfg = await LuczorApi.getConfig()
   return LuczorApi.syncPush({
     client_id: cfg.clientId,
     projects: plain(state.projects ?? []),
     messages: plain(state.messages ?? []),
     memories: plain(state.global?.memories ?? []),
     summaries: plain(state.summaries ?? []),
-  });
+  })
 }
 
 /**
@@ -50,44 +50,44 @@ export async function pushAllToServer(): Promise<SyncPushResponse> {
  * the matching keys into the local settings store. Returns how many applied.
  */
 export async function pullServerDefaults(): Promise<number> {
-  const boot = await LuczorApi.bootstrap();
-  const server = (boot.runtime_settings?.settings ?? {}) as Record<string, unknown>;
+  const boot = await LuczorApi.bootstrap()
+  const server = (boot.runtime_settings?.settings ?? {}) as Record<string, unknown>
 
   // server key -> local settings-store key
   const map: Record<string, string> = {
-    assistant_name: "assistant_name",
-    ui_accent: "ui_accent",
-    memory_inject: "memory_inject",
-    memory_inject_count: "memory_inject_count",
-    client_history_token_budget: "client_history_token_budget",
-    sync_auto: "sync_auto",
-    sync_auto_threshold: "sync_auto_threshold",
-    default_mode: "default_mode",
-    allow_unrestricted: "allow_unrestricted",
-    chat_auto_speech: "chat_auto_speech",
-    voice_mode: "voice_mode",
-    voice_wake_word: "voice_wake_word",
-    voice_local_stt_language: "voice_local_stt_language",
-    voice_stt_engine: "voice_stt_engine",
-    hands_free_strategy: "hands_free_strategy",
-    voice_trigger_phrase: "voice_trigger_phrase",
-    voice_end_phrase: "voice_end_phrase",
-    voice_continuous_silence_ms: "voice_continuous_silence_ms",
-    voice_tts_rate: "voice_tts_rate",
-    voice_tts_volume: "voice_tts_volume",
-    voice_interrupt_mode: "voice_interrupt_mode",
-  };
+    assistant_name: 'assistant_name',
+    ui_accent: 'ui_accent',
+    memory_inject: 'memory_inject',
+    memory_inject_count: 'memory_inject_count',
+    client_history_token_budget: 'client_history_token_budget',
+    sync_auto: 'sync_auto',
+    sync_auto_threshold: 'sync_auto_threshold',
+    default_mode: 'default_mode',
+    allow_unrestricted: 'allow_unrestricted',
+    chat_auto_speech: 'chat_auto_speech',
+    voice_mode: 'voice_mode',
+    voice_wake_word: 'voice_wake_word',
+    voice_local_stt_language: 'voice_local_stt_language',
+    voice_stt_engine: 'voice_stt_engine',
+    hands_free_strategy: 'hands_free_strategy',
+    voice_trigger_phrase: 'voice_trigger_phrase',
+    voice_end_phrase: 'voice_end_phrase',
+    voice_continuous_silence_ms: 'voice_continuous_silence_ms',
+    voice_tts_rate: 'voice_tts_rate',
+    voice_tts_volume: 'voice_tts_volume',
+    voice_interrupt_mode: 'voice_interrupt_mode',
+  }
 
-  const s = await Store.load("luczor.settings.json");
-  let applied = 0;
+  const s = await Store.load('luczor.settings.json')
+  let applied = 0
   for (const [serverKey, localKey] of Object.entries(map)) {
     if (serverKey in server && server[serverKey] != null) {
-      await s.set(localKey, server[serverKey]);
-      applied++;
+      await s.set(localKey, server[serverKey])
+      applied++
     }
   }
-  await s.save();
-  return applied;
+  await s.save()
+  return applied
 }
 
 /**
@@ -95,17 +95,11 @@ export async function pullServerDefaults(): Promise<number> {
  * Silently no-ops when the server/device key is not configured, and never
  * throws — telemetry must not break the agent loop.
  */
-export async function logAgentEvent(
-  eventType: string,
-  payload: Record<string, unknown>
-): Promise<void> {
+export async function logAgentEvent(eventType: string, payload: Record<string, unknown>): Promise<void> {
   try {
-    const cfg = await LuczorApi.getConfig();
-    if (!cfg.baseUrl || !cfg.deviceKey) return;
-    await LuczorApi.agentEvent(
-      { event_type: eventType, payload, occurred_at_client: Date.now() },
-      cfg.clientId
-    );
+    const cfg = await LuczorApi.getConfig()
+    if (!cfg.baseUrl || !cfg.deviceKey) return
+    await LuczorApi.agentEvent({ event_type: eventType, payload, occurred_at_client: Date.now() }, cfg.clientId)
   } catch {
     /* ignore */
   }

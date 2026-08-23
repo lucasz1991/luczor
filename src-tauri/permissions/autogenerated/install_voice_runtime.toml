@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-install-voice-runtime"
+description = "Enables the install_voice_runtime command without any pre-configured scope."
+commands.allow = ["install_voice_runtime"]
+
+[[permission]]
+identifier = "deny-install-voice-runtime"
+description = "Denies the install_voice_runtime command without any pre-configured scope."
+commands.deny = ["install_voice_runtime"]

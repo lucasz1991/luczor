@@ -1,0 +1,283 @@
+{
+  "src/App.vue": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 32
+    },
+    "@typescript-eslint/no-unused-vars": {
+      "count": 4
+    },
+    "id-length": {
+      "count": 34
+    }
+  },
+  "src/components/JarvisHud.vue": {
+    "id-length": {
+      "count": 15
+    },
+    "security/detect-object-injection": {
+      "count": 4
+    }
+  },
+  "src/components/Settings.vue": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 6
+    },
+    "id-length": {
+      "count": 8
+    },
+    "security/detect-object-injection": {
+      "count": 1
+    },
+    "vue/multi-word-component-names": {
+      "count": 1
+    }
+  },
+  "src/env.d.ts": {
+    "@typescript-eslint/ban-types": {
+      "count": 1
+    },
+    "@typescript-eslint/no-empty-object-type": {
+      "count": 2
+    }
+  },
+  "src/services/agent.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "id-length": {
+      "count": 2
+    },
+    "security/detect-object-injection": {
+      "count": 3
+    }
+  },
+  "src/services/agents.ts": {
+    "id-length": {
+      "count": 1
+    }
+  },
+  "src/services/api/luczorApi.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    },
+    "id-length": {
+      "count": 5
+    }
+  },
+  "src/services/api/preferences.ts": {
+    "id-length": {
+      "count": 3
+    },
+    "security/detect-object-injection": {
+      "count": 1
+    }
+  },
+  "src/services/api/sync.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "id-length": {
+      "count": 2
+    },
+    "security/detect-object-injection": {
+      "count": 2
+    }
+  },
+  "src/services/appearance.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "id-length": {
+      "count": 4
+    },
+    "security/detect-object-injection": {
+      "count": 1
+    }
+  },
+  "src/services/approvals.ts": {
+    "id-length": {
+      "count": 2
+    }
+  },
+  "src/services/chat.service.ts": {
+    "id-length": {
+      "count": 1
+    }
+  },
+  "src/services/chatPresentation.ts": {
+    "security/detect-object-injection": {
+      "count": 1
+    }
+  },
+  "src/services/contextController.ts": {
+    "id-length": {
+      "count": 4
+    }
+  },
+  "src/services/deviceJobs.ts": {
+    "id-length": {
+      "count": 2
+    }
+  },
+  "src/services/envelope.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    },
+    "id-length": {
+      "count": 19
+    },
+    "security/detect-object-injection": {
+      "count": 3
+    }
+  },
+  "src/services/memory/luczorMemory.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 2
+    },
+    "id-length": {
+      "count": 25
+    },
+    "security/detect-object-injection": {
+      "count": 1
+    }
+  },
+  "src/services/notifications.ts": {
+    "security/detect-object-injection": {
+      "count": 1
+    }
+  },
+  "src/services/openrouter.service.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 4
+    },
+    "id-length": {
+      "count": 4
+    },
+    "security/detect-object-injection": {
+      "count": 1
+    }
+  },
+  "src/services/persistence.ts": {
+    "id-length": {
+      "count": 2
+    }
+  },
+  "src/services/plan.spec.ts": {
+    "id-length": {
+      "count": 4
+    }
+  },
+  "src/services/plan.ts": {
+    "id-length": {
+      "count": 4
+    }
+  },
+  "src/services/pushToTalk.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    },
+    "id-length": {
+      "count": 2
+    },
+    "security/detect-object-injection": {
+      "count": 2
+    }
+  },
+  "src/services/richText.ts": {
+    "id-length": {
+      "count": 4
+    },
+    "security/detect-object-injection": {
+      "count": 14
+    }
+  },
+  "src/services/sfx.ts": {
+    "id-length": {
+      "count": 12
+    },
+    "security/detect-object-injection": {
+      "count": 1
+    }
+  },
+  "src/services/status.ts": {
+    "id-length": {
+      "count": 4
+    }
+  },
+  "src/services/voice/bargeIn.spec.ts": {
+    "id-length": {
+      "count": 4
+    }
+  },
+  "src/services/voice/speak.ts": {
+    "id-length": {
+      "count": 2
+    },
+    "prefer-const": {
+      "count": 1
+    }
+  },
+  "src/services/voice/voiceEngine.ts": {
+    "id-length": {
+      "count": 1
+    },
+    "security/detect-object-injection": {
+      "count": 7
+    }
+  },
+  "src/services/voice/voiceStrategy.spec.ts": {
+    "id-length": {
+      "count": 9
+    }
+  },
+  "src/services/voice/voiceStrategy.ts": {
+    "id-length": {
+      "count": 6
+    },
+    "security/detect-object-injection": {
+      "count": 3
+    }
+  },
+  "src/services/voice/wav.ts": {
+    "id-length": {
+      "count": 4
+    },
+    "security/detect-object-injection": {
+      "count": 3
+    }
+  },
+  "src/state/hud.ts": {
+    "id-length": {
+      "count": 12
+    },
+    "security/detect-object-injection": {
+      "count": 2
+    }
+  },
+  "src/state/store.ts": {
+    "id-length": {
+      "count": 23
+    },
+    "security/detect-object-injection": {
+      "count": 3
+    }
+  },
+  "src/state/types.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 3
+    }
+  },
+  "src/vite-env.d.ts": {
+    "@typescript-eslint/no-empty-object-type": {
+      "count": 2
+    },
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  },
+  "tests/unit/voiceEngine.test.ts": {
+    "@typescript-eslint/no-explicit-any": {
+      "count": 1
+    }
+  }
+}

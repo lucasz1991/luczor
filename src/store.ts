@@ -19,11 +19,11 @@ export const useStore = defineStore('main', {
   },
 
   getters: {
-    isReady: (state) => {
+    isReady: state => {
       return !state.isInitialized
     },
 
-    storeGreet: (state) => {
+    storeGreet: state => {
       if (state.name.length > 0) {
         return `Greetings from Pinia store, ${state.name}!`
       }

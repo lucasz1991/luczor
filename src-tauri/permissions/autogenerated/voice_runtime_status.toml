@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-voice-runtime-status"
+description = "Enables the voice_runtime_status command without any pre-configured scope."
+commands.allow = ["voice_runtime_status"]
+
+[[permission]]
+identifier = "deny-voice-runtime-status"
+description = "Denies the voice_runtime_status command without any pre-configured scope."
+commands.deny = ["voice_runtime_status"]

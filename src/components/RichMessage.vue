@@ -12,47 +12,47 @@
      intercepts the click and hands the URL to the `open_url` Tauri command,
      which enforces http(s) natively. -->
 <script setup lang="ts">
-import { computed } from "vue";
-import { invoke } from "@tauri-apps/api/core";
-import { renderRichText } from "@/services/richText";
+import { computed } from 'vue'
+import { invoke } from '@tauri-apps/api/core'
+import { renderRichText } from '@/services/richText'
 
 const props = defineProps<{
   /** Raw markdown-ish assistant text. */
-  content: string;
+  content: string
   /** Show a blinking caret while the answer is still streaming. */
-  streaming?: boolean;
-}>();
+  streaming?: boolean
+}>()
 
-const html = computed(() => renderRichText(props.content ?? ""));
+const html = computed(() => renderRichText(props.content ?? ''))
 
 function resolveHref(target: EventTarget | null): string | null {
-  if (!(target instanceof Element)) return null;
-  const anchor = target.closest("[data-href]");
-  const href = anchor?.getAttribute("data-href")?.trim();
-  return href ? href : null;
+  if (!(target instanceof Element)) return null
+  const anchor = target.closest('[data-href]')
+  const href = anchor?.getAttribute('data-href')?.trim()
+  return href ? href : null
 }
 
 /** Open a link in the OS browser instead of navigating the WebView. */
 function openExternal(url: string) {
-  void invoke("open_url", { payload: { url } }).catch((error) => {
-    console.warn("[richMessage] open_url failed:", error);
-  });
+  void invoke('open_url', { payload: { url } }).catch(error => {
+    console.warn('[richMessage] open_url failed:', error)
+  })
 }
 
 function onClick(event: MouseEvent) {
-  const url = resolveHref(event.target);
-  if (!url) return;
-  event.preventDefault();
-  openExternal(url);
+  const url = resolveHref(event.target)
+  if (!url) return
+  event.preventDefault()
+  openExternal(url)
 }
 
 /** The renderer emits role="link" + tabindex="0", so keyboard must work too. */
 function onKeydown(event: KeyboardEvent) {
-  if (event.key !== "Enter" && event.key !== " ") return;
-  const url = resolveHref(event.target);
-  if (!url) return;
-  event.preventDefault();
-  openExternal(url);
+  if (event.key !== 'Enter' && event.key !== ' ') return
+  const url = resolveHref(event.target)
+  if (!url) return
+  event.preventDefault()
+  openExternal(url)
 }
 </script>
 
@@ -91,8 +91,12 @@ function onKeydown(event: KeyboardEvent) {
 .rt :deep(.rt-h:first-child) {
   margin-top: 0;
 }
-.rt :deep(h3.rt-h) { font-size: 1.16em; }
-.rt :deep(h4.rt-h) { font-size: 1.06em; }
+.rt :deep(h3.rt-h) {
+  font-size: 1.16em;
+}
+.rt :deep(h4.rt-h) {
+  font-size: 1.06em;
+}
 .rt :deep(h5.rt-h) {
   font-size: 0.95em;
   text-transform: uppercase;
@@ -129,7 +133,7 @@ function onKeydown(event: KeyboardEvent) {
   position: relative;
 }
 .rt :deep(ul.rt-list > .rt-li)::before {
-  content: "";
+  content: '';
   position: absolute;
   left: -0.9em;
   top: 0.62em;
@@ -279,6 +283,8 @@ function onKeydown(event: KeyboardEvent) {
   animation: rt-blink 1s steps(2, start) infinite;
 }
 @keyframes rt-blink {
-  50% { opacity: 0; }
+  50% {
+    opacity: 0;
+  }
 }
 </style>

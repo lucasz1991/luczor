@@ -13,15 +13,15 @@
 //  - Subprocesses run off the async runtime, with a wall-clock timeout and a
 //    captured-output cap, and no console window flashes on Windows.
 
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::mpsc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::process::Command;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewWindow};
+
+use super::ensure_main_webview;
+use super::process::run_bounded_command;
 
 const MAX_OUTPUT_BYTES: usize = 200_000;
 const MAX_FILE_BYTES: usize = 5_000_000;
@@ -36,7 +36,8 @@ fn files_root(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("app data dir unavailable: {e}"))?
         .join("workflow-files");
     std::fs::create_dir_all(&root).map_err(|e| format!("cannot create files root: {e}"))?;
-    root.canonicalize().map_err(|e| format!("files root cannot be resolved: {e}"))
+    root.canonicalize()
+        .map_err(|e| format!("files root cannot be resolved: {e}"))
 }
 
 /// Resolve a caller-supplied relative path against the confined root, rejecting
@@ -56,7 +57,9 @@ fn safe_path(root: &Path, raw: &str) -> Result<PathBuf, String> {
     // The parent must resolve to somewhere inside the root; the leaf need not exist.
     let parent = joined.parent().unwrap_or(root);
     std::fs::create_dir_all(parent).map_err(|e| format!("cannot create target dir: {e}"))?;
-    let canonical_parent = parent.canonicalize().map_err(|e| format!("path cannot be resolved: {e}"))?;
+    let canonical_parent = parent
+        .canonicalize()
+        .map_err(|e| format!("path cannot be resolved: {e}"))?;
     if !canonical_parent.starts_with(root) {
         return Err("path escapes the workflow files root".into());
     }
@@ -77,12 +80,21 @@ pub struct FileReadResult {
 
 /// Read a UTF-8 (lossy) file from the confined workflow files root.
 #[tauri::command]
-pub async fn wf_file_read(app: AppHandle, payload: FileReadPayload) -> Result<FileReadResult, String> {
+pub async fn wf_file_read(
+    window: WebviewWindow,
+    app: AppHandle,
+    payload: FileReadPayload,
+) -> Result<FileReadResult, String> {
+    ensure_main_webview(&window)?;
     let root = files_root(&app)?;
     let path = safe_path(&root, &payload.path)?;
     let data = std::fs::read(&path).map_err(|e| format!("read failed: {e}"))?;
     let truncated = data.len() > MAX_FILE_BYTES;
-    let slice = if truncated { &data[..MAX_FILE_BYTES] } else { &data[..] };
+    let slice = if truncated {
+        &data[..MAX_FILE_BYTES]
+    } else {
+        &data[..]
+    };
     Ok(FileReadResult {
         content: String::from_utf8_lossy(slice).into_owned(),
         bytes: data.len(),
@@ -104,14 +116,20 @@ pub struct FileWriteResult {
 
 /// Atomically write a file into the confined workflow files root.
 #[tauri::command]
-pub async fn wf_file_write(app: AppHandle, payload: FileWritePayload) -> Result<FileWriteResult, String> {
+pub async fn wf_file_write(
+    window: WebviewWindow,
+    app: AppHandle,
+    payload: FileWritePayload,
+) -> Result<FileWriteResult, String> {
+    ensure_main_webview(&window)?;
     if payload.content.len() > MAX_FILE_BYTES {
         return Err("content exceeds the maximum file size".into());
     }
     let root = files_root(&app)?;
     let path = safe_path(&root, &payload.path)?;
     let partial = path.with_extension("part");
-    std::fs::write(&partial, payload.content.as_bytes()).map_err(|e| format!("write failed: {e}"))?;
+    std::fs::write(&partial, payload.content.as_bytes())
+        .map_err(|e| format!("write failed: {e}"))?;
     std::fs::rename(&partial, &path).map_err(|e| format!("rename failed: {e}"))?;
     Ok(FileWriteResult {
         path: path.to_string_lossy().into_owned(),
@@ -141,14 +159,6 @@ fn runtime_candidates(runtime: &str) -> Option<&'static [&'static str]> {
     }
 }
 
-#[cfg(windows)]
-fn hide_console_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-}
-#[cfg(not(windows))]
-fn hide_console_window(_command: &mut Command) {}
-
 #[derive(Deserialize)]
 pub struct RunScriptPayload {
     pub runtime: String,
@@ -163,11 +173,17 @@ pub struct RunScriptResult {
     pub stdout: String,
     pub stderr: String,
     pub timed_out: bool,
+    pub stdout_truncated: bool,
+    pub stderr_truncated: bool,
 }
 
 /// Run a Python/Node snippet headlessly with a timeout and bounded output.
 #[tauri::command]
-pub async fn wf_run_script(payload: RunScriptPayload) -> Result<RunScriptResult, String> {
+pub async fn wf_run_script(
+    window: WebviewWindow,
+    payload: RunScriptPayload,
+) -> Result<RunScriptResult, String> {
+    ensure_main_webview(&window)?;
     let code = payload.code.trim().to_string();
     if code.is_empty() {
         return Err("code is empty".into());
@@ -180,81 +196,42 @@ pub async fn wf_run_script(payload: RunScriptPayload) -> Result<RunScriptResult,
     let exe = find_executable(names)
         .ok_or_else(|| format!("{} runtime not found in PATH", payload.runtime))?;
     let timeout = Duration::from_secs(
-        payload.timeout_seconds.unwrap_or(DEFAULT_TIMEOUT_SECS).clamp(1, MAX_TIMEOUT_SECS),
+        payload
+            .timeout_seconds
+            .unwrap_or(DEFAULT_TIMEOUT_SECS)
+            .clamp(1, MAX_TIMEOUT_SECS),
     );
 
     // Run the potentially long subprocess off the async runtime.
-    tauri::async_runtime::spawn_blocking(move || run_script_blocking(exe, &payload.runtime, code, timeout))
-        .await
-        .map_err(|e| format!("join failed: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        run_script_blocking(exe, &payload.runtime, code, timeout)
+    })
+    .await
+    .map_err(|e| format!("join failed: {e}"))?
 }
 
-fn run_script_blocking(exe: PathBuf, runtime: &str, code: String, timeout: Duration) -> Result<RunScriptResult, String> {
+fn run_script_blocking(
+    exe: PathBuf,
+    runtime: &str,
+    code: String,
+    timeout: Duration,
+) -> Result<RunScriptResult, String> {
     let mut command = Command::new(exe);
     // Read the program from stdin: `python -` / `node -` avoids writing temp files.
     command.arg("-");
-    hide_console_window(&mut command);
-    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    let mut child = command.spawn().map_err(|e| format!("spawn failed: {e}"))?;
-
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        // node reads the whole stream; python executes stdin as a script.
-        let _ = stdin.write_all(code.as_bytes());
-        let _ = runtime; // runtime kept for clarity/future per-runtime tweaks
-    }
-
-    // Drain stdout/stderr on their own threads so full pipe buffers never deadlock.
-    let mut out = child.stdout.take();
-    let mut err = child.stderr.take();
-    let out_handle = thread::spawn(move || drain(out.as_mut()));
-    let err_handle = thread::spawn(move || drain(err.as_mut()));
-
-    let deadline = Instant::now() + timeout;
-    let (status, timed_out) = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break (status, false),
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let status = child.wait().ok();
-                    break (status.unwrap_or_else(|| child.wait().expect("wait after kill")), true);
-                }
-                thread::sleep(Duration::from_millis(40));
-            }
-            Err(e) => return Err(format!("wait failed: {e}")),
-        }
-    };
-
-    let stdout = out_handle.join().unwrap_or_default();
-    let stderr = err_handle.join().unwrap_or_default();
+    let output = run_bounded_command(command, Some(code.into_bytes()), timeout, MAX_OUTPUT_BYTES)?;
+    let _ = runtime;
 
     Ok(RunScriptResult {
-        ok: status.success() && !timed_out,
-        code: status.code().unwrap_or(-1),
-        stdout: cap(stdout),
-        stderr: cap(stderr),
-        timed_out,
+        ok: output.success,
+        code: output.code,
+        stdout: output.stdout,
+        stderr: output.stderr,
+        timed_out: output.timed_out,
+        stdout_truncated: output.stdout_truncated,
+        stderr_truncated: output.stderr_truncated,
     })
 }
-
-fn drain(reader: Option<&mut impl Read>) -> Vec<u8> {
-    let mut buf = Vec::new();
-    if let Some(r) = reader {
-        let _ = r.take(MAX_OUTPUT_BYTES as u64 + 1).read_to_end(&mut buf);
-    }
-    buf
-}
-
-fn cap(bytes: Vec<u8>) -> String {
-    let slice = if bytes.len() > MAX_OUTPUT_BYTES { &bytes[..MAX_OUTPUT_BYTES] } else { &bytes[..] };
-    String::from_utf8_lossy(slice).into_owned()
-}
-
-// Silence an unused-import warning when the mpsc helper is not compiled in.
-#[allow(unused_imports)]
-use mpsc as _mpsc_marker;
 
 #[cfg(test)]
 mod tests {

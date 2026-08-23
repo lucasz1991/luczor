@@ -1,98 +1,125 @@
 // src/services/openrouter.service.ts
-import { getApiConfig } from "@/services/api/luczorApi";
+import { createCorrelationId, getApiConfig, readBoundedResponseText } from '@/services/api/luczorApi'
 
-export type LuczorMode = "observe" | "act" | "unrestricted";
-export type ToolChoice = "auto" | "required" | "none";
+const MAX_STREAM_BYTES = 8 * 1024 * 1024
+const MAX_STREAM_LINE_CHARS = 1024 * 1024
+const MAX_STREAM_CONTENT_CHARS = 4 * 1024 * 1024
+const MAX_TOOL_CALLS = 128
+const MAX_TOOL_ARGUMENT_CHARS = 1024 * 1024
+
+export type LuczorMode = 'observe' | 'act' | 'unrestricted'
+export type ToolChoice = 'auto' | 'required' | 'none'
 
 /* =========================================================
  * Wire message shapes (OpenAI/OpenRouter chat format)
  * ========================================================= */
 export type WireToolCall = {
-  id: string;
-  type: "function";
+  id: string
+  type: 'function'
   function: {
-    name: string;
+    name: string
     /** JSON string of arguments (always complete here — non-streaming). */
-    arguments: string;
-  };
-};
+    arguments: string
+  }
+}
 
 export type WireMessage =
-  | { role: "system" | "user"; content: string }
+  | { role: 'system' | 'user'; content: string }
   | {
-      role: "assistant";
-      content: string;
-      tool_calls?: WireToolCall[];
+      role: 'assistant'
+      content: string
+      tool_calls?: WireToolCall[]
     }
-  | { role: "tool"; tool_call_id: string; name?: string; content: string };
+  | { role: 'tool'; tool_call_id: string; name?: string; content: string }
 
 /* =========================================================
  * Parsed result of a single completion round
  * ========================================================= */
 export type ParsedToolCall = {
-  id: string;
-  name: string;
+  id: string
+  name: string
   /** Parsed arguments object; {} if the model produced invalid JSON. */
-  arguments: Record<string, unknown>;
+  arguments: Record<string, unknown>
   /** Original argument string as returned by the model. */
-  rawArguments: string;
-};
+  rawArguments: string
+}
 
 export type ChatResult = {
   /** Assistant free-text content (may be "" when the model only calls tools). */
-  content: string;
+  content: string
   /** Parsed tool calls (empty when the model returned a final answer). */
-  toolCalls: ParsedToolCall[];
+  toolCalls: ParsedToolCall[]
   /** Raw tool calls, to be echoed back into the assistant wire message. */
-  rawToolCalls: WireToolCall[];
-  finishReason: string;
-  requestId?: string;
+  rawToolCalls: WireToolCall[]
+  finishReason: string
+  requestId?: string
+  correlationId?: string
   /** Server-reported routing metadata (X-Luczor-* headers). */
-  model?: string;
-  provider?: string;
-  useCase?: string;
-};
+  model?: string
+  provider?: string
+  useCase?: string
+}
 
 type ChatWithToolsArgs = {
-  messages: WireMessage[];
-  tools?: unknown[];
+  messages: WireMessage[]
+  tools?: unknown[]
   /** Provider-level tool policy for this round. Defaults to auto. */
-  toolChoice?: ToolChoice;
-  projectId?: string;
-  taskType?: string;
-  contextId?: string;
-  repoId?: string;
-  branch?: string;
-  commitSha?: string;
+  toolChoice?: ToolChoice
+  projectId?: string
+  taskType?: string
+  contextId?: string
+  repoId?: string
+  branch?: string
+  commitSha?: string
   /** How the user produced this turn (marks spoken input server-side). */
-  inputSource?: "keyboard" | "push_to_talk" | "hands_free";
-  signal?: AbortSignal;
-};
+  inputSource?: 'keyboard' | 'push_to_talk' | 'hands_free'
+  signal?: AbortSignal
+}
 
 /** Read the server routing metadata headers into a ChatResult fragment. */
-function readLuczorHeaders(headers: Headers): Pick<ChatResult, "requestId" | "model" | "provider" | "useCase"> {
+function readLuczorHeaders(
+  headers: Headers
+): Pick<ChatResult, 'requestId' | 'correlationId' | 'model' | 'provider' | 'useCase'> {
   return {
-    requestId: headers.get("X-Luczor-Request-Id") ?? undefined,
-    model: headers.get("X-Luczor-Model-Id") ?? undefined,
-    provider: headers.get("X-Luczor-Provider") ?? undefined,
-    useCase: headers.get("X-Luczor-Use-Case") ?? undefined,
-  };
+    requestId: headers.get('X-Luczor-Request-Id') ?? undefined,
+    correlationId: headers.get('X-Luczor-Correlation-Id') ?? undefined,
+    model: headers.get('X-Luczor-Model-Id') ?? undefined,
+    provider: headers.get('X-Luczor-Provider') ?? undefined,
+    useCase: headers.get('X-Luczor-Use-Case') ?? undefined,
+  }
 }
 
 type StreamChatArgs = ChatWithToolsArgs & {
   /** Called with the full accumulated content each time a token arrives. */
-  onToken?: (content: string) => void;
-};
+  onToken?: (content: string) => void
+}
 
 function safeParseArgs(raw: string): Record<string, unknown> {
-  const s = (raw ?? "").trim();
-  if (!s) return {};
+  const s = (raw ?? '').trim()
+  if (!s) return {}
   try {
-    const parsed = JSON.parse(s);
-    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+    const parsed = JSON.parse(s)
+    return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
   } catch {
-    return {};
+    return {}
   }
+}
+
+function readStreamError(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null
+
+  const error = (payload as { error?: unknown }).error
+  if (!error || typeof error !== 'object') return null
+
+  const details = error as { code?: unknown; message?: unknown; status?: unknown }
+  const code = typeof details.code === 'string' ? details.code.slice(0, 128) : 'stream_error'
+  const message =
+    typeof details.message === 'string' && details.message.trim()
+      ? details.message.trim().slice(0, 2048)
+      : 'Der Server hat den Antwort-Stream abgebrochen.'
+  const status = Number.isInteger(details.status) ? ` (HTTP ${String(details.status)})` : ''
+
+  return `${message} [${code}]${status}`
 }
 
 /**
@@ -100,29 +127,42 @@ function safeParseArgs(raw: string): Record<string, unknown> {
  * request is sent to the Laravel proxy (authenticated with the device key) and
  * the server injects the real OpenRouter key — so no provider key on the client.
  */
-async function getEndpoint(): Promise<{ url: string; headers: Record<string, string>; proxied: boolean; clientId?: string }> {
-  const cfg = await getApiConfig();
-    if (!cfg.deviceKey) {
-      throw new Error("Server-Proxy aktiv, aber Device-Key fehlt (Settings → Server).");
-    }
-    return {
-      url: `${cfg.baseUrl}/api/v1/proxy/chat`,
-      headers: { Authorization: `Bearer ${cfg.deviceKey}`, "Content-Type": "application/json" },
-      proxied: true,
-      clientId: cfg.clientId,
-    };
+async function getEndpoint(): Promise<{
+  url: string
+  headers: Record<string, string>
+  proxied: boolean
+  clientId?: string
+}> {
+  const cfg = await getApiConfig()
+  if (!cfg.deviceKey) {
+    throw new Error('Server-Proxy aktiv, aber Device-Key fehlt (Settings → Server).')
+  }
+  return {
+    url: `${cfg.baseUrl}/api/v1/proxy/chat`,
+    headers: {
+      Authorization: `Bearer ${cfg.deviceKey}`,
+      'Content-Type': 'application/json',
+      'X-Luczor-Correlation-Id': createCorrelationId(),
+    },
+    proxied: true,
+    clientId: cfg.clientId,
+  }
 }
 
-function attachLuczorMeta(body: Record<string, unknown>, endpoint: Awaited<ReturnType<typeof getEndpoint>>, args: ChatWithToolsArgs) {
-  if (!endpoint.proxied) return;
-  body.client_id = endpoint.clientId;
-  body.project_id = args.projectId;
-  body.task_type = args.taskType ?? "chat.general";
-  body.context_id = args.contextId;
-  body.repo_id = args.repoId;
-  body.branch = args.branch;
-  body.commit_sha = args.commitSha;
-  body.input_source = args.inputSource ?? "keyboard";
+function attachLuczorMeta(
+  body: Record<string, unknown>,
+  endpoint: Awaited<ReturnType<typeof getEndpoint>>,
+  args: ChatWithToolsArgs
+) {
+  if (!endpoint.proxied) return
+  body.client_id = endpoint.clientId
+  body.project_id = args.projectId
+  body.task_type = args.taskType ?? 'chat.general'
+  body.context_id = args.contextId
+  body.repo_id = args.repoId
+  body.branch = args.branch
+  body.commit_sha = args.commitSha
+  body.input_source = args.inputSource ?? 'keyboard'
 }
 
 export class OpenRouterService {
@@ -133,58 +173,57 @@ export class OpenRouterService {
    * The caller (agent loop) executes tools, appends results, and calls again.
    */
   static async chatWithTools(args: ChatWithToolsArgs): Promise<ChatResult> {
-    const endpoint = await getEndpoint();
+    const endpoint = await getEndpoint()
 
     const body: Record<string, unknown> = {
       messages: args.messages,
-    };
-    if (args.tools && args.tools.length) {
-      body.tools = args.tools;
-      body.tool_choice = args.toolChoice ?? "auto";
     }
-    attachLuczorMeta(body, endpoint, args);
+    if (args.tools && args.tools.length) {
+      body.tools = args.tools
+      body.tool_choice = args.toolChoice ?? 'auto'
+    }
+    attachLuczorMeta(body, endpoint, args)
 
     const res = await fetch(endpoint.url, {
-      method: "POST",
+      method: 'POST',
       headers: endpoint.headers,
       body: JSON.stringify(body),
       signal: args.signal,
-    });
+    })
 
     if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      throw new Error(`OpenRouter HTTP ${res.status}: ${txt || res.statusText}`);
+      const txt = await readBoundedResponseText(res, 256 * 1024).catch(() => '')
+      throw new Error(`OpenRouter HTTP ${res.status}: ${txt || res.statusText}`)
     }
 
-    const json: any = await res.json();
-    const choice = json?.choices?.[0];
-    const message = choice?.message ?? {};
+    const json: any = JSON.parse(await readBoundedResponseText(res))
+    const choice = json?.choices?.[0]
+    const message = choice?.message ?? {}
 
-    const content = typeof message.content === "string" ? message.content : "";
-    const finishReason = String(choice?.finish_reason ?? "stop");
+    const content = typeof message.content === 'string' ? message.content : ''
+    const finishReason = String(choice?.finish_reason ?? 'stop')
 
     const rawToolCalls: WireToolCall[] = Array.isArray(message.tool_calls)
       ? message.tool_calls
           .filter((tc: any) => tc?.function?.name)
           .map((tc: any) => ({
             id: String(tc.id ?? `call_${Math.random().toString(16).slice(2)}`),
-            type: "function" as const,
+            type: 'function' as const,
             function: {
               name: String(tc.function.name),
-              arguments:
-                typeof tc.function.arguments === "string" ? tc.function.arguments : "{}",
+              arguments: typeof tc.function.arguments === 'string' ? tc.function.arguments : '{}',
             },
           }))
-      : [];
+      : []
 
-    const toolCalls: ParsedToolCall[] = rawToolCalls.map((tc) => ({
+    const toolCalls: ParsedToolCall[] = rawToolCalls.map(tc => ({
       id: tc.id,
       name: tc.function.name,
       arguments: safeParseArgs(tc.function.arguments),
       rawArguments: tc.function.arguments,
-    }));
+    }))
 
-    return { content, toolCalls, rawToolCalls, finishReason, ...readLuczorHeaders(res.headers) };
+    return { content, toolCalls, rawToolCalls, finishReason, ...readLuczorHeaders(res.headers) }
   }
 
   /**
@@ -195,98 +234,126 @@ export class OpenRouterService {
    * stream ends, so the agent loop can treat it like chatWithTools.
    */
   static async streamChatWithTools(args: StreamChatArgs): Promise<ChatResult> {
-    const endpoint = await getEndpoint();
+    const endpoint = await getEndpoint()
 
     const body: Record<string, unknown> = {
       messages: args.messages,
       stream: true,
-    };
-    if (args.tools && args.tools.length) {
-      body.tools = args.tools;
-      body.tool_choice = args.toolChoice ?? "auto";
     }
-    attachLuczorMeta(body, endpoint, args);
+    if (args.tools && args.tools.length) {
+      body.tools = args.tools
+      body.tool_choice = args.toolChoice ?? 'auto'
+    }
+    attachLuczorMeta(body, endpoint, args)
 
     const res = await fetch(endpoint.url, {
-      method: "POST",
+      method: 'POST',
       headers: endpoint.headers,
       body: JSON.stringify(body),
       signal: args.signal,
-    });
+    })
 
     if (!res.ok || !res.body) {
-      const txt = await res.text().catch(() => "");
-      throw new Error(`OpenRouter HTTP ${res.status}: ${txt || res.statusText}`);
+      const txt = await readBoundedResponseText(res, 256 * 1024).catch(() => '')
+      throw new Error(`OpenRouter HTTP ${res.status}: ${txt || res.statusText}`)
     }
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder("utf-8");
+    const reader = res.body.getReader()
+    const decoder = new TextDecoder('utf-8')
 
-    let buffer = "";
-    let content = "";
-    let finishReason = "stop";
-    const toolAcc: Array<{ id: string; name: string; args: string }> = [];
+    let buffer = ''
+    let content = ''
+    let receivedBytes = 0
+    let finishReason = 'stop'
+    const toolAcc: Array<{ id: string; name: string; args: string }> = []
 
     while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
+      const { done, value } = await reader.read()
+      if (done) break
 
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? ""; // keep the trailing partial line
+      receivedBytes += value.byteLength
+      if (receivedBytes > MAX_STREAM_BYTES) {
+        await reader.cancel().catch(() => undefined)
+        throw new Error('Die Streaming-Antwort überschreitet das sichere Größenlimit.')
+      }
+
+      buffer += decoder.decode(value, { stream: true })
+      if (buffer.length > MAX_STREAM_LINE_CHARS) {
+        await reader.cancel().catch(() => undefined)
+        throw new Error('Die Streaming-Antwort enthält einen zu großen Datenblock.')
+      }
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? '' // keep the trailing partial line
 
       for (const line of lines) {
-        const l = line.trim();
-        if (!l || l.startsWith(":")) continue; // skip keep-alive comments
-        if (!l.startsWith("data:")) continue;
+        const l = line.trim()
+        if (!l || l.startsWith(':')) continue // skip keep-alive comments
+        if (!l.startsWith('data:')) continue
 
-        const data = l.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
+        const data = l.slice(5).trim()
+        if (!data || data === '[DONE]') continue
 
-        let json: any;
+        let json: any
         try {
-          json = JSON.parse(data);
+          json = JSON.parse(data)
         } catch {
-          continue;
+          continue
         }
 
-        const choice = json?.choices?.[0];
-        const delta = choice?.delta;
-        if (choice?.finish_reason) finishReason = String(choice.finish_reason);
-        if (!delta) continue;
+        const streamError = readStreamError(json)
+        if (streamError !== null) {
+          await reader.cancel().catch(() => undefined)
+          throw new Error(streamError)
+        }
 
-        if (typeof delta.content === "string" && delta.content) {
-          content += delta.content;
-          args.onToken?.(content);
+        const choice = json?.choices?.[0]
+        const delta = choice?.delta
+        if (choice?.finish_reason) finishReason = String(choice.finish_reason)
+        if (!delta) continue
+
+        if (typeof delta.content === 'string' && delta.content) {
+          content += delta.content
+          if (content.length > MAX_STREAM_CONTENT_CHARS) {
+            await reader.cancel().catch(() => undefined)
+            throw new Error('Die Streaming-Antwort überschreitet das sichere Inhaltslimit.')
+          }
+          args.onToken?.(content)
         }
 
         if (Array.isArray(delta.tool_calls)) {
           for (const tc of delta.tool_calls) {
-            const idx = typeof tc?.index === "number" ? tc.index : 0;
-            const slot = (toolAcc[idx] ??= { id: "", name: "", args: "" });
-            if (tc?.id) slot.id = String(tc.id);
-            if (tc?.function?.name) slot.name = String(tc.function.name);
-            if (typeof tc?.function?.arguments === "string") slot.args += tc.function.arguments;
+            const idx = typeof tc?.index === 'number' ? tc.index : 0
+            if (!Number.isSafeInteger(idx) || idx < 0 || idx >= MAX_TOOL_CALLS) continue
+            const slot = (toolAcc[idx] ??= { id: '', name: '', args: '' })
+            if (tc?.id) slot.id = String(tc.id)
+            if (tc?.function?.name) slot.name = String(tc.function.name)
+            if (typeof tc?.function?.arguments === 'string') {
+              if (slot.args.length + tc.function.arguments.length > MAX_TOOL_ARGUMENT_CHARS) {
+                await reader.cancel().catch(() => undefined)
+                throw new Error('Ein Tool-Aufruf überschreitet das sichere Argumentlimit.')
+              }
+              slot.args += tc.function.arguments
+            }
           }
         }
       }
     }
 
     const rawToolCalls: WireToolCall[] = toolAcc
-      .filter((t) => t && t.name)
-      .map((t) => ({
+      .filter(t => t && t.name)
+      .map(t => ({
         id: t.id || `call_${Math.random().toString(16).slice(2)}`,
-        type: "function" as const,
-        function: { name: t.name, arguments: t.args || "{}" },
-      }));
+        type: 'function' as const,
+        function: { name: t.name, arguments: t.args || '{}' },
+      }))
 
-    const toolCalls: ParsedToolCall[] = rawToolCalls.map((tc) => ({
+    const toolCalls: ParsedToolCall[] = rawToolCalls.map(tc => ({
       id: tc.id,
       name: tc.function.name,
       arguments: safeParseArgs(tc.function.arguments),
       rawArguments: tc.function.arguments,
-    }));
+    }))
 
-    return { content, toolCalls, rawToolCalls, finishReason, ...readLuczorHeaders(res.headers) };
+    return { content, toolCalls, rawToolCalls, finishReason, ...readLuczorHeaders(res.headers) }
   }
 }

@@ -51,6 +51,7 @@ pub fn run() {
             commands::local_tasks::wf_file_read,
             commands::local_tasks::wf_file_write,
             commands::local_tasks::wf_run_script,
+            commands::workflow_http::wf_http_request,
             commands::notifications::show_native_notification,
             commands::browser::browser_open,
             commands::browser::browser_navigate,
@@ -58,6 +59,9 @@ pub fn run() {
             commands::browser::browser_click,
             commands::browser::browser_read,
             commands::browser::browser_report,
+            commands::device_key::device_key_get,
+            commands::device_key::device_key_set,
+            commands::device_key::device_key_delete,
         ])
         .on_window_event(|window, event| {
             #[cfg(desktop)]

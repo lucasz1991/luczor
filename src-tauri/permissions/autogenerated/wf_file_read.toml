@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wf-file-read"
+description = "Enables the wf_file_read command without any pre-configured scope."
+commands.allow = ["wf_file_read"]
+
+[[permission]]
+identifier = "deny-wf-file-read"
+description = "Denies the wf_file_read command without any pre-configured scope."
+commands.deny = ["wf_file_read"]

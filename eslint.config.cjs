@@ -1,11 +1,11 @@
 const pluginVitest = require('@vitest/eslint-plugin')
 const skipFormatting = require('@vue/eslint-config-prettier/skip-formatting')
-const vueTsEslintConfig = require('@vue/eslint-config-typescript')
+const { defineConfigWithVueTs, vueTsConfigs } = require('@vue/eslint-config-typescript')
 const security = require('eslint-plugin-security')
 const pluginVue = require('eslint-plugin-vue')
 
 /** @type {import('eslint').Linter.Config[]} */
-module.exports = [
+module.exports = defineConfigWithVueTs(
   {
     name: 'app/files-to-lint',
     files: ['**/*.{ts,mts,tsx,vue}'],
@@ -39,8 +39,8 @@ module.exports = [
     },
   },
 
-  ...pluginVue.configs['flat/recommended'],
-  ...vueTsEslintConfig(),
+  pluginVue.configs['flat/recommended'],
+  vueTsConfigs.recommended,
 
   {
     ...pluginVitest.configs.recommended,
@@ -50,4 +50,15 @@ module.exports = [
   skipFormatting,
 
   security.configs.recommended,
-]
+
+  {
+    name: 'app/security-gates',
+    rules: {
+      // Promote security findings to hard failures. Reviewed legacy dynamic
+      // index accesses live in the count-based suppressions file, so any new
+      // occurrence fails CI until it is audited explicitly.
+      'security/detect-object-injection': 'error',
+      'security/detect-non-literal-regexp': 'error',
+    },
+  }
+)

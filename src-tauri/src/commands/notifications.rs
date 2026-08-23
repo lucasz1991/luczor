@@ -1,6 +1,8 @@
 use notify_rust::{Notification, NotificationResponse, Urgency};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+
+use super::ensure_main_webview;
 
 pub const NATIVE_NOTIFICATION_ACTION_EVENT: &str = "luczor://notification-action";
 
@@ -30,9 +32,11 @@ struct NativeNotificationAction {
 /// the handle alive until the toast is activated or dismissed.
 #[tauri::command]
 pub fn show_native_notification(
+    window: WebviewWindow,
     app: AppHandle,
     payload: NativeNotificationPayload,
 ) -> Result<(), String> {
+    ensure_main_webview(&window)?;
     validate_payload(&payload)?;
 
     let mut notification = Notification::new();

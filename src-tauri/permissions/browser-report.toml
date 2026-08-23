@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "browser-report"
+description = "Allows only the dedicated Luczor browser webview to return a correlated, bounded browser-read result."
+commands.allow = ["browser_report"]

@@ -1,0 +1,93 @@
+name: Release readiness
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release-gate:
+    name: Fail-closed release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+
+      - name: Verify release metadata
+        run: node check-version.cjs
+
+      - name: Verify updater runtime configuration
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('fs')
+          const config = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'))
+          const cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8')
+          const updater = config.plugins?.updater
+          const createsArtifacts = config.bundle?.createUpdaterArtifacts === true
+          const hasEndpoint = Array.isArray(updater?.endpoints) && updater.endpoints.length > 0
+          const hasPublicKey = typeof updater?.pubkey === 'string' && updater.pubkey.trim() !== ''
+          const hasDependency = /^tauri-plugin-updater\s*=/m.test(cargo)
+
+          const missing = []
+          if (!createsArtifacts) missing.push('bundle.createUpdaterArtifacts=true')
+          if (!hasEndpoint) missing.push('plugins.updater.endpoints')
+          if (!hasPublicKey) missing.push('plugins.updater.pubkey')
+          if (!hasDependency) missing.push('tauri-plugin-updater dependency')
+
+          if (missing.length > 0) {
+            console.error(`Release blocked; updater setup is incomplete: ${missing.join(', ')}`)
+            process.exit(1)
+          }
+          NODE
+
+          if ! grep -Rqs 'tauri_plugin_updater' src-tauri/src; then
+            echo 'Release blocked; tauri-plugin-updater is not registered in the Rust runtime.' >&2
+            exit 1
+          fi
+
+      - name: Verify signing secrets
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          required=(
+            APPLE_CERTIFICATE
+            APPLE_CERTIFICATE_PASSWORD
+            APPLE_ID
+            APPLE_PASSWORD
+            APPLE_SIGNING_IDENTITY
+            APPLE_TEAM_ID
+            TAURI_SIGNING_PRIVATE_KEY
+            TAURI_SIGNING_PRIVATE_KEY_PASSWORD
+            WINDOWS_CERTIFICATE
+            WINDOWS_CERTIFICATE_PASSWORD
+          )
+
+          missing=0
+          for name in "${required[@]}"; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error title=Missing release secret::$name is not configured"
+              missing=1
+            fi
+          done
+
+          exit "$missing"
+
+      - name: Readiness result
+        run: echo 'Release prerequisites are present. Publishing remains a separate, explicit workflow.'

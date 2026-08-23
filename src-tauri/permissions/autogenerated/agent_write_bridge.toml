@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-write-bridge"
+description = "Enables the agent_write_bridge command without any pre-configured scope."
+commands.allow = ["agent_write_bridge"]
+
+[[permission]]
+identifier = "deny-agent-write-bridge"
+description = "Denies the agent_write_bridge command without any pre-configured scope."
+commands.deny = ["agent_write_bridge"]

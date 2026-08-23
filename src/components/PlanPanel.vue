@@ -6,32 +6,32 @@
      are owned by the agent. Renders nothing when no plan exists, so it never
      takes up space during simple one-shot chats. -->
 <script setup lang="ts">
-import { computed } from "vue";
-import { clearPlan, currentPlanStep, getPlan, isPlanComplete, planProgress, type PlanStepStatus } from "@/services/plan";
+import { computed } from 'vue'
+import { clearPlan, currentPlanStep, getPlan, isPlanComplete, planProgress, type PlanStepStatus } from '@/services/plan'
 
 const props = defineProps<{
-  projectId: string;
+  projectId: string
   /** Collapsed state is owned by the parent so it survives re-renders. */
-  collapsed?: boolean;
-}>();
+  collapsed?: boolean
+}>()
 
-const emit = defineEmits<{ (e: "toggle"): void }>();
+const emit = defineEmits<{ (e: 'toggle'): void }>()
 
-const plan = computed(() => getPlan(props.projectId));
-const hasPlan = computed(() => plan.value.steps.length > 0);
-const progress = computed(() => planProgress(plan.value));
-const active = computed(() => currentPlanStep(plan.value));
-const complete = computed(() => isPlanComplete(plan.value));
+const plan = computed(() => getPlan(props.projectId))
+const hasPlan = computed(() => plan.value.steps.length > 0)
+const progress = computed(() => planProgress(plan.value))
+const active = computed(() => currentPlanStep(plan.value))
+const complete = computed(() => isPlanComplete(plan.value))
 
 const STATUS_LABEL: Record<PlanStepStatus, string> = {
-  pending: "Offen",
-  in_progress: "Läuft",
-  done: "Fertig",
-  skipped: "Übersprungen",
-};
+  pending: 'Offen',
+  in_progress: 'Läuft',
+  done: 'Fertig',
+  skipped: 'Übersprungen',
+}
 
 function onClear() {
-  clearPlan(props.projectId);
+  clearPlan(props.projectId)
 }
 </script>
 
@@ -42,11 +42,11 @@ function onClear() {
         type="button"
         class="plan__toggle"
         :aria-expanded="!collapsed"
-        @click="emit('toggle')"
         :title="collapsed ? 'Plan aufklappen' : 'Plan einklappen'"
+        @click="emit('toggle')"
       >
         <span class="plan__chevron" :class="{ 'is-open': !collapsed }" aria-hidden="true">›</span>
-        <span class="plan__title">{{ complete ? "Plan abgeschlossen" : "Plan" }}</span>
+        <span class="plan__title">{{ complete ? 'Plan abgeschlossen' : 'Plan' }}</span>
         <span class="plan__count">{{ progress.done }}/{{ progress.total }}</span>
       </button>
 
@@ -56,16 +56,13 @@ function onClear() {
         <i :style="{ width: progress.percent + '%' }" />
       </div>
 
-      <button type="button" class="plan__clear" @click="onClear" title="Plan verwerfen" aria-label="Plan verwerfen">×</button>
+      <button type="button" class="plan__clear" title="Plan verwerfen" aria-label="Plan verwerfen" @click="onClear">
+        ×
+      </button>
     </header>
 
     <ol v-if="!collapsed" class="plan__steps">
-      <li
-        v-for="(step, index) in plan.steps"
-        :key="index"
-        class="plan__step"
-        :class="`is-${step.status}`"
-      >
+      <li v-for="(step, index) in plan.steps" :key="index" class="plan__step" :class="`is-${step.status}`">
         <span class="plan__mark" aria-hidden="true">
           <template v-if="step.status === 'done'">✓</template>
           <template v-else-if="step.status === 'skipped'">–</template>
@@ -251,8 +248,15 @@ function onClear() {
   animation: plan-pulse 1.3s ease-in-out infinite;
 }
 @keyframes plan-pulse {
-  0%, 100% { opacity: 0.35; transform: scale(0.8); }
-  50% { opacity: 1; transform: scale(1.15); }
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.15);
+  }
 }
 
 .plan__note {

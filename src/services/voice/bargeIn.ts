@@ -7,7 +7,7 @@
 // Pure + testable: it only consumes per-frame RMS values.
 
 export class BargeInDetector {
-  private count = 0;
+  private count = 0
 
   /**
    * @param threshold RMS above which a frame counts as speech.
@@ -16,24 +16,24 @@ export class BargeInDetector {
    */
   constructor(
     private readonly threshold: number,
-    private readonly frames: number,
+    private readonly frames: number
   ) {}
 
   reset(): void {
-    this.count = 0;
+    this.count = 0
   }
 
   /** Feed one frame's RMS; returns true exactly once when speech is sustained. */
   push(rms: number): boolean {
     if (rms > this.threshold) {
-      this.count += 1;
+      this.count += 1
       if (this.count >= this.frames) {
-        this.count = 0;
-        return true;
+        this.count = 0
+        return true
       }
     } else {
-      this.count = 0;
+      this.count = 0
     }
-    return false;
+    return false
   }
 }

@@ -1,6 +1,6 @@
 // src/services/chat.service.ts
-import type * as T from "@/state/types";
-import { mutations } from "@/state/store";
+import type * as T from '@/state/types'
+import { mutations } from '@/state/store'
 
 /**
  * Single place for message creation/appending.
@@ -9,37 +9,37 @@ import { mutations } from "@/state/store";
  */
 
 export function createUserMessage(projectId: T.Id, content: string): T.Message {
-  return mutations.makeMsg("user", content, projectId);
+  return mutations.makeMsg('user', content, projectId)
 }
 
 export function createAssistantMessage(projectId: T.Id, content: string): T.Message {
-  return mutations.makeMsg("assistant", content, projectId);
+  return mutations.makeMsg('assistant', content, projectId)
 }
 
 export function createToolBackchannelMessage(projectId: T.Id, parsed: unknown, meta?: T.MessageMeta) {
   // hidden message: persisted for context, not shown in UI
-  mutations.addHiddenToolMessage(projectId, parsed, meta);
+  mutations.addHiddenToolMessage(projectId, parsed, meta)
 }
 
 export function appendMessage(msg: T.Message) {
-  mutations.addMessage(msg);
+  mutations.addMessage(msg)
 }
 
 export function patchMessage(projectId: T.Id, messageId: T.Id, patch: Partial<T.Message>) {
-  mutations.patchMessage(projectId, messageId, patch);
+  mutations.patchMessage(projectId, messageId, patch)
 }
 
 /**
  * Convenience: append user + placeholder assistant.
  */
 export function appendUserAndPlaceholder(projectId: T.Id, userText: string) {
-  const user = createUserMessage(projectId, userText);
-  appendMessage(user);
+  const user = createUserMessage(projectId, userText)
+  appendMessage(user)
 
-  const assistant = createAssistantMessage(projectId, "");
-  assistant.raw = "";
-  assistant.parsed = null;
-  appendMessage(assistant);
+  const assistant = createAssistantMessage(projectId, '')
+  assistant.raw = ''
+  assistant.parsed = null
+  appendMessage(assistant)
 
-  return { user, assistant };
+  return { user, assistant }
 }

@@ -4,8 +4,6 @@ import { fileURLToPath, URL } from 'node:url'
 import AutoImport from 'unplugin-auto-import/vite'
 import Components from 'unplugin-vue-components/vite'
 import { defineConfig } from 'vite'
-import { nodePolyfills } from 'vite-plugin-node-polyfills'
-import topLevelAwait from 'vite-plugin-top-level-await'
 import vueDevTools from 'vite-plugin-vue-devtools'
 import { version as pkgVersion } from './package.json'
 
@@ -20,8 +18,6 @@ if (process.env.NODE_ENV === 'production') {
 export default defineConfig({
   plugins: [
     tailwind(),
-    topLevelAwait(),
-    nodePolyfills(),
     vue(),
     vueDevTools(),
     AutoImport({

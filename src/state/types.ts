@@ -1,168 +1,163 @@
 // src/state/types.ts
 
-export type Id = string;
+export type Id = string
 
 /* =========================================================
  * Core chat types
  * ========================================================= */
-export type ChatRole = "user" | "assistant" | "tool";
-export type MessageVisibility = "visible" | "hidden";
+export type ChatRole = 'user' | 'assistant' | 'tool'
+export type MessageVisibility = 'visible' | 'hidden'
 
 export type MessageMeta = {
-  kind?: "question" | "statement";
-  isLoading?: boolean;
+  kind?: 'question' | 'statement'
+  isLoading?: boolean
 
   // tool/backchannel linkage
-  toolCallId?: Id;
-  toolName?: string;
+  toolCallId?: Id
+  toolName?: string
 
   // streamed envelope fields (assistant)
-  summary?: string;
-  question?: string;
-  bullets?: string[];
+  summary?: string
+  question?: string
+  bullets?: string[]
 
   // server routing metadata (from X-Luczor-* headers)
-  model?: string;
-  provider?: string;
-  useCase?: string;
+  model?: string
+  provider?: string
+  useCase?: string
 
   // how a user turn was produced; drives the "Gesprochen" badge
-  inputSource?: "keyboard" | "push_to_talk" | "hands_free";
+  inputSource?: 'keyboard' | 'push_to_talk' | 'hands_free'
 
   // LLM run evaluation linkage
-  llmRequestId?: string;
-  userFeedback?: "up" | "down" | null;
-};
+  llmRequestId?: string
+  userFeedback?: 'up' | 'down' | null
+}
 
 export type Message = {
-  id: Id;
-  projectId: Id;
+  id: Id
+  projectId: Id
 
-  role: ChatRole;
-  content: string;
+  role: ChatRole
+  content: string
 
-  ts: number;
-  createdAt: number;
+  ts: number
+  createdAt: number
 
   // raw model output (optional; not necessarily shown)
-  raw?: string;
+  raw?: string
 
   // parsed structured output (if any). Keep generic because schema can evolve.
-  parsed: unknown | null;
+  parsed: unknown | null
 
   // whether UI should display it
-  visibility: MessageVisibility;
+  visibility: MessageVisibility
 
-  meta: MessageMeta;
-};
+  meta: MessageMeta
+}
 
 /* =========================================================
  * Project management
  * ========================================================= */
-export type GoalStatus = "open" | "in_progress" | "done";
-export type GoalPriority = "low" | "normal" | "high";
+export type GoalStatus = 'open' | 'in_progress' | 'done'
+export type GoalPriority = 'low' | 'normal' | 'high'
 
 export type ProjectGoal = {
-  id: Id;
-  title: string;
-  description?: string;
-  status: GoalStatus;
-  priority?: GoalPriority;
+  id: Id
+  title: string
+  description?: string
+  status: GoalStatus
+  priority?: GoalPriority
 
-  createdAt: number;
-  updatedAt: number;
-  doneAt?: number | null;
-};
+  createdAt: number
+  updatedAt: number
+  doneAt?: number | null
+}
 
 export type ProjectFocus = {
-  activeTodoId: Id | null;
-  activeStepId: Id | null;
-};
+  activeTodoId: Id | null
+  activeStepId: Id | null
+}
 
 export type ProjectDefaults = {
-  maxOutputTokens: number;
-};
+  maxOutputTokens: number
+}
 
 export type Project = {
-  id: Id;
-  name: string;
+  id: Id
+  name: string
 
   /**
    * Optional human-readable "overall goal" (high-level)
    * Separate from structured goals[] list.
    */
-  goal?: string;
+  goal?: string
 
   /**
    * Structured goals with status.
    */
-  goals: ProjectGoal[];
+  goals: ProjectGoal[]
 
   /**
    * Short project summary maintained over time.
    */
-  summary: string;
+  summary: string
 
-  defaults: ProjectDefaults;
-  focus: ProjectFocus;
+  defaults: ProjectDefaults
+  focus: ProjectFocus
 
-  archivedAt: number | null;
-  createdAt: number;
-  updatedAt: number;
-};
+  archivedAt: number | null
+  createdAt: number
+  updatedAt: number
+}
 
 /* =========================================================
  * Memories / Summaries (optional but supported)
  * ========================================================= */
-export type MemoryKind =
-  | "rule"
-  | "todo_policy"
-  | "preference"
-  | "fact"
-  | "note";
+export type MemoryKind = 'rule' | 'todo_policy' | 'preference' | 'fact' | 'note'
 
 export type MemorySource = {
-  by: "user" | "assistant" | "system";
-};
+  by: 'user' | 'assistant' | 'system'
+}
 
 export type MemoryItem = {
-  id: Id;
-  projectId: Id | null;
+  id: Id
+  projectId: Id | null
 
-  kind: MemoryKind;
-  key: string;
-  value: string;
+  kind: MemoryKind
+  key: string
+  value: string
 
-  priority: 1 | 2 | 3 | 4 | 5;
-  active: boolean;
+  priority: 1 | 2 | 3 | 4 | 5
+  active: boolean
 
-  createdAt: number;
-  updatedAt: number;
-  source: MemorySource;
-};
+  createdAt: number
+  updatedAt: number
+  source: MemorySource
+}
 
 export type SummaryItem = {
-  id: Id;
-  projectId: Id;
-  text: string;
-  createdAt: number;
-};
+  id: Id
+  projectId: Id
+  text: string
+  createdAt: number
+}
 
 /* =========================================================
  * Tool calling (pending approvals / results)
  * ========================================================= */
 export type ToolCallStatus =
-  | "proposed"     // waiting for user approval/execution
-  | "approved"     // user approved, app may execute
-  | "executing"    // app is executing
-  | "executed"     // executed successfully
-  | "failed"       // executed with error
-  | "rejected"     // user rejected
-  | "canceled";    // aborted by user/app
+  | 'proposed' // waiting for user approval/execution
+  | 'approved' // user approved, app may execute
+  | 'executing' // app is executing
+  | 'executed' // executed successfully
+  | 'failed' // executed with error
+  | 'rejected' // user rejected
+  | 'canceled' // aborted by user/app
 
 export type PendingToolCall = {
-  id: Id;
-  projectId: Id;
+  id: Id
+  projectId: Id
 
   /**
    * Tool name. Examples:
@@ -171,86 +166,86 @@ export type PendingToolCall = {
    * - "project.set_summary"
    * - "project.upsert_goal"
    */
-  name: string;
+  name: string
 
   /**
    * Optional category for grouping in UI
    * (keeps "name" stable while UI can bucket tools).
    */
-  category?: "os" | "project" | "app" | "custom";
+  category?: 'os' | 'project' | 'app' | 'custom'
 
   /**
    * Tool arguments as plain JSON.
    */
-  args: Record<string, unknown>;
+  args: Record<string, unknown>
 
   /**
    * Whether user approval is required before execution.
    */
-  requiresApproval: boolean;
+  requiresApproval: boolean
 
-  status: ToolCallStatus;
+  status: ToolCallStatus
 
-  createdAt: number;
-  updatedAt: number;
+  createdAt: number
+  updatedAt: number
 
-  result?: ToolResult;
-};
+  result?: ToolResult
+}
 
 export type ToolResult = {
-  toolCallId: Id;
-  name: string;
+  toolCallId: Id
+  name: string
 
-  ok: boolean;
+  ok: boolean
 
   /**
    * Raw payload returned by the host app/tool executor.
    */
-  output?: unknown;
+  output?: unknown
 
   /**
    * Error info if ok=false
    */
-  error?: string;
+  error?: string
 
-  ts: number;
-};
+  ts: number
+}
 
 /* =========================================================
  * Global app state
  * ========================================================= */
 export type GlobalDefaults = {
-  maxOutputTokens: number;
-};
+  maxOutputTokens: number
+}
 
 export type GlobalUi = {
-  lastProjectId?: Id;
-};
+  lastProjectId?: Id
+}
 
 export type GlobalState = {
-  defaults: GlobalDefaults;
-  memories: MemoryItem[];
-  ui?: GlobalUi;
-};
+  defaults: GlobalDefaults
+  memories: MemoryItem[]
+  ui?: GlobalUi
+}
 
 export type PendingState = {
-  toolCallsByProject: Record<Id, PendingToolCall[]>;
-};
+  toolCallsByProject: Record<Id, PendingToolCall[]>
+}
 
 export type AppState = {
-  version: 1;
+  version: 1
 
-  global: GlobalState;
+  global: GlobalState
 
-  projects: Project[];
-  messages: Message[];
+  projects: Project[]
+  messages: Message[]
 
   // optional legacy / future features
-  todos: any[];
-  todoSteps: any[];
-  projectMemories: any[];
+  todos: any[]
+  todoSteps: any[]
+  projectMemories: any[]
 
-  summaries: SummaryItem[];
+  summaries: SummaryItem[]
 
-  pending: PendingState;
-};
+  pending: PendingState
+}

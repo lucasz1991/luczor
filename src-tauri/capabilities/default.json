@@ -4,16 +4,13 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "core:window:allow-show",
-    "core:window:allow-hide",
-    "core:window:allow-set-focus",
-    "notification:default",
-    "store:default",
+    "notification:allow-is-permission-granted",
+    "notification:allow-request-permission",
     "store:allow-load",
     "store:allow-save",
     "store:allow-get",
     "store:allow-set",
-    "global-shortcut:default",
-    "autostart:default"
+    "store:allow-delete",
+    "main-runtime"
   ]
 }

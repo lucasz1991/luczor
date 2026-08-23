@@ -1,12 +1,12 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
 @plugin "@egoist/tailwindcss-icons" {
   prefixes: mdi;
 }
 
 @theme {
-  --font-sans: "Segoe UI Variable", "Aptos", "Inter", system-ui, sans-serif;
-  --font-mono: "Cascadia Mono", "JetBrains Mono", ui-monospace, Consolas, monospace;
+  --font-sans: 'Segoe UI Variable', 'Aptos', 'Inter', system-ui, sans-serif;
+  --font-mono: 'Cascadia Mono', 'JetBrains Mono', ui-monospace, Consolas, monospace;
 }
 
 html {

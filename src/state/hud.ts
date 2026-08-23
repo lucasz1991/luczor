@@ -9,27 +9,21 @@
 // This is deliberately separate from the persisted AppState so the HUD can
 // animate every frame without triggering autosave.
 
-import { reactive } from "vue";
+import { reactive } from 'vue'
 
-export type HudStatus =
-  | "idle"
-  | "listening"
-  | "thinking"
-  | "executing"
-  | "speaking"
-  | "error";
+export type HudStatus = 'idle' | 'listening' | 'thinking' | 'executing' | 'speaking' | 'error'
 
-export type ActivityChannel = "audio" | "network" | "file" | "os";
-export type ConnState = "unknown" | "online" | "offline" | "disabled" | "configured";
+export type ActivityChannel = 'audio' | 'network' | 'file' | 'os'
+export type ConnState = 'unknown' | 'online' | 'offline' | 'disabled' | 'configured'
 
 export const hud = reactive({
-  status: "idle" as HudStatus,
+  status: 'idle' as HudStatus,
   /** 0..1 microphone RMS level while recording. */
   micLevel: 0,
   /** When true, no tool executes — a hard, user-controlled stop. */
   killSwitch: false,
   /** Last executed/attempted tool name (for the HUD ticker). */
-  lastTool: "",
+  lastTool: '',
   /** Decaying 0..1 pulses per channel. */
   activity: {
     audio: 0,
@@ -40,63 +34,63 @@ export const hud = reactive({
   /** Memory / sync telemetry shown in the HUD. */
   sync: {
     pending: 0,
-    server: "disabled" as ConnState,
-    cognee: "disabled" as ConnState,
+    server: 'disabled' as ConnState,
+    cognee: 'disabled' as ConnState,
   },
-});
+})
 
 export function setSyncStatus(s: { pending: number; server: ConnState; cognee: ConnState }) {
-  hud.sync.pending = s.pending;
-  hud.sync.server = s.server;
-  hud.sync.cognee = s.cognee;
+  hud.sync.pending = s.pending
+  hud.sync.server = s.server
+  hud.sync.cognee = s.cognee
 }
 
-let rafId = 0;
-let running = false;
+let rafId = 0
+let running = false
 
 function frame() {
-  const a = hud.activity;
-  a.audio *= 0.9;
-  a.network *= 0.9;
-  a.file *= 0.9;
-  a.os *= 0.9;
-  if (a.audio < 0.001) a.audio = 0;
-  if (a.network < 0.001) a.network = 0;
-  if (a.file < 0.001) a.file = 0;
-  if (a.os < 0.001) a.os = 0;
-  rafId = requestAnimationFrame(frame);
+  const a = hud.activity
+  a.audio *= 0.9
+  a.network *= 0.9
+  a.file *= 0.9
+  a.os *= 0.9
+  if (a.audio < 0.001) a.audio = 0
+  if (a.network < 0.001) a.network = 0
+  if (a.file < 0.001) a.file = 0
+  if (a.os < 0.001) a.os = 0
+  rafId = requestAnimationFrame(frame)
 }
 
 /** Start the decay animation loop (idempotent). */
 export function startHud() {
-  if (running) return;
-  running = true;
-  rafId = requestAnimationFrame(frame);
+  if (running) return
+  running = true
+  rafId = requestAnimationFrame(frame)
 }
 
 export function stopHud() {
-  if (rafId) cancelAnimationFrame(rafId);
-  rafId = 0;
-  running = false;
+  if (rafId) cancelAnimationFrame(rafId)
+  rafId = 0
+  running = false
 }
 
 export function setStatus(s: HudStatus) {
-  hud.status = s;
+  hud.status = s
 }
 
 export function setMicLevel(v: number) {
-  hud.micLevel = Math.max(0, Math.min(1, v));
+  hud.micLevel = Math.max(0, Math.min(1, v))
 }
 
 /** Fire a pulse on a channel (0..1). Used to light up the HUD rings. */
 export function pulse(channel: ActivityChannel, value = 1) {
-  hud.activity[channel] = Math.max(hud.activity[channel], Math.min(1, value));
+  hud.activity[channel] = Math.max(hud.activity[channel], Math.min(1, value))
 }
 
 export function setKillSwitch(on: boolean) {
-  hud.killSwitch = on;
+  hud.killSwitch = on
 }
 
 export function setLastTool(name: string) {
-  hud.lastTool = name;
+  hud.lastTool = name
 }

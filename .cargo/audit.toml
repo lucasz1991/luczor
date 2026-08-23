@@ -1,0 +1,6 @@
+[advisories]
+ignore = [
+    # Luczor uses rsa only for public-key signature verification. The advisory
+    # concerns timing leakage from private-key operations, which are not used.
+    "RUSTSEC-2023-0071",
+]

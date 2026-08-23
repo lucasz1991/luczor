@@ -12,10 +12,15 @@ export {}
 declare module 'vue' {
   export interface GlobalComponents {
     AmbientBackdrop: typeof import('./src/components/vengeance/AmbientBackdrop.vue')['default']
+    AppearanceSettingsSection: typeof import('./src/components/settings/AppearanceSettingsSection.vue')['default']
+    ChatSettingsSection: typeof import('./src/components/settings/ChatSettingsSection.vue')['default']
+    ExecutionSettingsSection: typeof import('./src/components/settings/ExecutionSettingsSection.vue')['default']
     JarvisHud: typeof import('./src/components/JarvisHud.vue')['default']
     PlanPanel: typeof import('./src/components/PlanPanel.vue')['default']
+    PrivacyDiagnosticsSettings: typeof import('./src/components/PrivacyDiagnosticsSettings.vue')['default']
     RichMessage: typeof import('./src/components/RichMessage.vue')['default']
     Settings: typeof import('./src/components/Settings.vue')['default']
     SpotlightSurface: typeof import('./src/components/vengeance/SpotlightSurface.vue')['default']
+    VoiceSettingsSection: typeof import('./src/components/settings/VoiceSettingsSection.vue')['default']
   }
 }

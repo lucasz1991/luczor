@@ -7,14 +7,15 @@
 // and per-call user approval. Nothing here bypasses that gate.
 
 use base64::Engine;
-use enigo::{
-    Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings,
-};
+use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use nvml_wrapper::{enum_wrappers::device::TemperatureSensor, Nvml};
 use serde::{Deserialize, Serialize};
-use sysinfo::{Components, System, MINIMUM_CPU_UPDATE_INTERVAL};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+use sysinfo::{Components, System, MINIMUM_CPU_UPDATE_INTERVAL};
+use tauri::WebviewWindow;
+
+use super::ensure_main_webview;
 
 /* =========================================================
  * Perception
@@ -30,7 +31,8 @@ pub struct ScreenCapture {
 
 /// Capture the primary monitor as a PNG (base64).
 #[tauri::command]
-pub async fn capture_screen() -> Result<ScreenCapture, String> {
+pub async fn capture_screen(window: WebviewWindow) -> Result<ScreenCapture, String> {
+    ensure_main_webview(&window)?;
     let monitors = xcap::Monitor::all().map_err(|e| format!("Monitor::all failed: {e}"))?;
     let monitor = monitors
         .into_iter()
@@ -64,9 +66,11 @@ pub async fn capture_screen() -> Result<ScreenCapture, String> {
 
 /// Read the system clipboard (text).
 #[tauri::command]
-pub async fn read_clipboard() -> Result<String, String> {
+pub async fn read_clipboard(window: WebviewWindow) -> Result<String, String> {
+    ensure_main_webview(&window)?;
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("Clipboard init failed: {e}"))?;
-    cb.get_text().map_err(|e| format!("Clipboard read failed: {e}"))
+    cb.get_text()
+        .map_err(|e| format!("Clipboard read failed: {e}"))
 }
 
 #[derive(Debug, Serialize)]
@@ -79,11 +83,14 @@ pub struct WindowInfo {
 
 /// List visible windows (title + owning app). Read-only perception.
 #[tauri::command]
-pub async fn list_windows() -> Result<Vec<WindowInfo>, String> {
+pub async fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, String> {
+    ensure_main_webview(&window)?;
     let windows = xcap::Window::all().map_err(|e| format!("Window::all failed: {e}"))?;
     let mut out = Vec::new();
     for w in windows {
-        let title = w.title().map_err(|e| format!("Window::title failed: {e}"))?;
+        let title = w
+            .title()
+            .map_err(|e| format!("Window::title failed: {e}"))?;
         if title.trim().is_empty() {
             continue;
         }
@@ -92,7 +99,9 @@ pub async fn list_windows() -> Result<Vec<WindowInfo>, String> {
             app_name: w
                 .app_name()
                 .map_err(|e| format!("Window::app_name failed: {e}"))?,
-            width: w.width().map_err(|e| format!("Window::width failed: {e}"))?,
+            width: w
+                .width()
+                .map_err(|e| format!("Window::width failed: {e}"))?,
             height: w
                 .height()
                 .map_err(|e| format!("Window::height failed: {e}"))?,
@@ -115,9 +124,14 @@ pub struct SystemMetrics {
 static METRICS_CACHE: OnceLock<Mutex<Option<(Instant, SystemMetrics)>>> = OnceLock::new();
 
 #[tauri::command]
-pub async fn system_metrics() -> Result<SystemMetrics, String> {
+pub async fn system_metrics(window: WebviewWindow) -> Result<SystemMetrics, String> {
+    ensure_main_webview(&window)?;
     let cache = METRICS_CACHE.get_or_init(|| Mutex::new(None));
-    if let Some((updated_at, metrics)) = cache.lock().map_err(|_| "System metrics cache unavailable" )?.as_ref() {
+    if let Some((updated_at, metrics)) = cache
+        .lock()
+        .map_err(|_| "System metrics cache unavailable")?
+        .as_ref()
+    {
         if updated_at.elapsed() < Duration::from_secs(2) {
             return Ok(metrics.clone());
         }
@@ -149,7 +163,9 @@ pub async fn system_metrics() -> Result<SystemMetrics, String> {
         cpu_temp_c,
         gpu_temp_c: nvml_gpu_temp_c.or(sensor_gpu_temp_c),
     };
-    *cache.lock().map_err(|_| "System metrics cache unavailable" )? = Some((Instant::now(), metrics.clone()));
+    *cache
+        .lock()
+        .map_err(|_| "System metrics cache unavailable")? = Some((Instant::now(), metrics.clone()));
     Ok(metrics)
 }
 
@@ -252,7 +268,8 @@ pub struct MoveMousePayload {
 }
 
 #[tauri::command]
-pub async fn move_mouse(payload: MoveMousePayload) -> Result<(), String> {
+pub async fn move_mouse(window: WebviewWindow, payload: MoveMousePayload) -> Result<(), String> {
+    ensure_main_webview(&window)?;
     let mut enigo = new_enigo()?;
     enigo
         .move_mouse(payload.x, payload.y, Coordinate::Abs)
@@ -270,7 +287,8 @@ pub struct MouseClickPayload {
 }
 
 #[tauri::command]
-pub async fn mouse_click(payload: MouseClickPayload) -> Result<(), String> {
+pub async fn mouse_click(window: WebviewWindow, payload: MouseClickPayload) -> Result<(), String> {
+    ensure_main_webview(&window)?;
     let mut enigo = new_enigo()?;
     if let (Some(x), Some(y)) = (payload.x, payload.y) {
         enigo
@@ -282,7 +300,11 @@ pub async fn mouse_click(payload: MouseClickPayload) -> Result<(), String> {
         Some("middle") => Button::Middle,
         _ => Button::Left,
     };
-    let times = if payload.double.unwrap_or(false) { 2 } else { 1 };
+    let times = if payload.double.unwrap_or(false) {
+        2
+    } else {
+        1
+    };
     for _ in 0..times {
         enigo
             .button(button, Direction::Click)
@@ -297,7 +319,8 @@ pub struct TypeTextPayload {
 }
 
 #[tauri::command]
-pub async fn type_text(payload: TypeTextPayload) -> Result<(), String> {
+pub async fn type_text(window: WebviewWindow, payload: TypeTextPayload) -> Result<(), String> {
+    ensure_main_webview(&window)?;
     if payload.text.is_empty() {
         return Err("Empty text".into());
     }
@@ -345,7 +368,8 @@ fn parse_key(name: &str) -> Result<Key, String> {
 }
 
 #[tauri::command]
-pub async fn press_key(payload: PressKeyPayload) -> Result<(), String> {
+pub async fn press_key(window: WebviewWindow, payload: PressKeyPayload) -> Result<(), String> {
+    ensure_main_webview(&window)?;
     let key = parse_key(&payload.key)?;
     let mut enigo = new_enigo()?;
     enigo
@@ -363,9 +387,12 @@ pub struct OpenUrlPayload {
 }
 
 #[tauri::command]
-pub async fn open_url(payload: OpenUrlPayload) -> Result<(), String> {
+pub async fn open_url(window: WebviewWindow, payload: OpenUrlPayload) -> Result<(), String> {
+    ensure_main_webview(&window)?;
     let url = payload.url.trim();
-    if !(url.starts_with("https://") || url.starts_with("http://")) || url.chars().any(char::is_control) {
+    if !(url.starts_with("https://") || url.starts_with("http://"))
+        || url.chars().any(char::is_control)
+    {
         return Err("Only valid http(s) URLs may be opened.".into());
     }
     webbrowser::open(url).map_err(|error| format!("open_url failed: {error}"))?;

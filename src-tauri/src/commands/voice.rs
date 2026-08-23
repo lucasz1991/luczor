@@ -10,7 +10,9 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, WebviewWindow};
+
+use super::ensure_main_webview;
 
 const MANIFEST_PUBLIC_KEY_B64: Option<&str> = option_env!("LUCZOR_VOICE_MANIFEST_PUBLIC_KEY_B64");
 
@@ -80,15 +82,21 @@ pub struct LocalTtsResponse {
 }
 
 #[tauri::command]
-pub async fn voice_runtime_status(app: AppHandle) -> Result<VoiceRuntimeStatus, String> {
+pub async fn voice_runtime_status(
+    window: WebviewWindow,
+    app: AppHandle,
+) -> Result<VoiceRuntimeStatus, String> {
+    ensure_main_webview(&window)?;
     Ok(status(&app))
 }
 
 #[tauri::command]
 pub async fn install_voice_runtime(
+    window: WebviewWindow,
     app: AppHandle,
     payload: VoiceManifestInstallPayload,
 ) -> Result<VoiceRuntimeStatus, String> {
+    ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(move || install_voice_runtime_sync(&app, payload))
         .await
         .map_err(|error| structured_error("task_join", &error.to_string()))?
@@ -102,7 +110,10 @@ fn install_voice_runtime_sync(
     let manifest: VoiceManifest = serde_json::from_str(&payload.payload_json)
         .map_err(|error| structured_error("invalid_manifest", &error.to_string()))?;
     if manifest.version.trim().is_empty() || manifest.assets.is_empty() {
-        return Err(structured_error("invalid_manifest", "Version oder Assets fehlen."));
+        return Err(structured_error(
+            "invalid_manifest",
+            "Version oder Assets fehlen.",
+        ));
     }
 
     let platform = current_platform();
@@ -112,45 +123,82 @@ fn install_voice_runtime_sync(
         let asset = manifest
             .assets
             .iter()
-            .find(|asset| asset.kind == kind && (asset.platform == platform || asset.platform == "any"))
-            .ok_or_else(|| structured_error("asset_missing", &format!("Release enthält kein Asset für {kind} auf {platform}.")))?;
+            .find(|asset| {
+                asset.kind == kind && (asset.platform == platform || asset.platform == "any")
+            })
+            .ok_or_else(|| {
+                structured_error(
+                    "asset_missing",
+                    &format!("Release enthält kein Asset für {kind} auf {platform}."),
+                )
+            })?;
         validate_asset(asset)?;
         selected.push(asset);
     }
 
     let root = runtime_root(app)?;
     let target = root.join(&manifest.version);
-    std::fs::create_dir_all(&target).map_err(|error| structured_error("install_directory", &error.to_string()))?;
+    std::fs::create_dir_all(&target)
+        .map_err(|error| structured_error("install_directory", &error.to_string()))?;
     let mut paths = BTreeMap::new();
 
-    if let Some(config) = manifest.assets.iter().find(|asset| asset.kind == "tts_config" && (asset.platform == platform || asset.platform == "any")) {
+    if let Some(config) = manifest.assets.iter().find(|asset| {
+        asset.kind == "tts_config" && (asset.platform == platform || asset.platform == "any")
+    }) {
         validate_asset(config)?;
         selected.push(config);
     }
 
     for asset in selected {
         let path = target.join(&asset.file_name);
-        if ! valid_file_hash(&path, &asset.sha256)? {
+        if !valid_file_hash(&path, &asset.sha256)? {
             download(asset, &path)?;
         }
         let runtime_path = if asset.archive {
-            let relative = asset.runtime_path.as_deref().ok_or_else(|| structured_error("archive_runtime_path", &format!("Runtime-Pfad für {} fehlt.", asset.id)))?;
+            let relative = asset.runtime_path.as_deref().ok_or_else(|| {
+                structured_error(
+                    "archive_runtime_path",
+                    &format!("Runtime-Pfad für {} fehlt.", asset.id),
+                )
+            })?;
             let extracted = target.join(relative);
-            if ! extracted.is_file() { extract_zip(&path, &target)?; }
-            if ! extracted.is_file() { return Err(structured_error("archive_runtime_missing", &format!("{} wurde nicht im Runtime-Archiv gefunden.", relative))); }
+            if !extracted.is_file() {
+                extract_zip(&path, &target)?;
+            }
+            if !extracted.is_file() {
+                return Err(structured_error(
+                    "archive_runtime_missing",
+                    &format!("{} wurde nicht im Runtime-Archiv gefunden.", relative),
+                ));
+            }
             extracted
-        } else { path };
-        if asset.executable { make_executable(&runtime_path)?; }
-        paths.insert(asset.kind.clone(), runtime_path.to_string_lossy().to_string());
+        } else {
+            path
+        };
+        if asset.executable {
+            make_executable(&runtime_path)?;
+        }
+        paths.insert(
+            asset.kind.clone(),
+            runtime_path.to_string_lossy().to_string(),
+        );
     }
 
-    let state = RuntimeState { version: manifest.version, paths };
+    let state = RuntimeState {
+        version: manifest.version,
+        paths,
+    };
     write_state(app, &state)?;
     Ok(status(app))
 }
 
 #[tauri::command]
-pub async fn local_stt(app: AppHandle, payload: LocalSttPayload) -> Result<LocalSttResponse, String> {
+pub async fn local_stt(
+    window: WebviewWindow,
+    app: AppHandle,
+    payload: LocalSttPayload,
+) -> Result<LocalSttResponse, String> {
+    ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(move || local_stt_sync(&app, payload))
         .await
         .map_err(|error| structured_error("task_join", &error.to_string()))?
@@ -175,15 +223,18 @@ fn local_stt_sync(app: &AppHandle, payload: LocalSttPayload) -> Result<LocalSttR
     }
     let mut command = Command::new(&runtime.paths["stt_binary"]);
     hide_console_window(&mut command);
-    let output = command
-        .args(args)
-        .output();
+    let output = command.args(args).output();
     let _ = std::fs::remove_file(wav);
     let output = output.map_err(|error| structured_error("stt_start", &error.to_string()))?;
     if !output.status.success() {
-        return Err(structured_error("stt_runtime", &String::from_utf8_lossy(&output.stderr)));
+        return Err(structured_error(
+            "stt_runtime",
+            &String::from_utf8_lossy(&output.stderr),
+        ));
     }
-    Ok(LocalSttResponse { text: filter_recognizer_output(&String::from_utf8_lossy(&output.stdout)) })
+    Ok(LocalSttResponse {
+        text: filter_recognizer_output(&String::from_utf8_lossy(&output.stdout)),
+    })
 }
 
 /// SOLL §14 P5 — native whisper-rs STT with a long-lived context (selectable in
@@ -191,7 +242,12 @@ fn local_stt_sync(app: &AppHandle, payload: LocalSttPayload) -> Result<LocalSttR
 /// `--features whisper_rs` (needs CMake); otherwise it returns a clear error so
 /// the client can fall back to the `whisper_local` (whisper.cpp) engine.
 #[tauri::command]
-pub async fn local_stt_rs(app: AppHandle, payload: LocalSttPayload) -> Result<LocalSttResponse, String> {
+pub async fn local_stt_rs(
+    window: WebviewWindow,
+    app: AppHandle,
+    payload: LocalSttPayload,
+) -> Result<LocalSttResponse, String> {
+    ensure_main_webview(&window)?;
     #[cfg(feature = "whisper_rs")]
     {
         return tauri::async_runtime::spawn_blocking(move || whisper_rs_stt(&app, payload))
@@ -237,14 +293,17 @@ fn whisper_rs_stt(app: &AppHandle, payload: LocalSttPayload) -> Result<LocalSttR
     // Long-lived context, reused unless the model path changes.
     let cell = CTX.get_or_init(|| Mutex::new(None));
     let context = {
-        let mut guard = cell.lock().map_err(|_| structured_error("ctx_lock", "Kontext-Mutex vergiftet."))?;
+        let mut guard = cell
+            .lock()
+            .map_err(|_| structured_error("ctx_lock", "Kontext-Mutex vergiftet."))?;
         let needs_new = match guard.as_ref() {
             Some((path, _)) => path != &model_path,
             None => true,
         };
         if needs_new {
-            let loaded = WhisperContext::new_with_params(&model_path, WhisperContextParameters::default())
-                .map_err(|error| structured_error("whisper_load", &error.to_string()))?;
+            let loaded =
+                WhisperContext::new_with_params(&model_path, WhisperContextParameters::default())
+                    .map_err(|error| structured_error("whisper_load", &error.to_string()))?;
             *guard = Some((model_path.clone(), Arc::new(loaded)));
         }
         guard.as_ref().map(|(_, ctx)| Arc::clone(ctx)).unwrap()
@@ -258,7 +317,11 @@ fn whisper_rs_stt(app: &AppHandle, payload: LocalSttPayload) -> Result<LocalSttR
     params.set_print_special(false);
     params.set_print_realtime(false);
     params.set_no_timestamps(true);
-    if let Some(language) = payload.language.as_ref().filter(|value| !value.trim().is_empty()) {
+    if let Some(language) = payload
+        .language
+        .as_ref()
+        .filter(|value| !value.trim().is_empty())
+    {
         params.set_language(Some(language.trim()));
     }
     state
@@ -276,11 +339,18 @@ fn whisper_rs_stt(app: &AppHandle, payload: LocalSttPayload) -> Result<LocalSttR
         }
     }
 
-    Ok(LocalSttResponse { text: filter_recognizer_output(text.trim()) })
+    Ok(LocalSttResponse {
+        text: filter_recognizer_output(text.trim()),
+    })
 }
 
 #[tauri::command]
-pub async fn local_tts(app: AppHandle, payload: LocalTtsPayload) -> Result<LocalTtsResponse, String> {
+pub async fn local_tts(
+    window: WebviewWindow,
+    app: AppHandle,
+    payload: LocalTtsPayload,
+) -> Result<LocalTtsResponse, String> {
+    ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(move || local_tts_sync(&app, payload))
         .await
         .map_err(|error| structured_error("task_join", &error.to_string()))?
@@ -302,7 +372,10 @@ fn local_tts_sync(app: &AppHandle, payload: LocalTtsPayload) -> Result<LocalTtsR
     ];
     if let Some(config) = runtime.paths.get("tts_config") {
         if !Path::new(config).is_file() {
-            return Err(structured_error("runtime_incomplete", "Komponente tts_config ist nicht verfuegbar."));
+            return Err(structured_error(
+                "runtime_incomplete",
+                "Komponente tts_config ist nicht verfuegbar.",
+            ));
         }
         args.push("--config".to_string());
         args.push(config.clone());
@@ -318,17 +391,27 @@ fn local_tts_sync(app: &AppHandle, payload: LocalTtsPayload) -> Result<LocalTtsR
         .spawn()
         .map_err(|error| structured_error("tts_start", &error.to_string()))?;
     if let Some(mut stdin) = child.stdin.take() {
-        stdin.write_all(text.as_bytes()).map_err(|error| structured_error("tts_input", &error.to_string()))?;
+        stdin
+            .write_all(text.as_bytes())
+            .map_err(|error| structured_error("tts_input", &error.to_string()))?;
     }
-    let output = child.wait_with_output().map_err(|error| structured_error("tts_runtime", &error.to_string()))?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| structured_error("tts_runtime", &error.to_string()))?;
     if !output.status.success() {
         let _ = std::fs::remove_file(&out);
-        return Err(structured_error("tts_runtime", &String::from_utf8_lossy(&output.stderr)));
+        return Err(structured_error(
+            "tts_runtime",
+            &String::from_utf8_lossy(&output.stderr),
+        ));
     }
     let bytes = std::fs::read(&out);
     let _ = std::fs::remove_file(out);
     let bytes = bytes.map_err(|error| structured_error("tts_output", &error.to_string()))?;
-    Ok(LocalTtsResponse { base64: base64::engine::general_purpose::STANDARD.encode(bytes), mime: "audio/wav".to_string() })
+    Ok(LocalTtsResponse {
+        base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        mime: "audio/wav".to_string(),
+    })
 }
 
 fn filter_recognizer_output(output: &str) -> String {
@@ -345,7 +428,11 @@ fn is_non_speech_recognizer_marker(value: &str) -> bool {
     let Some(marker) = value
         .strip_prefix('[')
         .and_then(|value| value.strip_suffix(']'))
-        .or_else(|| value.strip_prefix('(').and_then(|value| value.strip_suffix(')')))
+        .or_else(|| {
+            value
+                .strip_prefix('(')
+                .and_then(|value| value.strip_suffix(')'))
+        })
     else {
         return false;
     };
@@ -368,11 +455,21 @@ fn hide_console_window(command: &mut Command) {
 fn hide_console_window(_command: &mut Command) {}
 
 fn ready_runtime(app: &AppHandle, first: &str, second: &str) -> Result<RuntimeState, String> {
-    let state = read_state(app)?.ok_or_else(|| structured_error("runtime_missing", "Lokale Sprachkomponenten werden automatisch vorbereitet. Bitte erneut versuchen."))?;
+    let state = read_state(app)?.ok_or_else(|| {
+        structured_error(
+            "runtime_missing",
+            "Lokale Sprachkomponenten werden automatisch vorbereitet. Bitte erneut versuchen.",
+        )
+    })?;
     for key in [first, second] {
-        let path = state.paths.get(key).ok_or_else(|| structured_error("runtime_incomplete", &format!("Komponente {key} fehlt.")))?;
+        let path = state.paths.get(key).ok_or_else(|| {
+            structured_error("runtime_incomplete", &format!("Komponente {key} fehlt."))
+        })?;
         if !Path::new(path).is_file() {
-            return Err(structured_error("runtime_incomplete", &format!("Komponente {key} ist nicht verfügbar.")));
+            return Err(structured_error(
+                "runtime_incomplete",
+                &format!("Komponente {key} ist nicht verfügbar."),
+            ));
         }
     }
     Ok(state)
@@ -381,40 +478,125 @@ fn ready_runtime(app: &AppHandle, first: &str, second: &str) -> Result<RuntimeSt
 fn status(app: &AppHandle) -> VoiceRuntimeStatus {
     match read_state(app) {
         Ok(Some(state)) => {
-            let stt_ready = state.paths.get("stt_binary").is_some_and(|path| Path::new(path).is_file())
-                && state.paths.get("stt_model").is_some_and(|path| Path::new(path).is_file());
-            let tts_ready = state.paths.get("tts_binary").is_some_and(|path| Path::new(path).is_file())
-                && state.paths.get("tts_model").is_some_and(|path| Path::new(path).is_file())
-                && state.paths.get("tts_config").map(|path| Path::new(path).is_file()).unwrap_or(true);
+            let stt_ready = state
+                .paths
+                .get("stt_binary")
+                .is_some_and(|path| Path::new(path).is_file())
+                && state
+                    .paths
+                    .get("stt_model")
+                    .is_some_and(|path| Path::new(path).is_file());
+            let tts_ready = state
+                .paths
+                .get("tts_binary")
+                .is_some_and(|path| Path::new(path).is_file())
+                && state
+                    .paths
+                    .get("tts_model")
+                    .is_some_and(|path| Path::new(path).is_file())
+                && state
+                    .paths
+                    .get("tts_config")
+                    .map(|path| Path::new(path).is_file())
+                    .unwrap_or(true);
             let error = if !(stt_ready && tts_ready) && MANIFEST_PUBLIC_KEY_B64.is_none() {
-                Some(structured_error("manifest_key_missing", "Die Tauri-App wurde ohne Voice-Manifest-Public-Key gebaut."))
-            } else { None };
-            VoiceRuntimeStatus { state: if stt_ready && tts_ready { "ready".into() } else { "incomplete".into() }, version: Some(state.version), stt_ready, tts_ready, error }
+                Some(structured_error(
+                    "manifest_key_missing",
+                    "Die Tauri-App wurde ohne Voice-Manifest-Public-Key gebaut.",
+                ))
+            } else {
+                None
+            };
+            VoiceRuntimeStatus {
+                state: if stt_ready && tts_ready {
+                    "ready".into()
+                } else {
+                    "incomplete".into()
+                },
+                version: Some(state.version),
+                stt_ready,
+                tts_ready,
+                error,
+            }
         }
-        Ok(None) => VoiceRuntimeStatus { state: "missing".into(), version: None, stt_ready: false, tts_ready: false, error: MANIFEST_PUBLIC_KEY_B64.is_none().then(|| structured_error("manifest_key_missing", "Die Tauri-App wurde ohne Voice-Manifest-Public-Key gebaut.")) },
-        Err(error) => VoiceRuntimeStatus { state: "error".into(), version: None, stt_ready: false, tts_ready: false, error: Some(error) },
+        Ok(None) => VoiceRuntimeStatus {
+            state: "missing".into(),
+            version: None,
+            stt_ready: false,
+            tts_ready: false,
+            error: MANIFEST_PUBLIC_KEY_B64.is_none().then(|| {
+                structured_error(
+                    "manifest_key_missing",
+                    "Die Tauri-App wurde ohne Voice-Manifest-Public-Key gebaut.",
+                )
+            }),
+        },
+        Err(error) => VoiceRuntimeStatus {
+            state: "error".into(),
+            version: None,
+            stt_ready: false,
+            tts_ready: false,
+            error: Some(error),
+        },
     }
 }
 
 fn verify_manifest(payload: &str, signature: &str) -> Result<(), String> {
-    let key_b64 = MANIFEST_PUBLIC_KEY_B64.ok_or_else(|| structured_error("manifest_key_missing", "Diese App-Version enthält keinen Voice-Release-Schlüssel."))?;
-    let pem = String::from_utf8(base64::engine::general_purpose::STANDARD.decode(key_b64).map_err(|error| structured_error("manifest_key", &error.to_string()))?)
+    let key_b64 = MANIFEST_PUBLIC_KEY_B64.ok_or_else(|| {
+        structured_error(
+            "manifest_key_missing",
+            "Diese App-Version enthält keinen Voice-Release-Schlüssel.",
+        )
+    })?;
+    let pem = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(key_b64)
+            .map_err(|error| structured_error("manifest_key", &error.to_string()))?,
+    )
+    .map_err(|error| structured_error("manifest_key", &error.to_string()))?;
+    let key = RsaPublicKey::from_public_key_pem(&pem)
         .map_err(|error| structured_error("manifest_key", &error.to_string()))?;
-    let key = RsaPublicKey::from_public_key_pem(&pem).map_err(|error| structured_error("manifest_key", &error.to_string()))?;
-    let signature = Signature::try_from(base64::engine::general_purpose::STANDARD.decode(signature).map_err(|error| structured_error("manifest_signature", &error.to_string()))?.as_slice())
-        .map_err(|error| structured_error("manifest_signature", &error.to_string()))?;
-    VerifyingKey::<Sha256>::new(key).verify(payload.as_bytes(), &signature)
-        .map_err(|_| structured_error("manifest_signature", "Die Voice-Manifest-Signatur ist ungültig."))
+    let signature = Signature::try_from(
+        base64::engine::general_purpose::STANDARD
+            .decode(signature)
+            .map_err(|error| structured_error("manifest_signature", &error.to_string()))?
+            .as_slice(),
+    )
+    .map_err(|error| structured_error("manifest_signature", &error.to_string()))?;
+    VerifyingKey::<Sha256>::new(key)
+        .verify(payload.as_bytes(), &signature)
+        .map_err(|_| {
+            structured_error(
+                "manifest_signature",
+                "Die Voice-Manifest-Signatur ist ungültig.",
+            )
+        })
 }
 
 fn validate_asset(asset: &VoiceAsset) -> Result<(), String> {
-    if !safe_asset_url(&asset.url) || asset.file_name.is_empty() || asset.file_name.contains('/') || asset.file_name.contains('\\') || asset.sha256.len() != 64 {
-        return Err(structured_error("asset_invalid", &format!("Ungültiges Asset {}.", asset.id)));
+    if !safe_asset_url(&asset.url)
+        || asset.file_name.is_empty()
+        || asset.file_name.contains('/')
+        || asset.file_name.contains('\\')
+        || asset.sha256.len() != 64
+    {
+        return Err(structured_error(
+            "asset_invalid",
+            &format!("Ungültiges Asset {}.", asset.id),
+        ));
     }
     if asset.archive {
         let runtime = asset.runtime_path.as_deref().unwrap_or("");
-        if !asset.file_name.to_ascii_lowercase().ends_with(".zip") || runtime.is_empty() || runtime.starts_with('/') || runtime.contains("..") || runtime.contains('\\') {
-            return Err(structured_error("asset_invalid", &format!("Ungültiges Runtime-Archiv {}.", asset.id)));
+        if !asset.file_name.to_ascii_lowercase().ends_with(".zip")
+            || runtime.is_empty()
+            || runtime.starts_with('/')
+            || runtime.contains("..")
+            || runtime.contains('\\')
+        {
+            return Err(structured_error(
+                "asset_invalid",
+                &format!("Ungültiges Runtime-Archiv {}.", asset.id),
+            ));
         }
     }
     Ok(())
@@ -425,21 +607,31 @@ fn safe_asset_url(url: &str) -> bool {
 }
 
 fn extract_zip(archive_path: &Path, target: &Path) -> Result<(), String> {
-    let file = File::open(archive_path).map_err(|error| structured_error("archive_read", &error.to_string()))?;
-    let mut archive = zip::ZipArchive::new(file).map_err(|error| structured_error("archive_read", &error.to_string()))?;
+    let file = File::open(archive_path)
+        .map_err(|error| structured_error("archive_read", &error.to_string()))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|error| structured_error("archive_read", &error.to_string()))?;
     for index in 0..archive.len() {
-        let mut entry = archive.by_index(index).map_err(|error| structured_error("archive_read", &error.to_string()))?;
-        let Some(relative) = entry.enclosed_name().map(|path| path.to_owned()) else { continue; };
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|error| structured_error("archive_read", &error.to_string()))?;
+        let Some(relative) = entry.enclosed_name().map(|path| path.to_owned()) else {
+            continue;
+        };
         let destination = target.join(relative);
         if entry.is_dir() {
-            std::fs::create_dir_all(&destination).map_err(|error| structured_error("archive_extract", &error.to_string()))?;
+            std::fs::create_dir_all(&destination)
+                .map_err(|error| structured_error("archive_extract", &error.to_string()))?;
             continue;
         }
         if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| structured_error("archive_extract", &error.to_string()))?;
+            std::fs::create_dir_all(parent)
+                .map_err(|error| structured_error("archive_extract", &error.to_string()))?;
         }
-        let mut output = File::create(&destination).map_err(|error| structured_error("archive_extract", &error.to_string()))?;
-        std::io::copy(&mut entry, &mut output).map_err(|error| structured_error("archive_extract", &error.to_string()))?;
+        let mut output = File::create(&destination)
+            .map_err(|error| structured_error("archive_extract", &error.to_string()))?;
+        std::io::copy(&mut entry, &mut output)
+            .map_err(|error| structured_error("archive_extract", &error.to_string()))?;
     }
     Ok(())
 }
@@ -447,68 +639,115 @@ fn extract_zip(archive_path: &Path, target: &Path) -> Result<(), String> {
 fn download(asset: &VoiceAsset, target: &Path) -> Result<(), String> {
     let response = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(180))
-        .build().map_err(|error| structured_error("download_client", &error.to_string()))?
-        .get(&asset.url).send().map_err(|error| structured_error("download_failed", &error.to_string()))?;
+        .build()
+        .map_err(|error| structured_error("download_client", &error.to_string()))?
+        .get(&asset.url)
+        .send()
+        .map_err(|error| structured_error("download_failed", &error.to_string()))?;
     if !response.status().is_success() {
-        return Err(structured_error("download_failed", &format!("HTTP {} für {}", response.status(), asset.id)));
+        return Err(structured_error(
+            "download_failed",
+            &format!("HTTP {} für {}", response.status(), asset.id),
+        ));
     }
-    let bytes = response.bytes().map_err(|error| structured_error("download_failed", &error.to_string()))?;
+    let bytes = response
+        .bytes()
+        .map_err(|error| structured_error("download_failed", &error.to_string()))?;
     let hash = hex_sha256(&bytes);
     if !hash.eq_ignore_ascii_case(&asset.sha256) {
-        return Err(structured_error("checksum_failed", &format!("Prüfsumme für {} stimmt nicht.", asset.id)));
+        return Err(structured_error(
+            "checksum_failed",
+            &format!("Prüfsumme für {} stimmt nicht.", asset.id),
+        ));
     }
     let partial = target.with_extension("part");
-    std::fs::write(&partial, bytes).map_err(|error| structured_error("download_write", &error.to_string()))?;
-    std::fs::rename(&partial, target).map_err(|error| structured_error("download_write", &error.to_string()))
+    std::fs::write(&partial, bytes)
+        .map_err(|error| structured_error("download_write", &error.to_string()))?;
+    std::fs::rename(&partial, target)
+        .map_err(|error| structured_error("download_write", &error.to_string()))
 }
 
 fn valid_file_hash(path: &Path, expected: &str) -> Result<bool, String> {
-    if !path.is_file() { return Ok(false); }
-    let bytes = std::fs::read(path).map_err(|error| structured_error("runtime_read", &error.to_string()))?;
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|error| structured_error("runtime_read", &error.to_string()))?;
     Ok(hex_sha256(&bytes).eq_ignore_ascii_case(expected))
 }
 
-fn hex_sha256(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+fn hex_sha256(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
 
 fn runtime_root(app: &AppHandle) -> Result<PathBuf, String> {
-    let root = app.path().app_data_dir().map_err(|error| structured_error("runtime_directory", &error.to_string()))?.join("voice");
-    std::fs::create_dir_all(&root).map_err(|error| structured_error("runtime_directory", &error.to_string()))?;
+    let root = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| structured_error("runtime_directory", &error.to_string()))?
+        .join("voice");
+    std::fs::create_dir_all(&root)
+        .map_err(|error| structured_error("runtime_directory", &error.to_string()))?;
     Ok(root)
 }
 
-fn state_path(app: &AppHandle) -> Result<PathBuf, String> { Ok(runtime_root(app)?.join("runtime.json")) }
+fn state_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(runtime_root(app)?.join("runtime.json"))
+}
 fn read_state(app: &AppHandle) -> Result<Option<RuntimeState>, String> {
     let path = state_path(app)?;
-    if !path.is_file() { return Ok(None); }
-    let data = std::fs::read_to_string(path).map_err(|error| structured_error("runtime_read", &error.to_string()))?;
-    serde_json::from_str(&data).map(Some).map_err(|error| structured_error("runtime_state", &error.to_string()))
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let data = std::fs::read_to_string(path)
+        .map_err(|error| structured_error("runtime_read", &error.to_string()))?;
+    serde_json::from_str(&data)
+        .map(Some)
+        .map_err(|error| structured_error("runtime_state", &error.to_string()))
 }
 fn write_state(app: &AppHandle, state: &RuntimeState) -> Result<(), String> {
     let path = state_path(app)?;
     let partial = path.with_extension("part");
-    std::fs::write(&partial, serde_json::to_vec(state).map_err(|error| structured_error("runtime_state", &error.to_string()))?)
-        .map_err(|error| structured_error("runtime_state", &error.to_string()))?;
-    std::fs::rename(partial, path).map_err(|error| structured_error("runtime_state", &error.to_string()))
+    std::fs::write(
+        &partial,
+        serde_json::to_vec(state)
+            .map_err(|error| structured_error("runtime_state", &error.to_string()))?,
+    )
+    .map_err(|error| structured_error("runtime_state", &error.to_string()))?;
+    std::fs::rename(partial, path)
+        .map_err(|error| structured_error("runtime_state", &error.to_string()))
 }
 
 fn write_temp(bytes: &[u8], ext: &str) -> Result<PathBuf, String> {
     let path = std::env::temp_dir().join(format!("luczor_voice_{}.{}", uuid::Uuid::new_v4(), ext));
-    std::fs::write(&path, bytes).map_err(|error| structured_error("audio_temp", &error.to_string()))?;
+    std::fs::write(&path, bytes)
+        .map_err(|error| structured_error("audio_temp", &error.to_string()))?;
     Ok(path)
 }
-fn normalize_base64(value: &str) -> &str { value.split_once(',').map(|(_, rest)| rest).unwrap_or(value) }
-fn current_platform() -> String { format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH) }
-fn structured_error(code: &str, message: &str) -> String { serde_json::json!({"code": code, "message": message}).to_string() }
+fn normalize_base64(value: &str) -> &str {
+    value.split_once(',').map(|(_, rest)| rest).unwrap_or(value)
+}
+fn current_platform() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
+}
+fn structured_error(code: &str, message: &str) -> String {
+    serde_json::json!({"code": code, "message": message}).to_string()
+}
 
 #[cfg(unix)]
 fn make_executable(path: &Path) -> Result<(), String> {
     use std::os::unix::fs::PermissionsExt;
-    let mut permissions = std::fs::metadata(path).map_err(|error| structured_error("runtime_permissions", &error.to_string()))?.permissions();
+    let mut permissions = std::fs::metadata(path)
+        .map_err(|error| structured_error("runtime_permissions", &error.to_string()))?
+        .permissions();
     permissions.set_mode(0o700);
-    std::fs::set_permissions(path, permissions).map_err(|error| structured_error("runtime_permissions", &error.to_string()))
+    std::fs::set_permissions(path, permissions)
+        .map_err(|error| structured_error("runtime_permissions", &error.to_string()))
 }
 #[cfg(not(unix))]
-fn make_executable(_path: &Path) -> Result<(), String> { Ok(()) }
+fn make_executable(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests {
@@ -517,7 +756,10 @@ mod tests {
     #[test]
     fn removes_whisper_non_speech_markers_without_discarding_commands() {
         assert_eq!(filter_recognizer_output("[BLANK_AUDIO]"), "");
-        assert_eq!(filter_recognizer_output("[Musik]\nStarte einen Timer"), "Starte einen Timer");
+        assert_eq!(
+            filter_recognizer_output("[Musik]\nStarte einen Timer"),
+            "Starte einen Timer"
+        );
         assert_eq!(filter_recognizer_output("spiele Musik"), "spiele Musik");
     }
 }

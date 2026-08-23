@@ -5,5 +5,5 @@
   "remote": {
     "urls": ["http://*/*", "https://*/*"]
   },
-  "permissions": ["core:default"]
+  "permissions": ["browser-report"]
 }
