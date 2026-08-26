@@ -4,6 +4,7 @@
 // individual definitions; this file owns their public order and lookup API.
 
 import { agentTools } from './agents'
+import { filesystemTools } from './filesystem'
 import { osTools } from './os'
 import { planTools } from './plans'
 import { projectCreationTools, projectStateTools } from './project'
@@ -19,6 +20,7 @@ export type { ToolCategory, ToolContext, ToolDef } from './types'
  */
 const TOOLS: ToolDef[] = [
   ...projectStateTools,
+  ...filesystemTools,
   ...osTools,
   ...projectCreationTools,
   ...taskTools,

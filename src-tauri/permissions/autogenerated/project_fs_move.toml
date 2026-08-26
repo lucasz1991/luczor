@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-fs-move"
+description = "Enables the project_fs_move command without any pre-configured scope."
+commands.allow = ["project_fs_move"]
+
+[[permission]]
+identifier = "deny-project-fs-move"
+description = "Denies the project_fs_move command without any pre-configured scope."
+commands.deny = ["project_fs_move"]

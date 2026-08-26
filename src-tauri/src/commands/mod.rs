@@ -4,6 +4,7 @@ pub mod device_jobs;
 pub mod device_key;
 pub mod local_tasks;
 pub mod notifications;
+pub mod project_workspace;
 pub mod repository_graph;
 pub mod system;
 pub mod voice;
@@ -88,6 +89,19 @@ mod tests {
             "local_graph_search",
             "local_graph_read_snippets",
             "local_graph_unbind",
+            "scroll",
+            "hotkey",
+            "project_workspace_bind",
+            "project_workspace_get",
+            "project_workspace_unbind",
+            "project_fs_list",
+            "project_fs_stat",
+            "project_fs_read",
+            "project_fs_search",
+            "project_fs_write",
+            "project_fs_create_dir",
+            "project_fs_move",
+            "project_fs_delete",
         ] {
             assert!(main_runtime.contains(command));
             assert!(!capability.to_string().contains(command));

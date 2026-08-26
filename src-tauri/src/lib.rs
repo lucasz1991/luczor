@@ -5,6 +5,7 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_prevent_default::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_store::Builder::default().build())
@@ -38,6 +39,8 @@ pub fn run() {
             commands::system::mouse_click,
             commands::system::type_text,
             commands::system::press_key,
+            commands::system::scroll,
+            commands::system::hotkey,
             commands::system::open_url,
             commands::voice::local_stt,
             commands::voice::local_stt_rs,
@@ -69,6 +72,17 @@ pub fn run() {
             commands::repository_graph::local_graph_search,
             commands::repository_graph::local_graph_read_snippets,
             commands::repository_graph::local_graph_unbind,
+            commands::project_workspace::project_workspace_bind,
+            commands::project_workspace::project_workspace_get,
+            commands::project_workspace::project_workspace_unbind,
+            commands::project_workspace::project_fs_list,
+            commands::project_workspace::project_fs_stat,
+            commands::project_workspace::project_fs_read,
+            commands::project_workspace::project_fs_search,
+            commands::project_workspace::project_fs_write,
+            commands::project_workspace::project_fs_create_dir,
+            commands::project_workspace::project_fs_move,
+            commands::project_workspace::project_fs_delete,
         ])
         .on_window_event(|window, event| {
             #[cfg(desktop)]

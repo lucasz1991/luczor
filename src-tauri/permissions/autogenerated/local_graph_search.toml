@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-local-graph-search"
+description = "Enables the local_graph_search command without any pre-configured scope."
+commands.allow = ["local_graph_search"]
+
+[[permission]]
+identifier = "deny-local-graph-search"
+description = "Denies the local_graph_search command without any pre-configured scope."
+commands.deny = ["local_graph_search"]

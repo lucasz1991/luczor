@@ -23,34 +23,12 @@ jobs:
         run: node check-version.cjs
 
       - name: Verify updater runtime configuration
-        shell: bash
-        run: |
-          node <<'NODE'
-          const fs = require('fs')
-          const config = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'))
-          const cargo = fs.readFileSync('src-tauri/Cargo.toml', 'utf8')
-          const updater = config.plugins?.updater
-          const createsArtifacts = config.bundle?.createUpdaterArtifacts === true
-          const hasEndpoint = Array.isArray(updater?.endpoints) && updater.endpoints.length > 0
-          const hasPublicKey = typeof updater?.pubkey === 'string' && updater.pubkey.trim() !== ''
-          const hasDependency = /^tauri-plugin-updater\s*=/m.test(cargo)
-
-          const missing = []
-          if (!createsArtifacts) missing.push('bundle.createUpdaterArtifacts=true')
-          if (!hasEndpoint) missing.push('plugins.updater.endpoints')
-          if (!hasPublicKey) missing.push('plugins.updater.pubkey')
-          if (!hasDependency) missing.push('tauri-plugin-updater dependency')
-
-          if (missing.length > 0) {
-            console.error(`Release blocked; updater setup is incomplete: ${missing.join(', ')}`)
-            process.exit(1)
-          }
-          NODE
-
-          if ! grep -Rqs 'tauri_plugin_updater' src-tauri/src; then
-            echo 'Release blocked; tauri-plugin-updater is not registered in the Rust runtime.' >&2
-            exit 1
-          fi
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: node scripts/release-readiness.cjs --mode production
 
       - name: Verify signing secrets
         shell: bash

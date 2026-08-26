@@ -32,6 +32,9 @@ export type MessageMeta = {
   // LLM run evaluation linkage
   llmRequestId?: string
   userFeedback?: 'up' | 'down' | null
+
+  /** Ephemeral tool results remain device-local and are excluded from sync. */
+  dataHandling?: 'syncable' | 'ephemeral'
 }
 
 export type Message = {

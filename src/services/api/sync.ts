@@ -10,6 +10,7 @@
 import { Store } from '@tauri-apps/plugin-store'
 import { LuczorApi, type SyncPushResponse } from './luczorApi'
 import { state } from '@/state/store'
+import type { Message } from '@/state/types'
 
 /** Strip Vue reactivity / proxies into a plain JSON-serializable value. */
 function plain<T>(x: T): T {
@@ -37,6 +38,15 @@ export function projectsForSync(projects: unknown[]): Array<Record<string, unkno
   })
 }
 
+/**
+ * Tool observations such as clipboard text, local file contents and coding
+ * agent output are usable only inside their approved provider round. They must
+ * never become part of the server-side archive.
+ */
+export function messagesForSync(messages: Message[]): Message[] {
+  return plain(messages.filter(message => message.meta?.dataHandling !== 'ephemeral'))
+}
+
 /** Verify the server is reachable and the device key is valid. */
 export async function testConnection(): Promise<ConnectionResult> {
   try {
@@ -58,7 +68,7 @@ export async function pushAllToServer(): Promise<SyncPushResponse> {
   return LuczorApi.syncPush({
     client_id: cfg.clientId,
     projects: projectsForSync(state.projects ?? []),
-    messages: plain(state.messages ?? []),
+    messages: messagesForSync(state.messages ?? []),
     memories: plain(state.global?.memories ?? []),
     summaries: plain(state.summaries ?? []),
   })

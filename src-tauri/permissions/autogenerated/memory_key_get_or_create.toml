@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-memory-key-get-or-create"
+description = "Enables the memory_key_get_or_create command without any pre-configured scope."
+commands.allow = ["memory_key_get_or_create"]
+
+[[permission]]
+identifier = "deny-memory-key-get-or-create"
+description = "Denies the memory_key_get_or_create command without any pre-configured scope."
+commands.deny = ["memory_key_get_or_create"]

@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
 use tree_sitter::{Language, Node, Parser};
 use uuid::Uuid;
 
@@ -237,8 +237,8 @@ pub async fn local_graph_unbind(
     .map_err(|error| format!("Repository unbind task failed: {error}"))?
 }
 
-fn bind_repository(
-    app: &AppHandle,
+fn bind_repository<D: GraphDatabaseProvider>(
+    app: &D,
     principal_id: &str,
     project_id: &str,
     root_path: &str,
@@ -312,8 +312,8 @@ fn bind_repository(
     })
 }
 
-fn index_repository(
-    app: &AppHandle,
+fn index_repository<D: GraphDatabaseProvider>(
+    app: &D,
     principal_id: &str,
     project_id: &str,
 ) -> Result<GraphIndexResult, String> {
@@ -365,8 +365,8 @@ fn index_repository(
     }
 }
 
-fn perform_index(
-    app: &AppHandle,
+fn perform_index<D: GraphDatabaseProvider>(
+    app: &D,
     bound: &BoundRepository,
     run_id: &str,
 ) -> Result<GraphIndexResult, String> {
@@ -532,8 +532,8 @@ fn perform_index(
     })
 }
 
-fn graph_status(
-    app: &AppHandle,
+fn graph_status<D: GraphDatabaseProvider>(
+    app: &D,
     principal_id: &str,
     project_id: &str,
 ) -> Result<GraphStatus, String> {
@@ -587,8 +587,8 @@ fn graph_status(
     Ok(status)
 }
 
-fn search_repository(
-    app: &AppHandle,
+fn search_repository<D: GraphDatabaseProvider>(
+    app: &D,
     principal_id: &str,
     project_id: &str,
     query: &str,
@@ -689,8 +689,8 @@ fn search_repository(
     })
 }
 
-fn read_snippets(
-    app: &AppHandle,
+fn read_snippets<D: GraphDatabaseProvider>(
+    app: &D,
     principal_id: &str,
     project_id: &str,
     evidence_ids: Vec<String>,
@@ -799,8 +799,8 @@ fn read_snippets(
     Ok(GraphSnippetResult { snippets, omitted })
 }
 
-fn unbind_repository(
-    app: &AppHandle,
+fn unbind_repository<D: GraphDatabaseProvider>(
+    app: &D,
     principal_id: &str,
     project_id: &str,
     delete_index: bool,
@@ -838,16 +838,42 @@ fn unbind_repository(
     tx.commit().map_err(db_error)
 }
 
-fn open_database(app: &AppHandle) -> Result<Connection, String> {
-    let directory = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("Cannot resolve app data directory: {error}"))?
-        .join("local-context")
-        .join("v1");
-    fs::create_dir_all(&directory)
+trait GraphDatabaseProvider {
+    fn graph_database_path(&self) -> Result<PathBuf, String>;
+}
+
+impl<R: Runtime> GraphDatabaseProvider for AppHandle<R> {
+    fn graph_database_path(&self) -> Result<PathBuf, String> {
+        Ok(self
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("Cannot resolve app data directory: {error}"))?
+            .join("local-context")
+            .join("v1")
+            .join("local-context.sqlite3"))
+    }
+}
+
+#[cfg(test)]
+struct TestGraphDatabase {
+    path: PathBuf,
+}
+
+#[cfg(test)]
+impl GraphDatabaseProvider for TestGraphDatabase {
+    fn graph_database_path(&self) -> Result<PathBuf, String> {
+        Ok(self.path.clone())
+    }
+}
+
+fn open_database<D: GraphDatabaseProvider>(database: &D) -> Result<Connection, String> {
+    let path = database.graph_database_path()?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| "Local repository database path has no parent directory.".to_string())?;
+    fs::create_dir_all(directory)
         .map_err(|error| format!("Cannot create local context directory: {error}"))?;
-    let connection = Connection::open(directory.join("local-context.sqlite3")).map_err(db_error)?;
+    let connection = Connection::open(path).map_err(db_error)?;
     initialize_schema(&connection)?;
     Ok(connection)
 }
@@ -2276,6 +2302,123 @@ fn db_error(error: rusqlite::Error) -> String {
 mod tests {
     use super::*;
 
+    const CONTRACT_COMMIT_A: &str = "1111111111111111111111111111111111111111";
+    const CONTRACT_COMMIT_B: &str = "2222222222222222222222222222222222222222";
+
+    struct GraphContractHarness {
+        database: TestGraphDatabase,
+        base: PathBuf,
+        repository: PathBuf,
+        outside: PathBuf,
+    }
+
+    impl GraphContractHarness {
+        fn new() -> Self {
+            let nonce = Uuid::new_v4().simple().to_string();
+            let base = std::env::temp_dir().join(format!("luczor-graph-contract-{nonce}"));
+            let repository = base.join("repository");
+            let outside = base.join("outside");
+            fs::create_dir_all(&repository).expect("create contract repository");
+            fs::create_dir_all(&outside).expect("create outside fixture");
+
+            Self {
+                database: TestGraphDatabase {
+                    path: base.join("local-context.sqlite3"),
+                },
+                base,
+                repository,
+                outside,
+            }
+        }
+
+        fn database(&self) -> &TestGraphDatabase {
+            &self.database
+        }
+
+        fn seed_repository(&self) -> (String, bool) {
+            let git = self.repository.join(".git");
+            fs::create_dir_all(git.join("refs/heads")).expect("create git refs");
+            fs::write(git.join("HEAD"), "ref: refs/heads/main\n").expect("write git HEAD");
+            fs::write(
+                git.join("refs/heads/main"),
+                format!("{CONTRACT_COMMIT_A}\n"),
+            )
+            .expect("write git branch");
+            fs::write(self.repository.join(".gitignore"), "ignored/\n").expect("write gitignore");
+            fs::write(self.repository.join(".luczorignore"), "private-note.md\n")
+                .expect("write luczorignore");
+
+            fs::create_dir_all(self.repository.join("src")).expect("create source directory");
+            let memory_source = concat!(
+                "pub struct MemoryOrchestrator;\n",
+                "impl MemoryOrchestrator {\n",
+                "    pub fn recall(&self) -> &'static str { \"local-only\" }\n",
+                "}\n",
+                "// API_KEY=contract-secret-never-egress\n"
+            )
+            .to_string();
+            fs::write(self.repository.join("src/memory.rs"), &memory_source)
+                .expect("write indexed Rust source");
+            fs::write(
+                self.repository.join("src/helper.ts"),
+                "import { recall } from './memory';\nexport function helper() { return recall(); }\n",
+            )
+            .expect("write indexed TypeScript source");
+
+            fs::create_dir_all(self.repository.join("ignored")).expect("create ignored directory");
+            fs::write(
+                self.repository.join("ignored/ignored.rs"),
+                "pub struct IgnoredNeedle;\n",
+            )
+            .expect("write ignored source");
+            fs::write(
+                self.repository.join("private-note.md"),
+                "LuczorIgnoreNeedle must never be indexed.\n",
+            )
+            .expect("write custom ignored source");
+            fs::write(
+                self.repository.join("credentials.json"),
+                "{\"SecretFileNeedle\":\"must-never-be-indexed\"}\n",
+            )
+            .expect("write sensitive fixture");
+            fs::write(
+                self.outside.join("outside.rs"),
+                "pub struct OutsideSymlinkNeedle;\n",
+            )
+            .expect("write outside fixture");
+            let symlink_created = create_contract_symlink(
+                &self.outside.join("outside.rs"),
+                &self.repository.join("src/outside-link.rs"),
+            )
+            .is_ok();
+
+            (memory_source, symlink_created)
+        }
+    }
+
+    impl Drop for GraphContractHarness {
+        fn drop(&mut self) {
+            let base_name = self
+                .base
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or_default();
+            if base_name.starts_with("luczor-graph-contract-") {
+                let _ = fs::remove_dir_all(&self.base);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    fn create_contract_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::unix::fs::symlink(target, link)
+    }
+
+    #[cfg(windows)]
+    fn create_contract_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+        std::os::windows::fs::symlink_file(target, link)
+    }
+
     #[test]
     fn schema_supports_fts_and_foreign_keys() {
         let connection = Connection::open_in_memory().expect("sqlite");
@@ -2659,6 +2802,238 @@ mod tests {
             query_terms("MemoryController::remember() OR token"),
             vec!["memorycontroller", "remember", "or", "token"]
         );
+    }
+
+    #[test]
+    fn real_local_repository_contract_is_isolated_hash_checked_and_egress_free() {
+        let harness = GraphContractHarness::new();
+        let (memory_source, symlink_created) = harness.seed_repository();
+        let app = harness.database();
+        let root = harness
+            .repository
+            .canonicalize()
+            .expect("canonical contract root");
+        let root_text = root.to_string_lossy().to_string();
+        let principal_alpha = "account:graph-alpha";
+        let principal_beta = "account:graph-beta";
+        let project = "project-contract";
+
+        let alpha_binding = bind_repository(app, principal_alpha, project, &root_text)
+            .expect("bind alpha repository");
+        assert_eq!(alpha_binding.project_id, project);
+        assert_eq!(alpha_binding.status, "unindexed");
+        assert_eq!(alpha_binding.branch.as_deref(), Some("main"));
+        assert_eq!(alpha_binding.commit_sha.as_deref(), Some(CONTRACT_COMMIT_A));
+        assert_eq!(
+            graph_status(app, principal_alpha, project)
+                .expect("alpha pre-index status")
+                .status,
+            "unindexed"
+        );
+        assert_eq!(
+            graph_status(app, principal_beta, project)
+                .expect("cross-principal status")
+                .status,
+            "unbound"
+        );
+        assert_eq!(
+            graph_status(app, principal_alpha, "other-project")
+                .expect("cross-project status")
+                .status,
+            "unbound"
+        );
+
+        let alpha_index =
+            index_repository(app, principal_alpha, project).expect("index alpha repository");
+        assert_eq!(alpha_index.status, "ready");
+        assert_eq!(alpha_index.files, 2);
+        assert!(alpha_index.symbols >= 3);
+        assert_eq!(alpha_index.branch.as_deref(), Some("main"));
+        assert_eq!(alpha_index.commit_sha.as_deref(), Some(CONTRACT_COMMIT_A));
+
+        let alpha_status = graph_status(app, principal_alpha, project).expect("alpha ready status");
+        assert_eq!(alpha_status.status, "ready");
+        assert_eq!(alpha_status.files, 2);
+        assert_eq!(alpha_status.commit_sha.as_deref(), Some(CONTRACT_COMMIT_A));
+
+        let connection = open_database(app).expect("open contract graph database");
+        let mut statement = connection
+            .prepare(
+                "SELECT relative_path FROM repository_files
+                 WHERE principal_id = ?1 AND repository_id = ?2 ORDER BY relative_path",
+            )
+            .expect("prepare indexed-path query");
+        let indexed_paths = statement
+            .query_map(
+                params![principal_alpha, alpha_binding.repository_id],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("query indexed paths")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect indexed paths");
+        assert_eq!(indexed_paths, vec!["src/helper.ts", "src/memory.rs"]);
+        assert!(!indexed_paths
+            .iter()
+            .any(|path| path.contains("outside-link")));
+        drop(statement);
+        drop(connection);
+
+        let alpha_search =
+            search_repository(app, principal_alpha, project, "MemoryOrchestrator", Some(8))
+                .expect("search alpha graph");
+        assert_eq!(alpha_search.hits.len(), 1);
+        let alpha_hit = &alpha_search.hits[0];
+        assert_eq!(alpha_hit.relative_path, "src/memory.rs");
+        assert_eq!(alpha_hit.content_hash, sha256(memory_source.as_bytes()));
+        assert!(alpha_hit
+            .symbols
+            .iter()
+            .any(|symbol| symbol.name == "MemoryOrchestrator"));
+        assert!(alpha_hit
+            .reasons
+            .iter()
+            .any(|reason| reason == "symbol_exact"));
+
+        for excluded_query in ["IgnoredNeedle", "LuczorIgnoreNeedle", "SecretFileNeedle"] {
+            assert!(
+                search_repository(app, principal_alpha, project, excluded_query, Some(8))
+                    .expect("search excluded fixture")
+                    .hits
+                    .is_empty()
+            );
+        }
+        if symlink_created {
+            assert!(search_repository(
+                app,
+                principal_alpha,
+                project,
+                "OutsideSymlinkNeedle",
+                Some(8)
+            )
+            .expect("search outside symlink fixture")
+            .hits
+            .is_empty());
+        }
+
+        let alpha_snippets = read_snippets(
+            app,
+            principal_alpha,
+            project,
+            vec![alpha_hit.evidence_id.clone()],
+            Some(32 * 1024),
+        )
+        .expect("materialize alpha snippet");
+        assert_eq!(alpha_snippets.snippets.len(), 1);
+        assert!(alpha_snippets.omitted.is_empty());
+        assert_eq!(
+            alpha_snippets.snippets[0].content_hash,
+            alpha_hit.content_hash
+        );
+        assert!(alpha_snippets.snippets[0].redactions >= 1);
+        assert!(!alpha_snippets.snippets[0]
+            .content
+            .contains("contract-secret-never-egress"));
+
+        let beta_binding = bind_repository(app, principal_beta, project, &root_text)
+            .expect("bind beta repository");
+        index_repository(app, principal_beta, project).expect("index beta repository");
+        let beta_search =
+            search_repository(app, principal_beta, project, "MemoryOrchestrator", Some(8))
+                .expect("search beta graph");
+        assert_eq!(beta_search.hits.len(), 1);
+        assert_ne!(alpha_binding.repository_id, beta_binding.repository_id);
+        assert_ne!(alpha_hit.evidence_id, beta_search.hits[0].evidence_id);
+        assert!(search_repository(
+            app,
+            principal_alpha,
+            "other-project",
+            "MemoryOrchestrator",
+            Some(8)
+        )
+        .is_err());
+
+        fs::write(
+            harness.repository.join("src/memory.rs"),
+            format!("{memory_source}// changed after indexing\n"),
+        )
+        .expect("mutate indexed source");
+        let stale_snippet = read_snippets(
+            app,
+            principal_alpha,
+            project,
+            vec![alpha_hit.evidence_id.clone()],
+            Some(32 * 1024),
+        )
+        .expect("check stale snippet hash");
+        assert!(stale_snippet.snippets.is_empty());
+        assert_eq!(stale_snippet.omitted.len(), 1);
+        assert_eq!(stale_snippet.omitted[0].reason, "stale_hash");
+
+        fs::write(
+            harness.repository.join(".git/refs/heads/main"),
+            format!("{CONTRACT_COMMIT_B}\n"),
+        )
+        .expect("advance contract Git ref");
+        assert_eq!(
+            graph_status(app, principal_alpha, project)
+                .expect("alpha stale status")
+                .status,
+            "stale"
+        );
+        assert_eq!(
+            graph_status(app, principal_beta, project)
+                .expect("beta stale status")
+                .status,
+            "stale"
+        );
+
+        let provider_visible = serde_json::to_string(&(
+            &alpha_binding,
+            &alpha_index,
+            &alpha_status,
+            &alpha_search,
+            &alpha_snippets,
+        ))
+        .expect("serialize graph contract responses");
+        assert!(!provider_visible.contains(&root_text));
+        assert!(!provider_visible.contains("contract-secret-never-egress"));
+        assert!(!provider_visible.contains("OutsideSymlinkNeedle"));
+
+        unbind_repository(app, principal_alpha, project, true).expect("unbind alpha graph");
+        assert_eq!(
+            graph_status(app, principal_alpha, project)
+                .expect("alpha unbound status")
+                .status,
+            "unbound"
+        );
+        assert_eq!(
+            graph_status(app, principal_beta, project)
+                .expect("beta remains isolated")
+                .status,
+            "stale"
+        );
+        assert!(
+            search_repository(app, principal_alpha, project, "MemoryOrchestrator", Some(8))
+                .is_err()
+        );
+
+        let connection = open_database(app).expect("verify contract cleanup");
+        let alpha_rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM repository_files WHERE principal_id = ?1",
+                [principal_alpha],
+                |row| row.get(0),
+            )
+            .expect("count alpha files after unbind");
+        let beta_rows: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM repository_files WHERE principal_id = ?1",
+                [principal_beta],
+                |row| row.get(0),
+            )
+            .expect("count beta files after alpha unbind");
+        assert_eq!(alpha_rows, 0);
+        assert_eq!(beta_rows, 2);
     }
 
     fn insert_test_binding(

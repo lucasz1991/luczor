@@ -2,12 +2,13 @@
 //
 // OS perception + control commands for Luczor.
 //
-// SAFETY: These are powerful. The frontend only ever calls them through the
-// tool registry, which enforces the observe/act mode, the global kill switch,
-// and per-call user approval. Nothing here bypasses that gate.
+// SAFETY: These are powerful. The trusted local main webview calls them through
+// the tool registry, which enforces the observe/act mode, global kill switch,
+// and per-call approval. Native label/capability checks isolate remote webviews;
+// the main webview itself remains the explicit trust boundary.
 
 use base64::Engine;
-use enigo::{Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use nvml_wrapper::{enum_wrappers::device::TemperatureSensor, Nvml};
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
@@ -79,6 +80,7 @@ pub struct WindowInfo {
     pub app_name: String,
     pub width: u32,
     pub height: u32,
+    pub focused: bool,
 }
 
 /// List visible windows (title + owning app). Read-only perception.
@@ -105,6 +107,9 @@ pub async fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, Stri
             height: w
                 .height()
                 .map_err(|e| format!("Window::height failed: {e}"))?,
+            focused: w
+                .is_focused()
+                .map_err(|e| format!("Window::is_focused failed: {e}"))?,
         });
     }
     Ok(out)
@@ -343,6 +348,9 @@ pub struct PressKeyPayload {
 }
 
 fn parse_key(name: &str) -> Result<Key, String> {
+    if name.chars().any(char::is_control) {
+        return Err("Key must not contain control characters.".into());
+    }
     let k = name.trim().to_lowercase();
     Ok(match k.as_str() {
         "enter" | "return" => Key::Return,
@@ -377,6 +385,122 @@ pub async fn press_key(window: WebviewWindow, payload: PressKeyPayload) -> Resul
         .map_err(|e| format!("press_key failed: {e}"))
 }
 
+const MAX_SCROLL_AMOUNT: i32 = 100;
+const MAX_HOTKEY_MODIFIERS: usize = 4;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScrollPayload {
+    /// Signed number of scroll steps. Positive/negative direction follows the
+    /// platform convention exposed by Enigo.
+    pub amount: i32,
+    /// "vertical" (default) or "horizontal".
+    pub axis: Option<String>,
+}
+
+fn validate_scroll_amount(amount: i32) -> Result<i32, String> {
+    if amount == 0 || amount.unsigned_abs() > MAX_SCROLL_AMOUNT as u32 {
+        Err(format!(
+            "Scroll amount must be between -{MAX_SCROLL_AMOUNT} and {MAX_SCROLL_AMOUNT}, excluding zero."
+        ))
+    } else {
+        Ok(amount)
+    }
+}
+
+fn parse_scroll_axis(value: Option<&str>) -> Result<Axis, String> {
+    match value
+        .unwrap_or("vertical")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "vertical" | "v" => Ok(Axis::Vertical),
+        "horizontal" | "h" => Ok(Axis::Horizontal),
+        _ => Err("Scroll axis must be vertical or horizontal.".into()),
+    }
+}
+
+#[tauri::command]
+pub async fn scroll(window: WebviewWindow, payload: ScrollPayload) -> Result<(), String> {
+    ensure_main_webview(&window)?;
+    let amount = validate_scroll_amount(payload.amount)?;
+    let axis = parse_scroll_axis(payload.axis.as_deref())?;
+    let mut enigo = new_enigo()?;
+    enigo
+        .scroll(amount, axis)
+        .map_err(|e| format!("scroll failed: {e}"))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HotkeyPayload {
+    /// One to four unique modifiers: control, alt, shift, meta/windows.
+    pub modifiers: Vec<String>,
+    /// One safe named key accepted by press_key, or a single character.
+    pub key: String,
+}
+
+fn parse_modifier(name: &str) -> Result<(&'static str, Key), String> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "control" | "ctrl" => Ok(("control", Key::Control)),
+        "alt" | "option" => Ok(("alt", Key::Alt)),
+        "shift" => Ok(("shift", Key::Shift)),
+        "meta" | "super" | "windows" | "win" | "command" | "cmd" => Ok(("meta", Key::Meta)),
+        _ => Err(format!("Unsupported hotkey modifier: {name}")),
+    }
+}
+
+fn parse_hotkey_modifiers(values: &[String]) -> Result<Vec<Key>, String> {
+    if values.is_empty() || values.len() > MAX_HOTKEY_MODIFIERS {
+        return Err(format!(
+            "A hotkey requires one to {MAX_HOTKEY_MODIFIERS} modifiers."
+        ));
+    }
+    let mut names = Vec::new();
+    let mut keys = Vec::new();
+    for value in values {
+        let (name, key) = parse_modifier(value)?;
+        if names.contains(&name) {
+            return Err(format!("Duplicate hotkey modifier: {name}"));
+        }
+        names.push(name);
+        keys.push(key);
+    }
+    Ok(keys)
+}
+
+#[tauri::command]
+pub async fn hotkey(window: WebviewWindow, payload: HotkeyPayload) -> Result<(), String> {
+    ensure_main_webview(&window)?;
+    let modifiers = parse_hotkey_modifiers(&payload.modifiers)?;
+    let key = parse_key(&payload.key)?;
+    let mut enigo = new_enigo()?;
+    let mut pressed = Vec::new();
+    for modifier in &modifiers {
+        if let Err(error) = enigo.key(*modifier, Direction::Press) {
+            for pressed_key in pressed.iter().rev() {
+                let _ = enigo.key(*pressed_key, Direction::Release);
+            }
+            return Err(format!("hotkey modifier press failed: {error}"));
+        }
+        pressed.push(*modifier);
+    }
+
+    let click_result = enigo.key(key, Direction::Click);
+    let mut release_error = None;
+    for modifier in pressed.iter().rev() {
+        if let Err(error) = enigo.key(*modifier, Direction::Release) {
+            release_error.get_or_insert_with(|| error.to_string());
+        }
+    }
+    click_result.map_err(|error| format!("hotkey key press failed: {error}"))?;
+    if let Some(error) = release_error {
+        return Err(format!("hotkey modifier release failed: {error}"));
+    }
+    Ok(())
+}
+
 /* =========================================================
  * Browser
  * ========================================================= */
@@ -397,4 +521,52 @@ pub async fn open_url(window: WebviewWindow, payload: OpenUrlPayload) -> Result<
     }
     webbrowser::open(url).map_err(|error| format!("open_url failed: {error}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        parse_hotkey_modifiers, parse_key, parse_scroll_axis, validate_scroll_amount, WindowInfo,
+        MAX_SCROLL_AMOUNT,
+    };
+    use enigo::{Axis, Key};
+
+    #[test]
+    fn window_snapshot_serializes_the_real_focus_field() {
+        let window = WindowInfo {
+            title: "Editor".into(),
+            app_name: "Code".into(),
+            width: 1200,
+            height: 800,
+            focused: true,
+        };
+        let value = serde_json::to_value(window).expect("serialize window info");
+        assert_eq!(value["focused"], true);
+    }
+
+    #[test]
+    fn scroll_is_bounded_and_axis_is_closed() {
+        assert_eq!(validate_scroll_amount(1).unwrap(), 1);
+        assert_eq!(validate_scroll_amount(-MAX_SCROLL_AMOUNT).unwrap(), -100);
+        assert!(validate_scroll_amount(0).is_err());
+        assert!(validate_scroll_amount(MAX_SCROLL_AMOUNT + 1).is_err());
+        assert_eq!(parse_scroll_axis(None).unwrap(), Axis::Vertical);
+        assert_eq!(
+            parse_scroll_axis(Some("horizontal")).unwrap(),
+            Axis::Horizontal
+        );
+        assert!(parse_scroll_axis(Some("diagonal")).is_err());
+    }
+
+    #[test]
+    fn hotkey_modifiers_are_allowlisted_unique_and_bounded() {
+        let modifiers = parse_hotkey_modifiers(&["ctrl".into(), "shift".into()]).unwrap();
+        assert_eq!(modifiers, vec![Key::Control, Key::Shift]);
+        assert!(parse_hotkey_modifiers(&[]).is_err());
+        assert!(parse_hotkey_modifiers(&["ctrl".into(), "control".into()]).is_err());
+        assert!(parse_hotkey_modifiers(&["hyper".into()]).is_err());
+        assert_eq!(parse_key("s").unwrap(), Key::Unicode('s'));
+        assert!(parse_key("\0").is_err());
+        assert!(parse_key("launch calculator").is_err());
+    }
 }

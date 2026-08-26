@@ -23,11 +23,17 @@
     "tauri": "tauri",
     "bump": "node bump-version.cjs",
     "version:check": "node check-version.cjs",
+    "node:check": "node scripts/release-readiness.cjs --mode node",
+    "release:check:local": "node scripts/release-readiness.cjs --mode local-test",
+    "release:check:production": "node scripts/release-readiness.cjs --mode production",
+    "release:check:test": "node --test scripts/release-readiness.test.cjs scripts/check-unsigned-pe.test.cjs",
+    "release:installer:windows:test": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-test-installer.ps1",
     "check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "security:audit": "pnpm audit --audit-level=moderate"
   },
   "dependencies": {
     "@tauri-apps/api": "~2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.7.2",
     "@tauri-apps/plugin-notification": "^2.3.3",
     "@tauri-apps/plugin-store": "^2.4.4",
     "pinia": "^3.0.4",

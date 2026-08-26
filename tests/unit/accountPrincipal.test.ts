@@ -101,7 +101,9 @@ describe('verified account principal', () => {
 
     const online = await getVerifiedAccountSnapshot()
     const encrypted = String(harness.bindingValues.get('bindings_v1_encrypted'))
-    expect(encrypted).not.toContain(String(harness.accountId))
+    // A short decimal account ID can occur by chance in randomized Base64
+    // ciphertext. Assert that the serialized plaintext field is absent.
+    expect(encrypted).not.toContain(`"accountId":${String(harness.accountId)}`)
     expect(encrypted).not.toContain(String(online?.principalId))
 
     harness.bootstrapWithApiConfig.mockRejectedValueOnce({ status: 0, message: 'network unavailable' })

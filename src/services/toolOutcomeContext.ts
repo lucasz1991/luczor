@@ -30,7 +30,10 @@ export function toolOutcomePreview(message: Message, maxLength = 320): string {
  */
 export function buildRecentToolOutcomeContext(messages: Message[], limit = 4): string {
   const outcomes = messages
-    .filter(message => message.role === 'tool' && message.visibility === 'hidden')
+    .filter(
+      message =>
+        message.role === 'tool' && message.visibility === 'hidden' && message.meta?.dataHandling !== 'ephemeral'
+    )
     .slice(-Math.max(0, limit))
 
   if (!outcomes.length) return ''

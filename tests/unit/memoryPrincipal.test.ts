@@ -63,8 +63,8 @@ function accountSnapshot(accountId: number, deviceKey: string) {
   })
 }
 
-function jsonResponse(body: unknown): Response {
-  return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } })
 }
 
 async function setServerEnabled(enabled: boolean): Promise<void> {
@@ -403,5 +403,221 @@ describe('desktop memory account isolation', () => {
       memory.remember({ content: 'Must not be guessed into a partition', scope: 'project', projectId: 'project-1' })
     ).rejects.toThrow('verification failed')
     expect(harness.files.has('luczor.memory.json')).toBe(false)
+  })
+
+  it('uses the acknowledged server version as CAS for the next feature write', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    await memory.remember({
+      content: 'Erste geräteübergreifende Regel',
+      scope: 'project',
+      projectId: 'project-1',
+      featureKey: 'answer.shared-rule',
+      source: 'user',
+      writeIntent: 'explicit',
+    })
+
+    await setServerEnabled(true)
+    harness.fetch.mockResolvedValueOnce(
+      jsonResponse({ decision: 'accepted', persisted: true, id: 'shared-rule', memory_link_id: 41 })
+    )
+    await memory.flushPendingSync()
+
+    await setServerEnabled(false)
+    await memory.remember({
+      content: 'Zweite geräteübergreifende Regel',
+      scope: 'project',
+      projectId: 'project-1',
+      featureKey: 'answer.shared-rule',
+      source: 'user',
+      writeIntent: 'explicit',
+    })
+    await setServerEnabled(true)
+    harness.fetch.mockClear()
+    harness.fetch.mockResolvedValueOnce(
+      jsonResponse({ decision: 'accepted', persisted: true, id: 'shared-rule', memory_link_id: 42 })
+    )
+    await memory.flushPendingSync()
+
+    expect(harness.fetch).toHaveBeenCalledOnce()
+    const rememberRequest = harness.fetch.mock.calls[0]
+    expect(rememberRequest).toBeDefined()
+    const [, options] = rememberRequest!
+    expect(JSON.parse(String(options?.body))).toMatchObject({
+      feature_key: 'answer.shared-rule',
+      expected_previous_id: 41,
+    })
+    expect(String(rememberRequest![0])).toContain('/api/v1/memory/remember')
+    await expect(memory.pendingSyncCount()).resolves.toBe(0)
+  })
+
+  it('turns a stale first-write CAS conflict into a review candidate instead of overwriting', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const record = await memory.remember({
+      content: 'Offline-Regel mit unbekanntem Server-Vorgänger',
+      scope: 'project',
+      projectId: 'project-1',
+      featureKey: 'answer.remote-conflict',
+      source: 'user',
+      writeIntent: 'explicit',
+    })
+
+    await setServerEnabled(true)
+    harness.fetch.mockResolvedValueOnce(jsonResponse({ message: 'Version conflict' }, 409))
+    await memory.flushPendingSync()
+
+    const rememberCall = harness.fetch.mock.calls.find(([url]) => String(url).endsWith('/api/v1/memory/remember'))
+    expect(JSON.parse(String(rememberCall?.[1]?.body))).toMatchObject({
+      feature_key: 'answer.remote-conflict',
+      expected_previous_id: null,
+    })
+    await expect(memory.listCandidates('project-1')).resolves.toEqual([
+      expect.objectContaining({
+        id: record.id,
+        status: 'candidate',
+        synced: false,
+        requiresServerVersionRefresh: true,
+      }),
+    ])
+    await expect(memory.pendingSyncCount()).resolves.toBe(0)
+  })
+
+  it('uses the current version from a structured conflict for an explicit reviewed promotion', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const record = await memory.remember({
+      content: 'Lokale Änderung auf einem neuen Gerät',
+      scope: 'project',
+      projectId: 'project-1',
+      featureKey: 'answer.structured-conflict',
+      source: 'user',
+      writeIntent: 'explicit',
+    })
+
+    await setServerEnabled(true)
+    harness.fetch.mockResolvedValueOnce(jsonResponse({ message: 'Version conflict', current_memory_id: 77 }, 409))
+    await memory.flushPendingSync()
+
+    await expect(memory.listCandidates('project-1')).resolves.toEqual([
+      expect.objectContaining({
+        id: record.id,
+        expectedPreviousServerVersionId: 77,
+        requiresServerVersionRefresh: false,
+      }),
+    ])
+
+    await setServerEnabled(false)
+    await expect(memory.promote(record.id)).resolves.toMatchObject({ status: 'active' })
+    await setServerEnabled(true)
+    harness.fetch.mockClear()
+    harness.fetch.mockResolvedValueOnce(
+      jsonResponse({ decision: 'accepted', persisted: true, id: 'structured-conflict', memory_link_id: 78 })
+    )
+    await memory.flushPendingSync()
+
+    expect(harness.fetch).toHaveBeenCalledOnce()
+    const promotedRequest = harness.fetch.mock.calls[0]
+    expect(promotedRequest).toBeDefined()
+    expect(JSON.parse(String(promotedRequest![1]?.body))).toMatchObject({
+      feature_key: 'answer.structured-conflict',
+      expected_previous_id: 77,
+    })
+    await expect(memory.pendingSyncCount()).resolves.toBe(0)
+  })
+
+  it('refreshes an unstructured conflict through recall before the reviewed promotion', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const record = await memory.remember({
+      content: 'Neue lokale Fassung einer bestehenden Regel',
+      scope: 'project',
+      projectId: 'project-1',
+      featureKey: 'answer.recalled-conflict',
+      source: 'user',
+      writeIntent: 'explicit',
+    })
+
+    await setServerEnabled(true)
+    harness.fetch.mockResolvedValueOnce(jsonResponse({ message: 'Version conflict' }, 409)).mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            id: 'recalled-conflict',
+            content: 'Aktive Fassung auf dem Server',
+            feature_key: 'answer.recalled-conflict',
+            source_record_id: '91',
+          },
+        ],
+      })
+    )
+    await memory.flushPendingSync()
+
+    expect(harness.fetch.mock.calls.map(([url]) => String(url))).toEqual([
+      expect.stringContaining('/api/v1/memory/remember'),
+      expect.stringContaining('/api/v1/memory/recall'),
+    ])
+    await expect(memory.listCandidates('project-1')).resolves.toEqual([
+      expect.objectContaining({
+        id: record.id,
+        expectedPreviousServerVersionId: 91,
+        requiresServerVersionRefresh: false,
+      }),
+    ])
+
+    await setServerEnabled(false)
+    await memory.promote(record.id)
+    await setServerEnabled(true)
+    harness.fetch.mockClear()
+    harness.fetch.mockResolvedValueOnce(
+      jsonResponse({ decision: 'accepted', persisted: true, id: 'recalled-conflict', memory_link_id: 92 })
+    )
+    await memory.flushPendingSync()
+
+    const promotedRequest = harness.fetch.mock.calls[0]
+    expect(promotedRequest).toBeDefined()
+    expect(JSON.parse(String(promotedRequest![1]?.body))).toMatchObject({
+      expected_previous_id: 91,
+    })
+  })
+
+  it('keeps a conflict candidate unchanged when the active server version cannot be verified', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const record = await memory.remember({
+      content: 'Nicht blind zu überschreibende lokale Regel',
+      scope: 'project',
+      projectId: 'project-1',
+      featureKey: 'answer.unresolved-conflict',
+      source: 'user',
+      writeIntent: 'explicit',
+    })
+
+    await setServerEnabled(true)
+    harness.fetch
+      .mockResolvedValueOnce(jsonResponse({ message: 'Version conflict' }, 409))
+      .mockResolvedValueOnce(jsonResponse({ data: [] }))
+      .mockResolvedValueOnce(jsonResponse({ data: [] }))
+    await memory.flushPendingSync()
+
+    harness.fetch.mockClear()
+    harness.fetch.mockResolvedValue(jsonResponse({ data: [] }))
+    await expect(memory.promote(record.id)).rejects.toThrow('could not be verified')
+
+    expect(harness.fetch).toHaveBeenCalledTimes(2)
+    expect(harness.fetch.mock.calls.every(([url]) => String(url).endsWith('/api/v1/memory/recall'))).toBe(true)
+    await expect(memory.listCandidates('project-1')).resolves.toEqual([
+      expect.objectContaining({
+        id: record.id,
+        status: 'candidate',
+        requiresServerVersionRefresh: true,
+      }),
+    ])
+    await expect(memory.pendingSyncCount()).resolves.toBe(0)
   })
 })

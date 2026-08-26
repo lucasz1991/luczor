@@ -8,7 +8,6 @@ import PlanPanel from './components/PlanPanel.vue'
 import AmbientBackdrop from './components/vengeance/AmbientBackdrop.vue'
 import SpotlightSurface from './components/vengeance/SpotlightSurface.vue'
 import { type LuczorMode, type WireMessage } from './services/openrouter.service'
-import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { runAgent, buildSystemPreamble, shouldRequireToolCall } from '@/services/agent'
 import { parseEnvelope } from '@/services/envelope'
 import { resolveApproval, rejectAllApprovals } from '@/services/approvals'
@@ -25,7 +24,18 @@ import { appearance } from '@/services/appearance'
 import { recordDebugEvent } from '@/services/debug'
 import { getSafeRecordValue } from '@/services/safeRecord'
 import { buildRecentToolOutcomeContext, toolOutcomePreview } from '@/services/toolOutcomeContext'
+import { getTool } from '@/services/tools/registry'
 import { buildPlanContext } from '@/services/plan'
+import { assemblePromptContext, type PromptFragment } from '@/services/prompt/promptContextAssembler'
+import { buildProjectStartContext } from '@/services/prompt/projectStartContext'
+import {
+  bindProjectWorkspace,
+  getProjectWorkspace,
+  resolveWorkspacePrincipalId,
+  selectProjectWorkspaceDirectory,
+  unbindProjectWorkspace,
+  type ProjectWorkspaceBinding,
+} from '@/services/projectWorkspace'
 import { ACTIVE_MODE_KEY, createAppRuntimeLifecycle } from '@/services/appRuntimeLifecycle'
 import {
   bindRepository,
@@ -346,12 +356,25 @@ function newChat() {
   mutations.resetProjectChat(activeProjectId.value)
 }
 
-function addProject() {
+async function addProject() {
   void stopGenerating()
+  const rootPath = await selectProjectWorkspaceDirectory('Projektordner als neues Luczor-Projekt öffnen')
+  if (!rootPath) return
+
   const id = `p_${Math.random().toString(16).slice(2)}`
-  const name = `Projekt ${projects.value.length + 1}`
-  mutations.addProject({ id, name })
-  activeProjectId.value = id
+  try {
+    const workspace = await bindProjectWorkspace(id, rootPath)
+    mutations.addProject({ id, name: workspace.displayName || `Projekt ${projects.value.length + 1}` })
+    activeProjectId.value = id
+    activeWorkspace.value = workspace
+
+    // Server mirroring is best-effort; the desktop project remains usable
+    // offline and its absolute directory never enters the sync payload.
+    void LuczorApi.createProject(id, workspace.displayName).catch(() => undefined)
+    if (workspace.isGitRepository) await bindAndIndexWorkspace(workspace)
+  } catch (error) {
+    window.alert(error instanceof Error ? error.message : String(error))
+  }
 }
 
 /* -------------------------------------------------
@@ -486,6 +509,12 @@ function rejectTool(id: string) {
   resolveApproval(id, false)
 }
 
+function approvalDataNotice(toolName: string): string {
+  const tool = getTool(toolName)
+  if (tool?.dataHandling !== 'ephemeral') return ''
+  return 'Das lokale Ergebnis wird nur für diese laufende Modellrunde verwendet, danach redigiert und weder synchronisiert noch als Memory gespeichert.'
+}
+
 /**
  * Cycle: Beobachten -> Handeln -> Vollzugriff -> Beobachten.
  * Entering "unrestricted" requires an explicit confirmation, because it
@@ -508,8 +537,8 @@ function toggleMode() {
   if (next === 'unrestricted') {
     const ok = window.confirm(
       'VOLLZUGRIFF aktivieren?\n\n' +
-        'Luczor führt dann ALLE Tools (Maus, Tastatur, Programme, Dateien) OHNE Rückfrage aus. ' +
-        'Nur der Not-Aus im HUD stoppt ihn noch.\n\nWirklich aktivieren?'
+        'Luczor führt dann ALLE freigeschalteten Tools (Maus, Tastatur, URLs, lokale Dateien und Coding-Agenten) OHNE Rückfrage aus. ' +
+        'Dabei können gelesene lokale Daten einmalig an das aktive Modell übergeben werden. Native Projekt- und Pfadgrenzen sowie der Not-Aus bleiben aktiv.\n\nWirklich aktivieren?'
     )
     if (!ok) {
       return
@@ -541,7 +570,9 @@ const modeTitle = computed(() => {
 const showAudit = ref(false)
 // Context panel (goals + summaries) is collapsed by default for a chat-first UI.
 const showContext = ref(false)
-const repositoryRootInput = ref('')
+const activeWorkspace = ref<ProjectWorkspaceBinding | null>(null)
+const workspaceBusy = ref(false)
+const workspaceMessage = ref('')
 const localGraphStatus = ref<RepositoryGraphStatus>({
   status: 'unbound',
   files: 0,
@@ -555,14 +586,21 @@ const repositoryExternalPolicy = ref<RepositoryExternalPolicy>('deny')
 const memoryCandidates = ref<MemoryRecord[]>([])
 const memoryCandidateBusyId = ref('')
 
+function workspacePathLabel(path: string): string {
+  return path.replace(/^\\\\\?\\UNC\\/iu, '\\\\').replace(/^\\\\\?\\/u, '')
+}
+
 async function requireRepositoryPrincipalId(): Promise<string> {
-  const account = await getVerifiedAccountSnapshot()
-  if (!account) {
-    throw new Error(
-      'Für einen accountgebundenen lokalen Repository-Graph muss zuerst ein Device-Key eingerichtet sein.'
-    )
+  return resolveWorkspacePrincipalId()
+}
+
+async function refreshActiveWorkspace() {
+  try {
+    activeWorkspace.value = await getProjectWorkspace(activeProjectId.value)
+  } catch (error) {
+    activeWorkspace.value = null
+    workspaceMessage.value = error instanceof Error ? error.message : String(error)
   }
-  return account.principalId
 }
 
 async function refreshMemoryCandidates() {
@@ -614,15 +652,13 @@ async function refreshLocalGraphStatus() {
   }
 }
 
-async function bindAndIndexRepository() {
-  const root = repositoryRootInput.value.trim()
-  if (!root || localGraphBusy.value) return
+async function bindAndIndexWorkspace(workspace: ProjectWorkspaceBinding) {
+  if (!workspace.isGitRepository || localGraphBusy.value) return
   localGraphBusy.value = true
   localGraphMessage.value = 'Repository wird lokal gebunden …'
   try {
     const principalId = await requireRepositoryPrincipalId()
-    await bindRepository(principalId, activeProjectId.value, root)
-    repositoryRootInput.value = ''
+    await bindRepository(principalId, activeProjectId.value, workspace.gitRootPath ?? workspace.rootPath)
     localGraphMessage.value = 'Lokaler Index wird aufgebaut …'
     await indexRepository(principalId, activeProjectId.value)
     localGraphMessage.value = 'Lokaler Repository-Graph ist bereit.'
@@ -634,8 +670,27 @@ async function bindAndIndexRepository() {
   }
 }
 
+async function bindCurrentProjectWorkspace() {
+  if (workspaceBusy.value || activeWorkspace.value) return
+  workspaceBusy.value = true
+  workspaceMessage.value = ''
+  try {
+    const rootPath = await selectProjectWorkspaceDirectory('Lokalen Ordner mit diesem Projekt verknüpfen')
+    if (!rootPath) return
+    const workspace = await bindProjectWorkspace(activeProjectId.value, rootPath)
+    activeWorkspace.value = workspace
+    workspaceMessage.value = 'Der Projektordner ist lokal zugeordnet.'
+    if (workspace.isGitRepository) await bindAndIndexWorkspace(workspace)
+  } catch (error) {
+    workspaceMessage.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    workspaceBusy.value = false
+    await Promise.all([refreshActiveWorkspace(), refreshLocalGraphStatus()])
+  }
+}
+
 async function reindexRepository() {
-  if (localGraphBusy.value) return
+  if (localGraphBusy.value || !activeWorkspace.value?.isGitRepository) return
   localGraphBusy.value = true
   localGraphMessage.value = 'Änderungen werden lokal indexiert …'
   try {
@@ -651,15 +706,27 @@ async function reindexRepository() {
 }
 
 async function removeRepositoryBinding() {
-  if (localGraphBusy.value) return
+  if (localGraphBusy.value || workspaceBusy.value || !activeWorkspace.value) return
+  const confirmed = window.confirm(
+    'Lokale Projektzuordnung lösen? Die Dateien im gewählten Ordner werden nicht verändert oder gelöscht.'
+  )
+  if (!confirmed) return
+  workspaceBusy.value = true
   localGraphBusy.value = true
   try {
     const principalId = await requireRepositoryPrincipalId()
     await unbindRepository(principalId, activeProjectId.value, true)
-    localGraphMessage.value = 'Lokale Repository-Bindung und Index wurden gelöscht.'
+    await unbindProjectWorkspace(activeProjectId.value, principalId)
+    activeWorkspace.value = null
+    workspaceMessage.value =
+      'Die lokale Zuordnung und der Graph-Index wurden entfernt. Projektdateien blieben unverändert.'
+    localGraphMessage.value = ''
+  } catch (error) {
+    workspaceMessage.value = error instanceof Error ? error.message : String(error)
   } finally {
+    workspaceBusy.value = false
     localGraphBusy.value = false
-    await refreshLocalGraphStatus()
+    await Promise.all([refreshActiveWorkspace(), refreshLocalGraphStatus()])
   }
 }
 
@@ -672,10 +739,10 @@ async function saveRepositoryPolicy() {
 watch(
   activeProjectId,
   async () => {
-    repositoryRootInput.value = ''
+    workspaceMessage.value = ''
     localGraphMessage.value = ''
     repositoryExternalPolicy.value = await getRepositoryExternalPolicy()
-    await Promise.all([refreshLocalGraphStatus(), refreshMemoryCandidates()])
+    await Promise.all([refreshActiveWorkspace(), refreshLocalGraphStatus(), refreshMemoryCandidates()])
   },
   { immediate: true }
 )
@@ -813,6 +880,7 @@ async function send() {
     .getProjectMessages(pid)
     .filter(m => m.id !== assistant.id)
     .filter(m => m.role === 'user' || m.role === 'assistant')
+    .filter(message => message.meta?.dataHandling !== 'ephemeral')
     .filter(m => safeTrim(m.content).length > 0)
     .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
   const settingsStore = await Store.load('luczor.settings.json')
@@ -823,72 +891,126 @@ async function send() {
   )
   const history = compactHistory(fullHistory, historyBudget)
 
-  const baseMessages: WireMessage[] = [
-    { role: 'system', content: buildSystemPreamble(mode.value, prj?.name ?? pid, appearance.assistantName) },
-    ...(safeTrim((prj as any)?.summary)
-      ? [{ role: 'system' as const, content: `Projektzusammenfassung: ${safeTrim((prj as any).summary)}` }]
-      : []),
-    ...history,
-  ]
+  const contextFragments: PromptFragment[] = []
   const recentToolContext = buildRecentToolOutcomeContext(mutations.getProjectMessages(pid, { includeHidden: true }))
-  if (recentToolContext) baseMessages.splice(1, 0, { role: 'system', content: recentToolContext })
+  if (recentToolContext) {
+    contextFragments.push({
+      id: 'recent-tool-outcomes',
+      source: 'tool',
+      trust: 'untrusted_data',
+      scope: 'session',
+      egress: 'allowed',
+      priority: 60,
+      content: recentToolContext,
+    })
+  }
 
   // Keep the active plan in front of the model across turns.
   const planContext = buildPlanContext(pid)
-  if (planContext) baseMessages.splice(1, 0, { role: 'system', content: planContext })
+  if (planContext) {
+    contextFragments.push({
+      id: 'active-plan',
+      source: 'project',
+      trust: 'untrusted_data',
+      scope: 'project',
+      egress: 'allowed',
+      priority: 80,
+      content: planContext,
+    })
+  }
 
-  // Inject relevant long-term memory (project scope) as an extra system note.
+  // Build one deterministic, bounded and redacted provider context. Absolute
+  // workspace paths remain local; providers only ever receive @project.
   let promptContext: PromptContextDetails = { text: '', taskType }
+  const memoryPrefs = await getMemoryPrefs().catch(() => ({ inject: true, injectCount: 5 }))
   try {
-    const prefs = await getMemoryPrefs()
-    if (prefs.inject) {
+    if (prj) {
+      const startContext = await buildProjectStartContext({
+        project: prj,
+        workspace: activeWorkspace.value,
+        includeMemory: memoryPrefs.inject,
+        memoryLimit: memoryPrefs.injectCount,
+      })
+      contextFragments.push(...startContext.fragments)
+    }
+  } catch (error) {
+    console.warn('[prompt] start context skipped:', error)
+  }
+
+  // Add query-specific Memory/Repository retrieval. Repository snippets enter
+  // only after a fresh per-turn approval when the local policy requires it.
+  try {
+    if (memoryPrefs.inject) {
       // Context Controller (server) ranks + budgets memory; local fallback.
-      promptContext = await buildPromptContextDetails(pid, text, prefs.injectCount, taskType)
+      promptContext = await buildPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType)
       if (promptContext.repositoryApprovalRequired) {
         const approved = window.confirm(
           'Für diese Codefrage wurden passende lokale Repository-Treffer gefunden.\n\n' +
             'Dürfen ausschließlich die ausgewählten, begrenzten und redigierten Ausschnitte für diese eine Modellanfrage verwendet werden?'
         )
         if (approved) {
-          promptContext = await buildPromptContextDetails(pid, text, prefs.injectCount, taskType, true)
+          promptContext = await buildPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType, true)
         }
       }
-      if (promptContext.text) baseMessages.splice(1, 0, { role: 'system', content: promptContext.text })
+      if (promptContext.text) {
+        contextFragments.push({
+          id: 'query-context',
+          source: 'repository',
+          trust: 'untrusted_data',
+          scope: 'project',
+          egress: 'allowed',
+          priority: 75,
+          content: promptContext.text,
+        })
+      }
     }
   } catch (e) {
     console.warn('[memory] context injection skipped:', e)
   }
 
+  const assembledContext = assemblePromptContext(contextFragments, {
+    maxChars: 9_000,
+    maxEstimatedTokens: 2_250,
+    maxFragments: 20,
+    maxFragmentChars: 1_800,
+  })
+  const baseMessages: WireMessage[] = [
+    { role: 'system', content: buildSystemPreamble(mode.value, prj?.name ?? pid, appearance.assistantName) },
+    ...(assembledContext.providerText ? [{ role: 'system' as const, content: assembledContext.providerText }] : []),
+    ...history,
+  ]
+
   let streamStarted = false
 
   try {
     void playSfx('loading')
-    const { finalText, requestId, model, provider, useCase, toolFailures, toolSuccesses } = await runAgent({
-      projectId: pid,
-      baseMessages,
-      mode: mode.value,
-      getMode: () => mode.value,
-      toolChoice: shouldRequireToolCall(text) ? 'required' : 'auto',
-      taskType: promptContext.taskType,
-      contextId: promptContext.contextId,
-      repoId: promptContext.repoId,
-      branch: promptContext.branch,
-      commitSha: promptContext.commitSha,
-      inputSource,
-      signal: abort.signal,
+    const { finalText, requestId, model, provider, useCase, toolFailures, toolSuccesses, ephemeralDataUsed } =
+      await runAgent({
+        projectId: pid,
+        baseMessages,
+        mode: mode.value,
+        getMode: () => mode.value,
+        toolChoice: shouldRequireToolCall(text) ? 'required' : 'auto',
+        taskType: promptContext.taskType,
+        contextId: promptContext.contextId,
+        repoId: promptContext.repoId,
+        branch: promptContext.branch,
+        commitSha: promptContext.commitSha,
+        inputSource,
+        signal: abort.signal,
 
-      // Live streaming: parse the envelope progressively and render it.
-      onToken: raw => {
-        if (!streamStarted) {
-          streamStarted = true
-          stopAssistantLoading()
-          try {
-            stopSfx('loading')
-          } catch {}
-        }
-        applyStreamedContent(pid, assistant.id, raw, false)
-      },
-    })
+        // Live streaming: parse the envelope progressively and render it.
+        onToken: raw => {
+          if (!streamStarted) {
+            streamStarted = true
+            stopAssistantLoading()
+            try {
+              stopSfx('loading')
+            } catch {}
+          }
+          applyStreamedContent(pid, assistant.id, raw, false)
+        },
+      })
 
     try {
       stopSfx('loading')
@@ -900,7 +1022,13 @@ async function send() {
     {
       const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
       mutations.patchMessage(pid, assistant.id, {
-        meta: { ...(current?.meta ?? {}), model, provider, useCase },
+        meta: {
+          ...(current?.meta ?? {}),
+          model,
+          provider,
+          useCase,
+          ...(ephemeralDataUsed ? { dataHandling: 'ephemeral' as const } : {}),
+        },
       })
     }
     if (requestId) {
@@ -918,7 +1046,7 @@ async function send() {
 
     setStatus('idle')
     void autoSpeakAssistantIfEnabled(pid, assistant.id)
-    void rememberExchange(pid, text, assistant.id)
+    if (!ephemeralDataUsed) void rememberExchange(pid, text, assistant.id)
   } catch (e: any) {
     try {
       stopSfx('loading')
@@ -990,7 +1118,7 @@ watch(
           </svg>
           <span class="dock-label">Neuer Chat</span>
         </button>
-        <button class="btn-ghost" type="button" title="Neues Projekt" @click="addProject">
+        <button class="btn-ghost" type="button" title="Projektordner öffnen" @click="addProject">
           <svg
             viewBox="0 0 24 24"
             width="18"
@@ -1004,7 +1132,7 @@ watch(
             <path d="M4 19V7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z" />
             <path d="M12 11v6M9 14h6" />
           </svg>
-          <span class="dock-label">Neues Projekt</span>
+          <span class="dock-label">Projektordner öffnen</span>
         </button>
       </div>
 
@@ -1082,6 +1210,9 @@ watch(
         <div class="header__identity">
           <span class="header__eyebrow">Aktiver Raum</span>
           <div class="header__title">{{ activeProject?.name }}</div>
+          <div class="header__workspace">
+            {{ activeWorkspace ? `@project · ${activeWorkspace.displayName}` : '@project · kein Ordner' }}
+          </div>
         </div>
 
         <button
@@ -1228,14 +1359,29 @@ watch(
 
         <div class="info-block repo-graph-block">
           <div class="info-head">
-            <span class="tac-label">Lokaler Repository-Graph</span>
-            <span class="info-stat" :class="`is-${localGraphStatus.status}`">
-              {{ localGraphStatus.status === 'ready' ? 'bereit' : localGraphStatus.status }}
+            <span class="tac-label">Lokaler Projektordner</span>
+            <span class="info-stat" :class="`is-${activeWorkspace?.status ?? 'unbound'}`">
+              {{ activeWorkspace?.status === 'ready' ? 'bereit' : (activeWorkspace?.status ?? 'nicht zugeordnet') }}
             </span>
           </div>
 
+          <div v-if="activeWorkspace" class="repo-graph-summary workspace-summary">
+            <strong>{{ activeWorkspace.displayName }}</strong>
+            <code :title="workspacePathLabel(activeWorkspace.rootPath)">{{
+              workspacePathLabel(activeWorkspace.rootPath)
+            }}</code>
+            <span>
+              Modellpfad <strong>@project</strong> ·
+              {{ activeWorkspace.isGitRepository ? 'Git-Repository' : 'normaler Projektordner' }}
+            </span>
+          </div>
+          <p v-else class="repo-graph-privacy">
+            Ordne diesem Luczor-Projekt einen lokalen Ordner zu. Dateiwerkzeuge und Coding-Agenten bleiben anschließend
+            strikt auf diesen Ordner begrenzt.
+          </p>
+
           <div v-if="localGraphStatus.status === 'ready'" class="repo-graph-summary">
-            <strong>{{ localGraphStatus.display_name }}</strong>
+            <strong>Repository-Graph</strong>
             <span>
               {{ localGraphStatus.files }} Dateien · {{ localGraphStatus.symbols }} Symbole ·
               {{ localGraphStatus.edges }} Beziehungen
@@ -1245,20 +1391,7 @@ watch(
             </span>
           </div>
 
-          <label class="repo-graph-field">
-            <span>Lokaler Git-Pfad</span>
-            <input
-              v-model="repositoryRootInput"
-              type="text"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="E:\\projekte\\mein-projekt"
-              :disabled="localGraphBusy"
-              @keydown.enter.prevent="bindAndIndexRepository"
-            />
-          </label>
-
-          <label class="repo-graph-field">
+          <label v-if="activeWorkspace?.isGitRepository" class="repo-graph-field">
             <span>Code an externe Modelle</span>
             <select v-model="repositoryExternalPolicy" @change="saveRepositoryPolicy">
               <option value="deny">Nie übertragen</option>
@@ -1269,14 +1402,15 @@ watch(
 
           <div class="repo-graph-actions">
             <button
+              v-if="!activeWorkspace"
               type="button"
-              :disabled="localGraphBusy || !repositoryRootInput.trim()"
-              @click="bindAndIndexRepository"
+              :disabled="workspaceBusy"
+              @click="bindCurrentProjectWorkspace"
             >
-              {{ localGraphStatus.status === 'unbound' ? 'Binden & indexieren' : 'Anderen Pfad binden' }}
+              Projektordner auswählen
             </button>
             <button
-              v-if="localGraphStatus.status !== 'unbound'"
+              v-if="activeWorkspace?.isGitRepository"
               type="button"
               :disabled="localGraphBusy"
               @click="reindexRepository"
@@ -1284,20 +1418,21 @@ watch(
               Aktualisieren
             </button>
             <button
-              v-if="localGraphStatus.status !== 'unbound'"
+              v-if="activeWorkspace"
               type="button"
               class="is-danger"
-              :disabled="localGraphBusy"
+              :disabled="localGraphBusy || workspaceBusy"
               @click="removeRepositoryBinding"
             >
-              Lokal löschen
+              Zuordnung lösen
             </button>
           </div>
-          <p v-if="localGraphMessage || localGraphStatus.error" class="repo-graph-message">
-            {{ localGraphMessage || localGraphStatus.error }}
+          <p v-if="workspaceMessage || localGraphMessage || localGraphStatus.error" class="repo-graph-message">
+            {{ workspaceMessage || localGraphMessage || localGraphStatus.error }}
           </p>
           <p class="repo-graph-privacy">
-            Pfad, Index, Symbole und Graph bleiben im App-Datenverzeichnis dieses Geräts.
+            Der absolute Pfad, Index, Symbole und Graph bleiben auf diesem Gerät. Externe Modelle sehen nur
+            <strong>@project</strong> und ausdrücklich freigegebene, redigierte Ausschnitte.
           </p>
         </div>
 
@@ -1464,6 +1599,9 @@ watch(
             <span class="approval__tool">{{ call.name }}</span>
           </div>
           <pre class="approval__args">{{ previewToolArguments(call.args) }}</pre>
+          <p v-if="approvalDataNotice(call.name)" class="approval__privacy">
+            {{ approvalDataNotice(call.name) }}
+          </p>
           <div class="approval__actions">
             <button type="button" class="btn-reject" @click="rejectTool(call.id)">Ablehnen</button>
             <button type="button" class="btn-exec" @click="approveTool(call.id)">Ausführen</button>

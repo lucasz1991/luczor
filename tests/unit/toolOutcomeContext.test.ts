@@ -41,4 +41,11 @@ describe('tool outcome context', () => {
     expect(context).toContain('agent_bridge_write: FEHLER')
     expect(context).toContain('project_dir is not a directory')
   })
+
+  it('never carries ephemeral local observations into a later provider turn', () => {
+    const message = toolMessage('fs_read', { ok: true, output: 'LOCAL_SECRET' }, 1)
+    message.meta.dataHandling = 'ephemeral'
+
+    expect(buildRecentToolOutcomeContext([message])).toBe('')
+  })
 })

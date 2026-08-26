@@ -38,6 +38,12 @@ jobs:
       - name: Verify release metadata
         run: pnpm version:check
 
+      - name: Verify pinned Node and local installer contract
+        run: |
+          pnpm node:check
+          pnpm release:check:local
+          pnpm release:check:test
+
       - name: Lint
         run: pnpm lint
 

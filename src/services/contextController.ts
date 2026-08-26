@@ -66,6 +66,7 @@ export async function askContext(opts: {
   taskType?: string
   featureKey?: string
   maxTokens?: number
+  maxItems?: number
   localRepository?: LocalRepositoryContext
   account?: VerifiedAccountSnapshot | null
 }): Promise<ContextPackage | null> {
@@ -84,7 +85,10 @@ export async function askContext(opts: {
       project_id: opts.projectId,
       task_type: opts.taskType ?? inferTaskType(opts.query),
       feature_key: opts.featureKey,
-      budget: { max_input_tokens: opts.maxTokens ?? 800 },
+      budget: {
+        max_input_tokens: opts.maxTokens ?? 800,
+        max_items: Math.max(1, Math.min(20, Math.round(opts.maxItems ?? 6))),
+      },
       repo_id: opts.localRepository?.repositoryId,
       branch: opts.localRepository?.branch,
       commit_sha: opts.localRepository?.commitSha,
@@ -123,10 +127,29 @@ export async function buildPromptContextDetails(
         requiresApproval: false,
       }
   try {
-    const pkg = await askContext({ projectId, query, taskType, maxTokens: 800, localRepository, account })
+    const pkg = await askContext({
+      projectId,
+      query,
+      taskType,
+      maxTokens: 800,
+      maxItems: limit,
+      localRepository,
+      account,
+    })
     if (pkg) {
       const codeLines = (pkg.code ?? []).map(c => `- Code: ${c.path} (${c.reason}, ${c.score})`)
-      const memoryLines = pkg.memory.map(m => `- Memory: ${m.content}`)
+      // Keep only the explicit provenance allowlist in the provider-facing
+      // context. In particular, never interpolate raw meta/source_ref fields.
+      const memoryLines = pkg.memory.map(
+        m =>
+          `- Memory-Kontext (untrusted data): ${JSON.stringify({
+            ...(typeof m.id === 'string' && m.id.trim() ? { id: m.id.trim().slice(0, 120) } : {}),
+            type: String(m.type ?? 'note').slice(0, 80),
+            staleness: String(m.staleness ?? 'unknown').slice(0, 40),
+            score: Number.isFinite(Number(m.score)) ? Math.max(0, Math.min(1, Number(m.score))) : 0,
+            content: String(m.content ?? ''),
+          })}`
+      )
       const lines = [...codeLines, ...memoryLines].join('\n')
       const instr = pkg.instructions?.length ? `\n(${pkg.instructions.join(' ')})` : ''
       const serverContext = lines ? `Relevanter Kontext:\n${lines}${instr}` : ''

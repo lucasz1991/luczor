@@ -147,6 +147,44 @@ describe('agent mode and tool reliability', () => {
     expect(result.finalText).not.toBe('Fertig.')
   })
 
+  it('keeps ephemeral tool content out of durable history and server telemetry', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'project',
+      mutating: false,
+      requiresApproval: true,
+      dataHandling: 'ephemeral',
+      execute: mocks.execute,
+    })
+    mocks.awaitApproval.mockResolvedValue(true)
+    mocks.execute.mockResolvedValue({ text: 'LOCAL_SECRET' })
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(toolCallResult)
+      .mockResolvedValueOnce({ content: 'Gelesen.', toolCalls: [], rawToolCalls: [] })
+
+    const result = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'lies lokal' }],
+      mode: 'act',
+    })
+
+    expect(mocks.addHiddenToolMessage).toHaveBeenCalledWith(
+      'project-2',
+      {
+        ok: true,
+        output: { redacted: true, output_type: 'object', item_count: undefined },
+      },
+      expect.objectContaining({ dataHandling: 'ephemeral' })
+    )
+    expect(mocks.logAgentEvent).toHaveBeenCalledWith(
+      'tool.executed',
+      expect.objectContaining({ output: null, output_redacted: true, error: null })
+    )
+    expect(JSON.stringify(mocks.addHiddenToolMessage.mock.calls)).not.toContain('LOCAL_SECRET')
+    expect(JSON.stringify(mocks.logAgentEvent.mock.calls)).not.toContain('LOCAL_SECRET')
+    expect(result.ephemeralDataUsed).toBe(true)
+  })
+
   it('blocks a pending mutation when the user switches back to observe before execution', async () => {
     let runtimeMode: 'act' | 'observe' = 'act'
     mocks.getTool.mockReturnValue({

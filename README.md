@@ -4,7 +4,7 @@ Tauri-2-Desktop-Client für Luczor. Die Vue-3-Anwendung verbindet den lokalen Ch
 
 ## Voraussetzungen
 
-- Node.js 22.12 oder neuer
+- Node.js 22.22.0 fuer reproduzierbare lokale Builds (`.nvmrc`); unterstuetzter Bereich: Node 22.12 bis kleiner 23
 - Corepack und PNPM
 - Rust Stable
 - Tauri-2-Systemvoraussetzungen für das Zielbetriebssystem
@@ -12,12 +12,15 @@ Tauri-2-Desktop-Client für Luczor. Die Vue-3-Anwendung verbindet den lokalen Ch
 ## Entwicklung
 
 ```powershell
-corepack enable
-pnpm install --frozen-lockfile
-pnpm tauri dev
+$version = (Get-Content .nvmrc -Raw).Trim()
+nvm install $version 64
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/with-pinned-node.ps1 node.exe --version
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/with-pinned-node.ps1 corepack.cmd pnpm install --frozen-lockfile
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/with-pinned-node.ps1 corepack.cmd pnpm tauri dev
 ```
 
 Der Vite-Dev-Server läuft über `pnpm vite:dev`. Das native Fenster und die Rust-Kommandos werden über Tauri gestartet.
+Der Wrapper verwendet die installierte NVM-Version nur in seinem eigenen Prozess und fuehrt bewusst kein global wirkendes `nvm use` aus.
 
 ## Qualitätsprüfungen
 
@@ -50,5 +53,13 @@ pnpm tauri build
 ```
 
 Das Bump-Script muss `package.json`, `src-tauri/Cargo.toml` und `src-tauri/tauri.conf.json` konsistent aktualisieren. Ein Release ist erst gültig, wenn Tests, Lints, Security-Audits, Signatur und Update-/Rollback-Pfad geprüft wurden.
+
+Einen getrennten, ausdruecklich unsignierten Windows-Testinstaller baut:
+
+```powershell
+powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-test-installer.ps1
+```
+
+Dieser lokale NSIS-Build besitzt eine eigene Testidentitaet und darf nicht veroeffentlicht werden. Der genaue Ordnerdialog-/Approval-Smoke sowie die weiterhin fail-closed bleibenden Produktionsvoraussetzungen stehen in [`docs/desktop-release-smoke.md`](docs/desktop-release-smoke.md).
 
 Der Workspace-übergreifende Betriebsleitfaden liegt in `../README.md`.

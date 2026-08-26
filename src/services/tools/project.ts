@@ -1,4 +1,5 @@
 import { LuczorApi } from '@/services/api/luczorApi'
+import { getProjectWorkspace } from '@/services/projectWorkspace'
 import { mutations } from '@/state/store'
 import type { ProjectGoal } from '@/state/types'
 import { asGoalStatus, asString, getProject, uid } from './shared'
@@ -28,6 +29,7 @@ export const projectStateTools: ToolDef[] = [
     async execute(args, ctx) {
       const project = getProject(ctx.projectId)
       const includeGoals = args.include_goals !== false
+      const workspace = await getProjectWorkspace(ctx.projectId).catch(() => null)
       return {
         id: ctx.projectId,
         name: project?.name ?? ctx.projectId,
@@ -40,6 +42,15 @@ export const projectStateTools: ToolDef[] = [
               status: goal.status,
             }))
           : undefined,
+        workspace: workspace
+          ? {
+              bound: true,
+              status: workspace.status,
+              display_name: workspace.displayName,
+              is_git_repository: workspace.isGitRepository,
+              alias: '@project',
+            }
+          : { bound: false, status: 'unbound', alias: '@project' },
       }
     },
   },
@@ -136,8 +147,18 @@ export const projectCreationTools: ToolDef[] = [
       const name = asString(args.name).trim()
       if (!name) throw new Error('name is empty')
       const externalId = uid()
-      await LuczorApi.createProject(externalId, name)
-      return { ok: true, project_id: externalId, name }
+      mutations.addProject({ id: externalId, name })
+
+      let synced = false
+      try {
+        await LuczorApi.createProject(externalId, name)
+        synced = true
+      } catch {
+        // Desktop projects are offline-first. The normal state sync will
+        // mirror the allowlisted project metadata once the server is back.
+      }
+
+      return { ok: true, project_id: externalId, name, synced }
     },
   },
 ]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-workspace-unbind"
+description = "Enables the project_workspace_unbind command without any pre-configured scope."
+commands.allow = ["project_workspace_unbind"]
+
+[[permission]]
+identifier = "deny-project-workspace-unbind"
+description = "Denies the project_workspace_unbind command without any pre-configured scope."
+commands.deny = ["project_workspace_unbind"]

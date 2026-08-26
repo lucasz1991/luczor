@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-local-graph-read-snippets"
+description = "Enables the local_graph_read_snippets command without any pre-configured scope."
+commands.allow = ["local_graph_read_snippets"]
+
+[[permission]]
+identifier = "deny-local-graph-read-snippets"
+description = "Denies the local_graph_read_snippets command without any pre-configured scope."
+commands.deny = ["local_graph_read_snippets"]

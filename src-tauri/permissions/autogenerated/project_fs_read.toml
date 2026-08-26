@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-fs-read"
+description = "Enables the project_fs_read command without any pre-configured scope."
+commands.allow = ["project_fs_read"]
+
+[[permission]]
+identifier = "deny-project-fs-read"
+description = "Denies the project_fs_read command without any pre-configured scope."
+commands.deny = ["project_fs_read"]

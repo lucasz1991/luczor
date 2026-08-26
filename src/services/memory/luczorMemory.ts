@@ -25,6 +25,9 @@ export type MemoryRecord = {
   id: string
   principalId: string
   serverId?: string
+  serverVersionId?: number
+  expectedPreviousServerVersionId?: number | null
+  requiresServerVersionRefresh?: boolean
   scope: MemoryScope
   dataset: string
   content: string
@@ -139,7 +142,37 @@ type ServerWriteResult = {
   id?: string
   status?: MemoryStatus
   projection_status?: string
+  memory_link_id?: number
   persisted?: boolean
+}
+
+class MemoryHttpError extends Error {
+  constructor(
+    readonly status: number,
+    readonly responseBody?: unknown
+  ) {
+    super(`Memory HTTP ${status}`)
+  }
+}
+
+function positiveInteger(value: unknown): number | undefined {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined
+}
+
+/** Accept only explicit server-version fields from a structured 409 response. */
+function conflictVersionFromResponse(value: unknown, depth = 0): number | undefined {
+  if (depth > 3 || !value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const body = value as Record<string, unknown>
+  for (const candidate of [body.current_memory_id, body.current_memory_link_id, body.source_record_id]) {
+    const version = positiveInteger(candidate)
+    if (version) return version
+  }
+  for (const nested of [body.current_memory, body.current, body.conflict, body.data, body.error]) {
+    const version = conflictVersionFromResponse(nested, depth + 1)
+    if (version) return version
+  }
+  return undefined
 }
 
 type ServerForgetResult = {
@@ -595,6 +628,20 @@ class OfflineMemoryStore {
       }
 
       if (record.status === 'active' && record.featureKey) {
+        const previous = state.records
+          .filter(
+            item =>
+              item.principalId === record.principalId &&
+              item.dataset === record.dataset &&
+              item.featureKey === record.featureKey &&
+              item.status === 'active'
+          )
+          .sort((left, right) => right.updatedAt - left.updatedAt)[0]
+        if (record.expectedPreviousServerVersionId === undefined) {
+          // CAS is explicit even for a first local write. Unknown remote state
+          // therefore conflicts instead of being silently overwritten.
+          record.expectedPreviousServerVersionId = previous?.serverVersionId ?? null
+        }
         for (const item of state.records) {
           if (
             item.principalId === record.principalId &&
@@ -604,7 +651,6 @@ class OfflineMemoryStore {
           ) {
             item.status = 'superseded'
             item.updatedAt = Date.now()
-            queueRemoteDelete(state, item)
           }
         }
       }
@@ -747,7 +793,7 @@ class OfflineMemoryStore {
     )
   }
 
-  async acknowledge(eventId: string, serverId?: string): Promise<void> {
+  async acknowledge(eventId: string, serverId?: string, serverVersionId?: number): Promise<void> {
     await this.mutate(state => {
       const event = state.outbox.find(item => item.id === eventId)
       if (!event) return
@@ -756,6 +802,8 @@ class OfflineMemoryStore {
         record.synced = true
         record.syncError = undefined
         if (serverId) record.serverId = serverId
+        if (serverVersionId) record.serverVersionId = serverVersionId
+        record.requiresServerVersionRefresh = false
       }
       if (event.operation === 'delete') {
         state.tombstones = state.tombstones.filter(
@@ -813,6 +861,35 @@ class OfflineMemoryStore {
     })
   }
 
+  async markVersionConflict(eventId: string, currentServerVersionId?: number): Promise<void> {
+    await this.mutate(state => {
+      const event = state.outbox.find(item => item.id === eventId)
+      if (!event) return
+      const record = state.records.find(item => item.id === event.recordId && item.principalId === event.principalId)
+      if (record) {
+        record.status = 'candidate'
+        record.synced = false
+        record.expectedPreviousServerVersionId = currentServerVersionId
+        record.requiresServerVersionRefresh = currentServerVersionId === undefined
+        record.syncError = 'Server memory changed; review this local version before promoting it.'
+      }
+      state.outbox = state.outbox.filter(item => item.id !== eventId)
+    })
+  }
+
+  async confirmServerVersion(recordId: string, principalId: string, currentServerVersionId: number): Promise<void> {
+    await this.mutate(state => {
+      const record = state.records.find(
+        item => item.id === recordId && item.principalId === principalId && item.status === 'candidate'
+      )
+      if (!record) return
+      record.expectedPreviousServerVersionId = currentServerVersionId
+      record.requiresServerVersionRefresh = false
+      record.syncError = 'Server memory changed; this local version is ready for an explicit reviewed promotion.'
+      record.updatedAt = Date.now()
+    })
+  }
+
   async pending(principalId: string): Promise<number> {
     return (await this.load()).outbox.filter(event => event.principalId === principalId).length
   }
@@ -863,7 +940,18 @@ class ServerMemoryBackend {
       },
       body: JSON.stringify(body),
     })
-    if (!response.ok) throw new Error(`Memory HTTP ${response.status}`)
+    if (!response.ok) {
+      const rawBody = await response.text().catch(() => '')
+      let responseBody: unknown = rawBody
+      if (rawBody) {
+        try {
+          responseBody = JSON.parse(rawBody)
+        } catch {
+          // Keep a non-JSON error body opaque; it is never copied into local memory.
+        }
+      }
+      throw new MemoryHttpError(response.status, responseBody)
+    }
     return (await response.json().catch(() => ({}))) as T
   }
 
@@ -891,6 +979,8 @@ class ServerMemoryBackend {
       source_ref: record.provenance?.source_ref,
       provenance: record.provenance,
       external_id: record.id,
+      write_id: record.id,
+      expected_previous_id: record.featureKey ? (record.expectedPreviousServerVersionId ?? null) : undefined,
       client_id: this.clientId,
       tags: record.tags,
       meta: record.meta,
@@ -924,6 +1014,7 @@ class ServerMemoryBackend {
         id: String(item.id ?? `server_${index}`),
         principalId: context.principalId,
         serverId: String(item.id ?? `server_${index}`),
+        serverVersionId: Number.isInteger(Number(item.source_record_id)) ? Number(item.source_record_id) : undefined,
         scope: context.scope,
         dataset: context.dataset,
         content: String(item.content ?? ''),
@@ -946,6 +1037,31 @@ class ServerMemoryBackend {
         meta: item.meta ?? undefined,
         synced: true,
       }))
+  }
+
+  /**
+   * Refresh the active version through the canonical, authorized SQL-backed
+   * recall endpoint. Exact feature-key matching prevents a semantically
+   * similar memory from being accepted as the CAS predecessor.
+   */
+  async refreshFeatureVersion(context: MemoryContext, record: MemoryRecord): Promise<number | undefined> {
+    if (!record.featureKey) return undefined
+    for (const query of [record.content, '']) {
+      const result = await this.call<{ data?: Array<Record<string, unknown>> }>('/memory/recall', {
+        query,
+        scope: context.scope,
+        project_id: context.projectId,
+        agent_id: context.agentId,
+        session_id: context.sessionId,
+        limit: 20,
+      })
+      const versions = (result.data ?? [])
+        .filter(item => item.feature_key === record.featureKey)
+        .map(item => positiveInteger(item.source_record_id))
+        .filter((version): version is number => version !== undefined)
+      if (versions.length > 0) return Math.max(...versions)
+    }
+    return undefined
   }
 
   forget(context: MemoryContext, id: string): Promise<ServerForgetResult> {
@@ -1106,6 +1222,25 @@ export class LuczorMemoryService {
 
   async promote(recordId: string): Promise<MemoryRecord | null> {
     const snapshot = await this.operationSnapshot()
+    const candidate = await this.offline.recordForOutbox(recordId, snapshot.principalId)
+    if (candidate?.status === 'candidate' && candidate.featureKey && candidate.requiresServerVersionRefresh) {
+      const server = await this.server(snapshot)
+      if (!server) {
+        throw new Error(
+          'The current server memory version could not be verified; keeping the local memory as a candidate.'
+        )
+      }
+      const currentServerVersionId = await server.refreshFeatureVersion(
+        this.context(candidate.scope, candidate, snapshot.principalId),
+        candidate
+      )
+      if (!currentServerVersionId) {
+        throw new Error(
+          'The current server memory version could not be verified; keeping the local memory as a candidate.'
+        )
+      }
+      await this.offline.confirmServerVersion(recordId, snapshot.principalId, currentServerVersionId)
+    }
     const record = await this.offline.promote(recordId, snapshot.principalId)
     if (record && !recordWritePlan(record).localOnly) void this.flushPendingSync()
     return record
@@ -1190,7 +1325,7 @@ export class LuczorMemoryService {
             })
             continue
           }
-          await this.offline.acknowledge(event.id, result.id)
+          await this.offline.acknowledge(event.id, result.id, result.memory_link_id)
         } else {
           const tombstone = await this.offline.tombstoneForOutbox(event.recordId, principalId)
           if (!tombstone) {
@@ -1204,6 +1339,17 @@ export class LuczorMemoryService {
           await this.offline.acknowledge(event.id)
         }
       } catch (error) {
+        if (event.operation === 'upsert' && error instanceof MemoryHttpError && error.status === 409) {
+          const record = await this.offline.recordForOutbox(event.recordId, principalId)
+          let currentServerVersionId = conflictVersionFromResponse(error.responseBody)
+          if (!currentServerVersionId && record?.featureKey) {
+            currentServerVersionId = await server
+              .refreshFeatureVersion(this.context(record.scope, record, principalId), record)
+              .catch(() => undefined)
+          }
+          await this.offline.markVersionConflict(event.id, currentServerVersionId)
+          continue
+        }
         await this.offline.fail(event.id, error)
       }
     }
@@ -1345,6 +1491,10 @@ function migrateLegacyRecord(record: Partial<MemoryRecord>): MemoryRecord {
     updatedAt: record.updatedAt ?? record.createdAt ?? now,
     projectId: record.projectId,
     featureKey: record.featureKey,
+    serverId: record.serverId,
+    serverVersionId: record.serverVersionId,
+    expectedPreviousServerVersionId: record.expectedPreviousServerVersionId,
+    requiresServerVersionRefresh: record.requiresServerVersionRefresh,
     meta: record.meta,
     synced: record.synced,
   }

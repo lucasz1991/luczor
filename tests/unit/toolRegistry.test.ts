@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   setProjectSummary: vi.fn(),
   upsertGoal: vi.fn(),
+  addProject: vi.fn(),
   createProject: vi.fn(),
   createConversation: vi.fn(),
   createTask: vi.fn(),
@@ -21,6 +22,10 @@ const mocks = vi.hoisted(() => ({
   getPlan: vi.fn(),
   planProgress: vi.fn(),
   currentPlanStep: vi.fn(),
+  getProjectWorkspace: vi.fn(),
+  requireProjectWorkspace: vi.fn(),
+  resolveWorkspacePrincipalId: vi.fn(),
+  getRepositoryExternalPolicy: vi.fn(),
   state: { projects: [] as unknown[] },
 }))
 
@@ -30,7 +35,7 @@ vi.mock('@/state/store', () => ({
   mutations: {
     upsertGoal: mocks.upsertGoal,
     setProjectSummary: mocks.setProjectSummary,
-    addProject: vi.fn(),
+    addProject: mocks.addProject,
   },
 }))
 vi.mock('@/services/api/luczorApi', () => ({
@@ -48,6 +53,14 @@ vi.mock('@/services/agents', () => ({
   writeBridgeFile: mocks.writeBridgeFile,
   buildBridgeMarkdown: mocks.buildBridgeMarkdown,
 }))
+vi.mock('@/services/projectWorkspace', () => ({
+  getProjectWorkspace: mocks.getProjectWorkspace,
+  requireProjectWorkspace: mocks.requireProjectWorkspace,
+  resolveWorkspacePrincipalId: mocks.resolveWorkspacePrincipalId,
+}))
+vi.mock('@/services/repositoryGraph', () => ({
+  getRepositoryExternalPolicy: mocks.getRepositoryExternalPolicy,
+}))
 vi.mock('@/services/plan', () => ({
   setPlan: mocks.setPlan,
   getPlan: mocks.getPlan,
@@ -57,19 +70,30 @@ vi.mock('@/services/plan', () => ({
 
 import { getTool, lastScreenshot, listTools, toOpenAITools } from '@/services/tools/registry'
 
-const LEGACY_TOOL_CONTRACT = [
+const TOOL_CONTRACT = [
   { name: 'project_get_state', category: 'project', mutating: false, requiresApproval: false },
   { name: 'project_set_summary', category: 'project', mutating: true, requiresApproval: true },
   { name: 'project_upsert_goal', category: 'project', mutating: true, requiresApproval: true },
-  { name: 'os_read_clipboard', category: 'os', mutating: false, requiresApproval: false },
-  { name: 'os_list_windows', category: 'os', mutating: false, requiresApproval: false },
-  { name: 'os_screen_capture', category: 'os', mutating: false, requiresApproval: false },
+  { name: 'workspace_get', category: 'project', mutating: false, requiresApproval: true },
+  { name: 'fs_list', category: 'app', mutating: false, requiresApproval: true },
+  { name: 'fs_stat', category: 'app', mutating: false, requiresApproval: true },
+  { name: 'fs_read', category: 'app', mutating: false, requiresApproval: true },
+  { name: 'fs_search', category: 'app', mutating: false, requiresApproval: true },
+  { name: 'fs_write', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'fs_create_dir', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'fs_move', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'fs_delete', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'os_read_clipboard', category: 'os', mutating: false, requiresApproval: true },
+  { name: 'os_list_windows', category: 'os', mutating: false, requiresApproval: true },
+  { name: 'os_screen_capture', category: 'os', mutating: false, requiresApproval: true },
   { name: 'os_move_mouse', category: 'os', mutating: true, requiresApproval: true },
   { name: 'os_click', category: 'os', mutating: true, requiresApproval: true },
   { name: 'os_type_text', category: 'os', mutating: true, requiresApproval: true },
   { name: 'os_press_key', category: 'os', mutating: true, requiresApproval: true },
+  { name: 'os_scroll', category: 'os', mutating: true, requiresApproval: true },
+  { name: 'os_hotkey', category: 'os', mutating: true, requiresApproval: true },
   { name: 'os_open_url', category: 'os', mutating: true, requiresApproval: true },
-  { name: 'os_environment', category: 'os', mutating: false, requiresApproval: false },
+  { name: 'os_environment', category: 'os', mutating: false, requiresApproval: true },
   { name: 'project_create', category: 'project', mutating: true, requiresApproval: true },
   { name: 'chat_create', category: 'app', mutating: true, requiresApproval: true },
   { name: 'task_create', category: 'app', mutating: true, requiresApproval: true },
@@ -83,7 +107,7 @@ const LEGACY_TOOL_CONTRACT = [
   { name: 'plan_get', category: 'app', mutating: false, requiresApproval: false },
 ] as const
 
-const TOOL_SCHEMA_SHA256 = 'db492189db3cfaa165df80ef607eb771fc2413a469657e1e9e4f13caef37cb45'
+const TOOL_SCHEMA_SHA256 = '73df93e0d2b07084741f540c6218bbd0ff5a578cc061984a2a996a670b202954'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {
@@ -99,6 +123,22 @@ describe('tool registry contract', () => {
     mocks.runAgentCli.mockResolvedValue({ ok: true, code: 0, stdout: 'done', stderr: '' })
     mocks.writeBridgeFile.mockResolvedValue('E:\\project\\LUCZOR.md')
     mocks.buildBridgeMarkdown.mockReturnValue('# Bridge')
+    mocks.getProjectWorkspace.mockResolvedValue({
+      projectId: 'project-1',
+      rootPath: 'E:\\project',
+      displayName: 'project',
+      isGitRepository: true,
+      status: 'ready',
+    })
+    mocks.requireProjectWorkspace.mockResolvedValue({
+      projectId: 'project-1',
+      rootPath: 'E:\\project',
+      displayName: 'project',
+      isGitRepository: true,
+      status: 'ready',
+    })
+    mocks.resolveWorkspacePrincipalId.mockResolvedValue('device:v1:test')
+    mocks.getRepositoryExternalPolicy.mockResolvedValue('allow_selected')
     mocks.state.projects = [{ id: 'project-1', name: 'Projekt 1', summary: 'Stand', goals: [] }]
 
     const plan = {
@@ -122,9 +162,9 @@ describe('tool registry contract', () => {
       requiresApproval: tool.requiresApproval,
     }))
 
-    expect(contract).toEqual(LEGACY_TOOL_CONTRACT)
-    expect(new Set(contract.map(tool => tool.name))).toHaveLength(LEGACY_TOOL_CONTRACT.length)
-    expect(toOpenAITools().map(tool => tool.function.name)).toEqual(LEGACY_TOOL_CONTRACT.map(tool => tool.name))
+    expect(contract).toEqual(TOOL_CONTRACT)
+    expect(new Set(contract.map(tool => tool.name))).toHaveLength(TOOL_CONTRACT.length)
+    expect(toOpenAITools().map(tool => tool.function.name)).toEqual(TOOL_CONTRACT.map(tool => tool.name))
     expect(getTool('missing_tool')).toBeUndefined()
   })
 
@@ -142,7 +182,7 @@ describe('tool registry contract', () => {
     const listed = listTools()
     listed.pop()
 
-    expect(listTools()).toHaveLength(LEGACY_TOOL_CONTRACT.length)
+    expect(listTools()).toHaveLength(TOOL_CONTRACT.length)
     expect(getTool('plan_get')?.name).toBe('plan_get')
   })
 
@@ -159,6 +199,13 @@ describe('tool registry contract', () => {
       name: 'Projekt 1',
       summary: 'Stand',
       goals: [],
+      workspace: {
+        bound: true,
+        status: 'ready',
+        display_name: 'project',
+        is_git_repository: true,
+        alias: '@project',
+      },
     })
     expect(mocks.setProjectSummary).toHaveBeenCalledWith('project-1', 'Neuer Stand')
     expect(goalResult.goal.id).not.toBe('')
@@ -171,6 +218,7 @@ describe('tool registry contract', () => {
     await getTool('task_create')!.execute({ title: 'Tests schreiben' }, PROJECT_CONTEXT)
 
     expect(mocks.createProject).toHaveBeenCalledWith(expect.any(String), 'Neues Projekt')
+    expect(mocks.addProject).toHaveBeenCalledWith({ id: expect.any(String), name: 'Neues Projekt' })
     expect(mocks.createProject).toHaveBeenCalledWith('project-1', 'Projekt 1')
     expect(mocks.createConversation).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -239,6 +287,13 @@ describe('tool registry contract', () => {
     ],
     ['os_type_text', { text: 'Hallo' }, 'type_text', { payload: { text: 'Hallo' } }],
     ['os_press_key', { key: 'enter' }, 'press_key', { payload: { key: 'enter' } }],
+    ['os_scroll', { amount: -4, axis: 'vertical' }, 'scroll', { payload: { amount: -4, axis: 'vertical' } }],
+    [
+      'os_hotkey',
+      { modifiers: ['control', 'shift'], key: 's' },
+      'hotkey',
+      { payload: { modifiers: ['control', 'shift'], key: 's' } },
+    ],
     ['os_open_url', { url: 'https://example.test' }, 'open_url', { payload: { url: 'https://example.test' } }],
   ])('routes %s to the original Tauri command', async (toolName, args, command, payload) => {
     await getTool(toolName)!.execute(args, PROJECT_CONTEXT)
@@ -290,13 +345,11 @@ describe('tool registry contract', () => {
 
   it('routes coding-agent tools to detection, dispatch and bridge handlers', async () => {
     await getTool('agent_detect')!.execute({}, PROJECT_CONTEXT)
-    await getTool('agent_dispatch')!.execute(
-      { agent: 'codex', prompt: '  Prüfen  ', project_dir: 'E:\\project' },
-      PROJECT_CONTEXT
-    )
-    await getTool('agent_bridge_write')!.execute({ project_dir: 'E:\\project', content: '# Explicit' }, PROJECT_CONTEXT)
+    await getTool('agent_dispatch')!.execute({ agent: 'codex', prompt: '  Prüfen  ' }, PROJECT_CONTEXT)
+    await getTool('agent_bridge_write')!.execute({ content: '# Explicit' }, PROJECT_CONTEXT)
 
     expect(mocks.detectAgents).toHaveBeenCalledOnce()
+    expect(mocks.requireProjectWorkspace).toHaveBeenCalledWith('project-1')
     expect(mocks.runAgentCli).toHaveBeenCalledWith('codex', 'Prüfen', 'E:\\project')
     expect(mocks.writeBridgeFile).toHaveBeenCalledWith('E:\\project', '# Explicit')
   })
