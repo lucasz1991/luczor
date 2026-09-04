@@ -49,6 +49,9 @@ function createHarness(remoteAllow: boolean | undefined = true) {
         settings: remoteAllow === undefined ? {} : { allow_unrestricted: remoteAllow },
       },
     })),
+    beginLocalInferenceBootstrap: vi.fn(async () => 41),
+    initializeLocalInference: vi.fn(async () => true),
+    markLocalInferenceBootstrapUnavailable: vi.fn(),
     listenHotkey: vi.fn(async listener => {
       hotkeyAction = listener
     }),
@@ -121,6 +124,12 @@ describe('app runtime lifecycle', () => {
     expect(harness.dependencies.loadAppearance).toHaveBeenCalledOnce()
     expect(harness.dependencies.loadPlans).toHaveBeenCalledOnce()
     expect(harness.dependencies.refreshStatus).toHaveBeenCalledOnce()
+    expect(harness.dependencies.beginLocalInferenceBootstrap).toHaveBeenCalledOnce()
+    expect(vi.mocked(harness.dependencies.beginLocalInferenceBootstrap!).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(harness.dependencies.bootstrap).mock.invocationCallOrder[0]!
+    )
+    expect(harness.dependencies.initializeLocalInference).toHaveBeenCalledWith(expect.anything(), 41)
+    expect(harness.dependencies.markLocalInferenceBootstrapUnavailable).not.toHaveBeenCalled()
 
     harness.triggerNotification()
     harness.triggerHotkey()
@@ -160,5 +169,73 @@ describe('app runtime lifecycle', () => {
     expect(allowUnrestricted.value).toBe(false)
     expect(mode.value).toBe('observe')
     expect(harness.values.get(ACTIVE_MODE_KEY)).toBe('observe')
+  })
+
+  it('keeps local inference blocked when bootstrap fails', async () => {
+    const harness = createHarness()
+    vi.mocked(harness.dependencies.bootstrap).mockRejectedValueOnce(new Error('offline'))
+    const lifecycle = createAppRuntimeLifecycle(
+      {
+        mode: ref('observe'),
+        allowUnrestricted: ref(false),
+        getActiveProjectId: () => 'project-1',
+        openProject: vi.fn(),
+        openNotificationCenter: vi.fn(),
+        togglePushToTalk: vi.fn(),
+      },
+      harness.dependencies
+    )
+
+    await lifecycle.start()
+    await vi.waitFor(() => expect(harness.dependencies.markLocalInferenceBootstrapUnavailable).toHaveBeenCalledWith(41))
+    expect(harness.dependencies.beginLocalInferenceBootstrap).toHaveBeenCalledOnce()
+    expect(harness.dependencies.initializeLocalInference).not.toHaveBeenCalled()
+  })
+
+  it('does not start network bootstrap when the native renderer boundary cannot be reset', async () => {
+    const harness = createHarness()
+    vi.mocked(harness.dependencies.beginLocalInferenceBootstrap!).mockRejectedValueOnce(
+      new Error('native boundary unavailable')
+    )
+    const lifecycle = createAppRuntimeLifecycle(
+      {
+        mode: ref('observe'),
+        allowUnrestricted: ref(false),
+        getActiveProjectId: () => 'project-1',
+        openProject: vi.fn(),
+        openNotificationCenter: vi.fn(),
+        togglePushToTalk: vi.fn(),
+      },
+      harness.dependencies
+    )
+
+    await lifecycle.start()
+
+    expect(harness.dependencies.bootstrap).not.toHaveBeenCalled()
+    expect(harness.dependencies.initializeLocalInference).not.toHaveBeenCalled()
+    expect(harness.dependencies.markLocalInferenceBootstrapUnavailable).toHaveBeenCalled()
+  })
+
+  it('does not apply remote policy from a bootstrap superseded by a newer identity generation', async () => {
+    const harness = createHarness(true)
+    vi.mocked(harness.dependencies.initializeLocalInference!).mockResolvedValueOnce(false)
+    harness.values.set('allow_unrestricted', false)
+    const allowUnrestricted = ref(false)
+    const lifecycle = createAppRuntimeLifecycle(
+      {
+        mode: ref<'observe' | 'act' | 'unrestricted'>('observe'),
+        allowUnrestricted,
+        getActiveProjectId: () => 'project-1',
+        openProject: vi.fn(),
+        openNotificationCenter: vi.fn(),
+        togglePushToTalk: vi.fn(),
+      },
+      harness.dependencies
+    )
+
+    await lifecycle.start()
+    await vi.waitFor(() => expect(harness.dependencies.initializeLocalInference).toHaveBeenCalledOnce())
+    expect(allowUnrestricted.value).toBe(false)
+    expect(harness.settings.save).not.toHaveBeenCalled()
   })
 })

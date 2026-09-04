@@ -1,5 +1,19 @@
 // src/services/openrouter.service.ts
 import { createCorrelationId, getApiConfig, readBoundedResponseText } from '@/services/api/luczorApi'
+import type {
+  ApprovedProxyConfig,
+  InferenceRequest,
+  InferenceResult,
+  ParsedToolCall,
+  WireToolCall,
+} from '@/services/inference/types'
+import {
+  buildLaravelProxyBody,
+  hashSerializedLaravelProxyBody,
+  serializeLaravelProxyBody,
+} from '@/services/inference/laravelProxyBody'
+
+export type { LuczorMode, ParsedToolCall, ToolChoice, WireMessage, WireToolCall } from '@/services/inference/types'
 
 const MAX_STREAM_BYTES = 8 * 1024 * 1024
 const MAX_STREAM_LINE_CHARS = 1024 * 1024
@@ -7,74 +21,8 @@ const MAX_STREAM_CONTENT_CHARS = 4 * 1024 * 1024
 const MAX_TOOL_CALLS = 128
 const MAX_TOOL_ARGUMENT_CHARS = 1024 * 1024
 
-export type LuczorMode = 'observe' | 'act' | 'unrestricted'
-export type ToolChoice = 'auto' | 'required' | 'none'
-
-/* =========================================================
- * Wire message shapes (OpenAI/OpenRouter chat format)
- * ========================================================= */
-export type WireToolCall = {
-  id: string
-  type: 'function'
-  function: {
-    name: string
-    /** JSON string of arguments (always complete here — non-streaming). */
-    arguments: string
-  }
-}
-
-export type WireMessage =
-  | { role: 'system' | 'user'; content: string }
-  | {
-      role: 'assistant'
-      content: string
-      tool_calls?: WireToolCall[]
-    }
-  | { role: 'tool'; tool_call_id: string; name?: string; content: string }
-
-/* =========================================================
- * Parsed result of a single completion round
- * ========================================================= */
-export type ParsedToolCall = {
-  id: string
-  name: string
-  /** Parsed arguments object; {} if the model produced invalid JSON. */
-  arguments: Record<string, unknown>
-  /** Original argument string as returned by the model. */
-  rawArguments: string
-}
-
-export type ChatResult = {
-  /** Assistant free-text content (may be "" when the model only calls tools). */
-  content: string
-  /** Parsed tool calls (empty when the model returned a final answer). */
-  toolCalls: ParsedToolCall[]
-  /** Raw tool calls, to be echoed back into the assistant wire message. */
-  rawToolCalls: WireToolCall[]
-  finishReason: string
-  requestId?: string
-  correlationId?: string
-  /** Server-reported routing metadata (X-Luczor-* headers). */
-  model?: string
-  provider?: string
-  useCase?: string
-}
-
-type ChatWithToolsArgs = {
-  messages: WireMessage[]
-  tools?: unknown[]
-  /** Provider-level tool policy for this round. Defaults to auto. */
-  toolChoice?: ToolChoice
-  projectId?: string
-  taskType?: string
-  contextId?: string
-  repoId?: string
-  branch?: string
-  commitSha?: string
-  /** How the user produced this turn (marks spoken input server-side). */
-  inputSource?: 'keyboard' | 'push_to_talk' | 'hands_free'
-  signal?: AbortSignal
-}
+export type ChatResult = InferenceResult
+type ChatWithToolsArgs = Omit<InferenceRequest, 'onToken'>
 
 /** Read the server routing metadata headers into a ChatResult fragment. */
 function readLuczorHeaders(
@@ -89,10 +37,7 @@ function readLuczorHeaders(
   }
 }
 
-type StreamChatArgs = ChatWithToolsArgs & {
-  /** Called with the full accumulated content each time a token arrives. */
-  onToken?: (content: string) => void
-}
+type StreamChatArgs = InferenceRequest
 
 function safeParseArgs(raw: string): Record<string, unknown> {
   const s = (raw ?? '').trim()
@@ -127,13 +72,16 @@ function readStreamError(payload: unknown): string | null {
  * request is sent to the Laravel proxy (authenticated with the device key) and
  * the server injects the real OpenRouter key — so no provider key on the client.
  */
-async function getEndpoint(): Promise<{
+async function getEndpoint(expected: ApprovedProxyConfig): Promise<{
   url: string
   headers: Record<string, string>
   proxied: boolean
-  clientId?: string
+  clientId: string
 }> {
   const cfg = await getApiConfig()
+  if (cfg.baseUrl !== expected.baseUrl || cfg.clientId !== expected.clientId || cfg.deviceKey !== expected.deviceKey) {
+    throw new Error('Die aktuelle Server-/Geräteidentität weicht von der externen Freigabe ab.')
+  }
   if (!cfg.deviceKey) {
     throw new Error('Server-Proxy aktiv, aber Device-Key fehlt (Settings → Server).')
   }
@@ -149,20 +97,32 @@ async function getEndpoint(): Promise<{
   }
 }
 
-function attachLuczorMeta(
-  body: Record<string, unknown>,
-  endpoint: Awaited<ReturnType<typeof getEndpoint>>,
-  args: ChatWithToolsArgs
-) {
-  if (!endpoint.proxied) return
-  body.client_id = endpoint.clientId
-  body.project_id = args.projectId
-  body.task_type = args.taskType ?? 'chat.general'
-  body.context_id = args.contextId
-  body.repo_id = args.repoId
-  body.branch = args.branch
-  body.commit_sha = args.commitSha
-  body.input_source = args.inputSource ?? 'keyboard'
+function assertApprovalNotExpired(args: InferenceRequest): void {
+  const expires = Date.parse(args.expectedProxyApprovalExpiresAt ?? '')
+  if (!Number.isFinite(expires) || expires <= Date.now()) {
+    throw new Error('Die externe Anfrage besitzt keine gültige paketgebundene Freigabe.')
+  }
+}
+
+function approvedConfig(args: InferenceRequest): ApprovedProxyConfig {
+  assertApprovalNotExpired(args)
+  if (!args.expectedProxyConfig) {
+    throw new Error('Die externe Anfrage besitzt keine gültige paketgebundene Freigabe.')
+  }
+  return args.expectedProxyConfig
+}
+
+async function approvedProxyBody(args: InferenceRequest, clientId: string, stream: boolean): Promise<string> {
+  const expected = args.expectedProxyBodySha256?.toLocaleLowerCase('en-US')
+  if (!expected || !/^[a-f0-9]{64}$/.test(expected)) {
+    throw new Error('Die externe Anfrage besitzt keine gültige paketgebundene Freigabe.')
+  }
+  const serialized = serializeLaravelProxyBody(buildLaravelProxyBody(args, clientId, stream))
+  const actual = await hashSerializedLaravelProxyBody(serialized)
+  if (actual !== expected) {
+    throw new Error('Die finalen Proxy-Bytes weichen vom freigegebenen externen Paket ab.')
+  }
+  return serialized
 }
 
 export class OpenRouterService {
@@ -173,21 +133,14 @@ export class OpenRouterService {
    * The caller (agent loop) executes tools, appends results, and calls again.
    */
   static async chatWithTools(args: ChatWithToolsArgs): Promise<ChatResult> {
-    const endpoint = await getEndpoint()
-
-    const body: Record<string, unknown> = {
-      messages: args.messages,
-    }
-    if (args.tools && args.tools.length) {
-      body.tools = args.tools
-      body.tool_choice = args.toolChoice ?? 'auto'
-    }
-    attachLuczorMeta(body, endpoint, args)
+    const endpoint = await getEndpoint(approvedConfig(args))
+    const serializedBody = await approvedProxyBody(args, endpoint.clientId, false)
+    assertApprovalNotExpired(args)
 
     const res = await fetch(endpoint.url, {
       method: 'POST',
       headers: endpoint.headers,
-      body: JSON.stringify(body),
+      body: serializedBody,
       signal: args.signal,
     })
 
@@ -234,22 +187,16 @@ export class OpenRouterService {
    * stream ends, so the agent loop can treat it like chatWithTools.
    */
   static async streamChatWithTools(args: StreamChatArgs): Promise<ChatResult> {
-    const endpoint = await getEndpoint()
-
-    const body: Record<string, unknown> = {
-      messages: args.messages,
-      stream: true,
-    }
-    if (args.tools && args.tools.length) {
-      body.tools = args.tools
-      body.tool_choice = args.toolChoice ?? 'auto'
-    }
-    attachLuczorMeta(body, endpoint, args)
+    const endpoint = await getEndpoint(approvedConfig(args))
+    // Rebuild and hash immediately before fetch. A client-id/config or request
+    // mutation after the UI approval therefore fails closed.
+    const serializedBody = await approvedProxyBody(args, endpoint.clientId, true)
+    assertApprovalNotExpired(args)
 
     const res = await fetch(endpoint.url, {
       method: 'POST',
       headers: endpoint.headers,
-      body: JSON.stringify(body),
+      body: serializedBody,
       signal: args.signal,
     })
 
@@ -265,6 +212,7 @@ export class OpenRouterService {
     let content = ''
     let receivedBytes = 0
     let finishReason = 'stop'
+    let sawTerminalMarker = false
     const toolAcc: Array<{ id: string; name: string; args: string }> = []
 
     while (true) {
@@ -291,7 +239,11 @@ export class OpenRouterService {
         if (!l.startsWith('data:')) continue
 
         const data = l.slice(5).trim()
-        if (!data || data === '[DONE]') continue
+        if (!data) continue
+        if (data === '[DONE]') {
+          sawTerminalMarker = true
+          continue
+        }
 
         let json: any
         try {
@@ -308,7 +260,10 @@ export class OpenRouterService {
 
         const choice = json?.choices?.[0]
         const delta = choice?.delta
-        if (choice?.finish_reason) finishReason = String(choice.finish_reason)
+        if (choice?.finish_reason) {
+          finishReason = String(choice.finish_reason)
+          sawTerminalMarker = true
+        }
         if (!delta) continue
 
         if (typeof delta.content === 'string' && delta.content) {
@@ -337,6 +292,16 @@ export class OpenRouterService {
           }
         }
       }
+    }
+
+    buffer += decoder.decode()
+    const trailing = buffer.trim()
+    if (trailing) {
+      if (trailing === 'data: [DONE]') sawTerminalMarker = true
+      else throw new Error('Die Streaming-Antwort endete mit einem unvollständigen Datenblock.')
+    }
+    if (!sawTerminalMarker) {
+      throw new Error('Die Streaming-Antwort endete ohne terminalen Abschlussmarker.')
     }
 
     const rawToolCalls: WireToolCall[] = toolAcc

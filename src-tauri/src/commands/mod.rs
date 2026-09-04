@@ -2,6 +2,7 @@ pub mod agent;
 pub mod browser;
 pub mod device_jobs;
 pub mod device_key;
+pub mod local_model;
 pub mod local_tasks;
 pub mod notifications;
 pub mod project_workspace;
@@ -102,6 +103,15 @@ mod tests {
             "project_fs_create_dir",
             "project_fs_move",
             "project_fs_delete",
+            "local_model_register_manifest_session",
+            "local_model_begin_manifest_acceptance",
+            "local_model_verify_manifest",
+            "local_model_status",
+            "local_model_hardware_snapshot",
+            "local_model_prepare",
+            "local_model_infer",
+            "local_model_cancel",
+            "local_model_stop",
         ] {
             assert!(main_runtime.contains(command));
             assert!(!capability.to_string().contains(command));

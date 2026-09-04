@@ -4,7 +4,12 @@
 import { Store } from '@tauri-apps/plugin-store'
 import { invoke } from '@tauri-apps/api/core'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
-import { fetchWithTimeout, type LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
+import {
+  DEFAULT_FETCH_TIMEOUT_MS,
+  fetchBoundedResponseWithTimeout,
+  fetchWithTimeout,
+  type LuczorApiConfigSnapshot,
+} from '@/services/api/luczorApi'
 
 const SETTINGS_FILE = 'luczor.settings.json'
 const MEMORY_FILE = 'luczor.memory.json'
@@ -12,6 +17,7 @@ const ENCRYPTED_STATE_KEY = 'state_v3_encrypted'
 const PLAINTEXT_STATE_KEY = 'state_v2'
 const LEGACY_KEY = 'records_v1'
 const MAX_RECORDS = 5_000
+const MAX_MEMORY_RESPONSE_BYTES = 1024 * 1024
 
 export type MemoryScope =
   'device' | 'private' | 'user' | 'project' | 'workspace' | 'skill' | 'agent' | 'session' | 'global'
@@ -931,28 +937,38 @@ class ServerMemoryBackend {
   ) {}
 
   private async call<T>(path: string, body: unknown): Promise<T> {
-    const response = await fetchWithTimeout(`${this.baseUrl}/api/v1${path}`, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${this.deviceKey}`,
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
+    const { response, text } = await fetchBoundedResponseWithTimeout(
+      `${this.baseUrl}/api/v1${path}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.deviceKey}`,
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify(body),
+        redirect: 'error',
       },
-      body: JSON.stringify(body),
-    })
+      DEFAULT_FETCH_TIMEOUT_MS,
+      MAX_MEMORY_RESPONSE_BYTES
+    )
     if (!response.ok) {
-      const rawBody = await response.text().catch(() => '')
-      let responseBody: unknown = rawBody
-      if (rawBody) {
+      let responseBody: unknown = text
+      if (text) {
         try {
-          responseBody = JSON.parse(rawBody)
+          responseBody = JSON.parse(text)
         } catch {
           // Keep a non-JSON error body opaque; it is never copied into local memory.
         }
       }
       throw new MemoryHttpError(response.status, responseBody)
     }
-    return (await response.json().catch(() => ({}))) as T
+    if (!text) return {} as T
+    try {
+      return JSON.parse(text) as T
+    } catch {
+      return {} as T
+    }
   }
 
   remember(record: MemoryRecord): Promise<ServerWriteResult> {

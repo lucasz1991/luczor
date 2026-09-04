@@ -41,7 +41,23 @@ export type BootstrapResponse = {
   device: { id: string | null; name: string | null; abilities: string[] }
   user: { id: number | null; name: string | null; email: string | null }
   runtime_settings: RuntimeSettings
-  routing: { managed_by: 'server'; client_model_selection: false }
+  routing: {
+    managed_by: 'server'
+    client_model_selection: false
+    legacy_scope?: 'external_provider'
+    external_routing_managed_by?: 'server'
+    external_client_model_selection?: false
+    local_routing_managed_by?: 'desktop_signed_policy'
+    local_model_manifest_required?: true
+  }
+  local_model_manifest?: {
+    url: '/api/v1/local-model/manifest'
+    schema_version: 1
+    catalog_version: number
+    policy_version: number
+    key_id: string
+    available: boolean
+  }
   realtime?: { key: string | null; host: string | null; port: number; scheme: string | null }
 }
 
@@ -230,6 +246,38 @@ function abortError(signal: AbortSignal): Error {
   return error
 }
 
+function abortDeadline(callerSignal: AbortSignal | null | undefined, timeoutMs: number) {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('Fetch timeout must be greater than zero.')
+
+  const controller = new AbortController()
+  let rejectCancellation: (reason: Error) => void = () => undefined
+  const cancellation = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject
+  })
+  const cancelFromCaller = () => {
+    const reason = callerSignal ? abortError(callerSignal) : new Error('Request aborted.')
+    controller.abort(reason)
+    rejectCancellation(reason)
+  }
+  if (callerSignal?.aborted) cancelFromCaller()
+  else callerSignal?.addEventListener('abort', cancelFromCaller, { once: true })
+  const timeoutId = globalThis.setTimeout(() => {
+    const error = new Error(`Request timed out after ${timeoutMs} ms.`)
+    error.name = 'TimeoutError'
+    controller.abort(error)
+    rejectCancellation(error)
+  }, timeoutMs)
+
+  return {
+    signal: controller.signal,
+    cancellation,
+    dispose() {
+      globalThis.clearTimeout(timeoutId)
+      callerSignal?.removeEventListener('abort', cancelFromCaller)
+    },
+  }
+}
+
 /**
  * Execute a fetch with a hard deadline. The explicit rejection race is
  * intentional: it also settles callers when a test double or non-conforming
@@ -240,35 +288,12 @@ export async function fetchWithTimeout(
   init: RequestInit = {},
   timeoutMs = DEFAULT_FETCH_TIMEOUT_MS
 ): Promise<Response> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error('Fetch timeout must be greater than zero.')
-
-  const controller = new AbortController()
-  const callerSignal = init.signal
-  let rejectCancellation: (reason: Error) => void = () => undefined
-  const cancellation = new Promise<never>((_resolve, reject) => {
-    rejectCancellation = reject
-  })
-
-  const cancelFromCaller = () => {
-    const reason = callerSignal ? abortError(callerSignal) : new Error('Request aborted.')
-    controller.abort(reason)
-    rejectCancellation(reason)
-  }
-  if (callerSignal?.aborted) cancelFromCaller()
-  else callerSignal?.addEventListener('abort', cancelFromCaller, { once: true })
-
-  const timeoutId = globalThis.setTimeout(() => {
-    const error = new Error(`Request timed out after ${timeoutMs} ms.`)
-    error.name = 'TimeoutError'
-    controller.abort(error)
-    rejectCancellation(error)
-  }, timeoutMs)
+  const deadline = abortDeadline(init.signal, timeoutMs)
 
   try {
-    return await Promise.race([fetch(input, { ...init, signal: controller.signal }), cancellation])
+    return await Promise.race([fetch(input, { ...init, signal: deadline.signal }), deadline.cancellation])
   } finally {
-    globalThis.clearTimeout(timeoutId)
-    callerSignal?.removeEventListener('abort', cancelFromCaller)
+    deadline.dispose()
   }
 }
 
@@ -288,8 +313,13 @@ export function createCorrelationId(): string {
  * Read a Fetch response incrementally and stop before an untrusted server can
  * make the WebView buffer an arbitrarily large body.
  */
-export async function readBoundedResponseText(response: Response, maxBytes = MAX_API_RESPONSE_BYTES): Promise<string> {
+export async function readBoundedResponseText(
+  response: Response,
+  maxBytes = MAX_API_RESPONSE_BYTES,
+  signal?: AbortSignal
+): Promise<string> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new Error('Response limit must be a positive integer.')
+  if (signal?.aborted) throw abortError(signal)
 
   const declaredLength = Number(response.headers.get('Content-Length'))
   if (Number.isFinite(declaredLength) && declaredLength > maxBytes) {
@@ -302,10 +332,22 @@ export async function readBoundedResponseText(response: Response, maxBytes = MAX
   const decoder = new TextDecoder()
   let receivedBytes = 0
   let text = ''
+  let rejectCancellation: (reason: Error) => void = () => undefined
+  const cancellation = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject
+  })
+  const cancelRead = () => {
+    if (!signal) return
+    const reason = abortError(signal)
+    void reader.cancel(reason).catch(() => undefined)
+    rejectCancellation(reason)
+  }
+  if (signal?.aborted) cancelRead()
+  else signal?.addEventListener('abort', cancelRead, { once: true })
 
   try {
     while (true) {
-      const { done, value } = await reader.read()
+      const { done, value } = await Promise.race([reader.read(), cancellation])
       if (done) break
       receivedBytes += value.byteLength
       if (receivedBytes > maxBytes) {
@@ -316,7 +358,32 @@ export async function readBoundedResponseText(response: Response, maxBytes = MAX
     }
     return text + decoder.decode()
   } finally {
-    reader.releaseLock()
+    signal?.removeEventListener('abort', cancelRead)
+    try {
+      reader.releaseLock()
+    } catch {
+      // An abort may leave a non-conforming reader pending; cancellation was
+      // already requested and the deadline race must still settle the caller.
+    }
+  }
+}
+
+export async function fetchBoundedResponseWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
+  maxBytes = MAX_API_RESPONSE_BYTES
+): Promise<{ response: Response; text: string }> {
+  const deadline = abortDeadline(init.signal, timeoutMs)
+  try {
+    const operation = (async () => {
+      const response = await fetch(input, { ...init, signal: deadline.signal })
+      const text = await readBoundedResponseText(response, maxBytes, deadline.signal)
+      return { response, text }
+    })()
+    return await Promise.race([operation, deadline.cancellation])
+  } finally {
+    deadline.dispose()
   }
 }
 
@@ -531,14 +598,28 @@ async function requestWithConfig<T>(path: string, opts: RequestOptions, cfg: Luc
   Object.assign(headers, opts.headers ?? {})
 
   let res: Response
+  let text = ''
   try {
-    res = await fetchWithTimeout(url, {
-      method: opts.method ?? 'GET',
-      headers,
-      body: opts.body != null ? JSON.stringify(opts.body) : undefined,
-      signal: opts.signal,
-    })
+    const result = await fetchBoundedResponseWithTimeout(
+      url,
+      {
+        method: opts.method ?? 'GET',
+        headers,
+        body: opts.body != null ? JSON.stringify(opts.body) : undefined,
+        signal: opts.signal,
+        redirect: 'error',
+      },
+      DEFAULT_FETCH_TIMEOUT_MS,
+      MAX_API_RESPONSE_BYTES
+    )
+    res = result.response
+    text = result.text
   } catch (e: any) {
+    if (e instanceof LuczorApiError) {
+      e.correlationId = requestCorrelationId
+      emitDebug('error', 'api_response_too_large', { path, correlation_id: requestCorrelationId })
+      throw e
+    }
     emitDebug('error', 'api_network_error', {
       path,
       correlation_id: requestCorrelationId,
@@ -547,15 +628,16 @@ async function requestWithConfig<T>(path: string, opts: RequestOptions, cfg: Luc
     throw new LuczorApiError(0, `Verbindung fehlgeschlagen: ${e?.message ?? String(e)}`, requestCorrelationId)
   }
 
-  const correlationId = res.headers.get('X-Luczor-Correlation-Id') || requestCorrelationId
-  let text = ''
-  try {
-    text = await readBoundedResponseText(res)
-  } catch (error) {
-    emitDebug('error', 'api_response_too_large', { path, correlation_id: correlationId })
-    if (error instanceof LuczorApiError) error.correlationId = correlationId
-    throw error
+  if (res.redirected) {
+    emitDebug('error', 'api_redirect_rejected', { path, correlation_id: requestCorrelationId })
+    throw new LuczorApiError(
+      0,
+      'Server-Redirects sind für die gebundene API-Identität nicht zulässig.',
+      requestCorrelationId
+    )
   }
+
+  const correlationId = res.headers.get('X-Luczor-Correlation-Id') || requestCorrelationId
   let json: any = null
   try {
     json = text ? JSON.parse(text) : null
@@ -587,6 +669,14 @@ export function bootstrapWithApiConfig(
   return requestWithConfig<BootstrapResponse>('/bootstrap', { signal }, config)
 }
 
+/** Fetch the signed local-model envelope with the exact verified API identity. */
+export function localModelManifestWithApiConfig(
+  config: LuczorApiConfigSnapshot,
+  signal?: AbortSignal
+): Promise<Record<string, unknown>> {
+  return requestWithConfig<Record<string, unknown>>('/local-model/manifest', { signal }, config)
+}
+
 /* =========================================================
  * Public API
  * ========================================================= */
@@ -597,6 +687,7 @@ export const LuczorApi = {
 
   health: () => request<{ status?: string; time?: string }>('/health', { auth: false }),
   bootstrap: (signal?: AbortSignal) => request<BootstrapResponse>('/bootstrap', { signal }),
+  localModelManifest: () => request<Record<string, unknown>>('/local-model/manifest'),
   realtimeConfig: () => request<{ data: RealtimeConfig }>('/realtime/config'),
   runtimeSettings: () =>
     request<{ data: RuntimeSettings; routing: { managed_by: 'server'; client_model_selection: false } }>(

@@ -113,7 +113,7 @@ describe('desktop memory account isolation', () => {
     await expect(memory.listCandidates('project-1')).resolves.toEqual([])
   })
 
-  it('flushes a pre-rotation outbox with the new key of the same verified account', async () => {
+  it('uses the bounded redirect-safe path with the new verified key for a pre-rotation outbox', async () => {
     await setServerEnabled(false)
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
     const memory = new LuczorMemoryService()
@@ -132,6 +132,7 @@ describe('desktop memory account isolation', () => {
 
     const rememberCall = harness.fetch.mock.calls.find(([url]) => String(url).endsWith('/api/v1/memory/remember'))
     expect(rememberCall?.[1]?.headers).toMatchObject({ Authorization: 'Bearer key-b' })
+    expect(rememberCall?.[1]?.redirect).toBe('error')
     await expect(memory.pendingSyncCount()).resolves.toBe(0)
   })
 

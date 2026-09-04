@@ -4,7 +4,7 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_prevent_default::init())
         .plugin(tauri_plugin_notification::init())
@@ -83,6 +83,15 @@ pub fn run() {
             commands::project_workspace::project_fs_create_dir,
             commands::project_workspace::project_fs_move,
             commands::project_workspace::project_fs_delete,
+            commands::local_model::local_model_register_manifest_session,
+            commands::local_model::local_model_begin_manifest_acceptance,
+            commands::local_model::local_model_verify_manifest,
+            commands::local_model::local_model_status,
+            commands::local_model::local_model_hardware_snapshot,
+            commands::local_model::local_model_prepare,
+            commands::local_model::local_model_infer,
+            commands::local_model::local_model_cancel,
+            commands::local_model::local_model_stop,
         ])
         .on_window_event(|window, event| {
             #[cfg(desktop)]
@@ -93,8 +102,16 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(|_app, event| {
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
+            commands::local_model::shutdown_all();
+        }
+    });
 }
 
 #[cfg(desktop)]
@@ -110,7 +127,10 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .menu(&menu)
         .tooltip("Luczor")
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "quit" => app.exit(0),
+            "quit" => {
+                commands::local_model::shutdown_all();
+                app.exit(0);
+            }
             "show" => {
                 if let Some(win) = app.get_webview_window("main") {
                     let _ = win.show();

@@ -17,7 +17,8 @@ vi.mock('@tauri-apps/plugin-store', () => ({
 
 vi.mock('@/services/api/luczorApi', () => ({
   getApiConfig: mocks.getApiConfig,
-  fetchWithTimeout: mocks.fetch,
+  DEFAULT_FETCH_TIMEOUT_MS: 10_000,
+  fetchBoundedResponseWithTimeout: mocks.fetch,
 }))
 vi.mock('@/services/accountPrincipal', () => ({ getVerifiedAccountSnapshot: mocks.getVerifiedAccountSnapshot }))
 vi.mock('@/services/memory/luczorMemory', () => ({
@@ -42,8 +43,8 @@ describe('context account snapshot boundary', () => {
     mocks.getContextForPrompt.mockReset().mockResolvedValue('')
     mocks.storeGet.mockReset().mockResolvedValue(true)
     mocks.fetch.mockReset().mockResolvedValue({
-      ok: true,
-      json: async () => ({
+      response: { ok: true, status: 200 },
+      text: JSON.stringify({
         context_id: 'context-1',
         task_type: 'coding.fix_bug',
         budget: { max_input_tokens: 800, estimated_tokens: 0 },
@@ -82,7 +83,10 @@ describe('context account snapshot boundary', () => {
       'https://verified.example/api/v1/context/ask',
       expect.objectContaining({
         headers: expect.objectContaining({ Authorization: 'Bearer verified-device-key' }),
-      })
+        redirect: 'error',
+      }),
+      10_000,
+      1024 * 1024
     )
 
     const request = JSON.parse(String(mocks.fetch.mock.calls[0]?.[1]?.body))
@@ -105,8 +109,8 @@ describe('context account snapshot boundary', () => {
       })
     )
     mocks.fetch.mockResolvedValueOnce({
-      ok: true,
-      json: async () => ({
+      response: { ok: true, status: 200 },
+      text: JSON.stringify({
         context_id: 'context-2',
         task_type: 'chat.general',
         budget: { max_input_tokens: 800, estimated_tokens: 20 },

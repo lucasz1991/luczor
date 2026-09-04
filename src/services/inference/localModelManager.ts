@@ -1,0 +1,319 @@
+import type { InferenceGateway, InferenceRequest, InferenceResult } from '@/services/inference/types'
+import type { LocalModelReleaseManifest } from '@/services/inference/modelManifest'
+
+export type LocalRuntimeState = 'stopped' | 'ready' | 'busy' | 'degraded' | 'cooldown' | 'error'
+
+export type LocalModelHealth = {
+  modelReleaseId: string
+  state: LocalRuntimeState
+  consecutiveFailures: number
+  cooldownUntil?: string
+  lastErrorCode?: string
+  updatedAt: string
+}
+
+export type LocalReadinessEvidence = {
+  modelReleaseId: string
+  manifestPayloadSha256: string
+  artifactSha256: string
+  runtimeSha256: string
+  ready: boolean
+  verifiedAtMs: number
+  validUntilMs: number
+}
+
+export type LocalCatalogBinding = Readonly<{
+  acceptanceSessionId: string
+  acceptanceGeneration: number
+  manifestPayloadSha256: string
+}>
+
+export type LocalRuntimeRequest = InferenceRequest & {
+  requestId: string
+  modelReleaseId: string
+  scopeDigest: string
+  catalogBinding: LocalCatalogBinding
+  maxOutputTokens?: number
+  contextLimit?: number
+  reasoningMode?: 'auto' | 'off'
+}
+
+export interface LocalRuntimeTransport {
+  stream(release: LocalModelReleaseManifest, request: LocalRuntimeRequest): Promise<InferenceResult>
+  cancel(requestId: string, catalogBinding: LocalCatalogBinding): Promise<void>
+  stop(modelReleaseId: string, catalogBinding: LocalCatalogBinding): Promise<void>
+}
+
+export class LocalInferenceError extends Error {
+  constructor(
+    message: string,
+    readonly code: string,
+    readonly retryable: boolean,
+    readonly partialOutput: boolean
+  ) {
+    super(message)
+    this.name = 'LocalInferenceError'
+  }
+}
+
+function nowIso(now: () => Date): string {
+  return now().toISOString()
+}
+
+function abortError(): DOMException {
+  return new DOMException('Aborted', 'AbortError')
+}
+
+/** Removes Qwen-compatible thinking blocks before any content reaches UI/history. */
+export function visibleLocalContent(content: string): string {
+  let visible = String(content ?? '')
+  visible = visible.replace(/<think>[\s\S]*?<\/think>/gi, '')
+  const open = visible.toLocaleLowerCase().lastIndexOf('<think>')
+  if (open >= 0) visible = visible.slice(0, open)
+  return visible.replace(/<\/think>/gi, '').trimStart()
+}
+
+export class LocalModelManager {
+  private readonly health = new Map<string, LocalModelHealth>()
+  private readonly active = new Map<string, { controller: AbortController; catalogBinding: LocalCatalogBinding }>()
+  private boundaryEpoch = 0
+
+  constructor(
+    private readonly transport: LocalRuntimeTransport,
+    private readonly now: () => Date = () => new Date(),
+    private readonly requestIdFactory: () => string = () => crypto.randomUUID()
+  ) {}
+
+  getHealth(release: LocalModelReleaseManifest): LocalModelHealth {
+    const current = this.health.get(release.id)
+    if (!current) {
+      return {
+        modelReleaseId: release.id,
+        state: 'stopped',
+        consecutiveFailures: 0,
+        updatedAt: nowIso(this.now),
+      }
+    }
+    if (current.state === 'cooldown' && current.cooldownUntil) {
+      if (Date.parse(current.cooldownUntil) <= this.now().getTime()) {
+        const recovered: LocalModelHealth = {
+          ...current,
+          state: 'degraded',
+          cooldownUntil: undefined,
+          updatedAt: nowIso(this.now),
+        }
+        this.health.set(release.id, recovered)
+        return { ...recovered }
+      }
+    }
+    return { ...current }
+  }
+
+  /** Abort old JS turns before the native catalog/session boundary rotates. */
+  invalidateCatalogBoundary(): void {
+    this.boundaryEpoch += 1
+    for (const [requestId, active] of this.active) {
+      active.controller.abort()
+      void this.transport.cancel(requestId, active.catalogBinding).catch(() => undefined)
+    }
+    this.health.clear()
+  }
+
+  gateway(
+    release: LocalModelReleaseManifest,
+    readiness: LocalReadinessEvidence,
+    catalogBinding: LocalCatalogBinding,
+    scopeDigest: string
+  ): InferenceGateway {
+    const fixedBinding = Object.freeze({ ...catalogBinding })
+    const gatewayEpoch = this.boundaryEpoch
+    return Object.freeze({
+      id: `local:${release.id}`,
+      target: 'local_llama_cpp' as const,
+      streamChatWithTools: (request: InferenceRequest) =>
+        this.stream(release, readiness, fixedBinding, scopeDigest, gatewayEpoch, request),
+    })
+  }
+
+  async cancel(requestId: string, catalogBinding: LocalCatalogBinding): Promise<void> {
+    const active = this.active.get(requestId)
+    active?.controller.abort()
+    await this.transport.cancel(requestId, active?.catalogBinding ?? catalogBinding)
+  }
+
+  async stop(release: LocalModelReleaseManifest, catalogBinding: LocalCatalogBinding): Promise<void> {
+    for (const [requestId, active] of this.active) {
+      active.controller.abort()
+      await this.transport.cancel(requestId, active.catalogBinding).catch(() => undefined)
+    }
+    await this.transport.stop(release.id, catalogBinding)
+    this.health.set(release.id, {
+      modelReleaseId: release.id,
+      state: 'stopped',
+      consecutiveFailures: 0,
+      updatedAt: nowIso(this.now),
+    })
+  }
+
+  private async stream(
+    release: LocalModelReleaseManifest,
+    readiness: LocalReadinessEvidence,
+    catalogBinding: LocalCatalogBinding,
+    scopeDigest: string,
+    gatewayEpoch: number,
+    request: InferenceRequest
+  ): Promise<InferenceResult> {
+    if (gatewayEpoch !== this.boundaryEpoch) {
+      throw new LocalInferenceError(
+        'Die lokale Route gehört zu einer abgelaufenen Kataloggrenze.',
+        'catalog_binding_stale',
+        false,
+        false
+      )
+    }
+    if (!release.enabled || release.executionTarget !== 'local_llama_cpp' || !release.artifact || !release.runtime) {
+      throw new LocalInferenceError(
+        'Das lokale Modellrelease ist nicht ausführbar.',
+        'release_unavailable',
+        false,
+        false
+      )
+    }
+    if (
+      !readiness.ready ||
+      readiness.modelReleaseId !== release.id ||
+      readiness.manifestPayloadSha256 !== catalogBinding.manifestPayloadSha256 ||
+      readiness.artifactSha256 !== release.artifact.sha256 ||
+      readiness.runtimeSha256 !== release.runtime.sha256 ||
+      !Number.isFinite(readiness.validUntilMs) ||
+      readiness.validUntilMs <= this.now().getTime()
+    ) {
+      throw new LocalInferenceError(
+        'Lokale Artifact-/Runtime-Readiness fehlt oder ist abgelaufen.',
+        'readiness_unavailable',
+        false,
+        false
+      )
+    }
+    if (!/^[a-f0-9]{64}$/.test(scopeDigest)) {
+      throw new LocalInferenceError('Der lokale Scope-Digest ist ungültig.', 'scope_invalid', false, false)
+    }
+    if (
+      !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(
+        catalogBinding.acceptanceSessionId
+      ) ||
+      !Number.isSafeInteger(catalogBinding.acceptanceGeneration) ||
+      catalogBinding.acceptanceGeneration < 1 ||
+      !/^[a-f0-9]{64}$/.test(catalogBinding.manifestPayloadSha256)
+    ) {
+      throw new LocalInferenceError('Die lokale Katalogbindung ist ungültig.', 'catalog_binding_invalid', false, false)
+    }
+
+    const previous = this.getHealth(release)
+    if (previous.state === 'cooldown') {
+      throw new LocalInferenceError(
+        'Das lokale Modell befindet sich in der Abkühlphase.',
+        'model_cooldown',
+        true,
+        false
+      )
+    }
+    if (this.active.size > 0) {
+      throw new LocalInferenceError('Die lokale Runtime ist ausgelastet.', 'runtime_busy', true, false)
+    }
+
+    const operationEpoch = this.boundaryEpoch
+    const requestId = this.requestIdFactory()
+    const controller = new AbortController()
+    const parentAbort = () => {
+      controller.abort()
+      // Tauri invoke cannot consume AbortSignal directly. Propagate the abort
+      // immediately so native code kills the scope-bound llama.cpp process.
+      void this.transport.cancel(requestId, catalogBinding).catch(() => undefined)
+    }
+    request.signal?.addEventListener('abort', parentAbort, { once: true })
+    this.active.set(requestId, { controller, catalogBinding })
+    let partialOutput = false
+    this.health.set(release.id, {
+      ...previous,
+      modelReleaseId: release.id,
+      state: 'busy',
+      updatedAt: nowIso(this.now),
+    })
+
+    const runtimeRequest: LocalRuntimeRequest = {
+      ...request,
+      requestId,
+      modelReleaseId: release.id,
+      scopeDigest,
+      catalogBinding,
+      signal: controller.signal,
+      onToken: accumulated => {
+        if (controller.signal.aborted || operationEpoch !== this.boundaryEpoch) return
+        const visible = visibleLocalContent(accumulated)
+        partialOutput ||= visible.length > 0
+        request.onToken?.(visible)
+      },
+    }
+
+    try {
+      if (controller.signal.aborted) throw abortError()
+      const result = await this.transport.stream(release, runtimeRequest)
+      if (controller.signal.aborted) throw abortError()
+      const visible = visibleLocalContent(result.content)
+      if (operationEpoch === this.boundaryEpoch) {
+        this.health.set(release.id, {
+          modelReleaseId: release.id,
+          state: 'ready',
+          consecutiveFailures: 0,
+          updatedAt: nowIso(this.now),
+        })
+      }
+      return {
+        ...result,
+        content: visible,
+        requestId: result.requestId ?? requestId,
+        model: release.id,
+        provider: 'local',
+        target: 'local_llama_cpp',
+      }
+    } catch (error) {
+      if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+        if (operationEpoch === this.boundaryEpoch) {
+          this.health.set(release.id, {
+            ...previous,
+            modelReleaseId: release.id,
+            state: 'ready',
+            updatedAt: nowIso(this.now),
+          })
+        }
+        await this.transport.cancel(requestId, catalogBinding).catch(() => undefined)
+        throw abortError()
+      }
+
+      const failures = previous.consecutiveFailures + 1
+      const entersCooldown = failures >= release.healthPolicy.maxConsecutiveFailures
+      const cooldownUntil = entersCooldown
+        ? new Date(this.now().getTime() + release.healthPolicy.cooldownMs).toISOString()
+        : undefined
+      const code = error instanceof LocalInferenceError ? error.code : 'runtime_failed'
+      if (operationEpoch === this.boundaryEpoch) {
+        this.health.set(release.id, {
+          modelReleaseId: release.id,
+          state: entersCooldown ? 'cooldown' : 'degraded',
+          consecutiveFailures: failures,
+          cooldownUntil,
+          lastErrorCode: code,
+          updatedAt: nowIso(this.now),
+        })
+      }
+      if (error instanceof LocalInferenceError) {
+        throw new LocalInferenceError(error.message, error.code, error.retryable, partialOutput || error.partialOutput)
+      }
+      throw new LocalInferenceError('Die lokale Runtime ist fehlgeschlagen.', code, true, partialOutput)
+    } finally {
+      request.signal?.removeEventListener('abort', parentAbort)
+      this.active.delete(requestId)
+    }
+  }
+}

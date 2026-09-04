@@ -27,4 +27,5 @@ test-results
 LOCAL_NOTES.md
 .env
 .env.voice
+.env.local-model
 target/

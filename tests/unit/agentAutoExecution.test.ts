@@ -21,6 +21,15 @@ const mocks = vi.hoisted(() => ({
 vi.mock('@/services/openrouter.service', () => ({
   OpenRouterService: { streamChatWithTools: mocks.streamChatWithTools },
 }))
+vi.mock('@/services/inference/coordinator', () => ({
+  resolveInferenceRouteForTurn: vi.fn(async () => ({
+    gateway: {
+      id: 'test-laravel',
+      target: 'laravel_proxy',
+      streamChatWithTools: mocks.streamChatWithTools,
+    },
+  })),
+}))
 vi.mock('@/services/tools/registry', () => ({
   getTool: mocks.getTool,
   toOpenAITools: mocks.toOpenAITools,

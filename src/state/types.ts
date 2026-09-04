@@ -25,6 +25,8 @@ export type MessageMeta = {
   model?: string
   provider?: string
   useCase?: string
+  inferenceTarget?: 'local_llama_cpp' | 'laravel_proxy'
+  routeDecisionId?: string
 
   // how a user turn was produced; drives the "Gesprochen" badge
   inputSource?: 'keyboard' | 'push_to_talk' | 'hands_free'

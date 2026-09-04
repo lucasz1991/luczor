@@ -16,7 +16,15 @@
 // The UI (App.vue) renders proposed calls from `state.pending` and resolves
 // approvals via services/approvals.ts.
 
-import { OpenRouterService, type LuczorMode, type ToolChoice, type WireMessage } from '@/services/openrouter.service'
+import {
+  hashInferenceEgressRequest,
+  resolveInferenceRouteForTurn,
+  type ExternalTurnPackage,
+  type ResolvedTurnRoute,
+} from '@/services/inference/coordinator'
+import type { HybridRoutingSettings } from '@/services/inference/hybridRouter'
+import { LocalInferenceError } from '@/services/inference/localModelManager'
+import type { InferenceGateway, LuczorMode, ToolChoice, WireMessage } from '@/services/inference/types'
 import { getTool, toOpenAITools, type ToolCategory } from '@/services/tools/registry'
 import type { ToolDataHandling } from '@/services/tools/types'
 import { awaitApproval } from '@/services/approvals'
@@ -24,6 +32,7 @@ import { canAutoExecuteTool, loadExecutionPolicy } from '@/services/executionPol
 import { mutations } from '@/state/store'
 import { hud, setStatus, pulse, setLastTool } from '@/state/hud'
 import { logAgentEvent } from '@/services/api/sync'
+import { getApiConfigSnapshot } from '@/services/api/luczorApi'
 
 /** Truncate a value for the server event payload (avoid huge uploads). */
 function clip(v: unknown, max = 500): unknown {
@@ -56,6 +65,22 @@ export type RunAgentOptions = {
   commitSha?: string
   maxRounds?: number
   signal?: AbortSignal
+  /** Explicit test/integration gateway. Production callers resolve through the signed coordinator. */
+  inferenceGateway?: InferenceGateway
+  /** Local/external boundary for this turn. Local-only can never route to Laravel. */
+  contextEgress?: 'local_only' | 'external_allowed'
+  routingSettings?: Partial<HybridRoutingSettings>
+  /** Separately assembled provider-safe packet plus packet-bound approval. */
+  externalPackage?: ExternalTurnPackage
+  /** Provider-safe messages rebuilt independently from local-only context. */
+  externalBaseMessages?: WireMessage[]
+  requestExternalApproval?: (summary: {
+    packetHash: string
+    destination: string
+    messageCount: number
+    characterCount: number
+    toolsAllowed: false
+  }) => boolean | Promise<boolean>
   /** How this user turn was produced (marks spoken input server-side). */
   inputSource?: 'keyboard' | 'push_to_talk' | 'hands_free'
   /** Streamed content of the current round (full accumulated text). */
@@ -198,11 +223,75 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   toolFailures: number
   toolSuccesses: number
   ephemeralDataUsed: boolean
+  inferenceTarget?: 'local_llama_cpp' | 'laravel_proxy'
+  routeDecisionId?: string
 }> {
   const { projectId, mode, maxRounds = 6, signal } = opts
-
-  const messages: WireMessage[] = [...opts.baseMessages]
-  const tools = toOpenAITools()
+  const currentMode = () => opts.getMode?.() ?? mode
+  const allTools = toOpenAITools()
+  const routeInput = (externalPackage?: ExternalTurnPackage) => ({
+    projectId,
+    contextId: opts.contextId,
+    repoId: opts.repoId,
+    taskType: opts.taskType,
+    contextEgress: opts.contextEgress,
+    routingSettings: opts.routingSettings,
+    externalPackage,
+  })
+  let resolvedRoute: ResolvedTurnRoute
+  if (opts.inferenceGateway) {
+    resolvedRoute = { gateway: opts.inferenceGateway }
+  } else {
+    try {
+      resolvedRoute = await resolveInferenceRouteForTurn(routeInput(opts.externalPackage))
+    } catch (error) {
+      if (
+        !(error instanceof LocalInferenceError) ||
+        error.code !== 'external_approval_required' ||
+        !opts.externalBaseMessages ||
+        !opts.requestExternalApproval
+      ) {
+        throw error
+      }
+      const externalMessages = opts.externalBaseMessages.map(message => ({ ...message })) as WireMessage[]
+      applyRuntimeMode(externalMessages, currentMode())
+      const approvedRequest = {
+        messages: externalMessages,
+        tools: [],
+        toolChoice: 'none' as const,
+        projectId,
+        taskType: opts.taskType,
+        contextId: opts.contextId,
+        repoId: opts.repoId,
+        branch: opts.branch,
+        commitSha: opts.commitSha,
+        inputSource: opts.inputSource,
+      }
+      const approvedApiConfig = await getApiConfigSnapshot()
+      const packetHash = await hashInferenceEgressRequest(approvedRequest, approvedApiConfig.clientId)
+      const approved = await opts.requestExternalApproval({
+        packetHash,
+        destination: approvedApiConfig.baseUrl,
+        messageCount: externalMessages.length,
+        characterCount: externalMessages.reduce((sum, message) => sum + message.content.length, 0),
+        toolsAllowed: false,
+      })
+      if (!approved) throw error
+      const externalPackage: ExternalTurnPackage = {
+        messages: externalMessages,
+        packetHash,
+        apiConfig: approvedApiConfig,
+        approval: {
+          approvalId: crypto.randomUUID(),
+          packetHash,
+          expiresAt: new Date(Date.now() + 2 * 60_000).toISOString(),
+        },
+      }
+      resolvedRoute = await resolveInferenceRouteForTurn(routeInput(externalPackage))
+    }
+  }
+  const messages: WireMessage[] = [...(resolvedRoute.replacementMessages ?? opts.baseMessages)]
+  const tools = resolvedRoute.externalOneShot ? [] : allTools
   const executionPolicy = await loadExecutionPolicy()
   let lastRequestId: string | undefined
   let lastModel: string | undefined
@@ -212,11 +301,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   let toolSuccesses = 0
   let ephemeralDataUsed = false
   const toolOutcomes: ToolOutcomeRecord[] = []
-  const currentMode = () => opts.getMode?.() ?? mode
   let reasoningRetryUsed = false
-  let nextToolChoice: ToolChoice = opts.toolChoice ?? 'auto'
+  let nextToolChoice: ToolChoice = resolvedRoute.externalOneShot ? 'none' : (opts.toolChoice ?? 'auto')
+  const inferenceGateway = resolvedRoute.gateway
+  const roundLimit = resolvedRoute.externalOneShot ? 1 : maxRounds
 
-  for (let round = 0; round < maxRounds; round++) {
+  for (let round = 0; round < roundLimit; round++) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
 
     // The user can change the mode while context/model/tool rounds are still
@@ -226,7 +316,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     setStatus('thinking')
     pulse('network', 1)
     let roundContent = ''
-    const res = await OpenRouterService.streamChatWithTools({
+    const res = await inferenceGateway.streamChatWithTools({
       messages,
       tools,
       toolChoice: nextToolChoice,
@@ -248,12 +338,29 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     lastModel = res.model ?? lastModel
     lastProvider = res.provider ?? lastProvider
     lastUseCase = res.useCase ?? lastUseCase
-    nextToolChoice = 'auto'
+    nextToolChoice = resolvedRoute.externalOneShot ? 'none' : 'auto'
+
+    if (resolvedRoute.externalOneShot && res.toolCalls.length) {
+      throw new LocalInferenceError(
+        'Ein externer Tool-Aufruf benötigt ein neues, separat freigegebenes Paket.',
+        'external_reapproval_required',
+        false,
+        false
+      )
+    }
 
     // No tool calls -> this is the final answer.
     if (!res.toolCalls.length) {
       const content = res.content.trim()
       const reasoningLeak = looksLikeInternalReasoningLeak(content)
+      if (reasoningLeak && resolvedRoute.externalOneShot) {
+        throw new LocalInferenceError(
+          'Die einmalige externe Antwort enthielt keine sicher darstellbare Nutzerantwort und wurde verworfen.',
+          'external_unsafe_response',
+          false,
+          false
+        )
+      }
       if (reasoningLeak && !reasoningRetryUsed) {
         reasoningRetryUsed = true
         nextToolChoice = opts.toolChoice === 'required' ? 'required' : 'auto'
@@ -282,6 +389,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         toolFailures,
         toolSuccesses,
         ephemeralDataUsed,
+        inferenceTarget: inferenceGateway.target,
+        routeDecisionId: resolvedRoute.decision?.id,
       }
     }
 
@@ -454,6 +563,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     toolFailures,
     toolSuccesses,
     ephemeralDataUsed,
+    inferenceTarget: inferenceGateway.target,
+    routeDecisionId: resolvedRoute.decision?.id,
   }
 }
 

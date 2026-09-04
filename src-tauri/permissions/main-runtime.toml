@@ -53,4 +53,13 @@ commands.allow = [
     "project_fs_create_dir",
     "project_fs_move",
     "project_fs_delete",
+    "local_model_register_manifest_session",
+    "local_model_begin_manifest_acceptance",
+    "local_model_verify_manifest",
+    "local_model_status",
+    "local_model_hardware_snapshot",
+    "local_model_prepare",
+    "local_model_infer",
+    "local_model_cancel",
+    "local_model_stop",
 ]

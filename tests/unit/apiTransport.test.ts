@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   bootstrapWithApiConfig,
   createCorrelationId,
+  fetchBoundedResponseWithTimeout,
   fetchWithTimeout,
   readBoundedResponseText,
 } from '@/services/api/luczorApi'
@@ -67,6 +68,79 @@ describe('Luczor API transport boundaries', () => {
 
     await vi.advanceTimersByTimeAsync(10_000)
     await expect(outcome).resolves.toMatchObject({ name: 'LuczorApiError', status: 0 })
+  })
+
+  it('times out and cancels a response body that stalls after successful headers', async () => {
+    vi.useFakeTimers()
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{'))
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body, { status: 200 }))
+    )
+
+    const outcome = bootstrapWithApiConfig({
+      baseUrl: 'https://slow-body.example.test',
+      deviceKey: 'device-key',
+      clientId: 'desktop-1',
+    }).catch(error => error)
+
+    await vi.advanceTimersByTimeAsync(10_000)
+    await expect(outcome).resolves.toMatchObject({ name: 'LuczorApiError', status: 0 })
+    expect(cancelled).toBe(true)
+  })
+
+  it('honours caller abort after headers while a bounded response body is pending', async () => {
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      cancel() {
+        cancelled = true
+      },
+    })
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response(body, { status: 200 }))
+    )
+    const controller = new AbortController()
+    const outcome = fetchBoundedResponseWithTimeout(
+      'https://slow-body.example.test',
+      { signal: controller.signal },
+      10_000,
+      1024
+    ).catch(error => error)
+
+    await Promise.resolve()
+    await Promise.resolve()
+    controller.abort()
+
+    await expect(outcome).resolves.toMatchObject({ name: 'AbortError' })
+    expect(cancelled).toBe(true)
+  })
+
+  it('rejects redirects while keeping bootstrap bound to its configured server instance', async () => {
+    const redirected = new Response('{}', { status: 200 })
+    Object.defineProperty(redirected, 'redirected', { value: true })
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.redirect).toBe('error')
+      return redirected
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      bootstrapWithApiConfig({
+        baseUrl: 'https://bound.example.test/luczor',
+        deviceKey: 'device-key',
+        clientId: 'desktop-1',
+      })
+    ).rejects.toThrow('Redirects')
+    expect(fetchMock).toHaveBeenCalledOnce()
   })
 
   it('honours a caller AbortSignal even when fetch ignores it', async () => {

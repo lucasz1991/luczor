@@ -2,6 +2,7 @@
 
 const fs = require('node:fs')
 const path = require('node:path')
+const crypto = require('node:crypto')
 
 const MODES = new Set(['node', 'local-test', 'production'])
 
@@ -30,6 +31,38 @@ function isPlaceholder(value) {
 
 function hasTarget(targets, expected) {
   return targets === 'all' || (Array.isArray(targets) && targets.includes(expected))
+}
+
+function validLocalModelPublicKey(value) {
+  try {
+    const encoded = String(value)
+    if (
+      !encoded ||
+      /\s/.test(encoded) ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)
+    ) {
+      return false
+    }
+    const raw = Buffer.from(encoded, 'base64')
+    if (raw.toString('base64') !== encoded) return false
+    const decoded = raw.toString('utf8')
+    const match = decoded.match(
+      /^-----BEGIN PUBLIC KEY-----\r?\n([A-Za-z0-9+/=\r\n]+)\r?\n-----END PUBLIC KEY-----(?:\r?\n)?$/
+    )
+    if (!match || decoded.includes('BEGIN RSA PUBLIC KEY')) return false
+    const pemPayload = match[1].replace(/\r?\n/g, '')
+    if (
+      !pemPayload ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(pemPayload) ||
+      Buffer.from(pemPayload, 'base64').toString('base64') !== pemPayload
+    ) {
+      return false
+    }
+    const key = crypto.createPublicKey({ key: decoded, format: 'pem', type: 'spki' })
+    return key.asymmetricKeyType === 'rsa' && Number(key.asymmetricKeyDetails?.modulusLength ?? 0) >= 2048
+  } catch {
+    return false
+  }
 }
 
 function inspectProject({
@@ -104,6 +137,9 @@ function inspectProject({
       warnings.push('production updater is intentionally unavailable in this checkout')
     }
     warnings.push('local test installers are intentionally unsigned and must not be published')
+    if (!environment.LUCZOR_LLAMA_CPP_BIN || !environment.LUCZOR_LOCAL_MODEL_DIR) {
+      warnings.push('local llama.cpp runtime/model paths are not configured; local inference remains unavailable')
+    }
     return { mode, errors, warnings }
   }
 
@@ -131,6 +167,27 @@ function inspectProject({
     } else if (isPlaceholder(environment[name])) {
       errors.push(`production release secret is a placeholder: ${name}`)
     }
+  }
+
+
+  const localKeyId = environment.LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID
+  const localPublicKey = environment.LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64
+  if (!localKeyId || !/^[a-z0-9][a-z0-9._-]{0,127}$/.test(localKeyId) || isPlaceholder(localKeyId)) {
+    errors.push('production local-model manifest key id is missing or invalid')
+  }
+  if (!localPublicKey || isPlaceholder(localPublicKey) || !validLocalModelPublicKey(localPublicKey)) {
+    errors.push('production local-model manifest public key is missing or invalid')
+  }
+  const runtimePath = environment.LUCZOR_LLAMA_CPP_BIN
+  const modelPath = environment.LUCZOR_LOCAL_MODEL_DIR
+  if ((runtimePath && !modelPath) || (!runtimePath && modelPath)) {
+    errors.push('local llama.cpp runtime and model paths must be configured together')
+  }
+  if (runtimePath && (!path.isAbsolute(runtimePath) || !path.isAbsolute(modelPath))) {
+    errors.push('local llama.cpp runtime and model paths must be absolute')
+  }
+  if (!runtimePath && !modelPath) {
+    warnings.push('local llama.cpp runtime/model paths are per-device runtime configuration, not release inputs')
   }
 
   return { mode, errors, warnings }

@@ -1,0 +1,179 @@
+import { Channel, invoke } from '@tauri-apps/api/core'
+import type { HardwareSnapshot } from '@/services/inference/capacity'
+import type {
+  LocalCatalogBinding,
+  LocalRuntimeRequest,
+  LocalRuntimeTransport,
+  LocalReadinessEvidence,
+} from '@/services/inference/localModelManager'
+import type {
+  LocalModelReleaseManifest,
+  NativeManifestVerifier,
+  NativeManifestVerification,
+} from '@/services/inference/modelManifest'
+import type { InferenceResult, WireToolCall } from '@/services/inference/types'
+
+type NativeInferenceEvent =
+  | { type: 'started'; requestId: string }
+  | { type: 'delta'; requestId: string; content: string }
+  | { type: 'error'; requestId: string; code: string; retryable: boolean }
+
+type NativeInferenceResult = {
+  content: string
+  rawToolCalls: WireToolCall[]
+  finishReason: string
+  requestId: string
+}
+
+export type NativeLocalModelStatus = {
+  manifestAvailable: boolean
+  catalogVersion?: number
+  policyVersion?: number
+  activeModelId?: string
+  state: 'unavailable' | 'stopped' | 'starting' | 'ready' | 'busy' | 'cooldown' | 'error'
+  reasonCode?: string
+  readiness: LocalReadinessEvidence[]
+}
+
+let manifestAcceptanceSessionId: string | null = null
+let manifestAcceptanceRegistration: Promise<string> | null = null
+
+/** Register this renderer lifetime before any asynchronous manifest fetch. */
+export function registerNativeManifestAcceptanceSession(): Promise<string> {
+  manifestAcceptanceRegistration ??= (async () => {
+    manifestAcceptanceSessionId ??= globalThis.crypto?.randomUUID?.() ?? null
+    if (!manifestAcceptanceSessionId) {
+      throw new Error('Secure manifest acceptance session generation is unavailable.')
+    }
+    await invoke('local_model_register_manifest_session', { sessionId: manifestAcceptanceSessionId })
+    return manifestAcceptanceSessionId
+  })().catch(error => {
+    manifestAcceptanceRegistration = null
+    throw error
+  })
+  return manifestAcceptanceRegistration
+}
+
+/** Clear the previous native catalog before this generation performs any network work. */
+export async function beginNativeManifestAcceptance(acceptanceGeneration: number): Promise<string> {
+  if (!Number.isSafeInteger(acceptanceGeneration) || acceptanceGeneration < 1) {
+    throw new Error('Native manifest acceptance generation is invalid.')
+  }
+  const sessionId = await registerNativeManifestAcceptanceSession()
+  await invoke('local_model_begin_manifest_acceptance', { sessionId, acceptanceGeneration })
+  return sessionId
+}
+
+/** Native verification also activates the exact verified catalog for runtime commands. */
+export const tauriManifestVerifier: NativeManifestVerifier = {
+  verify: (wireEnvelope, acceptance) => {
+    const {
+      trustDomain,
+      acceptanceSessionId,
+      acceptanceGeneration,
+      expectedSchemaVersion,
+      expectedCatalogVersion,
+      expectedPolicyVersion,
+      expectedKeyId,
+    } = acceptance
+    if (
+      !Number.isSafeInteger(expectedSchemaVersion) ||
+      !Number.isSafeInteger(expectedCatalogVersion) ||
+      !Number.isSafeInteger(expectedPolicyVersion)
+    ) {
+      throw new Error('Native manifest verification requires exact bootstrap discovery versions.')
+    }
+    return invoke<NativeManifestVerification>('local_model_verify_manifest', {
+      envelope: wireEnvelope,
+      acceptance: {
+        expectedSchemaVersion,
+        expectedCatalogVersion,
+        expectedPolicyVersion,
+        expectedKeyId,
+        expectedTrustDomain: trustDomain,
+        expectedAcceptanceSessionId: acceptanceSessionId,
+        expectedAcceptanceGeneration: acceptanceGeneration,
+      },
+    })
+  },
+}
+
+export async function getNativeLocalModelStatus(): Promise<NativeLocalModelStatus> {
+  return invoke<NativeLocalModelStatus>('local_model_status')
+}
+
+export async function getNativeHardwareSnapshot(): Promise<HardwareSnapshot> {
+  return invoke<HardwareSnapshot>('local_model_hardware_snapshot')
+}
+
+export async function prepareNativeLocalModel(
+  modelReleaseId: string,
+  catalogBinding: LocalCatalogBinding
+): Promise<LocalReadinessEvidence> {
+  return invoke<LocalReadinessEvidence>('local_model_prepare', { modelReleaseId, catalogBinding })
+}
+
+/** Actual OpenAI-compatible llama.cpp path; endpoint, API key and files stay native. */
+export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
+  async stream(_release: LocalModelReleaseManifest, request: LocalRuntimeRequest): Promise<InferenceResult> {
+    const channel = new Channel<NativeInferenceEvent>()
+    let accumulated = ''
+    channel.onmessage = event => {
+      if (event.type === 'delta') {
+        if (request.signal?.aborted) return
+        accumulated += event.content
+        request.onToken?.(accumulated)
+      }
+    }
+
+    const result = await invoke<NativeInferenceResult>('local_model_infer', {
+      request: {
+        requestId: request.requestId,
+        scopeDigest: request.scopeDigest,
+        modelReleaseId: request.modelReleaseId,
+        catalogBinding: request.catalogBinding,
+        useCase: request.taskType ?? 'chat.general',
+        messages: request.messages,
+        tools: request.tools ?? [],
+        toolChoice: request.toolChoice ?? 'auto',
+        maxOutputTokens: request.maxOutputTokens ?? 2_048,
+        contextLimit: request.contextLimit,
+        reasoningMode: request.reasoningMode ?? 'auto',
+      },
+      onEvent: channel,
+    })
+    return {
+      content: result.content,
+      rawToolCalls: result.rawToolCalls,
+      toolCalls: result.rawToolCalls.map(call => {
+        let args: Record<string, unknown> = {}
+        try {
+          const parsed = JSON.parse(call.function.arguments)
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) args = parsed
+        } catch {
+          // The agent loop receives an empty object and the raw arguments for audit.
+        }
+        return {
+          id: call.id,
+          name: call.function.name,
+          arguments: args,
+          rawArguments: call.function.arguments,
+        }
+      }),
+      finishReason: result.finishReason,
+      requestId: result.requestId,
+      model: request.modelReleaseId,
+      provider: 'local',
+      target: 'local_llama_cpp',
+      useCase: request.taskType ?? 'chat.general',
+    }
+  }
+
+  cancel(requestId: string, catalogBinding: LocalCatalogBinding): Promise<void> {
+    return invoke('local_model_cancel', { requestId, catalogBinding })
+  }
+
+  stop(modelReleaseId: string, catalogBinding: LocalCatalogBinding): Promise<void> {
+    return invoke('local_model_stop', { modelReleaseId, catalogBinding })
+  }
+}

@@ -46,6 +46,7 @@ import {
   type RepositoryExternalPolicy,
   type RepositoryGraphStatus,
 } from '@/services/repositoryGraph'
+import { FLASH_EXPERIMENT_SETTING_KEY } from '@/services/inference/hybridRouter'
 
 import { setStatus } from '@/state/hud'
 import { state, mutations } from '@/state/store'
@@ -889,6 +890,7 @@ async function send() {
     400,
     12000
   )
+  const experimentalFlashNext = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
   const history = compactHistory(fullHistory, historyBudget)
 
   const contextFragments: PromptFragment[] = []
@@ -984,33 +986,56 @@ async function send() {
 
   try {
     void playSfx('loading')
-    const { finalText, requestId, model, provider, useCase, toolFailures, toolSuccesses, ephemeralDataUsed } =
-      await runAgent({
-        projectId: pid,
-        baseMessages,
-        mode: mode.value,
-        getMode: () => mode.value,
-        toolChoice: shouldRequireToolCall(text) ? 'required' : 'auto',
-        taskType: promptContext.taskType,
-        contextId: promptContext.contextId,
-        repoId: promptContext.repoId,
-        branch: promptContext.branch,
-        commitSha: promptContext.commitSha,
-        inputSource,
-        signal: abort.signal,
+    const {
+      finalText,
+      requestId,
+      model,
+      provider,
+      useCase,
+      inferenceTarget,
+      routeDecisionId,
+      toolFailures,
+      toolSuccesses,
+      ephemeralDataUsed,
+    } = await runAgent({
+      projectId: pid,
+      baseMessages,
+      // This list is assembled exclusively through the existing provider-safe
+      // prompt path. Local-only broker fragments are never reused here.
+      externalBaseMessages: baseMessages,
+      contextEgress: 'external_allowed',
+      routingSettings: { experimentalFlashNext },
+      requestExternalApproval: ({ packetHash, destination, messageCount, characterCount }) =>
+        window.confirm(
+          'Das lokale Modell ist für diese Anfrage nicht verfügbar.\n\n' +
+            `Dürfen ${messageCount} begrenzte Nachrichten (${characterCount} Zeichen) einmalig an das externe Modell gesendet werden?\n` +
+            `Ziel: ${destination}\n` +
+            'Tools und Folgerunden sind in dieser Freigabe gesperrt.\n' +
+            `Paket: ${packetHash.slice(0, 16)}…`
+        ),
+      mode: mode.value,
+      getMode: () => mode.value,
+      toolChoice: shouldRequireToolCall(text) ? 'required' : 'auto',
+      taskType: promptContext.taskType,
+      contextId: promptContext.contextId,
+      repoId: promptContext.repoId,
+      branch: promptContext.branch,
+      commitSha: promptContext.commitSha,
+      inputSource,
+      signal: abort.signal,
 
-        // Live streaming: parse the envelope progressively and render it.
-        onToken: raw => {
-          if (!streamStarted) {
-            streamStarted = true
-            stopAssistantLoading()
-            try {
-              stopSfx('loading')
-            } catch {}
-          }
-          applyStreamedContent(pid, assistant.id, raw, false)
-        },
-      })
+      // Live streaming: parse the envelope progressively and render it.
+      onToken: raw => {
+        if (!streamStarted) {
+          streamStarted = true
+          stopAssistantLoading()
+          try {
+            stopSfx('loading')
+          } catch {}
+        }
+        applyStreamedContent(pid, assistant.id, raw, false)
+      },
+    })
 
     try {
       stopSfx('loading')
@@ -1027,6 +1052,8 @@ async function send() {
           model,
           provider,
           useCase,
+          inferenceTarget,
+          routeDecisionId,
           ...(ephemeralDataUsed ? { dataHandling: 'ephemeral' as const } : {}),
         },
       })

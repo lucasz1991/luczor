@@ -5,12 +5,18 @@
 // memory when the server isn't used/reachable.
 
 import { Store } from '@tauri-apps/plugin-store'
-import { fetchWithTimeout, getApiConfig, type LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
+import {
+  DEFAULT_FETCH_TIMEOUT_MS,
+  fetchBoundedResponseWithTimeout,
+  getApiConfig,
+  type LuczorApiConfigSnapshot,
+} from '@/services/api/luczorApi'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { luczorMemory } from '@/services/memory/luczorMemory'
 import { buildLocalRepositoryContext, type LocalRepositoryContext } from '@/services/repositoryGraph'
 
 const SETTINGS_FILE = 'luczor.settings.json'
+const MAX_CONTEXT_RESPONSE_BYTES = 1024 * 1024
 
 export type ContextPackage = {
   context_id: string
@@ -73,30 +79,36 @@ export async function askContext(opts: {
   const srv = await serverTarget(opts.account?.config)
   if (!srv) return null
 
-  const res = await fetchWithTimeout(`${srv.baseUrl}/api/v1/context/ask`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${srv.deviceKey}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify({
-      query: opts.query,
-      project_id: opts.projectId,
-      task_type: opts.taskType ?? inferTaskType(opts.query),
-      feature_key: opts.featureKey,
-      budget: {
-        max_input_tokens: opts.maxTokens ?? 800,
-        max_items: Math.max(1, Math.min(20, Math.round(opts.maxItems ?? 6))),
+  const { response, text } = await fetchBoundedResponseWithTimeout(
+    `${srv.baseUrl}/api/v1/context/ask`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${srv.deviceKey}`,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
       },
-      repo_id: opts.localRepository?.repositoryId,
-      branch: opts.localRepository?.branch,
-      commit_sha: opts.localRepository?.commitSha,
-      code: opts.localRepository?.hints ?? [],
-    }),
-  })
-  if (!res.ok) throw new Error(`context/ask HTTP ${res.status}`)
-  return (await res.json()) as ContextPackage
+      body: JSON.stringify({
+        query: opts.query,
+        project_id: opts.projectId,
+        task_type: opts.taskType ?? inferTaskType(opts.query),
+        feature_key: opts.featureKey,
+        budget: {
+          max_input_tokens: opts.maxTokens ?? 800,
+          max_items: Math.max(1, Math.min(20, Math.round(opts.maxItems ?? 6))),
+        },
+        repo_id: opts.localRepository?.repositoryId,
+        branch: opts.localRepository?.branch,
+        commit_sha: opts.localRepository?.commitSha,
+        code: opts.localRepository?.hints ?? [],
+      }),
+      redirect: 'error',
+    },
+    DEFAULT_FETCH_TIMEOUT_MS,
+    MAX_CONTEXT_RESPONSE_BYTES
+  )
+  if (!response.ok) throw new Error(`context/ask HTTP ${response.status}`)
+  return JSON.parse(text) as ContextPackage
 }
 
 /**

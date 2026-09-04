@@ -52,7 +52,8 @@ describe('verified account principal', () => {
   })
 
   it('keeps the principal stable across Device-Key rotation and canonical URL variants', async () => {
-    const { getVerifiedAccountSnapshot } = await import('@/services/accountPrincipal')
+    const { deriveLocalModelManifestTrustDomain, getVerifiedAccountSnapshot } =
+      await import('@/services/accountPrincipal')
 
     const first = await getVerifiedAccountSnapshot()
     harness.config = {
@@ -65,12 +66,16 @@ describe('verified account principal', () => {
     expect(first?.principalId).toMatch(/^account:v2:[a-f0-9]{64}$/)
     expect(rotated?.principalId).toBe(first?.principalId)
     expect(rotated?.config.deviceKey).toBe('device-key-b')
+    await expect(deriveLocalModelManifestTrustDomain(first!)).resolves.toBe(
+      await deriveLocalModelManifestTrustDomain(rotated!)
+    )
     expect(Object.isFrozen(rotated)).toBe(true)
     expect(Object.isFrozen(rotated?.config)).toBe(true)
   })
 
   it('uses the normalized deployment path to separate server instances on the same origin', async () => {
-    const { getVerifiedAccountSnapshot } = await import('@/services/accountPrincipal')
+    const { deriveLocalModelManifestTrustDomain, getVerifiedAccountSnapshot } =
+      await import('@/services/accountPrincipal')
 
     harness.config.baseUrl = 'https://memory.example.test/luczor-a/'
     const first = await getVerifiedAccountSnapshot()
@@ -81,6 +86,10 @@ describe('verified account principal', () => {
     expect(first?.serverInstance).toBe('https://memory.example.test/luczor-a')
     expect(second?.serverInstance).toBe('https://memory.example.test/luczor-b')
     expect(second?.principalId).not.toBe(first?.principalId)
+    expect(await deriveLocalModelManifestTrustDomain(first!)).toMatch(/^server:v1:[a-f0-9]{64}$/)
+    expect(await deriveLocalModelManifestTrustDomain(second!)).not.toBe(
+      await deriveLocalModelManifestTrustDomain(first!)
+    )
   })
 
   it('partitions different authenticated server users and passes one exact config snapshot to bootstrap', async () => {

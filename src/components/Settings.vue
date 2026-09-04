@@ -16,6 +16,10 @@ import {
   type AppNotificationCategory,
   type NotificationCategoryPreferences,
 } from '@/services/api/luczorApi'
+import {
+  invalidateLocalInferenceApiIdentity,
+  reinitializeLocalInferenceForCurrentApi,
+} from '@/services/inference/coordinator'
 import { loadAppearance, type HudPosition } from '@/services/appearance'
 import {
   getPushNotificationPreferences,
@@ -23,6 +27,7 @@ import {
   setPushNotificationPreferences,
 } from '@/services/notifications'
 import { AUTO_EXECUTE_MUTATING_TOOLS_KEY, DEFAULT_EXECUTION_POLICY } from '@/services/executionPolicy'
+import { FLASH_EXPERIMENT_SETTING_KEY } from '@/services/inference/hybridRouter'
 import type { VoiceMode } from '@/services/voice/localVoice'
 
 type SettingsTab = 'server' | 'notifications' | 'execution' | 'voice' | 'chat' | 'appearance' | 'privacy'
@@ -46,6 +51,7 @@ type AppSettings = {
   chat_auto_speech: boolean
   chat_auto_speech_mode: ChatAutoSpeechMode
   client_history_token_budget: number
+  local_model_flash_experiment: boolean
 
   // Tool execution
   auto_execute_mutating_tools: boolean
@@ -81,6 +87,7 @@ const DEFAULTS: AppSettings = {
   chat_auto_speech: true,
   chat_auto_speech_mode: 'assistant_only',
   client_history_token_budget: 2400,
+  local_model_flash_experiment: false,
   auto_execute_mutating_tools: DEFAULT_EXECUTION_POLICY.autoExecuteMutatingTools,
   voice_mode: 'wakeword',
   voice_wake_word: 'luczor',
@@ -179,6 +186,7 @@ async function ensureStoreLoaded() {
   const historyBudget = await settingsStore.get<number>('client_history_token_budget')
   if (typeof historyBudget === 'number' && !Number.isNaN(historyBudget))
     settings.client_history_token_budget = clamp(historyBudget, 400, 12000)
+  settings.local_model_flash_experiment = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
   const autoExecuteMutatingTools = await settingsStore.get<unknown>(AUTO_EXECUTE_MUTATING_TOOLS_KEY)
   settings.auto_execute_mutating_tools = autoExecuteMutatingTools === true
   const voiceMode = await settingsStore.get<VoiceMode>('voice_mode')
@@ -259,7 +267,13 @@ async function saveAll() {
     }
   }
 
-  // Luczor Admin API
+  // Luczor Admin API. Invalidate the signed local policy before changing the
+  // account/server identity; a fresh bootstrap may reactivate it afterwards.
+  const currentApi = await getApiConfig()
+  const nextApiBase = settings.luczor_api_base_url.trim().replace(/\/+$/, '')
+  const apiIdentityChanged =
+    currentApi.baseUrl !== nextApiBase || currentApi.deviceKey !== settings.luczor_device_key.trim()
+  if (apiIdentityChanged) await invalidateLocalInferenceApiIdentity()
   await settingsStore.set('luczor_api_base_url', settings.luczor_api_base_url.trim().replace(/\/+$/, ''))
   await saveDeviceKey(settings.luczor_device_key)
 
@@ -270,6 +284,7 @@ async function saveAll() {
     'client_history_token_budget',
     clamp(Math.round(settings.client_history_token_budget), 400, 12000)
   )
+  await settingsStore.set(FLASH_EXPERIMENT_SETTING_KEY, settings.local_model_flash_experiment)
   await settingsStore.set(AUTO_EXECUTE_MUTATING_TOOLS_KEY, settings.auto_execute_mutating_tools)
   await settingsStore.set('voice_mode', settings.voice_mode)
   await settingsStore.set('voice_wake_word', settings.voice_wake_word.trim().toLowerCase() || 'luczor')
@@ -296,6 +311,7 @@ async function saveAll() {
   await settingsStore.set('use_server_proxy', true)
 
   await settingsStore.save()
+  if (apiIdentityChanged) void reinitializeLocalInferenceForCurrentApi().catch(() => undefined)
   await loadAppearance() // re-apply theme/HUD/name live
   setSavedPulse()
 }
@@ -311,9 +327,15 @@ async function resetChatSettings() {
  * --------------------------- */
 async function persistServerConfig() {
   if (!settingsStore) return
-  await settingsStore.set('luczor_api_base_url', settings.luczor_api_base_url.trim().replace(/\/+$/, ''))
+  const currentApi = await getApiConfig()
+  const nextApiBase = settings.luczor_api_base_url.trim().replace(/\/+$/, '')
+  const apiIdentityChanged =
+    currentApi.baseUrl !== nextApiBase || currentApi.deviceKey !== settings.luczor_device_key.trim()
+  if (apiIdentityChanged) await invalidateLocalInferenceApiIdentity()
+  await settingsStore.set('luczor_api_base_url', nextApiBase)
   await saveDeviceKey(settings.luczor_device_key)
   await settingsStore.save()
+  if (apiIdentityChanged) void reinitializeLocalInferenceForCurrentApi().catch(() => undefined)
 }
 
 async function testServer() {
@@ -645,6 +667,23 @@ function iconPath(kind: string) {
                   <p class="lz-hint">
                     An = Chat läuft über den Server, der den OpenRouter-Key injiziert. Dann ist lokal kein
                     OpenRouter-Key nötig.
+                  </p>
+                  <div class="lz-row">
+                    <span class="lz-rowlabel">Flash-Next lokal experimentell bevorzugen</span>
+                    <button
+                      type="button"
+                      class="lz-switch"
+                      :class="{ 'is-on': settings.local_model_flash_experiment }"
+                      role="switch"
+                      :aria-checked="settings.local_model_flash_experiment"
+                      @click="settings.local_model_flash_experiment = !settings.local_model_flash_experiment"
+                    >
+                      <span />
+                    </button>
+                  </div>
+                  <p class="lz-hint">
+                    Standardmäßig aus. Wirkt nur, wenn das signierte Manifest Flash-Next ausdrücklich aktiviert, aber
+                    noch nicht zum stabilen Hauptmodell befördert hat, und alle lokalen Prüfungen bestehen.
                   </p>
                   <div class="lz-row">
                     <span class="lz-rowlabel">Auto-Sync im Hintergrund</span>

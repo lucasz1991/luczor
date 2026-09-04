@@ -2,7 +2,7 @@ import { listen } from '@tauri-apps/api/event'
 import { Store } from '@tauri-apps/plugin-store'
 import type { Ref } from 'vue'
 import type { LuczorMode } from '@/services/openrouter.service'
-import { LuczorApi } from '@/services/api/luczorApi'
+import { LuczorApi, type BootstrapResponse } from '@/services/api/luczorApi'
 import { loadAppearance } from '@/services/appearance'
 import { installDebugCapture, startDebugCollector } from '@/services/debug'
 import { startDeviceJobChannel } from '@/services/deviceJobs'
@@ -11,6 +11,11 @@ import { loadAppState } from '@/services/persistence'
 import { loadPlans } from '@/services/plan'
 import { luczorMemory } from '@/services/memory/luczorMemory'
 import { preloadSfx } from '@/services/sfx'
+import {
+  beginLocalInferenceBootstrap,
+  initializeLocalInference,
+  markLocalInferenceBootstrapUnavailable,
+} from '@/services/inference/coordinator'
 import { refreshStatus } from '@/services/status'
 import { startHud } from '@/state/hud'
 import { mutations } from '@/state/store'
@@ -50,7 +55,10 @@ export type AppRuntimeLifecycleDependencies = {
   hydrate: (loaded: AppState) => void
   ensureDefaults: () => void
   loadSettingsStore: () => Promise<RuntimeSettingsStore>
-  bootstrap: () => Promise<{ runtime_settings?: { settings?: Record<string, unknown> } }>
+  bootstrap: () => Promise<BootstrapResponse | { runtime_settings?: { settings?: Record<string, unknown> } }>
+  beginLocalInferenceBootstrap?: () => Promise<number>
+  initializeLocalInference?: (bootstrap: BootstrapResponse, expectedPendingGeneration?: number) => Promise<boolean>
+  markLocalInferenceBootstrapUnavailable?: (expectedGeneration?: number) => void
   listenHotkey: (listener: () => void) => Promise<void>
   refreshStatus: () => void | Promise<void>
   setStatusHeartbeat: (listener: () => void, intervalMs: number) => number
@@ -99,6 +107,9 @@ function createDefaultDependencies(): AppRuntimeLifecycleDependencies {
     ensureDefaults: () => mutations.ensureDefaults(),
     loadSettingsStore: () => Store.load('luczor.settings.json'),
     bootstrap: () => LuczorApi.bootstrap(),
+    beginLocalInferenceBootstrap,
+    initializeLocalInference,
+    markLocalInferenceBootstrapUnavailable,
     listenHotkey: async listener => {
       await listen('luczor://hotkey', listener)
     },
@@ -120,6 +131,19 @@ export function createAppRuntimeLifecycle(
   let statusHeartbeat: number | null = null
 
   async function start(): Promise<void> {
+    let localBootstrapGeneration: number | undefined
+    let localManifestBoundaryReady = false
+    try {
+      if (!dependencies.beginLocalInferenceBootstrap) {
+        throw new Error('Native local-model manifest boundary is unavailable.')
+      }
+      localBootstrapGeneration = await dependencies.beginLocalInferenceBootstrap()
+      localManifestBoundaryReady = true
+    } catch (error) {
+      dependencies.markLocalInferenceBootstrapUnavailable?.(localBootstrapGeneration)
+      dependencies.warn('[local-model] native manifest boundary unavailable', error)
+    }
+
     dependencies.addNotificationActionListener(options.openNotificationCenter)
     void dependencies
       .startNotificationActionListener()
@@ -151,23 +175,32 @@ export function createAppRuntimeLifecycle(
       const restoredMode = resolveStartupMode(persistedMode, defaultMode, options.allowUnrestricted.value)
       if (restoredMode) options.mode.value = restoredMode
 
-      void (async () => {
-        try {
-          const bootstrap = await dependencies.bootstrap()
-          const remoteAllow = bootstrap.runtime_settings?.settings?.allow_unrestricted
-          if (remoteAllow === true || remoteAllow === false) {
-            options.allowUnrestricted.value = remoteAllow
-            await settings.set('allow_unrestricted', remoteAllow)
-            if (!remoteAllow && options.mode.value === 'unrestricted') {
-              options.mode.value = 'observe'
-              await settings.set(ACTIVE_MODE_KEY, 'observe')
+      if (localManifestBoundaryReady)
+        void (async () => {
+          try {
+            const bootstrap = await dependencies.bootstrap()
+            if (dependencies.initializeLocalInference) {
+              const accepted = await dependencies.initializeLocalInference(
+                bootstrap as BootstrapResponse,
+                localBootstrapGeneration
+              )
+              if (!accepted) return
             }
-            await settings.save()
+            const remoteAllow = bootstrap.runtime_settings?.settings?.allow_unrestricted
+            if (remoteAllow === true || remoteAllow === false) {
+              options.allowUnrestricted.value = remoteAllow
+              await settings.set('allow_unrestricted', remoteAllow)
+              if (!remoteAllow && options.mode.value === 'unrestricted') {
+                options.mode.value = 'observe'
+                await settings.set(ACTIVE_MODE_KEY, 'observe')
+              }
+              await settings.save()
+            }
+          } catch {
+            dependencies.markLocalInferenceBootstrapUnavailable?.(localBootstrapGeneration)
+            // No signed policy is restored from disk; routing stays blocked.
           }
-        } catch {
-          // Offline: keep the last locally cached policy.
-        }
-      })()
+        })()
     } catch {
       // Local settings are optional; the in-memory defaults remain valid.
     }

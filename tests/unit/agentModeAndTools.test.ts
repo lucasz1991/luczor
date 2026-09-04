@@ -12,11 +12,21 @@ const mocks = vi.hoisted(() => ({
   updateToolCallStatus: vi.fn(),
   addHiddenToolMessage: vi.fn(),
   logAgentEvent: vi.fn(),
+  resolveInferenceRouteForTurn: vi.fn(),
+  hashInferenceEgressRequest: vi.fn(),
+  getApiConfigSnapshot: vi.fn(),
   hud: { killSwitch: false },
 }))
 
 vi.mock('@/services/openrouter.service', () => ({
   OpenRouterService: { streamChatWithTools: mocks.streamChatWithTools },
+}))
+vi.mock('@/services/inference/coordinator', () => ({
+  resolveInferenceRouteForTurn: mocks.resolveInferenceRouteForTurn,
+  hashInferenceEgressRequest: mocks.hashInferenceEgressRequest,
+}))
+vi.mock('@/services/api/luczorApi', () => ({
+  getApiConfigSnapshot: mocks.getApiConfigSnapshot,
 }))
 vi.mock('@/services/tools/registry', () => ({
   getTool: mocks.getTool,
@@ -43,6 +53,7 @@ vi.mock('@/state/hud', () => ({
 vi.mock('@/services/api/sync', () => ({ logAgentEvent: mocks.logAgentEvent }))
 
 import { buildSystemPreamble, looksLikeInternalReasoningLeak, runAgent, shouldRequireToolCall } from '@/services/agent'
+import { LocalInferenceError } from '@/services/inference/localModelManager'
 
 const toolCallResult = {
   content: 'interne Tool-Überlegung',
@@ -60,6 +71,19 @@ const toolCallResult = {
 describe('agent mode and tool reliability', () => {
   beforeEach(() => {
     vi.resetAllMocks()
+    mocks.resolveInferenceRouteForTurn.mockResolvedValue({
+      gateway: {
+        id: 'test-laravel',
+        target: 'laravel_proxy',
+        streamChatWithTools: mocks.streamChatWithTools,
+      },
+    })
+    mocks.hashInferenceEgressRequest.mockResolvedValue('a'.repeat(64))
+    mocks.getApiConfigSnapshot.mockResolvedValue({
+      baseUrl: 'https://luczor.example/luczor-a',
+      deviceKey: 'device-key',
+      clientId: 'desktop-1',
+    })
     mocks.hud.killSwitch = false
     mocks.toOpenAITools.mockReturnValue([
       { type: 'function', function: { name: 'project_get_state', parameters: {} } },
@@ -245,6 +269,77 @@ describe('agent mode and tool reliability', () => {
     expect(visibleTokens).toHaveBeenCalledTimes(1)
     expect(visibleTokens).toHaveBeenCalledWith('Hallo! Wie kann ich helfen?')
     expect(result.finalText).toBe('Hallo! Wie kann ich helfen?')
+  })
+
+  it('fails closed instead of retrying a one-shot external reasoning leak', async () => {
+    mocks.resolveInferenceRouteForTurn.mockResolvedValueOnce({
+      gateway: {
+        id: 'approved-external',
+        target: 'laravel_proxy',
+        streamChatWithTools: mocks.streamChatWithTools,
+      },
+      replacementMessages: [{ role: 'user', content: 'Hallo' }],
+      externalOneShot: true,
+    })
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: 'We need to respond: The user says hello. According to system...',
+      toolCalls: [],
+      rawToolCalls: [],
+    })
+
+    await expect(
+      runAgent({
+        projectId: 'project-2',
+        baseMessages: [{ role: 'user', content: 'Hallo' }],
+        mode: 'observe',
+      })
+    ).rejects.toMatchObject({ code: 'external_unsafe_response' })
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(1)
+  })
+
+  it('propagates Flash opt-in and rebuilds one approved external turn only from provider-safe messages', async () => {
+    mocks.resolveInferenceRouteForTurn
+      .mockRejectedValueOnce(new LocalInferenceError('approval required', 'external_approval_required', false, false))
+      .mockImplementationOnce(async input => ({
+        gateway: {
+          id: 'approved-external',
+          target: 'laravel_proxy',
+          streamChatWithTools: mocks.streamChatWithTools,
+        },
+        replacementMessages: input.externalPackage.messages,
+        externalOneShot: true,
+      }))
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: 'Sichere externe Antwort',
+      toolCalls: [],
+      rawToolCalls: [],
+    })
+    const approve = vi.fn(async () => true)
+
+    const result = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'system', content: 'LOCAL_ONLY_SECRET' }],
+      externalBaseMessages: [{ role: 'user', content: 'Provider-sichere Frage' }],
+      mode: 'observe',
+      routingSettings: { experimentalFlashNext: true },
+      requestExternalApproval: approve,
+    })
+
+    expect(mocks.resolveInferenceRouteForTurn.mock.calls[0]![0]).toMatchObject({
+      routingSettings: { experimentalFlashNext: true },
+    })
+    expect(approve).toHaveBeenCalledWith(
+      expect.objectContaining({
+        packetHash: 'a'.repeat(64),
+        destination: 'https://luczor.example/luczor-a',
+        toolsAllowed: false,
+      })
+    )
+    const sent = mocks.streamChatWithTools.mock.calls[0]![0]
+    expect(JSON.stringify(sent.messages)).toContain('Provider-sichere Frage')
+    expect(JSON.stringify(sent.messages)).not.toContain('LOCAL_ONLY_SECRET')
+    expect(sent).toMatchObject({ tools: [], toolChoice: 'none' })
+    expect(result).toMatchObject({ finalText: 'Sichere externe Antwort', inferenceTarget: 'laravel_proxy' })
   })
 
   it('re-checks the kill switch after an approval wait', async () => {

@@ -1,6 +1,7 @@
 const path = require('node:path')
 const test = require('node:test')
 const assert = require('node:assert/strict')
+const crypto = require('node:crypto')
 
 const { compareVersions, inspectProject, parseVersion } = require('./release-readiness.cjs')
 
@@ -30,6 +31,8 @@ test('rejects an unpinned runtime and incomplete production release', () => {
   })
   assert.ok(productionResult.errors.some(error => error.includes('updater requirement missing')))
   assert.ok(productionResult.errors.some(error => error.includes('release secret missing')))
+  assert.ok(productionResult.errors.some(error => error.includes('local-model manifest key id')))
+  assert.ok(productionResult.errors.some(error => error.includes('local-model manifest public key')))
 
   const placeholderResult = inspectProject({
     root: projectRoot,
@@ -44,3 +47,94 @@ test('rejects an unpinned runtime and incomplete production release', () => {
   })
   assert.ok(placeholderResult.errors.some(error => error.includes('is a placeholder')))
 })
+
+test('validates the public local-model trust anchor and paired absolute runtime paths', () => {
+  const publicPem = require('node:fs').readFileSync(
+    path.join(projectRoot, 'tests', 'fixtures', 'local-model-manifest-test-public.pem'),
+    'utf8'
+  )
+  const result = inspectProject({
+    root: projectRoot,
+    mode: 'production',
+    runtimeVersion: '22.22.0',
+    environment: {
+      LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID: 'luczor-local-model-2026-01',
+      LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64: Buffer.from(publicPem).toString('base64'),
+      LUCZOR_LLAMA_CPP_BIN: 'relative/llama-server',
+      LUCZOR_LOCAL_MODEL_DIR: 'D:\\models',
+    },
+  })
+  expectErrors(result.errors)
+  assert.ok(result.errors.some(error => error.includes('paths must be absolute')))
+  assert.ok(!result.errors.some(error => error.includes('manifest key id')))
+  assert.ok(!result.errors.some(error => error.includes('manifest public key')))
+
+  const invalidPem = inspectProject({
+    root: projectRoot,
+    mode: 'production',
+    runtimeVersion: '22.22.0',
+    environment: {
+      LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID: 'luczor-local-model-2026-01',
+      LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64: Buffer.from(
+        '-----BEGIN PUBLIC KEY-----\nTEST\n-----END PUBLIC KEY-----\n'
+      ).toString('base64'),
+    },
+  })
+  assert.ok(invalidPem.errors.some(error => error.includes('manifest public key')))
+
+  for (const publicKey of [
+    crypto.generateKeyPairSync('ec', { namedCurve: 'P-256' }).publicKey,
+    crypto.generateKeyPairSync('rsa', { modulusLength: 1024 }).publicKey,
+  ]) {
+    const rejected = inspectProject({
+      root: projectRoot,
+      mode: 'production',
+      runtimeVersion: '22.22.0',
+      environment: {
+        LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID: 'luczor-local-model-2026-01',
+        LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64: Buffer.from(
+          publicKey.export({ type: 'spki', format: 'pem' })
+        ).toString('base64'),
+      },
+    })
+    assert.ok(rejected.errors.some(error => error.includes('manifest public key')))
+  }
+
+  const pkcs1 = crypto
+    .generateKeyPairSync('rsa', { modulusLength: 2048 })
+    .publicKey.export({ type: 'pkcs1', format: 'pem' })
+  for (const invalidEncoding of [
+    Buffer.from(pkcs1).toString('base64'),
+    `${Buffer.from(publicPem).toString('base64').slice(0, 40)}\n${Buffer.from(publicPem)
+      .toString('base64')
+      .slice(40)}`,
+    Buffer.from(`${publicPem}garbage`).toString('base64'),
+    Buffer.from(publicPem).toString('base64').replace(/=+$/, ''),
+  ]) {
+    const rejected = inspectProject({
+      root: projectRoot,
+      mode: 'production',
+      runtimeVersion: '22.22.0',
+      environment: {
+        LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID: 'luczor-local-model-2026-01',
+        LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64: invalidEncoding,
+      },
+    })
+    assert.ok(rejected.errors.some(error => error.includes('manifest public key')))
+  }
+
+  const invalidBase64 = inspectProject({
+    root: projectRoot,
+    mode: 'production',
+    runtimeVersion: '22.22.0',
+    environment: {
+      LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID: 'luczor-local-model-2026-01',
+      LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64: 'not-base64',
+    },
+  })
+  assert.ok(invalidBase64.errors.some(error => error.includes('manifest public key')))
+})
+
+function expectErrors(errors) {
+  assert.ok(errors.length > 0)
+}

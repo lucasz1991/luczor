@@ -20,6 +20,20 @@ export type VerifiedAccountSnapshot = Readonly<{
   config: LuczorApiConfigSnapshot
 }>
 
+/**
+ * Stable, non-reversible namespace for server-wide signed local-model policy.
+ * It deliberately excludes account, client and device credentials so rotation
+ * does not reset native anti-downgrade history.
+ */
+export async function deriveLocalModelManifestTrustDomain(snapshot: VerifiedAccountSnapshot): Promise<string> {
+  const canonical = canonicalServer(snapshot.config.baseUrl)
+  if (canonical.instance !== snapshot.serverInstance) {
+    throw new AccountPrincipalVerificationError('Die verifizierte Server-Identität ist widersprüchlich.')
+  }
+  const digest = await strongSha256(`luczor-local-model-manifest-domain-v1\u0000${snapshot.serverInstance}`)
+  return `server:v1:${digest}`
+}
+
 type CredentialBinding = {
   credentialId: string
   serverInstance: string
