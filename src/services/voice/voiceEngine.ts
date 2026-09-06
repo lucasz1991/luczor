@@ -18,12 +18,13 @@
 import { setMicLevel, pulse, setStatus } from '@/state/hud'
 import { chunksToWavBase64 } from './wav'
 import { cleanSttTranscript } from './transcript'
-import { HandsFreeMachine, type StrategyConfig } from './voiceStrategy'
+import { HandsFreeMachine, type StrategyConfig, type VoiceCompletionReason } from './voiceStrategy'
 import { BargeInDetector } from './bargeIn'
 import { findWakeWord } from './voicePhrases'
 
 export { findWakeWord } from './voicePhrases'
 export type { VoicePhraseMatch as WakeWordMatch } from './voicePhrases'
+export type { VoiceCompletionReason } from './voiceStrategy'
 
 export type VoiceEngineMode = 'continuous' | 'wakeword'
 export type VoiceEngineState = 'stopped' | 'listening' | 'armed' | 'dictating' | 'transcribing' | 'muted' | 'error'
@@ -33,8 +34,8 @@ export type VoiceEngineOptions = {
   wakeWord?: string
   /** Transcribe a captured utterance (WAV base64) to text. */
   transcribe: (wavBase64: string, mime: string) => Promise<string>
-  /** Called with a recognized command (post wake-word for wakeword mode). */
-  onCommand: (text: string) => void
+  /** Final command and its confirmed completion cause; legacy mode has no explicit cause. */
+  onCommand: (text: string, reason?: VoiceCompletionReason) => void
   /** Optional: raw transcript of every utterance (for debugging/HUD). */
   onUtterance?: (text: string) => void
   /** Runtime or transcription failures; callers can expose a concise state and retain diagnostics. */
@@ -245,8 +246,8 @@ export class VoiceEngine {
         const allowed = () => this.valid(generation, opts) && !this.muted && !this.suppressMachineCallbacks
         this.machine = new HandsFreeMachine(
           opts.handsFree,
-          text => {
-            if (allowed()) opts.onCommand(text)
+          (text, reason) => {
+            if (allowed()) opts.onCommand(text, reason)
           },
           text => {
             if (allowed()) opts.onPartial?.(text)

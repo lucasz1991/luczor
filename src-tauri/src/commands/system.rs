@@ -8,7 +8,9 @@
 // the main webview itself remains the explicit trust boundary.
 
 use base64::Engine;
-use enigo::{Axis, Button, Coordinate, Direction, Enigo, Key, Keyboard, Mouse, Settings};
+#[cfg(not(windows))]
+use enigo::Coordinate;
+use enigo::{Axis, Button, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use nvml_wrapper::{enum_wrappers::device::TemperatureSensor, Nvml};
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
@@ -22,23 +24,107 @@ use super::ensure_main_webview;
  * Perception
  * ========================================================= */
 
+#[derive(Debug, Serialize, Clone)]
+pub struct MonitorInfo {
+    pub id: u32,
+    pub name: String,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub scale_factor: f32,
+    pub primary: bool,
+}
+
+fn monitor_info(monitor: &xcap::Monitor) -> Result<MonitorInfo, String> {
+    let info = MonitorInfo {
+        id: monitor
+            .id()
+            .map_err(|e| format!("Monitor::id failed: {e}"))?,
+        name: monitor
+            .name()
+            .map_err(|e| format!("Monitor::name failed: {e}"))?,
+        x: monitor.x().map_err(|e| format!("Monitor::x failed: {e}"))?,
+        y: monitor.y().map_err(|e| format!("Monitor::y failed: {e}"))?,
+        width: monitor
+            .width()
+            .map_err(|e| format!("Monitor::width failed: {e}"))?,
+        height: monitor
+            .height()
+            .map_err(|e| format!("Monitor::height failed: {e}"))?,
+        scale_factor: monitor
+            .scale_factor()
+            .map_err(|e| format!("Monitor::scale_factor failed: {e}"))?,
+        primary: monitor
+            .is_primary()
+            .map_err(|e| format!("Monitor::is_primary failed: {e}"))?,
+    };
+    if info.width == 0
+        || info.height == 0
+        || !info.scale_factor.is_finite()
+        || info.scale_factor <= 0.0
+    {
+        return Err("Monitor geometry is unavailable.".into());
+    }
+    Ok(info)
+}
+
+/// Native desktop coordinates, including negative origins on secondary displays.
+#[tauri::command]
+pub async fn list_monitors(window: WebviewWindow) -> Result<Vec<MonitorInfo>, String> {
+    ensure_main_webview(&window)?;
+    let monitors = xcap::Monitor::all().map_err(|e| format!("Monitor::all failed: {e}"))?;
+    if monitors.is_empty() {
+        return Err("No monitor found".into());
+    }
+    monitors.iter().map(monitor_info).collect()
+}
+
+fn select_monitor_index(
+    monitors: &[MonitorInfo],
+    requested_id: Option<u32>,
+) -> Result<usize, String> {
+    monitors
+        .iter()
+        .position(|monitor| match requested_id {
+            Some(id) => monitor.id == id,
+            None => monitor.primary,
+        })
+        .ok_or_else(|| match requested_id {
+            Some(_) => "Selected monitor is no longer available. Refresh os_environment.".into(),
+            None => "Primary monitor is unavailable.".into(),
+        })
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScreenCapturePayload {
+    pub monitor_id: Option<u32>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct ScreenCapture {
     pub base64: String,
     pub mime: String,
     pub width: u32,
     pub height: u32,
+    pub monitor: MonitorInfo,
 }
 
-/// Capture the primary monitor as a PNG (base64).
+/// Capture the primary or explicitly selected monitor as a PNG (base64).
 #[tauri::command]
-pub async fn capture_screen(window: WebviewWindow) -> Result<ScreenCapture, String> {
+pub async fn capture_screen(
+    window: WebviewWindow,
+    payload: Option<ScreenCapturePayload>,
+) -> Result<ScreenCapture, String> {
     ensure_main_webview(&window)?;
     let monitors = xcap::Monitor::all().map_err(|e| format!("Monitor::all failed: {e}"))?;
-    let monitor = monitors
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No monitor found".to_string())?;
+    let infos: Vec<_> = monitors
+        .iter()
+        .map(monitor_info)
+        .collect::<Result<_, _>>()?;
+    let index = select_monitor_index(&infos, payload.and_then(|payload| payload.monitor_id))?;
+    let monitor = &monitors[index];
 
     let img = monitor
         .capture_image()
@@ -62,6 +148,7 @@ pub async fn capture_screen(window: WebviewWindow) -> Result<ScreenCapture, Stri
         mime: "image/png".to_string(),
         width: w,
         height: h,
+        monitor: infos[index].clone(),
     })
 }
 
@@ -76,11 +163,15 @@ pub async fn read_clipboard(window: WebviewWindow) -> Result<String, String> {
 
 #[derive(Debug, Serialize)]
 pub struct WindowInfo {
+    pub id: u32,
     pub title: String,
     pub app_name: String,
+    pub x: i32,
+    pub y: i32,
     pub width: u32,
     pub height: u32,
     pub focused: bool,
+    pub minimized: bool,
 }
 
 /// List visible windows (title + owning app). Read-only perception.
@@ -97,10 +188,13 @@ pub async fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, Stri
             continue;
         }
         out.push(WindowInfo {
+            id: w.id().map_err(|e| format!("Window::id failed: {e}"))?,
             title,
             app_name: w
                 .app_name()
                 .map_err(|e| format!("Window::app_name failed: {e}"))?,
+            x: w.x().map_err(|e| format!("Window::x failed: {e}"))?,
+            y: w.y().map_err(|e| format!("Window::y failed: {e}"))?,
             width: w
                 .width()
                 .map_err(|e| format!("Window::width failed: {e}"))?,
@@ -110,6 +204,9 @@ pub async fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, Stri
             focused: w
                 .is_focused()
                 .map_err(|e| format!("Window::is_focused failed: {e}"))?,
+            minimized: w
+                .is_minimized()
+                .map_err(|e| format!("Window::is_minimized failed: {e}"))?,
         });
     }
     Ok(out)
@@ -272,13 +369,93 @@ pub struct MoveMousePayload {
     pub y: i32,
 }
 
+fn validate_coordinates(x: i32, y: i32) -> Result<(), String> {
+    if x.unsigned_abs() > 100_000 || y.unsigned_abs() > 100_000 {
+        return Err("Coordinates must be between -100000 and 100000.".into());
+    }
+    Ok(())
+}
+
+#[cfg(any(windows, test))]
+fn place_physical_pointer(
+    x: i32,
+    y: i32,
+    monitors: &[MonitorInfo],
+    place: impl FnOnce(i32, i32) -> Result<(), String>,
+    locate: impl FnOnce() -> Result<(i32, i32), String>,
+) -> Result<(), String> {
+    validate_coordinates(x, y)?;
+    let visible = monitors.iter().any(|monitor| {
+        i64::from(x) >= i64::from(monitor.x)
+            && i64::from(y) >= i64::from(monitor.y)
+            && i64::from(x) < i64::from(monitor.x) + i64::from(monitor.width)
+            && i64::from(y) < i64::from(monitor.y) + i64::from(monitor.height)
+    });
+    if !visible {
+        return Err("Target is outside the current monitors. Refresh os_environment.".into());
+    }
+    place(x, y)?;
+    if locate()? != (x, y) {
+        return Err("Pointer did not reach the requested position; no click was sent.".into());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn move_pointer(x: i32, y: i32) -> Result<(), String> {
+    use windows_sys::Win32::{
+        Foundation::POINT,
+        UI::WindowsAndMessaging::{GetPhysicalCursorPos, SetPhysicalCursorPos},
+    };
+    let monitors = xcap::Monitor::all().map_err(|e| format!("Monitor::all failed: {e}"))?;
+    let infos: Vec<_> = monitors
+        .iter()
+        .map(monitor_info)
+        .collect::<Result<_, _>>()?;
+    // Enigo 0.3 normalizes absolute moves against the primary display only.
+    // Physical Win32 coordinates preserve negative origins and mixed DPI:
+    // https://learn.microsoft.com/windows/win32/api/winuser/nf-winuser-setphysicalcursorpos
+    place_physical_pointer(
+        x,
+        y,
+        &infos,
+        |x, y| {
+            // SAFETY: Win32 accepts scalar physical coordinates; no pointers are passed.
+            if unsafe { SetPhysicalCursorPos(x, y) } == 0 {
+                return Err(format!(
+                    "move_mouse failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok(())
+        },
+        || {
+            let mut position = POINT { x: 0, y: 0 };
+            // SAFETY: position is valid writable storage for this synchronous call.
+            if unsafe { GetPhysicalCursorPos(&mut position) } == 0 {
+                return Err(format!(
+                    "Pointer verification failed: {}",
+                    std::io::Error::last_os_error()
+                ));
+            }
+            Ok((position.x, position.y))
+        },
+    )
+}
+
+#[cfg(not(windows))]
+fn move_pointer(x: i32, y: i32) -> Result<(), String> {
+    validate_coordinates(x, y)?;
+    new_enigo()?
+        .move_mouse(x, y, Coordinate::Abs)
+        .map_err(|e| format!("move_mouse failed: {e}"))
+}
+
 #[tauri::command]
 pub async fn move_mouse(window: WebviewWindow, payload: MoveMousePayload) -> Result<(), String> {
     ensure_main_webview(&window)?;
-    let mut enigo = new_enigo()?;
-    enigo
-        .move_mouse(payload.x, payload.y, Coordinate::Abs)
-        .map_err(|e| format!("move_mouse failed: {e}"))
+    validate_coordinates(payload.x, payload.y)?;
+    move_pointer(payload.x, payload.y)
 }
 
 #[derive(Debug, Deserialize)]
@@ -291,20 +468,29 @@ pub struct MouseClickPayload {
     pub double: Option<bool>,
 }
 
+fn validate_mouse_click(payload: &MouseClickPayload) -> Result<Button, String> {
+    match (payload.x, payload.y) {
+        (Some(x), Some(y)) => validate_coordinates(x, y)?,
+        (None, None) => {}
+        _ => return Err("x and y must be supplied together.".into()),
+    }
+    match payload.button.as_deref().unwrap_or("left") {
+        "left" => Ok(Button::Left),
+        "right" => Ok(Button::Right),
+        "middle" => Ok(Button::Middle),
+        _ => Err("Mouse button must be left, right or middle.".into()),
+    }
+}
+
 #[tauri::command]
 pub async fn mouse_click(window: WebviewWindow, payload: MouseClickPayload) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    // Validate the complete request before constructing an input session or moving.
+    let button = validate_mouse_click(&payload)?;
     let mut enigo = new_enigo()?;
     if let (Some(x), Some(y)) = (payload.x, payload.y) {
-        enigo
-            .move_mouse(x, y, Coordinate::Abs)
-            .map_err(|e| format!("move failed: {e}"))?;
+        move_pointer(x, y)?;
     }
-    let button = match payload.button.as_deref() {
-        Some("right") => Button::Right,
-        Some("middle") => Button::Middle,
-        _ => Button::Left,
-    };
     let times = if payload.double.unwrap_or(false) {
         2
     } else {
@@ -512,7 +698,10 @@ pub struct OpenUrlPayload {
 
 #[tauri::command]
 pub async fn open_url(window: WebviewWindow, payload: OpenUrlPayload) -> Result<(), String> {
-    ensure_main_webview(&window)?;
+    // Both trusted local chat surfaces can open a user-clicked HTTP(S) link.
+    if window.label() != super::mini_chat::MINI_LABEL {
+        ensure_main_webview(&window)?;
+    }
     let url = payload.url.trim();
     if !(url.starts_with("https://") || url.starts_with("http://"))
         || url.chars().any(char::is_control)
@@ -526,22 +715,170 @@ pub async fn open_url(window: WebviewWindow, payload: OpenUrlPayload) -> Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_hotkey_modifiers, parse_key, parse_scroll_axis, validate_scroll_amount, WindowInfo,
-        MAX_SCROLL_AMOUNT,
+        parse_hotkey_modifiers, parse_key, parse_scroll_axis, place_physical_pointer,
+        select_monitor_index, validate_coordinates, validate_mouse_click, validate_scroll_amount,
+        MonitorInfo, MouseClickPayload, WindowInfo, MAX_SCROLL_AMOUNT,
     };
-    use enigo::{Axis, Key};
+    use enigo::{Axis, Button, Key};
+
+    fn monitor_fixture(id: u32, primary: bool, x: i32) -> MonitorInfo {
+        MonitorInfo {
+            id,
+            name: format!("Display {id}"),
+            x,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale_factor: 1.25,
+            primary,
+        }
+    }
+
+    #[test]
+    fn capture_selects_real_primary_or_exact_monitor_and_never_falls_back() {
+        let monitors = [
+            monitor_fixture(7, false, -1920),
+            monitor_fixture(9, true, 0),
+        ];
+        assert_eq!(select_monitor_index(&monitors, None).unwrap(), 1);
+        assert_eq!(select_monitor_index(&monitors, Some(7)).unwrap(), 0);
+        assert!(select_monitor_index(&monitors, Some(99)).is_err());
+        assert!(select_monitor_index(&monitors[..1], None).is_err());
+        assert!(select_monitor_index(&[], None).is_err());
+        let value = serde_json::to_value(&monitors[0]).unwrap();
+        assert_eq!(value["x"], -1920);
+        assert_eq!(value["scale_factor"], 1.25);
+    }
+
+    #[test]
+    fn pointer_adapter_preserves_secondary_pixels_and_rejects_offscreen_targets_before_input() {
+        let monitors = [
+            monitor_fixture(7, false, -1920),
+            monitor_fixture(9, true, 0),
+        ];
+        let placed = std::cell::Cell::new(None);
+        place_physical_pointer(
+            -1200,
+            60,
+            &monitors,
+            |x, y| {
+                placed.set(Some((x, y)));
+                Ok(())
+            },
+            || Ok((-1200, 60)),
+        )
+        .unwrap();
+        assert_eq!(placed.get(), Some((-1200, 60)));
+        let result = place_physical_pointer(
+            1920,
+            60,
+            &monitors,
+            |_, _| panic!("offscreen input"),
+            || panic!("offscreen read"),
+        );
+        assert!(result.unwrap_err().contains("outside"));
+    }
+
+    #[test]
+    fn pointer_failure_and_position_mismatch_prevent_the_click_path() {
+        let monitors = [monitor_fixture(9, true, 0)];
+        let result = place_physical_pointer(
+            120,
+            60,
+            &monitors,
+            |_, _| Err("access denied".into()),
+            || panic!("read after failed move"),
+        );
+        assert_eq!(result.unwrap_err(), "access denied");
+        let result = place_physical_pointer(120, 60, &monitors, |_, _| Ok(()), || Ok((100, 60)));
+        assert!(result.unwrap_err().contains("no click"));
+        let result = place_physical_pointer(
+            120,
+            60,
+            &monitors,
+            |_, _| Ok(()),
+            || Err("read failed".into()),
+        );
+        assert_eq!(result.unwrap_err(), "read failed");
+    }
+
+    #[test]
+    #[ignore = "read-only smoke requires an interactive desktop; run explicitly"]
+    fn native_monitor_geometry_smoke() {
+        let monitors = xcap::Monitor::all().expect("enumerate monitors");
+        let infos: Vec<_> = monitors
+            .iter()
+            .map(super::monitor_info)
+            .collect::<Result<_, _>>()
+            .expect("native monitor metadata");
+        assert!(!infos.is_empty());
+        assert_eq!(infos.iter().filter(|monitor| monitor.primary).count(), 1);
+        let primary = &infos[select_monitor_index(&infos, None).unwrap()];
+        println!(
+            "monitors={}, primary_id={}, primary_bounds=({}, {}, {}, {}), primary_scale={}",
+            infos.len(),
+            primary.id,
+            primary.x,
+            primary.y,
+            primary.width,
+            primary.height,
+            primary.scale_factor
+        );
+        let windows = xcap::Window::all().expect("enumerate windows");
+        let mut geometry_count = 0;
+        for window in windows {
+            // Do not read or print application names or window titles.
+            if let (Ok(x), Ok(y), Ok(width), Ok(height)) =
+                (window.x(), window.y(), window.width(), window.height())
+            {
+                assert!(i64::from(x) + i64::from(width) <= i64::from(i32::MAX));
+                assert!(i64::from(y) + i64::from(height) <= i64::from(i32::MAX));
+                geometry_count += 1;
+            }
+        }
+        assert!(geometry_count > 0);
+        println!("readable_window_geometries={geometry_count}; no screenshot or input performed");
+    }
+
+    #[test]
+    fn click_rejects_invalid_buttons_or_incomplete_coordinates_before_input() {
+        let mut payload = MouseClickPayload {
+            button: None,
+            x: None,
+            y: None,
+            double: None,
+        };
+        assert_eq!(validate_mouse_click(&payload).unwrap(), Button::Left);
+        payload.button = Some("unknown".into());
+        assert!(validate_mouse_click(&payload).is_err());
+        payload.button = Some("right".into());
+        payload.x = Some(-120);
+        assert!(validate_mouse_click(&payload).is_err());
+        payload.y = Some(50);
+        assert_eq!(validate_mouse_click(&payload).unwrap(), Button::Right);
+        payload.x = Some(i32::MIN);
+        assert!(validate_mouse_click(&payload).is_err());
+        assert!(validate_coordinates(0, 100_001).is_err());
+    }
 
     #[test]
     fn window_snapshot_serializes_the_real_focus_field() {
         let window = WindowInfo {
+            id: 42,
             title: "Editor".into(),
             app_name: "Code".into(),
+            x: -1920,
+            y: 40,
             width: 1200,
             height: 800,
             focused: true,
+            minimized: false,
         };
         let value = serde_json::to_value(window).expect("serialize window info");
         assert_eq!(value["focused"], true);
+        assert_eq!(value["x"], -1920);
+        assert_eq!(value["id"], 42);
+        assert_eq!(value["minimized"], false);
     }
 
     #[test]

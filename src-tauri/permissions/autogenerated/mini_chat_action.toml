@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mini-chat-action"
+description = "Enables the mini_chat_action command without any pre-configured scope."
+commands.allow = ["mini_chat_action"]
+
+[[permission]]
+identifier = "deny-mini-chat-action"
+description = "Denies the mini_chat_action command without any pre-configured scope."
+commands.deny = ["mini_chat_action"]

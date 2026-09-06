@@ -140,4 +140,97 @@ describe('runAgent auto execution', () => {
     expect(mocks.execute).not.toHaveBeenCalled()
     expect(result.toolFailures).toBe(1)
   })
+
+  it('honors auto-execution revocation between tools returned in the same round', async () => {
+    arrangeApprovalGatedTool()
+    mocks.streamChatWithTools.mockReset()
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce({
+        content: '',
+        toolCalls: [
+          { id: 'call-1', name: 'write_tool', arguments: { value: 1 } },
+          { id: 'call-2', name: 'write_tool', arguments: { value: 2 } },
+        ],
+        rawToolCalls: [],
+      })
+      .mockResolvedValueOnce({ content: 'Beide Änderungen ausgeführt.', toolCalls: [], rawToolCalls: [] })
+    mocks.loadExecutionPolicy
+      .mockResolvedValueOnce({ autoExecuteMutatingTools: true })
+      .mockResolvedValueOnce({ autoExecuteMutatingTools: false })
+    mocks.canAutoExecuteTool.mockImplementation(policy => policy.autoExecuteMutatingTools)
+    mocks.awaitApproval.mockResolvedValue(true)
+
+    const result = await runAgent({ projectId: 'p1', baseMessages: [], mode: 'act' })
+
+    expect(mocks.loadExecutionPolicy).toHaveBeenCalledTimes(2)
+    expect(mocks.awaitApproval).toHaveBeenCalledExactlyOnceWith('call-2')
+    expect(mocks.execute).toHaveBeenNthCalledWith(1, { value: 1 }, { projectId: 'p1' })
+    expect(mocks.execute).toHaveBeenNthCalledWith(2, { value: 2 }, { projectId: 'p1' })
+    expect(result.toolSuccesses).toBe(2)
+  })
+
+  it('rejects a queued tool when canceled while its live policy is loading', async () => {
+    arrangeApprovalGatedTool()
+    const abort = new AbortController()
+    mocks.loadExecutionPolicy.mockImplementation(async () => {
+      abort.abort()
+      return { autoExecuteMutatingTools: true }
+    })
+
+    await expect(
+      runAgent({ projectId: 'p1', baseMessages: [], mode: 'act', signal: abort.signal })
+    ).rejects.toMatchObject({ name: 'AbortError' })
+
+    expect(mocks.execute).not.toHaveBeenCalled()
+    expect(mocks.awaitApproval).not.toHaveBeenCalled()
+    expect(mocks.updateToolCallStatus).toHaveBeenCalledWith('p1', 'call-1', 'rejected')
+  })
+
+  it.each(['observe', 'kill_switch'] as const)('rechecks %s after loading the live policy', async change => {
+    arrangeApprovalGatedTool()
+    let mode: 'act' | 'observe' = 'act'
+    mocks.loadExecutionPolicy.mockImplementation(async () => {
+      if (change === 'observe') mode = 'observe'
+      else mocks.hud.killSwitch = true
+      return { autoExecuteMutatingTools: true }
+    })
+
+    const result = await runAgent({ projectId: 'p1', baseMessages: [], mode: 'act', getMode: () => mode })
+
+    expect(result.toolFailures).toBe(1)
+    expect(mocks.execute).not.toHaveBeenCalled()
+    expect(mocks.awaitApproval).not.toHaveBeenCalled()
+    expect(mocks.canAutoExecuteTool).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [{ ok: false, error: 'Aktion fehlgeschlagen.' }, 'Aktion fehlgeschlagen.'],
+    [{ ok: false, code: 1, stderr: 'CLI ist nicht angemeldet.' }, 'CLI ist nicht angemeldet.'],
+    [{ ok: false, timed_out: true }, 'Zeitlimit'],
+    [{ ok: false, code: 7 }, 'Exit-Code 7'],
+    [{ ok: false }, 'als fehlgeschlagen gemeldet'],
+  ])('records a structured action failure instead of a successful invocation: %j', async (output, expectedError) => {
+    arrangeApprovalGatedTool()
+    mocks.canAutoExecuteTool.mockReturnValue(true)
+    mocks.execute.mockResolvedValue(output)
+    mocks.streamChatWithTools.mockReset()
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce({
+        content: '',
+        toolCalls: [{ id: 'call-1', name: 'write_tool', arguments: {} }],
+        rawToolCalls: [],
+      })
+      .mockResolvedValueOnce({ content: '', toolCalls: [], rawToolCalls: [] })
+
+    const result = await runAgent({ projectId: 'p1', baseMessages: [], mode: 'act' })
+
+    expect(result).toMatchObject({ toolFailures: 1, toolSuccesses: 0 })
+    expect(result.finalText).toContain(expectedError)
+    expect(mocks.updateToolCallStatus).toHaveBeenCalledWith('p1', 'call-1', 'failed')
+    expect(mocks.logAgentEvent).toHaveBeenCalledWith('tool.failed', expect.objectContaining({ ok: false }))
+    const feedback = mocks.streamChatWithTools.mock.calls[1]![0].messages.find(
+      (message: { role: string }) => message.role === 'tool'
+    )
+    expect(JSON.parse(feedback.content)).toMatchObject({ ok: false, error: expect.stringContaining(expectedError) })
+  })
 })

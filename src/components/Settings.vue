@@ -6,6 +6,8 @@ import PrivacyDiagnosticsSettings from '@/components/PrivacyDiagnosticsSettings.
 import AppearanceSettingsSection from '@/components/settings/AppearanceSettingsSection.vue'
 import ChatSettingsSection from '@/components/settings/ChatSettingsSection.vue'
 import ExecutionSettingsSection from '@/components/settings/ExecutionSettingsSection.vue'
+import { listTools } from '@/services/tools/registry'
+import type { LuczorMode } from '@/services/inference/types'
 import VoiceSettingsSection from '@/components/settings/VoiceSettingsSection.vue'
 import { loadDeviceKey } from '@/services/secureDeviceKey'
 import { DISABLED_API_BASE_URL, persistApiIdentity } from '@/services/apiIdentitySettings'
@@ -41,10 +43,14 @@ const props = withDefaults(
   defineProps<{
     open: boolean
     initialTab?: SettingsTab
+    mode?: LuczorMode
+    killSwitch?: boolean
     testSpeech: (text: string, signal?: AbortSignal) => Promise<'completed' | 'cancelled'>
   }>(),
   {
     initialTab: 'server',
+    mode: 'observe',
+    killSwitch: false,
   }
 )
 const emit = defineEmits<{ (e: 'update:open', v: boolean): void }>()
@@ -164,6 +170,7 @@ const notificationUi = reactive({
 })
 
 const settings = reactive<AppSettings>({ ...DEFAULTS })
+const registeredTools = listTools()
 
 let settingsStore: Store | null = null
 
@@ -772,7 +779,7 @@ function iconPath(kind: string) {
                   <div>
                     <label class="lz-label">Anzahl eingeblendeter Erinnerungen</label>
                     <div class="lz-range">
-                      <input v-model.number="settings.memory_inject_count" type="range" min="0" max="15" step="1" />
+                      <input v-model.number="settings.memory_inject_count" type="range" min="0" max="20" step="1" />
                       <span class="lz-range__val">{{ settings.memory_inject_count }}</span>
                     </div>
                   </div>
@@ -897,6 +904,9 @@ function iconPath(kind: string) {
               <ExecutionSettingsSection
                 v-else-if="ui.tab === 'execution'"
                 v-model:auto-execute-mutating-tools="settings.auto_execute_mutating_tools"
+                :mode="props.mode"
+                :kill-switch="props.killSwitch"
+                :tools="registeredTools"
               />
 
               <!-- VOICE -->

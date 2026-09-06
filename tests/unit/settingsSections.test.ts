@@ -46,9 +46,9 @@ describe('settings section contracts', () => {
     expect(html).toContain('value="wakeword" selected')
     expect(html).toContain('value="luczor"')
     expect(html).toContain('value="luczor stopp"')
-    expect(html).toContain('Nach Diktatabschluss automatisch senden')
+    expect(html).toContain('Auch nach Sprechpause automatisch senden')
     expect(html).toContain('aria-checked="false"')
-    expect(html).toContain('Standardmäßig aus: Prüfe das Diktat im Eingabefeld')
+    expect(html).toContain('Close-Word sendet unabhängig von diesem Schalter automatisch')
     expect(emittedEvents(VoiceSettingsSection)).toEqual(
       expect.arrayContaining([
         'update:voiceMode',
@@ -77,7 +77,7 @@ describe('settings section contracts', () => {
     expect(html).toContain('value="jarvis ende"')
     expect(html).toContain('value="8"')
     expect(html).toContain('aria-checked="true"')
-    expect(html).toContain('ohne weitere Bestätigung gesendet')
+    expect(html).toContain('Sendet den fertigen Text ohne weiteren Klick')
     expect(html).toContain('min="1" max="30"')
   })
 

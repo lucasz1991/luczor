@@ -1,14 +1,19 @@
 import { describe, it, expect } from 'vitest'
-import { HandsFreeMachine, splitOnPhrase, type StrategyConfig } from './voiceStrategy'
+import { HandsFreeMachine, splitOnPhrase, type StrategyConfig, type VoiceCompletionReason } from './voiceStrategy'
 import { findVoicePhrase, findWakeWord, pendingVoicePhraseSuffix } from './voicePhrases'
 
 function collector() {
   const commands: string[] = []
+  const reasons: (VoiceCompletionReason | undefined)[] = []
   const partials: string[] = []
   return {
     commands,
+    reasons,
     partials,
-    onCommand: (text: string) => commands.push(text),
+    onCommand: (text: string, reason?: VoiceCompletionReason) => {
+      commands.push(text)
+      reasons.push(reason)
+    },
     onPartial: (text: string) => partials.push(text),
   }
 }
@@ -97,6 +102,7 @@ describe('safeword strategy', () => {
     const machine = new HandsFreeMachine(base, capture.onCommand, capture.onPartial, state => states.push(state))
     machine.pushSegment('Nebenbei Luxor Start sende bitte Grüße Lutz Or Stopp weiteres Gespräch', 100)
     expect(capture.commands).toEqual(['sende bitte Grüße'])
+    expect(capture.reasons).toEqual(['close_word'])
     expect(machine.state).toBe('armed')
     expect(capture.partials.slice(-1)[0]).toBe('')
     expect(states).toEqual(['dictating', 'armed'])
@@ -120,6 +126,7 @@ describe('safeword strategy', () => {
     expect(capture.partials.slice(-1)[0]).toBe('schreibe diese Notiz')
     machine.pushSegment('schließen', 500)
     expect(capture.commands).toEqual(['schreibe diese Notiz'])
+    expect(capture.reasons).toEqual(['close_word'])
     expect(capture.partials.join(' ')).not.toContain('Luczor')
   })
 
@@ -144,8 +151,10 @@ describe('safeword strategy', () => {
     machine.pushSegment('Luczor start sehr', 100)
     machine.pushSegment('sehr gut Luczor Sport', 200)
     expect(capture.commands).toEqual([])
+    expect(capture.reasons).toEqual([])
     machine.pushSegment('Luczor stopp', 300)
     expect(capture.commands).toEqual(['sehr sehr gut Luczor Sport'])
+    expect(capture.reasons).toEqual(['close_word'])
   })
 
   it('does not send an empty command and only reports real state transitions', () => {
@@ -157,6 +166,7 @@ describe('safeword strategy', () => {
     machine.reset()
     expect(capture.commands).toEqual([])
     expect(states).toEqual(['dictating', 'armed'])
+    expect(capture.reasons).toEqual([])
   })
 
   it('does not interpret closing before activation as a command', () => {
@@ -181,6 +191,7 @@ describe('replaceable live previews', () => {
     expect(capture.commands).toEqual([])
     machine.pushSegment('Luczor start tatsächlicher Text Luczor stopp', 100)
     expect(capture.commands).toEqual(['tatsächlicher Text'])
+    expect(capture.reasons).toEqual(['close_word'])
   })
 
   it('replaces hypotheses over the committed buffer and ignores an interim close when it is revised away', () => {
@@ -195,6 +206,7 @@ describe('replaceable live previews', () => {
     machine.pushSegment('und endgültige Version', 200)
     machine.finalize()
     expect(capture.commands).toEqual(['sichere Notiz und endgültige Version'])
+    expect(capture.reasons).toEqual(['manual'])
   })
 
   it('does not let an interim wake prefix influence the next final segment', () => {
@@ -217,6 +229,7 @@ describe('replaceable live previews', () => {
     machine.pushSegment('oder jemand anders', 200)
     machine.finalize()
     expect(capture.commands).toEqual(['Nachricht Lutz oder jemand anders'])
+    expect(capture.reasons).toEqual(['manual'])
   })
 
   it('empty revisions and resets clear preview without committing it', () => {
@@ -241,6 +254,7 @@ describe('replaceable live previews', () => {
     machine.previewSegment('stopp')
     machine.finalize()
     expect(capture.commands).toEqual(['öffne Luczor'])
+    expect(capture.reasons).toEqual(['manual'])
   })
 })
 
@@ -261,6 +275,7 @@ describe('continuous strategy', () => {
     machine.tick(6001) // >= 5s -> finalize
     expect(machine.state).toBe('armed')
     expect(capture.commands).toEqual(['erster Satz zweiter Satz'])
+    expect(capture.reasons).toEqual(['silence'])
   })
 
   it('finalizes early on an optional end phrase', () => {
@@ -268,6 +283,7 @@ describe('continuous strategy', () => {
     const machine = new HandsFreeMachine(cfg, capture.onCommand, capture.onPartial)
     machine.pushSegment('kurze Nachricht Luczor Stopp', 0)
     expect(capture.commands).toEqual(['kurze Nachricht'])
+    expect(capture.reasons).toEqual(['close_word'])
     expect(machine.state).toBe('armed')
   })
 
@@ -299,5 +315,18 @@ describe('continuous strategy', () => {
     machine.pushSegment('Mein Text Luxor', 100)
     machine.pushSegment('Stopp', 200)
     expect(capture.commands).toEqual(['Mein Text'])
+    expect(capture.reasons).toEqual(['close_word'])
+  })
+
+  it('does not turn an interim-only close suffix into a close-word completion on silence', () => {
+    const capture = collector()
+    const machine = new HandsFreeMachine(cfg, capture.onCommand, capture.onPartial)
+    machine.pushSegment('Frage an Luxor', 100)
+    machine.previewSegment('Stopp')
+    expect(capture.commands).toEqual([])
+    expect(capture.reasons).toEqual([])
+    machine.tick(5100)
+    expect(capture.commands).toEqual(['Frage an Luxor'])
+    expect(capture.reasons).toEqual(['silence'])
   })
 })

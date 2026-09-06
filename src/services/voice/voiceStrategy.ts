@@ -12,6 +12,7 @@ export type StrategyConfig = {
 }
 
 export type MachineState = 'armed' | 'dictating'
+export type VoiceCompletionReason = 'close_word' | 'silence' | 'manual'
 
 // Retain the existing public helper while sharing the exact matcher with VoiceEngine.
 export const splitOnPhrase = splitOnVoicePhrase
@@ -31,7 +32,7 @@ export class HandsFreeMachine {
 
   constructor(
     private cfg: StrategyConfig,
-    private onCommand: (text: string) => void,
+    private onCommand: (text: string, reason?: VoiceCompletionReason) => void,
     private onPartial?: (text: string) => void,
     private onStateChange?: (state: MachineState) => void
   ) {}
@@ -45,10 +46,10 @@ export class HandsFreeMachine {
   }
 
   /** Finalize committed text only. An unconfirmed partial control remains ordinary speech. */
-  finalize(): void {
+  finalize(reason: VoiceCompletionReason = 'manual'): void {
     const text = this.buffer.trim()
     this.reset()
-    if (text) this.onCommand(text)
+    if (text) this.onCommand(text, reason)
   }
 
   /** Speech frames and pending STT work postpone continuous-mode silence submission. */
@@ -73,7 +74,7 @@ export class HandsFreeMachine {
     this.setState(result.draft.state)
     if (result.command !== null) {
       this.onPartial?.('')
-      if (result.command) this.onCommand(result.command)
+      if (result.command) this.onCommand(result.command, 'close_word')
     } else this.onPartial?.(result.preview)
   }
 
@@ -81,7 +82,7 @@ export class HandsFreeMachine {
   tick(now: number): void {
     if (this.state !== 'dictating' || this.cfg.strategy !== 'continuous' || !this.buffer.trim()) return
     const silence = Number.isFinite(this.cfg.continuousSilenceMs) ? this.cfg.continuousSilenceMs : 5000
-    if (Number.isFinite(now) && now - this.lastSpeechAt >= Math.max(1000, silence)) this.finalize()
+    if (Number.isFinite(now) && now - this.lastSpeechAt >= Math.max(1000, silence)) this.finalize('silence')
   }
 
   private setState(state: MachineState): void {

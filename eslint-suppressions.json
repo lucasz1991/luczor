@@ -127,11 +127,6 @@
       "count": 3
     }
   },
-  "src/services/memory/luczorMemory.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
-    }
-  },
   "src/services/notifications.ts": {
     "security/detect-object-injection": {
       "count": 1

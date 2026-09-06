@@ -10,6 +10,7 @@ const APP_COMMANDS: &[&str] = &[
     "capture_screen",
     "read_clipboard",
     "list_windows",
+    "list_monitors",
     "system_metrics",
     "move_mouse",
     "mouse_click",

@@ -105,9 +105,10 @@ const TOOL_CONTRACT = [
   { name: 'agent_bridge_write', category: 'app', mutating: true, requiresApproval: true },
   { name: 'plan_update', category: 'app', mutating: false, requiresApproval: false },
   { name: 'plan_get', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'memory_recall', category: 'project', mutating: false, requiresApproval: false },
 ] as const
 
-const TOOL_SCHEMA_SHA256 = '73df93e0d2b07084741f540c6218bbd0ff5a578cc061984a2a996a670b202954'
+const TOOL_SCHEMA_SHA256 = 'e5585f769e3c04b5edd458a2f2ed11b8a26ecede958846133022f4650f0a43df'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {

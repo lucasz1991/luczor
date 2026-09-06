@@ -1,5 +1,16 @@
 # Current state
 
+## 2026-09-06 | Luczor Mini und entfernte UI-Bibliothek
+
+- Separates rahmenloses, transparentes Tauri-Fenster `luczor-mini`: standardmaessig Always-on-top, frei verschiebbar, Kreis-/Chat-/Antwortvorschau-Groessen, an Monitor-Arbeitsflaeche und DPI angepasst. Automatischer Start und Wiederoeffnen ueber Header, Systemstatus und Tray. Browser-Fallback verwendet dieselbe Vue-Komponente.
+- Kreisoptik aus dem Live-Status mit echten Verarbeitungs-, Ausfuehrungs-, Entscheidungs-, Mikrofon-, Sprach-, Fehler-, Not-Aus- und Antwortzustaenden. Reduzierte Bewegung beruecksichtigt; Antworten kurz als Sprechblase, Entscheidungen dauerhaft bedienbar.
+- Temporaerer projektgebundener Verlauf mit eigenem fluechtigem Tool-Journal, Auswahlantworten, Kopieren, Abbrechen und bestaetigtem Leeren. Ein Agentenlauf zur Zeit; Hauptchat-Freigaben sind im Mini erreichbar. Alte Session-Aktionen und spaete Abbruchereignisse werden ignoriert; die Sperre bleibt bis zum wirklichen Laufende erhalten.
+- Separater Einstieg verhindert doppelte Modell-, Store-, Sync- oder Mikrofoninitialisierung. Native Capability erlaubt nur validierte Mini-Aktionen, eigene Fensterbedienung, Snapshot-Lesen und den bestehenden geprueften HTTP(S)-Linkpfad. Bestehende Freigaben, Ausgabepruefung und externe Routingkontrolle bleiben aktiv.
+- UI-Bibliothek und ihr Menuepunkt auf ausdruecklichen Browser-Kommentar entfernt; verwendete Beautiful-UI-Komponenten und MIT-Herkunft bleiben erhalten. Die bestehende Vorschau auf Port 1428 wurde neu geladen und die Entfernung sichtbar bestaetigt.
+- Aktuelle integrierte Frontend-Abnahme: 53 Vitest-Dateien / 489 Tests, ESLint, TypeScript und Vite-Build bestanden. 74 Rust-Tests, Cargo Check und Clippy bestanden. Browserpruefung mit expliziter Fixture: Drag, Oeffnen/Einklappen, kompakte Freigaben, Auswahlantwort, Abbruch, Leeren und 420 x 660 Pixel; normale Viewportgroesse wiederhergestellt.
+- Dokumentation: `docs/mini-chat.md`. Native Always-on-top-/Minimierungs-, Hardware- und echte Inferenzabnahme bleiben getrennt von der erfolgreichen Kompilierung und Browser-Fixture; kein Installer und kein Deployment.
+- Finaler nativer Debug-Testbuild mit separater Local-Test-Identitaet erfolgreich: `src-tauri/target/debug/tauri-app.exe`, 41.983.488 Bytes, SHA-256 `35EBDF5CAE216D8EB42F165FCF124372E095C1990B4D937EF590BEB2B86B8DF8`, fertig 2026-09-06T02:55:14Z. Auch die Release-Kompilierung bestand; der abschliessende Debug-Build enthaelt die letzte kompakte Freigabedarstellung.
+
 ## 2026-09-06 | Einheitliche sichtbare Diktateinstellungen
 
 - `localVoice.ts` stellt einen gemeinsamen Resolver fuer UI und Laufzeit bereit. Explizites `voice_mode` bestimmt Wake-Word oder Continuous; `hands_free_strategy=continuous` bleibt nur als Fallback erhalten, solange kein neuer Modus existiert. `voice_trigger_phrase` bleibt nur als Fallback fuer ein noch nicht gesetztes `voice_wake_word` erhalten.

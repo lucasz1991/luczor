@@ -1,0 +1,171 @@
+import { describe, expect, it, vi } from 'vitest'
+import { createMiniChatController } from '@/services/miniChat/controller'
+import { miniStatus } from '@/services/miniChat/presentation'
+import { emptyMiniSnapshot } from '@/services/miniChat/types'
+import type { RunAgentOptions } from '@/services/agent'
+
+function setup(
+  run = vi
+    .fn<(options: RunAgentOptions) => Promise<{ finalText: string }>>()
+    .mockResolvedValue({ finalText: 'Eine kurze Antwort.' })
+) {
+  const context = { project: { id: 'project-a', name: 'Projekt A' }, mode: 'act' as 'act' | 'observe', mainBusy: false }
+  const controller = createMiniChatController({
+    context: () => context,
+    run,
+    preamble: () => 'System',
+    setMode: mode => {
+      context.mode = mode
+    },
+  })
+  const send = (text = 'Hallo') => controller.dispatch({ type: 'send', sessionId: controller.state.sessionId, text })
+  return { controller, context, run, send }
+}
+
+describe('temporary mini chat session', () => {
+  it('keeps its own transcript and returns structured answer choices', async () => {
+    const { controller, send, run } = setup(
+      vi.fn().mockResolvedValue({
+        finalText: '{"summary":"Zwei Wege.","question":"Was passt?","bullets":["Kurz","Ausführlich"]}',
+      })
+    )
+    await send()
+    expect(controller.state.messages).toHaveLength(2)
+    expect(controller.state.messages[1]).toMatchObject({
+      content: 'Zwei Wege.',
+      question: 'Was passt?',
+      choices: ['Kurz', 'Ausführlich'],
+      status: 'done',
+    })
+    expect(run.mock.calls[0]![0].toolSession).toBeDefined()
+    expect(controller.state.busy).toBe(false)
+  })
+  it('keeps the captured project across active-project changes until reset', async () => {
+    const { controller, context, send, run } = setup()
+    await send()
+    context.project = { id: 'project-b', name: 'Projekt B' }
+    await send('Weiter')
+    expect(run.mock.calls[1]![0].projectId).toBe('project-a')
+    controller.reset()
+    expect(controller.state.project?.id).toBe('project-b')
+    expect(controller.state.messages).toEqual([])
+  })
+  it('does not start a competing inference while the project chat is running', async () => {
+    const { controller, context, send, run } = setup()
+    context.mainBusy = true
+    await send()
+    expect(run).not.toHaveBeenCalled()
+    expect(controller.state.notice).toContain('große Chat')
+  })
+  it('validates input and ignores stale session commands', async () => {
+    const { controller, send, run } = setup()
+    await send('x'.repeat(12001))
+    const old = controller.state.sessionId
+    controller.reset()
+    await controller.dispatch({ type: 'send', sessionId: old, text: 'Veraltet' })
+    expect(run).not.toHaveBeenCalled()
+  })
+  it('resolves an actual tool approval once and does not accept a stale decision', async () => {
+    let result: boolean | undefined
+    const { controller, send } = setup(
+      vi.fn(async options => {
+        options.toolSession!.queue({
+          id: 'tool-a',
+          name: 'file_write',
+          args: { path: 'notes.md' },
+          category: 'project',
+          requiresApproval: true,
+          status: 'proposed',
+        })
+        result = await options.toolSession!.approve('tool-a')
+        return { finalText: result ? 'Freigegeben' : 'Abgelehnt' }
+      })
+    )
+    const pending = send()
+    const id = controller.state.decision!.id
+    controller.dispatch({ type: 'decide', sessionId: controller.state.sessionId, id: 'wrong', approved: true })
+    expect(controller.state.decision?.id).toBe(id)
+    controller.dispatch({ type: 'decide', sessionId: controller.state.sessionId, id, approved: false })
+    controller.dispatch({ type: 'decide', sessionId: controller.state.sessionId, id, approved: true })
+    await pending
+    expect(result).toBe(false)
+    expect(controller.state.decision).toBeNull()
+  })
+  it('cancellation settles a pending approval without leaving a spinner', async () => {
+    let approved: boolean | undefined
+    const { controller, send } = setup(
+      vi.fn(async options => {
+        options.toolSession!.queue({
+          id: 'tool-a',
+          name: 'file_write',
+          args: {},
+          category: 'project',
+          requiresApproval: true,
+          status: 'proposed',
+        })
+        approved = await options.toolSession!.approve('tool-a')
+        return { finalText: 'Late result' }
+      })
+    )
+    const pending = send()
+    controller.stop()
+    await pending
+    expect(approved).toBe(false)
+    expect(controller.state.busy).toBe(false)
+    expect(controller.state.messages[1]?.status).toBe('canceled')
+    expect(controller.state.tools[0]?.status).toBe('canceled')
+  })
+  it('clear hides old text immediately but keeps inference locked until the old run settles', async () => {
+    let release!: (value: { finalText: string }) => void
+    let options!: RunAgentOptions
+    const { controller, send, run } = setup(
+      vi.fn(async value => {
+        options = value
+        return new Promise(resolve => {
+          release = resolve
+        })
+      })
+    )
+    const pending = send()
+    controller.reset()
+    expect(controller.state.messages).toEqual([])
+    expect(controller.state.busy).toBe(true)
+    await send('Darf noch nicht starten')
+    options.onToken?.('Spätes Ergebnis')
+    options.onProgress?.({ phase: 'receiving', characters: 900 })
+    release({ finalText: 'Nicht wiederherstellen' })
+    await pending
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(controller.state.messages).toEqual([])
+    expect(controller.state.busy).toBe(false)
+  })
+  it('bounds output retained by the overlay', async () => {
+    const { controller, send } = setup(vi.fn().mockResolvedValue({ finalText: 'x'.repeat(100000) }))
+    for (let i = 0; i < 8; i++) await send()
+    expect(controller.state.messages.reduce((sum, message) => sum + message.content.length, 0)).toBeLessThanOrEqual(
+      80000
+    )
+    expect(controller.state.messages.every(message => message.content.length <= 16000)).toBe(true)
+  })
+})
+
+describe('meaningful circular status', () => {
+  it('prioritizes decisions and emergency stop above animation states', () => {
+    const state = emptyMiniSnapshot()
+    state.busy = true
+    expect(miniStatus(state).phase).toBe('thinking')
+    state.decision = { id: 'd', kind: 'tool', title: 'Speichern?', description: '', detail: '' }
+    expect(miniStatus(state)).toMatchObject({ phase: 'waiting', label: 'Deine Entscheidung' })
+    state.hud.killSwitch = true
+    expect(miniStatus(state).phase).toBe('stopped')
+  })
+  it('shows listening only for real microphone status and execution only for actual tools', () => {
+    const state = emptyMiniSnapshot()
+    expect(miniStatus(state).phase).toBe('idle')
+    state.hud.status = 'listening'
+    expect(miniStatus(state).phase).toBe('listening')
+    state.busy = true
+    state.tools.push({ id: 'a', name: 'file_read', detail: '', status: 'executing' })
+    expect(miniStatus(state).phase).toBe('executing')
+  })
+})

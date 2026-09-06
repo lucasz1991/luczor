@@ -1,6 +1,6 @@
 ﻿<!-- App.vue -->
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Settings from './components/Settings.vue'
 import JarvisHud from './components/JarvisHud.vue'
 import PlanPanel from './components/PlanPanel.vue'
@@ -15,6 +15,9 @@ import ContextCards from './components/ai/ContextCards.vue'
 import RecommendationCard from './components/ai/RecommendationCard.vue'
 import SelectionActions from './components/ai/SelectionActions.vue'
 import AiIcon from './components/ai/AiIcon.vue'
+import MiniChatSurface from './components/mini/MiniChatSurface.vue'
+import { useMiniChatHost } from '@/composables/useMiniChatHost'
+import { miniStatus } from '@/services/miniChat/presentation'
 import {
   activityLabel,
   createChatActivity,
@@ -24,12 +27,11 @@ import {
   type ChatActivity,
 } from '@/services/chatActivity'
 import type { Message } from '@/state/types'
-const UiLibrary = defineAsyncComponent(() => import('./components/ai/UiLibrary.vue'))
 import SpotlightSurface from './components/vengeance/SpotlightSurface.vue'
 import { type LuczorMode, type WireMessage } from './services/openrouter.service'
 import { runAgent, buildSystemPreamble, shouldRequireToolCall } from '@/services/agent'
 import { parseEnvelope } from '@/services/envelope'
-import { resolveApproval, rejectAllApprovals } from '@/services/approvals'
+import { resolveApproval, rejectAllApprovals, hasPendingApproval } from '@/services/approvals'
 import { Store } from '@tauri-apps/plugin-store'
 import { VoiceEngine } from '@/services/voice/voiceEngine'
 import { getVoiceConfig, handsFreeFromVoice, localStt } from '@/services/voice/localVoice'
@@ -68,7 +70,7 @@ import {
 } from '@/services/repositoryGraph'
 import { FLASH_EXPERIMENT_SETTING_KEY } from '@/services/inference/hybridRouter'
 
-import { setStatus } from '@/state/hud'
+import { hud, setStatus, setKillSwitch } from '@/state/hud'
 import { state, mutations } from '@/state/store'
 import { scheduleSave } from '@/services/persistence'
 import { playSfx, stopSfx } from '@/services/sfx'
@@ -98,7 +100,6 @@ function setComposerInput(value: string, source: ComposerInputSource) {
   writeComposerInput(value, source)
 }
 const sending = ref(false)
-const showLibrary = ref(false)
 const sidebarCollapsed = ref(false)
 const promptBar = ref<InstanceType<typeof PromptBar> | null>(null)
 const chatActivities = ref<Record<string, ChatActivity>>({})
@@ -493,7 +494,7 @@ const voiceInputSession = createVoiceInputSession({
   readInput: () => input.value,
   writeInput: writeComposerInput,
   scope: () => activeProjectId.value,
-  busy: () => sending.value,
+  busy: () => conversationBusy.value,
   async config() {
     const [voice, tts] = await Promise.all([getVoiceConfig(), getTtsConfig()])
     return { voice, handsFree: handsFreeFromVoice(voice), bargeIn: tts.interruptMode === 'on_speech' }
@@ -542,8 +543,6 @@ const voiceInputLabel = computed(() => {
   }
 })
 
-watch(sending, busy => voiceInputSession.setMuted(busy || voiceMuteDepth > 0), { flush: 'sync' })
-
 /** Keep continuous STT from hearing Luczor's server-generated TTS output. */
 async function speakWithVoiceMuted(text: string, signal?: AbortSignal): Promise<'completed' | 'cancelled'> {
   if (signal?.aborted) return 'cancelled'
@@ -564,7 +563,7 @@ async function speakWithVoiceMuted(text: string, signal?: AbortSignal): Promise<
   } finally {
     if (ownGeneration === speechGeneration) speechPending.value = false
     voiceMuteDepth = Math.max(0, voiceMuteDepth - 1)
-    voiceInputSession.setMuted(voiceMuteDepth > 0 || sending.value)
+    voiceInputSession.setMuted(voiceMuteDepth > 0 || conversationBusy.value)
   }
 }
 
@@ -882,7 +881,7 @@ function applyStreamedContent(pid: string, msgId: string, raw: string, done: boo
 /** Click a suggestion chip -> send it as the next user message. */
 function sendSuggestion(text: string) {
   const t = safeTrim(text)
-  if (!t || sending.value) return
+  if (!t || conversationBusy.value) return
   input.value = t
   void send()
 }
@@ -925,7 +924,7 @@ async function rememberExchange(pid: string, userText: string, assistantId: stri
 async function send(automaticVoice = false) {
   const pid = activeProjectId.value
   const text = input.value.trim()
-  if (!text || sending.value) return
+  if (!text || conversationBusy.value) return
   const taskType = inferTaskType(text)
   // Capture + reset how this turn was produced (spoken vs typed).
   const inputSource = consumeInputSource()
@@ -1222,16 +1221,68 @@ watch(
   () => scheduleSave(state),
   { deep: true }
 )
+const miniChat = useMiniChatHost({
+  context: () => ({
+    project: activeProject.value ? { id: activeProject.value.id, name: activeProject.value.name } : null,
+    mode: mode.value,
+    mainBusy: sending.value,
+  }),
+  setMode: next => {
+    mode.value = next
+    void persistActiveMode(next)
+  },
+  telemetry: () => ({
+    status: hud.status,
+    micLevel: hud.micLevel,
+    killSwitch: hud.killSwitch,
+    reduceMotion: appearance.reduceMotion,
+  }),
+  mainDecision: () => {
+    const call = pendingApprovals.value.find(item => hasPendingApproval(item.id))
+    return call
+      ? {
+          id: call.id,
+          kind: 'tool',
+          title: `${call.name} ausführen?`,
+          description: `Projektchat · ${activeProject.value?.name ?? ''}`,
+          detail: previewToolArguments(call.args, 6000),
+        }
+      : null
+  },
+  decideMain: (id, approved) => {
+    if (!pendingApprovals.value.some(call => call.id === id) || !hasPendingApproval(id)) return
+    if (approved) approveTool(id)
+    else rejectTool(id)
+  },
+  killSwitch: enabled => {
+    setKillSwitch(enabled)
+    if (enabled) void stopGenerating()
+  },
+})
+// Voice and both composers must share admission and mute state, including hotkeys.
+const conversationBusy = computed(() => sending.value || miniChat.state.busy)
+watch(conversationBusy, busy => voiceInputSession.setMuted(busy || voiceMuteDepth > 0), { flush: 'sync' })
+const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
 </script>
 
 <template>
   <Settings
     :open="showSettings"
     :initial-tab="settingsStartTab"
+    :mode="mode"
+    :kill-switch="hud.killSwitch"
     :test-speech="speakWithVoiceMuted"
     @update:open="showSettings = $event"
   />
-  <UiLibrary v-if="showLibrary" @close="showLibrary = false" />
+  <Teleport to="body">
+    <MiniChatSurface
+      v-if="miniChat.browserVisible.value"
+      :snapshot="miniChat.snapshot.value"
+      @action="miniChat.dispatch"
+      @hide="miniChat.browserVisible.value = false"
+      @show-main="miniChat.browserVisible.value = false"
+    />
+  </Teleport>
 
   <div class="app-shell ai-workspace" :class="{ 'ai-workspace--collapsed': sidebarCollapsed }">
     <SidebarNav
@@ -1243,7 +1294,6 @@ watch(
       @new-chat="newChat"
       @add-project="addProject"
       @settings="openSettings()"
-      @library="showLibrary = true"
       @system="showSystemPanel = !showSystemPanel"
     />
 
@@ -1292,6 +1342,16 @@ watch(
           </svg>
         </button>
 
+        <button
+          type="button"
+          class="icon-btn"
+          aria-label="Luczor Mini öffnen"
+          title="Schwebenden Mini-Chat öffnen"
+          @click="miniChat.open()"
+        >
+          <AiIcon name="spark" />
+        </button>
+        <span v-if="miniChat.error.value" class="ai-muted" role="alert">{{ miniChat.error.value }}</span>
         <button
           type="button"
           class="icon-btn"
@@ -1669,7 +1729,7 @@ watch(
         <PromptBar
           ref="promptBar"
           v-model="input"
-          :busy="sending"
+          :busy="conversationBusy"
           :recording="isRecording"
           :listening="listening"
           :voice-busy="voiceInputView.starting || voiceInputView.finishing"
@@ -1678,7 +1738,7 @@ watch(
           :commands="promptCommands"
           @input="setComposerInput(input, 'keyboard')"
           @send="send"
-          @stop="stopGenerating"
+          @stop="miniChat.state.busy ? miniChat.stop() : stopGenerating()"
           @record="togglePushToTalk"
           @listen="toggleListening"
           @model="openSettings()"
@@ -1694,7 +1754,7 @@ watch(
           <span class="system-panel__eyebrow">Systemkern</span>
           <strong>Live-Status</strong>
         </div>
-        <span class="system-panel__state"><i /> Bereit</span>
+        <span class="system-panel__state"><i /> {{ liveStatus.label }}</span>
         <button
           type="button"
           class="system-panel__close"
@@ -1705,6 +1765,7 @@ watch(
         </button>
       </div>
       <JarvisHud embedded />
+      <button type="button" class="ai-button" @click="miniChat.open()">Als Luczor Mini öffnen</button>
       <div class="system-panel__foot">
         <span>{{ activeProject?.name }}</span>
         <span>Privater Gerätekanal</span>

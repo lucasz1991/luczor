@@ -101,6 +101,51 @@ describe('agent mode and tool reliability', () => {
     mocks.execute.mockResolvedValue({ name: 'Projekt 2', summary: '', goals: [] })
   })
 
+  it('keeps temporary tool activity outside persistent messages and server audit', async () => {
+    const queue = vi.fn(),
+      update = vi.fn(),
+      approve = vi.fn().mockResolvedValue(true)
+    mocks.getTool.mockReturnValue({
+      name: 'project_upsert_goal',
+      category: 'project',
+      mutating: true,
+      requiresApproval: true,
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(toolCallResult)
+      .mockResolvedValueOnce({ content: 'Erledigt.', toolCalls: [], rawToolCalls: [] })
+    await runAgent({
+      projectId: 'p1',
+      mode: 'act',
+      baseMessages: [{ role: 'user', content: 'Bitte speichern' }],
+      toolSession: { queue, update, approve },
+    })
+    expect(approve).toHaveBeenCalledWith('call-1')
+    expect(mocks.execute).toHaveBeenCalledTimes(1)
+    expect(update).toHaveBeenCalledWith('call-1', 'executed')
+    expect(mocks.queueToolCall).not.toHaveBeenCalled()
+    expect(mocks.addHiddenToolMessage).not.toHaveBeenCalled()
+    expect(mocks.logAgentEvent).not.toHaveBeenCalled()
+  })
+
+  it('does not execute a late tool result after cancellation', async () => {
+    const abort = new AbortController()
+    mocks.streamChatWithTools.mockImplementationOnce(async () => {
+      abort.abort()
+      return toolCallResult
+    })
+    await expect(
+      runAgent({
+        projectId: 'p1',
+        mode: 'act',
+        baseMessages: [{ role: 'user', content: 'Bitte lesen' }],
+        signal: abort.signal,
+      })
+    ).rejects.toMatchObject({ name: 'AbortError' })
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
   it('recognizes explicit execution requests but not ordinary questions', () => {
     expect(shouldRequireToolCall('ok dann speichere es jetzt')).toBe(true)
     expect(shouldRequireToolCall('prüfen bitte')).toBe(true)
@@ -216,6 +261,47 @@ describe('agent mode and tool reliability', () => {
     expect(JSON.stringify(mocks.addHiddenToolMessage.mock.calls)).not.toContain('LOCAL_SECRET')
     expect(JSON.stringify(mocks.logAgentEvent.mock.calls)).not.toContain('LOCAL_SECRET')
     expect(result.ephemeralDataUsed).toBe(true)
+  })
+
+  it('returns useful partial environment data to the current model without archiving private details', async () => {
+    const partial = {
+      ok: false,
+      status: 'partial',
+      monitors: [{ id: 1, name: 'LOCAL_MONITOR' }],
+      sources: { monitors: { ok: true }, windows: { ok: false, error: 'LOCAL_WINDOW_ERROR' } },
+    }
+    mocks.getTool.mockReturnValue({
+      name: 'os_environment',
+      category: 'os',
+      mutating: false,
+      requiresApproval: true,
+      dataHandling: 'ephemeral',
+      execute: mocks.execute,
+    })
+    mocks.awaitApproval.mockResolvedValue(true)
+    mocks.execute.mockResolvedValue(partial)
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce({
+        ...toolCallResult,
+        toolCalls: [{ id: 'call-1', name: 'os_environment', arguments: {} }],
+      })
+      .mockResolvedValueOnce({
+        content: 'Monitor erkannt; Fensteranalyse fehlgeschlagen.',
+        toolCalls: [],
+        rawToolCalls: [],
+      })
+
+    const result = await runAgent({ projectId: 'p1', baseMessages: [], mode: 'act' })
+
+    const feedback = mocks.streamChatWithTools.mock.calls[1]![0].messages.find(
+      (message: { role: string }) => message.role === 'tool'
+    )
+    const outcome = JSON.parse(feedback.content)
+    expect(outcome.ok).toBe(false)
+    expect(JSON.parse(outcome.output)).toEqual(partial)
+    expect(result).toMatchObject({ toolFailures: 1, toolSuccesses: 0, ephemeralDataUsed: true })
+    expect(JSON.stringify(mocks.addHiddenToolMessage.mock.calls)).not.toMatch(/LOCAL_MONITOR|LOCAL_WINDOW_ERROR/)
+    expect(JSON.stringify(mocks.logAgentEvent.mock.calls)).not.toMatch(/LOCAL_MONITOR|LOCAL_WINDOW_ERROR/)
   })
 
   it('blocks a pending mutation when the user switches back to observe before execution', async () => {
@@ -349,6 +435,51 @@ describe('agent mode and tool reliability', () => {
     expect(JSON.stringify(sent.messages)).not.toContain('LOCAL_ONLY_SECRET')
     expect(sent).toMatchObject({ tools: [], toolChoice: 'none' })
     expect(result).toMatchObject({ finalText: 'Sichere externe Antwort', inferenceTarget: 'laravel_proxy' })
+  })
+
+  it('removes external tool claims before hashing and preserves that packet after a mode change', async () => {
+    let runtimeMode: 'act' | 'observe' = 'act'
+    let approvedMessages = ''
+    mocks.hashInferenceEgressRequest.mockImplementation(async request => {
+      approvedMessages = JSON.stringify(request.messages)
+      return 'a'.repeat(64)
+    })
+    mocks.resolveInferenceRouteForTurn
+      .mockRejectedValueOnce(new LocalInferenceError('approval required', 'external_approval_required', false, false))
+      .mockImplementationOnce(async input => ({
+        gateway: {
+          id: 'approved-external',
+          target: 'laravel_proxy',
+          streamChatWithTools: mocks.streamChatWithTools,
+        },
+        replacementMessages: input.externalPackage.messages,
+        externalOneShot: true,
+      }))
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: 'Diese Anfrage hat keine Tools zur Verfügung.',
+      toolCalls: [],
+      rawToolCalls: [],
+    })
+    const preamble = buildSystemPreamble('act', 'Projekt 2')
+
+    await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'system', content: preamble }],
+      externalBaseMessages: [{ role: 'system', content: preamble }],
+      mode: 'act',
+      getMode: () => runtimeMode,
+      requestExternalApproval: async () => {
+        runtimeMode = 'observe'
+        return true
+      },
+    })
+
+    const sent = mocks.streamChatWithTools.mock.calls[0]![0]
+    expect(JSON.stringify(sent.messages)).toBe(approvedMessages)
+    expect(approvedMessages).toContain('Für diese Anfrage sind keine Tools verfügbar')
+    expect(approvedMessages).not.toContain('Tatsächlich verfügbare Tools dieser Anfrage: project_get_state')
+    expect(sent).toMatchObject({ tools: [], toolChoice: 'none' })
+    expect(mocks.execute).not.toHaveBeenCalled()
   })
 
   it('re-checks the kill switch after an approval wait', async () => {

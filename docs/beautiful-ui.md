@@ -6,16 +6,14 @@ Die Tauri-App verwendet eine Vue-3-Adaption von
 MIT-Lizenz unter `vendor/beautiful-ui/`. Die tatsächlichen App-Komponenten liegen
 unter `src/components/ai/` und benötigen keine zusätzlichen Laufzeitpakete.
 
-## Öffnen
+## Einbindung
 
-In der linken Navigation **UI-Bibliothek** öffnen. Die Chat-Vorschau zeigt einen
-ausdrücklich als Beispiel gekennzeichneten Ablauf; **Ablauf abspielen** demonstriert
-Loader, Schritte, Tool-Chips, Textausgabe und Stoppen. **Alle 21 Komponenten** zeigt
-den vollständigen Katalog mit Suche und bedienbaren Vorschauen.
+Die Komponenten werden direkt im Projektchat und in [Luczor Mini](mini-chat.md)
+verwendet. Die frühere UI-Bibliothek einschließlich Menüpunkt und Vorschau wurde
+auf Wunsch entfernt. Die eigentlichen Komponenten bleiben im Quellcode verfügbar.
 
-Die echte Chatoberfläche verwendet die vorhandenen Projekt-, Modell-, Tool-,
-Freigabe-, Memory- und Sprachfunktionen. Die Bibliothek ruft weder ein Modell noch
-native Werkzeuge auf und schreibt keine Beispielwerte in den Projektzustand.
+Die Chatoberfläche verwendet die vorhandenen Projekt-, Modell-, Tool-, Freigabe-,
+Memory- und Sprachfunktionen.
 
 ## Komponenten und Einbindung
 
@@ -31,21 +29,21 @@ native Werkzeuge auf und schreibt keine Beispielwerte in den Projektzustand.
 | Prompt Bar          | `PromptBar.vue`          | Echte Eingabe, Projektkontext, Aktionen, Modelleinstellungen, Mikrofon und Stoppen |
 | Recommendation Card | `RecommendationCard.vue` | Memory-Kandidaten mit bestehenden Übernehmen-/Verwerfen-Funktionen                 |
 | Context Cards       | `ContextCards.vue`       | Bestehende Projektzusammenfassungen im Kontextbereich                              |
-| Diff Table          | `DiffTable.vue`          | Wiederverwendbare Auswahl vorgeschlagener Änderungen; interaktive Bibliothek       |
-| Records Table       | `RecordsTable.vue`       | Generische sortierbare Tabelle; interaktive Bibliothek                             |
-| Filter Table        | `FilterTable.vue`        | Statusfilter für generische Datensätze; interaktive Bibliothek                     |
+| Diff Table          | `DiffTable.vue`          | Wiederverwendbare Auswahl vorgeschlagener Änderungen; wiederverwendbare Komponente       |
+| Records Table       | `RecordsTable.vue`       | Generische sortierbare Tabelle; wiederverwendbare Komponente                             |
+| Filter Table        | `FilterTable.vue`        | Statusfilter für generische Datensätze; wiederverwendbare Komponente                     |
 | Sidebar Nav         | `SidebarNav.vue`         | Echte Projektliste, Suche, Einklappen, Systemstatus und Einstellungen              |
 | Search              | `SearchList.vue`         | Aktionssuche in der Eingabeleiste, einschließlich Tastaturbedienung                |
-| Flowchart           | `Flowchart.vue`          | Generische Statusschritte mit Details; interaktive Bibliothek                      |
-| Insight Cards       | `InsightCards.vue`       | Generische Einblicke mit Kurven und Navigation; interaktive Bibliothek             |
+| Flowchart           | `Flowchart.vue`          | Generische Statusschritte mit Details; wiederverwendbare Komponente                      |
+| Insight Cards       | `InsightCards.vue`       | Generische Einblicke mit Kurven und Navigation; wiederverwendbare Komponente             |
 | Code Block          | `CodeBlock.vue`          | Code und Unified Diffs in Chatantworten mit Zeilennummern und Kopieren             |
-| Fine-tune Card      | `FineTuneCard.vue`       | Gebundene Werte für Radius, Schriftgröße und Abstand; interaktive Bibliothek       |
+| Fine-tune Card      | `FineTuneCard.vue`       | Gebundene Werte für Radius, Schriftgröße und Abstand; wiederverwendbare Komponente       |
 | Selection Actions   | `SelectionActions.vue`   | Markierten Antworttext als neuen bearbeitbaren Auftrag vorbereiten                 |
 | Agent Screen        | `AgentScreen.vue`        | Slot/Bild für eine vorhandene Ansicht; leer ohne echte Bildschirmquelle            |
 
 Alle Datenkomponenten erhalten Werte über Props und geben Aktionen über typisierte
 Vue-Events zurück. Für Funktionen ohne bestehenden Luczor-Datenvertrag stellt die
-Bibliothek die Komponenten bereit, ohne Live-Daten, Werkzeugausführungen,
+Komponentensammlung die Bausteine bereit, ohne Live-Daten, Werkzeugausführungen,
 Bildschirmzugriff oder Erfolgsmetriken vorzutäuschen.
 
 ## Streaming und Denkstatus
@@ -82,9 +80,8 @@ bleiben im vorhandenen Tool-Protokoll und in den dafür vorgesehenen Freigaben.
   Externe Markdown-Links behalten den nativen, geprüften `open_url`-Pfad.
 - Scrollverfolgung folgt der Antwort nur, solange der Nutzer nahe am Ende bleibt.
 - Systemseitig reduzierte Bewegung und Luczors Einstellung werden berücksichtigt.
-- Die Bibliothek bietet eine lokale helle/dunkle Vorschau. Das bestehende
-  Einstellungssystem und die nativen Sprachfunktionen bleiben die zuständigen
-  Laufzeitpfade.
+- Das bestehende Einstellungssystem und die nativen Sprachfunktionen bleiben die
+  zuständigen Laufzeitpfade.
 
 ## Lokale Prüfung
 
@@ -94,7 +91,8 @@ in `tests/unit/chatActivity.test.ts` und `tests/unit/aiComponents.test.ts`.
 Modelltexte offenlegt. Kompilierung und Tests sind keine Bestätigung eines echten
 Modell-, Mikrofon- oder produktiven Tool-Laufs.
 
-Prüfstand vom 6. September 2026:
+Historischer Prüfstand der ursprünglichen Integration vom 6. September 2026
+(vor Entfernung der Vorschau; aktuelle Mini-Chat-Prüfung siehe `mini-chat.md`):
 
 - 48 Vitest-Dateien mit 360 bestandenen Tests; ESLint ohne Befund.
 - TypeScript-Prüfung und Vite-Produktionsbuild erfolgreich.

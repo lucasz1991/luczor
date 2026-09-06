@@ -1,5 +1,13 @@
 # Decisions
 
+## 2026-09-06 | Luczor Mini als eigene Anzeige mit gemeinsamer Laufzeit
+
+- Context: Der Nutzer verlangt ein verschiebbares, minimierbares Fenster ueber anderen Windows-Apps und die Kreisoptik des vorhandenen Live-Status. Die UI-Bibliothek soll entfallen.
+- Decision: `luczor-mini` ist ein eigenes rahmenloses Always-on-top-Webview ohne Parent-Bindung an das Hauptfenster. Nur `main` besitzt Modell-, Mikrofon-, Store- und Agentenlaufzeit. Validierte native Aktionen und begrenzte In-Memory-Snapshots verbinden beide Fenster; die Webvorschau nutzt dieselbe Vue-Oberflaeche als Overlay.
+- Decision: Der Mini-Verlauf und sein Tool-Journal bleiben fluechtig und projektgebunden. Gemeinsame Ausfuehrungssperre, echte einmalige Freigaben, API-Identitaetsreset, Abort-/Session-Grenzen und die bestehende Ausgabe-/Routingkontrolle bleiben verbindlich. Temporaer veraendert weder Provider-Aufbewahrung noch Auswirkungen explizit freigegebener Werkzeuge.
+- Decision: Kreisfarben und Symbole spiegeln echte Zustaende; Mikrofonpegel kommen ausschliesslich aus dem Hauptfenster. Keine erfundenen Prozent-, Denktext- oder Hardwareanzeigen. UI-Bibliothek, zugehoerige App-Einbindung und Menuepunkt entfernt; verwendete Komponenten bleiben erhalten.
+- Consequence: Kein zweiter Agent oder Mikrofonzugriff im Overlay. Hauptfenster-Minimierung und Vordergrundverhalten brauchen eine native interaktive Abnahme; Browser-Fixtures sind nur UI-Nachweis.
+
 Record durable decisions with date, context, decision, and consequences.
 
 ## 2026-09-06 | Hands-free-Einstellungen sind sichtbar und Auto-Senden ist opt-in

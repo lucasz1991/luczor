@@ -111,6 +111,8 @@ type Outcome = { ok: boolean; output?: unknown; error?: string }
 type ToolOutcomeRecord = { name: string; outcome: Outcome }
 
 const RUNTIME_MODE_MARKER = '[LUCZOR-LAUFZEITMODUS]'
+const RUNTIME_TOOLS_MARKER = '[LUCZOR-LAUFZEITTOOLS]'
+const LEGACY_TOOL_LIST_PREFIX = 'Tatsächlich verfügbare Tools dieser Anfrage:'
 
 export function buildRuntimeModeInstruction(mode: LuczorMode): string {
   const policy =
@@ -138,6 +140,58 @@ function applyRuntimeMode(messages: WireMessage[], mode: LuczorMode): void {
   const lineIndex = lines.findIndex(line => line.includes(RUNTIME_MODE_MARKER))
   if (lineIndex >= 0) lines[lineIndex] = instruction
   messages[index] = { role: 'system', content: lines.join('\n') }
+}
+
+function buildRuntimeToolInstruction(tools: ReturnType<typeof toOpenAITools>, mode: LuczorMode): string {
+  const names = tools.map(tool => tool.function.name).join(', ')
+  if (!names) {
+    return `${RUNTIME_TOOLS_MARKER} Für diese Anfrage sind keine Tools verfügbar. Antworte ausschließlich textlich anhand des übergebenen Kontexts. Behaupte keine aktuelle Geräteanalyse, Erinnerungssuche oder ausgeführte Änderung. Diese Einschränkung ersetzt ältere Aussagen über verfügbare Fähigkeiten.`
+  }
+  return `${RUNTIME_TOOLS_MARKER} ${LEGACY_TOOL_LIST_PREFIX} ${names}. Verwende ausschließlich exakt diese Namen. ${mode === 'observe' ? 'Datenverändernde Tools sind zwar beschrieben, bleiben im Beobachten-Modus gesperrt.' : 'Ausführung und Freigaben unterliegen dem aktuellen Modus und der lokalen Richtlinie.'}`
+}
+
+/** Keep advertised capabilities aligned with the actual request, before approval hashing. */
+function applyRuntimeTools(messages: WireMessage[], tools: ReturnType<typeof toOpenAITools>, mode: LuczorMode): void {
+  const instruction = buildRuntimeToolInstruction(tools, mode)
+  const index = messages.findIndex(
+    message =>
+      message.role === 'system' &&
+      (message.content.includes(RUNTIME_TOOLS_MARKER) || message.content.includes(LEGACY_TOOL_LIST_PREFIX))
+  )
+  const message = index >= 0 ? messages.slice(index, index + 1)[0] : undefined
+  if (!message || message.role !== 'system') {
+    messages.unshift({ role: 'system', content: instruction })
+    return
+  }
+  const lines = message.content.split('\n')
+  const lineIndex = lines.findIndex(
+    line => line.includes(RUNTIME_TOOLS_MARKER) || line.startsWith(LEGACY_TOOL_LIST_PREFIX)
+  )
+  if (lineIndex >= 0) lines.splice(lineIndex, 1, instruction)
+  messages.splice(index, 1, { role: 'system', content: lines.join('\n') })
+}
+
+/** Native/CLI tools can report a completed invocation whose action failed. */
+function normalizeToolOutcome(output: unknown): Outcome {
+  if (output && typeof output === 'object' && !Array.isArray(output)) {
+    const result = output as Record<string, unknown>
+    if (result.ok === false) {
+      const error = [result.error, result.stderr].find(value => typeof value === 'string' && value.trim())
+      return {
+        ok: false,
+        output,
+        error:
+          typeof error === 'string'
+            ? error.trim()
+            : result.timed_out === true
+              ? 'Zeitlimit der Tool-Ausführung überschritten.'
+              : typeof result.code === 'number' && Number.isFinite(result.code)
+                ? `Tool-Ausführung fehlgeschlagen (Exit-Code ${result.code}).`
+                : 'Das Tool hat die Ausführung als fehlgeschlagen gemeldet.',
+      }
+    }
+  }
+  return { ok: true, output }
 }
 
 function fallbackToolResult(records: ToolOutcomeRecord[]): string {
@@ -176,7 +230,11 @@ export function looksLikeInternalReasoningLeak(text: string): boolean {
 function outcomeMessage(toolCallId: string, toolName: string, outcome: Outcome): WireMessage {
   const compactOutcome = outcome.ok
     ? { ok: true, output: clip(outcome.output, 8000) }
-    : { ok: false, error: clip(outcome.error ?? 'Tool fehlgeschlagen.', 2000) }
+    : {
+        ok: false,
+        error: clip(outcome.error ?? 'Tool fehlgeschlagen.', 2000),
+        ...(outcome.output !== undefined ? { output: clip(outcome.output, 8000) } : {}),
+      }
   return {
     role: 'tool',
     tool_call_id: toolCallId,
@@ -282,6 +340,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       }
       const externalMessages = opts.externalBaseMessages.map(message => ({ ...message })) as WireMessage[]
       applyRuntimeMode(externalMessages, currentMode())
+      applyRuntimeTools(externalMessages, [], currentMode())
       const approvedRequest = {
         messages: externalMessages,
         tools: [],
@@ -319,7 +378,6 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   }
   const messages: WireMessage[] = [...(resolvedRoute.replacementMessages ?? opts.baseMessages)]
   const tools = resolvedRoute.externalOneShot ? [] : allTools
-  const executionPolicy = await loadExecutionPolicy()
   let lastRequestId: string | undefined
   let lastModel: string | undefined
   let lastProvider: string | undefined
@@ -338,7 +396,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
 
     // The user can change the mode while context/model/tool rounds are still
     // running. Refresh both the model instruction and the hard execution gate.
-    applyRuntimeMode(messages, currentMode())
+    // Approved external messages are immutable: even a mode change while the
+    // approval was open must not alter the already approved request hash.
+    if (!resolvedRoute.externalOneShot) {
+      applyRuntimeMode(messages, currentMode())
+      applyRuntimeTools(messages, tools, currentMode())
+    }
 
     setStatus('thinking')
     opts.onProgress?.({ phase: 'thinking', round: round + 1 })
@@ -446,6 +509,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         category,
         args: call.arguments,
         requiresApproval,
+        dataHandling,
         status: 'proposed' as const,
       }
       if (opts.toolSession) opts.toolSession.queue(queuedCall)
@@ -459,6 +523,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         recordOutcome(projectId, call.id, call.name, 'failed', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
         continue
+      }
+
+      // A saved policy change takes effect before the next tool, including
+      // another tool returned by the same model round. Never keep a turn-wide
+      // auto-approval snapshot after the user has revoked that setting.
+      const executionPolicy = await loadExecutionPolicy()
+      if (signal?.aborted) {
+        const outcome: Outcome = { ok: false, error: 'Abgebrochen.' }
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        throw new DOMException('Aborted', 'AbortError')
       }
 
       // Global kill switch: hard-stop ALL tool execution.
@@ -557,14 +633,15 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       if (dataHandling === 'ephemeral') ephemeralDataUsed = true
       try {
         const output = await tool.execute(call.arguments, { projectId })
-        const outcome: Outcome = { ok: true, output }
-        toolSuccesses++
+        const outcome = normalizeToolOutcome(output)
+        if (outcome.ok) toolSuccesses++
+        else toolFailures++
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(
           projectId,
           call.id,
           call.name,
-          'executed',
+          outcome.ok ? 'executed' : 'failed',
           outcome,
           dataHandling,
           res.requestId,
@@ -607,16 +684,11 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
  * the tool-approval policy. Prepended to the wire history by the caller.
  */
 export function buildSystemPreamble(mode: LuczorMode, projectName: string, assistantName = 'Luczor'): string {
-  const toolNames = toOpenAITools()
-    .map(tool => (tool as { function?: { name?: string } }).function?.name)
-    .filter((name): name is string => !!name)
-    .join(', ')
-
   return [
     `Du bist ${assistantName}, ein deutschsprachiger Assistent, der das Gerät wahrnehmen und steuern kann.`,
     `Aktuelles Projekt: "${projectName}".`,
     buildRuntimeModeInstruction(mode),
-    `Tatsächlich verfügbare Tools dieser Anfrage: ${toolNames || 'keine'}. Verwende ausschließlich exakt diese Namen und behaupte nicht, ein aufgeführtes Tool fehle.`,
+    buildRuntimeToolInstruction(toOpenAITools(), mode),
     'Bei einem klaren Auftrag zum Speichern, Erstellen, Ändern oder Prüfen rufst du das passende Tool auf. Im Handeln-Modus fragst du nicht nur textlich nach Freigabe; die Oberfläche übernimmt die Freigabe des Tool-Aufrufs.',
     'Behaupte niemals, etwas sei gespeichert, erstellt, geändert oder geprüft, bevor ein passender Tool-Aufruf erfolgreich zurückgekehrt ist. Nach Änderungen prüfst du das Ergebnis mit einem passenden Lese-Tool, sofern eines verfügbar ist, und nennst das konkrete Resultat.',
     'project_create ist ausschließlich für den ausdrücklichen Wunsch nach einem neuen, separaten Projekt. Für Änderungen am aktuellen Projekt nutzt du project_set_summary/project_upsert_goal; agent_bridge_write ist niemals ein Ersatz für Projektziele, Aufgaben oder Zusammenfassung.',

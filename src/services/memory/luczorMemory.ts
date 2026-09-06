@@ -59,6 +59,7 @@ export type MemoryRecord = {
   meta?: Record<string, unknown>
   synced?: boolean
   syncError?: string
+  retrievalScore?: number
 }
 
 export type RememberInput = {
@@ -678,11 +679,73 @@ class OfflineMemoryStore {
       )
       .filter(record => !record.expiresAt || record.expiresAt > now)
       .filter(record => !state.tombstones.some(tombstone => tombstone.recordId === record.id))
-      .filter(record => !containsSensitiveMemoryData(memoryRecordDlpPayload(record)))
+      .filter(isProviderSafeMemoryRecord)
+      .filter(record => matchesRecallQuery(record, query, terms))
       .map(record => ({ record, rank: memoryRank(record, terms) }))
       .sort((left, right) => right.rank - left.rank || right.record.updatedAt - left.record.updatedAt)
       .slice(0, limit)
       .map(item => item.record)
+  }
+
+  /** Pending local erasure and privacy decisions also govern remote recall. */
+  async reconcileRecall(
+    context: MemoryContext,
+    local: MemoryRecord[],
+    remote: MemoryRecord[]
+  ): Promise<{ local: MemoryRecord[]; remote: MemoryRecord[] }> {
+    await this.writes
+    const state = await this.load()
+    const scopedRecords = state.records.filter(
+      record => record.principalId === context.principalId && record.dataset === context.dataset
+    )
+    const blockedIds = new Set<string>()
+    const privateContent = new Set<string>()
+    for (const tombstone of state.tombstones) {
+      if (
+        tombstone.principalId === context.principalId &&
+        tombstone.scope === context.scope &&
+        tombstone.projectId === context.projectId &&
+        tombstone.agentId === context.agentId &&
+        tombstone.sessionId === context.sessionId
+      ) {
+        blockedIds.add(tombstone.recordId)
+        if (tombstone.serverId) blockedIds.add(tombstone.serverId)
+      }
+    }
+    for (const record of scopedRecords) {
+      if (record.status === 'superseded' || (record.status === 'active' && !isProviderSafeMemoryRecord(record))) {
+        blockedIds.add(record.id)
+        if (record.serverId) blockedIds.add(record.serverId)
+      }
+      if (record.status === 'active' && !isProviderSafeMemoryRecord(record)) {
+        privateContent.add(normalizeRecallContent(record.content))
+      }
+    }
+    const pendingFeatures = new Set(
+      scopedRecords
+        .filter(record => record.status === 'active' && !record.synced && record.featureKey)
+        .map(record => record.featureKey)
+    )
+    const recalledLocalIds = new Set(local.map(record => record.id))
+    const currentLocal = scopedRecords.filter(
+      record =>
+        recalledLocalIds.has(record.id) &&
+        record.status === 'active' &&
+        (!record.expiresAt || record.expiresAt > Date.now()) &&
+        !blockedIds.has(record.id) &&
+        isProviderSafeMemoryRecord(record)
+    )
+    const eligibleRemote = remote.filter(
+      record =>
+        !blockedIds.has(record.id) &&
+        !(record.serverId && blockedIds.has(record.serverId)) &&
+        !privateContent.has(normalizeRecallContent(record.content)) &&
+        !(record.featureKey && pendingFeatures.has(record.featureKey))
+    )
+    return {
+      local: currentLocal,
+      remote: eligibleRemote,
+    }
   }
 
   async candidates(context: MemoryContext, limit: number): Promise<MemoryRecord[]> {
@@ -811,11 +874,9 @@ class OfflineMemoryStore {
         if (serverVersionId) record.serverVersionId = serverVersionId
         record.requiresServerVersionRefresh = false
       }
-      if (event.operation === 'delete') {
-        state.tombstones = state.tombstones.filter(
-          item => !(item.recordId === event.recordId && item.principalId === event.principalId)
-        )
-      }
+      // Retain the bounded erasure marker after acknowledgement: an older
+      // in-flight recall can still deliver the pre-deletion SQL snapshot.
+      // normalizeState expires acknowledged markers after 90 days.
       state.outbox = state.outbox.filter(item => item.id !== eventId)
     })
   }
@@ -1004,55 +1065,73 @@ class ServerMemoryBackend {
   }
 
   async recall(context: MemoryContext, query: string, limit: number): Promise<MemoryRecord[]> {
-    const result = await this.call<{ data?: any[] }>('/memory/recall', {
+    const result = await this.call<{ data?: unknown }>('/memory/recall', {
       query,
       scope: context.scope,
       project_id: context.projectId,
       agent_id: context.agentId,
       session_id: context.sessionId,
-      limit,
+      limit: Math.max(1, Math.min(20, Math.floor(limit))),
     })
-    return (result.data ?? [])
-      .filter(
-        item =>
-          !containsSensitiveMemoryData({
-            content: item?.content,
-            external_id: item?.id,
-            feature_key: item?.feature_key,
-            type: item?.type,
-            source_type: item?.source,
-            tags: item?.tags,
-            provenance: item?.provenance,
-            meta: item?.meta,
-          })
-      )
-      .map((item: any, index: number) => ({
-        id: String(item.id ?? `server_${index}`),
-        principalId: context.principalId,
-        serverId: String(item.id ?? `server_${index}`),
-        serverVersionId: Number.isInteger(Number(item.source_record_id)) ? Number(item.source_record_id) : undefined,
-        scope: context.scope,
-        dataset: context.dataset,
-        content: String(item.content ?? ''),
-        contentHash: String(item.content_hash ?? ''),
-        type: String(item.type ?? 'note'),
-        visibility: 'syncable' as MemoryVisibility,
-        status: 'active' as MemoryStatus,
-        retention: 'durable' as MemoryRetention,
-        sensitivity: 'normal' as MemorySensitivity,
-        writeIntent: 'confirmed' as MemoryWriteIntent,
-        importance: clamp(Number(item.importance ?? 0.5)),
-        confidence: clamp(Number(item.confidence ?? 0.5)),
-        source: String(item.source ?? 'server'),
-        tags: [],
-        createdAt: parseDate(item.recorded_at) ?? Date.now(),
-        updatedAt: parseDate(item.recorded_at) ?? Date.now(),
-        projectId: context.projectId,
-        featureKey: item.feature_key ?? undefined,
-        provenance: item.provenance ?? undefined,
-        meta: item.meta ?? undefined,
-        synced: true,
-      }))
+    if (!Array.isArray(result.data)) return []
+    return result.data.flatMap((value): MemoryRecord[] => {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) return []
+      const item = value as Record<string, unknown>
+      if (
+        typeof item.content !== 'string' ||
+        !item.content.trim() ||
+        !['string', 'number'].includes(typeof item.id) ||
+        !String(item.id).trim() ||
+        (item.scope != null && item.scope !== context.scope) ||
+        (item.project_id != null && item.project_id !== context.projectId) ||
+        (item.agent_id != null && item.agent_id !== context.agentId) ||
+        (item.session_id != null && item.session_id !== context.sessionId) ||
+        (item.status != null && item.status !== 'active') ||
+        (item.visibility != null && item.visibility !== 'syncable' && item.visibility !== 'public') ||
+        (item.retention != null && item.retention !== 'durable' && item.retention !== 'permanent') ||
+        (item.sensitivity != null && item.sensitivity !== 'normal' && item.sensitivity !== 'sensitive') ||
+        (item.expires_at != null && (parseDate(item.expires_at) ?? 0) <= Date.now()) ||
+        (item.valid_until != null && (parseDate(item.valid_until) ?? 0) <= Date.now()) ||
+        (item.valid_from != null && (parseDate(item.valid_from) ?? Infinity) > Date.now()) ||
+        containsSensitiveMemoryData(item) ||
+        containsLocalRepositorySource(item)
+      ) {
+        return []
+      }
+      return [
+        {
+          id: String(item.id),
+          principalId: context.principalId,
+          serverId: String(item.id),
+          serverVersionId: positiveInteger(item.source_record_id),
+          scope: context.scope,
+          dataset: context.dataset,
+          content: item.content.trim(),
+          contentHash: String(item.content_hash ?? ''),
+          type: String(item.type ?? 'note'),
+          visibility: 'syncable' as MemoryVisibility,
+          status: 'active' as MemoryStatus,
+          retention: 'durable' as MemoryRetention,
+          sensitivity: 'normal' as MemorySensitivity,
+          writeIntent: 'confirmed' as MemoryWriteIntent,
+          importance: clamp(Number(item.importance ?? 0.5)),
+          confidence: clamp(Number(item.confidence ?? 0.5)),
+          source: String(item.source ?? 'server'),
+          tags: Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === 'string') : [],
+          createdAt: parseDate(item.recorded_at) ?? Date.now(),
+          updatedAt: parseDate(item.recorded_at) ?? Date.now(),
+          projectId: context.projectId,
+          agentId: context.agentId,
+          sessionId: context.sessionId,
+          featureKey: typeof item.feature_key === 'string' ? item.feature_key : undefined,
+          provenance: item.provenance as Record<string, unknown> | undefined,
+          meta: item.meta as Record<string, unknown> | undefined,
+          expiresAt: parseDate(item.expires_at) ?? parseDate(item.valid_until),
+          retrievalScore: typeof item.retrieval_score === 'number' ? clamp(item.retrieval_score) : undefined,
+          synced: true,
+        },
+      ]
+    })
   }
 
   /**
@@ -1216,7 +1295,7 @@ export class LuczorMemoryService {
     const snapshot = await this.operationSnapshot()
     const principalId = snapshot.principalId
     const context = this.context(scope, query, principalId)
-    const limit = Math.max(1, Math.min(20, query.limit ?? 6))
+    const limit = Number.isFinite(query.limit) ? Math.max(1, Math.min(20, Math.floor(query.limit!))) : 6
     const localPromise = this.offline.recall(context, query.query, limit * 2).catch(error => {
       console.warn('[memory] encrypted local store unavailable:', error)
       return []
@@ -1228,9 +1307,17 @@ export class LuczorMemoryService {
         return []
       })
     const [local, server] = await Promise.all([localPromise, serverPromise])
+    const reconciled = await this.offline.reconcileRecall(context, local, server).catch(error => {
+      console.warn('[memory] local recall policy unavailable:', error)
+      return { local: [], remote: [] }
+    })
+    // The verified request snapshot keeps reads partitioned, but its result
+    // must not be delivered into an account selected while I/O was pending.
+    const currentAccount = await getVerifiedAccountSnapshot()
+    if ((currentAccount?.principalId ?? 'device-local') !== principalId) return []
     return fuseMemories(
-      local.filter(isProviderSafeMemoryRecord),
-      server.filter(isProviderSafeMemoryRecord),
+      reconciled.local.filter(isProviderSafeMemoryRecord),
+      reconciled.remote.filter(isProviderSafeMemoryRecord),
       query.query,
       limit
     )
@@ -1555,35 +1642,140 @@ function queueRemoteDelete(state: MemoryState, record: MemoryRecord): void {
 function fuseMemories(local: MemoryRecord[], server: MemoryRecord[], query: string, limit: number): MemoryRecord[] {
   const byContent = new Map<string, MemoryRecord>()
   for (const record of [...local, ...server]) {
-    const key = record.contentHash || record.content.trim().toLocaleLowerCase()
+    // Local fallback hashes and canonical SQL SHA-256 hashes are not comparable.
+    // Compare the actual normalized content instead of trusting transport hashes.
+    const key = normalizeRecallContent(record.content)
     const existing = byContent.get(key)
     if (!existing || record.confidence + record.importance > existing.confidence + existing.importance) {
       byContent.set(key, record)
     }
   }
   const terms = queryTerms(query)
-  return [...byContent.values()]
+  const ranked = [...byContent.values()]
+    .filter(record => matchesRecallQuery(record, query, terms))
     .map(record => ({ record, rank: memoryRank(record, terms) }))
     .sort((left, right) => right.rank - left.rank || right.record.updatedAt - left.record.updatedAt)
+  const features = new Set<string>()
+  return ranked
+    .filter(({ record }) => {
+      if (!record.featureKey) return true
+      if (features.has(record.featureKey)) return false
+      features.add(record.featureKey)
+      return true
+    })
     .slice(0, limit)
-    .map(item => item.record)
+    .map(({ record }) => record)
 }
 
 function memoryRank(record: MemoryRecord, terms: string[]): number {
-  const content = record.content.toLocaleLowerCase()
-  const lexical = terms.length ? terms.filter(term => content.includes(term)).length / terms.length : 0
-  return lexical * 0.55 + record.importance * 0.2 + record.confidence * 0.2 + (record.synced ? 0.05 : 0.03)
+  const lexical = lexicalRecallScore(record, terms)
+  const semantic = record.source === 'cognee_revalidated' ? (record.retrievalScore ?? 0.5) : 0
+  return Math.max(lexical, semantic) * 0.6 + record.importance * 0.2 + record.confidence * 0.2
 }
+
+function normalizeRecallContent(content: string): string {
+  return content.normalize('NFKC').toLocaleLowerCase().replace(/\s+/gu, ' ').trim()
+}
+
+const RECALL_STOP_WORDS = new Set([
+  'aber',
+  'als',
+  'am',
+  'an',
+  'auch',
+  'auf',
+  'aus',
+  'bei',
+  'bitte',
+  'das',
+  'dass',
+  'den',
+  'der',
+  'des',
+  'die',
+  'dies',
+  'diese',
+  'dieser',
+  'dieses',
+  'du',
+  'ein',
+  'eine',
+  'einem',
+  'einen',
+  'einer',
+  'es',
+  'für',
+  'hat',
+  'ich',
+  'im',
+  'in',
+  'ist',
+  'kann',
+  'kannst',
+  'mit',
+  'mir',
+  'nach',
+  'noch',
+  'oder',
+  'sich',
+  'sie',
+  'sind',
+  'und',
+  'uns',
+  'vom',
+  'von',
+  'vor',
+  'war',
+  'was',
+  'welche',
+  'welcher',
+  'wie',
+  'wir',
+  'zu',
+  'zum',
+  'zur',
+  'and',
+  'are',
+  'for',
+  'from',
+  'how',
+  'is',
+  'it',
+  'of',
+  'on',
+  'please',
+  'the',
+  'this',
+  'to',
+  'what',
+  'with',
+  'you',
+])
 
 function queryTerms(query: string): string[] {
   return [
     ...new Set(
       query
+        .normalize('NFKC')
+        .replace(/([\p{Ll}\p{N}])(\p{Lu})/gu, '$1 $2')
         .toLocaleLowerCase()
-        .split(/[^\p{L}\p{N}_.-]+/u)
-        .filter(term => term.length >= 2)
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter(term => term.length >= 2 && !RECALL_STOP_WORDS.has(term))
     ),
   ]
+}
+
+function lexicalRecallScore(record: MemoryRecord, terms: string[]): number {
+  if (!terms.length) return 0
+  const tokens = queryTerms([record.content, record.featureKey ?? '', ...record.tags].join(' '))
+  const matches = terms.filter(term =>
+    tokens.some(token => token === term || (term.length >= 4 && token.startsWith(term)))
+  )
+  return matches.length / terms.length
+}
+
+function matchesRecallQuery(record: MemoryRecord, query: string, terms: string[]): boolean {
+  return !query.trim() || lexicalRecallScore(record, terms) > 0 || record.source === 'cognee_revalidated'
 }
 
 function parseDate(value: unknown): number | undefined {

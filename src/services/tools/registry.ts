@@ -5,6 +5,7 @@
 
 import { agentTools } from './agents'
 import { filesystemTools } from './filesystem'
+import { memoryTools } from './memory'
 import { osTools } from './os'
 import { planTools } from './plans'
 import { projectCreationTools, projectStateTools } from './project'
@@ -26,6 +27,7 @@ const TOOLS: ToolDef[] = [
   ...taskTools,
   ...agentTools,
   ...planTools,
+  ...memoryTools,
 ]
 
 const BY_NAME = new Map<string, ToolDef>(TOOLS.map(tool => [tool.name, tool]))

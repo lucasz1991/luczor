@@ -12,4 +12,4 @@
 | Port Beautiful UI components and integrate actual chat, streaming and tools | Codex/root | completed | 2026-09-06T02:00:00Z |
 | Gemeinsamen Server-TTS, sichere Settings-Identitaetswechsel und private Vorlesesperre integrieren | Codex/server_tts_desktop | completed | 2026-09-06T01:51:00Z |
 | Voice-Einstellungen und Hands-free-Runtime vereinheitlichen, Diktatabschluss/Auto-Senden und STT-Readiness absichern | Codex/server_tts_desktop | completed | 2026-09-06T02:15:00Z |
-| Independent always-on-top temporary mini chat with approvals and choices | Codex/mini_overlay | in-progress | 2026-09-06T02:13:50.0364972Z |
+| Independent always-on-top temporary mini chat with approvals and choices | Codex/mini_overlay | completed | 2026-09-06T02:56:00Z |

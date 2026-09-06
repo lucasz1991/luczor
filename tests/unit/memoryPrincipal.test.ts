@@ -234,6 +234,299 @@ describe('desktop memory account isolation', () => {
     await expect(memory.recall({ projectId: 'project-1', query: 'Repository-Struktur' })).resolves.toEqual([])
   })
 
+  it('returns relevant local evidence without unrelated high-importance or substring matches', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    for (const content of ['Die Kalenderfarben sind blau.', 'Klappbare Navigation verwenden.']) {
+      await memory.remember({ content, projectId: 'project-1', writeIntent: 'explicit', importance: 1 })
+    }
+    await expect(memory.recall({ projectId: 'project-1', query: 'Bitte App Speicher optimieren' })).resolves.toEqual([])
+    await expect(memory.recall({ projectId: 'project-1', query: '' })).resolves.toHaveLength(2)
+  })
+
+  it('finds tagged memories and technical feature names while preserving project isolation', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const tagged = await memory.remember({
+      content: 'Jeden Entwurf kurz gemeinsam prüfen.',
+      projectId: 'project-1',
+      writeIntent: 'explicit',
+      tags: ['Freigaben'],
+    })
+    const feature = await memory.remember({
+      content: 'Die Quellen bei jeder Antwort anzeigen.',
+      projectId: 'project-1',
+      writeIntent: 'explicit',
+      featureKey: 'memoryRecall.sources',
+    })
+    await memory.remember({
+      content: 'Memory recall eines anderen Projekts',
+      projectId: 'project-2',
+      writeIntent: 'explicit',
+      importance: 1,
+    })
+    await expect(memory.recall({ projectId: 'project-1', query: 'Freigabe' })).resolves.toEqual([
+      expect.objectContaining({ id: tagged.id }),
+    ])
+    await expect(memory.recall({ projectId: 'project-1', query: 'memory_recall' })).resolves.toEqual([
+      expect.objectContaining({ id: feature.id }),
+    ])
+  })
+
+  it('applies local privacy eligibility before the result budget', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    for (let index = 0; index < 3; index++) {
+      await memory.remember({
+        content: `Navigation intern ${index}`,
+        projectId: 'project-1',
+        writeIntent: 'explicit',
+        source: 'repository_graph',
+        importance: 1,
+        confidence: 1,
+      })
+    }
+    const safe = await memory.remember({
+      content: 'Navigation links anzeigen.',
+      projectId: 'project-1',
+      writeIntent: 'explicit',
+      importance: 0.1,
+      confidence: 0.1,
+    })
+    await expect(memory.recall({ projectId: 'project-1', query: 'Navigation', limit: 1 })).resolves.toEqual([
+      expect.objectContaining({ id: safe.id }),
+    ])
+  })
+
+  it('deduplicates identical local and SQL content even when their hash formats differ', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    await memory.remember({ content: 'Antworten kurz halten.', projectId: 'project-1', writeIntent: 'explicit' })
+    await memory.flushPendingSync()
+    await setServerEnabled(true)
+    harness.fetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            id: 'remote-short-answer',
+            content: 'Antworten  kurz halten.',
+            content_hash: 'server-sha256',
+            source: 'sql',
+          },
+        ],
+      })
+    )
+    await expect(memory.recall({ projectId: 'project-1', query: 'Antworten' })).resolves.toHaveLength(1)
+  })
+
+  it('keeps semantic SQL-revalidated hits without returning unrelated SQL fallback rows', async () => {
+    await setServerEnabled(true)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    harness.fetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          { id: 'semantic', content: 'Antworten kurz halten.', source: 'cognee_revalidated', retrieval_score: 0.8 },
+          { id: 'unrelated', content: 'Kalenderfarben sind blau.', source: 'sql', importance: 1, confidence: 1 },
+        ],
+      })
+    )
+    await expect(memory.recall({ projectId: 'project-1', query: 'Knapp formulieren' })).resolves.toEqual([
+      expect.objectContaining({ id: 'semantic' }),
+    ])
+  })
+
+  it.each([20, 11, 19.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'sends an integer limit within the canonical recall API contract for %s',
+    async limit => {
+      await setServerEnabled(true)
+      const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+      const memory = new LuczorMemoryService()
+      harness.fetch.mockResolvedValueOnce(jsonResponse({ data: [{ id: 'valid', content: 'Navigation links' }] }))
+      await expect(memory.recall({ projectId: 'project-1', query: 'Navigation', limit })).resolves.toHaveLength(1)
+      const request = JSON.parse(String(harness.fetch.mock.calls[0]?.[1]?.body))
+      expect(Number.isInteger(request.limit)).toBe(true)
+      expect(request.limit).toBeGreaterThanOrEqual(1)
+      expect(request.limit).toBeLessThanOrEqual(20)
+    }
+  )
+
+  it('rejects malformed, private, expired, future, foreign and unconfirmed remote rows independently', async () => {
+    await setServerEnabled(true)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const base = { content: 'Navigation links', source: 'sql' }
+    harness.fetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          null,
+          'malformed',
+          { id: 'invalid-content', content: { nested: 'Navigation' } },
+          { ...base, id: 'candidate', status: 'candidate' },
+          { ...base, id: 'private', visibility: 'private' },
+          { ...base, id: 'session', retention: 'session' },
+          { ...base, id: 'expired', expires_at: '2000-01-01T00:00:00Z' },
+          { ...base, id: 'future', valid_from: '2100-01-01T00:00:00Z' },
+          { ...base, id: 'foreign-scope', scope: 'user' },
+          { ...base, id: 'foreign-project', project_id: 'project-2' },
+          { ...base, id: 'foreign-agent', agent_id: 'agent-2' },
+          { ...base, id: 'foreign-session', session_id: 'session-2' },
+          { ...base, id: 'repository', source_type: 'repository_graph' },
+          { ...base, id: 'valid', tags: ['Bedienung'] },
+        ],
+      })
+    )
+    await expect(memory.recall({ projectId: 'project-1', query: 'Navigation' })).resolves.toEqual([
+      expect.objectContaining({ id: 'valid', tags: ['Bedienung'] }),
+    ])
+  })
+
+  it('suppresses a forgotten remote memory while its offline erasure is pending', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    await memory.forget('project', 'forgotten-remote', { projectId: 'project-1' })
+    await memory.flushPendingSync()
+    await setServerEnabled(true)
+    harness.fetch.mockResolvedValueOnce(
+      jsonResponse({ data: [{ id: 'forgotten-remote', content: 'Navigation links' }] })
+    )
+    await expect(memory.recall({ projectId: 'project-1', query: 'Navigation' })).resolves.toEqual([])
+    await expect(memory.pendingSyncCount()).resolves.toBe(1)
+  })
+
+  it('keeps a pending confirmed local replacement ahead of a stale remote feature version', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const replacement = await memory.remember({
+      content: 'Navigation rechts anzeigen.',
+      projectId: 'project-1',
+      featureKey: 'navigation.side',
+      writeIntent: 'explicit',
+    })
+    await memory.flushPendingSync()
+    await setServerEnabled(true)
+    harness.fetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            id: 'old-feature',
+            content: 'Navigation links anzeigen.',
+            feature_key: 'navigation.side',
+            importance: 1,
+            confidence: 1,
+          },
+        ],
+      })
+    )
+    await expect(memory.recall({ projectId: 'project-1', query: 'Navigation' })).resolves.toEqual([
+      expect.objectContaining({ id: replacement.id, content: 'Navigation rechts anzeigen.' }),
+    ])
+  })
+
+  it('drops local and remote snapshots erased while recall was in flight, even after server acknowledgement', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const record = await memory.remember({
+      content: 'Navigation links anzeigen.',
+      projectId: 'project-1',
+      writeIntent: 'explicit',
+    })
+    await memory.flushPendingSync()
+    await setServerEnabled(true)
+    let releaseRecall!: (response: Response) => void
+    let recallStarted!: () => void
+    const started = new Promise<void>(resolve => {
+      recallStarted = resolve
+    })
+    harness.fetch.mockImplementation(async (url: unknown) => {
+      if (String(url).endsWith('/memory/recall')) {
+        recallStarted()
+        return new Promise<Response>(resolve => {
+          releaseRecall = resolve
+        })
+      }
+      return jsonResponse({ forgotten: true, already_absent: false })
+    })
+    const recalling = memory.recall({ projectId: 'project-1', query: 'Navigation' })
+    await started
+    await memory.forget('project', record.id, { projectId: 'project-1' })
+    await memory.flushPendingSync()
+    await expect(memory.pendingSyncCount()).resolves.toBe(0)
+    releaseRecall(jsonResponse({ data: [{ id: record.id, content: record.content }] }))
+    await expect(recalling).resolves.toEqual([])
+  })
+
+  it('discards recall results if the active account changes during the remote request', async () => {
+    await setServerEnabled(true)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    harness.fetch.mockImplementationOnce(async () => {
+      harness.currentSnapshot = accountSnapshot(2, 'key-account-b')
+      return jsonResponse({ data: [{ id: 'account-a-memory', content: 'Navigation links' }] })
+    })
+    await expect(memory.recall({ projectId: 'project-1', query: 'Navigation' })).resolves.toEqual([])
+  })
+
+  it('returns the latest local evidence when its metadata changes during remote recall', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const original = await memory.remember({
+      content: 'Navigation links anzeigen.',
+      projectId: 'project-1',
+      writeIntent: 'explicit',
+      tags: ['Entwurf'],
+    })
+    await memory.flushPendingSync()
+    await setServerEnabled(true)
+    harness.fetch.mockImplementationOnce(async () => {
+      await setServerEnabled(false)
+      await memory.remember({
+        content: original.content,
+        projectId: 'project-1',
+        writeIntent: 'explicit',
+        tags: ['Geprüft'],
+      })
+      return jsonResponse({ data: [] })
+    })
+    await expect(memory.recall({ projectId: 'project-1', query: 'Navigation' })).resolves.toEqual([
+      expect.objectContaining({ id: original.id, tags: ['Entwurf', 'Geprüft'] }),
+    ])
+  })
+
+  it('does not let a remote copy override an explicit local-only content policy', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    await memory.remember({
+      content: 'Navigation intern aufbauen.',
+      projectId: 'project-1',
+      writeIntent: 'explicit',
+      visibility: 'private',
+    })
+    await memory.flushPendingSync()
+    await setServerEnabled(true)
+    harness.fetch.mockResolvedValueOnce(
+      jsonResponse({
+        data: [
+          {
+            id: 'remote-copy',
+            content: 'Navigation intern aufbauen.',
+            source: 'sql',
+          },
+        ],
+      })
+    )
+    await expect(memory.recall({ projectId: 'project-1', query: 'Navigation' })).resolves.toEqual([])
+  })
+
   it('normalizes nested origin_type provenance and keeps it local without a request', async () => {
     await setServerEnabled(true)
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')

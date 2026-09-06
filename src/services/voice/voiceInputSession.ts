@@ -87,9 +87,10 @@ export function createVoiceInputSession(deps: Dependencies) {
     void stop()
     update({
       status: 'error',
-      error: (error as (Error & { code?: string }) | undefined)?.code === 'voice_backlog'
-        ? 'Die lokale Spracherkennung kommt nicht nach. Aufnahme gestoppt; bisheriger Text bleibt erhalten. Bitte den letzten Abschnitt wiederholen.'
-        : 'Die lokale Spracherkennung wurde gestoppt. Text prüfen und den letzten Abschnitt gegebenenfalls wiederholen; bei wiederholten Fehlern die Voice-Einstellungen und lokale Whisper-Installation prüfen.',
+      error:
+        (error as (Error & { code?: string }) | undefined)?.code === 'voice_backlog'
+          ? 'Die lokale Spracherkennung kommt nicht nach. Aufnahme gestoppt; bisheriger Text bleibt erhalten. Bitte den letzten Abschnitt wiederholen.'
+          : 'Die lokale Spracherkennung wurde gestoppt. Text prüfen und den letzten Abschnitt gegebenenfalls wiederholen; bei wiederholten Fehlern die Voice-Einstellungen und lokale Whisper-Installation prüfen.',
     })
   }
 
@@ -121,8 +122,8 @@ export function createVoiceInputSession(deps: Dependencies) {
         mode === 'push_to_talk'
           ? 'Diktat läuft. Aufnahme stoppen beendet den Text ohne Absenden.'
           : handsFree.strategy === 'safeword'
-            ? `Bereit: „${handsFree.triggerPhrase}“ startet, „${handsFree.endPhrase}“ beendet das Diktat.`
-            : `Diktat läuft. „${handsFree.endPhrase}“ oder eine längere Pause beendet den Text.`
+            ? `Bereit: „${handsFree.triggerPhrase}“ startet, „${handsFree.endPhrase}“ beendet und sendet den Text.`
+            : `Diktat läuft. „${handsFree.endPhrase}“ beendet und sendet den Text. Eine längere Pause beendet das Diktat.`
 
       await deps.engine.start({
         mode: handsFree.strategy === 'safeword' ? 'wakeword' : 'continuous',
@@ -145,7 +146,7 @@ export function createVoiceInputSession(deps: Dependencies) {
           }
           if (text) update({ notice: 'Live-Vorschau im Eingabefeld – Erkennung kann sich noch ändern.' })
         },
-        onCommand: text => {
+        onCommand: (text, reason) => {
           if (!mayWrite()) return
           draftId ??= draft.begin(source)
           const result = draft.finalize(draftId, text)
@@ -154,14 +155,25 @@ export function createVoiceInputSession(deps: Dependencies) {
             void stop('Diktat pausiert – deine Eingabe bleibt erhalten.')
             return
           }
-          update({ notice: 'Diktat beendet. Text prüfen, bei Bedarf korrigieren und mit Enter senden.' })
-          if (mode !== 'hands_free' || !settings.handsFree.autoSubmit || !result.canAutoSubmit) return
+          // A confirmed close phrase is the user's spoken Send action, including a
+          // visible prefix. A mere pause still needs opt-in and a wholly dictated draft.
+          const closeSubmit = reason === 'close_word' && !!text.trim() && !!result.text.trim()
+          const silenceSubmit = reason === 'silence' && settings.handsFree.autoSubmit && result.canAutoSubmit
+          if (mode !== 'hands_free' || (!closeSubmit && !silenceSubmit)) {
+            update({ notice: 'Diktat beendet. Text prüfen, bei Bedarf korrigieren und mit Enter senden.' })
+            return
+          }
+          update({ notice: 'Diktat beendet. Nachricht wird automatisch gesendet.' })
           submitting = true
           syncMuted()
           void deps
             .submit()
+            .then(() => {
+              if (current()) update({ notice: 'Spracheingabe ist wieder bereit. Ergebnis im Chat prüfen.' })
+            })
             .catch(() => {
-              if (current()) update({ error: 'Der diktierte Text konnte nicht gesendet werden. Bitte prüfen.' })
+              if (current())
+                update({ notice: '', error: 'Der diktierte Text konnte nicht gesendet werden. Bitte prüfen.' })
             })
             .finally(() => {
               if (!current()) return

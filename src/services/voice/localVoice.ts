@@ -9,6 +9,7 @@ export type VoiceConfig = { mode: VoiceMode; wakeWord: string; localSttLanguage:
 export type ResolvedVoiceSettings = VoiceConfig & {
   endPhrase: string
   continuousSilenceMs: number
+  /** Optional silence-based submission; a confirmed close word always sends. */
   autoSubmit: boolean
 }
 export const VOICE_DEFAULTS: Readonly<ResolvedVoiceSettings> = Object.freeze({

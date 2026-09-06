@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
+import { computed, ref, watch } from 'vue'
 import { createVoiceInputSession, idleVoiceInput } from '@/services/voice/voiceInputSession'
 import type { VoiceEngineOptions } from '@/services/voice/voiceEngine'
+import { HandsFreeMachine } from '@/services/voice/voiceStrategy'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -12,7 +14,7 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-function setup(options: { input?: string; autoSubmit?: boolean } = {}) {
+function setup(options: { input?: string; autoSubmit?: boolean; busy?: () => boolean } = {}) {
   let input = options.input ?? ''
   let scope = 'project-one'
   let busy = false
@@ -48,7 +50,7 @@ function setup(options: { input?: string; autoSubmit?: boolean } = {}) {
       input = text
     },
     scope: () => scope,
-    busy: () => busy,
+    busy: options.busy ?? (() => busy),
     config,
     transcribe,
     stopOutput,
@@ -82,6 +84,58 @@ function setup(options: { input?: string; autoSubmit?: boolean } = {}) {
 }
 
 describe('local speech to visible composer integration', () => {
+  it.each(['', 'Vorhandener Text:'])(
+    'sends a confirmed close word once with the visible prefix "%s" even when silence auto-submit is disabled',
+    async prefix => {
+      const test = setup({ input: prefix, autoSubmit: false })
+      const pending = deferred<void>()
+      test.submit.mockImplementation(() => pending.promise)
+      await test.session.start('hands_free')
+      const voice = test.callbacks[0]!
+      const machine = new HandsFreeMachine(test.configValue.handsFree, voice.onCommand, voice.onPartial)
+      machine.previewSegment('Luczor, Treffen um neun Uhr. Luczor stopp.')
+      expect(test.submit).not.toHaveBeenCalled()
+      machine.pushSegment('Luczor, Treffen um zehn Uhr. Luczor stopp.', Date.now())
+      expect(test.input()).toBe([prefix, 'Treffen um zehn Uhr.'].filter(Boolean).join(' '))
+      expect(test.submit).toHaveBeenCalledOnce()
+      expect(test.engine.setMuted).toHaveBeenLastCalledWith(true)
+      expect(test.view().notice).toContain('automatisch gesendet')
+      voice.onCommand('Nicht doppelt senden', 'close_word')
+      expect(test.submit).toHaveBeenCalledOnce()
+      pending.resolve()
+      await vi.waitFor(() => expect(test.engine.setMuted).toHaveBeenLastCalledWith(false))
+      expect(test.view().notice).toBe('Spracheingabe ist wieder bereit. Ergebnis im Chat prüfen.')
+    }
+  )
+
+  it.each(['manual', undefined] as const)('does not treat a %s final as a spoken Send action', async reason => {
+    const test = setup({ autoSubmit: true })
+    await test.session.start('hands_free')
+    test.callbacks[0]!.onCommand('Nur ein Entwurf', reason)
+    expect(test.input()).toBe('Nur ein Entwurf')
+    expect(test.submit).not.toHaveBeenCalled()
+  })
+
+  it('never sends an empty close-word result, including with a pre-existing prefix', async () => {
+    const test = setup({ input: 'Noch nicht senden' })
+    await test.session.start('hands_free')
+    test.callbacks[0]!.onCommand('', 'close_word')
+    expect(test.input()).toBe('Noch nicht senden')
+    expect(test.submit).not.toHaveBeenCalled()
+  })
+
+  it('retains the final text and reports a failed close-word submission without retrying', async () => {
+    const test = setup()
+    test.submit.mockRejectedValue(new Error('private-network-detail'))
+    await test.session.start('hands_free')
+    test.callbacks[0]!.onCommand('Fertiger Text', 'close_word')
+    await vi.waitFor(() => expect(test.view().error).toContain('nicht gesendet'))
+    expect(test.input()).toBe('Fertiger Text')
+    expect(test.view().notice).toBe('')
+    expect(test.submit).toHaveBeenCalledOnce()
+    expect(test.view().error).not.toContain('private-network-detail')
+  })
+
   it('shows revisions while speaking and retains a final draft without automatic submission', async () => {
     const test = setup()
     await test.session.start('hands_free')
@@ -91,18 +145,18 @@ describe('local speech to visible composer integration', () => {
     voice.onPartial?.('Treffen um zehn')
     expect(test.input()).toBe('Treffen um zehn')
     voice.onPartial?.('') // machine closes its preview before the final callback
-    voice.onCommand('Treffen um zehn.')
+    voice.onCommand('Treffen um zehn.', 'silence')
     expect(test.input()).toBe('Treffen um zehn.')
     expect(test.submit).not.toHaveBeenCalled()
     expect(test.view().notice).toContain('Text prüfen')
     expect(test.view().mode).toBe('hands_free')
   })
 
-  it('keeps pre-existing text and never submits that combined draft automatically', async () => {
+  it('keeps pre-existing text and never submits that combined draft just because of a pause', async () => {
     const test = setup({ input: 'Schon geschrieben:', autoSubmit: true })
     await test.session.start('hands_free')
     test.callbacks[0]!.onPartial?.('plus Diktat')
-    test.callbacks[0]!.onCommand('plus Diktat')
+    test.callbacks[0]!.onCommand('plus Diktat', 'silence')
     expect(test.input()).toBe('Schon geschrieben: plus Diktat')
     expect(test.submit).not.toHaveBeenCalled()
   })
@@ -120,11 +174,11 @@ describe('local speech to visible composer integration', () => {
     test.submit.mockImplementation(() => pending.promise)
     await test.session.start('hands_free')
     const voice = test.callbacks[0]!
-    voice.onCommand('fertiger Text')
+    voice.onCommand('fertiger Text', 'silence')
     expect(test.submit).toHaveBeenCalledOnce()
     expect(test.engine.setMuted).toHaveBeenLastCalledWith(true)
     voice.onPartial?.('nicht dazwischen')
-    voice.onCommand('nicht doppelt')
+    voice.onCommand('nicht doppelt', 'close_word')
     expect(test.input()).toBe('fertiger Text')
     expect(test.submit).toHaveBeenCalledOnce()
     pending.resolve()
@@ -141,7 +195,7 @@ describe('local speech to visible composer integration', () => {
     voice.onPartial?.('Falscher Name')
     test.edit('Richtiger Name')
     voice.onPartial?.('Falscher Name erneut')
-    voice.onCommand('Falscher Name erneut')
+    voice.onCommand('Falscher Name erneut', 'close_word')
     expect(test.input()).toBe('Richtiger Name')
     expect(test.view().mode).toBeNull()
     expect(test.submit).not.toHaveBeenCalled()
@@ -153,7 +207,7 @@ describe('local speech to visible composer integration', () => {
     const old = test.callbacks[0]!
     await test.session.start('push_to_talk')
     old.onPartial?.('alte Aufnahme')
-    old.onCommand('alte Aufnahme')
+    old.onCommand('alte Aufnahme', 'close_word')
     old.onError?.(new Error('alte Daten'))
     test.callbacks[1]!.onPartial?.('neue Aufnahme')
     expect(test.input()).toBe('neue Aufnahme')
@@ -166,7 +220,7 @@ describe('local speech to visible composer integration', () => {
     await test.session.start('hands_free')
     test.project('project-two')
     test.callbacks[0]!.onPartial?.('altes Projekt')
-    test.callbacks[0]!.onCommand('altes Projekt')
+    test.callbacks[0]!.onCommand('altes Projekt', 'close_word')
     expect(test.input()).toBe('')
     expect(test.submit).not.toHaveBeenCalled()
   })
@@ -198,7 +252,7 @@ describe('local speech to visible composer integration', () => {
     voice.onPartial?.('während der Aufnahme')
     expect(test.input()).toBe('während der Aufnahme')
     test.engine.finalize.mockImplementation(async () => {
-      voice.onCommand('Abgeschlossener Satz.')
+      voice.onCommand('Abgeschlossener Satz.', 'manual')
     })
     await test.session.finish()
     expect(test.input()).toBe('Abgeschlossener Satz.')
@@ -214,7 +268,7 @@ describe('local speech to visible composer integration', () => {
     test.engine.finalize.mockImplementation(() => drain.promise)
     const finish = test.session.finish()
     await test.session.stop()
-    test.callbacks[0]!.onCommand('zu spät')
+    test.callbacks[0]!.onCommand('zu spät', 'close_word')
     drain.resolve()
     await finish
     expect(test.input()).toBe('')
@@ -226,7 +280,7 @@ describe('local speech to visible composer integration', () => {
     test.callbacks[0]!.onPartial?.('Bisher erkannt')
     test.session.setMuted(true)
     test.callbacks[0]!.onPartial?.('')
-    test.callbacks[0]!.onCommand('TTS-Echo')
+    test.callbacks[0]!.onCommand('TTS-Echo', 'close_word')
     expect(test.input()).toBe('Bisher erkannt')
     expect(test.engine.setMuted).toHaveBeenLastCalledWith(true)
   })
@@ -246,6 +300,56 @@ describe('local speech to visible composer integration', () => {
     await test.session.start('hands_free')
     expect(test.engine.start).not.toHaveBeenCalled()
   })
+
+  it.each([
+    { mode: 'hands_free' as const, activeMode: 'hands_free', muted: true },
+    { mode: 'push_to_talk' as const, activeMode: null, muted: false },
+  ])(
+    'preserves an active $mode draft and blocks late finals and hotkey starts while Mini Chat is busy',
+    async ({ mode, activeMode, muted }) => {
+      // App supplies this shared admission state and synchronously mutes capture.
+      // The Mini controller itself is outside this session-boundary regression.
+      const mainBusy = ref(false)
+      const miniBusy = ref(false)
+      const conversationBusy = computed(() => mainBusy.value || miniBusy.value)
+      const test = setup({ autoSubmit: true, busy: () => conversationBusy.value })
+      const stopWatching = watch(conversationBusy, value => test.session.setMuted(value), { flush: 'sync' })
+      try {
+        await test.session.start(mode)
+        const voice = test.callbacks[0]!
+        voice.onPartial?.('Bisher erkannter Entwurf')
+
+        miniBusy.value = true
+        expect(mainBusy.value).toBe(false)
+        expect(conversationBusy.value).toBe(true)
+        expect(test.engine.setMuted).toHaveBeenLastCalledWith(muted)
+        expect(test.view().mode).toBe(activeMode)
+
+        voice.onPartial?.('')
+        voice.onPartial?.('Späte Erkennung während Mini arbeitet')
+        voice.onCommand('Spätes abgeschlossenes Diktat', 'close_word')
+        expect(test.input()).toBe('Bisher erkannter Entwurf')
+        expect(test.submit).not.toHaveBeenCalled()
+
+        // A global microphone hotkey must use the same admission check as the UI.
+        await test.session.start('push_to_talk')
+        await test.session.start('hands_free')
+        expect(test.engine.start).toHaveBeenCalledOnce()
+        expect(test.config).toHaveBeenCalledOnce()
+        expect(test.stopOutput).toHaveBeenCalledOnce()
+        expect(test.input()).toBe('Bisher erkannter Entwurf')
+        expect(test.submit).not.toHaveBeenCalled()
+
+        miniBusy.value = false
+        expect(test.engine.setMuted).toHaveBeenLastCalledWith(false)
+        expect(test.input()).toBe('Bisher erkannter Entwurf')
+        expect(test.submit).not.toHaveBeenCalled()
+      } finally {
+        stopWatching()
+        await test.session.stop()
+      }
+    }
+  )
 
   it('shows a safe error instead of leaking raw transcript/runtime error content', async () => {
     const test = setup()

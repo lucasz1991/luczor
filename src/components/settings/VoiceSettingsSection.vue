@@ -125,7 +125,8 @@ onBeforeUnmount(() => testController?.abort())
       <div class="lz-card__title">Spracheingabe und Diktatabschluss</div>
       <p class="lz-hint">
         Wake-Word startet das Diktat nach dem Startwort. Dauer-Zuhören beginnt direkt und schließt das Diktat nach der
-        eingestellten Stille ab. Das Close-Word beendet in beiden Modi das aktuelle Diktat.
+        eingestellten Stille ab. Das bestätigte Close-Word beendet in beiden Modi das aktuelle Diktat und sendet den
+        fertigen Eingabetext automatisch.
       </p>
       <div class="lz-grid2">
         <div>
@@ -149,7 +150,7 @@ onBeforeUnmount(() => testController?.abort())
           <p class="lz-hint">Dieses Startwort wird auch tatsächlich für die Erkennung verwendet.</p>
         </div>
         <div>
-          <label for="voice-close-word" class="lz-label">Close-Word / Diktat beenden</label>
+          <label for="voice-close-word" class="lz-label">Close-Word / Diktat beenden und senden</label>
           <input
             id="voice-close-word"
             v-model="endPhraseModel"
@@ -159,7 +160,8 @@ onBeforeUnmount(() => testController?.abort())
             :disabled="voiceMode === 'push_to_talk'"
           />
           <p class="lz-hint">
-            Zum Beispiel „luczor stopp“. Start- und Schlusswort werden nicht in den Text übernommen.
+            Zum Beispiel „luczor stopp“. Sendet den fertigen Text ohne weiteren Klick, einschließlich vorhandenen Texts
+            im Eingabefeld. Start- und Schlusswort werden nicht übernommen. Tippen stoppt die Aufnahme.
           </p>
         </div>
         <div>
@@ -183,13 +185,14 @@ onBeforeUnmount(() => testController?.abort())
       </div>
       <p v-if="voiceValidationError" class="lz-result is-fail" role="alert">{{ voiceValidationError }}</p>
       <div class="lz-row">
-        <span id="voice-auto-submit-label" class="lz-rowlabel">Nach Diktatabschluss automatisch senden</span>
+        <span id="voice-auto-submit-label" class="lz-rowlabel">Auch nach Sprechpause automatisch senden</span>
         <button
           type="button"
           class="lz-switch"
           :class="{ 'is-on': autoSubmit }"
           role="switch"
           :aria-checked="autoSubmit"
+          :disabled="voiceMode !== 'continuous'"
           aria-labelledby="voice-auto-submit-label"
           aria-describedby="voice-auto-submit-hint"
           @click="emit('update:autoSubmit', !autoSubmit)"
@@ -198,8 +201,8 @@ onBeforeUnmount(() => testController?.abort())
         </button>
       </div>
       <p id="voice-auto-submit-hint" class="lz-hint">
-        Standardmäßig aus: Prüfe das Diktat im Eingabefeld und sende es selbst. Wenn aktiviert, wird der erkannte Text
-        ohne weitere Bestätigung gesendet und kann Agentenaktionen auslösen.
+        Nur für Dauer-Zuhören, standardmäßig aus: Eine Sprechpause lässt den Text zum Prüfen stehen. Das bestätigte
+        Close-Word sendet unabhängig von diesem Schalter automatisch. Gesendete Texte können Agentenaktionen auslösen.
       </p>
     </div>
   </div>

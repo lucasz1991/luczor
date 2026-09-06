@@ -175,7 +175,7 @@ describe('local STT live snapshots', () => {
 
     expect(transcribe).toHaveBeenCalledTimes(3)
     expect(opts.onUtterance).toHaveBeenCalledExactlyOnceWith('Hallo Welt heute')
-    expect(opts.onCommand).toHaveBeenCalledExactlyOnceWith('Hallo Welt heute')
+    expect(opts.onCommand).toHaveBeenCalledExactlyOnceWith('Hallo Welt heute', 'manual')
     expect(engine.isRunning).toBe(false)
   })
 
@@ -230,7 +230,80 @@ describe('local STT live snapshots', () => {
     expect(opts.onCommand).not.toHaveBeenCalled()
     frames(engine, 9, 0)
     await flush()
-    expect(opts.onCommand).toHaveBeenCalledExactlyOnceWith('prüfe den Plan')
+    expect(opts.onCommand).toHaveBeenCalledExactlyOnceWith('prüfe den Plan', 'close_word')
+  })
+
+  it('preserves the close-word reason through aliases and control phrases split across final segments', async () => {
+    const engine = newEngine()
+    const opts = options({
+      transcribe: vi
+        .fn()
+        .mockResolvedValueOnce('Nebengespräch Hey Lutz')
+        .mockResolvedValueOnce('Or Start sende Grüße Luczor')
+        .mockResolvedValueOnce('bitte SCHLIESSEN!'),
+      handsFree: {
+        strategy: 'safeword',
+        triggerPhrase: 'hey luczor start',
+        endPhrase: 'luczor bitte schließen',
+        continuousSilenceMs: 5000,
+      },
+    })
+    await engine.start(opts)
+    shortSegment(engine)
+    await flush()
+    expect(opts.onCommand).not.toHaveBeenCalled()
+    shortSegment(engine)
+    await flush()
+    expect(opts.onPartial).toHaveBeenLastCalledWith('sende Grüße')
+    expect(opts.onCommand).not.toHaveBeenCalled()
+    shortSegment(engine)
+    await flush()
+    expect(opts.onCommand).toHaveBeenCalledExactlyOnceWith('sende Grüße', 'close_word')
+    await engine.finalize()
+    expect(opts.onCommand).toHaveBeenCalledOnce()
+  })
+
+  it('does not preserve a speculative split close reason after the final transcript revises it away', async () => {
+    const engine = newEngine()
+    const opts = options({
+      transcribe: vi
+        .fn()
+        .mockResolvedValueOnce('Luczor Nachricht Lutz')
+        .mockResolvedValueOnce('or stopp')
+        .mockResolvedValueOnce('oder jemand anders'),
+      handsFree: {
+        strategy: 'safeword',
+        triggerPhrase: 'luczor',
+        endPhrase: 'luczor stopp',
+        continuousSilenceMs: 5000,
+      },
+    })
+    await engine.start(opts)
+    shortSegment(engine)
+    await flush()
+    frames(engine, 13)
+    await flush()
+    expect(opts.onPartial).toHaveBeenLastCalledWith('Nachricht')
+    expect(opts.onCommand).not.toHaveBeenCalled()
+    await engine.finalize()
+    expect(opts.onCommand).toHaveBeenCalledExactlyOnceWith('Nachricht Lutz oder jemand anders', 'manual')
+  })
+
+  it.each([
+    { mode: 'continuous' as const, segments: ['Text Luczor stopp'] },
+    { mode: 'wakeword' as const, segments: ['Luczor Text Luczor stopp'] },
+    { mode: 'wakeword' as const, segments: ['Luczor', 'Text Luczor stopp'] },
+  ])('does not invent a close-word reason in legacy $mode mode for $segments', async ({ mode, segments }) => {
+    const engine = newEngine()
+    const transcripts = [...segments]
+    const opts = options({ mode, handsFree: undefined, transcribe: vi.fn(async () => transcripts.shift() ?? '') })
+    await engine.start(opts)
+    for (const _segment of segments) {
+      shortSegment(engine)
+      await flush()
+    }
+    expect(opts.onCommand).toHaveBeenCalledExactlyOnceWith('Text Luczor stopp')
+    expect(vi.mocked(opts.onCommand).mock.calls[0]?.[1]).toBeUndefined()
   })
 
   it('bounds each snapshot to 15 seconds and queued finals to 20 seconds', async () => {
@@ -293,7 +366,7 @@ describe('local STT live snapshots', () => {
     pending.resolve('Zweiter Satz')
     await flush()
     await vi.advanceTimersByTimeAsync(1250)
-    expect(opts.onCommand).toHaveBeenCalledExactlyOnceWith('Erster Satz Zweiter Satz')
+    expect(opts.onCommand).toHaveBeenCalledExactlyOnceWith('Erster Satz Zweiter Satz', 'silence')
   })
 })
 
@@ -481,7 +554,7 @@ describe('explicit PTT finalization', () => {
     expect(JSON.parse(transcribe.mock.calls[2]![0]).samples).toBe(4 * 4800)
     second.resolve('Zweiter Teil')
     await completed
-    expect(opts.onCommand).toHaveBeenCalledExactlyOnceWith('Erster Teil Zweiter Teil')
+    expect(opts.onCommand).toHaveBeenCalledExactlyOnceWith('Erster Teil Zweiter Teil', 'manual')
     expect(engine.isRunning).toBe(false)
     expect(opts.onStateChange).toHaveBeenLastCalledWith('stopped')
   })

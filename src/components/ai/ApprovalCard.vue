@@ -11,6 +11,7 @@ const props = withDefaults(
     rejectLabel?: string
     busy?: boolean
     choices?: string[]
+    compact?: boolean
   }>(),
   {
     approveLabel: 'Einmal ausführen',
@@ -37,7 +38,11 @@ function resolve(approved: boolean) {
     <div class="ai-eyebrow"><AiIcon name="shield" />Deine Entscheidung</div>
     <h3 :id="id">{{ title }}</h3>
     <p v-if="description" class="ai-muted">{{ description }}</p>
-    <pre v-if="detail" class="ai-approval__detail">{{ detail }}</pre>
+    <details v-if="detail && compact" class="ai-approval__details">
+      <summary>Details prüfen</summary>
+      <pre class="ai-approval__detail">{{ detail }}</pre>
+    </details>
+    <pre v-else-if="detail" class="ai-approval__detail">{{ detail }}</pre>
     <fieldset v-if="choices.length" class="ai-choices">
       <legend class="ai-sr-only">Auswahl</legend>
       <label v-for="item in choices" :key="item"

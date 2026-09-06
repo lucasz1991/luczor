@@ -11,7 +11,6 @@ const emit = defineEmits<{
   newChat: []
   addProject: []
   settings: []
-  library: []
   system: []
   'update:collapsed': [value: boolean]
 }>()
@@ -66,9 +65,7 @@ const filtered = computed(() =>
       <p v-if="!filtered.length && !collapsed" class="ai-empty">Kein Projekt gefunden.</p>
     </nav>
     <footer>
-      <button type="button" title="UI-Bibliothek" @click="emit('library')">
-        <AiIcon name="grid" /><span>UI-Bibliothek</span><small>21</small></button
-      ><button type="button" title="Systemstatus und Not-Aus" @click="emit('system')">
+      <button type="button" title="Systemstatus und Not-Aus" @click="emit('system')">
         <AiIcon name="shield" /><span>Systemstatus</span></button
       ><button type="button" title="Einstellungen" @click="emit('settings')">
         <AiIcon name="settings" /><span>Einstellungen</span>

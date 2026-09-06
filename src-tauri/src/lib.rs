@@ -41,6 +41,7 @@ pub fn run() {
             commands::system::capture_screen,
             commands::system::read_clipboard,
             commands::system::list_windows,
+            commands::system::list_monitors,
             commands::system::system_metrics,
             commands::system::move_mouse,
             commands::system::mouse_click,

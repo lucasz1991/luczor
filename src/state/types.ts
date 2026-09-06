@@ -186,6 +186,9 @@ export type PendingToolCall = {
    */
   args: Record<string, unknown>
 
+  /** Preserve the execution-time retention boundary across registry changes. */
+  dataHandling?: 'syncable' | 'ephemeral'
+
   /**
    * Whether user approval is required before execution.
    */

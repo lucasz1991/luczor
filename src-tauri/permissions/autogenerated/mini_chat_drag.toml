@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mini-chat-drag"
+description = "Enables the mini_chat_drag command without any pre-configured scope."
+commands.allow = ["mini_chat_drag"]
+
+[[permission]]
+identifier = "deny-mini-chat-drag"
+description = "Denies the mini_chat_drag command without any pre-configured scope."
+commands.deny = ["mini_chat_drag"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mini-chat-snapshot"
+description = "Enables the mini_chat_snapshot command without any pre-configured scope."
+commands.allow = ["mini_chat_snapshot"]
+
+[[permission]]
+identifier = "deny-mini-chat-snapshot"
+description = "Denies the mini_chat_snapshot command without any pre-configured scope."
+commands.deny = ["mini_chat_snapshot"]

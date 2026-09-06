@@ -31,7 +31,7 @@ export type MiniSnapshot = {
   tools: MiniTool[]
   decision: MiniDecision | null
   notice: string
-  hud: { status: string; micLevel: number; killSwitch: boolean }
+  hud: { status: string; micLevel: number; killSwitch: boolean; reduceMotion?: boolean }
   mainDecision: MiniDecision | null
 }
 export type MiniAction =
@@ -47,7 +47,16 @@ export type MiniAction =
 export const MINI_ACTION_EVENT = 'luczor://mini-action'
 export const MINI_STATE_EVENT = 'luczor://mini-state'
 export const emptyMiniSnapshot = (): MiniSnapshot => ({
-  sessionId: '', revision: 0, project: null, mode: 'observe', busy: false, mainBusy: false,
-  messages: [], tools: [], decision: null, mainDecision: null, notice: '',
+  sessionId: '',
+  revision: 0,
+  project: null,
+  mode: 'observe',
+  busy: false,
+  mainBusy: false,
+  messages: [],
+  tools: [],
+  decision: null,
+  mainDecision: null,
+  notice: '',
   hud: { status: 'idle', micLevel: 0, killSwitch: false },
 })
