@@ -64,6 +64,8 @@ export type MemoryRecord = {
 
 export type RememberInput = {
   content: string
+  /** Bind reviewed imports to the account selected before asynchronous preparation. */
+  expectedPrincipalId?: string
   scope?: MemoryScope
   projectId?: string
   agentId?: string
@@ -1237,6 +1239,9 @@ export class LuczorMemoryService {
     const plan = planMemoryWrite({ ...input, scope })
     const snapshot = await this.operationSnapshot()
     const principalId = snapshot.principalId
+    if (input.expectedPrincipalId !== undefined && input.expectedPrincipalId !== principalId) {
+      throw new Error('The selected memory account changed before the write. Please review the import again.')
+    }
     const context = this.context(scope, input, principalId)
     const now = Date.now()
     const record: MemoryRecord = {

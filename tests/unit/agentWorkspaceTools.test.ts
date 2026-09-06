@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   detectAgents: vi.fn(),
   runAgentCli: vi.fn(),
+  prepareAgentJob: vi.fn(),
   writeBridgeFile: vi.fn(),
   buildBridgeMarkdown: vi.fn(),
   requireProjectWorkspace: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock('@/services/agents', () => ({
   writeBridgeFile: mocks.writeBridgeFile,
   buildBridgeMarkdown: mocks.buildBridgeMarkdown,
 }))
+vi.mock('@/services/agents/hub', () => ({ prepareAgentJob: mocks.prepareAgentJob }))
 vi.mock('@/services/projectWorkspace', () => ({
   requireProjectWorkspace: mocks.requireProjectWorkspace,
 }))
@@ -53,6 +55,7 @@ describe('workspace-bound coding-agent tools', () => {
       status: 'ready',
     })
     mocks.runAgentCli.mockResolvedValue({ ok: true, code: 0, stdout: 'done', stderr: '' })
+    mocks.prepareAgentJob.mockResolvedValue({ id: 'managed-job', status: 'awaiting_approval' })
     mocks.getRepositoryExternalPolicy.mockResolvedValue('allow_selected')
     mocks.writeBridgeFile.mockResolvedValue('E:\\private\\luczor\\LUCZOR.md')
     mocks.buildBridgeMarkdown.mockReturnValue('# generated bridge')
@@ -74,12 +77,19 @@ describe('workspace-bound coding-agent tools', () => {
     expect(tool('agent_bridge_write').effects).toEqual(['write'])
   })
 
-  it('runs the coding agent only in the active project binding', async () => {
+  it('stages the coding agent in the active project without running an unmanaged CLI', async () => {
     const result = await tool('agent_dispatch').execute({ agent: 'codex', prompt: '  Prüfen  ' }, CONTEXT)
 
     expect(mocks.requireProjectWorkspace).toHaveBeenCalledWith('project-1')
-    expect(mocks.runAgentCli).toHaveBeenCalledWith('codex', 'Prüfen', 'E:\\private\\luczor')
-    expect(result).toEqual({ ok: true, code: 0, stdout: 'done', stderr: '' })
+    expect(mocks.prepareAgentJob).toHaveBeenCalledWith({
+      projectId: 'project-1',
+      adapterId: 'codex',
+      prompt: 'Prüfen',
+      role: 'assistant',
+      permission: 'read-only',
+    })
+    expect(mocks.runAgentCli).not.toHaveBeenCalled()
+    expect(result).toMatchObject({ ok: true, job_id: 'managed-job', status: 'awaiting_approval' })
   })
 
   it('writes the bridge into the binding and returns only a relative path', async () => {

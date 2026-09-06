@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AgentHub: typeof import('./src/components/agents/AgentHub.vue')['default']
     AgentScreen: typeof import('./src/components/ai/AgentScreen.vue')['default']
     AiIcon: typeof import('./src/components/ai/AiIcon.vue')['default']
     AmbientBackdrop: typeof import('./src/components/vengeance/AmbientBackdrop.vue')['default']

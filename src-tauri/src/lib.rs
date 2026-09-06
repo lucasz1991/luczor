@@ -6,6 +6,7 @@ use tauri::Manager;
 pub fn run() {
     let app = tauri::Builder::default()
         .manage(commands::mini_chat::MiniChatState::default())
+        .manage(commands::codex::CodexJobs::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_prevent_default::init())
         .plugin(tauri_plugin_notification::init())
@@ -57,6 +58,11 @@ pub fn run() {
             commands::voice::install_voice_runtime,
             commands::device_jobs::verify_device_job,
             commands::agent::agent_cli_detect,
+            commands::codex::codex_runtime_status,
+            commands::codex::codex_desktop_open,
+            commands::codex::codex_job_start,
+            commands::codex::codex_job_status,
+            commands::codex::codex_job_cancel,
             commands::agent::agent_cli_run,
             commands::agent::agent_write_bridge,
             commands::local_tasks::wf_file_read,
@@ -118,6 +124,7 @@ pub fn run() {
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
             commands::local_model::shutdown_all();
+            _app.state::<commands::codex::CodexJobs>().cancel_all();
         }
     });
 }

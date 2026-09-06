@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-codex-job-start"
+description = "Enables the codex_job_start command without any pre-configured scope."
+commands.allow = ["codex_job_start"]
+
+[[permission]]
+identifier = "deny-codex-job-start"
+description = "Denies the codex_job_start command without any pre-configured scope."
+commands.deny = ["codex_job_start"]

@@ -71,3 +71,8 @@
 - Der Debug-Build ist erwartungsgemaess nicht code-signiert. Das Hauptfenster und die Projektordner-Schaltflaeche wurden sichtbar bestaetigt; die Windows-Aufnahmehilfe lieferte jedoch keine Klickgeometrie fuer den nativen Dialog. Echte Datei-/Computerfreigaben und ein signierter Installer benoetigen weiterhin eine interaktive Laufzeitabnahme.
 - Der lokale NSIS-Installer wurde gebaut, aber nicht installiert. Produktions-Updater, Zertifikatsimport, Code-Signing, veroeffentlichter Update-/Rollback-Pfad und der gemeinsam bediente Ordnerdialog-/Approval-Smoke bleiben externe Abnahmen.
 - Die parallel gehaertete Signatur des Laravel-Bootstrap-Kommandos muss vor dem ersten Lauf mit dem Launcher-Aufruf synchronisiert werden; der uebergebene Minimalstand verwendet noch `--token-file`.
+
+## 2026-09-06 | Funktionsumfang und Steuerung erweitert
+
+- 35 registrierte Werkzeuge einschliesslich memory_recall, sichtbare Freigaben, verbesserte Erinnerungsrelevanz und native Monitorsteuerung. Lokale Gesamtgates: 575 Frontendtests, 78 Rusttests, Typecheck, Lint, Format, Build und Clippy bestanden.
+- Vollbericht und Grenzen: ../.lmzdev/artifacts/reports/2026-09-06-capabilities-memory-computer.md (bezogen auf app/). Benutzerdokumentation: docs/capabilities-and-memory.md.

@@ -5,6 +5,8 @@ import Settings from './components/Settings.vue'
 import JarvisHud from './components/JarvisHud.vue'
 import PlanPanel from './components/PlanPanel.vue'
 import SidebarNav from './components/ai/SidebarNav.vue'
+import AgentHub from './components/agents/AgentHub.vue'
+import { configureAgentHub } from '@/services/agents/hub'
 import ChatComposer from './components/ai/ChatComposer.vue'
 import PromptBar from './components/ai/PromptBar.vue'
 import ThinkingState from './components/ai/ThinkingState.vue'
@@ -94,6 +96,7 @@ type SettingsStartTab = 'server' | 'notifications'
 const showSettings = ref(false)
 const settingsStartTab = ref<SettingsStartTab>('server')
 const showSystemPanel = ref(false)
+const showAgentHub = ref(false)
 const { input, autoGrow, setInput: writeComposerInput, consumeInputSource } = useChatComposer()
 function setComposerInput(value: string, source: ComposerInputSource) {
   if (source === 'keyboard') voiceInputSession.manualInput()
@@ -148,6 +151,8 @@ function finishActiveTurn(status: 'done' | 'failed' | 'canceled') {
 }
 const mode = ref<LuczorMode>('observe')
 const allowUnrestricted = ref(false)
+const stopAgentHub = configureAgentHub(() => mode.value)
+onBeforeUnmount(stopAgentHub)
 
 function openSettings(tab: SettingsStartTab = 'server') {
   void voiceInputSession.stop()
@@ -1266,6 +1271,14 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
 </script>
 
 <template>
+  <AgentHub
+    :open="showAgentHub"
+    :project-id="activeProjectId"
+    :mode="mode"
+    :kill-switch="hud.killSwitch"
+    @update:open="showAgentHub = $event"
+    @memory-imported="refreshMemoryCandidates"
+  />
   <Settings
     :open="showSettings"
     :initial-tab="settingsStartTab"
@@ -1295,6 +1308,7 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
       @add-project="addProject"
       @settings="openSettings()"
       @system="showSystemPanel = !showSystemPanel"
+      @agents="showAgentHub = true"
     />
 
     <main class="main-col">

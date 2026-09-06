@@ -144,3 +144,7 @@ Append-only communication log. Source and runtime evidence override stale entrie
 - Verification: 53 Vitest-Dateien/489 Tests, ESLint, TypeScript, Vite, 74 Rust-Tests, Cargo Check und Clippy bestanden. Browser-Drag, kompakte Freigabe, Auswahl, Stop, Leeren und 420x660 geprueft; Viewport zurueckgesetzt. Vorhandene Vorschau 1428 neu geladen, Menueentfernung sichtbar bestaetigt.
 - Artifact: Finaler lokaler Debug-Testbuild erfolgreich: src-tauri/target/debug/tauri-app.exe, 41983488 Bytes, SHA256 35EBDF5CAE216D8EB42F165FCF124372E095C1990B4D937EF590BEB2B86B8DF8. Release-Kompilierung ebenfalls bestanden, finale Layoutkorrektur im Debug-Artefakt. Kein Installer, Deployment, Commit oder Reset durch diesen Arbeitsschritt.
 - Limits: Native Always-on-top-/Minimierungsinteraktion und echte Inferenz/Mikrofon/Tools nicht interaktiv geprueft. Browser-Fixture enthaelt nur ausdrueckliche Beispieldaten. Parallele Voice-/Settings-Arbeit erhalten. Details: docs/mini-chat.md und docs/beautiful-ui.md.
+
+## 2026-09-06T03:39:35Z | Codex/root -> all | handoff
+
+- Message: Funktionssteuerung, Memory-Abruf, Archivredaktion und Computerfunktionen lokal erweitert. 575 Tests und Frontend-Gates sowie 78 Rusttests/Clippy gruen. Bedienung docs/capabilities-and-memory.md; Vollbericht im Root-LMZ. Bestehende parallele Aenderungen erhalten. Kein Deployment/Installer oder echte Eingabeaktionen.

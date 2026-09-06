@@ -13,3 +13,4 @@
 | Gemeinsamen Server-TTS, sichere Settings-Identitaetswechsel und private Vorlesesperre integrieren | Codex/server_tts_desktop | completed | 2026-09-06T01:51:00Z |
 | Voice-Einstellungen und Hands-free-Runtime vereinheitlichen, Diktatabschluss/Auto-Senden und STT-Readiness absichern | Codex/server_tts_desktop | completed | 2026-09-06T02:15:00Z |
 | Independent always-on-top temporary mini chat with approvals and choices | Codex/mini_overlay | completed | 2026-09-06T02:56:00Z |
+| Funktionssteuerung, Memory-Abruf, Archivredaktion und native Computeranalyse erweitern | Codex/root | completed | 2026-09-06T03:39:00Z |

@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use tauri::WebviewWindow;
 
 use super::ensure_main_webview;
+use super::codex::acquire_workspace_lease;
 use super::process::run_bounded_command;
 
 const MAX_AGENT_OUTPUT_BYTES: usize = 500_000;
@@ -139,11 +140,13 @@ pub async fn agent_cli_run(
         find_executable(names).ok_or_else(|| format!("{} CLI not found in PATH", payload.agent))?;
     let mut command = Command::new(exe);
     command.args(&args);
-    if let Some(dir) = payload.project_dir.as_ref() {
-        if !dir.is_empty() {
-            command.current_dir(validate_project_dir(dir)?);
-        }
-    }
+    let project_dir = match payload.project_dir.as_deref().filter(|dir| !dir.is_empty()) {
+        Some(dir) => validate_project_dir(dir)?,
+        None => validate_project_dir(&std::env::current_dir()
+            .map_err(|_| "Current coding-agent directory unavailable.")?.to_string_lossy())?,
+    };
+    let workspace_lease = acquire_workspace_lease(&project_dir)?;
+    command.current_dir(&project_dir);
     let timeout = Duration::from_secs(
         payload
             .timeout_seconds
@@ -151,6 +154,7 @@ pub async fn agent_cli_run(
             .clamp(1, MAX_AGENT_TIMEOUT_SECS),
     );
     let output = tauri::async_runtime::spawn_blocking(move || {
+        let _lease = workspace_lease;
         run_bounded_command(command, None, timeout, MAX_AGENT_OUTPUT_BYTES)
     })
     .await

@@ -93,6 +93,32 @@ describe('desktop memory account isolation', () => {
     vi.unstubAllGlobals()
   })
 
+  it('rejects a reviewed write when the principal changes while its operation snapshot is resolving', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const reviewedPrincipal = harness.currentSnapshot.principalId
+    harness.getVerifiedAccountSnapshot.mockImplementationOnce(async () => {
+      await Promise.resolve()
+      harness.currentSnapshot = accountSnapshot(2, 'key-c')
+      return harness.currentSnapshot
+    })
+
+    await expect(
+      memory.remember({
+        content: 'Reviewed import remains in the selected account.',
+        scope: 'project',
+        projectId: 'project-1',
+        expectedPrincipalId: reviewedPrincipal,
+        writeIntent: 'confirmed',
+        visibility: 'syncable',
+      })
+    ).rejects.toThrow('selected memory account changed')
+
+    expect(harness.fetch).not.toHaveBeenCalled()
+    await expect(memory.recall({ query: 'Reviewed import', projectId: 'project-1' })).resolves.toEqual([])
+  })
+
   it('keeps local memory available after same-account key rotation but isolated from another account', async () => {
     await setServerEnabled(false)
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')

@@ -33,4 +33,6 @@ Auf Windows verwendet die Mauspositionierung physische Desktopkoordinaten über 
 
 ## Abnahmegrenzen
 
+Die ergänzte [Projekt-Agentenzentrale](agent-hub.md) verbindet verwaltete Codex-Aufträge, lokale Modellagenten, Desktop-Übergabe und überprüfte ChatGPT-/Codex-Erinnerungsimporte. Der Funktionskatalog umfasst damit 38 Werkzeuge.
+
 Automatische Tests und ein nativer Lesetest prüfen die Verträge und Bildschirm-/Fenstererkennung. Eine echte Maus-/Tastaturaktion, visuelle Modellinterpretation, produktive Modellinferenz und eine installierte Endnutzerfassung benötigen eine gesonderte interaktive Abnahme. Die lokalen Änderungen installieren oder veröffentlichen keine neue App-Version.

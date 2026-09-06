@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod browser;
+pub mod codex;
 pub mod device_jobs;
 pub mod device_key;
 pub mod local_model;
@@ -84,6 +85,11 @@ mod tests {
 
         let main_runtime = include_str!("../../permissions/main-runtime.toml");
         for command in [
+            "codex_runtime_status",
+            "codex_desktop_open",
+            "codex_job_start",
+            "codex_job_status",
+            "codex_job_cancel",
             "memory_key_get_or_create",
             "local_graph_bind",
             "local_graph_index",

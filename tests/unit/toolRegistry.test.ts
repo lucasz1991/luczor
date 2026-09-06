@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   updateTask: vi.fn(),
   detectAgents: vi.fn(),
   runAgentCli: vi.fn(),
+  prepareAgentJob: vi.fn(),
   writeBridgeFile: vi.fn(),
   buildBridgeMarkdown: vi.fn(),
   setPlan: vi.fn(),
@@ -53,6 +54,7 @@ vi.mock('@/services/agents', () => ({
   writeBridgeFile: mocks.writeBridgeFile,
   buildBridgeMarkdown: mocks.buildBridgeMarkdown,
 }))
+vi.mock('@/services/agents/hub', () => ({ prepareAgentJob: mocks.prepareAgentJob }))
 vi.mock('@/services/projectWorkspace', () => ({
   getProjectWorkspace: mocks.getProjectWorkspace,
   requireProjectWorkspace: mocks.requireProjectWorkspace,
@@ -103,12 +105,15 @@ const TOOL_CONTRACT = [
   { name: 'agent_detect', category: 'app', mutating: false, requiresApproval: false },
   { name: 'agent_dispatch', category: 'app', mutating: true, requiresApproval: true },
   { name: 'agent_bridge_write', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'agent_job_prepare', category: 'app', mutating: true, requiresApproval: false },
+  { name: 'agent_job_status', category: 'app', mutating: false, requiresApproval: true },
+  { name: 'agent_job_cancel', category: 'app', mutating: true, requiresApproval: false },
   { name: 'plan_update', category: 'app', mutating: false, requiresApproval: false },
   { name: 'plan_get', category: 'app', mutating: false, requiresApproval: false },
   { name: 'memory_recall', category: 'project', mutating: false, requiresApproval: false },
 ] as const
 
-const TOOL_SCHEMA_SHA256 = 'e5585f769e3c04b5edd458a2f2ed11b8a26ecede958846133022f4650f0a43df'
+const TOOL_SCHEMA_SHA256 = '156771ba818696eb2d957e30f4372cae3a102c669a540359777c5f9ca36b8535'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {
@@ -122,6 +127,7 @@ describe('tool registry contract', () => {
     mocks.updateTask.mockResolvedValue({ data: {} })
     mocks.detectAgents.mockResolvedValue([{ name: 'codex', installed: true }])
     mocks.runAgentCli.mockResolvedValue({ ok: true, code: 0, stdout: 'done', stderr: '' })
+    mocks.prepareAgentJob.mockResolvedValue({ id: 'managed-job', status: 'awaiting_approval' })
     mocks.writeBridgeFile.mockResolvedValue('E:\\project\\LUCZOR.md')
     mocks.buildBridgeMarkdown.mockReturnValue('# Bridge')
     mocks.getProjectWorkspace.mockResolvedValue({
@@ -351,7 +357,10 @@ describe('tool registry contract', () => {
 
     expect(mocks.detectAgents).toHaveBeenCalledOnce()
     expect(mocks.requireProjectWorkspace).toHaveBeenCalledWith('project-1')
-    expect(mocks.runAgentCli).toHaveBeenCalledWith('codex', 'Prüfen', 'E:\\project')
+    expect(mocks.prepareAgentJob).toHaveBeenCalledWith(
+      expect.objectContaining({ projectId: 'project-1', prompt: 'Prüfen', permission: 'read-only' })
+    )
+    expect(mocks.runAgentCli).not.toHaveBeenCalled()
     expect(mocks.writeBridgeFile).toHaveBeenCalledWith('E:\\project', '# Explicit')
   })
 

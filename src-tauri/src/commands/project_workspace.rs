@@ -516,6 +516,19 @@ pub async fn project_fs_delete(
     .map_err(|error| format!("Project file delete task failed: {error}"))?
 }
 
+/// Capture the authoritative binding for a managed native agent. The version
+/// lets a running job stop when a project is rebound while it is working.
+pub(crate) fn agent_workspace_snapshot(
+    app: &AppHandle,
+    principal_id: &str,
+    project_id: &str,
+) -> Result<(PathBuf, i64), String> {
+    let connection = open_database(app)?;
+    let bound = get_workspace(&connection, principal_id, project_id)?
+        .ok_or_else(|| "No local workspace is bound to this project.".to_string())?;
+    Ok((validate_bound_root(&bound.root_path)?, bound.updated_at))
+}
+
 fn with_workspace<T>(
     app: &AppHandle,
     principal_id: &str,

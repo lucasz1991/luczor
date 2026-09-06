@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-codex-desktop-open"
+description = "Enables the codex_desktop_open command without any pre-configured scope."
+commands.allow = ["codex_desktop_open"]
+
+[[permission]]
+identifier = "deny-codex-desktop-open"
+description = "Denies the codex_desktop_open command without any pre-configured scope."
+commands.deny = ["codex_desktop_open"]

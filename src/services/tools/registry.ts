@@ -4,6 +4,7 @@
 // individual definitions; this file owns their public order and lookup API.
 
 import { agentTools } from './agents'
+import { agentJobTools } from './agentJobs'
 import { filesystemTools } from './filesystem'
 import { memoryTools } from './memory'
 import { osTools } from './os'
@@ -26,6 +27,7 @@ const TOOLS: ToolDef[] = [
   ...projectCreationTools,
   ...taskTools,
   ...agentTools,
+  ...agentJobTools,
   ...planTools,
   ...memoryTools,
 ]

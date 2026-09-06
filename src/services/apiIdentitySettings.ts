@@ -90,7 +90,12 @@ export const persistApiIdentity = createApiIdentityWriter({
   writeDeviceKey: saveDeviceKey,
   suspendSpeech,
   async beforeChange() {
-    if (typeof window !== 'undefined') window.dispatchEvent(new Event('luczor:voice-stop'))
+    if (typeof window !== 'undefined') {
+      // Synchronous listeners stop native jobs and clear private agent drafts
+      // before any identity-changing await or credential write can proceed.
+      window.dispatchEvent(new Event('luczor:api-identity-changing'))
+      window.dispatchEvent(new Event('luczor:voice-stop'))
+    }
     await invalidateLocalInferenceApiIdentity()
   },
 })

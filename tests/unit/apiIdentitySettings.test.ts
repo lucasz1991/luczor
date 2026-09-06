@@ -1,8 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createApiIdentityWriter, DISABLED_API_BASE_URL } from '@/services/apiIdentitySettings'
+import { createApiIdentityWriter, DISABLED_API_BASE_URL, persistApiIdentity } from '@/services/apiIdentitySettings'
+import { getApiConfig } from '@/services/api/luczorApi'
+import { invalidateLocalInferenceApiIdentity } from '@/services/inference/coordinator'
 
 vi.mock('@/services/inference/coordinator', () => ({ invalidateLocalInferenceApiIdentity: vi.fn() }))
 vi.mock('@/services/voice/speak', () => ({ suspendSpeech: vi.fn(() => vi.fn()) }))
+vi.mock('@/services/api/luczorApi', () => ({ getApiConfig: vi.fn(), DEFAULT_BASE_URL: 'https://luczor.example.test' }))
+vi.mock('@/services/secureDeviceKey', () => ({ saveDeviceKey: vi.fn() }))
 
 const originalBase = 'https://first.example.test'
 const originalKey = 'first-device-key'
@@ -59,6 +63,33 @@ function fixture() {
 }
 
 describe('Settings API identity persistence', () => {
+  it('dispatches the agent identity boundary before awaiting inference invalidation or writing settings', async () => {
+    const events = new EventTarget()
+    vi.stubGlobal('window', events)
+    const boundary = vi.fn()
+    events.addEventListener('luczor:api-identity-changing', boundary)
+    const store = { set: vi.fn(async () => undefined), save: vi.fn(async () => undefined) }
+    vi.mocked(getApiConfig).mockResolvedValue({ baseUrl: originalBase, deviceKey: originalKey, clientId: 'client' })
+    let resume!: () => void
+    vi.mocked(invalidateLocalInferenceApiIdentity).mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          expect(boundary).toHaveBeenCalledOnce()
+          expect(store.set).not.toHaveBeenCalled()
+          resume = resolve
+        })
+    )
+    try {
+      const running = persistApiIdentity(store, nextBase, nextKey)
+      await vi.waitFor(() => expect(boundary).toHaveBeenCalledOnce())
+      expect(store.set).not.toHaveBeenCalled()
+      resume()
+      await expect(running).resolves.toBe(true)
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('disconnects durably, replaces the protected credential, then publishes the matching server', async () => {
     const test = fixture()
     await expect(test.write(test.store, `${nextBase}/`, ` ${nextKey} `)).resolves.toBe(true)
