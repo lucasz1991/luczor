@@ -5,6 +5,7 @@ use tauri::Manager;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
+        .manage(commands::mini_chat::MiniChatState::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_prevent_default::init())
         .plugin(tauri_plugin_notification::init())
@@ -31,6 +32,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::mini_chat::mini_chat_open,
+            commands::mini_chat::mini_chat_action,
+            commands::mini_chat::mini_chat_publish,
+            commands::mini_chat::mini_chat_snapshot,
+            commands::mini_chat::mini_chat_drag,
+            commands::mini_chat::mini_chat_window,
             commands::system::capture_screen,
             commands::system::read_clipboard,
             commands::system::list_windows,
@@ -95,7 +102,7 @@ pub fn run() {
         ])
         .on_window_event(|window, event| {
             #[cfg(desktop)]
-            if window.label() == "main" {
+            if window.label() == "main" || window.label() == commands::mini_chat::MINI_LABEL {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                     api.prevent_close();
                     let _ = window.hide();
@@ -121,12 +128,21 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
     let show = MenuItem::with_id(app, "show", "Luczor anzeigen", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Beenden", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&show, &quit])?;
+    let mini = MenuItem::with_id(app, "mini", "Luczor Mini anzeigen", true, None::<&str>)?;
+    let menu = Menu::with_items(app, &[&show, &mini, &quit])?;
 
     let mut builder = TrayIconBuilder::new()
         .menu(&menu)
         .tooltip("Luczor")
         .on_menu_event(|app, event| match event.id.as_ref() {
+            "mini" => {
+                let handle = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = commands::mini_chat::show(handle).await {
+                        eprintln!("[luczor] Mini-Fenster konnte nicht geöffnet werden: {error}");
+                    }
+                });
+            }
             "quit" => {
                 commands::local_model::shutdown_all();
                 app.exit(0);

@@ -24,6 +24,7 @@ const REPORTABLE_EVENTS = new Set([
   'local_tts_failed',
   'local_tts_playback_failed',
   'manual_tts_failed',
+  'server_tts_playback_failed',
   'unhandledrejection',
   'voice_runtime_install_failed',
   'whisper_rs_fallback',

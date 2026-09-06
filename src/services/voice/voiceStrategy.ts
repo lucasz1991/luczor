@@ -1,177 +1,133 @@
-// src/services/voice/voiceStrategy.ts
-//
-// Pure, testable hands-free dictation strategies (SOLL §5.3). Two mutually
-// exclusive strategies drive continuous listening:
-//
-//  - "safeword":   armed until an ACTIVATION phrase is heard, then dictates
-//                  until an END phrase (or manual stop).
-//  - "continuous": no start/end word required — dictates from first speech and
-//                  auto-finalizes after a long pause (default 5s) OR an optional
-//                  end phrase.
-//
-// This module is transport-agnostic: it consumes already-transcribed utterances
-// (pushSegment) and a periodic clock (tick), so it can be unit-tested without
-// audio. VoiceEngine wires real STT + a timer into it.
+// Pure hands-free dictation state. Final STT segments are committed exactly once;
+// interim hypotheses are replaceable previews of only the current segment.
+import { pendingVoicePhraseSuffix, splitOnVoicePhrase } from './voicePhrases'
 
 export type HandsFreeStrategy = 'continuous' | 'safeword'
 
 export type StrategyConfig = {
   strategy: HandsFreeStrategy
-  triggerPhrase: string // safeword: activation phrase
-  endPhrase: string // safeword end phrase / optional continuous end
-  continuousSilenceMs: number // continuous: pause that finalizes a dictation
+  triggerPhrase: string
+  endPhrase: string
+  continuousSilenceMs: number
 }
 
 export type MachineState = 'armed' | 'dictating'
 
-function normalize(value: string): string {
-  return value
-    .toLocaleLowerCase('de-DE')
-    .normalize('NFD')
-    .replace(/\p{M}/gu, '')
-    .replace(/ß/g, 'ss')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
+// Retain the existing public helper while sharing the exact matcher with VoiceEngine.
+export const splitOnPhrase = splitOnVoicePhrase
 
-type Token = { n: string; start: number; end: number }
+type Draft = { state: MachineState; text: string; wakeTail: string }
+type SegmentResult = { draft: Draft; preview: string; command: string | null; activated: boolean }
 
-function tokenize(text: string): Token[] {
-  const out: Token[] = []
-  for (const match of text.matchAll(/[\p{L}\p{N}]+/gu)) {
-    const raw = match[0] ?? ''
-    const n = normalize(raw)
-    const start = match.index
-    if (n && start !== undefined) out.push({ n, start, end: start + raw.length })
-  }
-  return out
-}
-
-function withinOneEdit(a: string, b: string): boolean {
-  if (Math.abs(a.length - b.length) > 1) return false
-  let i = 0
-  let j = 0
-  let edits = 0
-  while (i < a.length && j < b.length) {
-    if (a[i] === b[j]) {
-      i++
-      j++
-      continue
-    }
-    if (++edits > 1) return false
-    if (a.length > b.length) i++
-    else if (b.length > a.length) j++
-    else {
-      i++
-      j++
-    }
-  }
-  return edits + (a.length - i) + (b.length - j) <= 1
-}
-
-function tokenMatch(a: string, b: string): boolean {
-  // Exact, or a single-edit fuzzy match for longer words (STT robustness).
-  return a === b || (a.length >= 4 && b.length >= 4 && withinOneEdit(a, b))
-}
-
-/** Locate `phrase` in `text` (whitespace-insensitive, lightly fuzzy). */
-export function splitOnPhrase(text: string, phrase: string): { before: string; after: string } | null {
-  const candidate = normalize(phrase).split(' ').filter(Boolean)
-  if (candidate.length === 0) return null
-  const words = tokenize(text)
-  for (let start = 0; start + candidate.length <= words.length; start++) {
-    if (candidate.every((part, offset) => tokenMatch(words[start + offset]!.n, part))) {
-      const from = words[start]!.start
-      const to = words[start + candidate.length - 1]!.end
-      return {
-        before: text.slice(0, from).trim(),
-        after: text
-          .slice(to)
-          .replace(/^[\s,.:;!?-]+/, '')
-          .trim(),
-      }
-    }
-  }
-  return null
+function join(left: string, right: string): string {
+  return [left.trim(), right.trim()].filter(Boolean).join(' ')
 }
 
 export class HandsFreeMachine {
   state: MachineState = 'armed'
-  private buffer: string[] = []
-  private lastSegmentAt = 0
+  private buffer = ''
+  private wakeTail = ''
+  private lastSpeechAt = 0
 
   constructor(
     private cfg: StrategyConfig,
     private onCommand: (text: string) => void,
-    private onPartial?: (text: string) => void
+    private onPartial?: (text: string) => void,
+    private onStateChange?: (state: MachineState) => void
   ) {}
 
   reset(): void {
-    this.state = 'armed'
-    this.buffer = []
+    this.buffer = ''
+    this.wakeTail = ''
+    this.lastSpeechAt = 0
+    this.setState('armed')
+    this.onPartial?.('')
   }
 
-  private emitPartial(): void {
-    this.onPartial?.(this.buffer.join(' ').trim())
-  }
-
-  private finalize(): void {
-    const text = this.buffer.join(' ').trim()
-    this.buffer = []
-    this.state = 'armed'
-    this.emitPartial()
+  /** Finalize committed text only. An unconfirmed partial control remains ordinary speech. */
+  finalize(): void {
+    const text = this.buffer.trim()
+    this.reset()
     if (text) this.onCommand(text)
   }
 
-  /** Feed a transcribed utterance heard at time `at` (ms). */
-  pushSegment(text: string, at: number): void {
-    const clean = (text ?? '').trim()
-    if (!clean) return
-    this.lastSegmentAt = at
-
-    if (this.cfg.strategy === 'safeword') {
-      if (this.state === 'armed') {
-        const match = splitOnPhrase(clean, this.cfg.triggerPhrase)
-        if (!match) return // ambient speech ignored until the activation phrase
-        this.state = 'dictating'
-        this.buffer = match.after ? [match.after] : []
-        this.emitPartial()
-        return
-      }
-      const end = this.cfg.endPhrase ? splitOnPhrase(clean, this.cfg.endPhrase) : null
-      if (end) {
-        if (end.before) this.buffer.push(end.before)
-        this.finalize()
-        return
-      }
-      this.buffer.push(clean)
-      this.emitPartial()
-      return
-    }
-
-    // continuous — arm on first speech, then also honour an optional end phrase
-    // in the very same utterance.
-    if (this.state === 'armed') {
-      this.state = 'dictating'
-      this.buffer = []
-    }
-    const end = this.cfg.endPhrase ? splitOnPhrase(clean, this.cfg.endPhrase) : null
-    if (end) {
-      if (end.before) this.buffer.push(end.before)
-      this.finalize()
-      return
-    }
-    this.buffer.push(clean)
-    this.emitPartial()
+  /** Speech frames and pending STT work postpone continuous-mode silence submission. */
+  touchSpeech(at: number): void {
+    if (Number.isFinite(at)) this.lastSpeechAt = Math.max(this.lastSpeechAt, at)
   }
 
-  /** Call periodically; finalizes a continuous dictation after a long pause. */
+  /** Replace the current interim hypothesis; never commit, transition or submit. */
+  previewSegment(text: string): string {
+    const result = this.reduceSegment(text)
+    this.onPartial?.(result.preview)
+    return result.preview
+  }
+
+  /** Commit one final STT segment. Revisions must use previewSegment instead. */
+  pushSegment(text: string, at: number): void {
+    const result = this.reduceSegment(text)
+    if (text.trim()) this.touchSpeech(at)
+    this.buffer = result.draft.text
+    this.wakeTail = result.draft.wakeTail
+    if (result.activated) this.setState('dictating')
+    this.setState(result.draft.state)
+    if (result.command !== null) {
+      this.onPartial?.('')
+      if (result.command) this.onCommand(result.command)
+    } else this.onPartial?.(result.preview)
+  }
+
+  /** The engine also pauses tick while audio or final transcription is pending. */
   tick(now: number): void {
-    if (this.state === 'dictating' && this.cfg.strategy === 'continuous' && this.buffer.length) {
-      if (now - this.lastSegmentAt >= Math.max(1000, this.cfg.continuousSilenceMs)) {
-        this.finalize()
+    if (this.state !== 'dictating' || this.cfg.strategy !== 'continuous' || !this.buffer.trim()) return
+    const silence = Number.isFinite(this.cfg.continuousSilenceMs) ? this.cfg.continuousSilenceMs : 5000
+    if (Number.isFinite(now) && now - this.lastSpeechAt >= Math.max(1000, silence)) this.finalize()
+  }
+
+  private setState(state: MachineState): void {
+    if (this.state === state) return
+    this.state = state
+    this.onStateChange?.(state)
+  }
+
+  private visibleText(text: string): string {
+    return this.cfg.endPhrase ? pendingVoicePhraseSuffix(text, this.cfg.endPhrase).before : text.trim()
+  }
+
+  private reduceSegment(text: string): SegmentResult {
+    const clean = text.trim()
+    let draft: Draft = { state: this.state, text: this.buffer, wakeTail: this.wakeTail }
+    let activated = false
+    if (!clean) return { draft, preview: this.visibleText(draft.text), command: null, activated }
+
+    if (draft.state === 'armed' && this.cfg.strategy === 'safeword') {
+      const combined = join(draft.wakeTail, clean)
+      const wake = splitOnVoicePhrase(combined, this.cfg.triggerPhrase)
+      if (!wake) {
+        draft = {
+          state: 'armed',
+          text: '',
+          wakeTail: pendingVoicePhraseSuffix(combined, this.cfg.triggerPhrase).pending,
+        }
+        return { draft, preview: '', command: null, activated }
+      }
+      draft = { state: 'dictating', text: wake.after, wakeTail: '' }
+      activated = true
+    } else {
+      activated = draft.state === 'armed'
+      draft = { state: 'dictating', text: join(draft.text, clean), wakeTail: '' }
+    }
+
+    // Also inspect the activation utterance, including a close phrase split over finals.
+    const close = this.cfg.endPhrase ? splitOnVoicePhrase(draft.text, this.cfg.endPhrase) : null
+    if (close) {
+      return {
+        draft: { state: 'armed', text: '', wakeTail: '' },
+        preview: close.before,
+        command: close.before,
+        activated,
       }
     }
+    return { draft, preview: this.visibleText(draft.text), command: null, activated }
   }
 }

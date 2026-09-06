@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest'
 import {
   clampNumber,
   compactHistory,
+  composeProviderSystemPrompt,
   goalStatusLabel,
+  normalizeConversationHistory,
   previewToolArguments,
   safeTrim,
 } from '../../src/services/chatPresentation'
@@ -23,6 +25,42 @@ describe('chat presentation helpers', () => {
     const newest: WireMessage = { role: 'user', content: 'important'.repeat(100) }
 
     expect(compactHistory([newest], 1)).toEqual([newest])
+  })
+
+  it('keeps the system policy and project context in one template-safe turn', () => {
+    expect(composeProviderSystemPrompt('Policy', 'Project context')).toBe('Policy\n\nProject context')
+    expect(composeProviderSystemPrompt('Policy', '')).toBe('Policy')
+  })
+
+  it('keeps UI greetings and consecutive status events out of the provider transcript', () => {
+    const history: WireMessage[] = [
+      { role: 'assistant', content: 'Willkommen. Was ist das Ziel?' },
+      { role: 'assistant', content: 'Mikrofon nicht verfügbar.' },
+      { role: 'user', content: 'Hallo' },
+      { role: 'user', content: 'Bist du da?' },
+      { role: 'assistant', content: 'Ja.' },
+      { role: 'assistant', content: '[Fehler] Alte lokale Runtime-Störung.' },
+      { role: 'assistant', content: 'Mikrofon-Fehler: Requested device not found' },
+      { role: 'assistant', content: 'Zuhören fehlgeschlagen: Requested device not found' },
+      { role: 'user', content: 'Antworte kurz.' },
+    ]
+
+    expect(normalizeConversationHistory(history)).toEqual([
+      { role: 'user', content: 'Hallo\n\nBist du da?' },
+      { role: 'assistant', content: 'Ja.' },
+      { role: 'user', content: 'Antworte kurz.' },
+    ])
+  })
+
+  it('drops a leading assistant turn exposed by history compaction', () => {
+    const history: WireMessage[] = [
+      { role: 'user', content: 'older user' },
+      { role: 'assistant', content: 'newer assistant' },
+      { role: 'user', content: 'newest user' },
+    ]
+
+    const compacted = compactHistory(normalizeConversationHistory(history), 7)
+    expect(normalizeConversationHistory(compacted)).toEqual([{ role: 'user', content: 'newest user' }])
   })
 
   it('normalizes common presentation values', () => {

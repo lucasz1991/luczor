@@ -122,6 +122,7 @@ describe('agent mode and tool reliability', () => {
 
   it('refreshes the live mode, forces only the first tool round and hides intermediate tool reasoning', async () => {
     const visibleTokens = vi.fn()
+    const progress = vi.fn()
     mocks.streamChatWithTools
       .mockImplementationOnce(async args => {
         args.onToken?.('interne Tool-Überlegung')
@@ -142,6 +143,7 @@ describe('agent mode and tool reliability', () => {
       getMode: () => 'act',
       toolChoice: 'required',
       onToken: visibleTokens,
+      onProgress: progress,
     })
 
     const firstArgs = mocks.streamChatWithTools.mock.calls[0]![0]
@@ -152,6 +154,13 @@ describe('agent mode and tool reliability', () => {
     expect(mocks.execute).toHaveBeenCalledOnce()
     expect(visibleTokens).toHaveBeenCalledTimes(1)
     expect(visibleTokens).toHaveBeenCalledWith('Projektzustand geprüft.')
+    expect(progress).toHaveBeenCalledWith({
+      phase: 'receiving',
+      round: 1,
+      characters: 'interne Tool-Überlegung'.length,
+    })
+    expect(progress).toHaveBeenCalledWith({ phase: 'thinking', round: 2 })
+    expect(JSON.stringify(progress.mock.calls)).not.toContain('interne Tool-Überlegung')
     expect(result.finalText).toBe('Projektzustand geprüft.')
   })
 

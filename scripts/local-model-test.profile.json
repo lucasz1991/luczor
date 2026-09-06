@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "profileId": "orcarouter-qwen3.8-27b-windows-cuda-smoke",
+  "node": {
+    "executable": "C:\\Users\\L. Zacharias\\AppData\\Roaming\\nvm\\v22.22.0\\node.exe",
+    "version": "v22.22.0",
+    "sizeBytes": 85804032,
+    "sha256": "bae898add4643fcf890a83ad8ae56e20dce7e781cab161a53991ceba70c99ffb",
+    "pnpmCli": "C:\\Users\\L. Zacharias\\AppData\\Roaming\\npm\\node_modules\\pnpm\\bin\\pnpm.cjs",
+    "pnpmVersion": "10.27.0",
+    "pnpmSizeBytes": 1102,
+    "pnpmSha256": "b276da51dc8ca5b0d3ee3371695b50fc8b3244b281b091c63a3f082a88dadeb9"
+  },
+  "assets": {
+    "model": {
+      "id": "orcarouter-qwen3.8-27b-uncensored-q4-k-m",
+      "relativePath": "models\\orcarouter-qwen3.8-27b-uncensored-q4-k-m.gguf",
+      "sizeBytes": 17772538112,
+      "sha256": "6c8c7658fe13eef22666aa89862f7fb70aa72109838cf19989e59b15875e5e08",
+      "sourceUrl": "https://huggingface.co/bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF/resolve/87d37daf5e5eb72a926d8b413e08809a57f1a120/orcarouter_Qwen3.8-27B-Uncensored-Q4_K_M.gguf",
+      "chatTemplateSha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+    },
+    "runtime": {
+      "relativePath": "runtime\\llama-server.exe",
+      "version": "b10809",
+      "commit": "5266f24da",
+      "sha256": "cb29f66008d4d73cce17cab2c2569ab318eb244b0b2ca2a15024b44d90dfcd3f"
+    },
+    "archives": [
+      {
+        "relativePath": "downloads\\llama-b10809-bin-win-cuda-12.4-x64.zip",
+        "sizeBytes": 253938543,
+        "sha256": "c77bfcd9ed8d91e8721a2d6a290b907fddd4fa5412a47b21c6fa1709116b85f9"
+      },
+      {
+        "relativePath": "downloads\\cudart-llama-bin-win-cuda-12.4-x64.zip",
+        "sizeBytes": 391443627,
+        "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"
+      }
+    ],
+    "evaluationReport": {
+      "relativePath": "docs\\local-model-evaluation\\orcarouter-qwen3.8-27b-uncensored-q4-k-m-preflight-2026-09-05.json",
+      "sha256": "c4df1eda58ba25d735f7e270bfefbbe42a71f3dc6726670ee882b5a837f8df13"
+    }
+  },
+  "signing": {
+    "keyId": "luczor-local-model-test-2026-09-05",
+    "privateKeyRelativePath": "control-plane\\local-model-test-private.pem",
+    "publicKeyRelativePath": "control-plane\\local-model-test-public.pem"
+  },
+  "catalog": {
+    "contextTokens": 8192,
+    "minTotalRamBytes": 32000000000,
+    "minAvailableRamBytes": 2000000000,
+    "minVramBytes": 20000000000,
+    "minStorageFreeBytes": 20000000000,
+    "maxStartupSeconds": 300,
+    "minPrefillTokensPerSecond": 100,
+    "minDecodeTokensPerSecond": 10,
+    "maxFirstTokenMs": 30000,
+    "cooldownMs": 300000,
+    "maxConsecutiveFailures": 2
+  }
+}

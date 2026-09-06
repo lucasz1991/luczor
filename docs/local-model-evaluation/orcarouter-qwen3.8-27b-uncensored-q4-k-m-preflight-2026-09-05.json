@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "evaluated_at": "2026-09-05T21:42:46.5973616Z",
+  "qualification": "isolated_local_test_preflight",
+  "result": "passed",
+  "model": {
+    "id": "orcarouter-qwen3.8-27b-uncensored-q4-k-m",
+    "display_name": "OrcaRouter Qwen3.8-27B Uncensored Q4_K_M",
+    "source_repository": "bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF",
+    "source_revision": "87d37daf5e5eb72a926d8b413e08809a57f1a120",
+    "source_url": "https://huggingface.co/bartowski/orcarouter_Qwen3.8-27B-Uncensored-GGUF/resolve/87d37daf5e5eb72a926d8b413e08809a57f1a120/orcarouter_Qwen3.8-27B-Uncensored-Q4_K_M.gguf",
+    "artifact_sha256": "6c8c7658fe13eef22666aa89862f7fb70aa72109838cf19989e59b15875e5e08",
+    "artifact_size_bytes": 17772538112,
+    "format": "gguf",
+    "quantization": "q4_k_m",
+    "embedded_name": "Qwen3.8 27B Uncensored",
+    "embedded_architecture": "qwen35",
+    "embedded_context_length": 262144,
+    "embedded_license": "apache-2.0",
+    "chat_template_sha256": "c3cf9e34abf4f9e36c2d72165aa9c132d3e2a725b6c2586aaa3a8af9d7a81041"
+  },
+  "runtime": {
+    "id": "llama.cpp",
+    "release": "b10809",
+    "commit": "5266f24da75dc449bd56cbed7addb9c8e4a6a73e",
+    "reported_version": "0.4.0-dev",
+    "platform": "windows-x86_64-cuda-12.4",
+    "executable_sha256": "cb29f66008d4d73cce17cab2c2569ab318eb244b0b2ca2a15024b44d90dfcd3f",
+    "runtime_archive": {
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10809/llama-b10809-bin-win-cuda-12.4-x64.zip",
+      "size_bytes": 253938543,
+      "sha256": "c77bfcd9ed8d91e8721a2d6a290b907fddd4fa5412a47b21c6fa1709116b85f9"
+    },
+    "cuda_archive": {
+      "url": "https://github.com/ggml-org/llama.cpp/releases/download/b10809/cudart-llama-bin-win-cuda-12.4-x64.zip",
+      "size_bytes": 391443627,
+      "sha256": "8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6"
+    }
+  },
+  "host": {
+    "manufacturer": "ASUS",
+    "model": "System Product Name",
+    "cpu": "Intel(R) Core(TM) i9-10900K CPU @ 3.70GHz",
+    "cpu_cores": 10,
+    "cpu_logical_processors": 20,
+    "total_physical_memory_bytes": 34223976448,
+    "available_physical_memory_bytes_before_test": 15748915200,
+    "gpu": "NVIDIA GeForce RTX 3090",
+    "gpu_vram_mib": 24576,
+    "nvidia_driver": "560.94",
+    "artifact_storage": "fixed_storage",
+    "artifact_storage_free_bytes_before_test": 769713213440
+  },
+  "test_profile": {
+    "loopback_only": true,
+    "context_tokens": 4096,
+    "parallel_slots": 1,
+    "web_ui": false,
+    "prompt_cache_reuse": false,
+    "external_model_fallback": false
+  },
+  "checks": {
+    "source_revision_and_license_metadata": "passed",
+    "artifact_size_and_sha256": "passed",
+    "runtime_version_and_sha256": "passed",
+    "embedded_gguf_metadata_and_chat_template": "passed",
+    "loopback_api_key_enforcement": "passed",
+    "tool_bearing_direct_completion": {
+      "result": "passed",
+      "required_marker": "LUCZOR_LOCAL_DIRECT_OK",
+      "elapsed_ms": 1258,
+      "prompt_tokens_per_second": 351.33,
+      "decode_tokens_per_second": 27.77
+    },
+    "luczor_capacity_benchmark_shape": {
+      "result": "passed",
+      "required_marker": "LUCZOR_BENCHMARK_OK",
+      "visible_first_token_upper_bound_ms": 1745,
+      "total_elapsed_ms": 1765,
+      "prompt_tokens": 863,
+      "predicted_tokens": 8,
+      "prompt_tokens_per_second": 730.8183471819035,
+      "decode_tokens_per_second": 31.4393377977193,
+      "reasoning_disabled_for_benchmark": true
+    },
+    "clean_runtime_stop": "passed"
+  },
+  "limitations": [
+    "This report qualifies one isolated Windows local-test profile; it is not a production release approval.",
+    "The measurements are single-host smoke evidence, not a broad quality, safety, regression, or endurance evaluation.",
+    "The source and embedded license identifiers were verified; this report is not legal advice.",
+    "The end-to-end signed Laravel-to-Tauri-to-Vue chat run is recorded separately and is not asserted by this preflight report.",
+    "Qwen3.8 Flash-Next remains disabled and was not evaluated by this report."
+  ]
+}

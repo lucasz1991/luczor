@@ -33,6 +33,22 @@ import { mutations } from '@/state/store'
 import { hud, setStatus, pulse, setLastTool } from '@/state/hud'
 import { logAgentEvent } from '@/services/api/sync'
 import { getApiConfigSnapshot } from '@/services/api/luczorApi'
+import type { AgentProgress } from '@/services/chatActivity'
+import type { ToolCallStatus } from '@/state/types'
+
+/** A transient caller can own tool UI without writing to the project archive. */
+export type AgentToolSession = {
+  queue: (call: {
+    id: string
+    name: string
+    category: ToolCategory
+    args: Record<string, unknown>
+    requiresApproval: boolean
+    status: ToolCallStatus
+  }) => void
+  update: (id: string, status: ToolCallStatus) => void
+  approve: (id: string) => Promise<boolean>
+}
 
 /** Truncate a value for the server event payload (avoid huge uploads). */
 function clip(v: unknown, max = 500): unknown {
@@ -85,6 +101,10 @@ export type RunAgentOptions = {
   inputSource?: 'keyboard' | 'push_to_talk' | 'hands_free'
   /** Streamed content of the current round (full accumulated text). */
   onToken?: (content: string) => void
+  /** Safe UI telemetry. Model text continues through the existing final-answer guard. */
+  onProgress?: (event: AgentProgress) => void
+  /** In-memory tool journal and approval gate for temporary conversations. */
+  toolSession?: AgentToolSession
 }
 
 type Outcome = { ok: boolean; output?: unknown; error?: string }
@@ -182,7 +202,7 @@ function redactedOutcome(outcome: Outcome): Outcome {
   }
 }
 
-function recordOutcome(
+function recordPersistentOutcome(
   projectId: string,
   callId: string,
   name: string,
@@ -227,6 +247,13 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   routeDecisionId?: string
 }> {
   const { projectId, mode, maxRounds = 6, signal } = opts
+  const updateToolStatus = (id: string, status: ToolCallStatus) =>
+    opts.toolSession ? opts.toolSession.update(id, status) : mutations.updateToolCallStatus(projectId, id, status)
+  const recordOutcome: typeof recordPersistentOutcome = (...args) => {
+    if (opts.toolSession) opts.toolSession.update(args[1], args[3])
+    else recordPersistentOutcome(...args)
+  }
+  opts.onProgress?.({ phase: 'routing' })
   const currentMode = () => opts.getMode?.() ?? mode
   const allTools = toOpenAITools()
   const routeInput = (externalPackage?: ExternalTurnPackage) => ({
@@ -314,6 +341,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     applyRuntimeMode(messages, currentMode())
 
     setStatus('thinking')
+    opts.onProgress?.({ phase: 'thinking', round: round + 1 })
     pulse('network', 1)
     let roundContent = ''
     const res = await inferenceGateway.streamChatWithTools({
@@ -332,6 +360,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       // tool call. Only the final no-tool round becomes visible chat content.
       onToken: content => {
         roundContent = content
+        opts.onProgress?.({ phase: 'receiving', round: round + 1, characters: content.length })
       },
     })
     lastRequestId = res.requestId ?? lastRequestId
@@ -339,6 +368,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     lastProvider = res.provider ?? lastProvider
     lastUseCase = res.useCase ?? lastUseCase
     nextToolChoice = resolvedRoute.externalOneShot ? 'none' : 'auto'
+    if (res.toolCalls.length) opts.onProgress?.({ phase: 'tools', round: round + 1 })
 
     if (resolvedRoute.externalOneShot && res.toolCalls.length) {
       throw new LocalInferenceError(
@@ -404,19 +434,22 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     // Handle each tool call. Every call MUST get a matching tool message,
     // otherwise the next request is malformed.
     for (const call of res.toolCalls) {
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
       const tool = getTool(call.name)
       const category = tool?.category ?? 'custom'
       const requiresApproval = !!tool?.requiresApproval
       const dataHandling = tool?.dataHandling ?? 'syncable'
 
-      mutations.queueToolCall(projectId, {
+      const queuedCall = {
         id: call.id,
         name: call.name,
         category,
         args: call.arguments,
         requiresApproval,
-        status: 'proposed',
-      })
+        status: 'proposed' as const,
+      }
+      if (opts.toolSession) opts.toolSession.queue(queuedCall)
+      else mutations.queueToolCall(projectId, queuedCall)
 
       // Unknown tool.
       if (!tool) {
@@ -465,8 +498,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         requiresApproval,
       })
       if (requiresApproval && approvalMode !== 'unrestricted' && !autoExecute) {
-        mutations.updateToolCallStatus(projectId, call.id, 'proposed')
-        const approved = await awaitApproval(call.id)
+        updateToolStatus(call.id, 'proposed')
+        const approved = await (opts.toolSession ? opts.toolSession.approve(call.id) : awaitApproval(call.id))
 
         if (signal?.aborted) {
           const outcome: Outcome = { ok: false, error: 'Abgebrochen.' }
@@ -515,7 +548,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       }
 
       // Execute.
-      mutations.updateToolCallStatus(projectId, call.id, 'executing')
+      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      updateToolStatus(call.id, 'executing')
       setStatus('executing')
       setLastTool(call.name)
       pulseForCategory(tool.category)

@@ -1,14 +1,19 @@
 use keyring::{Entry, Error as KeyringError};
 use serde::Deserialize;
-use tauri::WebviewWindow;
+use tauri::{Manager, WebviewWindow};
 use uuid::Uuid;
 
 use super::ensure_main_webview;
 
-const KEYRING_SERVICE: &str = "de.luczor.desktop";
 const KEYRING_ACCOUNT: &str = "luczor_device_key";
 const MEMORY_KEYRING_ACCOUNT: &str = "luczor_memory_encryption_key_v1";
 const MAX_DEVICE_KEY_BYTES: usize = 4_096;
+
+#[derive(Debug, Eq, PartialEq)]
+struct KeyringTarget<'a> {
+    service: &'a str,
+    account: &'static str,
+}
 
 #[derive(Deserialize)]
 pub struct DeviceKeyPayload {
@@ -20,7 +25,8 @@ pub struct DeviceKeyPayload {
 #[tauri::command]
 pub async fn device_key_get(window: WebviewWindow) -> Result<Option<String>, String> {
     ensure_main_webview(&window)?;
-    tauri::async_runtime::spawn_blocking(read_device_key)
+    let app_identifier = active_app_identifier(&window);
+    tauri::async_runtime::spawn_blocking(move || read_device_key(&app_identifier))
         .await
         .map_err(|error| format!("OS credential task failed: {error}"))?
 }
@@ -34,8 +40,9 @@ pub async fn device_key_set(
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
     validate_device_key(&payload.value)?;
+    let app_identifier = active_app_identifier(&window);
     tauri::async_runtime::spawn_blocking(move || {
-        entry()?
+        entry(&app_identifier)?
             .set_password(&payload.value)
             .map_err(map_keyring_error)
     })
@@ -46,9 +53,12 @@ pub async fn device_key_set(
 #[tauri::command]
 pub async fn device_key_delete(window: WebviewWindow) -> Result<(), String> {
     ensure_main_webview(&window)?;
-    tauri::async_runtime::spawn_blocking(|| match entry()?.delete_credential() {
-        Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-        Err(error) => Err(map_keyring_error(error)),
+    let app_identifier = active_app_identifier(&window);
+    tauri::async_runtime::spawn_blocking(move || {
+        match entry(&app_identifier)?.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+            Err(error) => Err(map_keyring_error(error)),
+        }
     })
     .await
     .map_err(|error| format!("OS credential task failed: {error}"))?
@@ -60,8 +70,9 @@ pub async fn device_key_delete(window: WebviewWindow) -> Result<(), String> {
 #[tauri::command]
 pub async fn memory_key_get_or_create(window: WebviewWindow) -> Result<String, String> {
     ensure_main_webview(&window)?;
-    tauri::async_runtime::spawn_blocking(|| {
-        let entry = memory_entry()?;
+    let app_identifier = active_app_identifier(&window);
+    tauri::async_runtime::spawn_blocking(move || {
+        let entry = memory_entry(&app_identifier)?;
         match entry.get_password() {
             Ok(value) => validate_memory_key(&value).map(|_| value),
             Err(KeyringError::NoEntry) => {
@@ -76,8 +87,12 @@ pub async fn memory_key_get_or_create(window: WebviewWindow) -> Result<String, S
     .map_err(|error| format!("OS credential task failed: {error}"))?
 }
 
-fn read_device_key() -> Result<Option<String>, String> {
-    match entry()?.get_password() {
+fn active_app_identifier(window: &WebviewWindow) -> String {
+    window.app_handle().config().identifier.clone()
+}
+
+fn read_device_key(app_identifier: &str) -> Result<Option<String>, String> {
+    match entry(app_identifier)?.get_password() {
         Ok(value) => {
             validate_device_key(&value)?;
             Ok(Some(value))
@@ -87,12 +102,21 @@ fn read_device_key() -> Result<Option<String>, String> {
     }
 }
 
-fn entry() -> Result<Entry, String> {
-    Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT).map_err(map_keyring_error)
+fn entry(app_identifier: &str) -> Result<Entry, String> {
+    let target = keyring_target(app_identifier, KEYRING_ACCOUNT);
+    Entry::new(target.service, target.account).map_err(map_keyring_error)
 }
 
-fn memory_entry() -> Result<Entry, String> {
-    Entry::new(KEYRING_SERVICE, MEMORY_KEYRING_ACCOUNT).map_err(map_keyring_error)
+fn memory_entry(app_identifier: &str) -> Result<Entry, String> {
+    let target = keyring_target(app_identifier, MEMORY_KEYRING_ACCOUNT);
+    Entry::new(target.service, target.account).map_err(map_keyring_error)
+}
+
+fn keyring_target<'a>(app_identifier: &'a str, account: &'static str) -> KeyringTarget<'a> {
+    KeyringTarget {
+        service: app_identifier,
+        account,
+    }
 }
 
 fn validate_device_key(value: &str) -> Result<(), String> {
@@ -132,7 +156,35 @@ fn map_keyring_error(error: KeyringError) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_device_key, validate_memory_key, MAX_DEVICE_KEY_BYTES};
+    use super::{
+        keyring_target, validate_device_key, validate_memory_key, KEYRING_ACCOUNT,
+        MAX_DEVICE_KEY_BYTES, MEMORY_KEYRING_ACCOUNT,
+    };
+
+    const PRODUCTION_IDENTIFIER: &str = "de.luczor.desktop";
+    const LOCAL_TEST_IDENTIFIER: &str = "de.luczor.desktop.local-test";
+
+    #[test]
+    fn app_identifier_is_the_keyring_service_boundary() {
+        let production = keyring_target(PRODUCTION_IDENTIFIER, KEYRING_ACCOUNT);
+        let local_test = keyring_target(LOCAL_TEST_IDENTIFIER, KEYRING_ACCOUNT);
+
+        assert_eq!(production.service, PRODUCTION_IDENTIFIER);
+        assert_eq!(local_test.service, LOCAL_TEST_IDENTIFIER);
+        assert_ne!(production, local_test);
+    }
+
+    #[test]
+    fn device_and_memory_keys_keep_distinct_accounts_per_app_identifier() {
+        for identifier in [PRODUCTION_IDENTIFIER, LOCAL_TEST_IDENTIFIER] {
+            let device = keyring_target(identifier, KEYRING_ACCOUNT);
+            let memory = keyring_target(identifier, MEMORY_KEYRING_ACCOUNT);
+
+            assert_eq!(device.service, memory.service);
+            assert_ne!(device.account, memory.account);
+            assert_ne!(device, memory);
+        }
+    }
 
     #[test]
     fn device_key_validation_has_explicit_empty_control_and_size_boundaries() {

@@ -12,6 +12,7 @@
     "store:allow-get",
     "store:allow-set",
     "store:allow-delete",
-    "main-runtime"
+    "main-runtime",
+    "mini-chat-host"
   ]
 }

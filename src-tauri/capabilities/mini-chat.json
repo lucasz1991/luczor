@@ -1,0 +1,6 @@
+{
+  "identifier": "mini-chat",
+  "description": "Local mini chat display. All model and tool execution remains in the trusted main runtime.",
+  "windows": ["luczor-mini"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten", "mini-chat-client"]
+}

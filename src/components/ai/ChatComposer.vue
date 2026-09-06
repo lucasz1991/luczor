@@ -1,0 +1,66 @@
+<script setup lang="ts">
+import { onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
+const props = withDefaults(
+  defineProps<{ tabs?: { id: string; label: string }[]; title?: string; scrollId?: string; follow?: boolean }>(),
+  {
+    tabs: () => [],
+    title: 'Chat',
+    scrollId: undefined,
+    follow: true,
+  }
+)
+const activeTab = defineModel<string>('activeTab', { default: '' })
+const scroller = ref<HTMLElement | null>(null)
+const thread = ref<HTMLElement | null>(null)
+const generatedId = useId()
+const atBottom = ref(true)
+let observer: ResizeObserver | undefined
+onMounted(() => {
+  observer = new ResizeObserver(() => {
+    if (!props.follow && scroller.value) scroller.value.scrollTop = 0
+    else if (atBottom.value && scroller.value) scroller.value.scrollTop = scroller.value.scrollHeight
+  })
+  if (thread.value) observer.observe(thread.value)
+})
+onBeforeUnmount(() => observer?.disconnect())
+watch(
+  () => props.follow,
+  follow => {
+    if (!follow && scroller.value) {
+      scroller.value.scrollTop = 0
+      atBottom.value = true
+    }
+  },
+  { flush: 'post' }
+)
+function measure() {
+  const el = scroller.value
+  if (el) atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 120
+}
+function scrollToBottom() {
+  scroller.value?.scrollTo({ top: scroller.value.scrollHeight, behavior: 'smooth' })
+}
+defineExpose({ scrollToBottom })
+</script>
+<template>
+  <section class="ai-chat" :aria-label="title || 'Chat'">
+    <header v-if="tabs.length" class="ai-chat__tabs">
+      <button
+        v-for="tab in tabs"
+        :key="tab.id"
+        type="button"
+        :aria-pressed="activeTab === tab.id"
+        @click="activeTab = tab.id"
+      >
+        {{ tab.label }}
+      </button>
+    </header>
+    <div :id="scrollId || generatedId" ref="scroller" class="ai-chat__messages" @scroll.passive="measure">
+      <div ref="thread" class="ai-thread"><slot /></div>
+    </div>
+    <button v-if="follow && !atBottom" class="ai-jump ai-button" type="button" @click="scrollToBottom">
+      ↓ Zur neuesten Nachricht
+    </button>
+    <div v-if="$slots.composer" class="ai-chat__composer"><slot name="composer" /></div>
+  </section>
+</template>

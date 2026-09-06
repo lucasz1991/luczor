@@ -9,7 +9,7 @@ describe('Luczor wake-word matching', () => {
     ['Luczor, starte den Timer', 'luczor'],
     ['Luxor, starte den Timer', 'luxor'],
     ['Lutz or starte den Timer', 'lutz or'],
-    ['Luczer starte den Timer', 'luczor'],
+    ['Luczer starte den Timer', 'luczer'],
   ])('accepts the STT variant %s', (text, matched) => {
     expect(findWakeWord(text, 'luczor')).toMatchObject({ matched })
   })

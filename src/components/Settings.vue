@@ -7,7 +7,8 @@ import AppearanceSettingsSection from '@/components/settings/AppearanceSettingsS
 import ChatSettingsSection from '@/components/settings/ChatSettingsSection.vue'
 import ExecutionSettingsSection from '@/components/settings/ExecutionSettingsSection.vue'
 import VoiceSettingsSection from '@/components/settings/VoiceSettingsSection.vue'
-import { loadDeviceKey, saveDeviceKey } from '@/services/secureDeviceKey'
+import { loadDeviceKey } from '@/services/secureDeviceKey'
+import { DISABLED_API_BASE_URL, persistApiIdentity } from '@/services/apiIdentitySettings'
 import { testConnection, pushAllToServer, pullServerDefaults } from '@/services/api/sync'
 import {
   APP_NOTIFICATION_CATEGORIES,
@@ -16,10 +17,7 @@ import {
   type AppNotificationCategory,
   type NotificationCategoryPreferences,
 } from '@/services/api/luczorApi'
-import {
-  invalidateLocalInferenceApiIdentity,
-  reinitializeLocalInferenceForCurrentApi,
-} from '@/services/inference/coordinator'
+import { reinitializeLocalInferenceForCurrentApi } from '@/services/inference/coordinator'
 import { loadAppearance, type HudPosition } from '@/services/appearance'
 import {
   getPushNotificationPreferences,
@@ -28,13 +26,27 @@ import {
 } from '@/services/notifications'
 import { AUTO_EXECUTE_MUTATING_TOOLS_KEY, DEFAULT_EXECUTION_POLICY } from '@/services/executionPolicy'
 import { FLASH_EXPERIMENT_SETTING_KEY } from '@/services/inference/hybridRouter'
-import type { VoiceMode } from '@/services/voice/localVoice'
+import {
+  getVoiceConfig,
+  resolveVoiceSettings,
+  validateVoiceSettings,
+  voiceSettingsToStore,
+  VOICE_DEFAULTS,
+  type VoiceMode,
+} from '@/services/voice/localVoice'
 
 type SettingsTab = 'server' | 'notifications' | 'execution' | 'voice' | 'chat' | 'appearance' | 'privacy'
 
-const props = withDefaults(defineProps<{ open: boolean; initialTab?: SettingsTab }>(), {
-  initialTab: 'server',
-})
+const props = withDefaults(
+  defineProps<{
+    open: boolean
+    initialTab?: SettingsTab
+    testSpeech: (text: string, signal?: AbortSignal) => Promise<'completed' | 'cancelled'>
+  }>(),
+  {
+    initialTab: 'server',
+  }
+)
 const emit = defineEmits<{ (e: 'update:open', v: boolean): void }>()
 
 /* ---------------------------
@@ -59,6 +71,9 @@ type AppSettings = {
   // Local voice runtime (model binaries stay release-managed)
   voice_mode: VoiceMode
   voice_wake_word: string
+  voice_end_phrase: string
+  voice_continuous_silence_ms: number
+  voice_auto_submit: boolean
   voice_local_stt_language: string
 
   // Personalization
@@ -89,9 +104,12 @@ const DEFAULTS: AppSettings = {
   client_history_token_budget: 2400,
   local_model_flash_experiment: false,
   auto_execute_mutating_tools: DEFAULT_EXECUTION_POLICY.autoExecuteMutatingTools,
-  voice_mode: 'wakeword',
-  voice_wake_word: 'luczor',
-  voice_local_stt_language: 'de',
+  voice_mode: VOICE_DEFAULTS.mode,
+  voice_wake_word: VOICE_DEFAULTS.wakeWord,
+  voice_end_phrase: VOICE_DEFAULTS.endPhrase,
+  voice_continuous_silence_ms: VOICE_DEFAULTS.continuousSilenceMs,
+  voice_auto_submit: VOICE_DEFAULTS.autoSubmit,
+  voice_local_stt_language: VOICE_DEFAULTS.localSttLanguage,
 
   ui_accent: 'violet',
   ui_hud_visible: true,
@@ -174,6 +192,10 @@ async function ensureStoreLoaded() {
   // Luczor Admin API
   const apiBase = await settingsStore.get<string>('luczor_api_base_url')
   if (apiBase) settings.luczor_api_base_url = apiBase
+  if (apiBase === DISABLED_API_BASE_URL) {
+    ui.error =
+      'Die Serververbindung wurde nach einem Speicherfehler gesperrt. Bitte die gewünschte Server-URL und den Device-Key erneut eintragen und speichern.'
+  }
   settings.luczor_device_key = await loadDeviceKey()
   ui.clientId = (await getApiConfig()).clientId
 
@@ -189,13 +211,7 @@ async function ensureStoreLoaded() {
   settings.local_model_flash_experiment = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
   const autoExecuteMutatingTools = await settingsStore.get<unknown>(AUTO_EXECUTE_MUTATING_TOOLS_KEY)
   settings.auto_execute_mutating_tools = autoExecuteMutatingTools === true
-  const voiceMode = await settingsStore.get<VoiceMode>('voice_mode')
-  if (voiceMode === 'push_to_talk' || voiceMode === 'continuous' || voiceMode === 'wakeword')
-    settings.voice_mode = voiceMode
-  const wakeWord = await settingsStore.get<string>('voice_wake_word')
-  if (wakeWord) settings.voice_wake_word = wakeWord
-  const sttLanguage = await settingsStore.get<string>('voice_local_stt_language')
-  if (sttLanguage) settings.voice_local_stt_language = sttLanguage
+  Object.assign(settings, voiceSettingsToStore(await getVoiceConfig()))
 
   // Personalization
   const accent = await settingsStore.get<string>('ui_accent')
@@ -258,6 +274,22 @@ async function saveAll() {
 
   ui.error = null
 
+  const voiceDraft = {
+    mode: settings.voice_mode,
+    wakeWord: settings.voice_wake_word,
+    endPhrase: settings.voice_end_phrase,
+    localSttLanguage: settings.voice_local_stt_language,
+    continuousSilenceMs: settings.voice_continuous_silence_ms,
+    autoSubmit: settings.voice_auto_submit,
+  }
+  const voiceError = validateVoiceSettings(voiceDraft)
+  if (voiceError) {
+    ui.error = voiceError
+    ui.tab = 'voice'
+    return
+  }
+  const voiceValues = voiceSettingsToStore(resolveVoiceSettings(voiceSettingsToStore(voiceDraft)))
+
   // Minimal validation only when API tab is open (skipped when using the server proxy)
   if (false) {
     const or = 'server-managed'
@@ -269,13 +301,17 @@ async function saveAll() {
 
   // Luczor Admin API. Invalidate the signed local policy before changing the
   // account/server identity; a fresh bootstrap may reactivate it afterwards.
-  const currentApi = await getApiConfig()
-  const nextApiBase = settings.luczor_api_base_url.trim().replace(/\/+$/, '')
-  const apiIdentityChanged =
-    currentApi.baseUrl !== nextApiBase || currentApi.deviceKey !== settings.luczor_device_key.trim()
-  if (apiIdentityChanged) await invalidateLocalInferenceApiIdentity()
-  await settingsStore.set('luczor_api_base_url', settings.luczor_api_base_url.trim().replace(/\/+$/, ''))
-  await saveDeviceKey(settings.luczor_device_key)
+  let apiIdentityChanged: boolean
+  try {
+    apiIdentityChanged = await persistApiIdentity(
+      settingsStore,
+      settings.luczor_api_base_url,
+      settings.luczor_device_key
+    )
+  } catch (error) {
+    ui.error = error instanceof Error ? error.message : 'Server-Einstellungen konnten nicht gespeichert werden.'
+    return
+  }
 
   // Chat
   await settingsStore.set('chat_auto_speech', settings.chat_auto_speech)
@@ -286,9 +322,7 @@ async function saveAll() {
   )
   await settingsStore.set(FLASH_EXPERIMENT_SETTING_KEY, settings.local_model_flash_experiment)
   await settingsStore.set(AUTO_EXECUTE_MUTATING_TOOLS_KEY, settings.auto_execute_mutating_tools)
-  await settingsStore.set('voice_mode', settings.voice_mode)
-  await settingsStore.set('voice_wake_word', settings.voice_wake_word.trim().toLowerCase() || 'luczor')
-  await settingsStore.set('voice_local_stt_language', settings.voice_local_stt_language.trim().toLowerCase() || 'de')
+  for (const [key, value] of Object.entries(voiceValues)) await settingsStore.set(key, value)
 
   // Personalization
   await settingsStore.set('ui_accent', settings.ui_accent)
@@ -311,6 +345,8 @@ async function saveAll() {
   await settingsStore.set('use_server_proxy', true)
 
   await settingsStore.save()
+  Object.assign(settings, voiceValues)
+  window.dispatchEvent(new Event('luczor:voice-settings-changed'))
   if (apiIdentityChanged) void reinitializeLocalInferenceForCurrentApi().catch(() => undefined)
   await loadAppearance() // re-apply theme/HUD/name live
   setSavedPulse()
@@ -327,14 +363,11 @@ async function resetChatSettings() {
  * --------------------------- */
 async function persistServerConfig() {
   if (!settingsStore) return
-  const currentApi = await getApiConfig()
-  const nextApiBase = settings.luczor_api_base_url.trim().replace(/\/+$/, '')
-  const apiIdentityChanged =
-    currentApi.baseUrl !== nextApiBase || currentApi.deviceKey !== settings.luczor_device_key.trim()
-  if (apiIdentityChanged) await invalidateLocalInferenceApiIdentity()
-  await settingsStore.set('luczor_api_base_url', nextApiBase)
-  await saveDeviceKey(settings.luczor_device_key)
-  await settingsStore.save()
+  const apiIdentityChanged = await persistApiIdentity(
+    settingsStore,
+    settings.luczor_api_base_url,
+    settings.luczor_device_key
+  )
   if (apiIdentityChanged) void reinitializeLocalInferenceForCurrentApi().catch(() => undefined)
 }
 
@@ -498,7 +531,7 @@ const tabs: Array<{
   { id: 'server', title: 'Server', desc: 'Laravel Sync API', icon: 'server' },
   { id: 'notifications', title: 'Benachrichtigungen', desc: 'Native Pushs', icon: 'bell' },
   { id: 'execution', title: 'Ausführung', desc: 'Freigaben & Sicherheit', icon: 'shield' },
-  { id: 'voice', title: 'Voice', desc: 'Lokal · Wake-Word', icon: 'mic' },
+  { id: 'voice', title: 'Voice', desc: 'Lokale STT · Server-TTS', icon: 'mic' },
   { id: 'chat', title: 'Chat', desc: 'Auto Speech', icon: 'chat' },
   { id: 'appearance', title: 'Appearance', desc: 'UI (später)', icon: 'palette' },
   { id: 'privacy', title: 'Datenschutz', desc: 'Diagnose & Freigabe', icon: 'shield' },
@@ -608,11 +641,16 @@ function iconPath(kind: string) {
           <!-- Main -->
           <section class="lz-main" role="tabpanel">
             <div class="lz-scroll">
+              <p v-if="ui.error" class="lz-result is-fail" role="alert">{{ ui.error }}</p>
               <!-- SERVER -->
               <div v-if="ui.tab === 'server'" class="lz-section">
                 <div class="lz-section__head">
                   <h3>Luczor Server (Admin API)</h3>
-                  <p>Optionales Sync-/Archiv-Backend. Die App arbeitet auch ohne Server voll offline.</p>
+                  <p>
+                    Verbindung für Synchronisierung, Serverdienste und die gemeinsame Sprachausgabe. Lokale
+                    Spracheingabe und installierte lokale Funktionen bleiben auf dem Gerät nutzbar; Server-Sprachausgabe
+                    benötigt eine Verbindung.
+                  </p>
                 </div>
                 <div class="lz-card">
                   <label class="lz-label">Server URL (optional)</label>
@@ -866,7 +904,11 @@ function iconPath(kind: string) {
                 v-else-if="ui.tab === 'voice'"
                 v-model:voice-mode="settings.voice_mode"
                 v-model:wake-word="settings.voice_wake_word"
+                v-model:end-phrase="settings.voice_end_phrase"
+                v-model:continuous-silence-ms="settings.voice_continuous_silence_ms"
+                v-model:auto-submit="settings.voice_auto_submit"
                 v-model:stt-language="settings.voice_local_stt_language"
+                :test-speech="props.testSpeech"
                 :device-key="settings.luczor_device_key"
                 @open-server="selectTab('server')"
               />

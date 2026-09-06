@@ -1262,6 +1262,30 @@
 }
 
 /* ============ COMPOSER ============ */
+.speech-output {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 16px;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.speech-output button {
+  min-height: 44px;
+  flex-shrink: 0;
+  padding: 8px 12px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.speak-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .composer {
   display: flex;
   align-items: flex-end;
@@ -2122,5 +2146,42 @@
   to {
     opacity: 1;
     transform: none;
+  }
+}
+
+.voice-input-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 8px 20px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-color, #3d485b);
+  border-radius: 12px;
+  font-size: 13px;
+}
+
+.voice-input-status > div {
+  display: grid;
+  gap: 4px;
+}
+
+.voice-input-status.is-error {
+  border-color: #d97272;
+}
+
+.voice-input-status button {
+  flex-shrink: 0;
+  min-height: 44px;
+  padding: 4px 12px;
+  border: 1px solid currentColor;
+  border-radius: 8px;
+}
+
+@media (max-width: 700px) {
+  .voice-input-status {
+    align-items: stretch;
+    flex-direction: column;
+    margin-inline: 10px;
   }
 }

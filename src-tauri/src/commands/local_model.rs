@@ -31,6 +31,7 @@ const EXPECTED_KEY_ID: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_K
 const FLASH_MODEL_ID: &str = "qwen3.8-flash-next";
 const FALLBACK_MODEL_ID: &str = "orcarouter-qwen3.8-27b-uncensored-q4-k-m";
 const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_ERROR_RESPONSE_BYTES: usize = 16 * 1024;
 const MAX_CONTENT_CHARS: usize = 4 * 1024 * 1024;
 const MAX_TOOL_CALLS: usize = 128;
 const MAX_TOOL_ARGUMENT_CHARS: usize = 1024 * 1024;
@@ -250,6 +251,100 @@ enum RequestOutcome {
     Success,
     Failed,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LlamaHttpFailureKind {
+    ContextWindowExceeded,
+    ChatHistoryRejected,
+    ChatTemplateFailed,
+    ToolContractRejected,
+    CapacityExhausted,
+    AuthenticationFailed,
+    ModelUnavailable,
+    RequestRejected,
+    ServerFailed,
+    HttpFailed,
+}
+
+impl LlamaHttpFailureKind {
+    fn code(self) -> &'static str {
+        match self {
+            Self::ContextWindowExceeded => "runtime_context_exceeded",
+            Self::ChatHistoryRejected => "runtime_chat_history_rejected",
+            Self::ChatTemplateFailed => "runtime_chat_template_failed",
+            Self::ToolContractRejected => "runtime_tool_contract_rejected",
+            Self::CapacityExhausted => "runtime_capacity_exhausted",
+            Self::AuthenticationFailed => "runtime_auth_failed",
+            Self::ModelUnavailable => "runtime_model_unavailable",
+            Self::RequestRejected => "runtime_request_rejected",
+            Self::ServerFailed => "runtime_server_failed",
+            Self::HttpFailed => "runtime_http_failed",
+        }
+    }
+
+    fn retryable(self, status: u16) -> bool {
+        matches!(self, Self::CapacityExhausted | Self::ServerFailed)
+            || (matches!(self, Self::HttpFailed)
+                && (status == 408 || status == 429 || status >= 500))
+    }
+
+    fn public_message(self, status: u16) -> String {
+        let reason = match self {
+            Self::ContextWindowExceeded => {
+                "rejected the request because the context window was exceeded"
+            }
+            Self::ChatHistoryRejected => {
+                "rejected the conversation role order in its chat template"
+            }
+            Self::ChatTemplateFailed => "could not apply the chat template",
+            Self::ToolContractRejected => "rejected the tool contract",
+            Self::CapacityExhausted => "has insufficient runtime capacity",
+            Self::AuthenticationFailed => "rejected native authentication",
+            Self::ModelUnavailable => "could not resolve the requested model",
+            Self::RequestRejected => "rejected the request",
+            Self::ServerFailed => "reported an internal server error",
+            Self::HttpFailed => return format!("Local llama.cpp returned HTTP {status}."),
+        };
+        format!("Local llama.cpp {reason} (HTTP {status}).")
+    }
+}
+
+#[derive(Debug)]
+struct LocalInferenceFailure {
+    code: &'static str,
+    public_message: String,
+    retryable: bool,
+}
+
+impl LocalInferenceFailure {
+    fn stream(message: impl Into<String>) -> Self {
+        Self {
+            code: "runtime_stream_failed",
+            public_message: message.into(),
+            retryable: true,
+        }
+    }
+
+    fn http(status: u16, kind: LlamaHttpFailureKind) -> Self {
+        Self {
+            code: kind.code(),
+            public_message: kind.public_message(status),
+            retryable: kind.retryable(status),
+        }
+    }
+}
+
+impl From<String> for LocalInferenceFailure {
+    fn from(message: String) -> Self {
+        Self::stream(message)
+    }
+}
+
+impl From<&str> for LocalInferenceFailure {
+    fn from(message: &str) -> Self {
+        Self::stream(message)
+    }
 }
 
 static STATE: OnceLock<Mutex<ManagerState>> = OnceLock::new();
@@ -1466,7 +1561,8 @@ fn run_signed_benchmark(
     .send()
     .map_err(|_| "Local benchmark request failed.".to_string())?;
     if !response.status().is_success() {
-        return Err("Local benchmark endpoint rejected the request.".into());
+        let status = response.status().as_u16();
+        return Err(llama_http_failure(status, response).public_message);
     }
 
     let mut first_token_ms = None;
@@ -1565,8 +1661,11 @@ fn ensure_model_storage(
     let disk = disks
         .list()
         .iter()
-        .filter(|disk| path.starts_with(disk.mount_point()))
-        .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        .filter_map(|disk| {
+            storage_mount_match_len(path, disk.mount_point()).map(|length| (disk, length))
+        })
+        .max_by_key(|(_, length)| *length)
+        .map(|(disk, _)| disk)
         .ok_or("Model storage could not be classified.")?;
     let required = signed_min_storage_free_bytes.max(artifact.size_bytes);
     let proven_bus = if disk.is_removable() {
@@ -1580,6 +1679,43 @@ fn ensure_model_storage(
         return Err("Model storage is removable or has insufficient free space.".into());
     }
     Ok(())
+}
+
+fn storage_mount_match_len(path: &Path, mount_point: &Path) -> Option<usize> {
+    let path = normalize_storage_mount_path(path)?;
+    let mount_point = normalize_storage_mount_path(mount_point)?;
+    path.starts_with(&mount_point)
+        .then_some(mount_point.as_os_str().len())
+}
+
+#[cfg(windows)]
+fn normalize_storage_mount_path(path: &Path) -> Option<PathBuf> {
+    use std::path::{Component, Prefix};
+
+    if !path.is_absolute() {
+        return None;
+    }
+
+    let mut components = path.components();
+    let drive = match components.next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let mut normalized = PathBuf::from(format!("{}:\\", char::from(drive).to_ascii_uppercase()));
+    for component in components {
+        if !matches!(component, Component::RootDir) {
+            normalized.push(component.as_os_str());
+        }
+    }
+    Some(normalized)
+}
+
+#[cfg(not(windows))]
+fn normalize_storage_mount_path(path: &Path) -> Option<PathBuf> {
+    Some(path.to_path_buf())
 }
 
 fn storage_class_eligible(storage_class: &str, removable: bool, proven_bus: &str) -> bool {
@@ -1658,6 +1794,7 @@ fn infer_blocking(
             &request.request_id,
             &request.catalog_binding,
             outcome,
+            None,
         );
         let _ = on_event.send(LocalInferenceEvent::Error {
             request_id: request.request_id.clone(),
@@ -1682,23 +1819,34 @@ fn infer_blocking(
         RequestOutcome::Failed
     };
     if result.is_err() {
+        let failure = result.as_ref().err();
         let _ = on_event.send(LocalInferenceEvent::Error {
             request_id: request.request_id.clone(),
             code: if outcome == RequestOutcome::Cancelled {
                 "cancelled".into()
             } else {
-                "runtime_stream_failed".into()
+                failure
+                    .map(|error| error.code)
+                    .unwrap_or("runtime_stream_failed")
+                    .into()
             },
-            retryable: outcome != RequestOutcome::Cancelled,
+            retryable: outcome != RequestOutcome::Cancelled
+                && failure.is_none_or(|error| error.retryable),
         });
     }
+    let failure_code = if outcome == RequestOutcome::Failed {
+        result.as_ref().err().map(|error| error.code)
+    } else {
+        None
+    };
     finish_request(
         &model,
         &request.request_id,
         &request.catalog_binding,
         outcome,
+        failure_code,
     );
-    result
+    result.map_err(|error| error.public_message)
 }
 
 fn claim_inference_operation(
@@ -1977,12 +2125,134 @@ fn await_health(
     Err("llama.cpp health check timed out.".into())
 }
 
+fn llama_http_failure(status: u16, response: impl Read) -> LocalInferenceFailure {
+    let kind = read_bounded_error_body(response)
+        .as_deref()
+        .map(|body| classify_llama_http_error(status, body))
+        .unwrap_or_else(|| classify_llama_http_status(status));
+    LocalInferenceFailure::http(status, kind)
+}
+
+fn read_bounded_error_body(response: impl Read) -> Option<Vec<u8>> {
+    let mut reader = response.take((MAX_ERROR_RESPONSE_BYTES + 1) as u64);
+    let mut body = Vec::with_capacity(MAX_ERROR_RESPONSE_BYTES.min(4 * 1024));
+    reader.read_to_end(&mut body).ok()?;
+    (body.len() <= MAX_ERROR_RESPONSE_BYTES).then_some(body)
+}
+
+fn classify_llama_http_error(status: u16, body: &[u8]) -> LlamaHttpFailureKind {
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return classify_llama_http_status(status);
+    };
+    let error = value.get("error").unwrap_or(&value);
+    let error_type = error
+        .get("type")
+        .or_else(|| value.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let error_code = error
+        .get("code")
+        .or_else(|| value.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let message = error
+        .get("message")
+        .or_else(|| value.get("message"))
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str())
+        .unwrap_or_default();
+    let diagnostic = format!("{error_type}\n{error_code}\n{message}").to_ascii_lowercase();
+
+    if matches!(
+        error_type.as_str(),
+        "exceed_context_size"
+            | "exceed_context_size_error"
+            | "context_length_exceeded"
+            | "context_window_exceeded"
+    ) || diagnostic.contains("exceeds the available context size")
+        || diagnostic.contains("context length exceeded")
+        || diagnostic.contains("context window exceeded")
+        || diagnostic.contains("context size has been exceeded")
+        || diagnostic.contains("prompt is too long")
+        || diagnostic.contains("prompt too long")
+    {
+        return LlamaHttpFailureKind::ContextWindowExceeded;
+    }
+    if diagnostic.contains("roles must alternate")
+        || diagnostic.contains("role must alternate")
+        || diagnostic.contains("system message must be at the beginning")
+        || diagnostic.contains("system message must be first")
+        || diagnostic.contains("system role is only allowed at the beginning")
+        || diagnostic.contains("only user and assistant roles are supported")
+    {
+        return LlamaHttpFailureKind::ChatHistoryRejected;
+    }
+    if matches!(
+        error_type.as_str(),
+        "chat_template_error" | "template_error"
+    ) || diagnostic.contains("chat template")
+        || diagnostic.contains("chat_template")
+        || diagnostic.contains("jinja")
+    {
+        return LlamaHttpFailureKind::ChatTemplateFailed;
+    }
+    if matches!(
+        error_type.as_str(),
+        "tool_schema_error" | "tool_call_error" | "tool_contract_error" | "grammar_error"
+    ) || diagnostic.contains("tool schema")
+        || diagnostic.contains("tool_choice")
+        || diagnostic.contains("parse_tool_calls")
+        || diagnostic.contains("cannot use tools")
+        || diagnostic.contains("tool calling is not supported")
+        || diagnostic.contains("tools are not supported")
+        || diagnostic.contains("failed to parse tool call")
+    {
+        return LlamaHttpFailureKind::ToolContractRejected;
+    }
+    if matches!(
+        error_type.as_str(),
+        "insufficient_capacity" | "out_of_memory" | "server_busy"
+    ) || diagnostic.contains("out of memory")
+        || diagnostic.contains("not enough memory")
+        || diagnostic.contains("failed to allocate")
+        || diagnostic.contains("no available slot")
+        || diagnostic.contains("server is busy")
+    {
+        return LlamaHttpFailureKind::CapacityExhausted;
+    }
+    if diagnostic.contains("model not found")
+        || diagnostic.contains("model is unavailable")
+        || diagnostic.contains("unknown model")
+    {
+        return LlamaHttpFailureKind::ModelUnavailable;
+    }
+    match error_type.as_str() {
+        "authentication_error" | "permission_error" => LlamaHttpFailureKind::AuthenticationFailed,
+        "not_found_error" => LlamaHttpFailureKind::ModelUnavailable,
+        "unavailable_error" => LlamaHttpFailureKind::CapacityExhausted,
+        "invalid_request_error" | "not_supported_error" => LlamaHttpFailureKind::RequestRejected,
+        _ => classify_llama_http_status(status),
+    }
+}
+
+fn classify_llama_http_status(status: u16) -> LlamaHttpFailureKind {
+    match status {
+        400 | 413 | 422 => LlamaHttpFailureKind::RequestRejected,
+        401 | 403 => LlamaHttpFailureKind::AuthenticationFailed,
+        404 => LlamaHttpFailureKind::ModelUnavailable,
+        429 | 503 => LlamaHttpFailureKind::CapacityExhausted,
+        500..=599 => LlamaHttpFailureKind::ServerFailed,
+        _ => LlamaHttpFailureKind::HttpFailed,
+    }
+}
+
 fn stream_completion(
     model: &ModelRelease,
     request: &LocalInferenceRequest,
     cancel: Arc<AtomicBool>,
     on_event: &Channel<LocalInferenceEvent>,
-) -> Result<LocalInferenceResult, String> {
+) -> Result<LocalInferenceResult, LocalInferenceFailure> {
     let (port, api_key) = {
         let mut guard = state()
             .lock()
@@ -2024,10 +2294,8 @@ fn stream_completion(
     .send()
     .map_err(|_| "Local llama.cpp request failed.".to_string())?;
     if !response.status().is_success() {
-        return Err(format!(
-            "Local llama.cpp returned HTTP {}.",
-            response.status().as_u16()
-        ));
+        let status = response.status().as_u16();
+        return Err(llama_http_failure(status, response));
     }
     parse_sse(response, request, cancel, on_event)
 }
@@ -2037,7 +2305,7 @@ fn parse_sse(
     request: &LocalInferenceRequest,
     cancel: Arc<AtomicBool>,
     on_event: &Channel<LocalInferenceEvent>,
-) -> Result<LocalInferenceResult, String> {
+) -> Result<LocalInferenceResult, LocalInferenceFailure> {
     let mut reader = BufReader::new(response);
     let mut line = Vec::new();
     let mut bytes = 0usize;
@@ -2161,6 +2429,7 @@ fn finish_request(
     request_id: &str,
     catalog_binding: &CatalogBindingInput,
     outcome: RequestOutcome,
+    failure_code: Option<&str>,
 ) {
     let mut runtime_to_stop = None;
     if let Ok(mut guard) = state().lock() {
@@ -2189,7 +2458,7 @@ fn finish_request(
                         now_ms().unwrap_or(i128::MAX) + model.health_policy.cooldown_ms as i128,
                     );
                 }
-                guard.last_error = Some("local_runtime_failed".into());
+                guard.last_error = Some(failure_code.unwrap_or("local_runtime_failed").into());
                 runtime_to_stop = guard.runtime.take();
             }
         }
@@ -2718,21 +2987,29 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 mod tests {
     use super::{
         acceptance_generation_is_current, begin_manifest_acceptance, benchmark_qualifies,
-        canonical_contract_hash, canonical_json, contract_versions_acceptable,
-        decode_manifest_public_key, loopback_listener_owned_by, operation_owns_catalog_binding,
-        parse_manifest_payload, parse_rfc3339_millis, persist_versions_in_connection,
+        canonical_contract_hash, canonical_json, classify_llama_http_status,
+        contract_versions_acceptable, decode_manifest_public_key, llama_http_failure,
+        loopback_listener_owned_by, operation_owns_catalog_binding, parse_manifest_payload,
+        parse_rfc3339_millis, persist_versions_in_connection, read_bounded_error_body,
         require_catalog_binding, rotate_manifest_session, safe_id, signed_read_timeout,
         storage_class_eligible, valid_hash, valid_manifest_session_id, valid_manifest_trust_domain,
         validate_discovery_binding, verify_envelope_with_trust, versions_are_monotone,
-        BenchmarkThresholds, CatalogBindingInput, ManagerState, SignedEnvelope, VerifiedCatalog,
+        BenchmarkThresholds, CatalogBindingInput, LlamaHttpFailureKind, ManagerState,
+        SignedEnvelope, VerifiedCatalog, MAX_ERROR_RESPONSE_BYTES,
     };
     #[cfg(windows)]
-    use super::{attach_process_lifetime_guard, open_artifact_guard, sha256_open_file_cancellable};
+    use super::{
+        attach_process_lifetime_guard, open_artifact_guard, sha256_open_file_cancellable,
+        storage_mount_match_len,
+    };
     use base64::Engine;
     use serde_json::json;
     #[cfg(windows)]
     use std::fs::{self, OpenOptions};
+    use std::io::Cursor;
     use std::net::TcpListener;
+    #[cfg(windows)]
+    use std::path::Path;
     #[cfg(windows)]
     use std::process::Command;
     use std::time::Duration;
@@ -2767,6 +3044,104 @@ mod tests {
         assert!(parse_rfc3339_millis("not-a-time").is_err());
         assert!(parse_rfc3339_millis("2026-02-29T00:00:00Z").is_err());
         assert!(parse_rfc3339_millis("2024-02-29T00:00:00Z").is_ok());
+    }
+
+    #[test]
+    fn llama_http_context_error_is_classified_without_leaking_response_data() {
+        let body = br#"{"error":{"code":400,"message":"request (30380 tokens) exceeds the available context size (8192 tokens); D:\\private\\prompt.txt","type":"exceed_context_size"}}"#;
+        let failure = llama_http_failure(400, Cursor::new(body));
+
+        assert_eq!(failure.code, "runtime_context_exceeded");
+        assert!(!failure.retryable);
+        assert_eq!(
+            failure.public_message,
+            "Local llama.cpp rejected the request because the context window was exceeded (HTTP 400)."
+        );
+        assert!(!failure.public_message.contains("30380"));
+        assert!(!failure.public_message.contains("private"));
+    }
+
+    #[test]
+    fn llama_http_500_chat_errors_have_only_fixed_safe_diagnostics() {
+        let history_body = br#"{"error":{"code":500,"message":"Jinja Exception: Conversation roles must alternate user/assistant; prompt=TOP_SECRET","type":"server_error"}}"#;
+        let history_failure = llama_http_failure(500, Cursor::new(history_body));
+        assert_eq!(history_failure.code, "runtime_chat_history_rejected");
+        assert!(!history_failure.retryable);
+        assert_eq!(
+            history_failure.public_message,
+            "Local llama.cpp rejected the conversation role order in its chat template (HTTP 500)."
+        );
+        assert!(!history_failure.public_message.contains("TOP_SECRET"));
+
+        let template_body = br#"{"error":{"code":500,"message":"Failed to apply chat template for D:\\private\\secret.gguf; prompt=TOP_SECRET","type":"server_error"}}"#;
+        let failure = llama_http_failure(500, Cursor::new(template_body));
+
+        assert_eq!(failure.code, "runtime_chat_template_failed");
+        assert!(!failure.retryable);
+        assert_eq!(
+            failure.public_message,
+            "Local llama.cpp could not apply the chat template (HTTP 500)."
+        );
+        assert!(!failure.public_message.contains("secret"));
+        assert!(!failure.public_message.contains("TOP_SECRET"));
+    }
+
+    #[test]
+    fn llama_http_tool_contract_and_capacity_errors_have_stable_codes() {
+        let tool_failure = llama_http_failure(
+            400,
+            Cursor::new(
+                br#"{"error":{"message":"tools are not supported by this configuration","type":"invalid_request_error"}}"#,
+            ),
+        );
+        assert_eq!(tool_failure.code, "runtime_tool_contract_rejected");
+        assert!(!tool_failure.retryable);
+
+        let capacity_failure = llama_http_failure(
+            503,
+            Cursor::new(br#"{"error":{"message":"server is busy","type":"server_error"}}"#),
+        );
+        assert_eq!(capacity_failure.code, "runtime_capacity_exhausted");
+        assert!(capacity_failure.retryable);
+
+        let unsupported = llama_http_failure(
+            501,
+            Cursor::new(
+                br#"{"error":{"message":"unsupported parameter","type":"not_supported_error"}}"#,
+            ),
+        );
+        assert_eq!(unsupported.code, "runtime_request_rejected");
+        assert!(!unsupported.retryable);
+    }
+
+    #[test]
+    fn unknown_or_oversized_llama_http_errors_remain_generic_and_bounded() {
+        let unknown = llama_http_failure(
+            500,
+            Cursor::new(
+                br#"{"error":{"message":"D:\\private\\secret.gguf prompt=TOP_SECRET","type":"server_error"}}"#,
+            ),
+        );
+        assert_eq!(unknown.code, "runtime_server_failed");
+        assert_eq!(
+            unknown.public_message,
+            "Local llama.cpp reported an internal server error (HTTP 500)."
+        );
+        assert!(!unknown.public_message.contains("secret"));
+        assert!(!unknown.public_message.contains("TOP_SECRET"));
+
+        let oversized = vec![b'x'; MAX_ERROR_RESPONSE_BYTES + 1];
+        assert!(read_bounded_error_body(Cursor::new(&oversized)).is_none());
+        let oversized_failure = llama_http_failure(418, Cursor::new(oversized));
+        assert_eq!(oversized_failure.code, "runtime_http_failed");
+        assert_eq!(
+            oversized_failure.public_message,
+            "Local llama.cpp returned HTTP 418."
+        );
+        assert_eq!(
+            classify_llama_http_status(401),
+            LlamaHttpFailureKind::AuthenticationFailed
+        );
     }
 
     #[test]
@@ -3059,6 +3434,48 @@ mod tests {
             Duration::from_millis(1_200_000)
         );
         assert!(signed_read_timeout(0).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_storage_mount_matches_extended_length_drive_path() {
+        assert!(
+            storage_mount_match_len(Path::new(r"\\?\D:\models\orca.gguf"), Path::new(r"D:\"))
+                .is_some()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_storage_mount_matches_normal_drive_path() {
+        assert!(
+            storage_mount_match_len(Path::new(r"D:\models\orca.gguf"), Path::new(r"D:\")).is_some()
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_storage_mount_does_not_match_partial_component_prefix() {
+        assert!(storage_mount_match_len(
+            Path::new(r"\\?\D:\models-other\orca.gguf"),
+            Path::new(r"D:\models")
+        )
+        .is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_storage_mount_rejects_network_paths() {
+        assert!(storage_mount_match_len(
+            Path::new(r"\\?\UNC\server\share\models\orca.gguf"),
+            Path::new(r"\\?\UNC\server\share")
+        )
+        .is_none());
+        assert!(storage_mount_match_len(
+            Path::new(r"\\server\share\models\orca.gguf"),
+            Path::new(r"\\server\share")
+        )
+        .is_none());
     }
 
     #[test]

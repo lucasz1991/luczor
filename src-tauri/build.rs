@@ -1,6 +1,12 @@
 use std::{env, fs, path::Path};
 
 const APP_COMMANDS: &[&str] = &[
+    "mini_chat_open",
+    "mini_chat_action",
+    "mini_chat_publish",
+    "mini_chat_snapshot",
+    "mini_chat_drag",
+    "mini_chat_window",
     "capture_screen",
     "read_clipboard",
     "list_windows",

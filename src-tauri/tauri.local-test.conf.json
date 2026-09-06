@@ -2,6 +2,14 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Luczor Local Test",
   "identifier": "de.luczor.desktop.local-test",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Luczor — lokaler Modelltest"
+      }
+    ]
+  },
   "bundle": {
     "active": true,
     "targets": ["nsis"],

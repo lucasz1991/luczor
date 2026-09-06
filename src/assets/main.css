@@ -1,4 +1,7 @@
 @import 'tailwindcss';
+/* Upstream React snapshots are reference material, never Vue/Tailwind inputs. */
+@source not '../../vendor';
+@source not '../../.lmzdev';
 
 @plugin "@egoist/tailwindcss-icons" {
   prefixes: mdi;

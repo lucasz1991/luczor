@@ -1,13 +1,10 @@
 {
   "src/App.vue": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 30
-    },
-    "@typescript-eslint/no-unused-vars": {
-      "count": 4
+      "count": 24
     },
     "id-length": {
-      "count": 34
+      "count": 33
     }
   },
   "src/components/JarvisHud.vue": {
@@ -203,33 +200,9 @@
       "count": 4
     }
   },
-  "src/services/voice/speak.ts": {
-    "id-length": {
-      "count": 2
-    },
-    "prefer-const": {
-      "count": 1
-    }
-  },
   "src/services/voice/voiceEngine.ts": {
-    "id-length": {
-      "count": 1
-    },
     "security/detect-object-injection": {
-      "count": 7
-    }
-  },
-  "src/services/voice/voiceStrategy.spec.ts": {
-    "id-length": {
-      "count": 9
-    }
-  },
-  "src/services/voice/voiceStrategy.ts": {
-    "id-length": {
-      "count": 6
-    },
-    "security/detect-object-injection": {
-      "count": 3
+      "count": 4
     }
   },
   "src/services/voice/wav.ts": {

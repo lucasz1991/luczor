@@ -9,6 +9,11 @@ export function safeTrim(value: unknown): string {
   return typeof value === 'string' ? value.trim() : ''
 }
 
+/** Keep policy and bounded project context in one template-safe system turn. */
+export function composeProviderSystemPrompt(preamble: string, providerContext: string): string {
+  return [preamble.trim(), providerContext.trim()].filter(Boolean).join('\n\n')
+}
+
 /**
  * Keep the newest complete messages within the inexpensive client-side token
  * estimate. The newest message is always retained, even when it alone exceeds
@@ -31,6 +36,43 @@ export function compactHistory(messages: WireMessage[], maxTokens: number): Wire
   }
 
   return selected
+}
+
+/**
+ * Convert UI chat events into an alternating provider transcript. Static
+ * greetings and local error/status messages can precede the first real user
+ * turn or occur consecutively; they are presentation state, not valid model
+ * turns. Consecutive messages from the same role are combined without losing
+ * their visible text.
+ */
+export function normalizeConversationHistory(messages: WireMessage[]): WireMessage[] {
+  const normalized: WireMessage[] = []
+
+  for (const message of messages) {
+    if (message.role !== 'user' && message.role !== 'assistant') continue
+    const content = String(message.content ?? '').trim()
+    if (!content) continue
+    if (
+      message.role === 'assistant' &&
+      (content === 'Willkommen. Was ist das Ziel dieses Projekts?' ||
+        content === 'Neuer Chat. Was ist das Ziel?' ||
+        content.startsWith('[Fehler]') ||
+        content.startsWith('Mikrofon-Fehler:') ||
+        content.startsWith('Zuhören fehlgeschlagen:'))
+    ) {
+      continue
+    }
+    if (normalized.length === 0 && message.role === 'assistant') continue
+
+    const previous = normalized[normalized.length - 1]
+    if (previous?.role === message.role && 'content' in previous) {
+      previous.content = `${String(previous.content).trim()}\n\n${content}`
+      continue
+    }
+    normalized.push({ role: message.role, content })
+  }
+
+  return normalized
 }
 
 export function formatChatTime(timestamp: number, seconds = false): string {

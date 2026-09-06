@@ -1,0 +1,9 @@
+[[permission]]
+identifier = "mini-chat-host"
+description = "Main window can open the mini view and publish in-memory display snapshots."
+commands.allow = ["mini_chat_open", "mini_chat_publish"]
+
+[[permission]]
+identifier = "mini-chat-client"
+description = "Mini view can send typed user actions, read its display snapshot and operate only its own window."
+commands.allow = ["mini_chat_action", "mini_chat_snapshot", "mini_chat_drag", "mini_chat_window", "open_url"]

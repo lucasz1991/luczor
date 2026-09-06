@@ -180,6 +180,54 @@ describe('LocalModelManager runtime safety', () => {
     expect(transport.stream).toHaveBeenCalledTimes(model.healthPolicy.maxConsecutiveFailures)
   })
 
+  it('surfaces only allow-listed native runtime diagnostics', async () => {
+    const model = await release()
+    const nativeFailure: LocalRuntimeTransport = {
+      stream: vi.fn(async () => {
+        throw 'Local llama.cpp returned HTTP 400.'
+      }),
+      cancel: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+    }
+    const manager = new LocalModelManager(nativeFailure, () => new Date('2026-08-30T12:30:00Z'))
+
+    await expect(
+      manager
+        .gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+        .streamChatWithTools({ messages: [{ role: 'user', content: 'test' }] })
+    ).rejects.toMatchObject({ message: 'Local llama.cpp returned HTTP 400.', code: 'runtime_failed' })
+
+    const classifiedFailure: LocalRuntimeTransport = {
+      ...nativeFailure,
+      stream: vi.fn(async () => {
+        throw 'Local llama.cpp could not apply the chat template (HTTP 500).'
+      }),
+    }
+    const classifiedManager = new LocalModelManager(classifiedFailure, () => new Date('2026-08-30T12:30:00Z'))
+    await expect(
+      classifiedManager
+        .gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+        .streamChatWithTools({ messages: [{ role: 'user', content: 'test' }] })
+    ).rejects.toMatchObject({
+      message: 'Local llama.cpp could not apply the chat template (HTTP 500).',
+      code: 'runtime_failed',
+    })
+
+    const untrustedFailure: LocalRuntimeTransport = {
+      ...nativeFailure,
+      stream: vi.fn(async () => {
+        throw new Error('D:\\private\\secret.gguf')
+      }),
+    }
+    const isolatedManager = new LocalModelManager(untrustedFailure, () => new Date('2026-08-30T12:30:00Z'))
+
+    await expect(
+      isolatedManager
+        .gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+        .streamChatWithTools({ messages: [{ role: 'user', content: 'test' }] })
+    ).rejects.toMatchObject({ message: 'Die lokale Runtime ist fehlgeschlagen.', code: 'runtime_failed' })
+  })
+
   it('keeps a turn fixed to one local runtime and strips reasoning blocks from output', async () => {
     const model = await release()
     const transport: LocalRuntimeTransport = {

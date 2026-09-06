@@ -1,2 +1,3 @@
 artifacts/temp/*
 !artifacts/temp/.gitkeep
+artifacts/research/beautiful-ui/

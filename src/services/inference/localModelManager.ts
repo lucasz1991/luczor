@@ -73,6 +73,24 @@ export function visibleLocalContent(content: string): string {
   return visible.replace(/<\/think>/gi, '').trimStart()
 }
 
+const SAFE_NATIVE_RUNTIME_FAILURES = [
+  /^Local llama\.cpp returned HTTP [45]\d{2}\.$/,
+  /^Local llama\.cpp request failed\.$/,
+  /^Local llama\.cpp response exceeded the native size limit\.$/,
+  /^Local llama\.cpp emitted invalid UTF-8\.$/,
+  /^Local llama\.cpp emitted invalid SSE JSON\.$/,
+  /^Local llama\.cpp content exceeded the native size limit\.$/,
+  /^Local llama\.cpp stream ended without a terminal marker\.$/,
+  /^Local llama\.cpp stream failed\.$/,
+  /^Local llama\.cpp SSE line exceeded the native limit\.$/,
+  /^Local llama\.cpp (?:rejected the request because the context window was exceeded|rejected the conversation role order in its chat template|could not apply the chat template|rejected the tool contract|has insufficient runtime capacity|rejected native authentication|could not resolve the requested model|rejected the request|reported an internal server error) \(HTTP [45]\d{2}\)\.$/,
+] as const
+
+function safeNativeRuntimeFailure(error: unknown): string | undefined {
+  const message = typeof error === 'string' ? error : error instanceof Error ? error.message : ''
+  return SAFE_NATIVE_RUNTIME_FAILURES.some(pattern => pattern.test(message)) ? message : undefined
+}
+
 export class LocalModelManager {
   private readonly health = new Map<string, LocalModelHealth>()
   private readonly active = new Map<string, { controller: AbortController; catalogBinding: LocalCatalogBinding }>()
@@ -310,7 +328,12 @@ export class LocalModelManager {
       if (error instanceof LocalInferenceError) {
         throw new LocalInferenceError(error.message, error.code, error.retryable, partialOutput || error.partialOutput)
       }
-      throw new LocalInferenceError('Die lokale Runtime ist fehlgeschlagen.', code, true, partialOutput)
+      throw new LocalInferenceError(
+        safeNativeRuntimeFailure(error) ?? 'Die lokale Runtime ist fehlgeschlagen.',
+        code,
+        true,
+        partialOutput
+      )
     } finally {
       request.signal?.removeEventListener('abort', parentAbort)
       this.active.delete(requestId)

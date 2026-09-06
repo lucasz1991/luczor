@@ -4,8 +4,8 @@
 //
 // The engine captures the mic continuously, segments speech using an energy
 // threshold (start on speech, cut after a silence gap), transcribes each
-// segment via an injected `transcribe()` (cloud or local STT), and emits
-// recognized commands.
+// bounded snapshots via injected local STT, and emits final recognized commands.
+// Interim hypotheses replace a preview; they never execute a command.
 //
 // Modes:
 //  - "continuous": every spoken utterance is a command.
@@ -20,8 +20,13 @@ import { chunksToWavBase64 } from './wav'
 import { cleanSttTranscript } from './transcript'
 import { HandsFreeMachine, type StrategyConfig } from './voiceStrategy'
 import { BargeInDetector } from './bargeIn'
+import { findWakeWord } from './voicePhrases'
+
+export { findWakeWord } from './voicePhrases'
+export type { VoicePhraseMatch as WakeWordMatch } from './voicePhrases'
 
 export type VoiceEngineMode = 'continuous' | 'wakeword'
+export type VoiceEngineState = 'stopped' | 'listening' | 'armed' | 'dictating' | 'transcribing' | 'muted' | 'error'
 
 export type VoiceEngineOptions = {
   mode: VoiceEngineMode
@@ -45,6 +50,8 @@ export type VoiceEngineOptions = {
   bargeIn?: boolean
   /** Fired once when sustained speech is detected during TTS playback. */
   onInterrupt?: () => void
+  /** Real capture/transcription lifecycle; interim STT is snapshot-based, not token streaming. */
+  onStateChange?: (state: VoiceEngineState) => void
 }
 
 // VAD tuning (frames are ~85ms at 48kHz / 4096 samples).
@@ -52,109 +59,24 @@ const START_RMS = 0.022
 const END_RMS = 0.014
 const MIN_VOICE_FRAMES = 3 // ~0.25s of speech to count as an utterance
 const SILENCE_FRAMES = 9 // ~0.75s of silence ends a segment
-const MAX_SEGMENT_FRAMES = 240 // ~20s hard cap
+const MAX_SEGMENT_SECONDS = 15
+const INTERIM_SECONDS = 1.25
+const MAX_QUEUED_SECONDS = 20
+const MAX_QUEUED_SEGMENTS = 2
 // SOLL §5–§7 TTS-Preroll: rolling buffer of mic audio while TTS is audible so a
 // barge-in keeps the interrupting words (~0.5s before + everything after the
 // interrupt until unmute, capped at ~2s).
 const PREROLL_FRAMES = 6
 const PREROLL_MAX_FRAMES = 24
 
-// Whisper commonly transcribes the product name as one of these near-homophones.
-// Keep aliases scoped to Luczor so a custom wake word keeps its exact semantics.
-const LUCZOR_WAKE_ALIASES = ['luczor', 'luxor', 'lucor', 'lutzor', 'lukzor', 'luksor', 'lutz or']
-
-type WakeWordToken = { normalized: string; start: number; end: number }
-
-export type WakeWordMatch = { start: number; end: number; matched: string }
-
-function normalizeWakeText(value: string): string {
-  return value
-    .toLocaleLowerCase('de-DE')
-    .normalize('NFD')
-    .replace(/\p{M}/gu, '')
-    .replace(/ß/g, 'ss')
-    .replace(/[^\p{L}\p{N}]+/gu, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function tokenizeWakeText(text: string): WakeWordToken[] {
-  const tokens: WakeWordToken[] = []
-  for (const match of text.matchAll(/[\p{L}\p{N}]+/gu)) {
-    const raw = match[0] ?? ''
-    const normalized = normalizeWakeText(raw)
-    const start = match.index
-    if (normalized && start !== undefined) {
-      tokens.push({ normalized, start, end: start + raw.length })
-    }
-  }
-  return tokens
-}
-
-function isAtMostOneEditAway(left: string, right: string): boolean {
-  if (Math.abs(left.length - right.length) > 1) return false
-
-  let leftIndex = 0
-  let rightIndex = 0
-  let edits = 0
-  while (leftIndex < left.length && rightIndex < right.length) {
-    if (left[leftIndex] === right[rightIndex]) {
-      leftIndex++
-      rightIndex++
-      continue
-    }
-
-    edits++
-    if (edits > 1) return false
-    if (left.length > right.length) leftIndex++
-    else if (right.length > left.length) rightIndex++
-    else {
-      leftIndex++
-      rightIndex++
-    }
-  }
-
-  return edits + (left.length - leftIndex) + (right.length - rightIndex) <= 1
-}
-
-function wakeTokensMatch(transcriptToken: string, candidateToken: string): boolean {
-  if (transcriptToken === candidateToken) return true
-  // Avoid turning ordinary short words into wake words. The configured Luczor
-  // name is long enough that a single edit remains useful and predictable.
-  return (
-    transcriptToken.length >= 4 && candidateToken.length >= 5 && isAtMostOneEditAway(transcriptToken, candidateToken)
-  )
-}
-
-function wakeCandidates(wakeWord: string): string[][] {
-  const requested = normalizeWakeText(wakeWord)
-  if (!requested) return []
-
-  const candidates = new Set([requested])
-  if (requested === 'luczor' || LUCZOR_WAKE_ALIASES.includes(requested)) {
-    for (const alias of LUCZOR_WAKE_ALIASES) candidates.add(normalizeWakeText(alias))
-  }
-
-  return [...candidates].map(candidate => candidate.split(' '))
-}
-
-/** Finds a configured wake word (including Luczor STT aliases) in original-text offsets. */
-export function findWakeWord(text: string, wakeWord = 'luczor'): WakeWordMatch | null {
-  const words = tokenizeWakeText(text)
-  const candidates = wakeCandidates(wakeWord)
-
-  for (let start = 0; start < words.length; start++) {
-    for (const candidate of candidates) {
-      if (start + candidate.length > words.length) continue
-      if (!candidate.every((part, offset) => wakeTokensMatch(words[start + offset]!.normalized, part))) continue
-
-      const first = words[start]!
-      const last = words[start + candidate.length - 1]!
-      return { start: first.start, end: last.end, matched: candidate.join(' ') }
-    }
-  }
-
-  return null
+type TranscriptionJob = {
+  generation: number
+  epoch: number
+  segmentId: number
+  final: boolean
+  frames: Float32Array[]
+  sampleRate: number
+  opts: VoiceEngineOptions
 }
 
 export class VoiceEngine {
@@ -166,7 +88,20 @@ export class VoiceEngine {
   private sampleRate = 48000
 
   private running = false
-  private busy = false // transcription in flight
+  private starting = false
+  // Retained across stop/start: an old native process must settle before another starts.
+  private inFlight: Promise<void> | null = null
+  private finalQueue: TranscriptionJob[] = []
+  private generation = 0
+  private epoch = 0
+  private segmentId = 0
+  private segmentSamples = 0
+  private lastInterimSamples = 0
+  private finalizing = false
+  private finalization: { promise: Promise<void>; resolve: () => void } | null = null
+  private captureClosing: Promise<void> = Promise.resolve()
+  private lastState: VoiceEngineState | null = null
+  private suppressMachineCallbacks = false
   private muted = false
   private speaking = false
   private segment: Float32Array[] = []
@@ -183,23 +118,65 @@ export class VoiceEngine {
     return this.running
   }
 
+  private valid(generation: number, opts: VoiceEngineOptions, epoch?: number): boolean {
+    return (
+      this.running &&
+      this.generation === generation &&
+      this.opts === opts &&
+      (epoch === undefined || this.epoch === epoch)
+    )
+  }
+
+  private notifyState(state: VoiceEngineState, opts = this.opts): void {
+    if (this.lastState === state) return
+    this.lastState = state
+    // TTS owns the HUD while playback is active. Update before callbacks, which may start a new session.
+    if (!this.muted && state !== 'muted')
+      setStatus(
+        state === 'stopped' ? 'idle' : state === 'error' ? 'error' : state === 'transcribing' ? 'thinking' : 'listening'
+      )
+    opts?.onStateChange?.(state)
+  }
+
+  private refreshState(): void {
+    if (!this.running) return
+    this.notifyState(
+      this.muted ? 'muted' : this.inFlight || this.finalizing ? 'transcribing' : (this.machine?.state ?? 'listening')
+    )
+  }
+
+  private resetSegment(): void {
+    this.segment = []
+    this.segmentSamples = 0
+    this.lastInterimSamples = 0
+    this.speaking = false
+    this.voiceFrames = 0
+    this.silenceCount = 0
+  }
+
   /** Temporarily discard microphone input, e.g. while local TTS is audible. */
   setMuted(muted: boolean): void {
     if (this.muted === muted) return
 
     this.muted = muted
     if (muted) {
+      if (this.finalizing) {
+        void this.stop() // Playback invalidates a pending explicit finalization, too.
+        return
+      }
       // Never carry captured audio or a bare wake-word across TTS playback.
-      this.segment = []
-      this.speaking = false
-      this.voiceFrames = 0
-      this.silenceCount = 0
+      this.epoch++
+      this.resetSegment()
+      this.finalQueue = []
       this.awaitingCommand = false
+      this.suppressMachineCallbacks = true
       this.machine?.reset()
+      this.suppressMachineCallbacks = false
       this.barge?.reset() // fresh barge-in window each time TTS starts
       this.preroll = []
       this.prerollActive = false
       setMicLevel(0)
+      this.refreshState()
       return
     }
 
@@ -207,6 +184,9 @@ export class VoiceEngine {
     // was captured while TTS was still audible so the first words are not lost.
     if (this.prerollActive && this.preroll.length) {
       this.segment = this.preroll
+      this.segmentId++
+      this.segmentSamples = this.segment.reduce((count, frame) => count + frame.length, 0)
+      this.lastInterimSamples = 0
       this.speaking = true
       this.voiceFrames = Math.min(this.preroll.length, MIN_VOICE_FRAMES)
       this.silenceCount = 0
@@ -214,80 +194,165 @@ export class VoiceEngine {
     this.preroll = []
     this.prerollActive = false
 
-    if (this.running && !this.busy) setStatus('listening')
+    this.refreshState()
+    this.pump()
   }
 
   async start(opts: VoiceEngineOptions): Promise<void> {
-    if (this.running) return
+    if (this.running || this.starting) return
+    const generation = ++this.generation
+    this.epoch++
+    this.starting = true
     this.opts = opts
     this.awaitingCommand = false
-
-    this.stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      video: false,
-    })
-    this.audioCtx = new AudioContext()
-    this.sampleRate = this.audioCtx.sampleRate
-    this.source = this.audioCtx.createMediaStreamSource(this.stream)
-    this.processor = this.audioCtx.createScriptProcessor(4096, 1, 1)
-    this.processor.onaudioprocess = e => this.onFrame(e.inputBuffer.getChannelData(0))
-    this.source.connect(this.processor)
-    this.processor.connect(this.audioCtx.destination)
-
-    this.running = true
-    setStatus('listening')
-
-    // SOLL §6 — barge-in detector (≈0.25s of speech over TTS -> interrupt).
-    if (opts.bargeIn && opts.onInterrupt) {
-      this.barge = new BargeInDetector(START_RMS, 3)
-    }
-
-    // SOLL §5.3 — drive continuous/safeword dictation via the state machine.
-    if (opts.handsFree) {
-      this.machine = new HandsFreeMachine(opts.handsFree, opts.onCommand, opts.onPartial)
-      this.tickTimer = setInterval(() => {
-        if (this.running && !this.muted) this.machine?.tick(Date.now())
-      }, 500)
+    this.resetSegment()
+    this.lastState = null
+    let acquired: MediaStream | null = null
+    let context: AudioContext | null = null
+    let source: MediaStreamAudioSourceNode | null = null
+    let processor: ScriptProcessorNode | null = null
+    let attached = false
+    try {
+      acquired = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: false,
+      })
+      if (generation !== this.generation || this.opts !== opts) {
+        acquired.getTracks().forEach(track => track.stop())
+        return
+      }
+      context = new AudioContext()
+      source = context.createMediaStreamSource(acquired)
+      processor = context.createScriptProcessor(4096, 1, 1)
+      // Attach resources before resume: stop() must release the microphone even if resume never settles.
+      this.stream = acquired
+      this.audioCtx = context
+      this.sampleRate = context.sampleRate
+      this.source = source
+      this.processor = processor
+      attached = true
+      if (context.state === 'suspended') await context.resume()
+      // stop() already detached/closed the stale resources; do not touch a replacement capture.
+      if (generation !== this.generation || this.opts !== opts) return
+      this.running = true
+      processor.onaudioprocess = event => {
+        if (this.valid(generation, opts)) this.onFrame(event.inputBuffer.getChannelData(0))
+      }
+      source.connect(processor)
+      processor.connect(context.destination)
+      this.barge = opts.bargeIn && opts.onInterrupt ? new BargeInDetector(START_RMS, 3) : null
+      if (opts.handsFree) {
+        const allowed = () => this.valid(generation, opts) && !this.muted && !this.suppressMachineCallbacks
+        this.machine = new HandsFreeMachine(
+          opts.handsFree,
+          text => {
+            if (allowed()) opts.onCommand(text)
+          },
+          text => {
+            if (allowed()) opts.onPartial?.(text)
+          },
+          () => {
+            if (allowed()) this.refreshState()
+          }
+        )
+        this.tickTimer = setInterval(() => {
+          // Silence must not submit the previous text while newer audio is still being decoded.
+          if (allowed() && !this.speaking && !this.inFlight && !this.finalQueue.length && !this.finalizing) {
+            this.machine?.tick(Date.now())
+          }
+        }, 250)
+      }
+      this.refreshState()
+    } catch (error) {
+      if (!attached) {
+        acquired?.getTracks().forEach(track => track.stop())
+        try {
+          processor?.disconnect()
+          source?.disconnect()
+        } catch {
+          /* already disconnected */
+        }
+        await context?.close().catch(() => undefined)
+      }
+      if (generation !== this.generation || this.opts !== opts) return
+      await this.stop()
+      throw error
+    } finally {
+      if (generation === this.generation) this.starting = false
     }
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    return this.stopSession('stopped')
+  }
+
+  private async stopSession(state: 'stopped' | 'error'): Promise<void> {
+    const opts = this.opts
+    const finalization = this.finalization
+    this.generation++
+    this.epoch++
+    this.starting = false
     this.running = false
+    this.finalizing = false
     if (this.tickTimer) {
       clearInterval(this.tickTimer)
       this.tickTimer = null
     }
-    this.machine?.reset()
+    // Detach callbacks before resetting. Stopping preserves the visible caller-owned draft.
     this.machine = null
     this.barge = null
+    this.finalQueue = []
+    this.resetSegment()
+    this.preroll = []
+    this.prerollActive = false
+    setMicLevel(0)
+    this.opts = null
+    this.finalization = null
+    const closing = this.closeCapture()
+    this.notifyState(state, opts)
+    await closing
+    finalization?.resolve()
+  }
+
+  /** Stop accepting mic frames, decode bounded pending audio, then explicitly finalize the draft. */
+  finalize(): Promise<void> {
+    if (this.finalization) return this.finalization.promise
+    if (!this.running || !this.opts) return Promise.resolve()
+    if (this.muted) return this.stop()
+    this.finalizing = true
+    let resolve: () => void = () => undefined
+    const promise = new Promise<void>(done => {
+      resolve = done
+    })
+    this.finalization = { promise, resolve }
+    if (this.tickTimer) clearInterval(this.tickTimer)
+    this.tickTimer = null
+    void this.closeCapture()
+    this.enqueueCapturedFinal()
+    this.pump()
+    return promise
+  }
+
+  private closeCapture(): Promise<void> {
+    const context = this.audioCtx
+    if (this.processor) this.processor.onaudioprocess = null
     try {
       this.processor?.disconnect()
       this.source?.disconnect()
     } catch {
-      /* ignore */
+      /* already disconnected */
     }
     this.processor = null
     this.source = null
-    this.stream?.getTracks().forEach(t => t.stop())
+    this.stream?.getTracks().forEach(track => track.stop())
     this.stream = null
-    try {
-      await this.audioCtx?.close()
-    } catch {
-      /* ignore */
-    }
     this.audioCtx = null
-    this.segment = []
-    this.speaking = false
-    this.voiceFrames = 0
-    this.silenceCount = 0
-    this.preroll = []
-    this.prerollActive = false
-    setMicLevel(0)
-    setStatus('idle')
+    if (context) this.captureClosing = context.close().catch(() => undefined)
+    return this.captureClosing
   }
 
   private onFrame(input: Float32Array) {
-    if (!this.running) return
+    if (!this.running || this.finalizing || !input.length) return
     if (this.muted) {
       // While Luczor speaks: don't segment, but watch for barge-in and keep a
       // short preroll buffer so an interrupt doesn't swallow the first words.
@@ -298,7 +363,7 @@ export class VoiceEngine {
         this.preroll.push(new Float32Array(input))
         const cap = this.prerollActive ? PREROLL_MAX_FRAMES : PREROLL_FRAMES
         while (this.preroll.length > cap) this.preroll.shift()
-        if (this.barge.push(rms)) {
+        if (!this.prerollActive && this.barge.push(rms)) {
           this.barge.reset()
           this.prerollActive = true
           this.opts?.onInterrupt?.()
@@ -315,13 +380,16 @@ export class VoiceEngine {
     setMicLevel(Math.min(1, rms * 4))
     if (rms > START_RMS) pulse('audio', Math.min(1, rms * 4))
 
-    // While a transcription is in flight, don't start a new segment.
-    if (this.busy) return
+    // Capture continues while local STT runs. Only decoding is single-flight.
+    if (rms > END_RMS) this.machine?.touchSpeech(Date.now())
 
     if (!this.speaking) {
       if (rms > START_RMS) {
         this.speaking = true
         this.segment = [new Float32Array(input)]
+        this.segmentId++
+        this.segmentSamples = input.length
+        this.lastInterimSamples = 0
         this.voiceFrames = 1
         this.silenceCount = 0
       }
@@ -330,6 +398,7 @@ export class VoiceEngine {
 
     // speaking
     this.segment.push(new Float32Array(input))
+    this.segmentSamples += input.length
     if (rms > END_RMS) {
       this.voiceFrames++
       this.silenceCount = 0
@@ -337,34 +406,109 @@ export class VoiceEngine {
       this.silenceCount++
     }
 
-    if (this.silenceCount >= SILENCE_FRAMES || this.segment.length >= MAX_SEGMENT_FRAMES) {
-      const voiced = this.voiceFrames
-      const seg = this.segment
-      this.speaking = false
-      this.segment = []
-      this.voiceFrames = 0
-      this.silenceCount = 0
-
-      if (voiced >= MIN_VOICE_FRAMES) {
-        void this.finishSegment(seg)
-      }
+    if (this.silenceCount >= SILENCE_FRAMES || this.segmentSamples >= this.sampleRate * MAX_SEGMENT_SECONDS) {
+      this.enqueueCapturedFinal()
     }
+    this.pump()
   }
 
-  private async finishSegment(seg: Float32Array[]): Promise<void> {
+  private enqueueCapturedFinal(): void {
     const opts = this.opts
     if (!opts || !this.running) return
+    const frames = this.segment
+    const voiced = this.voiceFrames
+    const segmentId = this.segmentId
+    this.resetSegment()
+    if (voiced < MIN_VOICE_FRAMES) return
+    const queuedSeconds = this.finalQueue.reduce(
+      (seconds, job) => seconds + job.frames.reduce((samples, frame) => samples + frame.length, 0) / job.sampleRate,
+      0
+    )
+    const duration = frames.reduce((samples, frame) => samples + frame.length, 0) / this.sampleRate
+    if (this.finalQueue.length >= MAX_QUEUED_SEGMENTS || queuedSeconds + duration > MAX_QUEUED_SECONDS) {
+      this.failCapture(
+        Object.assign(
+          new Error(
+            'Die lokale Spracherkennung kommt nicht nach. Aufnahme gestoppt; bisheriger Text bleibt erhalten. Bitte den letzten Abschnitt wiederholen.'
+          ),
+          { code: 'voice_backlog' }
+        )
+      )
+      return
+    }
+    this.finalQueue.push({
+      generation: this.generation,
+      epoch: this.epoch,
+      segmentId,
+      final: true,
+      frames,
+      sampleRate: this.sampleRate,
+      opts,
+    })
+  }
 
-    this.busy = true
-    setStatus('thinking')
-    pulse('network', 0.6)
+  private pump(): void {
+    if (this.inFlight || !this.running || this.muted || !this.opts) return
+    let job = this.finalQueue.shift()
+    if (
+      !job &&
+      !this.finalizing &&
+      this.speaking &&
+      this.voiceFrames >= MIN_VOICE_FRAMES &&
+      this.segmentSamples - this.lastInterimSamples >= this.sampleRate * INTERIM_SECONDS
+    ) {
+      this.lastInterimSamples = this.segmentSamples
+      job = {
+        generation: this.generation,
+        epoch: this.epoch,
+        segmentId: this.segmentId,
+        final: false,
+        frames: this.segment.slice(),
+        sampleRate: this.sampleRate,
+        opts: this.opts,
+      }
+    }
+    if (!job) {
+      if (this.finalizing) this.completeFinalization()
+      else this.refreshState()
+      return
+    }
+    // Reserve the single-flight slot before invoking injected code (which may call back synchronously).
+    const pending = Promise.resolve().then(() => this.transcribeJob(job))
+    this.inFlight = pending
+    this.refreshState()
+    void pending.finally(() => {
+      if (this.inFlight === pending) {
+        this.inFlight = null
+        this.refreshState()
+        this.pump()
+      }
+    })
+  }
+
+  private async transcribeJob(job: TranscriptionJob): Promise<void> {
+    const { opts, generation, epoch } = job
+    if (!this.valid(generation, opts, epoch) || this.muted) return
     try {
-      const wav = chunksToWavBase64(seg, this.sampleRate)
+      const wav = chunksToWavBase64(job.frames, job.sampleRate)
+      job.frames = [] // Do not retain raw frames in addition to the bounded WAV during native inference.
       const text = cleanSttTranscript(await opts.transcribe(wav, 'audio/wav'))
-      // A request that began just before TTS must not yield an echo command.
-      if (!text || !this.running || this.muted) return
+      if (!this.valid(generation, opts, epoch) || this.muted) return
+      if (!job.final) {
+        // Once the final snapshot exists, an older hypothesis must not overwrite its draft.
+        if (!this.speaking || this.finalizing || this.segmentId !== job.segmentId) return
+        if (this.machine) this.machine.previewSegment(text)
+        else if (opts.mode === 'continuous') opts.onPartial?.(text)
+        return
+      }
+      if (!text) {
+        // A rejected/no-speech final must retract its speculative preview while preserving committed text.
+        if (this.machine) this.machine.pushSegment('', Date.now())
+        else opts.onPartial?.('')
+        return
+      }
       opts.onUtterance?.(text)
-      if (!this.running || this.muted) return
+      if (!this.valid(generation, opts, epoch) || this.muted) return
 
       // SOLL §5.3 — hands-free strategy machine owns segment routing when set.
       if (this.machine) {
@@ -397,12 +541,36 @@ export class VoiceEngine {
         // Wake word only -> next utterance is the command.
         this.awaitingCommand = true
       }
-    } catch (e) {
-      console.error('[VoiceEngine] segment failed:', e)
-      opts.onError?.(e instanceof Error ? e : new Error(String(e)))
-    } finally {
-      this.busy = false
-      if (this.running) setStatus('listening')
+    } catch {
+      if (this.valid(generation, opts, epoch) && !this.muted) {
+        this.failCapture(
+          new Error(
+            'Die lokale Spracherkennung ist fehlgeschlagen. Bisheriger Text bleibt erhalten; bitte den letzten Abschnitt erneut aufnehmen.'
+          )
+        )
+      }
     }
+  }
+
+  private completeFinalization(): void {
+    const pending = this.finalization
+    const opts = this.opts
+    const generation = this.generation
+    if (!pending || !opts || !this.running || this.muted) return
+    this.finalization = null
+    try {
+      this.machine?.finalize()
+    } finally {
+      // A final callback can stop/restart capture. Never close the newly started session.
+      if (this.valid(generation, opts)) void this.stop().then(pending.resolve, pending.resolve)
+      else pending.resolve()
+    }
+  }
+
+  private failCapture(error: Error): void {
+    const opts = this.opts
+    const stoppedGeneration = this.generation + 1
+    void this.stopSession('error')
+    if (this.generation === stoppedGeneration && !this.running) opts?.onError?.(error)
   }
 }

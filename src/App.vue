@@ -1,21 +1,41 @@
 ﻿<!-- App.vue -->
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Settings from './components/Settings.vue'
 import JarvisHud from './components/JarvisHud.vue'
-import RichMessage from './components/RichMessage.vue'
 import PlanPanel from './components/PlanPanel.vue'
-import AmbientBackdrop from './components/vengeance/AmbientBackdrop.vue'
+import SidebarNav from './components/ai/SidebarNav.vue'
+import ChatComposer from './components/ai/ChatComposer.vue'
+import PromptBar from './components/ai/PromptBar.vue'
+import ThinkingState from './components/ai/ThinkingState.vue'
+import StreamingText from './components/ai/StreamingText.vue'
+import ToolChips from './components/ai/ToolChips.vue'
+import ApprovalCard from './components/ai/ApprovalCard.vue'
+import ContextCards from './components/ai/ContextCards.vue'
+import RecommendationCard from './components/ai/RecommendationCard.vue'
+import SelectionActions from './components/ai/SelectionActions.vue'
+import AiIcon from './components/ai/AiIcon.vue'
+import {
+  activityLabel,
+  createChatActivity,
+  finishChatActivity,
+  presentToolCall,
+  updateChatActivity,
+  type ChatActivity,
+} from '@/services/chatActivity'
+import type { Message } from '@/state/types'
+const UiLibrary = defineAsyncComponent(() => import('./components/ai/UiLibrary.vue'))
 import SpotlightSurface from './components/vengeance/SpotlightSurface.vue'
 import { type LuczorMode, type WireMessage } from './services/openrouter.service'
 import { runAgent, buildSystemPreamble, shouldRequireToolCall } from '@/services/agent'
 import { parseEnvelope } from '@/services/envelope'
 import { resolveApproval, rejectAllApprovals } from '@/services/approvals'
-import { usePushToTalk } from '@/services/pushToTalk'
 import { Store } from '@tauri-apps/plugin-store'
 import { VoiceEngine } from '@/services/voice/voiceEngine'
-import { getVoiceConfig, getHandsFreeConfig, localStt } from '@/services/voice/localVoice'
+import { getVoiceConfig, handsFreeFromVoice, localStt } from '@/services/voice/localVoice'
 import { streamSpeak, stopSpeak } from '@/services/voice/speak'
+import { serverSpeechText } from '@/services/voice/messageSpeech'
+import { createVoiceInputSession, idleVoiceInput } from '@/services/voice/voiceInputSession'
 import { luczorMemory, getMemoryPrefs, type MemoryRecord } from '@/services/memory/luczorMemory'
 import { buildPromptContextDetails, inferTaskType, type PromptContextDetails } from '@/services/contextController'
 import { LuczorApi } from '@/services/api/luczorApi'
@@ -53,12 +73,14 @@ import { state, mutations } from '@/state/store'
 import { scheduleSave } from '@/services/persistence'
 import { playSfx, stopSfx } from '@/services/sfx'
 import { useAutoScroll } from '@/composables/useAutoScroll'
-import { useChatComposer } from '@/composables/useChatComposer'
+import { useChatComposer, type ComposerInputSource } from '@/composables/useChatComposer'
 import {
   clampNumber,
   compactHistory,
+  composeProviderSystemPrompt,
   formatChatTime,
   goalStatusLabel,
+  normalizeConversationHistory,
   previewToolArguments,
   safeTrim,
 } from '@/services/chatPresentation'
@@ -70,12 +92,64 @@ type SettingsStartTab = 'server' | 'notifications'
 const showSettings = ref(false)
 const settingsStartTab = ref<SettingsStartTab>('server')
 const showSystemPanel = ref(false)
-const { input, composerRef, autoGrow, setInput: setComposerInput, consumeInputSource } = useChatComposer()
+const { input, autoGrow, setInput: writeComposerInput, consumeInputSource } = useChatComposer()
+function setComposerInput(value: string, source: ComposerInputSource) {
+  if (source === 'keyboard') voiceInputSession.manualInput()
+  writeComposerInput(value, source)
+}
 const sending = ref(false)
+const showLibrary = ref(false)
+const sidebarCollapsed = ref(false)
+const promptBar = ref<InstanceType<typeof PromptBar> | null>(null)
+const chatActivities = ref<Record<string, ChatActivity>>({})
+const activeTurn = ref<{ projectId: string; messageId: string } | null>(null)
+const promptCommands = [
+  { id: 'summarize', label: '/zusammenfassen', description: 'Den bisherigen Chat zusammenfassen', icon: 'spark' },
+  { id: 'plan', label: '/plan', description: 'Einen konkreten Arbeitsplan erstellen', icon: 'check' },
+  { id: 'context', label: '@projekt', description: 'Projektkontext ansehen', icon: 'folder' },
+  { id: 'settings', label: '/modell', description: 'Modelleinstellungen öffnen', icon: 'settings' },
+]
+function handlePromptCommand(id: string) {
+  if (id === 'context') {
+    showContext.value = true
+    input.value = ''
+    return
+  }
+  if (id === 'settings') {
+    openSettings()
+    input.value = ''
+    return
+  }
+  setComposerInput(
+    id === 'plan'
+      ? 'Erstelle einen konkreten Arbeitsplan für dieses Projekt.'
+      : 'Fasse den bisherigen Chat und die nächsten Schritte zusammen.',
+    'keyboard'
+  )
+}
+function editSelection(instruction: string, selection: string) {
+  setComposerInput(`${instruction}:\n\n${selection}`, 'keyboard')
+  void nextTick(() => promptBar.value?.focus())
+}
+function messageTools(message: Message) {
+  const calls = getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, message.projectId) ?? []
+  const nextUser = messages.value.find(item => item.role === 'user' && item.ts > message.ts)
+  return calls
+    .filter(call => call.createdAt >= message.ts && (!nextUser || call.createdAt < nextUser.ts))
+    .map(presentToolCall)
+}
+function finishActiveTurn(status: 'done' | 'failed' | 'canceled') {
+  const turn = activeTurn.value
+  if (!turn) return
+  const activity = chatActivities.value[turn.messageId]
+  if (activity) finishChatActivity(activity, status)
+  mutations.patchMessage(turn.projectId, turn.messageId, { meta: { isLoading: false } })
+}
 const mode = ref<LuczorMode>('observe')
 const allowUnrestricted = ref(false)
 
 function openSettings(tab: SettingsStartTab = 'server') {
+  void voiceInputSession.stop()
   settingsStartTab.value = tab
   showSettings.value = true
 }
@@ -99,8 +173,17 @@ const appRuntimeLifecycle = createAppRuntimeLifecycle({
   togglePushToTalk,
 })
 
-onMounted(() => appRuntimeLifecycle.start())
-onBeforeUnmount(() => appRuntimeLifecycle.stop())
+onMounted(() => {
+  window.addEventListener('luczor:voice-stop', stopAllVoice)
+  window.addEventListener('luczor:voice-settings-changed', stopVoiceInputForSettings)
+  return appRuntimeLifecycle.start()
+})
+onBeforeUnmount(() => {
+  window.removeEventListener('luczor:voice-stop', stopAllVoice)
+  window.removeEventListener('luczor:voice-settings-changed', stopVoiceInputForSettings)
+  stopAllVoice()
+  appRuntimeLifecycle.stop()
+})
 
 /* -------------------------------------------------
  * Auto-Speech (Settings -> speak())
@@ -154,12 +237,19 @@ async function getTtsConfig(): Promise<{ rate: number; volume: number; interrupt
 }
 
 let _lastSpokenAssistantId: string | null = null
+const speechPending = ref(false)
+const speechError = ref('')
+let speechGeneration = 0
+
+function stopVoiceOutput() {
+  speechGeneration += 1
+  speechPending.value = false
+  stopSpeak()
+}
 
 function speakMessage(m: any) {
   try {
-    const q = ((m?.meta as any)?.question ?? '').toString().trim()
-    const content = (m?.content ?? '').toString().trim()
-    const text = (content + (q ? ' ' + q : '')).trim()
+    const text = serverSpeechText(m)
     if (!text) return
     void speakWithVoiceMuted(text).catch(error => {
       void recordDebugEvent('error', 'manual_tts_failed', {
@@ -195,16 +285,19 @@ async function autoSpeakAssistantIfEnabled(pid: string, assistantId: string) {
   if (_lastSpokenAssistantId === assistantId) return
 
   const msg = mutations.getProjectMessages(pid).find(m => m.id === assistantId)
-  const parts = [
-    safeTrim(msg?.content),
-    safeTrim((msg?.meta as any)?.question ?? (msg?.meta as any)?.content ?? ''),
-  ].filter(Boolean)
-  const text = parts.join(' ')
+  const text = serverSpeechText(msg)
 
   if (!text) return
   if (text.startsWith('[Fehler]')) return
 
+  const expectedGeneration = speechGeneration
   const s = await getAutoSpeechSettings()
+  if (
+    expectedGeneration !== speechGeneration ||
+    pid !== activeProjectId.value ||
+    serverSpeechText(mutations.getProjectMessages(pid).find(m => m.id === assistantId)) !== text
+  )
+    return
   if (!s.enabled) return
   if (!shouldSpeakAssistant(s.mode)) return
 
@@ -262,6 +355,10 @@ const activeProjectId = computed<string>({
 
 const activeProject = computed(() => projects.value.find(p => p.id === activeProjectId.value))
 const messages = computed(() => mutations.getProjectMessages(activeProjectId.value))
+const isWelcomeMessage = (message: Message) =>
+  message.role === 'assistant' &&
+  ['Willkommen. Was ist das Ziel dieses Projekts?', 'Neuer Chat. Was ist das Ziel?'].includes(message.content)
+const hasConversation = computed(() => messages.value.some(message => !isWelcomeMessage(message)))
 
 const { forceScroll } = useAutoScroll(messages, {
   selector: '#messages',
@@ -325,6 +422,8 @@ const projectSummaries = computed<any[]>(() => {
  * Core actions
  * ------------------------------------------------- */
 async function stopGenerating() {
+  finishActiveTurn('canceled')
+  stopVoiceOutput()
   stopAssistantLoading()
   _lastSpokenAssistantId = null
 
@@ -348,16 +447,19 @@ async function stopGenerating() {
 }
 
 function openProject(id: string) {
+  void voiceInputSession.stop()
   void stopGenerating()
   activeProjectId.value = id
 }
 
 function newChat() {
+  void voiceInputSession.stop()
   void stopGenerating()
   mutations.resetProjectChat(activeProjectId.value)
 }
 
 async function addProject() {
+  void voiceInputSession.stop()
   void stopGenerating()
   const rootPath = await selectProjectWorkspaceDirectory('Projektordner als neues Luczor-Projekt öffnen')
   if (!rootPath) return
@@ -379,115 +481,90 @@ async function addProject() {
 }
 
 /* -------------------------------------------------
- * Push-to-talk (local whisper.cpp STT)
- * ------------------------------------------------- */
-const { isRecording, start: startPtt, stop: stopPtt, cancel: cancelPtt } = usePushToTalk()
-
-async function togglePushToTalk() {
-  const pid = activeProjectId.value
-
-  if (!isRecording.value) {
-    try {
-      await startPtt()
-      setStatus('listening')
-    } catch (e: any) {
-      setStatus('error')
-      mutations.addMessage(mutations.makeMsg('assistant', `Mikrofon-Fehler: ${e?.message ?? String(e)}`, pid))
-    }
-    return
-  }
-
-  const audio = await stopPtt()
-  setStatus('idle')
-  if (!audio) return
-
-  try {
-    setComposerInput(await transcribeLocal(audio.base64), 'push_to_talk')
-  } catch (e: any) {
-    void recordDebugEvent('error', 'assistant_request_failed', {
-      message: e?.message ?? String(e),
-      status: e?.status ?? null,
-    })
-    mutations.addMessage(mutations.makeMsg('assistant', `STT Fehler: ${e?.message ?? String(e)}`, pid))
-  }
-}
-
-/* -------------------------------------------------
- * Continuous listening (VAD + wake word)
+ * Local dictation: one microphone, live draft, wake/close controls and PTT
  * ------------------------------------------------- */
 const voiceEngine = new VoiceEngine()
-const listening = ref(false)
-const lastHeard = ref('')
+const voiceInputView = ref(idleVoiceInput())
+const listening = computed(() => voiceInputView.value.mode === 'hands_free')
+const isRecording = computed(() => voiceInputView.value.mode === 'push_to_talk' && !voiceInputView.value.finishing)
 let voiceMuteDepth = 0
+const voiceInputSession = createVoiceInputSession({
+  engine: voiceEngine,
+  readInput: () => input.value,
+  writeInput: writeComposerInput,
+  scope: () => activeProjectId.value,
+  busy: () => sending.value,
+  async config() {
+    const [voice, tts] = await Promise.all([getVoiceConfig(), getTtsConfig()])
+    return { voice, handsFree: handsFreeFromVoice(voice), bargeIn: tts.interruptMode === 'on_speech' }
+  },
+  transcribe: (wav, language) => localStt(wav, language),
+  stopOutput: stopVoiceOutput,
+  submit: () => send(true),
+  changed: view => {
+    voiceInputView.value = view
+  },
+})
 
-/** Keep continuous STT from hearing Luczor's own local TTS output. */
-async function speakWithVoiceMuted(text: string): Promise<void> {
-  const tts = await getTtsConfig()
-  voiceMuteDepth += 1
-  voiceEngine.setMuted(true)
-  try {
-    await streamSpeak(text, { rate: tts.rate, volume: tts.volume })
-  } finally {
-    voiceMuteDepth = Math.max(0, voiceMuteDepth - 1)
-    voiceEngine.setMuted(voiceMuteDepth > 0)
-  }
+function stopAllVoice() {
+  void voiceInputSession.stop()
+  stopVoiceOutput()
 }
-const listenLabel = ref('Zuhören')
 
-async function transcribeLocal(wavBase64: string): Promise<string> {
-  const cfg = await getVoiceConfig()
-  return localStt(wavBase64, cfg.localSttLanguage)
+function stopVoiceInputForSettings() {
+  void voiceInputSession.stop('Voice-Einstellungen gespeichert. Spracheingabe bei Bedarf neu starten.')
 }
 
-async function transcribeUtterance(wavBase64: string): Promise<string> {
-  return transcribeLocal(wavBase64)
+async function togglePushToTalk() {
+  if (voiceInputView.value.mode === 'push_to_talk') await voiceInputSession.finish()
+  else await voiceInputSession.start('push_to_talk')
 }
 
 async function toggleListening() {
-  if (listening.value) {
-    await voiceEngine.stop()
-    listening.value = false
-    lastHeard.value = ''
-    return
+  if (listening.value) await voiceInputSession.stop('Zuhören gestoppt. Der bisherige Text bleibt zum Prüfen stehen.')
+  else await voiceInputSession.start('hands_free')
+}
+
+const voiceInputLabel = computed(() => {
+  if (voiceInputView.value.starting) return 'Mikrofon wird geöffnet'
+  if (voiceInputView.value.finishing) return 'Diktat wird abgeschlossen'
+  switch (voiceInputView.value.status) {
+    case 'armed':
+      return 'Wartet auf Wake Word'
+    case 'transcribing':
+      return 'Lokale Erkennung läuft'
+    case 'muted':
+      return 'Spracheingabe pausiert'
+    case 'dictating':
+      return 'Diktat läuft'
+    default:
+      return 'Lokale Spracheingabe'
   }
-  const cfg = await getVoiceConfig()
-  const hf = await getHandsFreeConfig()
-  const tts = await getTtsConfig()
-  listenLabel.value = hf.strategy === 'safeword' ? `Aktivierungsphrase „${hf.triggerPhrase}“` : 'Dauerzuhören'
-  lastHeard.value = ''
+})
+
+watch(sending, busy => voiceInputSession.setMuted(busy || voiceMuteDepth > 0), { flush: 'sync' })
+
+/** Keep continuous STT from hearing Luczor's server-generated TTS output. */
+async function speakWithVoiceMuted(text: string, signal?: AbortSignal): Promise<'completed' | 'cancelled'> {
+  if (signal?.aborted) return 'cancelled'
+  stopVoiceOutput()
+  const ownGeneration = speechGeneration
+  speechError.value = ''
+  speechPending.value = true
+  voiceMuteDepth += 1
+  voiceInputSession.setMuted(true)
   try {
-    await voiceEngine.start({
-      // SOLL §5.3 — the hands-free strategy (continuous XOR safeword) drives
-      // segmentation; the legacy mode field is kept only for type compatibility.
-      mode: 'continuous',
-      wakeWord: cfg.wakeWord,
-      handsFree: hf,
-      bargeIn: tts.interruptMode === 'on_speech',
-      onInterrupt: () => stopSpeak(),
-      transcribe: wav => transcribeUtterance(wav),
-      onUtterance: text => {
-        lastHeard.value = text
-      },
-      onPartial: text => {
-        lastHeard.value = text
-      },
-      onError: error => {
-        void recordDebugEvent('error', 'continuous_stt_failed', { message: error.message })
-      },
-      onCommand: text => {
-        const t = text.trim()
-        if (!t || sending.value) return
-        setComposerInput(t, 'hands_free')
-        void send()
-      },
-    })
-    listening.value = true
-  } catch (e: any) {
-    listening.value = false
-    setStatus('error')
-    mutations.addMessage(
-      mutations.makeMsg('assistant', `Zuhören fehlgeschlagen: ${e?.message ?? String(e)}`, activeProjectId.value)
-    )
+    const tts = await getTtsConfig()
+    if (ownGeneration !== speechGeneration || signal?.aborted) return 'cancelled'
+    return await streamSpeak(text, { rate: tts.rate, volume: tts.volume, signal })
+  } catch (error) {
+    if (ownGeneration !== speechGeneration || signal?.aborted) return 'cancelled'
+    speechError.value = error instanceof Error ? error.message : 'Die Server-Sprachausgabe ist fehlgeschlagen.'
+    throw error
+  } finally {
+    if (ownGeneration === speechGeneration) speechPending.value = false
+    voiceMuteDepth = Math.max(0, voiceMuteDepth - 1)
+    voiceInputSession.setMuted(voiceMuteDepth > 0 || sending.value)
   }
 }
 
@@ -740,6 +817,9 @@ async function saveRepositoryPolicy() {
 watch(
   activeProjectId,
   async () => {
+    void voiceInputSession.stop()
+    stopVoiceOutput()
+    speechError.value = ''
     workspaceMessage.value = ''
     localGraphMessage.value = ''
     repositoryExternalPolicy.value = await getRepositoryExternalPolicy()
@@ -779,6 +859,7 @@ function applyStreamedContent(pid: string, msgId: string, raw: string, done: boo
       content: env.summary,
       meta: {
         isLoading: done ? false : !env.complete,
+        serverSpeechAllowed: false,
         summary: env.summary,
         question: env.question,
         bullets: env.bullets,
@@ -794,7 +875,7 @@ function applyStreamedContent(pid: string, msgId: string, raw: string, done: boo
   mutations.patchMessage(pid, msgId, {
     raw,
     content: text || (done ? 'Fertig.' : ''),
-    meta: { isLoading: !done, question: '', bullets: [], summary: '' } as any,
+    meta: { isLoading: !done, serverSpeechAllowed: false, question: '', bullets: [], summary: '' } as any,
   })
 }
 
@@ -841,16 +922,18 @@ async function rememberExchange(pid: string, userText: string, assistantId: stri
 /* -------------------------------------------------
  * Send
  * ------------------------------------------------- */
-async function send() {
+async function send(automaticVoice = false) {
   const pid = activeProjectId.value
   const text = input.value.trim()
   if (!text || sending.value) return
   const taskType = inferTaskType(text)
   // Capture + reset how this turn was produced (spoken vs typed).
   const inputSource = consumeInputSource()
+  if (!automaticVoice) void voiceInputSession.stop()
 
   void playSfx('submit')
   await stopGenerating()
+  const turnSpeechGeneration = speechGeneration
 
   // user message (tag spoken input for the "Gesprochen" badge)
   const userMsg = mutations.makeMsg('user', text, pid)
@@ -865,7 +948,10 @@ async function send() {
   const assistant = mutations.makeMsg('assistant', '', pid)
   assistant.raw = ''
   assistant.parsed = null
+  assistant.meta = { ...assistant.meta, serverSpeechAllowed: false }
   mutations.addMessage(assistant)
+  chatActivities.value[assistant.id] = createChatActivity(assistant.ts)
+  activeTurn.value = { projectId: pid, messageId: assistant.id }
   await forceScroll('auto')
 
   await nextTick()
@@ -875,116 +961,124 @@ async function send() {
   abortController.value = abort
   cancelCurrent = async () => abort.abort()
 
-  // Build the wire history: system preamble + visible user/assistant text.
-  const prj = activeProject.value
-  const fullHistory: WireMessage[] = mutations
-    .getProjectMessages(pid)
-    .filter(m => m.id !== assistant.id)
-    .filter(m => m.role === 'user' || m.role === 'assistant')
-    .filter(message => message.meta?.dataHandling !== 'ephemeral')
-    .filter(m => safeTrim(m.content).length > 0)
-    .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
-  const settingsStore = await Store.load('luczor.settings.json')
-  const historyBudget = clampNumber(
-    (await settingsStore.get<number>('client_history_token_budget')) ?? 2400,
-    400,
-    12000
-  )
-  const experimentalFlashNext = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
-  const history = compactHistory(fullHistory, historyBudget)
-
-  const contextFragments: PromptFragment[] = []
-  const recentToolContext = buildRecentToolOutcomeContext(mutations.getProjectMessages(pid, { includeHidden: true }))
-  if (recentToolContext) {
-    contextFragments.push({
-      id: 'recent-tool-outcomes',
-      source: 'tool',
-      trust: 'untrusted_data',
-      scope: 'session',
-      egress: 'allowed',
-      priority: 60,
-      content: recentToolContext,
-    })
-  }
-
-  // Keep the active plan in front of the model across turns.
-  const planContext = buildPlanContext(pid)
-  if (planContext) {
-    contextFragments.push({
-      id: 'active-plan',
-      source: 'project',
-      trust: 'untrusted_data',
-      scope: 'project',
-      egress: 'allowed',
-      priority: 80,
-      content: planContext,
-    })
-  }
-
-  // Build one deterministic, bounded and redacted provider context. Absolute
-  // workspace paths remain local; providers only ever receive @project.
-  let promptContext: PromptContextDetails = { text: '', taskType }
-  const memoryPrefs = await getMemoryPrefs().catch(() => ({ inject: true, injectCount: 5 }))
   try {
-    if (prj) {
-      const startContext = await buildProjectStartContext({
-        project: prj,
-        workspace: activeWorkspace.value,
-        includeMemory: memoryPrefs.inject,
-        memoryLimit: memoryPrefs.injectCount,
+    // Build the wire history: system preamble + visible user/assistant text.
+    const prj = activeProject.value
+    const fullHistory: WireMessage[] = mutations
+      .getProjectMessages(pid)
+      .filter(m => m.id !== assistant.id)
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .filter(message => message.meta?.dataHandling !== 'ephemeral')
+      .filter(m => safeTrim(m.content).length > 0)
+      .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+    const settingsStore = await Store.load('luczor.settings.json')
+    const historyBudget = clampNumber(
+      (await settingsStore.get<number>('client_history_token_budget')) ?? 2400,
+      400,
+      12000
+    )
+    const experimentalFlashNext = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
+    const history = normalizeConversationHistory(
+      compactHistory(normalizeConversationHistory(fullHistory), historyBudget)
+    )
+
+    const contextFragments: PromptFragment[] = []
+    const recentToolContext = buildRecentToolOutcomeContext(mutations.getProjectMessages(pid, { includeHidden: true }))
+    if (recentToolContext) {
+      contextFragments.push({
+        id: 'recent-tool-outcomes',
+        source: 'tool',
+        trust: 'untrusted_data',
+        scope: 'session',
+        egress: 'allowed',
+        priority: 60,
+        content: recentToolContext,
       })
-      contextFragments.push(...startContext.fragments)
     }
-  } catch (error) {
-    console.warn('[prompt] start context skipped:', error)
-  }
 
-  // Add query-specific Memory/Repository retrieval. Repository snippets enter
-  // only after a fresh per-turn approval when the local policy requires it.
-  try {
-    if (memoryPrefs.inject) {
-      // Context Controller (server) ranks + budgets memory; local fallback.
-      promptContext = await buildPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType)
-      if (promptContext.repositoryApprovalRequired) {
-        const approved = window.confirm(
-          'Für diese Codefrage wurden passende lokale Repository-Treffer gefunden.\n\n' +
-            'Dürfen ausschließlich die ausgewählten, begrenzten und redigierten Ausschnitte für diese eine Modellanfrage verwendet werden?'
-        )
-        if (approved) {
-          promptContext = await buildPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType, true)
+    // Keep the active plan in front of the model across turns.
+    const planContext = buildPlanContext(pid)
+    if (planContext) {
+      contextFragments.push({
+        id: 'active-plan',
+        source: 'project',
+        trust: 'untrusted_data',
+        scope: 'project',
+        egress: 'allowed',
+        priority: 80,
+        content: planContext,
+      })
+    }
+
+    // Build one deterministic, bounded and redacted provider context. Absolute
+    // workspace paths remain local; providers only ever receive @project.
+    let promptContext: PromptContextDetails = { text: '', taskType }
+    const memoryPrefs = await getMemoryPrefs().catch(() => ({ inject: true, injectCount: 5 }))
+    try {
+      if (prj) {
+        const startContext = await buildProjectStartContext({
+          project: prj,
+          workspace: activeWorkspace.value,
+          includeMemory: memoryPrefs.inject,
+          memoryLimit: memoryPrefs.injectCount,
+        })
+        contextFragments.push(...startContext.fragments)
+      }
+    } catch (error) {
+      console.warn('[prompt] start context skipped:', error)
+    }
+
+    // Add query-specific Memory/Repository retrieval. Repository snippets enter
+    // only after a fresh per-turn approval when the local policy requires it.
+    try {
+      if (memoryPrefs.inject) {
+        // Context Controller (server) ranks + budgets memory; local fallback.
+        promptContext = await buildPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType)
+        if (promptContext.repositoryApprovalRequired) {
+          const approved = window.confirm(
+            'Für diese Codefrage wurden passende lokale Repository-Treffer gefunden.\n\n' +
+              'Dürfen ausschließlich die ausgewählten, begrenzten und redigierten Ausschnitte für diese eine Modellanfrage verwendet werden?'
+          )
+          if (approved) {
+            promptContext = await buildPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType, true)
+          }
+        }
+        if (promptContext.text) {
+          contextFragments.push({
+            id: 'query-context',
+            source: 'repository',
+            trust: 'untrusted_data',
+            scope: 'project',
+            egress: 'allowed',
+            priority: 75,
+            content: promptContext.text,
+          })
         }
       }
-      if (promptContext.text) {
-        contextFragments.push({
-          id: 'query-context',
-          source: 'repository',
-          trust: 'untrusted_data',
-          scope: 'project',
-          egress: 'allowed',
-          priority: 75,
-          content: promptContext.text,
-        })
-      }
+    } catch (e) {
+      console.warn('[memory] context injection skipped:', e)
     }
-  } catch (e) {
-    console.warn('[memory] context injection skipped:', e)
-  }
 
-  const assembledContext = assemblePromptContext(contextFragments, {
-    maxChars: 9_000,
-    maxEstimatedTokens: 2_250,
-    maxFragments: 20,
-    maxFragmentChars: 1_800,
-  })
-  const baseMessages: WireMessage[] = [
-    { role: 'system', content: buildSystemPreamble(mode.value, prj?.name ?? pid, appearance.assistantName) },
-    ...(assembledContext.providerText ? [{ role: 'system' as const, content: assembledContext.providerText }] : []),
-    ...history,
-  ]
+    const assembledContext = assemblePromptContext(contextFragments, {
+      maxChars: 9_000,
+      maxEstimatedTokens: 2_250,
+      maxFragments: 20,
+      maxFragmentChars: 1_800,
+    })
+    const baseMessages: WireMessage[] = [
+      {
+        role: 'system',
+        content: composeProviderSystemPrompt(
+          buildSystemPreamble(mode.value, prj?.name ?? pid, appearance.assistantName),
+          assembledContext.providerText
+        ),
+      },
+      ...history,
+    ]
 
-  let streamStarted = false
+    let streamStarted = false
 
-  try {
+    if (abort.signal.aborted) throw new DOMException('Aborted', 'AbortError')
     void playSfx('loading')
     const {
       finalText,
@@ -1024,7 +1118,11 @@ async function send() {
       inputSource,
       signal: abort.signal,
 
-      // Live streaming: parse the envelope progressively and render it.
+      onProgress: event => {
+        const activity = chatActivities.value[assistant.id]
+        if (activity) updateChatActivity(activity, event)
+      },
+      // Render only content released by the existing final-answer guard.
       onToken: raw => {
         if (!streamStarted) {
           streamStarted = true
@@ -1033,7 +1131,7 @@ async function send() {
             stopSfx('loading')
           } catch {}
         }
-        applyStreamedContent(pid, assistant.id, raw, false)
+        if (!abort.signal.aborted) applyStreamedContent(pid, assistant.id, raw, false)
       },
     })
 
@@ -1042,7 +1140,9 @@ async function send() {
     } catch {}
     stopAssistantLoading()
 
+    if (abort.signal.aborted) throw new DOMException('Aborted', 'AbortError')
     applyStreamedContent(pid, assistant.id, finalText, true)
+    finishChatActivity(chatActivities.value[assistant.id]!, 'done')
     // Attach the server-reported routing metadata to the assistant message.
     {
       const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
@@ -1054,6 +1154,7 @@ async function send() {
           useCase,
           inferenceTarget,
           routeDecisionId,
+          serverSpeechAllowed: !ephemeralDataUsed,
           ...(ephemeralDataUsed ? { dataHandling: 'ephemeral' as const } : {}),
         },
       })
@@ -1072,7 +1173,7 @@ async function send() {
     }
 
     setStatus('idle')
-    void autoSpeakAssistantIfEnabled(pid, assistant.id)
+    if (turnSpeechGeneration === speechGeneration) void autoSpeakAssistantIfEnabled(pid, assistant.id)
     if (!ephemeralDataUsed) void rememberExchange(pid, text, assistant.id)
   } catch (e: any) {
     try {
@@ -1084,6 +1185,7 @@ async function send() {
     const currentContent = safeTrim(current?.content)
 
     if (e?.name === 'AbortError') {
+      finishChatActivity(chatActivities.value[assistant.id]!, 'canceled')
       setStatus('idle')
       mutations.patchMessage(pid, assistant.id, {
         content: currentContent || 'Abgebrochen.',
@@ -1092,6 +1194,7 @@ async function send() {
       return
     }
 
+    finishChatActivity(chatActivities.value[assistant.id]!, 'failed')
     setStatus('error')
     mutations.patchMessage(pid, assistant.id, {
       content: `[Fehler] ${e?.message ?? String(e)}`,
@@ -1102,9 +1205,12 @@ async function send() {
       stopSfx('loading')
     } catch {}
 
-    if (abortController.value === abort) abortController.value = null
-    sending.value = false
-    cancelCurrent = null
+    if (abortController.value === abort) {
+      abortController.value = null
+      sending.value = false
+      cancelCurrent = null
+    }
+    if (activeTurn.value?.messageId === assistant.id) activeTurn.value = null
   }
 }
 
@@ -1119,118 +1225,27 @@ watch(
 </script>
 
 <template>
-  <Settings :open="showSettings" :initial-tab="settingsStartTab" @update:open="showSettings = $event" />
-  <AmbientBackdrop />
+  <Settings
+    :open="showSettings"
+    :initial-tab="settingsStartTab"
+    :test-speech="speakWithVoiceMuted"
+    @update:open="showSettings = $event"
+  />
+  <UiLibrary v-if="showLibrary" @close="showLibrary = false" />
 
-  <div class="app-shell">
-    <aside class="sidebar" aria-label="Hauptnavigation">
-      <div class="brand" :title="appearance.assistantName">
-        <span class="brand__dot" />
-        <span class="brand__word">{{ appearance.assistantName.slice(0, 1).toUpperCase() }}</span>
-      </div>
-      <div class="brand__project">Workspace</div>
-
-      <div class="side-actions">
-        <button class="btn-ghost" type="button" title="Neuer Chat" @click="newChat">
-          <svg
-            viewBox="0 0 24 24"
-            width="18"
-            height="18"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            stroke-linecap="round"
-          >
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-          <span class="dock-label">Neuer Chat</span>
-        </button>
-        <button class="btn-ghost" type="button" title="Projektordner öffnen" @click="addProject">
-          <svg
-            viewBox="0 0 24 24"
-            width="18"
-            height="18"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M4 19V7a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2Z" />
-            <path d="M12 11v6M9 14h6" />
-          </svg>
-          <span class="dock-label">Projektordner öffnen</span>
-        </button>
-      </div>
-
-      <div class="side-listhead">
-        <span class="tac-label">Projekte</span>
-        <span class="side-count">{{ projects.length }}</span>
-      </div>
-
-      <div class="project-list">
-        <button
-          v-for="p in projects"
-          :key="p.id"
-          type="button"
-          class="project-item"
-          :class="{ 'is-active': p.id === activeProjectId }"
-          :title="p.name"
-          :aria-label="`Projekt ${p.name}`"
-          :aria-current="p.id === activeProjectId ? 'page' : undefined"
-          @click="openProject(p.id)"
-        >
-          <span class="project-item__glyph">{{ p.name.slice(0, 2).toUpperCase() }}</span>
-          <span class="project-item__copy">
-            <span class="project-item__name">{{ p.name }}</span>
-            <span class="project-item__id">{{ p.id }}</span>
-          </span>
-        </button>
-      </div>
-
-      <div class="side-settings">
-        <button
-          class="settings-btn system-panel-toggle"
-          type="button"
-          :aria-expanded="showSystemPanel"
-          aria-controls="system-panel"
-          title="Systemstatus und Not-Aus"
-          @click="showSystemPanel = !showSystemPanel"
-        >
-          <svg
-            viewBox="0 0 24 24"
-            width="17"
-            height="17"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.8"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <rect x="4" y="4" width="16" height="16" rx="4" />
-            <path d="M9 9h6v6H9zM9 1v3M15 1v3M9 20v3M15 20v3M1 9h3M1 15h3M20 9h3M20 15h3" />
-          </svg>
-          <span class="dock-label">Systemstatus</span>
-        </button>
-        <button class="settings-btn" type="button" @click="openSettings('server')">
-          <svg
-            viewBox="0 0 24 24"
-            width="16"
-            height="16"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            <path d="M10 12a2 2 0 1 1 4 0v1" />
-            <path d="M9 13h6v4H9z" />
-          </svg>
-          <span class="dock-label">Einstellungen</span>
-        </button>
-      </div>
-    </aside>
+  <div class="app-shell ai-workspace" :class="{ 'ai-workspace--collapsed': sidebarCollapsed }">
+    <SidebarNav
+      v-model:collapsed="sidebarCollapsed"
+      :title="appearance.assistantName"
+      :items="projects.map(p => ({ id: p.id, label: p.name }))"
+      :active-id="activeProjectId"
+      @select="openProject"
+      @new-chat="newChat"
+      @add-project="addProject"
+      @settings="openSettings()"
+      @library="showLibrary = true"
+      @system="showSystemPanel = !showSystemPanel"
+    />
 
     <main class="main-col">
       <div class="header">
@@ -1463,6 +1478,19 @@ watch(
           </p>
         </div>
 
+        <ContextCards
+          :items="
+            projectSummaries.map(item => ({
+              id: item.id,
+              title: 'Projektzusammenfassung',
+              content: item.text,
+              source: activeProject?.name || 'Projekt',
+              kind: 'Memory',
+            }))
+          "
+          title="Projektkontext"
+        />
+
         <div class="info-block memory-candidates-block">
           <div class="info-head">
             <span class="tac-label">Memory-Kandidaten</span>
@@ -1472,133 +1500,112 @@ watch(
             Automatisch erkannte Inhalte bleiben lokal und werden erst nach deiner Bestätigung dauerhaft übernommen.
           </p>
           <div v-if="memoryCandidates.length" class="memory-candidate-list">
-            <article v-for="candidate in memoryCandidates" :key="candidate.id" class="memory-candidate">
-              <p>{{ candidate.content }}</p>
-              <div class="memory-candidate-meta">
-                <span>{{ candidate.source === 'assistant' ? 'Assistent' : 'Du' }}</span>
-                <time>{{ formatChatTime(candidate.updatedAt) }}</time>
-              </div>
-              <div class="memory-candidate-actions">
-                <button type="button" :disabled="!!memoryCandidateBusyId" @click="acceptMemoryCandidate(candidate)">
-                  Übernehmen
-                </button>
-                <button
-                  type="button"
-                  class="is-danger"
-                  :disabled="!!memoryCandidateBusyId"
-                  @click="rejectMemoryCandidate(candidate)"
-                >
-                  Verwerfen
-                </button>
-              </div>
-            </article>
+            <RecommendationCard
+              v-for="candidate in memoryCandidates"
+              :key="candidate.id"
+              title="Als Erinnerung behalten?"
+              :description="candidate.content"
+              :evidence="`${candidate.source === 'assistant' ? 'Assistent' : 'Du'} · ${formatChatTime(candidate.updatedAt)}`"
+              :busy="!!memoryCandidateBusyId"
+              @accept="acceptMemoryCandidate(candidate)"
+              @dismiss="rejectMemoryCandidate(candidate)"
+            />
           </div>
           <div v-else class="empty">Keine ungeprüften Erinnerungen.</div>
         </div>
       </div>
 
-      <!-- Messages -->
-      <div id="messages" class="messages">
-        <div class="thread">
-          <div v-if="!messages.length" class="chat-empty">
-            <div class="chat-empty__orb"></div>
-            <div class="chat-empty__kicker">{{ appearance.assistantName }}</div>
-            <div class="chat-empty__title">Bereit für die nächste Aufgabe.</div>
-            <div class="chat-empty__text">
-              Schreibe direkt los oder nutze Push-to-Talk. Kontext und Memory werden automatisch schlank in den Prompt
-              gelegt.
-            </div>
-          </div>
-
-          <div
-            v-for="m in messages"
-            :key="m.id"
-            class="msg"
-            :class="m.role === 'user' ? 'msg--user' : 'msg--assistant'"
-          >
-            <div class="msg__meta">
-              <span class="msg__role">{{ m.role === 'user' ? 'Du' : appearance.assistantName }}</span>
-              <span class="msg__time">{{ formatChatTime(m.ts) }}</span>
-              <span
-                v-if="m.role === 'user' && (m as any)?.meta?.inputSource && (m as any).meta.inputSource !== 'keyboard'"
-                class="msg__badge"
-                :title="
-                  (m as any).meta.inputSource === 'hands_free' ? 'Freihändig diktiert' : 'Per Push-to-Talk gesprochen'
-                "
-                >🎤 Gesprochen</span
-              >
-              <span
-                v-if="m.role === 'assistant' && ((m as any)?.meta?.model || (m as any)?.meta?.provider)"
-                class="msg__model"
-                :title="'Use-Case: ' + ((m as any)?.meta?.useCase || '—')"
-                >{{ (m as any).meta.provider
-                }}<template v-if="(m as any).meta.model"> · {{ (m as any).meta.model }}</template></span
-              >
-              <button
-                v-if="m.role === 'assistant' && m.content && m.content.trim()"
-                type="button"
-                class="speak-btn"
-                title="Vorlesen"
-                aria-label="Nachricht vorlesen"
-                @click.stop="speakMessage(m)"
-              >
-                🔊
-              </button>
-              <button
-                v-if="m.role === 'assistant' && (m as any)?.meta?.llmRequestId"
-                type="button"
-                class="feedback-btn"
-                :class="{ 'is-on': (m as any)?.meta?.userFeedback === 1 }"
-                title="Hilfreich"
-                aria-label="Antwort als hilfreich bewerten"
-                @click.stop="rateAssistantMessage(m, 1)"
-              >
-                ↑
-              </button>
-              <button
-                v-if="m.role === 'assistant' && (m as any)?.meta?.llmRequestId"
-                type="button"
-                class="feedback-btn"
-                :class="{ 'is-on is-negative': (m as any)?.meta?.userFeedback === -1 }"
-                title="Nicht hilfreich"
-                aria-label="Antwort als nicht hilfreich bewerten"
-                @click.stop="rateAssistantMessage(m, -1)"
-              >
-                ↓
-              </button>
-            </div>
-
-            <div class="bubble">
-              <template v-if="m.role === 'assistant'">
-                <div v-if="(m as any)?.meta?.isLoading && !(m.content && m.content.trim())" class="typing">
-                  <i></i><i></i><i></i>
-                </div>
-                <p v-else class="answer__summary">
-                  {{ m.content }}<span v-if="(m as any)?.meta?.isLoading" class="stream-caret"></span>
-                </p>
-
-                <div v-if="(m as any)?.meta?.question" class="answer__question">
-                  {{ (m as any).meta.question }}
-                </div>
-
-                <div v-if="(m as any)?.meta?.bullets && (m as any).meta.bullets.length" class="chips">
-                  <button
-                    v-for="(b, i) in (m as any).meta.bullets.slice(0, 10)"
-                    :key="i"
-                    type="button"
-                    class="chip"
-                    :title="b"
-                    @click="sendSuggestion(b)"
-                  >
-                    {{ b }}
-                  </button>
-                </div>
-              </template>
-              <template v-else>{{ m.content }}</template>
-            </div>
+      <!-- Shared chat surface: real messages, safe progress events and real tool states. -->
+      <ChatComposer scroll-id="messages" :follow="hasConversation">
+        <PlanPanel :project-id="activeProjectId" :collapsed="planCollapsed" @toggle="planCollapsed = !planCollapsed" />
+        <div v-if="!hasConversation" class="ai-welcome">
+          <span class="ai-welcome__mark"><AiIcon :size="32" /></span>
+          <span class="ai-eyebrow">DEIN PERSÖNLICHER WORKSPACE</span>
+          <h1>Woran arbeiten wir heute?</h1>
+          <p>
+            Von der ersten Idee bis zum letzten Schritt.<br />Mit deinem Projekt, deinem Kontext und
+            {{ appearance.assistantName }}.
+          </p>
+          <div class="ai-starters">
+            <button type="button" @click="handlePromptCommand('plan')">
+              <AiIcon name="check" /><span>Eine Aufgabe planen<small>Schritt für Schritt zum Ergebnis</small></span
+              ><AiIcon name="arrow" /></button
+            ><button
+              type="button"
+              @click="editSelection('Analysiere', 'den aktuellen Projektzustand und die nächsten sinnvollen Schritte.')"
+            >
+              <AiIcon name="code" /><span>Ein Projekt verstehen<small>Zusammenhänge sichtbar machen</small></span
+              ><AiIcon name="arrow" />
+            </button>
           </div>
         </div>
-      </div>
+        <template v-for="m in messages" :key="m.id">
+          <article
+            v-if="!isWelcomeMessage(m)"
+            class="ai-message"
+            :class="m.role === 'user' ? 'ai-message--user' : 'ai-message--assistant'"
+          >
+            <header>
+              <span v-if="m.role === 'assistant'" class="ai-message__avatar"><AiIcon :size="15" /></span
+              ><strong>{{ m.role === 'user' ? 'Du' : appearance.assistantName }}</strong
+              ><time>{{ formatChatTime(m.ts) }}</time
+              ><span v-if="m.meta.inputSource && m.meta.inputSource !== 'keyboard'" class="ai-badge">Gesprochen</span
+              ><span v-if="m.meta.model" class="ai-message__model" :title="m.meta.provider">{{ m.meta.model }}</span>
+            </header>
+            <template v-if="m.role === 'assistant'">
+              <ThinkingState
+                v-if="chatActivities[m.id]"
+                :active="chatActivities[m.id]!.status === 'running'"
+                :label="activityLabel(chatActivities[m.id]!, pendingApprovals.length > 0 && !!m.meta.isLoading)"
+                :steps="chatActivities[m.id]!.steps"
+                :started-at="chatActivities[m.id]!.startedAt"
+                :duration-ms="
+                  chatActivities[m.id]!.finishedAt
+                    ? chatActivities[m.id]!.finishedAt! - chatActivities[m.id]!.startedAt
+                    : undefined
+                "
+                ><ToolChips :tools="messageTools(m)"
+              /></ThinkingState>
+              <ToolChips v-else :tools="messageTools(m)" />
+              <SelectionActions :disabled="sending" @action="editSelection">
+                <StreamingText
+                  :content="m.content"
+                  :streaming="!!m.meta.isLoading && !!m.content"
+                  :animate="!!chatActivities[m.id]"
+                  :question="m.meta.question"
+                  :follow-ups="m.meta.bullets"
+                  :disabled="sending"
+                  :speech-disabled="!serverSpeechText(m)"
+                  speech-disabled-reason="Lokale oder unvollständige Inhalte werden nicht an den Sprachserver gesendet."
+                  @speak="speakMessage(m)"
+                  @follow-up="sendSuggestion"
+                >
+                  <template #actions
+                    ><button
+                      v-if="m.meta.llmRequestId"
+                      type="button"
+                      class="ai-icon-button"
+                      aria-label="Antwort als hilfreich bewerten"
+                      @click="rateAssistantMessage(m, 1)"
+                    >
+                      ↑</button
+                    ><button
+                      v-if="m.meta.llmRequestId"
+                      type="button"
+                      class="ai-icon-button"
+                      aria-label="Antwort als nicht hilfreich bewerten"
+                      @click="rateAssistantMessage(m, -1)"
+                    >
+                      ↓
+                    </button></template
+                  >
+                </StreamingText>
+              </SelectionActions>
+            </template>
+            <p v-else class="ai-message__user-text">{{ m.content }}</p>
+          </article>
+        </template>
+      </ChatComposer>
 
       <!-- Tool audit log -->
       <div v-if="showAudit" class="audit">
@@ -1617,111 +1624,67 @@ watch(
         <div v-else class="empty">Noch keine Tool-Ausführungen.</div>
       </div>
 
-      <!-- Pending tool-call approvals -->
-      <div v-if="pendingApprovals.length" class="approvals">
-        <span class="tac-label approvals__title">Bestätigung erforderlich ({{ pendingApprovals.length }})</span>
-        <div v-for="call in pendingApprovals" :key="call.id" class="approval">
-          <div class="approval__head">
-            <span class="approval__cat">{{ call.category }}</span>
-            <span class="approval__tool">{{ call.name }}</span>
-          </div>
-          <pre class="approval__args">{{ previewToolArguments(call.args) }}</pre>
-          <p v-if="approvalDataNotice(call.name)" class="approval__privacy">
-            {{ approvalDataNotice(call.name) }}
-          </p>
-          <div class="approval__actions">
-            <button type="button" class="btn-reject" @click="rejectTool(call.id)">Ablehnen</button>
-            <button type="button" class="btn-exec" @click="approveTool(call.id)">Ausführen</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Live listening bar -->
-      <div v-if="listening" class="listen-bar">
-        <span class="listen-bar__dot" />
-        <span class="listen-bar__label">{{ listenLabel }}</span>
-        <span class="listen-bar__text">{{ lastHeard || '…' }}</span>
-      </div>
-
-      <!-- Composer -->
-      <div class="composer">
-        <textarea
-          ref="composerRef"
-          v-model="input"
-          class="composer__input"
-          rows="1"
-          placeholder="Nachricht an Luczor…"
-          @input="autoGrow"
-          @keydown.enter.exact.prevent="send"
+      <div v-if="pendingApprovals.length" class="ai-approvals">
+        <ApprovalCard
+          v-for="call in pendingApprovals"
+          :key="call.id"
+          :title="call.name"
+          :description="`Luczor möchte dieses Tool ausführen${call.category ? ' · ' + call.category : ''}.`"
+          :detail="previewToolArguments(call.args, 12000)"
+          :notice="approvalDataNotice(call.name)"
+          @approve="approveTool(call.id)"
+          @reject="rejectTool(call.id)"
         />
+      </div>
+
+      <!-- Only gated dictation reaches the composer; ambient speech is never shown. -->
+      <div
+        v-if="voiceInputView.mode || voiceInputView.notice || voiceInputView.error"
+        class="voice-input-status"
+        :class="{ 'is-error': !!voiceInputView.error }"
+        role="status"
+        aria-live="polite"
+      >
+        <div>
+          <strong v-if="voiceInputView.mode">{{ voiceInputLabel }}</strong>
+          <span>{{ voiceInputView.error || voiceInputView.notice }}</span>
+        </div>
         <button
+          v-if="voiceInputView.mode"
           type="button"
-          class="mic-btn listen-btn"
-          :class="{ 'is-listening': listening }"
-          :title="listening ? 'Dauer-Zuhören stoppen' : 'Dauer-Zuhören / Wake-Word starten'"
-          @click="toggleListening"
+          @click="voiceInputSession.stop('Aufnahme gestoppt. Der bisherige Text bleibt zum Prüfen stehen.')"
         >
-          <svg
-            v-if="!listening"
-            viewBox="0 0 24 24"
-            width="18"
-            height="18"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <path d="M3 12a9 9 0 0 1 18 0" />
-            <path d="M7 12a5 5 0 0 1 10 0" />
-            <circle cx="12" cy="12" r="1.6" />
-          </svg>
-          <svg v-else viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
-            <rect x="6" y="6" width="12" height="12" rx="2" />
-          </svg>
+          Aufnahme abbrechen
         </button>
-        <button
-          type="button"
-          class="mic-btn"
-          :class="{ 'is-recording': isRecording }"
-          :disabled="sending"
-          :title="isRecording ? 'Aufnahme stoppen' : 'Push-to-talk'"
-          @click="togglePushToTalk"
-        >
-          <svg
-            v-if="!isRecording"
-            viewBox="0 0 24 24"
-            width="18"
-            height="18"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <rect x="9" y="2" width="6" height="12" rx="3" />
-            <path d="M5 10a7 7 0 0 0 14 0" />
-            <line x1="12" y1="19" x2="12" y2="22" />
-          </svg>
-          <svg v-else viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
-            <rect x="6" y="6" width="12" height="12" rx="2" />
-          </svg>
-        </button>
-        <button type="button" class="send-btn" :disabled="sending || !input.trim()" title="Senden" @click="send">
-          <svg
-            viewBox="0 0 24 24"
-            width="18"
-            height="18"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="2.2"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <line x1="12" y1="19" x2="12" y2="5" />
-            <polyline points="6 11 12 5 18 11" />
-          </svg>
-        </button>
+        <button v-else type="button" @click="voiceInputSession.stop()">Schließen</button>
+      </div>
+
+      <div v-if="speechPending || speechError" class="speech-output" aria-live="polite">
+        <span>{{ speechError || 'Server-Sprachausgabe aktiv' }}</span>
+        <button v-if="speechPending" type="button" @click="stopVoiceOutput">Vorlesen stoppen</button>
+        <button v-else type="button" @click="speechError = ''">Schließen</button>
+      </div>
+
+      <div class="ai-main-composer">
+        <PromptBar
+          ref="promptBar"
+          v-model="input"
+          :busy="sending"
+          :recording="isRecording"
+          :listening="listening"
+          :voice-busy="voiceInputView.starting || voiceInputView.finishing"
+          :model-label="'Automatische Modellwahl'"
+          :context-label="activeWorkspace?.displayName || activeProject?.name"
+          :commands="promptCommands"
+          @input="setComposerInput(input, 'keyboard')"
+          @send="send"
+          @stop="stopGenerating"
+          @record="togglePushToTalk"
+          @listen="toggleListening"
+          @model="openSettings()"
+          @context="showContext = !showContext"
+          @command="handlePromptCommand"
+        />
       </div>
     </main>
 
@@ -1751,3 +1714,4 @@ watch(
 </template>
 
 <style scoped src="./styles/app-shell.css"></style>
+<style scoped src="./styles/ai-workspace.css"></style>

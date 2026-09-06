@@ -52,3 +52,87 @@ Append-only communication log. Source and runtime evidence override stale entrie
 - Artifact: `src-tauri/target/debug/bundle/nsis/Luczor Local Test_2.9.3_x64-setup.exe`, 7.792.520 Bytes, SHA-256 `86FC1E8A0A8EE9985E0FE3E747E81B0D936C181EFBCDDAD3C2B32281011F551A`, ohne Authenticode-Zertifikatstabelle.
 - Remaining: Installer nicht ausgefuehrt; gemeinsamer Ordnerdialog-/Approval-Smoke, echtes Windows-Zertifikat, Updater-Public-Key/-Endpoint, signierter Release und Update-/Rollback bleiben offen.
 - Next: Den dokumentierten Smoke mit einem synthetischen temporaeren Projekt gemeinsam bedienen; danach echte Release-Infrastruktur getrennt bereitstellen.
+
+## 2026-09-05T21:42:20Z | Codex/root/local_test_bootstrap_command -> all | status
+
+- Message: Started: sicheren reproduzierbaren PowerShell-Launcher fuer lokalen Modell-E2E-Test implementieren
+
+## 2026-09-05T21:54:35Z | Codex/root/local_test_bootstrap_command -> all | handoff
+
+- Task: Sicheren reproduzierbaren PowerShell-Launcher fuer den lokalen Modell-E2E-Smoke bereitstellen.
+- Status: completed; Minimalstand zur Integration an Root uebergeben.
+- Changed: `scripts/run-local-model-test.ps1`, `scripts/local-model-test.profile.json` sowie LMZ-Statusdateien.
+- Verified: PowerShell-Parser, JSON-Parse und `git diff --check` bestanden; kein E2E-Lauf gestartet.
+- Remaining: Den Bootstrap-Aufruf nach Abschluss der parallelen Command-Haertung an deren finale Test-Root-/Marker-/Lock-Signatur anpassen.
+
+## 2026-09-05T22:52:05Z | Codex -> all | status
+
+- Message: Started: Fix Windows extended-length path normalization for local model storage mount classification
+
+## 2026-09-05T22:59:21Z | Codex windows_storage_fix -> all | handoff
+
+- Message: Completed Windows local-model storage mount normalization in src-tauri/src/commands/local_model.rs; Disk and VerbatimDisk compare identically, UNC/non-drive prefixes fail closed, and component-aware matching prevents partial-prefix matches. Verified cargo fmt --all -- --check, 4 focused mount tests, all 18 local_model tests, full 67 Rust tests, cargo clippy --all-targets -- -D warnings, and git diff --check. No test or verification artifacts created.
+
+## 2026-09-05T23:54:59Z | Codex native_http_diag -> all | status
+
+- Message: Started: sichere Klassifizierung lokaler llama.cpp non-2xx Antworten
+
+## 2026-09-05T23:58:16Z | Codex/docs_e2e_audit -> all | status
+
+- Message: Started: separaten lokalen Terminal-Chatstarter und gemeinsame Runtime-Sperre implementieren; kein Modellstart
+
+## 2026-09-06T00:05:11Z | Codex native_http_diag -> all | handoff
+
+- Message: Completed: bounded llama.cpp non-2xx classification in local_model.rs; 4 focused, 22 local-model, and all 71 Rust library tests plus fmt and clippy passed; no model process started.
+
+## 2026-09-06T01:09:55Z | Codex -> all | status
+
+- Message: Started: Beautiful UI components and Luczor chat streaming UX
+
+## 2026-09-06T01:15:34Z | Codex/server_tts_desktop -> all | status
+
+- Message: Started: shared server TTS transport, cancellable playback and Voice settings
+
+## 2026-09-06T01:31:00Z | Codex/server_tts_desktop -> all | handoff
+
+- Task: Gemeinsamen Server-TTS im Desktop integrieren.
+- Status: completed; an Root zur integrierten Abnahme uebergeben.
+- Changed: `src/services/voice/serverTts.ts`, `src/services/voice/speak.ts`, `src/components/settings/VoiceSettingsSection.vue`, `tests/unit/serverTts.test.ts`, `tests/unit/serverSpeak.test.ts`; nur obsoleter speak.ts-Eintrag in `eslint-suppressions.json` entfernt.
+- Verified: Node 22.22.0; 62/62 fokussierte Tests, fokussiertes ESLint ohne neue Suppressionen, Prettier, `git diff --check`. Initialer Typecheck bestanden; Folgelauf hatte ausschliesslich parallelen `chatActivity.ts:39` Array.at-Fehler, an Root gemeldet.
+- Next: Root integriert App-/Settings-Callback fuer Mikrofon-Mute, Identitaetswechsel-/Datenschutzgrenzen und prueft Backend/GUI/Gesamtsuite. Kein Deployment durch diesen Teilagenten.
+
+## 2026-09-06T01:28:00Z | Codex/root -> all | status
+
+- Beautiful UI integration owns src/components/ai, styles/beautiful-ui.css, App.vue chat/sidebar/composer presentation only, PlanPanel and numeric agent progress callback. Concurrent server_tts_desktop work in App.vue voice methods/imports is preserved; patches use the freshly read file. No voice transport or settings implementation changes in this task.
+
+## 2026-09-06T01:32:48Z | Codex/server_tts_desktop -> all | handoff
+
+- Message: Final desktop TTS handoff: updated settingsSections.test.ts to injected microphone-safe speech callback and server-TTS/local-STT UI contract; 4/4 section tests passed in addition to 62/62 voice/TTS tests. Focused ESLint and Prettier pass with standard flags after removing only obsolete speak.ts suppressions. Root owns integrated App/Settings, full suite, typecheck and live server/audio validation.
+
+## 2026-09-06T01:39:49Z | Codex/server_tts_desktop -> all | status
+
+- Message: Started: fail-closed Settings server identity writes and complete desktop verification
+
+## 2026-09-06T01:51:07Z | Codex/server_tts_desktop -> all | handoff
+
+- Message: Completed Settings partial-save hardening in apiIdentitySettings.ts and Settings.vue: persistent disconnected URL before native/cache key reset, verified key then URL publication, serialized writes, retained speech suspension on error, safe visible alert and successful retry recovery. Added13 identity fault tests; additive StreamingText speechDisabled/reason props plus two App bindings and rendering test preserve private/incomplete-message egress boundary. Final Node22.22 verification: all48 Vitest files/360 tests passed in216.62s with maxWorkers1; typecheck passed; Vite production build176 modules passed; focused ESLint0 warnings, Prettier and diff checks passed. No backend or deployment edits by this agent.
+
+## 2026-09-06T02:00:00Z | Codex/root -> all | handoff
+
+- Task: Beautiful UI vollstaendig als Vue-Komponenten uebernehmen und in den Luczor-Chat integrieren.
+- Status: completed. Alle 21 Komponenten plus gemeinsame Helfer, globale Designvariablen und durchsuchbare Beispielbibliothek vorhanden. Chat/Sidebar/Prompt/Plan/Kontext/Memory/Freigaben sind mit echten App-Funktionen verbunden.
+- Verified: 360/360 Tests in 48 Dateien, ESLint ohne Befund, TypeScript/Vite-Build, Browser-Bedienung und Responsive-QA, nativer finaler Windows-Release-Testbuild. EXE: 14.118.400 Bytes, SHA-256 D90605D52789A32D5AE1C277EA42D62BA9AED04318B98E5A608395208FC12C5D.
+- Boundaries: Ausgabepruefung und Tool-Freigaben erhalten; Fortschritt enthaelt nur Status/Runde/Zeichenanzahl. Beispielbibliothek simuliert ausschliesslich lokal. Reale Modell-/Mikrofon-/Tool-Ausfuehrung sowie Installation/Deployment nicht Bestandteil dieses UI-Nachweises. Parallel bearbeitete TTS-, Settings- und Modellpfade erhalten.
+- Handoff: docs/beautiful-ui.md, vendor/beautiful-ui/UPSTREAM.md und SOURCE-HASHES.json. UI-Bibliothek ueber die linke Navigation; Browser-Produktionsvorschau lokal auf Port 1428.
+
+## 2026-09-06T02:03:34Z | Codex/server_tts_desktop -> all | status
+
+- Message: Started: unified visible hands-free voice settings, close phrase, opt-in auto-submit and STT-only readiness
+
+## 2026-09-06T02:12:31Z | Codex/mini_overlay -> all | status
+
+- Message: Started: independent always-on-top temporary mini chat with confirmations and choices
+
+## 2026-09-06T02:15:38Z | Codex/server_tts_desktop -> all | handoff
+
+- Message: Completed localVoice.ts/Settings.vue/VoiceSettingsSection.vue unified visible/runtime voice config: legacy mode/trigger fallback only when new keys absent; exact wake+close, 1-30s continuous silence, explicit autoSubmit defaultfalse; shared alias-aware phrase validation and handsFreeFromVoice snapshot derivation. Settings emits voice-settings-changed after save. ensureVoiceRuntime defaultsSTT and skips Piper install when STT ready; localTts explicitly needsTTS. 37 focused tests passed, ESLint0 warnings, Prettier/diff passed on Node22.22 maxWorkers1. Root owns App/controller and final integrated/full-suite QA; no real runtime installation, server edits or deployment.

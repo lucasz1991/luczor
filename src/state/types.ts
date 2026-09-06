@@ -37,6 +37,8 @@ export type MessageMeta = {
 
   /** Ephemeral tool results remain device-local and are excluded from sync. */
   dataHandling?: 'syncable' | 'ephemeral'
+  /** False until a generated answer has a final server-egress classification. */
+  serverSpeechAllowed?: boolean
 }
 
 export type Message = {

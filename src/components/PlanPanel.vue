@@ -7,7 +7,9 @@
      takes up space during simple one-shot chats. -->
 <script setup lang="ts">
 import { computed } from 'vue'
-import { clearPlan, currentPlanStep, getPlan, isPlanComplete, planProgress, type PlanStepStatus } from '@/services/plan'
+import TaskRows from './ai/TaskRows.vue'
+import type { ActivityStep } from './ai/types'
+import { clearPlan, currentPlanStep, getPlan, isPlanComplete, planProgress } from '@/services/plan'
 
 const props = defineProps<{
   projectId: string
@@ -23,12 +25,20 @@ const progress = computed(() => planProgress(plan.value))
 const active = computed(() => currentPlanStep(plan.value))
 const complete = computed(() => isPlanComplete(plan.value))
 
-const STATUS_LABEL: Record<PlanStepStatus, string> = {
-  pending: 'Offen',
-  in_progress: 'Läuft',
-  done: 'Fertig',
-  skipped: 'Übersprungen',
-}
+const tasks = computed<ActivityStep[]>(() =>
+  plan.value.steps.map((step, index) => ({
+    id: String(index),
+    label: step.title,
+    status:
+      step.status === 'in_progress'
+        ? 'running'
+        : step.status === 'done'
+          ? 'done'
+          : step.status === 'skipped'
+            ? 'canceled'
+            : 'pending',
+  }))
+)
 
 function onClear() {
   clearPlan(props.projectId)
@@ -61,18 +71,7 @@ function onClear() {
       </button>
     </header>
 
-    <ol v-if="!collapsed" class="plan__steps">
-      <li v-for="(step, index) in plan.steps" :key="index" class="plan__step" :class="`is-${step.status}`">
-        <span class="plan__mark" aria-hidden="true">
-          <template v-if="step.status === 'done'">✓</template>
-          <template v-else-if="step.status === 'skipped'">–</template>
-          <template v-else-if="step.status === 'in_progress'"><i class="plan__spin" /></template>
-          <template v-else>{{ index + 1 }}</template>
-        </span>
-        <span class="plan__text">{{ step.title }}</span>
-        <span class="plan__status">{{ STATUS_LABEL[step.status] }}</span>
-      </li>
-    </ol>
+    <TaskRows v-if="!collapsed" :tasks="tasks" />
 
     <p v-if="!collapsed && plan.note" class="plan__note">{{ plan.note }}</p>
   </section>

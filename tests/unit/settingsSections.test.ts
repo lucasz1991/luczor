@@ -1,10 +1,11 @@
 import { createSSRApp, type Component } from 'vue'
 import { renderToString } from '@vue/server-renderer'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import AppearanceSettingsSection from '@/components/settings/AppearanceSettingsSection.vue'
 import ChatSettingsSection from '@/components/settings/ChatSettingsSection.vue'
 import ExecutionSettingsSection from '@/components/settings/ExecutionSettingsSection.vue'
 import VoiceSettingsSection from '@/components/settings/VoiceSettingsSection.vue'
+import { VOICE_DEFAULTS } from '@/services/voice/localVoice'
 
 async function render(component: Component, props: Record<string, unknown>): Promise<string> {
   return renderToString(createSSRApp(component, props))
@@ -25,20 +26,59 @@ describe('settings section contracts', () => {
     expect(emittedEvents(ExecutionSettingsSection)).toContain('update:autoExecuteMutatingTools')
   })
 
-  it('keeps the Voice warning and model event surface driven by props', async () => {
+  it('explains server TTS authentication and keeps local STT controls driven by props', async () => {
+    const testSpeech = vi.fn(async () => 'completed' as const)
     const html = await render(VoiceSettingsSection, {
       deviceKey: '',
       voiceMode: 'wakeword',
       wakeWord: 'luczor',
+      endPhrase: VOICE_DEFAULTS.endPhrase,
+      continuousSilenceMs: VOICE_DEFAULTS.continuousSilenceMs,
+      autoSubmit: VOICE_DEFAULTS.autoSubmit,
       sttLanguage: 'de',
+      testSpeech,
     })
 
-    expect(html).toContain('Device-Key für die erste Voice-Installation fehlt')
+    expect(html).toContain('Device-Key für die Server-Sprachausgabe fehlt')
+    expect(html).toContain('Die Spracheingabe läuft lokal mit whisper.cpp.')
+    expect(html).toContain('FollowFlow und RailTime')
+    expect(html).toMatch(/<button[^>]*disabled[^>]*>Sprachausgabe testen<\/button>/)
     expect(html).toContain('value="wakeword" selected')
     expect(html).toContain('value="luczor"')
+    expect(html).toContain('value="luczor stopp"')
+    expect(html).toContain('Nach Diktatabschluss automatisch senden')
+    expect(html).toContain('aria-checked="false"')
+    expect(html).toContain('Standardmäßig aus: Prüfe das Diktat im Eingabefeld')
     expect(emittedEvents(VoiceSettingsSection)).toEqual(
-      expect.arrayContaining(['update:voiceMode', 'update:wakeWord', 'update:sttLanguage', 'openServer'])
+      expect.arrayContaining([
+        'update:voiceMode',
+        'update:wakeWord',
+        'update:endPhrase',
+        'update:continuousSilenceMs',
+        'update:autoSubmit',
+        'update:sttLanguage',
+        'openServer',
+      ])
     )
+    expect(testSpeech).not.toHaveBeenCalled()
+  })
+
+  it('renders configurable dictation silence, close phrase and explicit automatic submission', async () => {
+    const html = await render(VoiceSettingsSection, {
+      deviceKey: 'test-device-key',
+      voiceMode: 'continuous',
+      wakeWord: 'jarvis start',
+      endPhrase: 'jarvis ende',
+      continuousSilenceMs: 8000,
+      autoSubmit: true,
+      sttLanguage: 'de',
+      testSpeech: vi.fn(async () => 'completed' as const),
+    })
+    expect(html).toContain('value="jarvis ende"')
+    expect(html).toContain('value="8"')
+    expect(html).toContain('aria-checked="true"')
+    expect(html).toContain('ohne weitere Bestätigung gesendet')
+    expect(html).toContain('min="1" max="30"')
   })
 
   it('renders the Chat controls without owning persistence', async () => {

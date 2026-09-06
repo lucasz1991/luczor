@@ -4,6 +4,7 @@ pub mod device_jobs;
 pub mod device_key;
 pub mod local_model;
 pub mod local_tasks;
+pub mod mini_chat;
 pub mod notifications;
 pub mod project_workspace;
 pub mod repository_graph;
@@ -78,7 +79,7 @@ mod tests {
             .contains(&serde_json::json!("store:allow-delete")));
         assert_eq!(
             config["app"]["security"]["capabilities"],
-            serde_json::json!(["default", "browser"])
+            serde_json::json!(["default", "browser", "mini-chat"])
         );
 
         let main_runtime = include_str!("../../permissions/main-runtime.toml");

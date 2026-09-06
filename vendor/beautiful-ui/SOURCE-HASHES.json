@@ -1,0 +1,180 @@
+{
+  "revision": "06557d7ff33a1eb70d5987bae9ac4c70fa0e20c4",
+  "files": [
+    {
+      "path": "globals.css",
+      "source": "app/globals.css",
+      "sha256": "90b764fdfb093f5bd9c851559240467716784febd2a440e3cadb37c276c17bba"
+    },
+    {
+      "path": "LICENSE",
+      "source": "LICENSE",
+      "sha256": "2c945861ed03aa2fbde20fb53aaf190552f6c9330515bbd4ce85d81ad4ac2c9b"
+    },
+    {
+      "path": "primitives/AgentScreen.tsx",
+      "source": "components/primitives/AgentScreen.tsx",
+      "sha256": "7455bb8a786da2cbe26e23234fc725fabd0e8aacaec0d95f68afc689185abd09"
+    },
+    {
+      "path": "primitives/ApprovalCard.tsx",
+      "source": "components/primitives/ApprovalCard.tsx",
+      "sha256": "7293556aee44c2492202074166f236b9de1f0892365a6e0c807ad402a6262eb5"
+    },
+    {
+      "path": "primitives/ChatComposer.tsx",
+      "source": "components/primitives/ChatComposer.tsx",
+      "sha256": "f211d9ca28958e2268b7b8c6bca0d2f350a0f23f74a12b403142c50d0b982aaa"
+    },
+    {
+      "path": "primitives/CodeBlock.tsx",
+      "source": "components/primitives/CodeBlock.tsx",
+      "sha256": "ac8ab28a58bb8f279970ccfe2800c49ea102a4e09e740998fa424fd5fc0462f0"
+    },
+    {
+      "path": "primitives/ContextCards.tsx",
+      "source": "components/primitives/ContextCards.tsx",
+      "sha256": "284973470e1ad10eca48edb3a8e9ecb7c76fbf00696c97defd29b9f64296390c"
+    },
+    {
+      "path": "primitives/DiffTable.tsx",
+      "source": "components/primitives/DiffTable.tsx",
+      "sha256": "f9b833e7c93efe630f5fd7a1d8cf092644402bb369d4703016377da5e69c5a01"
+    },
+    {
+      "path": "primitives/FilterTable.tsx",
+      "source": "components/primitives/FilterTable.tsx",
+      "sha256": "49a83142d5536c162ede5811155470af4d5ae2bb3c372ecc1f07a3d49c13a7d5"
+    },
+    {
+      "path": "primitives/FineTuneCard.tsx",
+      "source": "components/primitives/FineTuneCard.tsx",
+      "sha256": "0e8d98e5ab4309165a673a27736b819568fd94e205fbb4729db20b2476b4d8c3"
+    },
+    {
+      "path": "primitives/Flowchart.tsx",
+      "source": "components/primitives/Flowchart.tsx",
+      "sha256": "c4250f4cb0f085919dd54ff095bc23cfb97e101a3ec49e7b2a9cb2fd3bc83b82"
+    },
+    {
+      "path": "primitives/GlideMenu.tsx",
+      "source": "components/primitives/GlideMenu.tsx",
+      "sha256": "e026b8ef9424fb4ecd7b32d397c5a922c2cf4b1ad20bff891a369bdcd064056c"
+    },
+    {
+      "path": "primitives/InsightCards.tsx",
+      "source": "components/primitives/InsightCards.tsx",
+      "sha256": "693670bada462676f9a1db88f1b514967a858f8992c9afc371caef36ad68e936"
+    },
+    {
+      "path": "primitives/LoadingState.tsx",
+      "source": "components/primitives/LoadingState.tsx",
+      "sha256": "8afb9ae4cdec87ddbdd05f55c12a5a6c8981728eef28a1aa5089d8a3e19015d2"
+    },
+    {
+      "path": "primitives/PromptBar.tsx",
+      "source": "components/primitives/PromptBar.tsx",
+      "sha256": "227b1b3a1ea42f7170d0d2317b328a63122e8a992a3613ca0b2d6abbf335dda5"
+    },
+    {
+      "path": "primitives/RecommendationCard.tsx",
+      "source": "components/primitives/RecommendationCard.tsx",
+      "sha256": "8f536bb8f1fb78c683d814df40dc25c2e49687fc1e5bed62c2042cb1712bcb93"
+    },
+    {
+      "path": "primitives/RecordsTable.tsx",
+      "source": "components/primitives/RecordsTable.tsx",
+      "sha256": "c8bde6ba432663b8bb0894241999122fa0fe9264ac57391ff04359db53792bbf"
+    },
+    {
+      "path": "primitives/SearchList.tsx",
+      "source": "components/primitives/SearchList.tsx",
+      "sha256": "6607b55c752300cde284692e012f07d3d81392680e9b3c7b4c9fe27f4fb32021"
+    },
+    {
+      "path": "primitives/SelectionActions.tsx",
+      "source": "components/primitives/SelectionActions.tsx",
+      "sha256": "b45fab927091c34c594ae9b70cc44b53cd9f599f904d72f39bfa87f0d160f4ac"
+    },
+    {
+      "path": "primitives/SidebarNav.tsx",
+      "source": "components/primitives/SidebarNav.tsx",
+      "sha256": "1e83fb0f52cc181f2101b70070d8a2843b35eb058d5566f5d14df6fa45b6bb14"
+    },
+    {
+      "path": "primitives/StreamingText.tsx",
+      "source": "components/primitives/StreamingText.tsx",
+      "sha256": "199923b130af2da3b38f7f22ed075ee8259074c11ef4c23ab71e9a77e113a8fd"
+    },
+    {
+      "path": "primitives/TaskRows.tsx",
+      "source": "components/primitives/TaskRows.tsx",
+      "sha256": "c8ac5910df009d25e903398c182be4ca0535dcf99016a0d19978e0ce05f38eef"
+    },
+    {
+      "path": "primitives/ThinkingState.tsx",
+      "source": "components/primitives/ThinkingState.tsx",
+      "sha256": "9aa314e89f1b520256205da1db6f6a960085eb85a28828b873a86ca06bd129e2"
+    },
+    {
+      "path": "primitives/ToolChips.tsx",
+      "source": "components/primitives/ToolChips.tsx",
+      "sha256": "36de9ee8a0ce5c09bf348fa2b272c0f19f4ca760ce4463520e12ff2889559ae3"
+    },
+    {
+      "path": "shared/Button.tsx",
+      "source": "components/atoms/Button.tsx",
+      "sha256": "b12b82614be4284d2e84569f418892d663e857e1e4b5058b41979ee9e9b9e7e5"
+    },
+    {
+      "path": "shared/Chip.tsx",
+      "source": "components/atoms/Chip.tsx",
+      "sha256": "1f94106e5e6a534cf870bae5acb366596757371582ea3c73fad4070add193022"
+    },
+    {
+      "path": "shared/EntityChip.tsx",
+      "source": "components/atoms/EntityChip.tsx",
+      "sha256": "71001725173423d19519547e6970d3e71b564fb924859eeb7070f9a282ff4b01"
+    },
+    {
+      "path": "shared/ProgressRing.tsx",
+      "source": "components/atoms/ProgressRing.tsx",
+      "sha256": "8c734103e042343fcbfd2d2b48a4cf1d884f73efb267e0c192ba1c22b44d6184"
+    },
+    {
+      "path": "shared/SegmentedControl.tsx",
+      "source": "components/atoms/SegmentedControl.tsx",
+      "sha256": "0eac156ba1545f3e95330c118947caab15b3be457c750259b345d2df1708bdd2"
+    },
+    {
+      "path": "shared/Shimmer.tsx",
+      "source": "components/atoms/Shimmer.tsx",
+      "sha256": "12f629fb56e1d279b3a7ce2d4916e305e91e59935b954eaf301ac8d511e0eceb"
+    },
+    {
+      "path": "shared/StatusPill.tsx",
+      "source": "components/atoms/StatusPill.tsx",
+      "sha256": "707674a0c162dcf0d0bcf47e367aa876e5d541692405d31ae98b5a593d217cb4"
+    },
+    {
+      "path": "shared/StreamText.tsx",
+      "source": "components/atoms/StreamText.tsx",
+      "sha256": "540aa190d23e2c3a15d74ead9d61b8d1890c6d5461fdd61111fb97adcbf406fe"
+    },
+    {
+      "path": "shared/Switch.tsx",
+      "source": "components/atoms/Switch.tsx",
+      "sha256": "d4aca90a4dcb3e40020219fc0ecc72ced7067f5da130add598046bcb2cf70d70"
+    },
+    {
+      "path": "shared/TextRow.tsx",
+      "source": "components/atoms/TextRow.tsx",
+      "sha256": "e2d69e8ae32741039f0cef715ac3c63758de5539fc5469b6acb87c42d4362387"
+    },
+    {
+      "path": "shared/ValuePill.tsx",
+      "source": "components/atoms/ValuePill.tsx",
+      "sha256": "6f9932ceee1078867483859ac2e78762f509a615e0a2b64c7a4cc77c2c52ce51"
+    }
+  ]
+}
