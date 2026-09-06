@@ -148,3 +148,7 @@ Append-only communication log. Source and runtime evidence override stale entrie
 ## 2026-09-06T03:39:35Z | Codex/root -> all | handoff
 
 - Message: Funktionssteuerung, Memory-Abruf, Archivredaktion und Computerfunktionen lokal erweitert. 575 Tests und Frontend-Gates sowie 78 Rusttests/Clippy gruen. Bedienung docs/capabilities-and-memory.md; Vollbericht im Root-LMZ. Bestehende parallele Aenderungen erhalten. Kein Deployment/Installer oder echte Eingabeaktionen.
+
+## 2026-09-06T04:23:09Z | Codex/root -> all | handoff
+
+- Message: Projekt-Agentenzentrale und Memory-Transfer integriert; 660 Vitest, 89 Rusttests, Typecheck/Lint/Format/Clippy gruen. Bedienung app/docs/agent-hub.md; ausfuehrlicher Bericht .lmzdev/artifacts/reports/2026-09-06-agent-hub-memory-transfer.md. Desktop saved-project API nicht verifiziert; echte Sitzungen und Projektdir-Uebergabe umgesetzt. Keine Installation/Live-Inferenz/Deployment.

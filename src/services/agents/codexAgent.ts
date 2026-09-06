@@ -29,6 +29,11 @@ function terminal(snapshot: CodexJobSnapshot): boolean {
   return ['completed', 'failed', 'cancelled', 'timed_out'].includes(snapshot.status)
 }
 
+/** Native managed jobs require an executable, not merely a shell shim. */
+export function getCodexRuntimeStatus() {
+  return invoke<{ available: boolean; desktopProjectCreation: false; transport: string }>('codex_runtime_status')
+}
+
 /** Opens the native app at the bound project; a user still creates its task there. */
 export async function openCodexDesktopForProject(project: AgentProjectSnapshot, externalThreadId?: string) {
   if (!project.rootPath || !Number.isFinite(project.workspaceUpdatedAt)) {

@@ -77,15 +77,25 @@ describe('managed agent tools', () => {
 
   it('enforces the current repository egress policy while leaving safe status metadata readable', async () => {
     harness.externalPolicy.mockResolvedValue('deny')
-    await expect(tool('agent_job_status').execute({ job_id: 'job-a', include_output: true }, context)).rejects.toThrow('Repository-Richtlinie')
+    await expect(tool('agent_job_status').execute({ job_id: 'job-a', include_output: true }, context)).rejects.toThrow(
+      'Repository-Richtlinie'
+    )
     expect(harness.getOutput).not.toHaveBeenCalled()
-    expect(await tool('agent_job_status').execute({ job_id: 'job-a' }, context)).toMatchObject({ status: 'completed', output: undefined })
+    expect(await tool('agent_job_status').execute({ job_id: 'job-a' }, context)).toMatchObject({
+      status: 'completed',
+      output: undefined,
+    })
   })
 
   it('redacts provider credentials and absolute local paths before sharing final agent output', async () => {
-    harness.getOutput.mockReturnValue('Inspect E:\\private\\repo\\file.ts with ghp_abcdefghijklmnopqrstuvwxyz123456 and password=private-value')
+    harness.getOutput.mockReturnValue(
+      'Inspect E:\\private\\repo\\file.ts with ghp_abcdefghijklmnopqrstuvwxyz123456 and password=private-value'
+    )
     const result = await tool('agent_job_status').execute({ job_id: 'job-a', include_output: true }, context)
-    expect(result).toMatchObject({ output: 'Inspect @project with [REDACTED GITHUB KEY] and password=[REDACTED]', output_truncated: false })
+    expect(result).toMatchObject({
+      output: 'Inspect @project with [REDACTED GITHUB KEY] and password=[REDACTED]',
+      output_truncated: false,
+    })
   })
 
   it('rechecks account and workspace identity after awaiting the egress policy', async () => {
@@ -93,7 +103,9 @@ describe('managed agent tools', () => {
       harness.snapshot.mockResolvedValue({ ...project, principalId: 'account-b' })
       return 'ask'
     })
-    await expect(tool('agent_job_status').execute({ job_id: 'job-a', include_output: true }, context)).rejects.toThrow('Projektzuordnung hat sich')
+    await expect(tool('agent_job_status').execute({ job_id: 'job-a', include_output: true }, context)).rejects.toThrow(
+      'Projektzuordnung hat sich'
+    )
     expect(harness.getOutput).not.toHaveBeenCalled()
   })
 

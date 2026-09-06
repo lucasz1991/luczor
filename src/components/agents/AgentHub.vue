@@ -11,8 +11,7 @@ import {
 import { getAgentProjectLink } from '@/services/agents/links'
 import { listModelAgentOptions } from '@/services/agents/modelAgent'
 import { parseAgentMemorySource, importAgentMemory, type AgentMemorySource } from '@/services/agents/memoryTransfer'
-import { openCodexDesktopForProject } from '@/services/agents/codexAgent'
-import { detectAgents } from '@/services/agents'
+import { openCodexDesktopForProject, getCodexRuntimeStatus } from '@/services/agents/codexAgent'
 import type { AgentJob, AgentPermission, AgentProjectSnapshot, AgentRole } from '@/services/agents/types'
 import type { LuczorMode } from '@/services/inference/types'
 
@@ -92,11 +91,14 @@ async function refresh() {
   error.value = ''
   try {
     const snapshot = await agentProjectSnapshot(props.projectId)
-    const [link, agents] = await Promise.all([getAgentProjectLink(snapshot), detectAgents().catch(() => [])])
+    const [link, runtime] = await Promise.all([
+      getAgentProjectLink(snapshot),
+      getCodexRuntimeStatus().catch(() => ({ available: false })),
+    ])
     if (current !== generation || !props.open) return
     project.value = snapshot
     linkedThread.value = link?.externalThreadId ?? ''
-    codexAvailable.value = agents.some(agent => agent.name === 'codex' && agent.available)
+    codexAvailable.value = runtime.available
     modelOptions.value = listModelAgentOptions()
   } catch (caught) {
     if (current === generation)

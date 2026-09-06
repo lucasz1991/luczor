@@ -92,7 +92,9 @@ export const agentJobTools: ToolDef[] = [
       let outputTruncated: boolean | undefined
       if (args.include_output === true) {
         if (project.rootPath && (await getRepositoryExternalPolicy()) === 'deny') {
-          throw new Error('Die aktuelle Repository-Richtlinie verbietet die Übergabe dieser Agentenausgabe an das Modell.')
+          throw new Error(
+            'Die aktuelle Repository-Richtlinie verbietet die Übergabe dieser Agentenausgabe an das Modell.'
+          )
         }
         // Policy loading is asynchronous; do not deliver an old account's or
         // an old workspace binding's result after it resolves.

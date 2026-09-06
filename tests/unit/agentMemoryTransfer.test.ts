@@ -247,9 +247,17 @@ describe('selected agent memory transfer', () => {
     expect(remember).not.toHaveBeenCalled()
   })
 
-  it.each(['E:\\private\\repo', '\\\\server\\share', '/home/private/repo', 'file:///private/repo', 'source E:/private/repo'])('does not persist a local filesystem source reference: %s', async sourceRef => {
+  it.each([
+    'E:\\private\\repo',
+    '\\\\server\\share',
+    '/home/private/repo',
+    'file:///private/repo',
+    'source E:/private/repo',
+  ])('does not persist a local filesystem source reference: %s', async sourceRef => {
     const { input, dependencies, remember } = importHarness()
-    await expect(importAgentMemory({ ...input, visibility: 'syncable', sourceRef }, dependencies)).rejects.toThrow('keinen lokalen Dateipfad')
+    await expect(importAgentMemory({ ...input, visibility: 'syncable', sourceRef }, dependencies)).rejects.toThrow(
+      'keinen lokalen Dateipfad'
+    )
     expect(remember).not.toHaveBeenCalled()
   })
 

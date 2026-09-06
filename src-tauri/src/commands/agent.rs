@@ -17,8 +17,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tauri::WebviewWindow;
 
-use super::ensure_main_webview;
 use super::codex::acquire_workspace_lease;
+use super::ensure_main_webview;
 use super::process::run_bounded_command;
 
 const MAX_AGENT_OUTPUT_BYTES: usize = 500_000;
@@ -142,8 +142,11 @@ pub async fn agent_cli_run(
     command.args(&args);
     let project_dir = match payload.project_dir.as_deref().filter(|dir| !dir.is_empty()) {
         Some(dir) => validate_project_dir(dir)?,
-        None => validate_project_dir(&std::env::current_dir()
-            .map_err(|_| "Current coding-agent directory unavailable.")?.to_string_lossy())?,
+        None => validate_project_dir(
+            &std::env::current_dir()
+                .map_err(|_| "Current coding-agent directory unavailable.")?
+                .to_string_lossy(),
+        )?,
     };
     let workspace_lease = acquire_workspace_lease(&project_dir)?;
     command.current_dir(&project_dir);

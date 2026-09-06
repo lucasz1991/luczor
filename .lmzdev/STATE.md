@@ -76,3 +76,16 @@
 
 - 35 registrierte Werkzeuge einschliesslich memory_recall, sichtbare Freigaben, verbesserte Erinnerungsrelevanz und native Monitorsteuerung. Lokale Gesamtgates: 575 Frontendtests, 78 Rusttests, Typecheck, Lint, Format, Build und Clippy bestanden.
 - Vollbericht und Grenzen: ../.lmzdev/artifacts/reports/2026-09-06-capabilities-memory-computer.md (bezogen auf app/). Benutzerdokumentation: docs/capabilities-and-memory.md.
+
+## 2026-09-06T04:23:09Z | Projektagenten und Erinnerungsuebertragung
+
+- Agenten & Erinnerungen: verwaltete Codex-Auftraege, eigene und richtliniengesteuerte Modellagenten, persistente Codex-Sitzungsverknuepfung, verifizierte Desktop-Uebergabe und ausgewaehlte ChatGPT-/Codex-Erinnerungsimporte integriert.
+- 38 Werkzeuge; Not-Aus/Modus/Kontowechsel, gemeinsame native Ordnersperren, Paketfreigabe und provider-sichere Ergebnisuebergabe. SQL bleibt gemeinsamer Memory-Store, Cognee Projektion.
+- Tests: 660 Frontendtests, 89 Rusttests (1 interaktiver Monitor-Smoke ignoriert), kanonischer Typecheck, ESLint, Prettier, Clippy und Diffcheck bestanden. Browser-Fixture mit Start/Ergebnis/Import/Abbruch geprueft.
+- Grenzen: Desktop-Oeffnen bestaetigt keine gespeicherte Desktop-Projektanlage. ChatGPT-Uebergabe per kopierbarem Auftrag/ausgewaehltem Import. Keine echte Inferenz, Anmeldung, Installation, Veroeffentlichung oder Produktivmigration.
+- Bedienung: app/docs/agent-hub.md. Bericht: .lmzdev/artifacts/reports/2026-09-06-agent-hub-memory-transfer.md.
+
+### Finaler lokaler Build – 2026-09-06
+
+- Windows-Debug-Build mit 186 Frontendmodulen erfolgreich: app/src-tauri/target/debug/tauri-app.exe, 42482176 Bytes, SHA256 DD082DC77BAFA37DE0E2CDEC30AA771AA4D0C553BB2918506E423CBC94AA3F12.
+- Build erstellt, nicht installiert/gestartet; keine echte Modellinferenz oder Desktop-Sitzungsuebergabe. QA-Listener1437 beendet. Abschlussdokumentation app/docs/agent-hub.md.

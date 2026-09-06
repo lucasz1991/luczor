@@ -29,12 +29,19 @@ static WORKSPACE_LEASES: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::n
 
 /// Shared with the legacy CLI entry point so a device job cannot race a
 /// managed coding agent in the same directory or any parent/child directory.
-pub(crate) struct WorkspaceLease { id: String }
+pub(crate) struct WorkspaceLease {
+    id: String,
+}
 
 pub(crate) fn acquire_workspace_lease(root: &Path) -> Result<WorkspaceLease, String> {
-    let mut leases = WORKSPACE_LEASES.get_or_init(Mutex::default).lock()
+    let mut leases = WORKSPACE_LEASES
+        .get_or_init(Mutex::default)
+        .lock()
         .map_err(|_| "Coding-agent workspace leases unavailable.")?;
-    if leases.values().any(|active| workspaces_overlap(active, root)) {
+    if leases
+        .values()
+        .any(|active| workspaces_overlap(active, root))
+    {
         return Err("Another coding agent is already running in this workspace or an overlapping directory.".into());
     }
     let id = uuid::Uuid::new_v4().to_string();
@@ -45,7 +52,9 @@ pub(crate) fn acquire_workspace_lease(root: &Path) -> Result<WorkspaceLease, Str
 impl Drop for WorkspaceLease {
     fn drop(&mut self) {
         if let Some(leases) = WORKSPACE_LEASES.get() {
-            if let Ok(mut leases) = leases.lock() { leases.remove(&self.id); }
+            if let Ok(mut leases) = leases.lock() {
+                leases.remove(&self.id);
+            }
         }
     }
 }
@@ -597,7 +606,9 @@ fn run_job(
     let prompt = payload.prompt.as_bytes().to_vec();
     let input_job = Arc::clone(job);
     let input = thread::spawn(move || {
-        if input_job.cancel.load(Ordering::Acquire) { return Ok(()); }
+        if input_job.cancel.load(Ordering::Acquire) {
+            return Ok(());
+        }
         stdin.write_all(&prompt)
     });
     let stdout = child.stdout.take().ok_or("Codex stdout unavailable.")?;
@@ -1048,7 +1059,9 @@ mod tests {
             "sandbox_workspace_write.exclude_tmpdir_env_var=true",
             "sandbox_workspace_write.exclude_slash_tmp=true",
         ] {
-            assert!(codex_args(&data).windows(2).any(|pair| pair == ["--config", config]));
+            assert!(codex_args(&data)
+                .windows(2)
+                .any(|pair| pair == ["--config", config]));
         }
     }
 
@@ -1164,11 +1177,15 @@ mod tests {
 
     #[test]
     fn shared_workspace_lease_excludes_legacy_and_managed_overlap_until_release() {
-        let root = std::env::temp_dir().join(format!("luczor-workspace-lease-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("luczor-workspace-lease-{}", uuid::Uuid::new_v4()));
         let lease = acquire_workspace_lease(&root).unwrap();
         assert!(acquire_workspace_lease(&root).is_err());
         assert!(acquire_workspace_lease(&root.join("src")).is_err());
-        let separate = acquire_workspace_lease(&root.with_file_name(format!("luczor-other-{}", uuid::Uuid::new_v4()))).unwrap();
+        let separate = acquire_workspace_lease(
+            &root.with_file_name(format!("luczor-other-{}", uuid::Uuid::new_v4())),
+        )
+        .unwrap();
         drop(separate);
         drop(lease);
         assert!(acquire_workspace_lease(&root).is_ok());
