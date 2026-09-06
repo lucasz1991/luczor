@@ -127,6 +127,16 @@ export function looksLikeEnvelope(text: string): boolean {
   return t.startsWith('{') || t.includes('"summary"') || t.includes('"question"') || t.includes('"bullets"')
 }
 
+/** Hold only an actual, still incomplete envelope prefix, never field names in prose. */
+export function isEnvelopeStreamPrefix(text: string): boolean {
+  const candidate = text.trimStart().replace(/^```(?:json)?\s*/i, '')
+  if (!candidate.startsWith('{')) return false
+  const field = candidate.slice(1).trimStart()
+  if (!field) return true
+  const keys = ['summary', 'question', 'bullets', 'content']
+  return keys.some(key => `"${key}"`.startsWith(field) || field.startsWith(`"${key}"`))
+}
+
 /**
  * Parse the envelope from arbitrary (possibly partial) model text.
  * Returns null if the text is plain (non-envelope) or empty.

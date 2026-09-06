@@ -26,6 +26,10 @@ use uuid::Uuid;
 
 use super::ensure_main_webview;
 
+#[path = "local_model_context.rs"]
+mod context_budget;
+use context_budget::ContextUsage;
+
 const PUBLIC_KEY_B64: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64");
 const EXPECTED_KEY_ID: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID");
 const FLASH_MODEL_ID: &str = "qwen3.8-flash-next";
@@ -178,13 +182,36 @@ struct VerifiedCatalog {
 struct ManagedRuntime {
     child: Option<Child>,
     model_id: String,
-    scope_digest: String,
+    scope: RuntimeScope,
+    prepared_manifest_hash: Option<String>,
     port: u16,
     api_key: String,
     api_key_file: PathBuf,
     _runtime_guard: File,
     _model_guard: File,
     _process_lifetime_guard: ProcessLifetimeGuard,
+}
+
+/// Preparation contains only a fixed public benchmark. The first real request
+/// claims that process; maintenance must never erase an existing private scope.
+#[derive(Debug, Default, PartialEq, Eq)]
+enum RuntimeScope {
+    #[default]
+    Prepared,
+    Bound(String),
+}
+
+impl RuntimeScope {
+    fn claim(&mut self, requested: Option<&str>) -> bool {
+        match (&*self, requested) {
+            (_, None) => true,
+            (Self::Prepared, Some(digest)) => {
+                *self = Self::Bound(digest.into());
+                true
+            }
+            (Self::Bound(current), Some(digest)) => current == digest,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -216,6 +243,20 @@ impl Drop for ProcessLifetimeGuard {
 struct ProcessLifetimeGuard;
 
 impl ManagedRuntime {
+    fn reuse(&mut self, model_id: &str, scope: Option<&str>) -> Result<bool, String> {
+        if self.model_id != model_id {
+            return Ok(false);
+        }
+        let Some(child) = self.child.as_mut() else {
+            return Ok(false);
+        };
+        Ok(child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_none()
+            && self.scope.claim(scope))
+    }
+
     fn stop(&mut self) {
         if let Some(mut child) = self.child.take() {
             terminate_process(&mut child);
@@ -260,6 +301,7 @@ enum RequestOutcome {
     Success,
     Failed,
     Cancelled,
+    Rejected,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -491,6 +533,27 @@ pub struct LocalInferenceResult {
     raw_tool_calls: Vec<NativeToolCall>,
     finish_reason: String,
     request_id: String,
+    context_usage: Option<ContextUsage>,
+    usage: Option<InferenceTokenUsage>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+struct InferenceTokenUsage {
+    input_tokens: u64,
+    output_tokens: u64,
+    total_tokens: u64,
+}
+
+fn reported_token_usage(value: &Value) -> Option<InferenceTokenUsage> {
+    let input_tokens = value.get("prompt_tokens")?.as_u64()?;
+    let output_tokens = value.get("completion_tokens")?.as_u64()?;
+    let total_tokens = input_tokens.checked_add(output_tokens)?;
+    // All IPC numeric counters must remain exact JavaScript integers.
+    if total_tokens > 9_007_199_254_740_991 {
+        return None;
+    }
+    Some(InferenceTokenUsage { input_tokens, output_tokens, total_tokens })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -655,9 +718,19 @@ fn validate_discovery_binding(
 #[tauri::command]
 pub async fn local_model_status(window: WebviewWindow) -> Result<LocalModelStatus, String> {
     ensure_main_webview(&window)?;
-    let guard = state()
+    let mut guard = state()
         .lock()
         .map_err(|_| "Local model manager is unavailable.".to_string())?;
+    // A retained process handle is not proof that llama.cpp is still alive.
+    // Do not cancel or detach an in-flight operation from this status read;
+    // normal preparation/request cleanup still owns the runtime lifetime.
+    let unavailable_model = guard.runtime.as_mut().and_then(|runtime| {
+        (!managed_child_is_running(runtime.child.as_mut())).then(|| runtime.model_id.clone())
+    });
+    if let Some(model_id) = &unavailable_model {
+        guard.readiness.remove(model_id);
+        guard.last_error = Some("runtime_process_unavailable".into());
+    }
     let now = now_ms()?;
     let readiness = guard
         .readiness
@@ -689,6 +762,8 @@ pub async fn local_model_status(window: WebviewWindow) -> Result<LocalModelStatu
         .map(|runtime| runtime.model_id.clone());
     let state_name = if guard.catalog.is_none() {
         "unavailable"
+    } else if unavailable_model.is_some() {
+        "error"
     } else if guard.active_request_id.is_some() {
         "busy"
     } else if guard.runtime.is_some() {
@@ -705,6 +780,10 @@ pub async fn local_model_status(window: WebviewWindow) -> Result<LocalModelStatu
         reason_code: guard.last_error.clone(),
         readiness,
     })
+}
+
+fn managed_child_is_running(child: Option<&mut Child>) -> bool {
+    child.is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_none()))
 }
 
 #[tauri::command]
@@ -1397,9 +1476,6 @@ fn prepare_release_inner(
     catalog_binding: &CatalogBindingInput,
     cancel: Arc<AtomicBool>,
 ) -> Result<NativeReadiness, String> {
-    validate_capacity(&model)?;
-    let verified_artifacts = verify_configured_artifacts(app, &model, &cancel)?;
-    let model_path = verified_artifacts.model_path.clone();
     let artifact = model
         .artifact
         .as_ref()
@@ -1408,25 +1484,14 @@ fn prepare_release_inner(
         .runtime
         .as_ref()
         .ok_or("Runtime metadata is unavailable.")?;
-    ensure_model_storage(
-        &model_path,
-        artifact,
-        model
-            .capacity_policy
-            .min_storage_free_bytes
-            .ok_or("Capacity policy has no storage threshold.")?,
-    )?;
-    let benchmark_scope =
-        sha256_bytes(format!("luczor:local-benchmark:v1\0{}", model.id).as_bytes());
-    ensure_runtime(
-        app,
-        &model,
-        &benchmark_scope,
-        operation_id,
-        catalog_binding,
-        &cancel,
-    )?;
-    run_signed_benchmark(&model, operation_id, catalog_binding, &cancel)?;
+    // An expiring readiness lease is not a reason to reload 17 GB of weights.
+    // This evidence lives on the process that passed the signed benchmark, and
+    // its artifact handles remain locked throughout the resident lifetime.
+    if !refresh_resident_runtime(&model, operation_id, catalog_binding, &cancel)? {
+        validate_capacity(&model)?;
+        ensure_runtime(app, &model, None, operation_id, catalog_binding, &cancel)?;
+        run_signed_benchmark(&model, operation_id, catalog_binding, &cancel)?;
+    }
     let verified_at = now_ms()?;
     let valid_until =
         (verified_at + 10 * 60_000).min(parse_rfc3339_millis(&catalog.payload.expires_at)?);
@@ -1444,6 +1509,12 @@ fn prepare_release_inner(
         if !operation_owns_catalog_binding(&guard, operation_id, catalog_binding) {
             return Err("Local-model prepare operation lost its catalog binding.".into());
         }
+        let resident = guard
+            .runtime
+            .as_mut()
+            .ok_or("Local runtime stopped during preparation.")?;
+        verified_runtime_endpoint(resident)?;
+        resident.prepared_manifest_hash = Some(catalog.payload_hash.clone());
         guard.readiness.insert(model.id.clone(), readiness.clone());
     }
     Ok(NativeReadiness {
@@ -1455,6 +1526,46 @@ fn prepare_release_inner(
         verified_at_ms: verified_at as i64,
         valid_until_ms: valid_until as i64,
     })
+}
+
+fn refresh_resident_runtime(
+    model: &ModelRelease,
+    operation_id: &str,
+    catalog_binding: &CatalogBindingInput,
+    cancel: &AtomicBool,
+) -> Result<bool, String> {
+    require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)?;
+    let endpoint = {
+        let mut guard = state()
+            .lock()
+            .map_err(|_| "Local model manager is unavailable.".to_string())?;
+        if !operation_owns_catalog_binding(&guard, operation_id, catalog_binding) {
+            return Err("Local-model preparation lost its catalog binding.".into());
+        }
+        match guard.runtime.as_mut() {
+            Some(resident)
+                if resident.model_id == model.id
+                    && resident.prepared_manifest_hash.as_deref()
+                        == Some(catalog_binding.manifest_payload_sha256.as_str()) =>
+            {
+                Some(verified_runtime_endpoint(resident)?)
+            }
+            _ => None,
+        }
+    };
+    let Some((port, api_key)) = endpoint else {
+        return Ok(false);
+    };
+    let healthy = local_http_client(Duration::from_secs(2), Duration::from_secs(2))?
+        .get(format!("http://127.0.0.1:{port}/health"))
+        .bearer_auth(api_key)
+        .send()
+        .is_ok_and(|response| response.status().is_success());
+    require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)?;
+    if !healthy {
+        return Err("Resident local runtime health check failed.".into());
+    }
+    Ok(true)
 }
 
 fn verify_configured_artifacts(
@@ -1875,7 +1986,7 @@ fn infer_blocking(
     if let Err(error) = ensure_runtime(
         app,
         &model,
-        &request.scope_digest,
+        Some(&request.scope_digest),
         &request.request_id,
         &request.catalog_binding,
         &cancel,
@@ -1911,6 +2022,12 @@ fn infer_blocking(
         RequestOutcome::Cancelled
     } else if result.is_ok() {
         RequestOutcome::Success
+    } else if result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.code == "runtime_context_exceeded")
+    {
+        RequestOutcome::Rejected
     } else {
         RequestOutcome::Failed
     };
@@ -2007,7 +2124,7 @@ fn claim_inference_operation(
 fn ensure_runtime(
     app: &AppHandle,
     model: &ModelRelease,
-    scope_digest: &str,
+    scope_digest: Option<&str>,
     operation_id: &str,
     catalog_binding: &CatalogBindingInput,
     cancel: &Arc<AtomicBool>,
@@ -2020,15 +2137,7 @@ fn ensure_runtime(
             return Err("Local operation no longer owns the runtime.".into());
         }
         let reuse = if let Some(runtime) = guard.runtime.as_mut() {
-            runtime.model_id == model.id
-                && runtime.scope_digest == scope_digest
-                && runtime
-                    .child
-                    .as_mut()
-                    .ok_or("Local model runtime has already stopped.")?
-                    .try_wait()
-                    .map_err(|error| error.to_string())?
-                    .is_none()
+            runtime.reuse(&model.id, scope_digest)?
         } else {
             false
         };
@@ -2080,7 +2189,7 @@ fn ensure_runtime(
 fn start_runtime(
     app: &AppHandle,
     model: &ModelRelease,
-    scope_digest: &str,
+    scope_digest: Option<&str>,
     operation_id: &str,
     catalog_binding: &CatalogBindingInput,
     cancel: &AtomicBool,
@@ -2090,6 +2199,17 @@ fn start_runtime(
     // handles open for the complete runtime lifetime so the verified paths
     // cannot be replaced or opened for write/delete before use.
     let verified_artifacts = verify_configured_artifacts(app, model, cancel)?;
+    ensure_model_storage(
+        &verified_artifacts.model_path,
+        model
+            .artifact
+            .as_ref()
+            .ok_or("Model artifact metadata is unavailable.")?,
+        model
+            .capacity_policy
+            .min_storage_free_bytes
+            .ok_or("Capacity policy has no storage threshold.")?,
+    )?;
     let port = reserve_loopback_port()?;
     let api_key = Uuid::new_v4().simple().to_string();
     let key_dir = app
@@ -2157,7 +2277,10 @@ fn start_runtime(
     let mut runtime = ManagedRuntime {
         child: Some(child),
         model_id: model.id.clone(),
-        scope_digest: scope_digest.into(),
+        scope: scope_digest.map_or(RuntimeScope::Prepared, |digest| {
+            RuntimeScope::Bound(digest.into())
+        }),
+        prepared_manifest_hash: None,
         port,
         api_key,
         api_key_file,
@@ -2367,18 +2490,59 @@ fn stream_completion(
         .benchmark_thresholds
         .as_ref()
         .ok_or("Capacity policy has no read-time threshold.")?;
-    let body = json!({
+    let mut body = json!({
         "model": request.model_release_id,
         "messages": request.messages,
         "tools": request.tools,
         "tool_choice": request.tool_choice,
         "stream": true,
+        "stream_options": { "include_usage": true },
         "max_tokens": request.max_output_tokens,
         "chat_template_kwargs": {
             "enable_thinking": request.reasoning_mode != "off",
             "parse_tool_calls": true
         }
     });
+    let context_limit = model
+        .context_limit
+        .ok_or("Model context limit is unavailable.")?;
+    let tokenizer_client = local_http_client(Duration::from_secs(15), Duration::from_secs(15))?;
+    let started = Instant::now();
+    let usage = context_budget::fit_context(
+        &mut body,
+        u64::from(context_limit),
+        |candidate| {
+            require_runtime_operation_checkpoint(
+                &request.request_id,
+                &request.catalog_binding,
+                &cancel,
+            )?;
+            if started.elapsed() > Duration::from_secs(60) {
+                return Err("Local context preparation timed out.".into());
+            }
+            let response = tokenizer_client
+                .post(format!(
+                    "http://127.0.0.1:{port}/v1/chat/completions/input_tokens"
+                ))
+                .bearer_auth(&api_key)
+                .header("Content-Type", "application/json")
+                .body(serde_json::to_vec(candidate).map_err(|_| "Local context encoding failed.")?)
+                .send()
+                .map_err(|_| "Local tokenizer request failed.")?;
+            if !response.status().is_success() {
+                return Err(llama_http_failure(response.status().as_u16(), response));
+            }
+            let bytes = read_bounded_error_body(response)
+                .ok_or("Local tokenizer response exceeded its size limit.")?;
+            let value: Value = serde_json::from_slice(&bytes)
+                .map_err(|_| "Local tokenizer response is invalid.")?;
+            value["input_tokens"]
+                .as_u64()
+                .ok_or_else(|| "Local tokenizer token count is unavailable.".into())
+        },
+        || LocalInferenceFailure::http(400, LlamaHttpFailureKind::ContextWindowExceeded),
+    )?;
+    require_runtime_operation_checkpoint(&request.request_id, &request.catalog_binding, &cancel)?;
     let response = local_http_client(
         signed_read_timeout(thresholds.max_first_token_ms)?,
         Duration::from_secs(MAX_INFERENCE_TOTAL_SECONDS),
@@ -2393,7 +2557,9 @@ fn stream_completion(
         let status = response.status().as_u16();
         return Err(llama_http_failure(status, response));
     }
-    parse_sse(response, request, cancel, on_event)
+    let mut result = parse_sse(response, request, cancel, on_event)?;
+    result.context_usage = Some(usage);
+    Ok(result)
 }
 
 fn parse_sse(
@@ -2409,6 +2575,7 @@ fn parse_sse(
     let mut finish_reason = "stop".to_string();
     let mut tools: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
     let mut completed = false;
+    let mut usage = None;
     loop {
         if cancel.load(Ordering::SeqCst) {
             return Err("Local inference was cancelled.".into());
@@ -2436,6 +2603,10 @@ fn parse_sse(
         }
         let value: Value = serde_json::from_str(data)
             .map_err(|_| "Local llama.cpp emitted invalid SSE JSON.".to_string())?;
+        // The terminal usage frame may contain an empty choices array.
+        if let Some(reported) = value.get("usage").and_then(reported_token_usage) {
+            usage = Some(reported);
+        }
         let Some(choice) = value
             .get("choices")
             .and_then(Value::as_array)
@@ -2517,6 +2688,8 @@ fn parse_sse(
         raw_tool_calls,
         finish_reason,
         request_id: request.request_id.clone(),
+        context_usage: None,
+        usage,
     })
 }
 
@@ -2536,11 +2709,20 @@ fn finish_request(
         guard.cancel = None;
         match outcome {
             RequestOutcome::Success => {
+                // A scope change may have started a new, artifact-verified
+                // process under still-valid readiness. Its successful reply
+                // confirms residency for later lightweight lease renewal.
+                if let Some(runtime) = guard.runtime.as_mut() {
+                    if runtime.model_id == model.id {
+                        runtime.prepared_manifest_hash =
+                            Some(catalog_binding.manifest_payload_sha256.clone());
+                    }
+                }
                 guard.failures.remove(&model.id);
                 guard.cooldown_until_ms.remove(&model.id);
                 guard.last_error = None;
             }
-            RequestOutcome::Cancelled => {
+            RequestOutcome::Cancelled | RequestOutcome::Rejected => {
                 // User cancellation is not model-health evidence and must not
                 // increase failures or trigger cooldown.
                 guard.last_error = None;
@@ -2576,7 +2758,7 @@ fn release_operation(
     guard.active_request_id = None;
     guard.cancel = None;
     match outcome {
-        RequestOutcome::Success | RequestOutcome::Cancelled => {
+        RequestOutcome::Success | RequestOutcome::Cancelled | RequestOutcome::Rejected => {
             guard.last_error = None;
             None
         }
@@ -3081,6 +3263,46 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn retained_exited_child_is_not_a_ready_runtime() {
+        assert!(!super::managed_child_is_running(None));
+        #[cfg(windows)]
+        let mut command = {
+            use std::os::windows::process::CommandExt;
+            let mut command = std::process::Command::new("cmd.exe");
+            command.args(["/D", "/C", "exit", "0"]);
+            command.creation_flags(0x08000000);
+            command
+        };
+        #[cfg(not(windows))]
+        let mut command = {
+            let mut command = std::process::Command::new("sh");
+            command.args(["-c", "exit 0"]);
+            command
+        };
+        let mut child = command.spawn().unwrap();
+        child.wait().unwrap();
+        assert!(!super::managed_child_is_running(Some(&mut child)));
+    }
+
+    #[test]
+    fn token_usage_requires_real_counts_and_ignores_untrusted_totals() {
+        let actual = super::reported_token_usage(&serde_json::json!({
+            "prompt_tokens": 123, "completion_tokens": 7, "total_tokens": 999
+        })).unwrap();
+        assert_eq!(actual.input_tokens, 123);
+        assert_eq!(actual.output_tokens, 7);
+        assert_eq!(actual.total_tokens, 130);
+        for invalid in [
+            serde_json::json!({"prompt_tokens": 10}),
+            serde_json::json!({"prompt_tokens": -1, "completion_tokens": 2}),
+            serde_json::json!({"prompt_tokens": 2, "completion_tokens": 1.5}),
+            serde_json::json!({"prompt_tokens": 9_007_199_254_740_991_u64, "completion_tokens": 1}),
+        ] {
+            assert!(super::reported_token_usage(&invalid).is_none());
+        }
+    }
+
     use super::{
         acceptance_generation_is_current, begin_manifest_acceptance, benchmark_qualifies,
         canonical_contract_hash, canonical_json, classify_llama_http_status,
@@ -3097,7 +3319,7 @@ mod tests {
     use super::{
         attach_process_lifetime_guard, configured_paths_from_sources, open_artifact_guard,
         read_runtime_path_config, sha256_open_file_cancellable, storage_mount_match_len,
-        MAX_RUNTIME_PATH_CONFIG_BYTES,
+        ManagedRuntime, RuntimeScope, MAX_RUNTIME_PATH_CONFIG_BYTES,
     };
     use base64::Engine;
     use serde_json::json;
@@ -3166,6 +3388,60 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn prepared_process_is_reused_for_first_and_following_requests_and_keeps_scope() {
+        let fixture = RuntimePathFixture::new();
+        let mut command = Command::new("powershell.exe");
+        command.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Start-Sleep -Seconds 60",
+        ]);
+        super::configure_process(&mut command);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let lifetime = match attach_process_lifetime_guard(&child) {
+            Ok(lifetime) => lifetime,
+            Err(error) => {
+                super::terminate_process(&mut child);
+                panic!("{error}");
+            }
+        };
+        let mut resident = ManagedRuntime {
+            child: Some(child),
+            model_id: "model-a".into(),
+            scope: RuntimeScope::Prepared,
+            prepared_manifest_hash: Some("a".repeat(64)),
+            port: 0,
+            api_key: String::new(),
+            api_key_file: fixture.root.join("unused.key"),
+            _runtime_guard: open_artifact_guard(&fixture.runtime).unwrap(),
+            _model_guard: open_artifact_guard(&fixture.model_directory.join("model-a.gguf"))
+                .unwrap(),
+            _process_lifetime_guard: lifetime,
+        };
+        assert!(resident.reuse("model-a", None).unwrap());
+        assert!(resident.reuse("model-a", Some("project-a")).unwrap());
+        assert!(resident.reuse("model-a", Some("project-a")).unwrap());
+        // A readiness refresh cannot reset scope and expose a private slot to B.
+        assert!(resident.reuse("model-a", None).unwrap());
+        assert!(!resident.reuse("model-a", Some("project-b")).unwrap());
+        assert!(!resident.reuse("model-b", Some("project-a")).unwrap());
+        assert_eq!(resident.scope, RuntimeScope::Bound("project-a".into()));
+        assert_eq!(resident.child.as_ref().unwrap().id(), pid);
+        assert!(resident
+            .child
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none());
+        resident.stop();
+        assert!(!resident.reuse("model-a", Some("project-a")).unwrap());
     }
 
     #[cfg(windows)]

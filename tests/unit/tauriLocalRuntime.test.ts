@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LocalModelReleaseManifest } from '@/services/inference/modelManifest'
+import type { LocalRuntimeRequest } from '@/services/inference/localModelManager'
 
 const tauri = vi.hoisted(() => ({ invoke: vi.fn() }))
 
@@ -23,6 +24,45 @@ const catalogBinding = {
 } as const
 
 describe('Tauri local runtime catalog boundary', () => {
+  it('preserves measured context usage and classifies oversized input without leaking native errors', async () => {
+    const request: LocalRuntimeRequest = {
+      requestId: 'request-1',
+      modelReleaseId: 'model-1',
+      scopeDigest: 'd'.repeat(64),
+      catalogBinding,
+      messages: [{ role: 'user', content: 'test' }],
+    }
+    const transport = new TauriLocalRuntimeTransport()
+    const contextUsage = {
+      inputTokens: 1234,
+      contextTokens: 32768,
+      outputTokens: 2048,
+      omittedMessages: 2,
+      shortenedToolResults: 0,
+    }
+    tauri.invoke.mockResolvedValueOnce({
+      content: 'ok',
+      rawToolCalls: [],
+      finishReason: 'stop',
+      requestId: 'request-1',
+      contextUsage,
+      usage: { inputTokens: 1234, outputTokens: 7, totalTokens: 1241 },
+    })
+    await expect(transport.stream({} as LocalModelReleaseManifest, request)).resolves.toMatchObject({
+      contextUsage,
+      usage: { inputTokens: 1234, outputTokens: 7, totalTokens: 1241 },
+    })
+    tauri.invoke.mockImplementationOnce(async (_command, args) => {
+      args.onEvent.onmessage({ type: 'error', code: 'runtime_context_exceeded', retryable: false })
+      throw 'sensitive raw native text'
+    })
+    await expect(transport.stream({} as LocalModelReleaseManifest, request)).rejects.toMatchObject({
+      code: 'runtime_context_exceeded',
+      retryable: false,
+      message: expect.stringContaining('Modell bleibt geladen'),
+    })
+  })
+
   beforeEach(() => {
     tauri.invoke.mockReset()
     tauri.invoke.mockImplementation(async command => {

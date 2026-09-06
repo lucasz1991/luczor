@@ -54,6 +54,29 @@ describe('OpenRouterService tool choice', () => {
 
   afterEach(() => vi.unstubAllGlobals())
 
+  it('keeps private provider channels hidden and captures a usage-only terminal frame', async () => {
+    const onToken = vi.fn()
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        [
+          'data: {"choices":[{"delta":{"reasoning_content":"private notes","reasoning":"private"}}]}',
+          'data: {"choices":[{"delta":{"content":"Hallo"}}]}',
+          'data: {"choices":[{"delta":{"content":" Welt"},"finish_reason":"stop"}]}',
+          'data: {"choices":[],"usage":{"prompt_tokens":123,"completion_tokens":7,"total_tokens":130}}',
+          'data: [DONE]',
+          '',
+        ].join('\n\n'),
+        { status: 200, headers: { 'Content-Type': 'text/event-stream' } }
+      )
+    )
+    const result = await OpenRouterService.streamChatWithTools(
+      await approved({ messages: [{ role: 'user', content: 'Hallo' }], onToken })
+    )
+    expect(onToken.mock.calls).toEqual([['Hallo'], ['Hallo Welt']])
+    expect(result.usage).toEqual({ inputTokens: 123, outputTokens: 7, totalTokens: 130 })
+    expect(JSON.stringify(result)).not.toContain('private')
+  })
+
   it('sends required for an explicit execution round', async () => {
     await OpenRouterService.streamChatWithTools(
       await approved({

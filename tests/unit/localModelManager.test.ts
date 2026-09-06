@@ -64,6 +64,27 @@ const successfulResult: InferenceResult = {
 }
 
 describe('LocalModelManager runtime safety', () => {
+  it('keeps the model admissible after oversized input instead of cooling down or stopping it', async () => {
+    const model = await release()
+    const stream = vi
+      .fn()
+      .mockRejectedValue(new LocalInferenceError('Input too large', 'runtime_context_exceeded', false, false))
+    const transport: LocalRuntimeTransport = { stream, cancel: vi.fn(), stop: vi.fn() }
+    const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
+    const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await expect(
+        gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'long input' }] })
+      ).rejects.toMatchObject({ code: 'runtime_context_exceeded' })
+    }
+    expect(manager.getHealth(model)).toMatchObject({ state: 'ready', consecutiveFailures: 0 })
+    expect(transport.stop).not.toHaveBeenCalled()
+    stream.mockResolvedValueOnce(successfulResult)
+    await expect(
+      gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'short input' }] })
+    ).resolves.toMatchObject({ content: 'OK', provider: 'local' })
+  })
+
   it('propagates a parent abort to native cancel without counting a model failure', async () => {
     const model = await release()
     const cancel = vi.fn(async () => undefined)

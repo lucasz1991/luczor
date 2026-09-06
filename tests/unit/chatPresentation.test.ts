@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   clampNumber,
   compactHistory,
+  localConversationHistory,
   composeProviderSystemPrompt,
   goalStatusLabel,
   normalizeConversationHistory,
@@ -11,6 +12,29 @@ import {
 import type { WireMessage } from '../../src/services/openrouter.service'
 
 describe('chat presentation helpers', () => {
+  it('lets the native tokenizer budget local history beyond the old small estimate', () => {
+    const history: WireMessage[] = [
+      { role: 'user', content: 'a'.repeat(12000) },
+      { role: 'assistant', content: 'b'.repeat(12000) },
+      { role: 'user', content: 'current' },
+    ]
+    expect(localConversationHistory(history)).toEqual(history)
+    expect(compactHistory(history, 2400)).toEqual([history[2]])
+  })
+
+  it('bounds the local IPC history while retaining the latest complete user message', () => {
+    const history: WireMessage[] = Array.from({ length: 301 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: String(index),
+    }))
+    const result = localConversationHistory(history)
+    expect(result.length).toBeLessThanOrEqual(240)
+    expect(result[0]?.role).toBe('user')
+    expect(result.at(-1)).toEqual(history.at(-1))
+    const huge: WireMessage = { role: 'user', content: 'x'.repeat(600000) }
+    expect(localConversationHistory([...history, huge]).at(-1)?.content).toContain(huge.content)
+  })
+
   it('keeps the newest messages within the estimated history budget', () => {
     const history: WireMessage[] = [
       { role: 'user', content: 'a'.repeat(16) },

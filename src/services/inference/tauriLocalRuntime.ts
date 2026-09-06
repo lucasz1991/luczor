@@ -1,5 +1,6 @@
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type { HardwareSnapshot } from '@/services/inference/capacity'
+import { LocalInferenceError } from '@/services/inference/localModelManager'
 import type {
   LocalCatalogBinding,
   LocalRuntimeRequest,
@@ -12,6 +13,7 @@ import type {
   NativeManifestVerification,
 } from '@/services/inference/modelManifest'
 import type { InferenceResult, WireToolCall } from '@/services/inference/types'
+import { readReportedTokenUsage } from '@/services/tokenUsage'
 
 type NativeInferenceEvent =
   | { type: 'started'; requestId: string }
@@ -23,6 +25,8 @@ type NativeInferenceResult = {
   rawToolCalls: WireToolCall[]
   finishReason: string
   requestId: string
+  contextUsage?: InferenceResult['contextUsage']
+  usage?: InferenceResult['usage']
 }
 
 export type NativeLocalModelStatus = {
@@ -118,7 +122,9 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
   async stream(_release: LocalModelReleaseManifest, request: LocalRuntimeRequest): Promise<InferenceResult> {
     const channel = new Channel<NativeInferenceEvent>()
     let accumulated = ''
+    let contextRejected = false
     channel.onmessage = event => {
+      if (event.type === 'error' && event.code === 'runtime_context_exceeded') contextRejected = true
       if (event.type === 'delta') {
         if (request.signal?.aborted) return
         accumulated += event.content
@@ -141,9 +147,24 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
         reasoningMode: request.reasoningMode ?? 'auto',
       },
       onEvent: channel,
+    }).catch(error => {
+      if (
+        contextRejected ||
+        String(error) === 'Local llama.cpp rejected the request because the context window was exceeded (HTTP 400).'
+      ) {
+        throw new LocalInferenceError(
+          'Der aktuelle Auftrag passt auch nach der Kontextanpassung nicht vollständig in das lokale Modell. Bitte große Inhalte als Datei abschnittsweise bearbeiten lassen. Das Modell bleibt geladen.',
+          'runtime_context_exceeded',
+          false,
+          false
+        )
+      }
+      throw error
     })
     return {
       content: result.content,
+      contextUsage: result.contextUsage,
+      usage: readReportedTokenUsage(result.usage),
       rawToolCalls: result.rawToolCalls,
       toolCalls: result.rawToolCalls.map(call => {
         let args: Record<string, unknown> = {}

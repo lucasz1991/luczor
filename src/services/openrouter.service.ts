@@ -1,6 +1,7 @@
 // src/services/openrouter.service.ts
 import { createCorrelationId, getApiConfig, readBoundedResponseText } from '@/services/api/luczorApi'
 import { apiTransportInput } from '@/services/api/transportTarget'
+import { readReportedTokenUsage } from '@/services/tokenUsage'
 import type {
   ApprovedProxyConfig,
   InferenceRequest,
@@ -179,7 +180,14 @@ export class OpenRouterService {
       rawArguments: tc.function.arguments,
     }))
 
-    return { content, toolCalls, rawToolCalls, finishReason, ...readLuczorHeaders(res.headers) }
+    return {
+      content,
+      toolCalls,
+      rawToolCalls,
+      finishReason,
+      usage: readReportedTokenUsage(json?.usage),
+      ...readLuczorHeaders(res.headers),
+    }
   }
 
   /**
@@ -218,6 +226,7 @@ export class OpenRouterService {
     let receivedBytes = 0
     let finishReason = 'stop'
     let sawTerminalMarker = false
+    let usage: InferenceResult['usage']
     const toolAcc: Array<{ id: string; name: string; args: string }> = []
 
     while (true) {
@@ -263,6 +272,8 @@ export class OpenRouterService {
           throw new Error(streamError)
         }
 
+        // Usage-only terminal frames deliberately have no choices/delta.
+        usage = readReportedTokenUsage(json?.usage) ?? usage
         const choice = json?.choices?.[0]
         const delta = choice?.delta
         if (choice?.finish_reason) {
@@ -324,6 +335,6 @@ export class OpenRouterService {
       rawArguments: tc.function.arguments,
     }))
 
-    return { content, toolCalls, rawToolCalls, finishReason, ...readLuczorHeaders(res.headers) }
+    return { content, toolCalls, rawToolCalls, finishReason, usage, ...readLuczorHeaders(res.headers) }
   }
 }

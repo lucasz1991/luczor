@@ -33,6 +33,13 @@ export type ParsedToolCall = {
   rawArguments: string
 }
 
+/** Counts actually reported by the model runtime/provider, never output limits. */
+export type InferenceTokenUsage = {
+  inputTokens: number
+  outputTokens: number
+  totalTokens: number
+}
+
 export type InferenceResult = {
   content: string
   toolCalls: ParsedToolCall[]
@@ -45,6 +52,14 @@ export type InferenceResult = {
   useCase?: string
   routeDecisionId?: string
   target?: InferenceTarget
+  usage?: InferenceTokenUsage
+  contextUsage?: {
+    inputTokens: number
+    contextTokens: number
+    outputTokens: number
+    omittedMessages: number
+    shortenedToolResults: number
+  }
 }
 
 export type InferenceRequest = {

@@ -44,7 +44,7 @@ export function projectsForSync(projects: unknown[]): Array<Record<string, unkno
  * never become part of the server-side archive.
  */
 export function messagesForSync(messages: Message[]): Message[] {
-  return plain(messages.filter(message => message.meta?.dataHandling !== 'ephemeral'))
+  return plain(messages.filter(message => message.meta?.dataHandling !== 'ephemeral' && !message.meta?.isLoading))
 }
 
 /** Verify the server is reachable and the device key is valid. */

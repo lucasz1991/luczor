@@ -176,6 +176,25 @@ describe('agent mode and tool reliability', () => {
     expect(prompt).toContain('Zustimmung zu einer Variante ist noch kein Ausführungsauftrag')
   })
 
+  it('makes local context shortening visible without changing the stored input messages', async () => {
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: 'Antwort',
+      toolCalls: [],
+      rawToolCalls: [],
+      contextUsage: {
+        inputTokens: 6000,
+        contextTokens: 8192,
+        outputTokens: 2048,
+        omittedMessages: 4,
+        shortenedToolResults: 0,
+      },
+    })
+    const baseMessages = [{ role: 'user' as const, content: 'Hallo' }]
+    const outcome = await runAgent({ projectId: 'project-2', mode: 'observe', baseMessages })
+    expect(outcome.finalText).toContain('gespeicherte Chatverlauf bleibt vollständig erhalten')
+    expect(baseMessages).toEqual([{ role: 'user', content: 'Hallo' }])
+  })
+
   it.each(['act', 'unrestricted'] as const)(
     'blocks mutations and agent starts during discussion in %s mode',
     async mode => {
@@ -260,7 +279,7 @@ describe('agent mode and tool reliability', () => {
     }
   )
 
-  it('refreshes the live mode, forces only the first tool round and hides intermediate tool reasoning', async () => {
+  it('refreshes the live mode, forces only the first tool round and hides recognized private work notes', async () => {
     const visibleTokens = vi.fn()
     const progress = vi.fn()
     mocks.streamChatWithTools
@@ -302,6 +321,82 @@ describe('agent mode and tool reliability', () => {
     expect(progress).toHaveBeenCalledWith({ phase: 'thinking', round: 2 })
     expect(JSON.stringify(progress.mock.calls)).not.toContain('interne Tool-Überlegung')
     expect(result.finalText).toBe('Projektzustand geprüft.')
+  })
+
+  it('publishes live text before completion and replaces usage estimates with runtime counts', async () => {
+    const visibleTokens = vi.fn()
+    const onUsage = vi.fn()
+    let complete!: () => void
+    const delayed = new Promise<void>(resolve => {
+      complete = resolve
+    })
+    let started!: () => void
+    const receiving = new Promise<void>(resolve => {
+      started = resolve
+    })
+    mocks.streamChatWithTools.mockImplementationOnce(async args => {
+      args.onToken('H')
+      args.onToken('Hallo')
+      started()
+      await delayed
+      return {
+        content: 'Hallo!',
+        toolCalls: [],
+        rawToolCalls: [],
+        usage: { inputTokens: 123, outputTokens: 3, totalTokens: 126 },
+      }
+    })
+    const result = runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Hallo' }],
+      mode: 'observe',
+      onToken: visibleTokens,
+      onUsage,
+    })
+    await receiving
+    expect(visibleTokens.mock.calls).toEqual([['H'], ['Hallo']])
+    expect(onUsage.mock.calls.at(-1)?.[0]).toMatchObject({ source: 'estimated', outputTokens: 2, rounds: 1 })
+    complete()
+    expect((await result).tokenUsage).toMatchObject({
+      source: 'reported',
+      inputTokens: 123,
+      outputTokens: 3,
+      totalTokens: 126,
+      rounds: 1,
+    })
+    expect(visibleTokens).toHaveBeenLastCalledWith('Hallo!')
+  })
+
+  it('streams public tool commentary and starts the next answer with a clean buffer', async () => {
+    const visibleTokens = vi.fn()
+    mocks.streamChatWithTools
+      .mockImplementationOnce(async args => {
+        args.onToken('Ich prüfe den Projektzustand.')
+        return { ...toolCallResult, usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 } }
+      })
+      .mockImplementationOnce(async args => {
+        args.onToken('Geprüft.')
+        return {
+          content: 'Geprüft.',
+          toolCalls: [],
+          rawToolCalls: [],
+          usage: { inputTokens: 130, outputTokens: 4, totalTokens: 134 },
+        }
+      })
+    const result = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'prüfen bitte' }],
+      mode: 'observe',
+      onToken: visibleTokens,
+    })
+    expect(visibleTokens.mock.calls).toEqual([['Ich prüfe den Projektzustand.'], [''], ['Geprüft.']])
+    expect(result.tokenUsage).toMatchObject({
+      inputTokens: 230,
+      outputTokens: 24,
+      totalTokens: 254,
+      rounds: 2,
+      source: 'reported',
+    })
   })
 
   it('returns the concrete tool output instead of a generic Fertig fallback', async () => {

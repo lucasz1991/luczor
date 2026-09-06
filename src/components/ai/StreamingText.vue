@@ -21,7 +21,11 @@ const props = withDefaults(
 )
 const emit = defineEmits<{ followUp: [text: string]; speak: [] }>()
 const { copy, copied, error } = useClipboard()
-const { shown, revealing, skip } = useStreamReveal(toRef(props, 'content'), toRef(props, 'animate'))
+const { shown, revealing, skip } = useStreamReveal(
+  toRef(props, 'content'),
+  toRef(props, 'animate'),
+  toRef(props, 'streaming')
+)
 const displaying = computed(() => props.streaming || revealing.value)
 // Split fenced blocks without interpreting HTML. RichMessage owns escaped prose.
 const blocks = computed(() => {

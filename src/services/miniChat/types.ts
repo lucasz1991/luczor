@@ -1,6 +1,7 @@
 import type { ChatActivity } from '@/services/chatActivity'
 import type { ToolCallStatus } from '@/state/types'
 import type { LuczorMode } from '@/services/inference/types'
+import type { TokenUsage } from '@/services/tokenUsage'
 
 export type MiniMessage = {
   id: string
@@ -11,6 +12,7 @@ export type MiniMessage = {
   createdAt: number
   status: 'running' | 'done' | 'failed' | 'canceled'
   activity?: ChatActivity
+  tokenUsage?: TokenUsage
 }
 export type MiniTool = { id: string; name: string; detail: string; status: ToolCallStatus }
 export type MiniDecision = {

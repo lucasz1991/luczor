@@ -20,6 +20,7 @@ import { Store } from '@tauri-apps/plugin-store'
 import { loadDeviceKey, saveDeviceKey } from '@/services/secureDeviceKey'
 import { DEFAULT_API_BASE_URL } from './endpoint'
 import { apiTransportInput } from './transportTarget'
+import type { AssistantProfile } from '@/services/assistantProfileTypes'
 
 const SETTINGS_FILE = 'luczor.settings.json'
 const API_PREFIX = '/api/v1'
@@ -40,6 +41,7 @@ export type RuntimeSettings = {
 }
 
 export type BootstrapResponse = {
+  assistant_profile?: AssistantProfile
   device: { id: string | null; name: string | null; abilities: string[] }
   user: { id: number | null; name: string | null; email: string | null }
   runtime_settings: RuntimeSettings
@@ -684,6 +686,13 @@ export function localModelManifestWithApiConfig(
   signal?: AbortSignal
 ): Promise<Record<string, unknown>> {
   return requestWithConfig<Record<string, unknown>>('/local-model/manifest', { signal }, config)
+}
+
+export function assistantProfileWithApiConfig(
+  config: LuczorApiConfigSnapshot,
+  signal?: AbortSignal
+): Promise<{ data: AssistantProfile }> {
+  return requestWithConfig<{ data: AssistantProfile }>('/assistant-profile', { signal }, config)
 }
 
 /* =========================================================

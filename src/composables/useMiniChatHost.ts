@@ -6,6 +6,7 @@ import { createMiniChatController } from '@/services/miniChat/controller'
 import { MINI_ACTION_EVENT, type MiniAction, type MiniDecision, type MiniSnapshot } from '@/services/miniChat/types'
 import type { LuczorMode } from '@/services/inference/types'
 import { setStatus } from '@/state/hud'
+import { localAssistantProfilePrompt, refreshAssistantProfile } from '@/services/assistantProfile'
 
 type Dependencies = {
   context: () => { project: { id: string; name: string } | null; mode: LuczorMode; mainBusy: boolean }
@@ -22,7 +23,15 @@ export function useMiniChatHost(deps: Dependencies) {
     preamble: buildSystemPreamble,
     run: async options => {
       try {
-        return await runAgent(options)
+        const profile = await refreshAssistantProfile()
+        if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+        const prompt = localAssistantProfilePrompt(profile)
+        return await runAgent({
+          ...options,
+          baseMessages: options.baseMessages.map(message =>
+            message.role === 'system' && prompt ? { ...message, content: `${message.content}\n\n${prompt}` } : message
+          ),
+        })
       } finally {
         if (!deps.context().mainBusy && ['thinking', 'executing'].includes(deps.telemetry().status)) setStatus('idle')
       }

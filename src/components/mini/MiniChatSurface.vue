@@ -5,6 +5,7 @@ import StatusOrb from './StatusOrb.vue'
 import AiIcon from '../ai/AiIcon.vue'
 import ChatComposer from '../ai/ChatComposer.vue'
 import StreamingText from '../ai/StreamingText.vue'
+import TokenCounter from '../ai/TokenCounter.vue'
 import ThinkingState from '../ai/ThinkingState.vue'
 import ApprovalCard from '../ai/ApprovalCard.vue'
 import ToolChips from '../ai/ToolChips.vue'
@@ -400,10 +401,11 @@ onBeforeUnmount(() => {
             <StreamingText
               :content="message.content"
               :streaming="message.status === 'running'"
-              animate
+              :animate="false"
               :actions="false"
               :question="message.question"
             />
+            <TokenCounter :usage="message.tokenUsage" :active="message.status === 'running'" />
             <button
               v-if="message.content && message.status === 'done'"
               type="button"

@@ -2,7 +2,8 @@ import { reactive } from 'vue'
 import type { AgentToolSession, RunAgentOptions } from '@/services/agent'
 import type { LuczorMode, WireMessage } from '@/services/inference/types'
 import { createChatActivity, finishChatActivity, updateChatActivity } from '@/services/chatActivity'
-import { parseEnvelope } from '@/services/envelope'
+import { isEnvelopeStreamPrefix, parseEnvelope } from '@/services/envelope'
+import type { TokenUsage } from '@/services/tokenUsage'
 import { compactHistory, normalizeConversationHistory, previewToolArguments } from '@/services/chatPresentation'
 import { executionGate } from '@/services/executionGate'
 import { emptyMiniSnapshot, type MiniAction, type MiniDecision, type MiniMessage } from './types'
@@ -12,7 +13,7 @@ type Dependencies = {
   context: () => Context
   setMode: (mode: 'observe' | 'act') => void
   preamble: (mode: LuczorMode, name: string) => string
-  run: (options: RunAgentOptions) => Promise<{ finalText: string }>
+  run: (options: RunAgentOptions) => Promise<{ finalText: string; tokenUsage?: TokenUsage }>
 }
 
 /** Conversation and tool journal are never passed to persistence, sync or memory. */
@@ -201,13 +202,20 @@ export function createMiniChatController(deps: Dependencies) {
         onToken(content) {
           if (valid()) {
             const parsed = parseEnvelope(content)
-            assistant.content = (parsed?.summary || content).slice(0, 16_000)
+            assistant.content = (parsed?.summary ?? (isEnvelopeStreamPrefix(content) ? '' : content)).slice(0, 16_000)
+            touch()
+          }
+        },
+        onUsage(usage) {
+          if (valid()) {
+            assistant.tokenUsage = usage
             touch()
           }
         },
       })
       executionGate.assert(turnExecution)
       if (!valid()) return
+      assistant.tokenUsage = result.tokenUsage ?? assistant.tokenUsage
       const parsed = parseEnvelope(result.finalText)
       assistant.content = (parsed?.summary || result.finalText).slice(0, 16_000)
       assistant.question = parsed?.question?.slice(0, 1000)

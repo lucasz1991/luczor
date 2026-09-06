@@ -17,6 +17,23 @@ function message(id: string, dataHandling: 'syncable' | 'ephemeral'): Message {
 }
 
 describe('sync privacy allowlists', () => {
+  it('keeps live and canceled unclassified answers local until final classification', () => {
+    const live = {
+      ...message('live', 'syncable'),
+      role: 'assistant' as const,
+      content: 'LOCAL_STREAM_CONTENT',
+      meta: { isLoading: true },
+    }
+    const canceled = { ...live, id: 'canceled', meta: { isLoading: false, dataHandling: 'ephemeral' as const } }
+    const completed = {
+      ...live,
+      id: 'completed',
+      content: 'Final public answer',
+      meta: { isLoading: false, dataHandling: 'syncable' as const },
+    }
+    expect(messagesForSync([live, canceled, completed]).map(item => item.id)).toEqual(['completed'])
+    expect(JSON.stringify(messagesForSync([live, canceled]))).not.toContain('LOCAL_STREAM_CONTENT')
+  })
   it('excludes ephemeral tool observations from the server archive', () => {
     const result = messagesForSync([message('local', 'ephemeral'), message('safe', 'syncable')])
 

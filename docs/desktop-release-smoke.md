@@ -52,6 +52,26 @@ Create a UTF-8 JSON file without a BOM using exactly these three fields. The pat
 
 Restart Luczor after changing the configuration to clear existing runtime/readiness state. Test the server connection to verify the signed policy, then send a short chat request with the external-fallback option off. The catalog must enable the local release and contain matching artifact/runtime hashes and capacity requirements; preparation also verifies the files, storage, available hardware and signed benchmark thresholds. A successful connection check alone does not establish local model readiness. This path configuration does not download models or override those checks.
 
+### Prepared models remain loaded
+
+Successful preparation leaves the verified llama.cpp process running. Its fixed public benchmark does not claim a private conversation scope: the first chat request claims the already loaded process, and subsequent requests in that same scope reuse it. Preparation hashes the model and executable once at process startup and holds their artifact guards for the process lifetime.
+
+The ten-minute readiness lease remains bounded by the signed manifest expiry. Renewing that lease for the same successfully prepared resident process checks process/listener ownership and authenticated health, without loading the weights again, repeating the benchmark or applying free-RAM startup thresholds to memory already occupied by the model. A renewal never clears the existing conversation scope. It cannot renew a different catalog or a process that has not passed preparation.
+
+There is no inactivity unload timer. App shutdown, explicit stop/cancellation, runtime failure, model or private-scope changes and catalog/session replacement still release the process. A rejected oversized input is not a runtime failure: the model stays loaded and neither native nor frontend health enters cooldown. Prompt caching remains disabled. Keeping the model loaded intentionally keeps its RAM/VRAM allocated; this does not preserve it across app or Windows restarts.
+
+For a real native acceptance check, record the owned llama.cpp PID during initial preparation, after the first reply, after a readiness renewal and after a second reply. They must be identical for an unchanged scope and catalog. Also verify a real local answer, no external chat requests, and the ready state after an idle interval. Frontend clock-based expiry tests alone do not establish process reuse.
+
+### Long conversations and the real context window
+
+The live catalog `2026090602` increases Orca's context from 8,192 to 32,768 tokens. This is a finite, hardware-dependent context window; `--ctx-size 0` would use the model's declared maximum, not make context unlimited. Other installations continue to use their signed catalog. The source evaluation fixture still describes the earlier 8,192-token baseline.
+
+Before every local generation, native code sends the exact completion body, including all tools and chat-template settings, to the owned runtime's `/v1/chat/completions/input_tokens` endpoint. It reserves answer space and a small margin. If necessary, it removes complete older conversation rounds from the transient request, preserving system messages and assistant/tool pairing. Large tool results can retain explicitly marked beginning/end excerpts. The current user request, system policy and tool schemas are never silently truncated. The chat archive is not changed, and the final answer displays a notice when model context was shortened.
+
+If only the requested output reservation is too large, it uses the actual remaining answer space. If the current request itself still cannot fit, Luczor gives a German explanation to process large files in sections and keeps the model ready. Native input/response/time bounds remain in force. There is no claim of unlimited context or lossless summarization.
+
+Endpoint contract: [llama.cpp server documentation](https://github.com/ggml-org/llama.cpp/blob/5266f24da/tools/server/README.md); the installed b10809 runtime uses commit `5266f24da`.
+
 ## Joint folder-dialog and approval smoke
 
 Use a disposable test directory containing only synthetic files. Do not select a real source repository for this QA run.

@@ -26,6 +26,33 @@ function setup(
 }
 
 describe('temporary mini chat session', () => {
+  it('shows live counts and text, hides partial envelope syntax and ignores callbacks after cancellation', async () => {
+    let options!: RunAgentOptions
+    let release!: (value: { finalText: string }) => void
+    const { controller, send } = setup(
+      vi.fn(value => {
+        options = value
+        return new Promise(resolve => {
+          release = resolve
+        })
+      })
+    )
+    const pending = send()
+    const usage = { inputTokens: 12, outputTokens: 2, totalTokens: 14, source: 'estimated' as const, rounds: 1 }
+    options.onUsage?.(usage)
+    options.onToken?.('{"sum')
+    expect(controller.state.messages[1]).toMatchObject({ content: '', tokenUsage: usage })
+    options.onToken?.('{"summary":"Hallo')
+    expect(controller.state.messages[1]?.content).toBe('Hallo')
+    controller.stop()
+    options.onToken?.('Später Text')
+    options.onUsage?.({ ...usage, totalTokens: 999 })
+    expect(controller.state.messages[1]).toMatchObject({ content: 'Hallo', tokenUsage: usage })
+    release({ finalText: 'Spätes Ende' })
+    await pending
+    expect(controller.state.messages[1]?.status).toBe('canceled')
+  })
+
   it('keeps its own transcript and returns structured answer choices', async () => {
     const { controller, send, run } = setup(
       vi.fn().mockResolvedValue({

@@ -3,6 +3,10 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Settings from './components/Settings.vue'
 import JarvisHud from './components/JarvisHud.vue'
+import LocalModelStatus from './components/LocalModelStatus.vue'
+import AssistantProfileStatus from './components/AssistantProfileStatus.vue'
+import TokenCounter from './components/ai/TokenCounter.vue'
+import { localAssistantProfilePrompt, refreshAssistantProfile } from '@/services/assistantProfile'
 import PlanPanel from './components/PlanPanel.vue'
 import SidebarNav from './components/ai/SidebarNav.vue'
 import AgentHub from './components/agents/AgentHub.vue'
@@ -46,15 +50,15 @@ import {
   activityLabel,
   createChatActivity,
   finishChatActivity,
-  presentToolCall,
   updateChatActivity,
   type ChatActivity,
 } from '@/services/chatActivity'
+import { presentLocalToolResult } from '@/services/toolProgressPresentation'
 import type { Message } from '@/state/types'
 import SpotlightSurface from './components/vengeance/SpotlightSurface.vue'
 import { type LuczorMode, type WireMessage } from './services/openrouter.service'
 import { runAgent, buildSystemPreamble, shouldRequireToolCall } from '@/services/agent'
-import { parseEnvelope } from '@/services/envelope'
+import { parseEnvelope, isEnvelopeStreamPrefix } from '@/services/envelope'
 import { resolveApproval, rejectAllApprovals, hasPendingApproval } from '@/services/approvals'
 import { Store } from '@tauri-apps/plugin-store'
 import { VoiceEngine } from '@/services/voice/voiceEngine'
@@ -103,6 +107,7 @@ import { useChatComposer, type ComposerInputSource } from '@/composables/useChat
 import {
   clampNumber,
   compactHistory,
+  localConversationHistory,
   composeProviderSystemPrompt,
   formatChatTime,
   goalStatusLabel,
@@ -209,7 +214,7 @@ function messageTools(message: Message) {
   const nextUser = messages.value.find(item => item.role === 'user' && item.ts > message.ts)
   return calls
     .filter(call => call.createdAt >= message.ts && (!nextUser || call.createdAt < nextUser.ts))
-    .map(presentToolCall)
+    .map(presentLocalToolResult)
 }
 function finishActiveTurn(status: 'done' | 'failed' | 'canceled') {
   const turn = activeTurn.value
@@ -994,7 +999,7 @@ function applyStreamedContent(pid: string, msgId: string, raw: string, done: boo
       parsed: env as any,
       content: env.summary,
       meta: {
-        isLoading: done ? false : !env.complete,
+        isLoading: !done,
         serverSpeechAllowed: false,
         summary: env.summary,
         question: env.question,
@@ -1007,7 +1012,7 @@ function applyStreamedContent(pid: string, msgId: string, raw: string, done: boo
   // Plain (non-envelope) text. Reset any question/bullets/summary that a
   // transient partial-envelope parse may have left behind, so stale suggestion
   // chips don't linger when the final text is not a valid envelope.
-  const text = safeTrim(raw)
+  const text = !done && isEnvelopeStreamPrefix(raw) ? '' : safeTrim(raw)
   mutations.patchMessage(pid, msgId, {
     raw,
     content: text || (done ? 'Fertig.' : ''),
@@ -1106,7 +1111,8 @@ async function send(automaticVoice = false) {
   const assistant = mutations.makeMsg('assistant', '', pid)
   assistant.raw = ''
   assistant.parsed = null
-  assistant.meta = { ...assistant.meta, serverSpeechAllowed: false }
+  // A live answer has no final retention classification yet.
+  assistant.meta = { ...assistant.meta, serverSpeechAllowed: false, dataHandling: 'ephemeral' }
   mutations.addMessage(assistant)
   chatActivities.value[assistant.id] = createChatActivity(assistant.ts)
   activeTurn.value = { projectId: pid, messageId: assistant.id }
@@ -1239,15 +1245,18 @@ async function send(automaticVoice = false) {
       })),
       budget: { maxChars: 9_000, maxFragments: 20, maxFragmentChars: 1_800 },
     })
+    const assistantProfile = await refreshAssistantProfile()
+    executionGate.assert(turnExecution)
+    const localProfilePrompt = localAssistantProfilePrompt(assistantProfile)
     const baseMessages: WireMessage[] = [
       {
         role: 'system',
         content: composeProviderSystemPrompt(
           buildSystemPreamble(mode.value, prj?.name ?? pid, appearance.assistantName),
-          packages.local.text
+          [localProfilePrompt, packages.local.text].filter(Boolean).join('\n\n')
         ),
       },
-      ...sanitizeInferenceMessagesForTarget(history, 'local_llama_cpp'),
+      ...sanitizeInferenceMessagesForTarget(localConversationHistory(fullHistory), 'local_llama_cpp'),
     ]
     const externalBaseMessages: WireMessage[] = [
       {
@@ -1276,6 +1285,7 @@ async function send(automaticVoice = false) {
       toolFailures,
       toolSuccesses,
       ephemeralDataUsed,
+      tokenUsage,
     } = await runAgent({
       projectId: pid,
       baseMessages,
@@ -1313,7 +1323,11 @@ async function send(automaticVoice = false) {
         const activity = chatActivities.value[assistant.id]
         if (activity) updateChatActivity(activity, event)
       },
-      // Render only content released by the existing final-answer guard.
+      onUsage: usage => {
+        if (turnExecution.signal.aborted) return
+        mutations.patchMessage(pid, assistant.id, { meta: { tokenUsage: usage } })
+      },
+      // Render public answer content as soon as each transport chunk arrives.
       onToken: raw => {
         if (turnExecution.signal.aborted) return
         if (!streamStarted) {
@@ -1347,8 +1361,9 @@ async function send(automaticVoice = false) {
           useCase,
           inferenceTarget,
           routeDecisionId,
+          tokenUsage,
           serverSpeechAllowed: !ephemeralDataUsed,
-          ...(ephemeralDataUsed ? { dataHandling: 'ephemeral' as const } : {}),
+          dataHandling: ephemeralDataUsed ? 'ephemeral' : 'syncable',
         },
       })
     }
@@ -1866,7 +1881,7 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
                 <StreamingText
                   :content="m.content"
                   :streaming="!!m.meta.isLoading && !!m.content"
-                  :animate="!!chatActivities[m.id]"
+                  :animate="false"
                   :question="m.meta.question"
                   :follow-ups="m.meta.bullets"
                   :disabled="sending"
@@ -1896,6 +1911,7 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
                   >
                 </StreamingText>
               </SelectionActions>
+              <TokenCounter :usage="m.meta.tokenUsage" :active="chatActivities[m.id]?.status === 'running'" />
             </template>
             <p v-else class="ai-message__user-text">{{ m.content }}</p>
           </article>
@@ -2009,6 +2025,8 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
           ×
         </button>
       </div>
+      <LocalModelStatus :active="showSystemPanel" />
+      <AssistantProfileStatus :active="showSystemPanel" />
       <JarvisHud embedded />
       <button type="button" class="ai-button" @click="miniChat.open()">Als Luczor Mini öffnen</button>
       <div class="system-panel__foot">

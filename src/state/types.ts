@@ -1,4 +1,5 @@
 // src/state/types.ts
+import type { TokenUsage } from '@/services/tokenUsage'
 
 export type Id = string
 
@@ -27,6 +28,7 @@ export type MessageMeta = {
   useCase?: string
   inferenceTarget?: 'local_llama_cpp' | 'laravel_proxy'
   routeDecisionId?: string
+  tokenUsage?: TokenUsage
 
   // how a user turn was produced; drives the "Gesprochen" badge
   inputSource?: 'keyboard' | 'push_to_talk' | 'hands_free'

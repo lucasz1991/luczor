@@ -38,6 +38,9 @@ import type { ToolCallStatus } from '@/state/types'
 import { executionGate } from '@/services/executionGate'
 import { validateToolArguments } from '@/services/tools/validateArguments'
 import { isPlanningDiscussion } from '@/services/planningEntry'
+import { createTokenUsageCounter, type TokenUsage } from '@/services/tokenUsage'
+import { looksLikeInternalReasoningLeak, publicAnswerText } from '@/services/publicAnswerStream'
+export { looksLikeInternalReasoningLeak } from '@/services/publicAnswerStream'
 
 /** A transient caller can own tool UI without writing to the project archive. */
 export type AgentToolSession = {
@@ -107,7 +110,9 @@ export type RunAgentOptions = {
   inputSource?: 'keyboard' | 'push_to_talk' | 'hands_free'
   /** Streamed content of the current round (full accumulated text). */
   onToken?: (content: string) => void
-  /** Safe UI telemetry. Model text continues through the existing final-answer guard. */
+  /** Per-turn counts across all rounds; live estimates are replaced with actual usage. */
+  onUsage?: (usage: TokenUsage) => void
+  /** Safe UI telemetry without private model channels or tool payloads. */
   onProgress?: (event: AgentProgress) => void
   /** In-memory tool journal and approval gate for temporary conversations. */
   toolSession?: AgentToolSession
@@ -241,14 +246,6 @@ export function shouldRequireToolCall(text: string): boolean {
   )
 }
 
-/** Detect providers that accidentally put their private scratchpad in content. */
-export function looksLikeInternalReasoningLeak(text: string): boolean {
-  const start = text.trimStart().slice(0, 600)
-  return /^(?:analysis\s*:|internal reasoning\s*:|we need to (?:respond|answer|set|use|check|call|determine)|the user (?:says|asks|wants)|according to (?:the )?(?:system|developer))/i.test(
-    start
-  )
-}
-
 function outcomeMessage(toolCallId: string, toolName: string, outcome: Outcome): WireMessage {
   const compactOutcome = outcome.ok
     ? { ok: true, output: clip(outcome.output, 8000) }
@@ -325,6 +322,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   ephemeralDataUsed: boolean
   inferenceTarget?: 'local_llama_cpp' | 'laravel_proxy'
   routeDecisionId?: string
+  tokenUsage: TokenUsage
 }> {
   const { projectId, mode, maxRounds = 6 } = opts
   const execution = executionGate.capture(opts.signal)
@@ -424,6 +422,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   let ephemeralDataUsed = false
   const toolOutcomes: ToolOutcomeRecord[] = []
   let reasoningRetryUsed = false
+  let localContextAdjusted = false
+  const tokenCounter = createTokenUsageCounter()
+  const updateUsage = (...args: Parameters<typeof tokenCounter.update>) => {
+    const usage = tokenCounter.update(...args)
+    opts.onUsage?.(usage)
+  }
+  let visibleContent = ''
+  const publish = (content: string) => {
+    if (content === visibleContent) return
+    visibleContent = content
+    opts.onToken?.(content)
+  }
   let nextToolChoice: ToolChoice = resolvedRoute.externalOneShot ? 'none' : (requestedToolChoice ?? 'auto')
   const inferenceGateway = resolvedRoute.gateway
   const roundLimit = resolvedRoute.externalOneShot ? 1 : maxRounds
@@ -443,7 +453,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     setStatus('thinking')
     opts.onProgress?.({ phase: 'thinking', round: round + 1 })
     pulse('network', 1)
-    let roundContent = ''
+    publish('')
+    updateUsage(round + 1, { messages, tools }, '')
     const res = await inferenceGateway.streamChatWithTools({
       messages,
       tools,
@@ -456,18 +467,22 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       commitSha: opts.commitSha,
       inputSource: opts.inputSource,
       signal,
-      // Do not expose intermediate reasoning from a round that later emits a
-      // tool call. Only the final no-tool round becomes visible chat content.
+      // Public content is released as it arrives. Private channels are ignored
+      // in transports; the guard also withholds known work notes and think tags.
       onToken: content => {
         if (signal.aborted) return
-        roundContent = content
         opts.onProgress?.({ phase: 'receiving', round: round + 1, characters: content.length })
+        updateUsage(round + 1, { messages, tools }, content)
+        publish(publicAnswerText(content))
       },
     })
+    localContextAdjusted ||=
+      !!res.contextUsage && (res.contextUsage.omittedMessages > 0 || res.contextUsage.shortenedToolResults > 0)
     // A provider may finish after ignoring AbortSignal. Never publish that late
     // result or execute its tools in a replacement account/project generation.
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
     executionGate.assert(execution)
+    updateUsage(round + 1, { messages, tools }, res.content, res)
     lastRequestId = res.requestId ?? lastRequestId
     lastModel = res.model ?? lastModel
     lastProvider = res.provider ?? lastProvider
@@ -486,8 +501,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
 
     // No tool calls -> this is the final answer.
     if (!res.toolCalls.length) {
-      const content = res.content.trim()
-      const reasoningLeak = looksLikeInternalReasoningLeak(content)
+      const content = publicAnswerText(res.content, true).trim()
+      const reasoningLeak = looksLikeInternalReasoningLeak(res.content) || (!!res.content.trim() && !content)
       if (reasoningLeak && resolvedRoute.externalOneShot) {
         throw new LocalInferenceError(
           'Die einmalige externe Antwort enthielt keine sicher darstellbare Nutzerantwort und wurde verworfen.',
@@ -509,12 +524,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         })
         continue
       }
-      const finalText = reasoningLeak
+      let finalText = reasoningLeak
         ? toolOutcomes.length
           ? fallbackToolResult(toolOutcomes)
           : 'Ich konnte keine sichere, nutzergerichtete Antwort erzeugen. Bitte versuche die Anfrage erneut.'
         : content || fallbackToolResult(toolOutcomes)
-      opts.onToken?.(reasoningLeak ? finalText : roundContent || finalText)
+      if (localContextAdjusted) {
+        finalText +=
+          '\n\nHinweis: Für diese Antwort wurden ältere Gesprächsrunden oder umfangreiche Werkzeugausgaben im Modellkontext gekürzt. Der gespeicherte Chatverlauf bleibt vollständig erhalten.'
+      }
+      publish(finalText)
       return {
         finalText,
         requestId: lastRequestId,
@@ -526,6 +545,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         ephemeralDataUsed,
         inferenceTarget: inferenceGateway.target,
         routeDecisionId: resolvedRoute.decision?.id,
+        tokenUsage: tokenCounter.snapshot(),
       }
     }
 
@@ -747,6 +767,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     ephemeralDataUsed,
     inferenceTarget: inferenceGateway.target,
     routeDecisionId: resolvedRoute.decision?.id,
+    tokenUsage: tokenCounter.snapshot(),
   }
 }
 

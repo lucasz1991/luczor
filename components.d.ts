@@ -18,6 +18,7 @@ declare module 'vue' {
     AmbientBackdrop: typeof import('./src/components/vengeance/AmbientBackdrop.vue')['default']
     AppearanceSettingsSection: typeof import('./src/components/settings/AppearanceSettingsSection.vue')['default']
     ApprovalCard: typeof import('./src/components/ai/ApprovalCard.vue')['default']
+    AssistantProfileStatus: typeof import('./src/components/AssistantProfileStatus.vue')['default']
     ChatComposer: typeof import('./src/components/ai/ChatComposer.vue')['default']
     ChatSettingsSection: typeof import('./src/components/settings/ChatSettingsSection.vue')['default']
     CodeBlock: typeof import('./src/components/ai/CodeBlock.vue')['default']
@@ -30,6 +31,7 @@ declare module 'vue' {
     InsightCards: typeof import('./src/components/ai/InsightCards.vue')['default']
     JarvisHud: typeof import('./src/components/JarvisHud.vue')['default']
     LoadingState: typeof import('./src/components/ai/LoadingState.vue')['default']
+    LocalModelStatus: typeof import('./src/components/LocalModelStatus.vue')['default']
     MiniChatSurface: typeof import('./src/components/mini/MiniChatSurface.vue')['default']
     MiniChatWindow: typeof import('./src/components/mini/MiniChatWindow.vue')['default']
     PayloadApproval: typeof import('./src/components/ai/PayloadApproval.vue')['default']
@@ -49,6 +51,7 @@ declare module 'vue' {
     StreamingText: typeof import('./src/components/ai/StreamingText.vue')['default']
     TaskRows: typeof import('./src/components/ai/TaskRows.vue')['default']
     ThinkingState: typeof import('./src/components/ai/ThinkingState.vue')['default']
+    TokenCounter: typeof import('./src/components/ai/TokenCounter.vue')['default']
     ToolChips: typeof import('./src/components/ai/ToolChips.vue')['default']
     VoiceSettingsSection: typeof import('./src/components/settings/VoiceSettingsSection.vue')['default']
   }

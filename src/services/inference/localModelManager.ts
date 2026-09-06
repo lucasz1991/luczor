@@ -1,5 +1,6 @@
 import type { InferenceGateway, InferenceRequest, InferenceResult } from '@/services/inference/types'
 import type { LocalModelReleaseManifest } from '@/services/inference/modelManifest'
+import { stripReasoningBlocks } from '@/services/publicAnswerStream'
 
 export type LocalRuntimeState = 'stopped' | 'ready' | 'busy' | 'degraded' | 'cooldown' | 'error'
 
@@ -66,11 +67,7 @@ function abortError(): DOMException {
 
 /** Removes Qwen-compatible thinking blocks before any content reaches UI/history. */
 export function visibleLocalContent(content: string): string {
-  let visible = String(content ?? '')
-  visible = visible.replace(/<think>[\s\S]*?<\/think>/gi, '')
-  const open = visible.toLocaleLowerCase().lastIndexOf('<think>')
-  if (open >= 0) visible = visible.slice(0, open)
-  return visible.replace(/<\/think>/gi, '').trimStart()
+  return stripReasoningBlocks(String(content ?? '')).trimStart()
 }
 
 const SAFE_NATIVE_RUNTIME_FAILURES = [
@@ -342,6 +339,14 @@ export class LocalModelManager {
         throw abortError()
       }
 
+      // Oversized input is not model-health evidence. Native code retains the
+      // resident process, so the next shorter request must remain admissible.
+      if (error instanceof LocalInferenceError && error.code === 'runtime_context_exceeded') {
+        if (operationEpoch === this.boundaryEpoch) {
+          this.health.set(release.id, { ...previous, state: 'ready', updatedAt: nowIso(this.now) })
+        }
+        throw error
+      }
       const failures = previous.consecutiveFailures + 1
       const entersCooldown = failures >= release.healthPolicy.maxConsecutiveFailures
       const cooldownUntil = entersCooldown
