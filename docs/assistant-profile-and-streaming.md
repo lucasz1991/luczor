@@ -54,11 +54,13 @@ Der Tokenzähler zeigt Eingabe, Ausgabe und Summe über sämtliche Modellrunden 
 
 Abbruch stoppt weitere UI-Updates. Hauptchatwerte bleiben beim gespeicherten Beitrag, Mini-Werte bleiben temporär. Alte Beiträge ohne Zählwerte erhalten keine erfundenen rückwirkenden Zahlen.
 
-## Lokaler Stand
+## Bereitgestellter Stand
 
-Die Grundbefüllung wurde ausschließlich in der vorhandenen lokalen SQLite-Testinstanz durchgeführt: zuerst 1 Persönlichkeit und 3 Skills, beim zweiten Lauf 0 und 0. Die Produktions-Admin-App wurde in diesem Auftrag nicht veröffentlicht oder befüllt.
+Die Grundbefüllung wurde zuerst in der vorhandenen lokalen SQLite-Testinstanz geprüft: 1 Persönlichkeit und 3 Skills, beim zweiten Lauf 0 und 0.
 
-Native Änderungen benötigen den neu gebauten Desktop-Build. Die zuvor laufende Debug-App wurde nicht beendet.
+Am 6. September 2026 wurde die Produktions-Admin-App auf ausdrücklichen Auftrag über Plesk veröffentlicht (Backend-Commit `d49abf0`). Dort sind jetzt „Luczor – klar und freundlich“ und alle drei Skills aktiv. Der zweite Befüllungslauf blieb unverändert. Profil und Bootstrap wurden mit Authentifizierung über echtes HTTPS erfolgreich geprüft; das Modellmanifest behält Version `2026090602` und 32768 Kontexttokens.
+
+Streaming, Tokenzähler und der lokale Modellstatus benötigen den neu gebauten Desktop-Build. Die zuvor laufende Debug-App wurde durch den Serverrollout nicht beendet.
 
 ## Technische Einstiegspunkte
 
