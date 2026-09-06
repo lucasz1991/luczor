@@ -13,8 +13,8 @@
 // input and reports what it changed, and the repair is fed back as the tool
 // result so the model can self-correct.
 //
-// Plans are per project and persisted separately from the chat AppState, so no
-// store migration is required.
+// Plans are isolated by verified principal and project. Legacy project-only
+// records stay on disk but are never assigned to the currently signed-in user.
 
 import { reactive } from 'vue'
 import { Store } from '@tauri-apps/plugin-store'
@@ -46,14 +46,45 @@ export type Plan = {
 }
 
 type PlanState = {
-  byProject: Record<string, Plan>
+  byPrincipal: Record<string, Record<string, Plan>>
+  activePrincipalId: string | null
   loaded: boolean
 }
 
 export const planState = reactive<PlanState>({
-  byProject: createSafeRecord<Plan>(),
+  byPrincipal: createSafeRecord<Record<string, Plan>>(),
+  activePrincipalId: null,
   loaded: false,
 })
+
+/** The app clears this synchronously before changing account credentials. */
+export function bindPlanPrincipal(principalId: string | null): void {
+  planState.activePrincipalId = null
+  if (principalId === null) return
+  if (!isSafeRecordKey(principalId)) throw new Error('Ungültige Plan-Kontoidentität.')
+  planState.activePrincipalId = principalId
+}
+
+export function assertPlanPrincipal(expectedPrincipalId: string): void {
+  if (!expectedPrincipalId || planState.activePrincipalId !== expectedPrincipalId)
+    throw new Error('Plan verworfen: Die Kontoidentität wurde geändert oder ist noch nicht gebunden.')
+}
+
+function writablePrincipal(expectedPrincipalId?: string): string {
+  const principalId = expectedPrincipalId ?? planState.activePrincipalId
+  if (!principalId) throw new Error('Pläne benötigen eine gebundene Kontoidentität.')
+  assertPlanPrincipal(principalId)
+  return principalId
+}
+
+function principalPlans(principalId: string): Record<string, Plan> {
+  let plans = getSafeRecordValue(planState.byPrincipal, principalId)
+  if (!plans) {
+    plans = createSafeRecord<Plan>()
+    setSafeRecordValue(planState.byPrincipal, principalId, plans)
+  }
+  return plans
+}
 
 /* -------------------------------------------------
  * Helpers
@@ -71,8 +102,11 @@ export function emptyPlan(): Plan {
   return { steps: [], note: '', updatedAt: 0 }
 }
 
-export function getPlan(projectId: string): Plan {
-  return getSafeRecordValue(planState.byProject, projectId) ?? emptyPlan()
+export function getPlan(projectId: string, expectedPrincipalId?: string): Plan {
+  const principalId = planState.activePrincipalId
+  if (!principalId || (expectedPrincipalId !== undefined && principalId !== expectedPrincipalId)) return emptyPlan()
+  const plans = getSafeRecordValue(planState.byPrincipal, principalId)
+  return (plans && getSafeRecordValue(plans, projectId)) ?? emptyPlan()
 }
 
 export function planProgress(plan: Plan): { done: number; total: number; percent: number } {
@@ -151,11 +185,23 @@ export function normalizeSteps(input: unknown): PlanNormalizeResult {
 // Portable timer handle: this module must also load in a plain Node context
 // (unit tests, SSR-style tooling) where `window` does not exist.
 let saveTimer: ReturnType<typeof setTimeout> | null = null
+let loadPromise: Promise<void> | null = null
+let persistQueue: Promise<void> = Promise.resolve()
+// Includes deletion tombstones so a late disk read cannot resurrect a cleared plan.
+const modifiedPlans = new Set<string>()
+
+function planKey(principalId: string, projectId: string): string {
+  return JSON.stringify([principalId, projectId])
+}
 
 async function persist(): Promise<void> {
   try {
+    await loadPlans()
+    // A failed read must never turn a save into a replacement of unseen accounts.
+    if (!planState.loaded) return
+    const snapshot = JSON.parse(JSON.stringify(planState.byPrincipal)) as Record<string, Record<string, Plan>>
     const store = await Store.load(PLAN_STORE_FILE)
-    await store.set('byProject', planState.byProject)
+    await store.set('byPrincipal', snapshot)
     await store.save()
   } catch (error) {
     console.warn('[plan] persist failed:', error)
@@ -166,7 +212,7 @@ function schedulePersist(): void {
   if (saveTimer !== null) clearTimeout(saveTimer)
   saveTimer = setTimeout(() => {
     saveTimer = null
-    void persist()
+    persistQueue = persistQueue.then(persist)
   }, 400)
   // Never hold the Node process / test runner open for a debounce timer.
   ;(saveTimer as unknown as { unref?: () => void })?.unref?.()
@@ -175,22 +221,37 @@ function schedulePersist(): void {
 /** Restore persisted plans. Safe to call more than once. */
 export async function loadPlans(): Promise<void> {
   if (planState.loaded) return
-  planState.loaded = true
-  try {
-    const store = await Store.load(PLAN_STORE_FILE)
-    const stored = await store.get<Record<string, Plan>>('byProject')
-    if (!stored || typeof stored !== 'object') return
-    for (const [projectId, plan] of Object.entries(stored)) {
-      if (!isSafeRecordKey(projectId)) continue
-      const { steps } = normalizeSteps(plan?.steps)
-      setSafeRecordValue(planState.byProject, projectId, {
-        steps,
-        note: clip(plan?.note, MAX_NOTE),
-        updatedAt: Number(plan?.updatedAt) || 0,
-      })
+  if (loadPromise) return loadPromise
+  loadPromise = (async () => {
+    try {
+      const store = await Store.load(PLAN_STORE_FILE)
+      // Deliberately do not read, adopt or delete the legacy `byProject` key.
+      const stored = await store.get<Record<string, Record<string, Plan>>>('byPrincipal')
+      if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+        for (const [principalId, projects] of Object.entries(stored)) {
+          if (!isSafeRecordKey(principalId) || !projects || typeof projects !== 'object' || Array.isArray(projects))
+            continue
+          for (const [projectId, plan] of Object.entries(projects)) {
+            if (!isSafeRecordKey(projectId) || modifiedPlans.has(planKey(principalId, projectId))) continue
+            const { steps } = normalizeSteps(plan?.steps)
+            const updatedAt = Number(plan?.updatedAt)
+            setSafeRecordValue(principalPlans(principalId), projectId, {
+              steps,
+              note: clip(plan?.note, MAX_NOTE),
+              updatedAt: Number.isFinite(updatedAt) ? updatedAt : 0,
+            })
+          }
+        }
+      }
+      planState.loaded = true
+    } catch (error) {
+      console.warn('[plan] load failed:', error)
     }
-  } catch (error) {
-    console.warn('[plan] load failed:', error)
+  })()
+  try {
+    await loadPromise
+  } finally {
+    loadPromise = null
   }
 }
 
@@ -203,7 +264,13 @@ export type SetPlanResult = {
 }
 
 /** Replace the plan for a project, repairing invalid model input. */
-export function setPlan(projectId: string, steps: unknown, note?: unknown): SetPlanResult {
+export function setPlan(
+  projectId: string,
+  steps: unknown,
+  note?: unknown,
+  expectedPrincipalId?: string
+): SetPlanResult {
+  const principalId = writablePrincipal(expectedPrincipalId)
   if (!isSafeRecordKey(projectId)) throw new Error('Ungültige Projekt-ID.')
   const { steps: normalized, repairs } = normalizeSteps(steps)
   const plan: Plan = {
@@ -211,14 +278,18 @@ export function setPlan(projectId: string, steps: unknown, note?: unknown): SetP
     note: clip(note, MAX_NOTE),
     updatedAt: Date.now(),
   }
-  setSafeRecordValue(planState.byProject, projectId, plan)
+  modifiedPlans.add(planKey(principalId, projectId))
+  setSafeRecordValue(principalPlans(principalId), projectId, plan)
   schedulePersist()
   return { plan, repairs }
 }
 
 /** Remove the plan for a project (used by the UI "clear" affordance). */
-export function clearPlan(projectId: string): void {
-  deleteSafeRecordValue(planState.byProject, projectId)
+export function clearPlan(projectId: string, expectedPrincipalId?: string): void {
+  const principalId = writablePrincipal(expectedPrincipalId)
+  if (!isSafeRecordKey(projectId)) throw new Error('Ungültige Projekt-ID.')
+  modifiedPlans.add(planKey(principalId, projectId))
+  deleteSafeRecordValue(principalPlans(principalId), projectId)
   schedulePersist()
 }
 
@@ -226,8 +297,8 @@ export function clearPlan(projectId: string): void {
  * Compact plan text for the model's system context, so the plan survives
  * across turns without the model having to re-read tool history.
  */
-export function buildPlanContext(projectId: string): string {
-  const plan = getPlan(projectId)
+export function buildPlanContext(projectId: string, expectedPrincipalId?: string): string {
+  const plan = getPlan(projectId, expectedPrincipalId)
   if (!plan.steps.length) return ''
   const { done, total } = planProgress(plan)
   const glyph: Record<PlanStepStatus, string> = {

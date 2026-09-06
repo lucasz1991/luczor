@@ -4,6 +4,7 @@ import type { LuczorMode, WireMessage } from '@/services/inference/types'
 import { createChatActivity, finishChatActivity, updateChatActivity } from '@/services/chatActivity'
 import { parseEnvelope } from '@/services/envelope'
 import { compactHistory, normalizeConversationHistory, previewToolArguments } from '@/services/chatPresentation'
+import { executionGate } from '@/services/executionGate'
 import { emptyMiniSnapshot, type MiniAction, type MiniDecision, type MiniMessage } from './types'
 
 type Context = { project: { id: string; name: string } | null; mode: LuczorMode; mainBusy: boolean }
@@ -97,8 +98,17 @@ export function createMiniChatController(deps: Dependencies) {
     const project = { ...state.project }
     const sessionId = state.sessionId
     const current = new AbortController()
+    const turnExecution = executionGate.capture(current.signal)
     abort = current
-    const valid = () => state.sessionId === sessionId && abort === current && !current.signal.aborted
+    const valid = () => {
+      if (state.sessionId !== sessionId || abort !== current || turnExecution.signal.aborted) return false
+      try {
+        executionGate.assert(turnExecution)
+        return true
+      } catch {
+        return false
+      }
+    }
     state.busy = true
     state.notice = ''
     state.tools = []
@@ -152,7 +162,7 @@ export function createMiniChatController(deps: Dependencies) {
             description: `Einmalige Freigabe für ${project.name}.`,
             detail: tool.detail,
           },
-          current.signal
+          turnExecution.signal
         )
       },
     }
@@ -172,14 +182,15 @@ export function createMiniChatController(deps: Dependencies) {
         },
         ...compactHistory(normalizeConversationHistory(transcript), 2400),
       ]
+      executionGate.assert(turnExecution)
       const result = await deps.run({
         projectId: project.id,
         mode: state.mode,
         getMode: () => deps.context().mode,
         baseMessages,
-        externalBaseMessages: baseMessages,
-        contextEgress: 'external_allowed',
-        signal: current.signal,
+        contextEgress: 'local_only',
+        routingSettings: { preference: 'local_only' },
+        signal: turnExecution.signal,
         toolSession,
         onProgress(event) {
           if (valid() && assistant.activity) {
@@ -194,20 +205,8 @@ export function createMiniChatController(deps: Dependencies) {
             touch()
           }
         },
-        requestExternalApproval(summary) {
-          if (!valid()) return Promise.resolve(false)
-          return ask(
-            {
-              id: crypto.randomUUID(),
-              kind: 'external',
-              title: 'Externes Modell einmalig verwenden?',
-              description: 'Das lokale Modell ist für diese Anfrage nicht verfügbar.',
-              detail: `${summary.messageCount} Nachrichten · ${summary.characterCount} Zeichen\nZiel: ${summary.destination}\nOhne Tools · Paket ${summary.packetHash.slice(0, 16)}`,
-            },
-            current.signal
-          )
-        },
       })
+      executionGate.assert(turnExecution)
       if (!valid()) return
       const parsed = parseEnvelope(result.finalText)
       assistant.content = (parsed?.summary || result.finalText).slice(0, 16_000)
@@ -218,8 +217,8 @@ export function createMiniChatController(deps: Dependencies) {
       if (assistant.activity) finishChatActivity(assistant.activity, 'done')
     } catch (error) {
       if (state.sessionId !== sessionId || abort !== current) return
-      assistant.status = current.signal.aborted ? 'canceled' : 'failed'
-      assistant.content = current.signal.aborted
+      assistant.status = turnExecution.signal.aborted ? 'canceled' : 'failed'
+      assistant.content = turnExecution.signal.aborted
         ? 'Abgebrochen.'
         : `Die Anfrage konnte nicht abgeschlossen werden. ${error instanceof Error ? error.message : 'Bitte erneut versuchen.'}`.slice(
             0,
@@ -228,7 +227,7 @@ export function createMiniChatController(deps: Dependencies) {
       if (assistant.activity) finishChatActivity(assistant.activity, assistant.status)
     } finally {
       if (abort === current) {
-        if (current.signal.aborted && state.sessionId === sessionId) {
+        if (turnExecution.signal.aborted && state.sessionId === sessionId) {
           assistant.status = 'canceled'
           assistant.content ||= 'Abgebrochen.'
           if (assistant.activity) finishChatActivity(assistant.activity, 'canceled')

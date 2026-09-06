@@ -134,14 +134,14 @@ describe('browser tasks drive the in-app browser (SOLL P24)', () => {
       runtime
     )
     expect(runtime.browserOpen).toHaveBeenCalledWith('https://example.org')
-    expect(runtime.browserClick).toHaveBeenCalledWith('#go')
+    expect(runtime.browserClick).toHaveBeenCalledWith('#go', 'https://example.org')
     expect(result).toMatchObject({ ok: true, clicked: '#go' })
   })
 
   it('reads element text via the browser', async () => {
     const runtime = primitives({ browserRead: vi.fn(async () => ({ ok: true, text: 'headline', truncated: false })) })
     const result = await runWorkflowTask(bundle('browser.read', { selector: 'h1' }), runtime)
-    expect(runtime.browserRead).toHaveBeenCalledWith('h1')
+    expect(runtime.browserRead).toHaveBeenCalledWith('h1', undefined)
     expect(result).toMatchObject({ ok: true, text: 'headline' })
   })
 

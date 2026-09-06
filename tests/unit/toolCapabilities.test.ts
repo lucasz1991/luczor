@@ -16,12 +16,16 @@ const mutation: ToolCapability = {
   description: 'Write a project file',
   mutating: true,
   requiresApproval: true,
+  scope: 'project',
+  risk: 'critical',
+  effects: ['write'],
 }
 
 describe('visible capability permissions', () => {
   it('keeps sensitive reading behind approval when automatic writing is enabled', () => {
     expect(capabilityAccess(sensitiveRead, 'act', true, false)).toBe('approval')
-    expect(capabilityAccess(mutation, 'act', true, false)).toBe('automatic')
+    expect(capabilityAccess(mutation, 'act', true, false)).toBe('approval')
+    expect(capabilityAccess({ ...mutation, risk: 'low' }, 'act', true, false)).toBe('automatic')
     expect(capabilityAccess(mutation, 'act', false, false)).toBe('approval')
     expect(capabilityAccess(mutation, 'observe', true, false)).toBe('observe_locked')
   })

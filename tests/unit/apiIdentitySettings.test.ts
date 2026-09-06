@@ -27,6 +27,7 @@ function fixture() {
   const resume = vi.fn()
   const suspend = vi.fn(() => resume)
   const beforeChange = vi.fn(async (): Promise<void> => undefined)
+  const afterChange = vi.fn()
   const readIdentity = vi.fn(async () => ({ baseUrl: state.memoryBase, deviceKey: state.cachedKey }))
   const writeDeviceKey = vi.fn(async (value: string) => {
     // Every native/key-cache transition must be preceded by a durable disconnected URL.
@@ -58,8 +59,14 @@ function fixture() {
       state.diskBase = state.memoryBase
     }),
   }
-  const write = createApiIdentityWriter({ readIdentity, writeDeviceKey, suspendSpeech: suspend, beforeChange })
-  return { state, store, events, resume, suspend, write, readIdentity, writeDeviceKey, beforeChange }
+  const write = createApiIdentityWriter({
+    readIdentity,
+    writeDeviceKey,
+    suspendSpeech: suspend,
+    beforeChange,
+    afterChange,
+  })
+  return { state, store, events, resume, suspend, write, readIdentity, writeDeviceKey, beforeChange, afterChange }
 }
 
 describe('Settings API identity persistence', () => {
@@ -67,7 +74,9 @@ describe('Settings API identity persistence', () => {
     const events = new EventTarget()
     vi.stubGlobal('window', events)
     const boundary = vi.fn()
+    const changed = vi.fn()
     events.addEventListener('luczor:api-identity-changing', boundary)
+    events.addEventListener('luczor:api-identity-changed', changed)
     const store = { set: vi.fn(async () => undefined), save: vi.fn(async () => undefined) }
     vi.mocked(getApiConfig).mockResolvedValue({ baseUrl: originalBase, deviceKey: originalKey, clientId: 'client' })
     let resume!: () => void
@@ -83,8 +92,10 @@ describe('Settings API identity persistence', () => {
       const running = persistApiIdentity(store, nextBase, nextKey)
       await vi.waitFor(() => expect(boundary).toHaveBeenCalledOnce())
       expect(store.set).not.toHaveBeenCalled()
+      expect(changed).not.toHaveBeenCalled()
       resume()
       await expect(running).resolves.toBe(true)
+      expect(changed).toHaveBeenCalledOnce()
     } finally {
       vi.unstubAllGlobals()
     }
@@ -109,6 +120,19 @@ describe('Settings API identity persistence', () => {
     })
     expect(test.suspend).toHaveBeenCalledOnce()
     expect(test.beforeChange).toHaveBeenCalledOnce()
+    expect(test.afterChange).toHaveBeenCalledOnce()
+    expect(test.resume).toHaveBeenCalledOnce()
+  })
+
+  it('keeps a durably committed identity when a post-change observer fails', async () => {
+    const test = fixture()
+    test.afterChange.mockImplementationOnce(() => {
+      throw new Error('runtime observer failed')
+    })
+
+    await expect(test.write(test.store, nextBase, nextKey)).resolves.toBe(true)
+    expect(test.state).toMatchObject({ diskBase: nextBase, memoryBase: nextBase, nativeKey: nextKey })
+    expect(test.afterChange).toHaveBeenCalledOnce()
     expect(test.resume).toHaveBeenCalledOnce()
   })
 
@@ -134,6 +158,7 @@ describe('Settings API identity persistence', () => {
       cachedKey: '',
     })
     expect(test.resume).not.toHaveBeenCalled()
+    expect(test.afterChange).not.toHaveBeenCalled()
   })
 
   it('can safely retry the original pair after a partially written replacement key', async () => {
@@ -172,9 +197,11 @@ describe('Settings API identity persistence', () => {
       nativeKey: nextKey,
     })
     expect(test.resume).not.toHaveBeenCalled()
+    expect(test.afterChange).not.toHaveBeenCalled()
     await expect(test.write(test.store, nextBase, nextKey)).resolves.toBe(true)
     expect(test.state).toMatchObject({ diskBase: nextBase, memoryBase: nextBase, nativeKey: nextKey })
     expect(test.resume).toHaveBeenCalledOnce()
+    expect(test.afterChange).toHaveBeenCalledOnce()
   })
 
   it('retains the original pair and blocks speech if storage rejects every attempted write', async () => {

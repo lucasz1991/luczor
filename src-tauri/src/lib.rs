@@ -33,6 +33,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::execution::execution_gate_update,
+            commands::system::desktop_observe,
+            commands::codex::codex_job_list,
+            commands::codex::codex_session_list,
             commands::mini_chat::mini_chat_open,
             commands::mini_chat::mini_chat_action,
             commands::mini_chat::mini_chat_publish,
@@ -51,6 +55,7 @@ pub fn run() {
             commands::system::scroll,
             commands::system::hotkey,
             commands::system::open_url,
+            commands::system::open_user_link,
             commands::voice::local_stt,
             commands::voice::local_stt_rs,
             commands::voice::local_tts,
@@ -76,6 +81,7 @@ pub fn run() {
             commands::browser::browser_click,
             commands::browser::browser_read,
             commands::browser::browser_report,
+            commands::browser::browser_action_admit,
             commands::device_key::device_key_get,
             commands::device_key::device_key_set,
             commands::device_key::device_key_delete,

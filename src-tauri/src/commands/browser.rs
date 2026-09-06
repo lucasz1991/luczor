@@ -15,7 +15,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
@@ -24,10 +24,16 @@ const MAX_READ_CHARS: usize = 200_000;
 const MAX_READ_BYTES: usize = MAX_READ_CHARS * 4;
 const MAX_SELECTOR_CHARS: usize = 4_096;
 
+use super::execution::{admit, ExecutionLease, ExecutionOnly, Guarded};
 use super::{ensure_browser_webview, ensure_main_webview, BROWSER_WEBVIEW_LABEL};
 
 /// Bridge the page uses to hand text back to browser_read.
 const BRIDGE_SCRIPT: &str = r#"
+window.__luczorAuthorize = async function(id) {
+    var api = (window.__TAURI__ && window.__TAURI__.core) || window.__TAURI_INTERNALS__;
+    if (!api || !api.invoke) throw new Error('IPC unavailable');
+    return await api.invoke('browser_action_admit', {payload:{id:id}});
+};
 window.__luczorReport = function (id, text, truncated) {
   try {
     var api = (window.__TAURI__ && window.__TAURI__.core) || window.__TAURI_INTERNALS__;
@@ -45,6 +51,36 @@ struct ReportedText {
 fn pending() -> &'static Mutex<HashMap<String, mpsc::Sender<ReportedText>>> {
     static PENDING: OnceLock<Mutex<HashMap<String, mpsc::Sender<ReportedText>>>> = OnceLock::new();
     PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn action_permits() -> &'static Mutex<HashMap<String, ExecutionLease>> {
+    static ACTIONS: OnceLock<Mutex<HashMap<String, ExecutionLease>>> = OnceLock::new();
+    ACTIONS.get_or_init(Mutex::default)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BrowserAdmissionPayload {
+    id: String,
+}
+/// Remote pages can consume only a nonce for an already reviewed action;
+/// they cannot change mode, create an action, or access main-window commands.
+#[tauri::command]
+pub async fn browser_action_admit(
+    window: WebviewWindow,
+    payload: BrowserAdmissionPayload,
+) -> Result<u64, String> {
+    ensure_browser_webview(&window)?;
+    let lease = action_permits()
+        .lock()
+        .map_err(|_| "Browser admission unavailable.")?
+        .remove(&payload.id)
+        .ok_or("Browser action is missing, stale or already admitted.")?;
+    lease.check()?;
+    Ok(SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "Browser clock unavailable.")?
+        .as_millis() as u64
+        + 250)
 }
 
 fn valid_http_url(raw: &str) -> Result<String, String> {
@@ -78,15 +114,18 @@ pub struct BrowserOkResult {
 pub async fn browser_open(
     window: WebviewWindow,
     app: AppHandle,
-    payload: BrowserOpenPayload,
+    payload: Guarded<BrowserOpenPayload>,
 ) -> Result<BrowserOkResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, true)?;
+    let payload = payload.request;
     let target = match payload.url.as_deref() {
         Some(u) if !u.trim().is_empty() => valid_http_url(u)?,
         _ => "about:blank".to_string(),
     };
 
     if let Some(window) = app.get_webview_window(BROWSER_WEBVIEW_LABEL) {
+        gate.check()?;
         if target != "about:blank" {
             let url = tauri::Url::parse(&target).map_err(|e| format!("bad url: {e}"))?;
             window
@@ -106,6 +145,7 @@ pub async fn browser_open(
         WebviewUrl::External(tauri::Url::parse(&target).map_err(|e| format!("bad url: {e}"))?)
     };
 
+    gate.check()?;
     WebviewWindowBuilder::new(&app, BROWSER_WEBVIEW_LABEL, webview_url)
         .title("Luczor Browser")
         .inner_size(1024.0, 768.0)
@@ -129,14 +169,17 @@ pub struct BrowserNavigatePayload {
 pub async fn browser_navigate(
     window: WebviewWindow,
     app: AppHandle,
-    payload: BrowserNavigatePayload,
+    payload: Guarded<BrowserNavigatePayload>,
 ) -> Result<BrowserOkResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, true)?;
+    let payload = payload.request;
     let target = valid_http_url(&payload.url)?;
     let window = app
         .get_webview_window(BROWSER_WEBVIEW_LABEL)
         .ok_or("The in-app browser is not open.")?;
     let url = tauri::Url::parse(&target).map_err(|e| format!("bad url: {e}"))?;
+    gate.check()?;
     window
         .navigate(url)
         .map_err(|e| format!("navigate failed: {e}"))?;
@@ -151,9 +194,12 @@ pub async fn browser_navigate(
 pub async fn browser_close(
     window: WebviewWindow,
     app: AppHandle,
+    payload: ExecutionOnly,
 ) -> Result<BrowserOkResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, true)?;
     if let Some(window) = app.get_webview_window(BROWSER_WEBVIEW_LABEL) {
+        gate.check()?;
         window.close().map_err(|e| format!("close failed: {e}"))?;
     }
     Ok(BrowserOkResult {
@@ -182,16 +228,28 @@ fn js_string(value: &str) -> String {
 #[derive(Deserialize)]
 pub struct BrowserClickPayload {
     pub selector: String,
+    #[serde(rename = "expectedUrl")]
+    pub expected_url: Option<String>,
 }
 
-/// Click an element in the in-app browser (best-effort, fire-and-forget).
+#[derive(Serialize, Deserialize)]
+pub struct BrowserActionResult {
+    pub ok: bool,
+    pub matched: bool,
+    pub clicked: bool,
+    pub url: String,
+}
+
+/// A click is successful only after the page reports a matching visible target.
 #[tauri::command]
 pub async fn browser_click(
     window: WebviewWindow,
     app: AppHandle,
-    payload: BrowserClickPayload,
-) -> Result<BrowserOkResult, String> {
+    payload: Guarded<BrowserClickPayload>,
+) -> Result<BrowserActionResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, true)?;
+    let payload = payload.request;
     let selector = payload.selector.trim();
     if selector.is_empty() {
         return Err("selector is empty".into());
@@ -202,21 +260,55 @@ pub async fn browser_click(
     let window = app
         .get_webview_window(BROWSER_WEBVIEW_LABEL)
         .ok_or("The in-app browser is not open.")?;
+    let current_url = window
+        .url()
+        .map_err(|_| "Browser URL unavailable.")?
+        .to_string();
+    if payload
+        .expected_url
+        .as_ref()
+        .is_some_and(|url| url != &current_url)
+    {
+        return Err("Browser URL changed before the approved click.".into());
+    }
+    let id = request_id();
     let js = format!(
-        "(function(){{var el=document.querySelector('{}'); if(el){{el.click();}}}})();",
-        js_string(selector)
+        r#"(async function(){{
+      var report=function(ok,matched,clicked){{if(window.__luczorReport)window.__luczorReport('{id}',JSON.stringify({{ok:ok,matched:matched,clicked:clicked,url:location.href}}),false);}};
+      try{{var until=await window.__luczorAuthorize('{id}');if(Date.now()>until){{report(false,false,false);return;}}if(location.href!=='{url}'||document.readyState==='loading'){{report(false,false,false);return;}}
+      var nodes=document.querySelectorAll('{selector}');if(nodes.length!==1){{report(false,false,false);return;}}
+      var el=nodes[0],r=el.getBoundingClientRect(),s=getComputedStyle(el);
+      if(el.disabled||el.getAttribute('aria-disabled')==='true'||r.width<=0||r.height<=0||s.visibility!=='visible'||s.display==='none'||s.pointerEvents==='none'){{report(false,true,false);return;}}
+      var x=r.left+r.width/2,y=r.top+r.height/2,hit=document.elementFromPoint(x,y);
+      if(x<0||y<0||x>=innerWidth||y>=innerHeight||!hit||(hit!==el&&!el.contains(hit))){{report(false,true,false);return;}}
+      el.click();report(true,true,true);
+      }}catch(error){{report(false,false,false);}}
+    }})();"#,
+        id = js_string(&id),
+        url = js_string(&current_url),
+        selector = js_string(selector)
     );
-    window.eval(&js).map_err(|e| format!("click failed: {e}"))?;
-    Ok(BrowserOkResult {
-        ok: true,
-        url: None,
-    })
+    let report = correlated_eval(&window, id, &js, gate, Duration::from_secs(10), true).await?;
+    decode_click_report(report)
+}
+fn decode_click_report(report: ReportedText) -> Result<BrowserActionResult, String> {
+    if report.truncated {
+        return Err("Truncated browser click acknowledgement.".into());
+    }
+    let result: BrowserActionResult =
+        serde_json::from_str(&report.text).map_err(|_| "Invalid browser click acknowledgement.")?;
+    if !result.ok || !result.matched || !result.clicked {
+        return Err("Browser click was not performed: page not ready, selector missing/ambiguous, or element not actionable.".into());
+    }
+    Ok(result)
 }
 
 #[derive(Deserialize)]
 pub struct BrowserReadPayload {
     pub selector: Option<String>,
     pub timeout_seconds: Option<u64>,
+    #[serde(rename = "expectedUrl")]
+    pub expected_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -231,9 +323,11 @@ pub struct BrowserReadResult {
 pub async fn browser_read(
     window: WebviewWindow,
     app: AppHandle,
-    payload: BrowserReadPayload,
+    payload: Guarded<BrowserReadPayload>,
 ) -> Result<BrowserReadResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, false)?;
+    let payload = payload.request;
     let window = app
         .get_webview_window(BROWSER_WEBVIEW_LABEL)
         .ok_or("The in-app browser is not open.")?;
@@ -247,44 +341,121 @@ pub async fn browser_read(
         return Err("selector is invalid or too long".into());
     }
     let timeout = Duration::from_secs(payload.timeout_seconds.unwrap_or(10).clamp(1, 60));
-
+    let current_url = window
+        .url()
+        .map_err(|_| "Browser URL unavailable.")?
+        .to_string();
+    if payload
+        .expected_url
+        .as_ref()
+        .is_some_and(|url| url != &current_url)
+    {
+        return Err("Browser URL changed before read.".into());
+    }
     let id = request_id();
+    let js = format!(
+        "(function(){{try{{var el=document.querySelector('{sel}'); var t=String(el?(el.innerText||el.textContent||''):''); if(window.__luczorReport) window.__luczorReport('{id}', JSON.stringify({{found:!!el,url:location.href,text:t.slice(0,{max})}}), t.length>{max});}}catch(e){{if(window.__luczorReport)window.__luczorReport('{id}',JSON.stringify({{found:false,url:location.href,text:''}}),false);}}}})();",
+        sel = js_string(&selector), id = js_string(&id), max = MAX_READ_CHARS / 2,
+    );
+    let report = correlated_eval(&window, id, &js, gate, timeout, false).await?;
+    decode_read_report(report, &current_url)
+}
+fn decode_read_report(
+    report: ReportedText,
+    current_url: &str,
+) -> Result<BrowserReadResult, String> {
+    let data: serde_json::Value =
+        serde_json::from_str(&report.text).map_err(|_| "Invalid browser read acknowledgement.")?;
+    if data.get("found").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(
+            "The requested browser selector was not found; no fallback content was returned."
+                .into(),
+        );
+    }
+    if data.get("url").and_then(serde_json::Value::as_str) != Some(current_url) {
+        return Err("Browser navigated during read; result discarded.".into());
+    }
+    let text = data
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("Browser read did not return text.")?
+        .to_string();
+    Ok(BrowserReadResult {
+        ok: true,
+        text,
+        truncated: report.truncated,
+    })
+}
+
+async fn correlated_eval(
+    window: &WebviewWindow,
+    id: String,
+    js: &str,
+    gate: ExecutionLease,
+    timeout: Duration,
+    authorize: bool,
+) -> Result<ReportedText, String> {
     let (tx, rx) = mpsc::channel::<ReportedText>();
     pending()
         .lock()
         .map_err(|_| "lock poisoned")?
         .insert(id.clone(), tx);
 
-    let js = format!(
-        "(function(){{var el=document.querySelector('{sel}')||document.body; var t=String(el?(el.innerText||el.textContent||''):''); if(window.__luczorReport) window.__luczorReport('{id}', t.slice(0,{max}), t.length>{max});}})();",
-        sel = js_string(&selector),
-        id = js_string(&id),
-        max = MAX_READ_CHARS,
-    );
-    if let Err(e) = window.eval(&js) {
+    if authorize {
+        action_permits()
+            .lock()
+            .map_err(|_| "Browser admission unavailable.")?
+            .insert(id.clone(), gate.clone());
+    }
+    if let Err(error) = gate.check() {
+        action_permits()
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(&id));
+        pending().lock().ok().and_then(|mut map| map.remove(&id));
+        return Err(error);
+    }
+    if let Err(e) = window.eval(js) {
+        action_permits()
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(&id));
         pending().lock().ok().and_then(|mut m| m.remove(&id));
         return Err(format!("read eval failed: {e}"));
     }
 
     let id_for_wait = id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || rx.recv_timeout(timeout))
-        .await
-        .map_err(|e| format!("join failed: {e}"))?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let deadline = Instant::now() + timeout;
+        loop {
+            gate.check()?;
+            match rx.recv_timeout(Duration::from_millis(40)) {
+                Ok(report) => {
+                    gate.check()?;
+                    return Ok(report);
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
+                Err(_) => {
+                    return Err(
+                        "The browser did not acknowledge the action before its deadline."
+                            .to_string(),
+                    )
+                }
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("join failed: {e}"));
     pending()
         .lock()
         .ok()
         .and_then(|mut m| m.remove(&id_for_wait));
+    action_permits()
+        .lock()
+        .ok()
+        .and_then(|mut map| map.remove(&id_for_wait));
 
-    match result {
-        Ok(report) => Ok(BrowserReadResult {
-            ok: true,
-            text: report.text,
-            truncated: report.truncated,
-        }),
-        Err(_) => Err(
-            "The page did not report content in time (IPC may be disabled for this origin).".into(),
-        ),
-    }
+    result?
 }
 
 #[derive(Deserialize)]
@@ -333,6 +504,42 @@ mod tests {
         complete_report, js_string, pending, valid_http_url, BrowserReportPayload, MAX_READ_CHARS,
     };
     use std::sync::mpsc;
+
+    #[test]
+    fn acknowledgements_reject_missing_targets_stale_reads_and_false_clicks() {
+        use super::{decode_click_report, decode_read_report, ReportedText};
+        let report = |text: &str| ReportedText {
+            text: text.into(),
+            truncated: false,
+        };
+        assert!(decode_click_report(report(
+            r#"{"ok":true,"matched":false,"clicked":false,"url":"https://example.org/"}"#
+        ))
+        .is_err());
+        assert!(decode_click_report(report(
+            r#"{"ok":true,"matched":true,"clicked":true,"url":"https://example.org/"}"#
+        ))
+        .is_ok());
+        assert!(decode_read_report(
+            report(r#"{"found":false,"url":"https://example.org/","text":""}"#),
+            "https://example.org/"
+        )
+        .is_err());
+        assert!(decode_read_report(
+            report(r#"{"found":true,"url":"https://other.org/","text":"wrong page"}"#),
+            "https://example.org/"
+        )
+        .is_err());
+        assert_eq!(
+            decode_read_report(
+                report(r#"{"found":true,"url":"https://example.org/","text":""}"#),
+                "https://example.org/"
+            )
+            .unwrap()
+            .text,
+            ""
+        );
+    }
 
     #[test]
     fn url_validation_rejects_non_http() {

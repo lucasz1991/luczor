@@ -1,5 +1,5 @@
 import { redactAbsoluteFilesystemPaths, redactProviderSecrets } from '@/services/prompt/promptContextAssembler'
-import type { InferenceTarget } from '@/services/inference/types'
+import type { InferenceTarget, WireMessage } from '@/services/inference/types'
 
 export type ContextScopeKey = {
   principalId: string
@@ -105,11 +105,44 @@ function audienceFor(target: InferenceTarget): ContextAudience {
   return target === 'local_llama_cpp' ? 'local_model' : 'external_provider'
 }
 
-function sanitizeContent(value: string, maxChars: number): string {
-  return redactAbsoluteFilesystemPaths(redactProviderSecrets(String(value ?? '')))
+export function sanitizeTextForInferenceTarget(value: string, target: InferenceTarget): string {
+  const withoutSecrets = redactProviderSecrets(String(value ?? ''))
+  return (target === 'laravel_proxy' ? redactAbsoluteFilesystemPaths(withoutSecrets) : withoutSecrets)
     .replace(/\0/g, '')
     .trim()
-    .slice(0, maxChars)
+}
+
+/** Sanitizes the complete wire history, including tool-call arguments, for its actual target. */
+export function sanitizeInferenceMessagesForTarget(
+  messages: readonly WireMessage[],
+  target: InferenceTarget
+): WireMessage[] {
+  return messages.map(message => {
+    const content = sanitizeTextForInferenceTarget(message.content, target)
+    if (message.role === 'assistant' && message.tool_calls) {
+      return {
+        ...message,
+        content,
+        tool_calls: message.tool_calls.map(call => ({
+          ...call,
+          function: {
+            ...call.function,
+            arguments: sanitizeTextForInferenceTarget(call.function.arguments, target),
+          },
+        })),
+      }
+    }
+    return { ...message, content }
+  })
+}
+
+function sanitizeContent(value: string, maxChars: number, target: InferenceTarget): string {
+  return sanitizeTextForInferenceTarget(value, target).slice(0, maxChars)
+}
+
+async function sha256(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
 }
 
 function canonical(value: string): string {
@@ -139,7 +172,7 @@ function render(fragment: ScopedContextFragment, content: string): string {
  * may contain local-only private context, but never a secret/candidate or a
  * fragment from another principal/server/project/session.
  */
-export function buildScopedContextPackage(request: ContextBrokerRequest): ContextPackage {
+export async function buildScopedContextPackage(request: ContextBrokerRequest): Promise<ContextPackage> {
   const budget = normalizeBudget(request)
   const approved = new Set(request.approvedEgressIds ?? [])
   const audience = audienceFor(request.target)
@@ -167,7 +200,7 @@ export function buildScopedContextPackage(request: ContextBrokerRequest): Contex
       continue
     }
 
-    const content = sanitizeContent(fragment.content, budget.maxFragmentChars)
+    const content = sanitizeContent(fragment.content, budget.maxFragmentChars, request.target)
     if (!content) {
       omitted.push({ id: fragment.id, reason: 'empty' })
       continue
@@ -195,7 +228,7 @@ export function buildScopedContextPackage(request: ContextBrokerRequest): Contex
       continue
     }
     lines.push(line)
-    selected.push({ id: fragment.id, contentHash: fragment.contentHash })
+    selected.push({ id: fragment.id, contentHash: await sha256(content) })
     seen.add(fingerprint)
   }
 
@@ -216,4 +249,31 @@ export function buildScopedContextPackage(request: ContextBrokerRequest): Contex
     charCount: text.length,
     budget,
   }
+}
+
+export type TargetContextPackages = {
+  local: ContextPackage
+  external: ContextPackage
+}
+
+/** Builds both immutable egress views from the same scoped source fragments. */
+export async function buildTargetContextPackages(
+  request: Omit<ContextBrokerRequest, 'target' | 'approvedEgressIds'> & {
+    approvedExternalEgressIds?: readonly string[]
+  }
+): Promise<TargetContextPackages> {
+  const common = {
+    scopeKey: request.scopeKey,
+    fragments: request.fragments,
+    budget: request.budget,
+  }
+  const [local, external] = await Promise.all([
+    buildScopedContextPackage({ ...common, target: 'local_llama_cpp' }),
+    buildScopedContextPackage({
+      ...common,
+      target: 'laravel_proxy',
+      approvedEgressIds: request.approvedExternalEgressIds,
+    }),
+  ])
+  return { local, external }
 }

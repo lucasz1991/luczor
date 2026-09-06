@@ -18,6 +18,8 @@
 
 import { Store } from '@tauri-apps/plugin-store'
 import { loadDeviceKey, saveDeviceKey } from '@/services/secureDeviceKey'
+import { DEFAULT_API_BASE_URL } from './endpoint'
+import { apiTransportInput } from './transportTarget'
 
 const SETTINGS_FILE = 'luczor.settings.json'
 const API_PREFIX = '/api/v1'
@@ -25,7 +27,7 @@ const MAX_API_RESPONSE_BYTES = 5 * 1024 * 1024
 export const DEFAULT_FETCH_TIMEOUT_MS = 10_000
 
 /** Production API. Always used when the user has not set a custom URL. */
-export const DEFAULT_BASE_URL = 'https://luczor.follow-flow.de'
+export const DEFAULT_BASE_URL = DEFAULT_API_BASE_URL
 
 /* =========================================================
  * Response/request types (match admin_api_app controllers)
@@ -230,12 +232,14 @@ export function isConfigured(cfg: LuczorApiConfig): boolean {
 export class LuczorApiError extends Error {
   status: number
   correlationId?: string
+  code?: string
 
-  constructor(status: number, message: string, correlationId?: string) {
+  constructor(status: number, message: string, correlationId?: string, code?: unknown) {
     super(message)
     this.name = 'LuczorApiError'
     this.status = status
     this.correlationId = correlationId
+    this.code = typeof code === 'string' && /^[a-z][a-z0-9_]{0,127}$/.test(code) ? code : undefined
   }
 }
 
@@ -291,7 +295,10 @@ export async function fetchWithTimeout(
   const deadline = abortDeadline(init.signal, timeoutMs)
 
   try {
-    return await Promise.race([fetch(input, { ...init, signal: deadline.signal }), deadline.cancellation])
+    return await Promise.race([
+      fetch(apiTransportInput(input), { ...init, signal: deadline.signal }),
+      deadline.cancellation,
+    ])
   } finally {
     deadline.dispose()
   }
@@ -377,7 +384,7 @@ export async function fetchBoundedResponseWithTimeout(
   const deadline = abortDeadline(init.signal, timeoutMs)
   try {
     const operation = (async () => {
-      const response = await fetch(input, { ...init, signal: deadline.signal })
+      const response = await fetch(apiTransportInput(input), { ...init, signal: deadline.signal })
       const text = await readBoundedResponseText(response, maxBytes, deadline.signal)
       return { response, text }
     })()
@@ -608,6 +615,7 @@ async function requestWithConfig<T>(path: string, opts: RequestOptions, cfg: Luc
         body: opts.body != null ? JSON.stringify(opts.body) : undefined,
         signal: opts.signal,
         redirect: 'error',
+        credentials: 'omit',
       },
       DEFAULT_FETCH_TIMEOUT_MS,
       MAX_API_RESPONSE_BYTES
@@ -655,7 +663,8 @@ async function requestWithConfig<T>(path: string, opts: RequestOptions, cfg: Luc
     throw new LuczorApiError(
       res.status,
       json?.message ?? `HTTP ${res.status}: ${text || res.statusText}`,
-      correlationId
+      correlationId,
+      json?.code
     )
   }
   return json as T

@@ -453,6 +453,7 @@ function decodeEnvelope(input: unknown): {
 export function isExecutableLocalModel(model: LocalModelReleaseManifest): boolean {
   const policy = model.capacityPolicy
   return !!(
+    model.enabled &&
     model.executionTarget === 'local_llama_cpp' &&
     model.artifact &&
     model.runtime &&

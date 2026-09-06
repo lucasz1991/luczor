@@ -16,6 +16,7 @@ use serde_json::Value;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 use super::ensure_main_webview;
+use super::execution::{admit, ExecutionLease, Guarded};
 use super::process::run_bounded_command;
 use super::project_workspace::agent_workspace_snapshot;
 
@@ -25,7 +26,7 @@ const MAX_OUTPUT: usize = 200_000;
 const MAX_LINE: usize = 512_000;
 const MAX_ERROR: usize = 8_000;
 
-static WORKSPACE_LEASES: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+static WORKSPACE_LEASES: OnceLock<Mutex<HashMap<String, (PathBuf, bool)>>> = OnceLock::new();
 
 /// Shared with the legacy CLI entry point so a device job cannot race a
 /// managed coding agent in the same directory or any parent/child directory.
@@ -33,19 +34,21 @@ pub(crate) struct WorkspaceLease {
     id: String,
 }
 
-pub(crate) fn acquire_workspace_lease(root: &Path) -> Result<WorkspaceLease, String> {
+pub(crate) fn acquire_workspace_lease(
+    root: &Path,
+    writing: bool,
+) -> Result<WorkspaceLease, String> {
     let mut leases = WORKSPACE_LEASES
         .get_or_init(Mutex::default)
         .lock()
         .map_err(|_| "Coding-agent workspace leases unavailable.")?;
-    if leases
-        .values()
-        .any(|active| workspaces_overlap(active, root))
-    {
+    if leases.values().any(|(active, active_write)| {
+        (*active_write || writing) && workspaces_overlap(active, root)
+    }) {
         return Err("Another coding agent is already running in this workspace or an overlapping directory.".into());
     }
     let id = uuid::Uuid::new_v4().to_string();
-    leases.insert(id.clone(), root.to_path_buf());
+    leases.insert(id.clone(), (root.to_path_buf(), writing));
     Ok(WorkspaceLease { id })
 }
 
@@ -59,9 +62,22 @@ impl Drop for WorkspaceLease {
     }
 }
 
-#[derive(Default)]
 pub struct CodexJobs {
     entries: Mutex<HashMap<String, Arc<Job>>>,
+    runtime_id: String,
+}
+impl Default for CodexJobs {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::default(),
+            runtime_id: format!(
+                "{}:{}:{}",
+                std::process::id(),
+                process_stamp(std::process::id()).unwrap_or(0),
+                uuid::Uuid::new_v4()
+            ),
+        }
+    }
 }
 
 struct Job {
@@ -70,6 +86,10 @@ struct Job {
     root: PathBuf,
     binding_version: i64,
     cancel: AtomicBool,
+    writing: bool,
+    execution: Option<ExecutionLease>,
+    database: Option<PathBuf>,
+    runtime_id: String,
     snapshot: Mutex<CodexJobSnapshot>,
 }
 
@@ -133,6 +153,8 @@ pub struct CodexJobPayload {
 #[serde(rename_all = "camelCase")]
 pub struct CodexJobSnapshot {
     id: String,
+    principal_id: String,
+    project_id: String,
     status: String,
     external_thread_id: Option<String>,
     output: String,
@@ -317,9 +339,12 @@ pub async fn codex_job_start(
     app: AppHandle,
     window: WebviewWindow,
     state: State<'_, CodexJobs>,
-    payload: CodexStartPayload,
+    payload: Guarded<CodexStartPayload>,
 ) -> Result<CodexJobSnapshot, String> {
     ensure_main_webview(&window)?;
+    let writing = matches!(payload.permission, CodexPermission::WorkspaceWrite);
+    let execution = admit(&payload.execution, writing)?;
+    let payload = payload.request;
     validate_start(&payload)?;
     let (root, binding_version) =
         agent_workspace_snapshot(&app, &payload.principal_id, &payload.project_id)?;
@@ -331,10 +356,11 @@ pub async fn codex_job_start(
     )?;
     let executable = find_codex().ok_or("Codex CLI executable was not found in PATH.")?;
     let database = link_database_path(&app)?;
+    ensure_no_foreign_runtime(&database, &state.runtime_id)?;
     if let Some(thread_id) = &payload.external_thread_id {
         verify_link(&database, &payload, &root, binding_version, thread_id)?;
     }
-    let lease = acquire_workspace_lease(&root)?;
+    let lease = acquire_workspace_lease(&root, writing)?;
     let mut entries = state
         .entries
         .lock()
@@ -358,9 +384,18 @@ pub async fn codex_job_start(
     }
     if active
         .iter()
-        .any(|job| workspaces_overlap(&job.root, &root))
+        .any(|job| (job.writing || writing) && workspaces_overlap(&job.root, &root))
     {
         return Err("A Codex job is already running in this workspace.".into());
+    }
+    if payload.external_thread_id.as_ref().is_some_and(|thread| {
+        active.iter().any(|job| {
+            job.snapshot.lock().map_or(true, |snapshot| {
+                snapshot.external_thread_id.as_ref() == Some(thread)
+            })
+        })
+    }) {
+        return Err("The managed Codex session already has an active turn; parallel readers need separate sessions.".into());
     }
     if entries.len() >= MAX_JOBS {
         let oldest = entries
@@ -377,6 +412,8 @@ pub async fn codex_job_start(
     }
     let initial = CodexJobSnapshot {
         id: uuid::Uuid::new_v4().to_string(),
+        principal_id: payload.principal_id.clone(),
+        project_id: payload.project_id.clone(),
         status: "starting".into(),
         external_thread_id: payload.external_thread_id.clone(),
         output: String::new(),
@@ -394,8 +431,14 @@ pub async fn codex_job_start(
         root,
         binding_version,
         cancel: AtomicBool::new(false),
+        writing,
+        execution: Some(execution),
+        database: Some(database.clone()),
+        runtime_id: state.runtime_id.clone(),
         snapshot: Mutex::new(initial.clone()),
     });
+    check_execution(&job)?;
+    persist_job_admitted(&database, &state.runtime_id, &initial)?;
     entries.insert(initial.id.clone(), Arc::clone(&job));
     drop(entries);
     thread::spawn(move || {
@@ -410,12 +453,27 @@ pub async fn codex_job_start(
 
 #[tauri::command]
 pub async fn codex_job_status(
+    app: AppHandle,
     window: WebviewWindow,
     state: State<'_, CodexJobs>,
     payload: CodexJobPayload,
 ) -> Result<CodexJobSnapshot, String> {
     ensure_main_webview(&window)?;
-    let job = owned_job(&state, &payload)?;
+    let job = match owned_job(&state, &payload) {
+        Ok(job) => job,
+        Err(error) => {
+            let rows = load_jobs(
+                &link_database_path(&app)?,
+                &state.runtime_id,
+                &payload.principal_id,
+                Some(&payload.project_id),
+            )?;
+            return rows
+                .into_iter()
+                .find(|row| row.id == payload.job_id)
+                .ok_or(error);
+        }
+    };
     let result = job
         .snapshot
         .lock()
@@ -426,12 +484,27 @@ pub async fn codex_job_status(
 
 #[tauri::command]
 pub async fn codex_job_cancel(
+    app: AppHandle,
     window: WebviewWindow,
     state: State<'_, CodexJobs>,
     payload: CodexJobPayload,
 ) -> Result<CodexJobSnapshot, String> {
     ensure_main_webview(&window)?;
-    let job = owned_job(&state, &payload)?;
+    let job = match owned_job(&state, &payload) {
+        Ok(job) => job,
+        Err(error) => {
+            let rows = load_jobs(
+                &link_database_path(&app)?,
+                &state.runtime_id,
+                &payload.principal_id,
+                Some(&payload.project_id),
+            )?;
+            return rows
+                .into_iter()
+                .find(|row| row.id == payload.job_id)
+                .ok_or(error);
+        }
+    };
     let mut snapshot = job
         .snapshot
         .lock()
@@ -441,6 +514,253 @@ pub async fn codex_job_cancel(
         snapshot.status = "cancelling".into();
     }
     Ok(snapshot.clone())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CodexListPayload {
+    principal_id: String,
+    project_id: Option<String>,
+}
+
+#[tauri::command]
+pub async fn codex_job_list(
+    app: AppHandle,
+    window: WebviewWindow,
+    state: State<'_, CodexJobs>,
+    payload: CodexListPayload,
+) -> Result<Vec<CodexJobSnapshot>, String> {
+    ensure_main_webview(&window)?;
+    let mut history = load_jobs(
+        &link_database_path(&app)?,
+        &state.runtime_id,
+        &payload.principal_id,
+        payload.project_id.as_deref(),
+    )?;
+    let entries = state
+        .entries
+        .lock()
+        .map_err(|_| "Agent job state unavailable.")?;
+    for job in entries.values().filter(|job| {
+        job.principal_id == payload.principal_id
+            && payload
+                .project_id
+                .as_ref()
+                .is_none_or(|project| &job.project_id == project)
+    }) {
+        let live = job
+            .snapshot
+            .lock()
+            .map_err(|_| "Agent job state unavailable.")?
+            .clone();
+        history.retain(|row| row.id != live.id);
+        history.push(live);
+    }
+    history.sort_by_key(|row| std::cmp::Reverse(row.created_at));
+    history.truncate(200);
+    Ok(history)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CodexSessionsPayload {
+    principal_id: String,
+    project_id: String,
+    expected_root_path: String,
+    expected_workspace_updated_at: i64,
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexSession {
+    thread_id: String,
+    updated_at: Option<u64>,
+}
+
+#[tauri::command]
+pub async fn codex_session_list(
+    app: AppHandle,
+    window: WebviewWindow,
+    payload: CodexSessionsPayload,
+) -> Result<Vec<CodexSession>, String> {
+    ensure_main_webview(&window)?;
+    let (root, version) =
+        agent_workspace_snapshot(&app, &payload.principal_id, &payload.project_id)?;
+    verify_expected_binding(
+        &root,
+        version,
+        &payload.expected_root_path,
+        payload.expected_workspace_updated_at,
+    )?;
+    let connection = open_links(&link_database_path(&app)?)?;
+    let mut statement = connection.prepare("SELECT l.thread_id,t.updated_at FROM codex_links l LEFT JOIN codex_session_times t ON t.thread_id=l.thread_id WHERE l.principal_id=?1 AND l.project_id=?2 AND l.root_path=?3 AND l.binding_version=?4 ORDER BY t.updated_at DESC LIMIT 200").map_err(|_| "Managed sessions unavailable.")?;
+    let rows = statement
+        .query_map(
+            params![
+                payload.principal_id,
+                payload.project_id,
+                root.to_string_lossy(),
+                version
+            ],
+            |row| {
+                Ok(CodexSession {
+                    thread_id: row.get(0)?,
+                    updated_at: row.get::<_, Option<i64>>(1)?.map(|n| n.max(0) as u64),
+                })
+            },
+        )
+        .map_err(|_| "Managed sessions unavailable.")?;
+    rows.filter_map(|row| match row {
+        Ok(session)
+            if uuid::Uuid::parse_str(&session.thread_id)
+                .is_ok_and(|id| id.to_string() == session.thread_id) =>
+        {
+            Some(Ok(session))
+        }
+        Ok(_) => None,
+        Err(_) => Some(Err("Managed sessions unavailable.".into())),
+    })
+    .collect()
+}
+
+// Only metadata survives restart. Prompts, output, errors, command text and
+// project roots are deliberately absent from this table.
+fn persist_job(path: &Path, runtime_id: &str, row: &CodexJobSnapshot) -> Result<(), String> {
+    let connection = open_links(path)?;
+    write_job_metadata(&connection, runtime_id, row)
+}
+fn persist_job_admitted(
+    path: &Path,
+    runtime_id: &str,
+    row: &CodexJobSnapshot,
+) -> Result<(), String> {
+    let mut connection = open_links(path)?;
+    let transaction = connection
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|_| "Agent runtime admission unavailable.")?;
+    reconcile_jobs(&transaction, runtime_id)?;
+    let foreign:bool=transaction.query_row("SELECT EXISTS(SELECT 1 FROM codex_jobs WHERE runtime_id<>?1 AND status NOT IN ('completed','failed','cancelled','timed_out','interrupted'))",[runtime_id],|r|r.get(0)).map_err(|_|"Agent runtime admission unavailable.")?;
+    if foreign {
+        return Err("Another Luczor process owns active Codex jobs.".into());
+    }
+    write_job_metadata(&transaction, runtime_id, row)?;
+    transaction
+        .commit()
+        .map_err(|_| "Agent runtime admission could not be saved.".into())
+}
+fn write_job_metadata(
+    connection: &Connection,
+    runtime_id: &str,
+    row: &CodexJobSnapshot,
+) -> Result<(), String> {
+    connection.execute("INSERT INTO codex_jobs(id,principal_id,project_id,runtime_id,status,external_thread_id,output_truncated,created_at,finished_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET status=excluded.status,external_thread_id=excluded.external_thread_id,output_truncated=excluded.output_truncated,finished_at=excluded.finished_at", params![row.id,row.principal_id,row.project_id,runtime_id,row.status,row.external_thread_id,row.output_truncated,row.created_at as i64,row.finished_at.map(|n|n as i64)]).map_err(|_| "Agent job metadata could not be saved.")?;
+    connection.execute("DELETE FROM codex_jobs WHERE status IN ('completed','failed','cancelled','timed_out','interrupted') AND id NOT IN (SELECT id FROM codex_jobs ORDER BY created_at DESC LIMIT 1000)", []).map_err(|_| "Agent job history cleanup failed.")?;
+    Ok(())
+}
+fn persist_current(job: &Job) {
+    if let (Some(path), Ok(snapshot)) = (&job.database, job.snapshot.lock()) {
+        let _ = persist_job(path, &job.runtime_id, &snapshot);
+    }
+}
+fn reconcile_jobs(connection: &Connection, runtime_id: &str) -> Result<(), String> {
+    let mut statement = connection.prepare("SELECT DISTINCT runtime_id FROM codex_jobs WHERE status NOT IN ('completed','failed','cancelled','timed_out','interrupted') AND runtime_id<>?1").map_err(|_| "Agent job reconciliation unavailable.")?;
+    let runtimes = statement
+        .query_map([runtime_id], |row| row.get::<_, String>(0))
+        .map_err(|_| "Agent job reconciliation unavailable.")?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "Agent job reconciliation unavailable.")?;
+    for old in runtimes.into_iter().filter(|old| !runtime_alive(old)) {
+        connection.execute("UPDATE codex_jobs SET status='interrupted',finished_at=?2 WHERE runtime_id=?1 AND status NOT IN ('completed','failed','cancelled','timed_out','interrupted')",params![old,now_ms() as i64]).map_err(|_| "Agent job reconciliation failed.")?;
+    }
+    Ok(())
+}
+fn ensure_no_foreign_runtime(path: &Path, runtime_id: &str) -> Result<(), String> {
+    let connection = open_links(path)?;
+    reconcile_jobs(&connection, runtime_id)?;
+    let active: bool = connection.query_row("SELECT EXISTS(SELECT 1 FROM codex_jobs WHERE runtime_id<>?1 AND status NOT IN ('completed','failed','cancelled','timed_out','interrupted'))",[runtime_id],|row|row.get(0)).map_err(|_| "Agent runtime ownership unavailable.")?;
+    if active {
+        Err(
+            "Another Luczor process owns active Codex jobs. Stop them in that app instance first."
+                .into(),
+        )
+    } else {
+        Ok(())
+    }
+}
+fn load_jobs(
+    path: &Path,
+    runtime_id: &str,
+    principal: &str,
+    project: Option<&str>,
+) -> Result<Vec<CodexJobSnapshot>, String> {
+    let connection = open_links(path)?;
+    reconcile_jobs(&connection, runtime_id)?;
+    let mut statement = connection.prepare("SELECT id,principal_id,project_id,status,external_thread_id,output_truncated,created_at,finished_at FROM codex_jobs WHERE principal_id=?1 AND (?2 IS NULL OR project_id=?2) ORDER BY created_at DESC LIMIT 200").map_err(|_| "Agent job history unavailable.")?;
+    let rows = statement
+        .query_map(params![principal, project], |row| {
+            let status: String = row.get(3)?;
+            Ok(CodexJobSnapshot {
+                id: row.get(0)?,
+                principal_id: row.get(1)?,
+                project_id: row.get(2)?,
+                error: (status == "interrupted").then(|| {
+                    "The owning app process ended; no job was automatically resumed.".into()
+                }),
+                status,
+                external_thread_id: row.get(4)?,
+                output_truncated: row.get(5)?,
+                created_at: row.get::<_, i64>(6)?.max(0) as u64,
+                finished_at: row.get::<_, Option<i64>>(7)?.map(|n| n.max(0) as u64),
+                output: String::new(),
+                events: vec![],
+                turn_completed: false,
+                turn_failed: false,
+            })
+        })
+        .map_err(|_| "Agent job history unavailable.")?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|_| "Agent job history unavailable.".into())
+}
+fn runtime_alive(runtime: &str) -> bool {
+    let mut parts = runtime.split(':');
+    let Some(pid) = parts.next().and_then(|part| part.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(started) = parts.next().and_then(|part| part.parse::<u64>().ok()) else {
+        return false;
+    };
+    process_stamp(pid) == Some(started)
+}
+#[cfg(windows)]
+fn process_stamp(pid: u32) -> Option<u64> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, FILETIME},
+        System::Threading::{
+            GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        },
+    };
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            return None;
+        }
+        let mut created = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
+        let mut exited = created;
+        let mut kernel = created;
+        let mut user = created;
+        let mut code = 0;
+        let ok = GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user) != 0
+            && GetExitCodeProcess(handle, &mut code) != 0
+            && code == 259;
+        CloseHandle(handle);
+        ok.then_some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    }
+}
+#[cfg(not(windows))]
+fn process_stamp(_pid: u32) -> Option<u64> {
+    None
 }
 
 fn owned_job(state: &CodexJobs, payload: &CodexJobPayload) -> Result<Arc<Job>, String> {
@@ -564,6 +884,7 @@ fn run_job(
         finish(job, "cancelled", None);
         return Ok(());
     }
+    check_execution(job)?;
     ensure_binding(app, job)?;
     let mut command = Command::new(executable);
     command
@@ -592,7 +913,7 @@ fn run_job(
         finish(job, "cancelled", None);
         return Ok(());
     }
-    if let Err(error) = ensure_binding(app, job) {
+    if let Err(error) = check_execution(job).and_then(|_| ensure_binding(app, job)) {
         drop(lifetime);
         let _ = child.wait();
         return Err(error);
@@ -602,11 +923,12 @@ fn run_job(
             snapshot.status = "running".into();
         }
     }
+    persist_current(job);
     let mut stdin = child.stdin.take().ok_or("Codex stdin unavailable.")?;
     let prompt = payload.prompt.as_bytes().to_vec();
     let input_job = Arc::clone(job);
     let input = thread::spawn(move || {
-        if input_job.cancel.load(Ordering::Acquire) {
+        if input_job.cancel.load(Ordering::Acquire) || check_execution(&input_job).is_err() {
             return Ok(());
         }
         stdin.write_all(&prompt)
@@ -622,6 +944,11 @@ fn run_job(
     let mut failure = None;
     let mut success = false;
     loop {
+        if check_execution(job).is_err() {
+            terminal = "cancelled";
+            failure = Some("Execution policy changed; Codex job stopped.".into());
+            break;
+        }
         if job.cancel.load(Ordering::Acquire) {
             terminal = "cancelled";
             break;
@@ -631,7 +958,7 @@ fn run_job(
             break;
         }
         if binding_check.elapsed() >= Duration::from_secs(1) {
-            if let Err(error) = ensure_binding(app, job) {
+            if let Err(error) = check_execution(job).and_then(|_| ensure_binding(app, job)) {
                 failure = Some(error);
                 break;
             }
@@ -654,9 +981,10 @@ fn run_job(
     drop(lifetime);
     let _ = child.kill();
     let _ = child.wait();
-    let input_result = input.join().map_err(|_| "Codex input worker failed.")?;
-    output.join().map_err(|_| "Codex output worker failed.")?;
-    let _error_output = errors.join().map_err(|_| "Codex error worker failed.")?;
+    let drain_deadline = Instant::now() + Duration::from_secs(2);
+    let input_result = super::process::finish_thread(input, drain_deadline, "Codex input")?;
+    super::process::finish_thread(output, drain_deadline, "Codex output")?;
+    let _error_output = super::process::finish_thread(errors, drain_deadline, "Codex error")?;
     let snapshot = job
         .snapshot
         .lock()
@@ -677,10 +1005,18 @@ fn run_job(
         }
     }
     if let Some(thread_id) = &snapshot.external_thread_id {
+        ensure_binding(app, job)?;
         save_link(database, payload, &job.root, job.binding_version, thread_id)?;
     }
     finish(job, terminal, failure);
     Ok(())
+}
+
+fn check_execution(job: &Job) -> Result<(), String> {
+    job.execution
+        .as_ref()
+        .ok_or("Missing native execution admission.")?
+        .check()
 }
 
 fn ensure_binding(app: &AppHandle, job: &Job) -> Result<(), String> {
@@ -737,11 +1073,9 @@ fn apply_event(job: &Job, bytes: &[u8]) {
     let mut detail = None;
     match kind {
         "thread.started" => {
-            if let Some(id) = value
-                .get("thread_id")
-                .and_then(Value::as_str)
-                .filter(|id| uuid::Uuid::parse_str(id).is_ok())
-            {
+            if let Some(id) = value.get("thread_id").and_then(Value::as_str).filter(|id| {
+                uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == *id)
+            }) {
                 if snapshot
                     .external_thread_id
                     .as_ref()
@@ -811,6 +1145,34 @@ fn apply_event(job: &Job, bytes: &[u8]) {
         r#type: kind.into(),
         detail,
     });
+    drop(snapshot);
+    if kind == "thread.started" {
+        persist_current(job);
+        if let Some(database) = &job.database {
+            let id = job
+                .snapshot
+                .lock()
+                .ok()
+                .and_then(|snapshot| snapshot.external_thread_id.clone());
+            if let Some(id) = id {
+                if save_link_scope(
+                    database,
+                    (&job.principal_id, &job.project_id),
+                    &job.root,
+                    job.binding_version,
+                    &id,
+                )
+                .is_err()
+                {
+                    job.cancel.store(true, Ordering::Release);
+                    if let Ok(mut state) = job.snapshot.lock() {
+                        state.error =
+                            Some("Managed Codex session identity could not be saved.".into());
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn read_bounded(mut reader: impl Read, max: usize) -> String {
@@ -836,7 +1198,10 @@ fn truncate(value: &str, max: usize) -> String {
 }
 
 fn is_terminal(status: &str) -> bool {
-    matches!(status, "completed" | "failed" | "cancelled" | "timed_out")
+    matches!(
+        status,
+        "completed" | "failed" | "cancelled" | "timed_out" | "interrupted"
+    )
 }
 
 fn finish(job: &Job, status: &str, error: Option<String>) {
@@ -847,6 +1212,7 @@ fn finish(job: &Job, status: &str, error: Option<String>) {
             snapshot.error = Some(truncate(&error, MAX_ERROR));
         }
     }
+    persist_current(job);
 }
 
 fn now_ms() -> u64 {
@@ -874,7 +1240,13 @@ fn open_links(path: &Path) -> Result<Connection, String> {
             "PRAGMA busy_timeout=5000;
         CREATE TABLE IF NOT EXISTS codex_links (
             thread_id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, project_id TEXT NOT NULL,
-            root_path TEXT NOT NULL, binding_version INTEGER NOT NULL);",
+            root_path TEXT NOT NULL, binding_version INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS codex_session_times (thread_id TEXT PRIMARY KEY, updated_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS codex_jobs (
+            id TEXT PRIMARY KEY, principal_id TEXT NOT NULL, project_id TEXT NOT NULL,
+            runtime_id TEXT NOT NULL, status TEXT NOT NULL, external_thread_id TEXT,
+            output_truncated INTEGER NOT NULL, created_at INTEGER NOT NULL, finished_at INTEGER);
+        CREATE INDEX IF NOT EXISTS codex_jobs_scope ON codex_jobs(principal_id,project_id,created_at);",
         )
         .map_err(|_| "Managed agent links unavailable.")?;
     Ok(connection)
@@ -922,17 +1294,40 @@ fn save_link(
     version: i64,
     id: &str,
 ) -> Result<(), String> {
+    save_link_scope(
+        path,
+        (&payload.principal_id, &payload.project_id),
+        root,
+        version,
+        id,
+    )
+}
+fn save_link_scope(
+    path: &Path,
+    identity: (&str, &str),
+    root: &Path,
+    version: i64,
+    id: &str,
+) -> Result<(), String> {
+    if !uuid::Uuid::parse_str(id).is_ok_and(|parsed| parsed.to_string() == id) {
+        return Err("Managed session ID is not canonical.".into());
+    }
     let connection = open_links(path)?;
-    connection.execute("INSERT OR IGNORE INTO codex_links (thread_id,principal_id,project_id,root_path,binding_version) VALUES (?1,?2,?3,?4,?5)",
-        params![id, payload.principal_id, payload.project_id, root.to_string_lossy(), version])
-        .map_err(|_| "Managed Codex session link could not be saved.")?;
-    verify_link(path, payload, root, version, id)
+    connection.execute("INSERT OR IGNORE INTO codex_links (thread_id,principal_id,project_id,root_path,binding_version) VALUES (?1,?2,?3,?4,?5)",params![id,identity.0,identity.1,root.to_string_lossy(),version]).map_err(|_|"Managed Codex session link could not be saved.")?;
+    verify_link_scope(path, identity, root, version, id)?;
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO codex_session_times(thread_id,updated_at) VALUES (?1,?2)",
+            params![id, now_ms() as i64],
+        )
+        .map_err(|_| "Managed session timestamp could not be saved.")?;
+    Ok(())
 }
 
 #[cfg(windows)]
 fn configure_process(command: &mut Command) {
     use std::os::windows::process::CommandExt;
-    command.creation_flags(0x0000_0200 | 0x0800_0000);
+    command.creation_flags(0x0000_0004 | 0x0000_0200 | 0x0800_0000);
 }
 
 #[cfg(unix)]
@@ -944,13 +1339,13 @@ fn configure_process(command: &mut Command) {
 #[cfg(not(any(windows, unix)))]
 fn configure_process(_command: &mut Command) {}
 
-struct LifetimeGuard {
+pub(crate) struct LifetimeGuard {
     handle: isize,
 }
 
 #[cfg(windows)]
 impl LifetimeGuard {
-    fn attach(child: &Child) -> Result<Self, String> {
+    pub(crate) fn attach(child: &Child) -> Result<Self, String> {
         use std::os::windows::io::AsRawHandle;
         use windows_sys::Win32::Foundation::CloseHandle;
         use windows_sys::Win32::System::JobObjects::*;
@@ -972,10 +1367,64 @@ impl LifetimeGuard {
                 CloseHandle(handle);
                 return Err("Codex process could not be bound to its protected lifetime.".into());
             }
-            Ok(Self {
+            let guard = Self {
                 handle: handle as isize,
-            })
+            };
+            // The child was created suspended. No user code can create an
+            // escaping descendant before the Job Object owns its lifetime.
+            resume_suspended_child(child)?;
+            Ok(guard)
         }
+    }
+}
+
+#[cfg(windows)]
+fn resume_suspended_child(child: &Child) -> Result<(), String> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
+        System::{
+            Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+                THREADENTRY32,
+            },
+            Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
+        },
+    };
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err("Protected process thread enumeration failed.".into());
+        }
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        let mut found = None;
+        let mut next = Thread32First(snapshot, &mut entry);
+        while next != 0 {
+            if entry.th32OwnerProcessID == child.id() {
+                found = Some(entry.th32ThreadID);
+                break;
+            }
+            next = Thread32Next(snapshot, &mut entry);
+        }
+        CloseHandle(snapshot);
+        let thread = OpenThread(
+            THREAD_SUSPEND_RESUME,
+            0,
+            found.ok_or("Protected process startup thread unavailable.")?,
+        );
+        if thread.is_null() {
+            return Err("Protected process startup thread could not be opened.".into());
+        }
+        let prior_count = ResumeThread(thread);
+        CloseHandle(thread);
+        if prior_count != 1 {
+            return Err(
+                "Protected process startup thread had an unexpected suspension state.".into(),
+            );
+        }
+        Ok(())
     }
 }
 
@@ -1020,8 +1469,14 @@ mod tests {
             root: PathBuf::from("test"),
             binding_version: 1,
             cancel: AtomicBool::new(false),
+            writing: false,
+            execution: None,
+            database: None,
+            runtime_id: "test".into(),
             snapshot: Mutex::new(CodexJobSnapshot {
                 id: "job".into(),
+                principal_id: "account:1".into(),
+                project_id: "one".into(),
                 status: "running".into(),
                 external_thread_id: None,
                 output: String::new(),
@@ -1179,16 +1634,93 @@ mod tests {
     fn shared_workspace_lease_excludes_legacy_and_managed_overlap_until_release() {
         let root =
             std::env::temp_dir().join(format!("luczor-workspace-lease-{}", uuid::Uuid::new_v4()));
-        let lease = acquire_workspace_lease(&root).unwrap();
-        assert!(acquire_workspace_lease(&root).is_err());
-        assert!(acquire_workspace_lease(&root.join("src")).is_err());
+        let lease = acquire_workspace_lease(&root, true).unwrap();
+        assert!(acquire_workspace_lease(&root, true).is_err());
+        assert!(acquire_workspace_lease(&root.join("src"), false).is_err());
         let separate = acquire_workspace_lease(
             &root.with_file_name(format!("luczor-other-{}", uuid::Uuid::new_v4())),
+            true,
         )
         .unwrap();
         drop(separate);
         drop(lease);
-        assert!(acquire_workspace_lease(&root).is_ok());
+        assert!(acquire_workspace_lease(&root, true).is_ok());
+    }
+
+    #[test]
+    fn shared_read_leases_allow_readers_and_reject_overlapping_writer() {
+        let root = std::env::temp_dir().join(format!("luczor-read-lease-{}", uuid::Uuid::new_v4()));
+        let one = acquire_workspace_lease(&root, false).unwrap();
+        let two = acquire_workspace_lease(&root.join("src"), false).unwrap();
+        assert!(acquire_workspace_lease(&root, true).is_err());
+        drop(one);
+        drop(two);
+        assert!(acquire_workspace_lease(&root, true).is_ok());
+    }
+
+    #[test]
+    fn durable_history_reconciles_only_dead_runtimes_and_never_stores_content() {
+        let directory =
+            std::env::temp_dir().join(format!("luczor-job-history-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("jobs.sqlite3");
+        let data = job();
+        let mut snapshot = data.snapshot.lock().unwrap().clone();
+        snapshot.output = "PROMPT_AND_RESULT_SECRET".into();
+        snapshot.error = Some("PRIVATE_RUNTIME_ERROR".into());
+        snapshot.external_thread_id = Some(uuid::Uuid::new_v4().to_string());
+        persist_job(&path, "dead-runtime", &snapshot).unwrap();
+        assert!(load_jobs(&path, "current", "another", None)
+            .unwrap()
+            .is_empty());
+        assert!(load_jobs(&path, "current", "account:1", Some("another"))
+            .unwrap()
+            .is_empty());
+        let rows = load_jobs(&path, "current", "account:1", Some("one")).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "interrupted");
+        assert!(rows[0].finished_at.is_some());
+        assert!(rows[0].output.is_empty());
+        assert_eq!(rows[0].external_thread_id, snapshot.external_thread_id);
+        let bytes = std::fs::read(&path).unwrap();
+        let disk = String::from_utf8_lossy(&bytes);
+        assert!(!disk.contains("PROMPT_AND_RESULT_SECRET"));
+        assert!(!disk.contains("PRIVATE_RUNTIME_ERROR"));
+        snapshot.id = "current-job".into();
+        persist_job(&path, "current", &snapshot).unwrap();
+        let rows = load_jobs(&path, "current", "account:1", None).unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|row| row.id == "current-job")
+                .unwrap()
+                .status,
+            "running"
+        );
+        #[cfg(windows)]
+        {
+            let live = CodexJobs::default();
+            snapshot.id = "live-other-instance".into();
+            persist_job(&path, &live.runtime_id, &snapshot).unwrap();
+            assert!(ensure_no_foreign_runtime(&path, "other").is_err());
+            let rows = load_jobs(&path, "other", "account:1", None).unwrap();
+            assert_eq!(
+                rows.iter()
+                    .find(|row| row.id == "live-other-instance")
+                    .unwrap()
+                    .status,
+                "running"
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn guarded_payload_deserializes_execution_without_weakening_inner_validation() {
+        let value = serde_json::json!({"execution":{"sessionId":uuid::Uuid::new_v4().to_string(),"generation":1},"principalId":"a","projectId":"p","expectedRootPath":"test","expectedWorkspaceUpdatedAt":1,"prompt":"x"});
+        assert!(serde_json::from_value::<Guarded<CodexStartPayload>>(value.clone()).is_ok());
+        let mut invalid = value;
+        invalid["unapprovedOption"] = true.into();
+        assert!(serde_json::from_value::<Guarded<CodexStartPayload>>(invalid).is_err());
     }
 
     #[test]
@@ -1202,6 +1734,29 @@ mod tests {
         assert_eq!(parameters.len(), 1);
         assert_eq!(parameters[0].0, "path");
         assert_eq!(parameters[0].1, path.to_string_lossy());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn process_cannot_execute_before_its_job_object_is_attached() {
+        let mut command = Command::new("cmd.exe");
+        command
+            .args(["/D", "/S", "/C", "exit 7"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure_process(&mut command);
+        let mut child = command.spawn().unwrap();
+        thread::sleep(Duration::from_millis(75));
+        assert!(child.try_wait().unwrap().is_none());
+        let guard = LifetimeGuard::attach(&child).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while child.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(child.wait().unwrap().code(), Some(7));
+        drop(guard);
     }
 
     #[cfg(windows)]

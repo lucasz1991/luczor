@@ -16,6 +16,7 @@ type IdentityWriterDependencies = {
   writeDeviceKey(value: string): Promise<void>
   suspendSpeech(): () => void
   beforeChange(): Promise<void>
+  afterChange?(): void
 }
 
 /** Serialize identity writes; never expose one account's key to another server on partial failure. */
@@ -56,6 +57,11 @@ export function createApiIdentityWriter(dependencies: IdentityWriterDependencies
         await store.set('luczor_api_base_url', baseUrl)
         await store.save()
 
+        try {
+          dependencies.afterChange?.()
+        } catch {
+          // The identity is already durable. A lifecycle observer must not roll it back.
+        }
         resumeBlockedSpeech()
         resumeBlockedSpeech = null
         return true
@@ -97,5 +103,8 @@ export const persistApiIdentity = createApiIdentityWriter({
       window.dispatchEvent(new Event('luczor:voice-stop'))
     }
     await invalidateLocalInferenceApiIdentity()
+  },
+  afterChange() {
+    if (typeof window !== 'undefined') window.dispatchEvent(new Event('luczor:api-identity-changed'))
   },
 })

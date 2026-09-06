@@ -58,15 +58,18 @@ function toggleAutoExecution(): void {
     <div class="lz-card">
       <div class="lz-card__head">
         <div>
-          <div class="lz-card__title">Datenverändernde Tools automatisch ausführen</div>
-          <div class="lz-card__meta">Überspringt die Einzelbestätigung nur im Modus „Handeln“.</div>
+          <div class="lz-card__title">Einfache Projektaktionen automatisch ausführen</div>
+          <div class="lz-card__meta">
+            Im Modus „Handeln“: Projektaktionen mit geringem Risiko. Desktop, Programme, Netzwerk und kritische
+            Dateiaktionen benötigen weiterhin eine Freigabe.
+          </div>
         </div>
         <button
           type="button"
           class="lz-switch"
           :class="{ 'is-on': autoExecuteMutatingTools }"
           :aria-pressed="autoExecuteMutatingTools"
-          aria-label="Datenverändernde Tools automatisch ausführen"
+          aria-label="Einfache Projektaktionen automatisch ausführen"
           @click="toggleAutoExecution"
         >
           <span />

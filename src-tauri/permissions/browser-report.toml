@@ -1,4 +1,4 @@
 [[permission]]
 identifier = "browser-report"
-description = "Allows only the dedicated Luczor browser webview to return a correlated, bounded browser-read result."
-commands.allow = ["browser_report"]
+description = "Allows only the dedicated Luczor browser webview to return a correlated result and consume a one-use admission nonce for an already reviewed browser action."
+commands.allow = ["browser_report", "browser_action_admit"]

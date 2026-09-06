@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   buildBridgeMarkdown: vi.fn(),
   setPlan: vi.fn(),
   getPlan: vi.fn(),
+  assertPlanPrincipal: vi.fn(),
   planProgress: vi.fn(),
   currentPlanStep: vi.fn(),
   getProjectWorkspace: vi.fn(),
@@ -54,7 +55,10 @@ vi.mock('@/services/agents', () => ({
   writeBridgeFile: mocks.writeBridgeFile,
   buildBridgeMarkdown: mocks.buildBridgeMarkdown,
 }))
-vi.mock('@/services/agents/hub', () => ({ prepareAgentJob: mocks.prepareAgentJob }))
+vi.mock('@/services/agents/hub', () => ({
+  prepareAgentJob: mocks.prepareAgentJob,
+  validateAgentScope: vi.fn(),
+}))
 vi.mock('@/services/projectWorkspace', () => ({
   getProjectWorkspace: mocks.getProjectWorkspace,
   requireProjectWorkspace: mocks.requireProjectWorkspace,
@@ -64,6 +68,7 @@ vi.mock('@/services/repositoryGraph', () => ({
   getRepositoryExternalPolicy: mocks.getRepositoryExternalPolicy,
 }))
 vi.mock('@/services/plan', () => ({
+  assertPlanPrincipal: mocks.assertPlanPrincipal,
   setPlan: mocks.setPlan,
   getPlan: mocks.getPlan,
   planProgress: mocks.planProgress,
@@ -71,6 +76,7 @@ vi.mock('@/services/plan', () => ({
 }))
 
 import { getTool, lastScreenshot, listTools, toOpenAITools } from '@/services/tools/registry'
+import { executionGate, executionPayload, updateExecutionControls } from '@/services/executionGate'
 
 const TOOL_CONTRACT = [
   { name: 'project_get_state', category: 'project', mutating: false, requiresApproval: false },
@@ -96,6 +102,7 @@ const TOOL_CONTRACT = [
   { name: 'os_hotkey', category: 'os', mutating: true, requiresApproval: true },
   { name: 'os_open_url', category: 'os', mutating: true, requiresApproval: true },
   { name: 'os_environment', category: 'os', mutating: false, requiresApproval: true },
+  { name: 'os_observe_desktop', category: 'os', mutating: false, requiresApproval: true },
   { name: 'project_create', category: 'project', mutating: true, requiresApproval: true },
   { name: 'chat_create', category: 'app', mutating: true, requiresApproval: true },
   { name: 'task_create', category: 'app', mutating: true, requiresApproval: true },
@@ -108,12 +115,15 @@ const TOOL_CONTRACT = [
   { name: 'agent_job_prepare', category: 'app', mutating: true, requiresApproval: false },
   { name: 'agent_job_status', category: 'app', mutating: false, requiresApproval: true },
   { name: 'agent_job_cancel', category: 'app', mutating: true, requiresApproval: false },
+  { name: 'agent_team_prepare', category: 'app', mutating: true, requiresApproval: false },
+  { name: 'agent_team_status', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'agent_team_cancel', category: 'app', mutating: true, requiresApproval: false },
   { name: 'plan_update', category: 'app', mutating: false, requiresApproval: false },
   { name: 'plan_get', category: 'app', mutating: false, requiresApproval: false },
   { name: 'memory_recall', category: 'project', mutating: false, requiresApproval: false },
 ] as const
 
-const TOOL_SCHEMA_SHA256 = '156771ba818696eb2d957e30f4372cae3a102c669a540359777c5f9ca36b8535'
+const TOOL_SCHEMA_SHA256 = '326c047eaf100b6b30b6860048dcf56f7142b28f338518dc2a9ffda71423d77f'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {
@@ -303,9 +313,18 @@ describe('tool registry contract', () => {
     ],
     ['os_open_url', { url: 'https://example.test' }, 'open_url', { payload: { url: 'https://example.test' } }],
   ])('routes %s to the original Tauri command', async (toolName, args, command, payload) => {
-    await getTool(toolName)!.execute(args, PROJECT_CONTEXT)
+    mocks.invoke.mockResolvedValue(undefined)
+    updateExecutionControls({ mode: 'act', killSwitch: false, scope: 'project-1' })
+    await executionPayload()
+    await getTool(toolName)!.execute({ ...args, observation_id: 'observed-window' }, PROJECT_CONTEXT)
 
-    expect(mocks.invoke).toHaveBeenCalledWith(command, payload)
+    expect(mocks.invoke).toHaveBeenCalledWith(command, {
+      payload: {
+        ...payload.payload,
+        ...(command === 'open_url' ? {} : { observationId: 'observed-window' }),
+        execution: { sessionId: executionGate.sessionId, generation: executionGate.snapshot().generation },
+      },
+    })
   })
 
   it('routes OS perception tools and keeps screenshot publication compatible', async () => {
@@ -361,7 +380,7 @@ describe('tool registry contract', () => {
       expect.objectContaining({ projectId: 'project-1', prompt: 'Prüfen', permission: 'read-only' })
     )
     expect(mocks.runAgentCli).not.toHaveBeenCalled()
-    expect(mocks.writeBridgeFile).toHaveBeenCalledWith('E:\\project', '# Explicit')
+    expect(mocks.writeBridgeFile).toHaveBeenCalledWith('E:\\project', '# Explicit', undefined)
   })
 
   it('routes plan updates and reads through the visible-plan service', async () => {
@@ -369,8 +388,9 @@ describe('tool registry contract', () => {
     await getTool('plan_update')!.execute({ steps, note: 'Start' }, PROJECT_CONTEXT)
     const result = await getTool('plan_get')!.execute({ include_done: false }, PROJECT_CONTEXT)
 
-    expect(mocks.setPlan).toHaveBeenCalledWith('project-1', steps, 'Start')
-    expect(mocks.getPlan).toHaveBeenCalledWith('project-1')
+    expect(mocks.assertPlanPrincipal).toHaveBeenCalledWith('device:v1:test')
+    expect(mocks.setPlan).toHaveBeenCalledWith('project-1', steps, 'Start', 'device:v1:test')
+    expect(mocks.getPlan).toHaveBeenCalledWith('project-1', 'device:v1:test')
     expect(result).toEqual({
       ok: true,
       steps: [{ title: 'Zweiter Schritt', status: 'in_progress' }],

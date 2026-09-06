@@ -96,6 +96,7 @@ describe('agent mode and tool reliability', () => {
       category: 'project',
       mutating: false,
       requiresApproval: false,
+      parameters: { type: 'object', additionalProperties: true },
       execute: mocks.execute,
     })
     mocks.execute.mockResolvedValue({ name: 'Projekt 2', summary: '', goals: [] })
@@ -110,6 +111,7 @@ describe('agent mode and tool reliability', () => {
       category: 'project',
       mutating: true,
       requiresApproval: true,
+      parameters: { type: 'object', additionalProperties: true },
       execute: mocks.execute,
     })
     mocks.streamChatWithTools
@@ -153,6 +155,13 @@ describe('agent mode and tool reliability', () => {
     expect(shouldRequireToolCall('Ändere die Projektbeschreibung.')).toBe(true)
     expect(shouldRequireToolCall('Öffne jetzt die Seite.')).toBe(true)
     expect(shouldRequireToolCall('Wie geht es dir heute?')).toBe(false)
+    expect(shouldRequireToolCall('Erstelle bitte einen Plan, wie wir Dateien löschen können.')).toBe(false)
+    expect(shouldRequireToolCall('Plan erstellen')).toBe(false)
+    expect(shouldRequireToolCall('Plan jetzt umsetzen')).toBe(true)
+    expect(shouldRequireToolCall('Noch nichts umsetzen.')).toBe(false)
+    expect(shouldRequireToolCall('Den Plan noch nicht umsetzen.')).toBe(false)
+    expect(shouldRequireToolCall('Ja, die Variante passt.')).toBe(false)
+    expect(shouldRequireToolCall('Prüfe die Dateien für den Plan.')).toBe(true)
     expect(looksLikeInternalReasoningLeak('We need to respond: The user says hello.')).toBe(true)
     expect(looksLikeInternalReasoningLeak('Ich habe den Projektzustand geprüft.')).toBe(false)
   })
@@ -163,7 +172,93 @@ describe('agent mode and tool reliability', () => {
     expect(prompt).toContain('project_get_state, project_upsert_goal')
     expect(prompt).toContain('Behaupte niemals')
     expect(prompt).toContain('project_create ist ausschließlich')
+    expect(prompt).toContain('Planung besprichst du normalerweise im Chat')
+    expect(prompt).toContain('Zustimmung zu einer Variante ist noch kein Ausführungsauftrag')
   })
+
+  it.each(['act', 'unrestricted'] as const)(
+    'blocks mutations and agent starts during discussion in %s mode',
+    async mode => {
+      mocks.getTool.mockImplementation(name => ({
+        name,
+        category: 'project',
+        mutating: name !== 'project_get_state',
+        requiresApproval: false,
+        effects: name === 'project_get_state' ? ['read'] : ['execute'],
+        parameters: { type: 'object', additionalProperties: true },
+        execute: mocks.execute,
+      }))
+      mocks.canAutoExecuteTool.mockReturnValue(true)
+      const result = {
+        ...toolCallResult,
+        toolCalls: [{ id: 'call-1', name: 'project_upsert_goal', arguments: {} }],
+        rawToolCalls: [
+          { id: 'call-1', type: 'function' as const, function: { name: 'project_upsert_goal', arguments: '{}' } },
+        ],
+      }
+      mocks.streamChatWithTools
+        .mockResolvedValueOnce(result)
+        .mockResolvedValueOnce({ content: 'Besprechen wir zuerst die Varianten.', toolCalls: [], rawToolCalls: [] })
+      const outcome = await runAgent({
+        projectId: 'project-2',
+        mode,
+        toolChoice: 'required',
+        baseMessages: [{ role: 'user', content: 'Erstelle bitte einen Plan.' }],
+      })
+      expect(mocks.streamChatWithTools.mock.calls[0]![0]).toMatchObject({
+        toolChoice: 'auto',
+        tools: [expect.objectContaining({ function: expect.objectContaining({ name: 'project_get_state' }) })],
+      })
+      expect(mocks.execute).not.toHaveBeenCalled()
+      expect(mocks.awaitApproval).not.toHaveBeenCalled()
+      expect(mocks.updateToolCallStatus).toHaveBeenCalledWith('project-2', 'call-1', 'rejected')
+      expect(outcome.toolFailures).toBe(1)
+    }
+  )
+
+  it('allows necessary read tools during a planning discussion without forcing a tool call', async () => {
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(toolCallResult)
+      .mockResolvedValueOnce({ content: 'Hier sind die besprochenen Schritte.', toolCalls: [], rawToolCalls: [] })
+    await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      toolChoice: 'required',
+      baseMessages: [{ role: 'user', content: 'Lass uns das Vorgehen gemeinsam planen.' }],
+    })
+    expect(mocks.streamChatWithTools.mock.calls[0]![0].toolChoice).toBe('auto')
+    expect(mocks.execute).toHaveBeenCalledTimes(1)
+    expect(mocks.awaitApproval).not.toHaveBeenCalled()
+  })
+
+  it.each(['Plan jetzt umsetzen', 'Aktualisiere den Plan um einen Testschritt.'])(
+    'preserves normal execution after a clear follow-up request: %s',
+    async text => {
+      mocks.getTool.mockReturnValue({
+        name: 'project_upsert_goal',
+        category: 'project',
+        mutating: true,
+        requiresApproval: true,
+        parameters: { type: 'object', additionalProperties: true },
+        execute: mocks.execute,
+      })
+      mocks.awaitApproval.mockResolvedValue(true)
+      mocks.streamChatWithTools
+        .mockResolvedValueOnce(toolCallResult)
+        .mockResolvedValueOnce({ content: 'Ausgeführt.', toolCalls: [], rawToolCalls: [] })
+      await runAgent({
+        projectId: 'project-2',
+        mode: 'act',
+        baseMessages: [
+          { role: 'user', content: 'Lass uns das Vorgehen planen.' },
+          { role: 'assistant', content: 'Vorschlag.' },
+          { role: 'user', content: text },
+        ],
+      })
+      expect(mocks.awaitApproval).toHaveBeenCalledWith('call-1')
+      expect(mocks.execute).toHaveBeenCalledTimes(1)
+    }
+  )
 
   it('refreshes the live mode, forces only the first tool round and hides intermediate tool reasoning', async () => {
     const visibleTokens = vi.fn()
@@ -232,6 +327,7 @@ describe('agent mode and tool reliability', () => {
       mutating: false,
       requiresApproval: true,
       dataHandling: 'ephemeral',
+      parameters: { type: 'object', additionalProperties: true },
       execute: mocks.execute,
     })
     mocks.awaitApproval.mockResolvedValue(true)
@@ -276,6 +372,7 @@ describe('agent mode and tool reliability', () => {
       mutating: false,
       requiresApproval: true,
       dataHandling: 'ephemeral',
+      parameters: { type: 'object', additionalProperties: true },
       execute: mocks.execute,
     })
     mocks.awaitApproval.mockResolvedValue(true)
@@ -311,6 +408,7 @@ describe('agent mode and tool reliability', () => {
       category: 'project',
       mutating: true,
       requiresApproval: true,
+      parameters: { type: 'object', additionalProperties: true },
       execute: mocks.execute,
     })
     mocks.awaitApproval.mockImplementation(async () => {
@@ -428,11 +526,13 @@ describe('agent mode and tool reliability', () => {
         packetHash: 'a'.repeat(64),
         destination: 'https://luczor.example/luczor-a',
         toolsAllowed: false,
+        localReadinessMessage: 'approval required',
       })
     )
     const sent = mocks.streamChatWithTools.mock.calls[0]![0]
     expect(JSON.stringify(sent.messages)).toContain('Provider-sichere Frage')
     expect(JSON.stringify(sent.messages)).not.toContain('LOCAL_ONLY_SECRET')
+    expect(JSON.stringify(sent.messages)).not.toContain('approval required')
     expect(sent).toMatchObject({ tools: [], toolChoice: 'none' })
     expect(result).toMatchObject({ finalText: 'Sichere externe Antwort', inferenceTarget: 'laravel_proxy' })
   })
@@ -488,6 +588,7 @@ describe('agent mode and tool reliability', () => {
       category: 'project',
       mutating: true,
       requiresApproval: true,
+      parameters: { type: 'object', additionalProperties: true },
       execute: mocks.execute,
     })
     mocks.awaitApproval.mockImplementation(async () => {

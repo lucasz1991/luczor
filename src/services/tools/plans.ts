@@ -1,5 +1,16 @@
-import { currentPlanStep, getPlan, planProgress, setPlan } from '@/services/plan'
-import type { ToolDef } from './types'
+import { assertPlanPrincipal, currentPlanStep, getPlan, planProgress, setPlan } from '@/services/plan'
+import { executionGate } from '@/services/executionGate'
+import { resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
+import type { ToolContext, ToolDef } from './types'
+
+async function planPrincipal(ctx: ToolContext) {
+  const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
+  executionGate.assert(ticket)
+  const principalId = await resolveWorkspacePrincipalId()
+  executionGate.assert(ticket)
+  assertPlanPrincipal(principalId)
+  return { principalId, ticket }
+}
 
 export const planTools: ToolDef[] = [
   {
@@ -37,7 +48,10 @@ export const planTools: ToolDef[] = [
       required: ['steps'],
     },
     async execute(args, ctx) {
-      const { plan, repairs } = setPlan(ctx.projectId, args.steps, args.note)
+      const { principalId, ticket } = await planPrincipal(ctx)
+      executionGate.assert(ticket)
+      assertPlanPrincipal(principalId)
+      const { plan, repairs } = setPlan(ctx.projectId, args.steps, args.note, principalId)
       const progress = planProgress(plan)
       return {
         ok: true,
@@ -64,7 +78,10 @@ export const planTools: ToolDef[] = [
       required: [],
     },
     async execute(args, ctx) {
-      const plan = getPlan(ctx.projectId)
+      const { principalId, ticket } = await planPrincipal(ctx)
+      executionGate.assert(ticket)
+      assertPlanPrincipal(principalId)
+      const plan = getPlan(ctx.projectId, principalId)
       const progress = planProgress(plan)
       const steps =
         args.include_done === false

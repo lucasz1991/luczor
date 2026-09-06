@@ -69,6 +69,7 @@ describe('project model-agent adapter', () => {
     const input = request()
     const adapter = createModelAgentAdapter({ id: 'local' }, fixture.dependencies)
     expect(adapter.permissions).toEqual(['read-only'])
+    expect(adapter.exclusiveResources).toEqual(['local_gpu1'])
     expect(await adapter.run(input)).toEqual({ output: 'Analyse abgeschlossen.' })
     expect(fixture.resolveRoute).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -90,6 +91,7 @@ describe('project model-agent adapter', () => {
     ['planner', 'planning.agent'],
     ['implementer', 'coding.agent'],
     ['reviewer', 'verification.agent'],
+    ['join', 'reasoning.synthesis'],
     ['assistant', 'chat.agent'],
   ] as const)('maps the %s role to the server-owned %s use case', async (role, taskType) => {
     const fixture = harness()

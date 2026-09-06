@@ -6,10 +6,12 @@ import {
   type VerifiedAccountSnapshot,
 } from '@/services/accountPrincipal'
 import { assessModelCapacity, type CapacityAssessment, type HardwareSnapshot } from '@/services/inference/capacity'
+import { requiredCapabilityForTask, type InferenceCapability } from '@/services/inference/capabilities'
 import { laravelInferenceGateway } from '@/services/inference/gateways'
 import { hashLaravelProxyBody } from '@/services/inference/laravelProxyBody'
 import {
   decideHybridRoute,
+  hasVerifiedLocalReadiness,
   type ExternalEgressApproval,
   type HybridRoutingSettings,
   type RouteDecision,
@@ -64,6 +66,146 @@ export type ResolvedTurnRoute = {
 type Discovery = NonNullable<BootstrapResponse['local_model_manifest']>
 type CoordinatorMode = 'loading' | 'active' | 'blocked'
 
+export type LocalPolicyDiagnostic = Readonly<{ mode: CoordinatorMode; reason: string; message: string }>
+export type InferenceConnectionResult = Readonly<{
+  ok: boolean
+  connected: boolean
+  stale: boolean
+  policy: LocalPolicyDiagnostic
+  message: string
+}>
+
+const manifestSigningDiagnostics = new Map<string, string>([
+  [
+    'local_model_signing_key_path_unsafe',
+    'Der Server hat keinen zulässigen Pfad für den Modell-Signaturschlüssel. In Produktion muss die Schlüsseldatei außerhalb des App-Verzeichnisses liegen.',
+  ],
+  [
+    'local_model_signing_key_unreadable',
+    'Der Server kann die Datei des Modell-Signaturschlüssels nicht lesen. Bitte Dateipfad und Leserechte auf dem Server prüfen.',
+  ],
+  [
+    'local_model_signing_key_invalid',
+    'Auf dem Server fehlt ein gültiger Modell-Signaturschlüssel. Bitte den dedizierten RSA-Schlüssel bereitstellen.',
+  ],
+  [
+    'local_model_signing_key_unsafe',
+    'Der Modell-Signaturschlüssel auf dem Server erfüllt die RSA-Sicherheitsanforderungen nicht.',
+  ],
+  [
+    'local_model_signing_public_key_pin_missing',
+    'Auf dem Server fehlt der SHA-256-Fingerabdruck des öffentlichen Modell-Signaturschlüssels.',
+  ],
+  [
+    'local_model_signing_public_key_pin_invalid',
+    'Der konfigurierte öffentliche Schlüsselfingerabdruck für die Modellrichtlinie ist ungültig.',
+  ],
+  [
+    'local_model_signing_public_key_mismatch',
+    'Der Modell-Signaturschlüssel auf dem Server passt nicht zum konfigurierten öffentlichen Schlüsselfingerabdruck.',
+  ],
+  [
+    'local_model_manifest_signing_failed',
+    'Der Server konnte die Modellrichtlinie nicht signieren. Bitte die Signaturkonfiguration auf dem Server prüfen.',
+  ],
+])
+
+/** Only known diagnostic categories reach the UI; native errors may contain private data. */
+export function localPolicyDiagnostic(mode: CoordinatorMode, reason: string): LocalPolicyDiagnostic {
+  const messages = new Map<string, string>([
+    ...manifestSigningDiagnostics,
+    [
+      'bootstrap_not_initialized',
+      'Die Modellrichtlinie wurde noch nicht geladen. Bitte in den Server-Einstellungen die Verbindung testen.',
+    ],
+    [
+      'bootstrap_unavailable',
+      'Die Modellrichtlinie konnte beim Start nicht geladen werden. Bitte die Serververbindung erneut testen.',
+    ],
+    [
+      'server_unreachable',
+      'Der Server ist nicht erreichbar oder die WebView-Verbindung wird blockiert. Bitte die Serververbindung erneut testen.',
+    ],
+    [
+      'authentication_failed',
+      'Der Server hat den Device-Key abgelehnt. Bitte den Key und seine Berechtigungen prüfen.',
+    ],
+    [
+      'manifest_discovery_missing',
+      'Der Server liefert keine signierte Modellrichtlinie. Der Serverstand muss diese Funktion unterstützen.',
+    ],
+    [
+      'manifest_discovery_invalid',
+      'Die Ankündigung der Modellrichtlinie ist ungültig oder inkompatibel. Bitte den Serverstand prüfen.',
+    ],
+    [
+      'manifest_unavailable',
+      'Der Server hat die signierte Modellrichtlinie noch nicht bereitgestellt. Bitte die Modellkonfiguration auf dem Server prüfen.',
+    ],
+    [
+      'manifest_fetch_failed',
+      'Die signierte Modellrichtlinie konnte nicht vom Server geladen werden. Bitte die Verbindung erneut testen.',
+    ],
+    [
+      'manifest_verification_failed',
+      'Die Modellrichtlinie konnte nicht sicher verifiziert werden. Bitte Signatur, Gültigkeit und Versionen auf dem Server prüfen.',
+    ],
+    [
+      'account_verification_failed',
+      'Die Modellrichtlinie konnte keinem verifizierten Konto zugeordnet werden. Bitte den Device-Key prüfen und die Verbindung erneut testen.',
+    ],
+    [
+      'manifest_session_unavailable',
+      'Die native Modellverwaltung ist nicht verfügbar. Bitte die aktuelle Luczor-Desktop-App starten und die Verbindung erneut testen.',
+    ],
+    [
+      'hardware_snapshot_failed',
+      'Die lokale Hardwareanalyse für die Modellrichtlinie ist fehlgeschlagen. Bitte die Verbindung erneut testen.',
+    ],
+    [
+      'api_identity_changed',
+      'Die Server- oder Konto-Einstellungen wurden geändert. Bitte die Verbindung erneut testen.',
+    ],
+    [
+      'manifest_refresh_failed',
+      'Die Modellrichtlinie konnte nicht erneuert werden. Bitte die Serververbindung erneut testen.',
+    ],
+  ])
+  const message =
+    mode === 'active'
+      ? 'Die signierte Modellrichtlinie ist geprüft. Modellbereitschaft und erforderliche Freigaben werden beim Start des Auftrags geprüft.'
+      : mode === 'loading'
+        ? 'Die Modellrichtlinie wird gerade geladen und geprüft. Bitte kurz warten.'
+        : `${messages.get(reason) ?? 'Die signierte Modellrichtlinie ist nicht verfügbar. Bitte die Serververbindung erneut testen.'} Externer Fallback bleibt gesperrt.`
+  return {
+    mode,
+    reason:
+      messages.has(reason) || reason === 'signed_policy_active' || reason === 'bootstrap_pending'
+        ? reason
+        : 'policy_unavailable',
+    message,
+  }
+}
+
+function policyFailureReason(error: unknown, fallback: string): string {
+  if (error && typeof error === 'object' && 'status' in error) {
+    if (error.status === 401 || error.status === 403) return 'authentication_failed'
+    if (error.status === 0) return 'server_unreachable'
+  }
+  return fallback
+}
+
+function staleConnectionResult(): InferenceConnectionResult {
+  const policy = localPolicyDiagnostic('blocked', 'api_identity_changed')
+  return {
+    ok: false,
+    connected: false,
+    stale: true,
+    policy,
+    message: 'Die Verbindungseinstellungen haben sich während der Prüfung geändert. Bitte erneut testen.',
+  }
+}
+
 export type LocalInferenceCoordinatorDependencies = {
   bootstrap: () => Promise<BootstrapResponse>
   fetchManifest: (config: LuczorApiConfigSnapshot) => Promise<Record<string, unknown>>
@@ -80,6 +222,74 @@ const DEFAULT_ROUTING_SETTINGS: HybridRoutingSettings = {
   preference: 'ask_external',
   experimentalFlashNext: false,
   allowDegradedLocal: false,
+}
+
+const localReadinessMessages = new Map<string, string>([
+  ['model_disabled', 'Der signierte Katalog hat das lokale Modell noch nicht aktiviert.'],
+  ['release_not_executable', 'Im signierten Katalog fehlen ausführbare Modell- oder Runtime-Metadaten.'],
+  ['capability_unavailable', 'Die lokalen Modelle unterstützen die angeforderte Aufgabe nicht.'],
+  ['capacity_unknown', 'Die lokale Hardwarebereitschaft konnte noch nicht bestätigt werden.'],
+  ['total_ram_below_minimum', 'Der Arbeitsspeicher unterschreitet die signierte Modellanforderung.'],
+  ['available_ram_below_minimum', 'Für das lokale Modell ist gerade zu wenig Arbeitsspeicher frei.'],
+  ['accelerator_unavailable', 'Für das lokale Modell ist keine geeignete GPU verfügbar.'],
+  ['vram_below_minimum', 'Der GPU-Speicher unterschreitet die signierte Modellanforderung.'],
+  ['storage_unavailable', 'Für das lokale Modell ist kein geeigneter Speicherplatz verfügbar.'],
+  ['fixed_nvme_storage_required', 'Das lokale Modell benötigt geeigneten internen NVMe-Speicher.'],
+  ['resource_pressure', 'Die aktuelle Systemauslastung lässt das lokale Modell nicht zu.'],
+  ['thermal_limit', 'Die Temperaturgrenze verhindert momentan die lokale Modellnutzung.'],
+  ['health_cooldown', 'Das lokale Modell wartet nach einem Fehler auf einen erneuten Versuch.'],
+  ['health_error', 'Die lokale Modellruntime befindet sich im Fehlerzustand.'],
+  ['runtime_not_configured', 'Die lokale Modellruntime ist in dieser App noch nicht eingerichtet.'],
+  ['model_directory_not_configured', 'Der lokale Modellordner ist in dieser App noch nicht eingerichtet.'],
+  ['runtime_unavailable', 'Die eingerichtete lokale Modellruntime ist nicht verfügbar.'],
+  ['model_files_unavailable', 'Die eingerichteten lokalen Modelldateien sind nicht verfügbar.'],
+  ['local_paths_invalid', 'Die eingerichteten lokalen Modellpfade sind ungültig.'],
+  ['artifact_mismatch', 'Die lokalen Modelldateien passen nicht zum signierten Katalog.'],
+  ['runtime_mismatch', 'Die lokale Modellruntime passt nicht zum signierten Katalog.'],
+  ['benchmark_failed', 'Das lokale Modell hat die vorgeschriebene Bereitschaftsprüfung nicht bestanden.'],
+  ['readiness_mismatch', 'Die lokale Bereitschaftsbestätigung ist veraltet oder passt nicht zum signierten Modell.'],
+  ['readiness_pending', 'Die Bereitschaft des lokalen Modells ist noch nicht bestätigt.'],
+  [
+    'local_preparation_failed',
+    'Die lokale Modellvorbereitung ist fehlgeschlagen. Bitte die lokale Einrichtung prüfen.',
+  ],
+])
+
+/** Match complete known native errors; never expose arbitrary native paths or error details. */
+function preparationFailureReason(error: unknown): string {
+  const nativeMessage = typeof error === 'string' ? error : error instanceof Error ? error.message : ''
+  const reasons = new Map<string, string>([
+    [
+      'Local-model runtime paths are not configured. Configure local-model/runtime-paths.json or both runtime environment paths.',
+      'runtime_not_configured',
+    ],
+    ['Both local-model runtime environment paths must be configured together.', 'local_paths_invalid'],
+    ['Local-model runtime path configuration has an invalid schema.', 'local_paths_invalid'],
+    ['Local-model runtime path configuration version is unsupported.', 'local_paths_invalid'],
+    ['Local-model runtime path configuration exceeds its size limit or is not a file.', 'local_paths_invalid'],
+    ['Local-model runtime path configuration exceeds its size limit.', 'local_paths_invalid'],
+    ['Local-model runtime path configuration cannot be read.', 'local_paths_invalid'],
+    ['Local-model configuration directory is unavailable.', 'local_paths_invalid'],
+    ['Local-model runtime path cannot be inspected.', 'local_paths_invalid'],
+    ['Local-model runtime paths must not contain symbolic links or reparse points.', 'local_paths_invalid'],
+    ['LUCZOR_LLAMA_CPP_BIN is not configured.', 'runtime_not_configured'],
+    ['LUCZOR_LOCAL_MODEL_DIR is not configured.', 'model_directory_not_configured'],
+    ['Configured llama.cpp runtime is unavailable.', 'runtime_unavailable'],
+    ['Configured local-model directory is unavailable.', 'model_files_unavailable'],
+    ['Configured GGUF file is unavailable.', 'model_files_unavailable'],
+    ['Local-model runtime and model directory must be absolute local paths.', 'local_paths_invalid'],
+    ['Configured local-model files are invalid.', 'local_paths_invalid'],
+    ['Configured GGUF size does not match the signed manifest.', 'artifact_mismatch'],
+    ['Configured GGUF hash does not match the signed manifest.', 'artifact_mismatch'],
+    ['Configured llama.cpp runtime hash does not match the signed manifest.', 'runtime_mismatch'],
+    ['Local model readiness evidence is stale or mismatched.', 'readiness_mismatch'],
+    ['Total RAM is below the signed model threshold.', 'total_ram_below_minimum'],
+    ['Available RAM is below the signed model threshold.', 'available_ram_below_minimum'],
+    ['GPU VRAM is below the signed model threshold.', 'vram_below_minimum'],
+    ['Local benchmark did not meet the signed capacity thresholds.', 'benchmark_failed'],
+    ['Local benchmark request failed.', 'benchmark_failed'],
+  ])
+  return reasons.get(nativeMessage) ?? 'local_preparation_failed'
 }
 
 function exactDiscovery(input: BootstrapResponse['local_model_manifest']): Discovery {
@@ -199,15 +409,16 @@ function cloneMessages(messages: readonly WireMessage[]): WireMessage[] {
   )
 }
 
-function capabilityForTask(taskType?: string): string {
-  const normalized = String(taskType ?? '').toLocaleLowerCase('en-US')
-  if (normalized.includes('plan')) return 'planning'
-  if (normalized.includes('reason') || normalized.includes('analysis')) return 'reasoning'
-  if (normalized.includes('execute') || normalized.includes('action') || normalized.includes('tool')) {
-    return 'execution_preparation'
-  }
-  return 'chat'
-}
+export type LocalModelAdmission = Readonly<{
+  modelReleaseId: string
+  enabled: boolean
+  executable: boolean
+  capacity: CapacityAssessment['status'] | 'unknown'
+  ready: boolean
+  health: ReturnType<LocalModelManager['getHealth']>['state']
+  admissible: boolean
+  reasons: readonly string[]
+}>
 
 export class LocalInferenceCoordinator {
   private mode: CoordinatorMode = 'blocked'
@@ -218,8 +429,11 @@ export class LocalInferenceCoordinator {
   private account?: VerifiedAccountSnapshot
   private assessments = new Map<string, CapacityAssessment>()
   private readiness = new Map<string, LocalReadinessEvidence>()
+  private preparationFailures = new Map<string, string>()
   private catalogBinding?: LocalCatalogBinding
   private generation = 0
+  private preparationTail: Promise<void> = Promise.resolve()
+  private recovery?: { generation: number; diagnoseUnavailable: boolean; promise: Promise<InferenceConnectionResult> }
 
   constructor(private readonly dependencies: LocalInferenceCoordinatorDependencies) {}
 
@@ -246,8 +460,134 @@ export class LocalInferenceCoordinator {
     return this.generation
   }
 
-  status(): { mode: CoordinatorMode; reason: string; manifest?: VerifiedLocalModelManifest } {
-    return { mode: this.mode, reason: this.reason, manifest: this.manifest }
+  /** Explicit retry also repairs a startup failure with unchanged server credentials. */
+  reinitialize(options: { diagnoseUnavailable?: boolean } = {}): Promise<InferenceConnectionResult> {
+    if (this.recovery?.generation === this.generation) {
+      this.recovery.diagnoseUnavailable ||= options.diagnoseUnavailable === true
+      return this.recovery.promise
+    }
+    const generation = this.beginBootstrap()
+    const recovery = {
+      generation,
+      diagnoseUnavailable: options.diagnoseUnavailable === true,
+      promise: Promise.resolve(staleConnectionResult()),
+    }
+    this.recovery = recovery
+    recovery.promise = (async (): Promise<InferenceConnectionResult> => {
+      let failureReason = 'manifest_session_unavailable'
+      try {
+        await this.dependencies.manifestSession(generation)
+        if (!this.isCurrent(generation)) return staleConnectionResult()
+        failureReason = 'server_unreachable'
+        const bootstrap = await this.dependencies.bootstrap()
+        if (!this.isCurrent(generation)) return staleConnectionResult()
+        await this.initialize(bootstrap, generation)
+        if (this.recovery !== recovery || !this.isCurrent(recovery.generation)) return staleConnectionResult()
+        if (recovery.diagnoseUnavailable && this.reason === 'manifest_unavailable') {
+          await this.diagnoseUnavailableManifest(bootstrap, recovery.generation)
+          if (this.recovery !== recovery || !this.isCurrent(recovery.generation)) return staleConnectionResult()
+        }
+        const policy = localPolicyDiagnostic(this.mode, this.reason)
+        return {
+          ok: policy.mode === 'active',
+          connected: true,
+          stale: false,
+          policy,
+          message: `Server verbunden. ${policy.message}`,
+        }
+      } catch (error) {
+        if (this.recovery !== recovery || !this.isCurrent(recovery.generation)) return staleConnectionResult()
+        this.markBootstrapUnavailable(policyFailureReason(error, failureReason), recovery.generation)
+        const policy = localPolicyDiagnostic(this.mode, this.reason)
+        return { ok: false, connected: false, stale: false, policy, message: policy.message }
+      } finally {
+        if (this.recovery === recovery) this.recovery = undefined
+      }
+    })()
+    return recovery.promise
+  }
+
+  /** Read only, explicitly requested diagnostics never accept or activate an envelope. */
+  private async diagnoseUnavailableManifest(bootstrap: BootstrapResponse, generation: number): Promise<void> {
+    let failureReason = 'account_verification_failed'
+    try {
+      const account = await this.dependencies.accountSnapshot()
+      if (!this.isCurrent(generation)) return
+      if (!account || account.accountId !== bootstrap.user?.id) {
+        this.blockGeneration(generation, failureReason)
+        return
+      }
+      failureReason = 'manifest_unavailable'
+      await this.dependencies.fetchManifest(account.config)
+      // Even an unexpected HTTP 200 cannot override discovery.available=false.
+    } catch (error) {
+      if (!this.isCurrent(generation)) return
+      if (
+        error &&
+        typeof error === 'object' &&
+        'status' in error &&
+        error.status === 503 &&
+        'code' in error &&
+        typeof error.code === 'string' &&
+        manifestSigningDiagnostics.has(error.code)
+      ) {
+        failureReason = error.code
+      }
+      this.blockGeneration(generation, policyFailureReason(error, failureReason))
+    }
+  }
+
+  status(): {
+    mode: CoordinatorMode
+    reason: string
+    manifest?: VerifiedLocalModelManifest
+    admissions: readonly LocalModelAdmission[]
+  } {
+    return {
+      mode: this.mode,
+      reason: this.reason,
+      manifest: this.manifest,
+      admissions: this.modelAdmissions(),
+    }
+  }
+
+  modelAdmissions(taskType?: string): readonly LocalModelAdmission[] {
+    const requiredCapability = requiredCapabilityForTask(taskType)
+    const now = this.dependencies.now().getTime()
+    return Object.freeze(
+      (this.manifest?.models ?? []).map(model => {
+        const assessment = this.assessments.get(model.id)
+        const readiness = this.readiness.get(model.id)
+        const health = this.dependencies.manager.getHealth(model)
+        const executable = isExecutableLocalModel(model)
+        const capacityAccepted = assessment?.status === 'eligible' || assessment?.status === 'degraded'
+        const ready = hasVerifiedLocalReadiness(model, readiness, this.manifest!.payloadSha256, now)
+        const reasons = [] as string[]
+        if (!model.enabled) reasons.push('model_disabled')
+        if (!executable) reasons.push('release_not_executable')
+        if (!model.capabilities.includes(requiredCapability)) reasons.push('capability_unavailable')
+        if (!assessment) reasons.push('capacity_unknown')
+        else if (!capacityAccepted) reasons.push(...assessment.reasons)
+        if (health.state === 'cooldown' || health.state === 'error') reasons.push(`health_${health.state}`)
+        if (!ready) reasons.push(this.preparationFailures.get(model.id) ?? 'readiness_pending')
+        return Object.freeze({
+          modelReleaseId: model.id,
+          enabled: model.enabled,
+          executable,
+          capacity: assessment?.status ?? 'unknown',
+          ready,
+          health: health.state,
+          admissible:
+            this.mode === 'active' &&
+            executable &&
+            model.capabilities.includes(requiredCapability) &&
+            capacityAccepted &&
+            health.state !== 'cooldown' &&
+            health.state !== 'error',
+          reasons: Object.freeze(reasons),
+        })
+      })
+    )
   }
 
   async initialize(bootstrap: BootstrapResponse, expectedPendingGeneration?: number): Promise<boolean> {
@@ -256,11 +596,15 @@ export class LocalInferenceCoordinator {
     }
     this.dependencies.manager.invalidateCatalogBoundary()
     const generation = ++this.generation
+    if (expectedPendingGeneration !== undefined && this.recovery?.generation === expectedPendingGeneration) {
+      this.recovery.generation = generation
+    }
     this.clearPolicyState()
     this.mode = 'loading'
     this.reason = 'bootstrap_pending'
     this.bootstrap = bootstrap
 
+    let failureReason = 'manifest_session_unavailable'
     try {
       const acceptanceSessionId = await this.dependencies.manifestSession(generation)
       if (!this.isCurrent(generation)) return false
@@ -268,9 +612,14 @@ export class LocalInferenceCoordinator {
         this.blockGeneration(generation, 'manifest_discovery_missing')
         return true
       }
+      failureReason = 'manifest_discovery_invalid'
       const discovery = exactDiscovery(bootstrap.local_model_manifest)
       this.discovery = discovery
-      if (!discovery.available) throw new Error('Local-model manifest is unavailable.')
+      if (!discovery.available) {
+        this.blockGeneration(generation, 'manifest_unavailable')
+        return true
+      }
+      failureReason = 'account_verification_failed'
       const account = await this.dependencies.accountSnapshot()
       if (!this.isCurrent(generation)) return false
       if (!account || account.accountId !== bootstrap.user.id) {
@@ -278,8 +627,10 @@ export class LocalInferenceCoordinator {
       }
       const trustDomain = await deriveLocalModelManifestTrustDomain(account)
       if (!this.isCurrent(generation)) return false
+      failureReason = 'manifest_fetch_failed'
       const envelope = await this.dependencies.fetchManifest(account.config)
       if (!this.isCurrent(generation)) return false
+      failureReason = 'manifest_verification_failed'
       const verified = await this.dependencies.verifyManifest(envelope, tauriManifestVerifier, {
         trustDomain,
         acceptanceSessionId,
@@ -301,6 +652,7 @@ export class LocalInferenceCoordinator {
         throw new Error('Bootstrap discovery and signed manifest versions differ.')
       }
 
+      failureReason = 'hardware_snapshot_failed'
       const snapshot = await this.dependencies.hardwareSnapshot()
       if (!this.isCurrent(generation)) return false
       const assessments = new Map<string, CapacityAssessment>()
@@ -330,16 +682,11 @@ export class LocalInferenceCoordinator {
       })
       this.assessments = assessments
       this.readiness.clear()
-      const candidates = [verified.routing.defaultModelId, ...verified.routing.fallbackModelIds]
-      for (const modelId of [...new Set(candidates)]) {
-        await this.prepareIfEligible(modelId, generation)
-        if (!this.isCurrent(generation)) return false
-      }
       this.mode = 'active'
       this.reason = 'signed_policy_active'
       return true
     } catch (error) {
-      this.blockGeneration(generation, error instanceof Error ? error.message : 'manifest_initialization_failed')
+      this.blockGeneration(generation, policyFailureReason(error, failureReason))
       return this.isCurrent(generation)
     }
   }
@@ -348,7 +695,7 @@ export class LocalInferenceCoordinator {
     let generation = this.generation
     if (this.mode !== 'active' || !this.manifest || !this.bootstrap || !this.account) {
       throw new LocalInferenceError(
-        'Die signierte lokale Modellrichtlinie ist nicht verfügbar; externer Fallback bleibt gesperrt.',
+        localPolicyDiagnostic(this.mode, this.reason).message,
         'local_policy_unavailable',
         false,
         false
@@ -377,15 +724,9 @@ export class LocalInferenceCoordinator {
     const settings = { ...DEFAULT_ROUTING_SETTINGS, ...input.routingSettings }
     await this.refreshCapacityIfStale(generation)
     this.requireActiveGeneration(generation)
-    for (const modelId of [this.manifest.routing.defaultModelId, ...this.manifest.routing.fallbackModelIds]) {
-      await this.prepareIfEligible(modelId, generation)
-      this.requireActiveGeneration(generation)
-    }
-    if (settings.experimentalFlashNext) {
-      const experimentalId = this.manifest.routing.experimentalModelIds[0]
-      if (experimentalId) await this.prepareIfEligible(experimentalId, generation)
-      this.requireActiveGeneration(generation)
-    }
+    const requiredCapability = requiredCapabilityForTask(input.taskType)
+    await this.prepareFirstAdmissibleCandidate(settings, requiredCapability, generation)
+    this.requireActiveGeneration(generation)
     const externalHash = input.externalPackage?.packetHash
 
     const health = new Map(
@@ -400,7 +741,7 @@ export class LocalInferenceCoordinator {
       contextEgress: input.contextEgress ?? 'external_allowed',
       externalApproval: input.externalPackage?.approval,
       expectedEgressPacketHash: externalHash,
-      requiredCapability: capabilityForTask(input.taskType),
+      requiredCapability,
       now: this.dependencies.now(),
     })
 
@@ -444,28 +785,40 @@ export class LocalInferenceCoordinator {
       }
     }
     throw new LocalInferenceError(
-      'Keine zulässige Inferenzroute ist für diesen Turn verfügbar.',
+      this.unavailableRouteMessage(settings, input.taskType, decision.reason),
       decision.reason,
       false,
       false
     )
   }
 
-  private async prepareIfEligible(modelId: string, generation = this.generation): Promise<void> {
+  private async prepareIfEligible(modelId: string, generation = this.generation, allowDegraded = false): Promise<void> {
+    const previous = this.preparationTail
+    let releaseQueue: () => void = () => undefined
+    this.preparationTail = new Promise<void>(resolve => {
+      releaseQueue = resolve
+    })
+    await previous
+    try {
+      await this.prepareIfEligibleExclusive(modelId, generation, allowDegraded)
+    } finally {
+      releaseQueue()
+    }
+  }
+
+  private async prepareIfEligibleExclusive(modelId: string, generation: number, allowDegraded: boolean): Promise<void> {
     if (!this.isCurrent(generation) || !this.manifest || !this.catalogBinding) return
     const manifestHash = this.manifest.payloadSha256
     const catalogBinding = this.catalogBinding
+    const model = this.manifest.models.find(candidate => candidate.id === modelId)
     const current = this.readiness.get(modelId)
-    if (
-      current?.ready &&
-      Number.isFinite(current.validUntilMs) &&
-      current.validUntilMs > this.dependencies.now().getTime() &&
-      current.manifestPayloadSha256 === manifestHash
-    ) {
+    if (hasVerifiedLocalReadiness(model, current, manifestHash, this.dependencies.now().getTime())) {
       return
     }
     this.readiness.delete(modelId)
-    if (this.assessments.get(modelId)?.status !== 'eligible') return
+    this.preparationFailures.delete(modelId)
+    const assessment = this.assessments.get(modelId)
+    if (assessment?.status !== 'eligible' && !(allowDegraded && assessment?.status === 'degraded')) return
     try {
       const readiness = await this.dependencies.prepareModel(modelId, catalogBinding)
       if (
@@ -473,11 +826,90 @@ export class LocalInferenceCoordinator {
         this.manifest?.payloadSha256 === manifestHash &&
         this.catalogBinding === catalogBinding
       ) {
-        this.readiness.set(modelId, readiness)
+        if (hasVerifiedLocalReadiness(model, readiness, manifestHash, this.dependencies.now().getTime())) {
+          this.readiness.set(modelId, readiness)
+        } else {
+          this.preparationFailures.set(modelId, 'readiness_mismatch')
+        }
       }
-    } catch {
-      if (this.isCurrent(generation)) this.readiness.delete(modelId)
+    } catch (error) {
+      if (this.isCurrent(generation)) {
+        this.readiness.delete(modelId)
+        this.preparationFailures.set(modelId, preparationFailureReason(error))
+      }
     }
+  }
+
+  private async prepareFirstAdmissibleCandidate(
+    settings: HybridRoutingSettings,
+    requiredCapability: InferenceCapability,
+    generation: number
+  ): Promise<void> {
+    if (!this.manifest) return
+    const experimental = settings.experimentalFlashNext
+      ? this.manifest.routing.experimentalModelIds.filter(modelId => {
+          const model = this.manifest?.models.find(candidate => candidate.id === modelId)
+          return model && !model.promoted
+        })
+      : []
+    const ids = [
+      ...new Set([...experimental, this.manifest.routing.defaultModelId, ...this.manifest.routing.fallbackModelIds]),
+    ]
+    for (const modelId of ids) {
+      const model = this.manifest.models.find(candidate => candidate.id === modelId)
+      const assessment = this.assessments.get(modelId)
+      const health = model ? this.dependencies.manager.getHealth(model) : undefined
+      const capacityAccepted =
+        assessment?.status === 'eligible' || (assessment?.status === 'degraded' && settings.allowDegradedLocal)
+      if (
+        !model ||
+        !isExecutableLocalModel(model) ||
+        !model.capabilities.includes(requiredCapability) ||
+        !capacityAccepted ||
+        health?.state === 'cooldown' ||
+        health?.state === 'error'
+      ) {
+        continue
+      }
+      await this.prepareIfEligible(modelId, generation, settings.allowDegradedLocal)
+      this.requireActiveGeneration(generation)
+      const readiness = this.readiness.get(modelId)
+      if (hasVerifiedLocalReadiness(model, readiness, this.manifest.payloadSha256, this.dependencies.now().getTime())) {
+        return
+      }
+    }
+  }
+
+  private unavailableRouteMessage(
+    settings: HybridRoutingSettings,
+    taskType: string | undefined,
+    reason: RouteDecision['reason']
+  ): string {
+    const manifest = this.manifest!
+    const candidates = new Set([
+      ...(settings.experimentalFlashNext ? manifest.routing.experimentalModelIds : []),
+      manifest.routing.defaultModelId,
+      ...manifest.routing.fallbackModelIds,
+    ])
+    const diagnostics = this.modelAdmissions(taskType)
+      .filter(model => candidates.has(model.modelReleaseId))
+      .flatMap(model => {
+        if (!model.enabled) return ['model_disabled']
+        if (!model.executable) return ['release_not_executable']
+        if (model.capacity === 'degraded' && !settings.allowDegradedLocal) {
+          return this.assessments.get(model.modelReleaseId)?.reasons ?? ['resource_pressure']
+        }
+        return model.reasons.filter(item => item !== 'readiness_pending' || model.reasons.length === 1)
+      })
+    const messages = [...new Set(diagnostics.map(code => localReadinessMessages.get(code)).filter(Boolean))]
+    const local = messages.slice(0, 3).join(' ') || localReadinessMessages.get('readiness_pending')!
+    const external =
+      reason === 'external_approval_required'
+        ? 'Ein externer Fallback ist nur nach ausdrücklicher Freigabe dieses Nachrichtenpakets möglich.'
+        : reason === 'local_only_blocked'
+          ? 'Dieser Chat ist auf lokale Modelle eingestellt.'
+          : 'Die Modellrichtlinie erlaubt für diesen Auftrag keinen externen Fallback.'
+    return `${local} ${external}`
   }
 
   private async refreshCapacityIfStale(generation: number): Promise<void> {
@@ -541,6 +973,7 @@ export class LocalInferenceCoordinator {
     this.catalogBinding = undefined
     this.assessments.clear()
     this.readiness.clear()
+    this.preparationFailures.clear()
   }
 
   private isCurrent(generation: number): boolean {
@@ -614,15 +1047,11 @@ export async function invalidateLocalInferenceApiIdentity(): Promise<void> {
   await beginNativeManifestAcceptance(generation)
 }
 
-/** Re-bootstrap only after a changed server/device identity has been persisted. */
-export async function reinitializeLocalInferenceForCurrentApi(): Promise<void> {
-  const generation = await beginLocalInferenceBootstrap()
-  try {
-    await initializeLocalInference(await LuczorApi.bootstrap(), generation)
-  } catch (error) {
-    markLocalInferenceBootstrapUnavailable(generation)
-    throw error
-  }
+/** Re-check the current identity explicitly; overlapping requests share one generation. */
+export function reinitializeLocalInferenceForCurrentApi(
+  options: { diagnoseUnavailable?: boolean } = {}
+): Promise<InferenceConnectionResult> {
+  return localInferenceCoordinator.reinitialize(options)
 }
 
 export function resolveInferenceRouteForTurn(input: TurnRoutingInput): Promise<ResolvedTurnRoute> {

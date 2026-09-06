@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import { assessModelCapacity, selectModelStorage, type HardwareSnapshot } from '@/services/inference/capacity'
-import { buildScopedContextPackage, type ScopedContextFragment } from '@/services/inference/contextBroker'
+import {
+  buildScopedContextPackage,
+  sanitizeInferenceMessagesForTarget,
+  type ScopedContextFragment,
+} from '@/services/inference/contextBroker'
 
 const GIB = 1024 ** 3
 
@@ -108,7 +112,7 @@ describe('local inference capacity and scoped context', () => {
     expect(assessment.reasons).toContain('vram_below_minimum')
   })
 
-  it('includes local-only active memory locally but never in an external package', () => {
+  it('includes local-only active memory locally but never in an external package', async () => {
     const scope = {
       principalId: 'account:v2:' + 'a'.repeat(64),
       serverInstance: 'https://example.test/luczor-a',
@@ -154,12 +158,72 @@ describe('local inference capacity and scoped context', () => {
         contentHash: '3'.repeat(64),
       },
     ]
-    const local = buildScopedContextPackage({ scopeKey: scope, target: 'local_llama_cpp', fragments })
-    const external = buildScopedContextPackage({ scopeKey: scope, target: 'laravel_proxy', fragments })
+    const local = await buildScopedContextPackage({ scopeKey: scope, target: 'local_llama_cpp', fragments })
+    const external = await buildScopedContextPackage({ scopeKey: scope, target: 'laravel_proxy', fragments })
     expect(local.text).toContain('Nur lokal bekannte Präferenz')
     expect(local.text).not.toContain('Fremder Account')
     expect(local.text).not.toContain('token=secret')
     expect(external.text).not.toContain('Nur lokal bekannte Präferenz')
     expect(external.omitted).toContainEqual({ id: 'private-memory', reason: 'local_only' })
+  })
+
+  it('preserves local paths, redacts external paths and hashes rendered content', async () => {
+    const scope = {
+      principalId: 'account:v2:' + 'a'.repeat(64),
+      serverInstance: 'https://example.test/luczor-a',
+      projectId: 'project-1',
+      sessionId: 'session-1',
+      taskType: 'coding.fix_bug',
+    }
+    const fragments: ScopedContextFragment[] = [
+      {
+        id: 'repository-path',
+        source: 'repository',
+        trust: 'untrusted_data',
+        scope,
+        sensitivity: 'normal',
+        lifecycle: 'active',
+        audiences: ['local_model', 'external_provider'],
+        egress: 'allowed',
+        content: 'Datei E:\\projekte\\luczor\\app\\src\\App.vue',
+        contentHash: 'f'.repeat(64),
+      },
+    ]
+
+    const local = await buildScopedContextPackage({ scopeKey: scope, target: 'local_llama_cpp', fragments })
+    const external = await buildScopedContextPackage({ scopeKey: scope, target: 'laravel_proxy', fragments })
+
+    expect(local.text).toContain('E:\\\\projekte\\\\luczor')
+    expect(external.text).not.toContain('E:\\\\projekte')
+    expect(external.text).toContain('@project')
+    expect(local.selected[0]?.contentHash).toMatch(/^[a-f0-9]{64}$/)
+    expect(local.selected[0]?.contentHash).not.toBe(fragments[0]?.contentHash)
+    expect(local.selected[0]?.contentHash).not.toBe(external.selected[0]?.contentHash)
+  })
+
+  it('sanitizes external history and tool arguments while retaining local paths', () => {
+    const messages = [
+      { role: 'user' as const, content: 'Öffne E:\\private\\repo\\secret.txt' },
+      {
+        role: 'assistant' as const,
+        content: 'Pfad E:\\private\\repo',
+        tool_calls: [
+          {
+            id: 'call-1',
+            type: 'function' as const,
+            function: { name: 'read_file', arguments: '{"path":"E:\\\\private\\\\repo\\\\secret.txt"}' },
+          },
+        ],
+      },
+    ]
+
+    const local = sanitizeInferenceMessagesForTarget(messages, 'local_llama_cpp')
+    const external = sanitizeInferenceMessagesForTarget(messages, 'laravel_proxy')
+    expect(local[0]?.content).toContain('E:\\private\\repo')
+    expect(external[0]?.content).not.toContain('E:\\private\\repo')
+    expect(external[0]?.content).toContain('@project')
+    expect(external[1]?.role === 'assistant' && external[1].tool_calls?.[0]?.function.arguments).not.toContain(
+      'E:\\\\private'
+    )
   })
 })

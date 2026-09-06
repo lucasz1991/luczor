@@ -1,7 +1,8 @@
 /** These records are local to the trusted desktop renderer. */
 export type AgentPermission = 'read-only' | 'workspace-write'
-export type AgentRole = 'planner' | 'implementer' | 'reviewer' | 'assistant'
-export type AgentJobStatus = 'awaiting_approval' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
+export type AgentRole = 'planner' | 'implementer' | 'reviewer' | 'join' | 'assistant'
+export type AgentJobStatus =
+  'awaiting_approval' | 'awaiting_external_approval' | 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 
 /** Capture a verified principal and its canonical workspace together, before enqueueing. */
 export type AgentProjectSnapshot = Readonly<{
@@ -20,6 +21,8 @@ export type AgentJobInput = Readonly<{
   role?: AgentRole
   model?: string
   externalThreadId?: string
+  teamRunId?: string
+  teamNodeId?: string
 }>
 
 /** Suitable for local metadata history; never contains prompts, output or absolute paths. */
@@ -33,10 +36,13 @@ export type AgentJobMetadata = Readonly<{
   permission: AgentPermission
   status: AgentJobStatus
   createdAt: number
+  approvalExpiresAt?: number
   startedAt?: number
   finishedAt?: number
   externalThreadId?: string
-  errorCode?: 'scope_changed' | 'execution_failed' | 'invalid_result'
+  teamRunId?: string
+  teamNodeId?: string
+  errorCode?: 'scope_changed' | 'execution_failed' | 'invalid_result' | 'approval_expired'
 }>
 
 /** Live UI record; the prompt is intentionally absent, including while queued. */
@@ -50,7 +56,11 @@ export type AgentRunRequest = Readonly<{
   role: AgentRole
   model?: string
   externalThreadId?: string
+  teamRunId?: string
+  teamNodeId?: string
   signal: AbortSignal
+  /** Report a bounded lifecycle phase without exposing prompts or output. */
+  onPhase?: (phase: 'running' | 'awaiting_external_approval') => void
   /** Replace the live text with this complete output snapshot; the orchestrator bounds it. */
   onOutput: (output: string) => void
 }>
@@ -64,6 +74,8 @@ export type AgentRunResult = Readonly<{
 export type AgentAdapter = Readonly<{
   id: string
   permissions: readonly AgentPermission[]
+  /** Device resources that this adapter holds exclusively while its run settles. */
+  exclusiveResources?: readonly string[]
   /** Must settle only after native cancellation has stopped the worker. */
   run: (request: AgentRunRequest) => Promise<AgentRunResult>
 }>
@@ -79,6 +91,7 @@ export type AgentOrchestratorOptions = Readonly<{
   maxHistory?: number
   maxOutputCharacters?: number
   maxPromptCharacters?: number
+  approvalTimeoutMs?: number
   createId?: () => string
   now?: () => number
 }>

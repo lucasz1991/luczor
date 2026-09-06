@@ -20,11 +20,12 @@ type InternalJob = {
   /** Stays true until the adapter settles, even after visible cancellation. */
   executing: boolean
   discard: boolean
+  approvalTimer?: ReturnType<typeof setTimeout>
 }
 
 const TERMINAL = new Set<AgentJobStatus>(['completed', 'failed', 'cancelled'])
 const PERMISSIONS: readonly AgentPermission[] = ['read-only', 'workspace-write']
-const ROLES: readonly AgentRole[] = ['planner', 'implementer', 'reviewer', 'assistant']
+const ROLES: readonly AgentRole[] = ['planner', 'implementer', 'reviewer', 'join', 'assistant']
 
 function boundedInteger(value: number | undefined, fallback: number, ceiling: number): number {
   if (value === undefined) return fallback
@@ -75,8 +76,11 @@ export class AgentOrchestrator {
   private readonly maxHistory: number
   private readonly maxOutputCharacters: number
   private readonly maxPromptCharacters: number
+  private readonly approvalTimeoutMs: number
   private readonly createId: () => string
   private readonly now: () => number
+  private readonly lastScheduledByScope = new Map<string, number>()
+  private scheduleSequence = 0
   private scheduling = false
   private disposed = false
 
@@ -87,11 +91,21 @@ export class AgentOrchestrator {
     this.maxHistory = boundedInteger(options.maxHistory, 50, 500)
     this.maxOutputCharacters = boundedInteger(options.maxOutputCharacters, 128_000, 1_000_000)
     this.maxPromptCharacters = boundedInteger(options.maxPromptCharacters, 32_000, 128_000)
+    this.approvalTimeoutMs = boundedInteger(options.approvalTimeoutMs, 15 * 60_000, 24 * 60 * 60_000)
     this.createId = options.createId ?? (() => crypto.randomUUID())
     this.now = options.now ?? Date.now
     for (const adapter of options.adapters) {
       if (!safeIdentifier(adapter.id) || this.adapters.has(adapter.id)) throw new Error('Ungültiger Agentenadapter.')
-      this.adapters.set(adapter.id, Object.freeze({ ...adapter, permissions: Object.freeze([...adapter.permissions]) }))
+      const resources = adapter.exclusiveResources ?? []
+      if (resources.some(resource => !safeIdentifier(resource))) throw new Error('Ungültige Agentenressource.')
+      this.adapters.set(
+        adapter.id,
+        Object.freeze({
+          ...adapter,
+          permissions: Object.freeze([...adapter.permissions]),
+          exclusiveResources: Object.freeze([...new Set(resources)]),
+        })
+      )
     }
   }
 
@@ -115,6 +129,9 @@ export class AgentOrchestrator {
     if (input.externalThreadId !== undefined && !safeIdentifier(input.externalThreadId)) {
       throw new Error('Die externe Aufgaben-ID ist ungültig.')
     }
+    if (input.teamRunId !== undefined && !safeIdentifier(input.teamRunId)) throw new Error('Die Team-ID ist ungültig.')
+    if (input.teamNodeId !== undefined && !safeIdentifier(input.teamNodeId))
+      throw new Error('Die Teamknoten-ID ist ungültig.')
     const pending = [...this.jobs.values()].filter(job => !TERMINAL.has(job.metadata.status) || job.executing)
     if (pending.length >= this.maxPendingTotal) throw new Error('Die Agentenwarteschlange ist voll.')
     if (pending.filter(job => this.sameProject(job.project, project)).length >= this.maxPendingPerProject) {
@@ -139,11 +156,26 @@ export class AgentOrchestrator {
         model: input.model,
         role,
         permission: input.permission,
+        teamRunId: input.teamRunId,
+        teamNodeId: input.teamNodeId,
         status: 'awaiting_approval',
         createdAt: this.now(),
+        approvalExpiresAt: this.now() + this.approvalTimeoutMs,
       }),
     }
     this.jobs.set(id, job)
+    job.approvalTimer = setTimeout(() => {
+      const current = this.jobs.get(id)
+      if (!current || current.metadata.status !== 'awaiting_approval') return
+      current.prompt = ''
+      this.update(current, {
+        status: 'cancelled',
+        finishedAt: this.now(),
+        errorCode: 'approval_expired',
+      })
+      this.prune()
+      this.schedule()
+    }, this.approvalTimeoutMs)
     this.publish(job)
     return this.liveRecord(job)
   }
@@ -152,7 +184,8 @@ export class AgentOrchestrator {
   approve(id: string): boolean {
     const job = this.jobs.get(id)
     if (this.disposed || !job || job.metadata.status !== 'awaiting_approval') return false
-    this.update(job, { status: 'queued' })
+    this.clearApprovalTimer(job)
+    this.update(job, { status: 'queued', approvalExpiresAt: undefined })
     this.schedule()
     return true
   }
@@ -160,6 +193,7 @@ export class AgentOrchestrator {
   cancel(id: string): boolean {
     const job = this.jobs.get(id)
     if (!job || TERMINAL.has(job.metadata.status)) return false
+    this.clearApprovalTimer(job)
     job.controller.abort()
     job.prompt = ''
     job.resumeThreadId = undefined
@@ -173,8 +207,8 @@ export class AgentOrchestrator {
   clearPrincipal(principalId: string): void {
     for (const job of [...this.jobs.values()]) {
       if (job.project.principalId !== principalId) continue
-      this.cancel(job.metadata.id)
       job.output = ''
+      this.cancel(job.metadata.id)
       job.discard = true
       if (!job.executing) this.jobs.delete(job.metadata.id)
     }
@@ -197,6 +231,12 @@ export class AgentOrchestrator {
 
   getOutput(id: string): string {
     return this.jobs.get(id)?.output ?? ''
+  }
+
+  /** Terminal UI state plus a settled adapter/native worker. */
+  isSettled(id: string): boolean {
+    const job = this.jobs.get(id)
+    return !!job && TERMINAL.has(job.metadata.status) && !job.executing
   }
 
   /** Trusted review UI only; this value must never enter shared metadata or logs. */
@@ -229,7 +269,31 @@ export class AgentOrchestrator {
       // Native bindings already resolve paths; only account for Windows casing here.
       return /^[a-z]:[\\/]|^\\\\/iu.test(root) ? root.replace(/\\/gu, '/').toLowerCase() : root
     }
-    return canonical(left.rootPath) === canonical(right.rootPath)
+    const leftRoot = canonical(left.rootPath).replace(/\/+$/u, '')
+    const rightRoot = canonical(right.rootPath).replace(/\/+$/u, '')
+    return leftRoot === rightRoot || leftRoot.startsWith(`${rightRoot}/`) || rightRoot.startsWith(`${leftRoot}/`)
+  }
+
+  private conflicts(left: InternalJob, right: InternalJob): boolean {
+    if (left.resumeThreadId && right.resumeThreadId && left.resumeThreadId === right.resumeThreadId) return true
+    if (
+      this.sharesWorkspace(left.project, right.project) &&
+      (left.metadata.permission === 'workspace-write' || right.metadata.permission === 'workspace-write')
+    ) {
+      return true
+    }
+    const leftResources = this.adapters.get(left.metadata.adapterId)?.exclusiveResources ?? []
+    const rightResources = new Set(this.adapters.get(right.metadata.adapterId)?.exclusiveResources ?? [])
+    return leftResources.some(resource => rightResources.has(resource))
+  }
+
+  private fairnessKey(job: InternalJob): string {
+    return `${job.project.principalId}\u0000${job.project.projectId}\u0000${job.metadata.teamRunId ?? 'single'}`
+  }
+
+  private clearApprovalTimer(job: InternalJob): void {
+    if (job.approvalTimer) clearTimeout(job.approvalTimer)
+    job.approvalTimer = undefined
   }
 
   private liveRecord(job: InternalJob): AgentJob {
@@ -266,12 +330,23 @@ export class AgentOrchestrator {
     queueMicrotask(() => {
       this.scheduling = false
       if (this.disposed) return
-      for (const job of this.jobs.values()) {
-        if (job.metadata.status !== 'queued') continue
-        const running = [...this.jobs.values()].filter(candidate => candidate.executing)
-        if (running.length >= this.maxConcurrent) break
-        if (running.some(candidate => this.sharesWorkspace(candidate.project, job.project))) continue
+      const running = [...this.jobs.values()].filter(candidate => candidate.executing)
+      while (running.length < this.maxConcurrent) {
+        const candidates = [...this.jobs.values()]
+          .filter(
+            job =>
+              !job.executing && job.metadata.status === 'queued' && !running.some(active => this.conflicts(active, job))
+          )
+          .sort((left, right) => {
+            const leftTurn = this.lastScheduledByScope.get(this.fairnessKey(left)) ?? 0
+            const rightTurn = this.lastScheduledByScope.get(this.fairnessKey(right)) ?? 0
+            return leftTurn - rightTurn || left.metadata.createdAt - right.metadata.createdAt
+          })
+        const job = candidates[0]
+        if (!job) break
         job.executing = true
+        running.push(job)
+        this.lastScheduledByScope.set(this.fairnessKey(job), ++this.scheduleSequence)
         void this.execute(job)
       }
     })
@@ -296,9 +371,21 @@ export class AgentOrchestrator {
           role: job.metadata.role,
           model: job.metadata.model,
           externalThreadId: job.resumeThreadId,
+          teamRunId: job.metadata.teamRunId,
+          teamNodeId: job.metadata.teamNodeId,
           signal: job.controller.signal,
+          onPhase: phase => {
+            if (job.controller.signal.aborted || this.disposed || TERMINAL.has(job.metadata.status)) return
+            if (phase === job.metadata.status) return
+            this.update(job, { status: phase })
+          },
           onOutput: (output: string) => {
-            if (job.controller.signal.aborted || this.disposed || job.metadata.status !== 'running') return
+            if (
+              job.controller.signal.aborted ||
+              this.disposed ||
+              !['running', 'awaiting_external_approval'].includes(job.metadata.status)
+            )
+              return
             if (typeof output !== 'string') return
             job.output = output.slice(0, this.maxOutputCharacters)
             this.notify()
@@ -334,6 +421,7 @@ export class AgentOrchestrator {
       }
     } finally {
       job.executing = false
+      this.clearApprovalTimer(job)
       job.prompt = ''
       job.resumeThreadId = undefined
       if (job.discard) {
@@ -341,6 +429,7 @@ export class AgentOrchestrator {
         this.notify()
       }
       this.prune()
+      this.notify()
       this.schedule()
     }
   }
@@ -350,6 +439,10 @@ export class AgentOrchestrator {
     const excess = finished.length - this.maxHistory
     if (excess <= 0) return
     for (const job of finished.slice(0, excess)) this.jobs.delete(job.metadata.id)
+    if (this.lastScheduledByScope.size > this.maxHistory * 4) {
+      const liveKeys = new Set([...this.jobs.values()].map(job => this.fairnessKey(job)))
+      for (const key of this.lastScheduledByScope.keys()) if (!liveKeys.has(key)) this.lastScheduledByScope.delete(key)
+    }
     this.notify()
   }
 }

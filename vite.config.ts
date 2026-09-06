@@ -6,6 +6,7 @@ import Components from 'unplugin-vue-components/vite'
 import { defineConfig } from 'vite'
 import vueDevTools from 'vite-plugin-vue-devtools'
 import { version as pkgVersion } from './package.json'
+import { DEFAULT_API_BASE_URL, DEV_API_PREFIX } from './src/services/api/endpoint'
 
 const HOST = process.env.TAURI_DEV_HOST
 const PLATFORM = process.env.TAURI_ENV_PLATFORM
@@ -51,6 +52,25 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     host: HOST || false,
+    // The packaged WebView uses its server-approved Tauri origin. Vite relays
+    // only the fixed Luczor API so localhost development needs no production CORS expansion.
+    proxy: {
+      [`^${DEV_API_PREFIX}/api/v1(?:/|\\?|$)`]: {
+        target: DEFAULT_API_BASE_URL,
+        changeOrigin: true,
+        secure: true,
+        followRedirects: false,
+        ws: false,
+        rewrite: path => path.slice(DEV_API_PREFIX.length),
+        configure: proxy => {
+          // This API authenticates with the explicit device bearer, never a localhost browser cookie.
+          proxy.on('proxyReq', request => request.removeHeader('cookie'))
+          proxy.on('proxyRes', response => {
+            delete response.headers['set-cookie']
+          })
+        },
+      },
+    },
     hmr: HOST
       ? {
           protocol: 'ws',

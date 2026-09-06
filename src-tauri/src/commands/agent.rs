@@ -11,20 +11,14 @@
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tauri::WebviewWindow;
 
-use super::codex::acquire_workspace_lease;
 use super::ensure_main_webview;
-use super::process::run_bounded_command;
+use super::execution::{admit, ExecutionLease, Guarded};
 
-const MAX_AGENT_OUTPUT_BYTES: usize = 500_000;
 const MAX_BRIDGE_BYTES: usize = 1_000_000;
-const DEFAULT_AGENT_TIMEOUT_SECS: u64 = 900;
-const MAX_AGENT_TIMEOUT_SECS: u64 = 3_600;
 
 #[derive(Serialize)]
 pub struct AgentInfo {
@@ -119,58 +113,13 @@ pub async fn agent_cli_run(
     payload: AgentRunPayload,
 ) -> Result<AgentRunResult, String> {
     ensure_main_webview(&window)?;
-    let prompt = payload.prompt.trim();
-    if prompt.is_empty() {
-        return Err("Empty prompt".into());
-    }
-    if prompt.chars().count() > 100_000 {
-        return Err("Prompt too long".into());
-    }
-
-    let names = candidates_for(&payload.agent)
-        .ok_or_else(|| format!("Unknown agent: {}", payload.agent))?;
-    // Headless invocation per CLI: claude uses `-p`, codex uses `exec`.
-    let args: Vec<String> = match payload.agent.as_str() {
-        "claude" => vec!["-p".into(), prompt.to_string()],
-        "codex" => vec!["exec".into(), prompt.to_string()],
-        other => return Err(format!("Unknown agent: {other}")),
-    };
-
-    let exe =
-        find_executable(names).ok_or_else(|| format!("{} CLI not found in PATH", payload.agent))?;
-    let mut command = Command::new(exe);
-    command.args(&args);
-    let project_dir = match payload.project_dir.as_deref().filter(|dir| !dir.is_empty()) {
-        Some(dir) => validate_project_dir(dir)?,
-        None => validate_project_dir(
-            &std::env::current_dir()
-                .map_err(|_| "Current coding-agent directory unavailable.")?
-                .to_string_lossy(),
-        )?,
-    };
-    let workspace_lease = acquire_workspace_lease(&project_dir)?;
-    command.current_dir(&project_dir);
-    let timeout = Duration::from_secs(
-        payload
-            .timeout_seconds
-            .unwrap_or(DEFAULT_AGENT_TIMEOUT_SECS)
-            .clamp(1, MAX_AGENT_TIMEOUT_SECS),
+    let _ = (
+        payload.agent,
+        payload.prompt,
+        payload.project_dir,
+        payload.timeout_seconds,
     );
-    let output = tauri::async_runtime::spawn_blocking(move || {
-        let _lease = workspace_lease;
-        run_bounded_command(command, None, timeout, MAX_AGENT_OUTPUT_BYTES)
-    })
-    .await
-    .map_err(|error| format!("join failed: {error}"))??;
-    Ok(AgentRunResult {
-        ok: output.success,
-        code: output.code,
-        stdout: output.stdout,
-        stderr: output.stderr,
-        timed_out: output.timed_out,
-        stdout_truncated: output.stdout_truncated,
-        stderr_truncated: output.stderr_truncated,
-    })
+    Err("Legacy agent CLI execution is disabled. Use a reviewed managed Codex job with a bound project, sandbox, cancellation and persistent session.".into())
 }
 
 #[derive(Deserialize)]
@@ -183,13 +132,15 @@ pub struct BridgePayload {
 #[tauri::command]
 pub async fn agent_write_bridge(
     window: WebviewWindow,
-    payload: BridgePayload,
+    payload: Guarded<BridgePayload>,
 ) -> Result<String, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, true)?;
+    let payload = payload.request;
     validate_bridge_content(&payload.content)?;
     let dir = validate_project_dir(&payload.project_dir)?;
     let file = dir.join("LUCZOR.md");
-    atomic_write(&file, payload.content.as_bytes())?;
+    atomic_write_guarded(&file, payload.content.as_bytes(), Some(&gate))?;
     Ok(file.to_string_lossy().into_owned())
 }
 
@@ -201,7 +152,16 @@ fn validate_bridge_content(content: &str) -> Result<(), String> {
     }
 }
 
+#[cfg(test)]
 fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    atomic_write_guarded(target, bytes, None)
+}
+
+fn atomic_write_guarded(
+    target: &Path,
+    bytes: &[u8],
+    gate: Option<&ExecutionLease>,
+) -> Result<(), String> {
     let temp = target.with_file_name(format!(".LUCZOR.md.{}.tmp", uuid::Uuid::new_v4()));
     let result = (|| -> Result<(), String> {
         let mut file = OpenOptions::new()
@@ -212,6 +172,9 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
         file.write_all(bytes)
             .and_then(|_| file.sync_all())
             .map_err(|error| format!("temporary bridge write failed: {error}"))?;
+        if let Some(gate) = gate {
+            gate.check()?;
+        }
         atomic_replace(&temp, target).map_err(|error| format!("bridge replace failed: {error}"))
     })();
     if result.is_err() {
@@ -221,7 +184,7 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+pub(crate) fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
 
     const MOVEFILE_REPLACE_EXISTING: u32 = 0x1;
@@ -249,7 +212,7 @@ fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(windows))]
-fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
+pub(crate) fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
     std::fs::rename(source, target)
 }
 

@@ -13,6 +13,7 @@ declare module 'vue' {
   export interface GlobalComponents {
     AgentHub: typeof import('./src/components/agents/AgentHub.vue')['default']
     AgentScreen: typeof import('./src/components/ai/AgentScreen.vue')['default']
+    AgentTeams: typeof import('./src/components/agents/AgentTeams.vue')['default']
     AiIcon: typeof import('./src/components/ai/AiIcon.vue')['default']
     AmbientBackdrop: typeof import('./src/components/vengeance/AmbientBackdrop.vue')['default']
     AppearanceSettingsSection: typeof import('./src/components/settings/AppearanceSettingsSection.vue')['default']
@@ -31,6 +32,8 @@ declare module 'vue' {
     LoadingState: typeof import('./src/components/ai/LoadingState.vue')['default']
     MiniChatSurface: typeof import('./src/components/mini/MiniChatSurface.vue')['default']
     MiniChatWindow: typeof import('./src/components/mini/MiniChatWindow.vue')['default']
+    PayloadApproval: typeof import('./src/components/ai/PayloadApproval.vue')['default']
+    PlanningWorkspace: typeof import('./src/components/planning/PlanningWorkspace.vue')['default']
     PlanPanel: typeof import('./src/components/PlanPanel.vue')['default']
     PrivacyDiagnosticsSettings: typeof import('./src/components/PrivacyDiagnosticsSettings.vue')['default']
     PromptBar: typeof import('./src/components/ai/PromptBar.vue')['default']

@@ -13,6 +13,7 @@ const emit = defineEmits<{
   settings: []
   system: []
   agents: []
+  planning: []
   'update:collapsed': [value: boolean]
 }>()
 const query = ref('')
@@ -42,6 +43,14 @@ const filtered = computed(() =>
     </button>
     <button class="ai-sidebar__action" type="button" title="Agenten und Erinnerungsübertragung" @click="emit('agents')">
       <AiIcon name="spark" /><span>Agenten & Erinnerungen</span>
+    </button>
+    <button
+      class="ai-sidebar__action"
+      type="button"
+      title="Optionales Planungsfenster öffnen"
+      @click="emit('planning')"
+    >
+      <AiIcon name="check" /><span>Planungsfenster</span>
     </button>
     <div class="ai-sidebar__section">
       <span>Projekte</span><span>{{ items.length }}</span>

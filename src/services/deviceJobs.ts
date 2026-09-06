@@ -1,7 +1,9 @@
 import Pusher from 'pusher-js'
 import { invoke } from '@tauri-apps/api/core'
 import { LuczorApi, getApiConfig, type DeviceJob } from '@/services/api/luczorApi'
-import { runAgentCli } from '@/services/agents'
+import { runWorkflowAgent } from '@/services/agents/workflowAgent'
+import { executionGate, invokeGuarded, type ExecutionTicket } from '@/services/executionGate'
+import { requestConfirmation } from '@/services/confirmation'
 import {
   catchUpPushNotifications,
   handleRealtimeNotification,
@@ -11,8 +13,9 @@ import { isWorkflowTaskBundle, runWorkflowTask, type WorkflowTaskPrimitives } fr
 
 let stop: (() => void) | null = null
 const inFlight = new Set<string>()
-let pollInFlight: Promise<void> | null = null
+let pollInFlight: { session: number; promise: Promise<void> } | null = null
 let sessionCounter = 0
+type ChannelSession = { id: number; isCurrent: () => boolean; signal: AbortSignal }
 
 export type DeviceJobChannelState = {
   running: boolean
@@ -54,11 +57,57 @@ function updateChannelState(patch: Partial<DeviceJobChannelState>): void {
   window.dispatchEvent(new CustomEvent('luczor://device-channel-state', { detail: getDeviceJobChannelState() }))
 }
 
+/** Synchronously retires both an established channel and a start waiting on configuration. */
+export function stopDeviceJobChannel(): void {
+  if (stop) {
+    stop()
+    return
+  }
+  sessionCounter++
+}
+
 export async function startDeviceJobChannel(): Promise<() => void> {
   stop?.()
   const session = ++sessionCounter
-  const config = await getApiConfig()
+  let active = true
+  const controller = new AbortController()
+  let cleanupStartedResources: (() => void) | null = null
+  let pusher: Pusher | null = null
+  let channelName: string | null = null
+
+  const isCurrent = () => active && session === sessionCounter
+  const deactivate = (publishStoppedState: boolean) => {
+    if (!active) return
+    const wasCurrent = session === sessionCounter
+    active = false
+    controller.abort()
+    if (wasCurrent) sessionCounter++
+    cleanupStartedResources?.()
+    if (pusher) {
+      pusher.connection.unbind_all()
+      if (channelName) pusher.unsubscribe(channelName)
+      pusher.disconnect()
+    }
+    if (stop === stopThis) stop = null
+    if (publishStoppedState && wasCurrent) {
+      updateChannelState({ running: false, rest: 'stopped', realtime: 'stopped', lastError: null })
+    }
+  }
+  const stopThis = () => deactivate(true)
+  stop = stopThis
+
+  let config: Awaited<ReturnType<typeof getApiConfig>>
+  try {
+    config = await getApiConfig()
+  } catch (error) {
+    if (!isCurrent()) return stopThis
+    deactivate(false)
+    updateChannelState({ running: false, rest: 'stopped', realtime: 'stopped', lastError: errorMessage(error) })
+    throw error
+  }
+  if (!isCurrent()) return stopThis
   if (!config.deviceKey) {
+    deactivate(false)
     updateChannelState({
       running: false,
       rest: 'stopped',
@@ -68,9 +117,11 @@ export async function startDeviceJobChannel(): Promise<() => void> {
     throw new Error('Ein Device-Key ist für den Gerätekanal erforderlich.')
   }
 
-  let active = true
-  let pusher: Pusher | null = null
-  let channelName: string | null = null
+  const channelSession: ChannelSession = {
+    id: session,
+    isCurrent,
+    signal: controller.signal,
+  }
   let realtimeRetryTimer: number | null = null
   let realtimeAttempt = 0
   let realtimeSetupInFlight = false
@@ -86,7 +137,7 @@ export async function startDeviceJobChannel(): Promise<() => void> {
   const setupRealtime = async () => {
     if (!active || session !== sessionCounter || realtimeSetupInFlight || pusher) return
     realtimeSetupInFlight = true
-    const connection = await connectRealtime(config, session, () => active)
+    const connection = await connectRealtime(config, session, () => active, controller.signal)
     realtimeSetupInFlight = false
     if (!active || session !== sessionCounter) {
       connection?.pusher.disconnect()
@@ -104,9 +155,13 @@ export async function startDeviceJobChannel(): Promise<() => void> {
   }
 
   const syncNotifications = () => {
-    void catchUpPushNotifications().catch(error => console.warn('[notifications] catch-up failed', error))
+    if (!channelSession.isCurrent()) return
+    void catchUpPushNotifications().catch(error => {
+      if (channelSession.isCurrent()) console.warn('[notifications] catch-up failed', error)
+    })
   }
   const syncWhenVisible = () => {
+    if (!channelSession.isCurrent()) return
     if (document.visibilityState === 'visible') {
       syncNotifications()
       pollNow()
@@ -118,9 +173,10 @@ export async function startDeviceJobChannel(): Promise<() => void> {
       !shouldPollDeviceJobs(Date.now(), channelState.lastPollAt, document.visibilityState, navigator.onLine !== false)
     )
       return
-    void pullPending(config.clientId)
+    void pullPending(config.clientId, channelSession)
   }
   const syncOnline = () => {
+    if (!channelSession.isCurrent()) return
     syncNotifications()
     pollNow()
     if (pusher && pusher.connection.state === 'disconnected') pusher.connect()
@@ -141,50 +197,40 @@ export async function startDeviceJobChannel(): Promise<() => void> {
   pollNow()
   const timer = window.setInterval(pollNow, 20_000)
 
-  stop = () => {
-    if (!active) return
-    active = false
-    sessionCounter++
+  cleanupStartedResources = () => {
     window.clearInterval(timer)
     if (realtimeRetryTimer !== null) window.clearTimeout(realtimeRetryTimer)
     window.removeEventListener('online', syncOnline)
     document.removeEventListener('visibilitychange', syncWhenVisible)
-    if (pusher) {
-      pusher.connection.unbind_all()
-      if (channelName) pusher.unsubscribe(channelName)
-      pusher.disconnect()
-    }
-    updateChannelState({
-      running: false,
-      rest: 'stopped',
-      realtime: 'stopped',
-      lastError: null,
-    })
-    stop = null
   }
 
   void setupRealtime()
 
-  return stop
+  return stopThis
 }
 
-async function pullPending(clientId: string): Promise<void> {
-  if (pollInFlight) return pollInFlight
-  pollInFlight = pullPendingBatch(clientId).finally(() => {
-    pollInFlight = null
+async function pullPending(clientId: string, session: ChannelSession): Promise<void> {
+  if (pollInFlight?.session === session.id) return pollInFlight.promise
+  const promise = pullPendingBatch(clientId, session).finally(() => {
+    if (pollInFlight?.session === session.id) pollInFlight = null
   })
-  return pollInFlight
+  pollInFlight = { session: session.id, promise }
+  return promise
 }
 
-async function pullPendingBatch(clientId: string): Promise<void> {
+async function pullPendingBatch(clientId: string, session: ChannelSession): Promise<void> {
   try {
     for (let count = 0; count < 25; count++) {
+      if (!session.isCurrent()) return
       const response = await LuczorApi.nextDeviceJob(clientId)
+      if (!session.isCurrent()) return
       if (!response.data) break
-      if (!(await safeProcessJob(clientId, response.data))) break
+      if (!(await safeProcessJob(clientId, response.data, session))) break
     }
+    if (!session.isCurrent()) return
     updateChannelState({ rest: 'polling', lastPollAt: Date.now() })
   } catch (error) {
+    if (!session.isCurrent()) return
     updateChannelState({ rest: 'error', lastError: errorMessage(error) })
     console.warn('[device-jobs] poll failed', error)
   }
@@ -193,10 +239,13 @@ async function pullPendingBatch(clientId: string): Promise<void> {
 async function connectRealtime(
   config: Awaited<ReturnType<typeof getApiConfig>>,
   session: number,
-  isActive: () => boolean
+  isActive: () => boolean,
+  signal: AbortSignal
 ): Promise<{ pusher: Pusher; channelName: string } | null> {
   try {
+    if (!isActive() || session !== sessionCounter) return null
     const registration = await LuczorApi.registerDevice(config.clientId, deviceName())
+    if (!isActive() || session !== sessionCounter) return null
     const realtime = (await LuczorApi.realtimeConfig()).data
     if (!isActive() || session !== sessionCounter) return null
     if (!realtime?.key) throw new Error('Der Reverb-Gerätekanal ist auf dem Server nicht konfiguriert.')
@@ -215,55 +264,84 @@ async function connectRealtime(
       enabledTransports: secure ? ['wss'] : ['ws'],
       channelAuthorization: {
         customHandler: async ({ socketId, channelName: requestedChannel }, callback) => {
+          const stale = () => new Error('Gerätekanalsitzung wurde beendet.')
           try {
+            if (!isActive() || session !== sessionCounter) {
+              callback(stale(), null)
+              return
+            }
             const auth = await LuczorApi.reverbAuth(
               socketId,
               requestedChannel,
               config.clientId,
               registration.session.token
             )
+            if (!isActive() || session !== sessionCounter) {
+              callback(stale(), null)
+              return
+            }
             callback(null, auth)
           } catch (error) {
+            if (!isActive() || session !== sessionCounter) {
+              callback(stale(), null)
+              return
+            }
             callback(error instanceof Error ? error : new Error(String(error)), null)
           }
         },
       },
     })
     const channel = pusher.subscribe(channelName)
-    channel.bind('device.job.created', (job: DeviceJob) => void safeProcessJob(config.clientId, job))
+    const current: ChannelSession = { id: session, isCurrent: () => isActive() && session === sessionCounter, signal }
+    channel.bind('device.job.created', (job: DeviceJob) => {
+      if (current.isCurrent()) void safeProcessJob(config.clientId, job, current)
+    })
     channel.bind(REALTIME_NOTIFICATION_EVENT, (payload: unknown) => {
-      void handleRealtimeNotification(payload).finally(() => {
-        void catchUpPushNotifications().catch(error => console.warn('[notifications] catch-up failed', error))
+      if (!current.isCurrent()) return
+      void (async () => {
+        await handleRealtimeNotification(payload)
+        if (!current.isCurrent()) return
+        await catchUpPushNotifications()
+      })().catch(error => {
+        if (current.isCurrent()) console.warn('[notifications] realtime handling failed', error)
       })
     })
     channel.bind('pusher:subscription_error', (error: unknown) => {
-      updateChannelState({ realtime: 'unavailable', lastError: errorMessage(error) })
+      if (current.isCurrent()) updateChannelState({ realtime: 'unavailable', lastError: errorMessage(error) })
     })
-    pusher.connection.bind('connecting', () => updateChannelState({ realtime: 'connecting' }))
+    pusher.connection.bind('connecting', () => {
+      if (current.isCurrent()) updateChannelState({ realtime: 'connecting' })
+    })
     pusher.connection.bind('connected', () => {
+      if (!current.isCurrent()) return
       updateChannelState({ realtime: 'connected', lastError: null, lastRealtimeAt: Date.now() })
-      void catchUpPushNotifications().catch(error => console.warn('[notifications] catch-up failed', error))
-      void pullPending(config.clientId)
+      void (async () => {
+        await catchUpPushNotifications()
+        if (!current.isCurrent()) return
+        await pullPending(config.clientId, current)
+      })().catch(error => {
+        if (current.isCurrent()) console.warn('[notifications] catch-up failed', error)
+      })
     })
     pusher.connection.bind('disconnected', () => {
-      if (isActive()) updateChannelState({ realtime: 'reconnecting' })
+      if (current.isCurrent()) updateChannelState({ realtime: 'reconnecting' })
     })
     pusher.connection.bind('unavailable', () => {
-      if (isActive())
+      if (current.isCurrent())
         updateChannelState({
           realtime: 'unavailable',
           lastError: 'Reverb ist nicht erreichbar; REST-Polling bleibt aktiv.',
         })
     })
     pusher.connection.bind('failed', () => {
-      if (isActive())
+      if (current.isCurrent())
         updateChannelState({
           realtime: 'unavailable',
           lastError: 'Reverb-Verbindung ist fehlgeschlagen; REST-Polling bleibt aktiv.',
         })
     })
     pusher.connection.bind('error', (error: unknown) => {
-      if (isActive()) updateChannelState({ realtime: 'reconnecting', lastError: errorMessage(error) })
+      if (current.isCurrent()) updateChannelState({ realtime: 'reconnecting', lastError: errorMessage(error) })
     })
     return { pusher, channelName }
   } catch (error) {
@@ -275,32 +353,67 @@ async function connectRealtime(
   }
 }
 
-async function safeProcessJob(clientId: string, job: DeviceJob): Promise<boolean> {
+async function safeProcessJob(clientId: string, job: DeviceJob, session: ChannelSession): Promise<boolean> {
   try {
-    await processJob(clientId, job)
+    if (!session.isCurrent()) return false
+    await processJob(clientId, job, session)
     return true
   } catch (error) {
+    if (!session.isCurrent()) return false
     updateChannelState({ lastError: errorMessage(error) })
     console.warn('[device-jobs] job failed before completion', { jobId: job.id, error })
     return false
   }
 }
 
-async function processJob(clientId: string, job: DeviceJob): Promise<void> {
-  if (inFlight.has(job.id)) return
-  inFlight.add(job.id)
+async function processJob(clientId: string, incoming: DeviceJob, session: ChannelSession): Promise<void> {
+  const job = structuredClone(incoming)
+  const key = `${session.id}:${job.id}`
+  if (inFlight.has(key)) return
+  inFlight.add(key)
+  const ticket = executionGate.capture(session.signal)
+  const mutating = !['desktop.capture_screen', 'desktop.clipboard.read', 'desktop.windows.list'].includes(
+    job.tool_profile
+  )
+  const assertCurrent = () => {
+    if (!session.isCurrent()) throw new Error('Gerätekanalsitzung wurde beendet.')
+    executionGate.assert(ticket, mutating)
+  }
   try {
+    assertCurrent()
     await invoke('verify_device_job', { payload: job })
+    assertCurrent()
+    // Approval is local, complete and bound to a private immutable copy of the signed payload.
+    const preview = await deviceJobApprovalPreview(job)
+    assertCurrent()
+    const confirmation = await requestConfirmation(preview, 'Luczor – Geräteauftrag freigeben')
+    assertCurrent()
+    if (confirmation.error) throw new Error(confirmation.error)
+    const approved = confirmation.approved
     if (job.status === 'approval_required') {
-      const approved = window.confirm(approvalPrompt(job))
       await LuczorApi.approveDeviceJob(job.id, clientId, approved, approved ? undefined : 'Rejected on local device')
-      if (!approved) return
+      assertCurrent()
+    }
+    if (!approved) {
+      if (job.status === 'approval_required') return
+      await LuczorApi.completeDeviceJob(job.id, clientId, false, undefined, 'Rejected on local device')
+      return
     }
     await LuczorApi.startDeviceJob(job.id, clientId)
+    assertCurrent()
     try {
-      const result = await executeProfile(job)
-      await LuczorApi.completeDeviceJob(job.id, clientId, true, result)
+      const result = await executeProfile(job, ticket, assertCurrent)
+      assertCurrent()
+      const success = result.ok !== false
+      await LuczorApi.completeDeviceJob(
+        job.id,
+        clientId,
+        success,
+        result,
+        success ? undefined : 'Die Aktion meldete einen Fehler.'
+      )
     } catch (error) {
+      if (!session.isCurrent() || ticket.signal.aborted) return
       await LuczorApi.completeDeviceJob(
         job.id,
         clientId,
@@ -310,7 +423,7 @@ async function processJob(clientId: string, job: DeviceJob): Promise<void> {
       )
     }
   } finally {
-    inFlight.delete(job.id)
+    inFlight.delete(key)
   }
 }
 
@@ -321,7 +434,11 @@ function errorMessage(error: unknown): string {
   return 'Unbekannter Gerätekanal-Fehler'
 }
 
-async function executeProfile(job: DeviceJob): Promise<Record<string, unknown>> {
+async function executeProfile(
+  job: DeviceJob,
+  ticket: ExecutionTicket,
+  assertCurrent: () => void
+): Promise<Record<string, unknown>> {
   const payload = job.payload
   switch (job.tool_profile) {
     case 'desktop.capture_screen': {
@@ -337,24 +454,24 @@ async function executeProfile(job: DeviceJob): Promise<Record<string, unknown>> 
       return { count: windows.length }
     }
     case 'desktop.input.move_mouse':
-      await invoke('move_mouse', { payload: { x: Number(payload.x), y: Number(payload.y) } })
+      await invokeGuarded('move_mouse', { ...payload, x: Number(payload.x), y: Number(payload.y) }, ticket)
       return { ok: true }
     case 'desktop.input.click':
-      await invoke('mouse_click', { payload })
+      await invokeGuarded('mouse_click', payload, ticket)
       return { ok: true }
     case 'desktop.input.type_text':
-      await invoke('type_text', { payload: { text: String(payload.text ?? '') } })
+      await invokeGuarded('type_text', { ...payload, text: String(payload.text ?? '') }, ticket)
       return { ok: true }
     case 'desktop.input.press_key':
-      await invoke('press_key', { payload: { key: String(payload.key ?? '') } })
+      await invokeGuarded('press_key', { ...payload, key: String(payload.key ?? '') }, ticket)
       return { ok: true }
     case 'desktop.open_url':
-      await invoke('open_url', { payload: { url: String(payload.url ?? '') } })
+      await invokeGuarded('open_url', { url: String(payload.url ?? '') }, ticket)
       return { ok: true }
     // SOLL §14 P15b — a workflow client task compiled into a bundle.
     case 'workflow.task': {
       if (!isWorkflowTaskBundle(payload)) throw new Error('Malformed workflow.task bundle.')
-      return runWorkflowTask(payload, WORKFLOW_TASK_PRIMITIVES)
+      return runWorkflowTask(payload, workflowPrimitives(ticket, assertCurrent))
     }
     default:
       throw new Error(`Unsupported signed tool profile: ${job.tool_profile}`)
@@ -362,30 +479,50 @@ async function executeProfile(job: DeviceJob): Promise<Record<string, unknown>> 
 }
 
 /** Real, Tauri-backed effects for workflow client tasks (see workflowTaskRunner). */
-const WORKFLOW_TASK_PRIMITIVES: WorkflowTaskPrimitives = {
-  openUrl: url => invoke('open_url', { payload: { url } }),
-  httpFetch: async (method, url, headers, body) => {
-    return invoke<{ status: number; ok: boolean; body: string; truncated: boolean }>('wf_http_request', {
-      payload: { method, url, headers, body, timeout_seconds: 30 },
-    })
-  },
-  runAgent: (agent, prompt, projectDir) => runAgentCli(agent as 'claude' | 'codex', prompt, projectDir),
-  fileRead: path => invoke('wf_file_read', { payload: { path } }),
-  fileWrite: (path, content) => invoke('wf_file_write', { payload: { path, content } }),
-  runScript: (runtime, code, timeoutSeconds) =>
-    invoke('wf_run_script', { payload: { runtime, code, timeout_seconds: timeoutSeconds ?? null } }),
-  browserOpen: url => invoke('browser_open', { payload: { url: url ?? null } }),
-  browserClick: selector => invoke('browser_click', { payload: { selector } }),
-  browserRead: selector => invoke('browser_read', { payload: { selector: selector ?? null } }),
+function workflowPrimitives(ticket: ExecutionTicket, assertCurrent: () => void): WorkflowTaskPrimitives {
+  async function guarded<T>(command: string, payload: Record<string, unknown>, mutating = true): Promise<T> {
+    assertCurrent()
+    const result = await invokeGuarded<T>(command, payload, ticket, mutating)
+    assertCurrent()
+    return result
+  }
+  return {
+    openUrl: url => guarded('open_url', { url }),
+    httpFetch: async (method, url, headers, body) => {
+      return guarded('wf_http_request', { method, url, headers, body, timeout_seconds: 30 })
+    },
+    runAgent: (agent, prompt, projectDir) => {
+      assertCurrent()
+      return runWorkflowAgent(agent, prompt, projectDir, ticket.signal)
+    },
+    fileRead: path => guarded('wf_file_read', { path }, false),
+    fileWrite: (path, content) => guarded('wf_file_write', { path, content }),
+    runScript: (runtime, code, timeoutSeconds) =>
+      guarded('wf_run_script', {
+        runtime,
+        code,
+        timeout_seconds: timeoutSeconds ?? null,
+        fullAccessAcknowledged: true,
+      }),
+    browserOpen: url => guarded('browser_open', { url: url ?? null }),
+    browserClick: (selector, expectedUrl) => guarded('browser_click', { selector, expectedUrl }),
+    browserRead: (selector, expectedUrl) => guarded('browser_read', { selector: selector ?? null, expectedUrl }, false),
+  }
 }
 
 /** A human-readable approval line; workflow bundles name the concrete task. */
-function approvalPrompt(job: DeviceJob): string {
-  if (job.tool_profile === 'workflow.task' && isWorkflowTaskBundle(job.payload)) {
-    const wf = job.payload.workflow
-    return `Workflow-Aktion: ${job.payload.task_key}\nSchritt „${wf?.step_key ?? '?'}" · Lauf ${wf?.run ?? '?'}\n\nAusführen?`
-  }
-  return `Remote action: ${job.tool_profile}`
+export async function deviceJobApprovalPreview(job: DeviceJob): Promise<string> {
+  const payload = JSON.stringify(job.payload, null, 2)
+  if (payload.length > 24_000)
+    throw new Error('Aktion zu groß für die vollständige lokale Freigabe (maximal 24000 Zeichen).')
+  const data = new TextEncoder().encode(
+    JSON.stringify({ id: job.id, tool_profile: job.tool_profile, payload: job.payload })
+  )
+  const digest = await crypto.subtle.digest('SHA-256', data)
+  const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+  const script =
+    job.tool_profile === 'workflow.task' && ['python.run', 'node.run'].includes(String(job.payload.task_key))
+  return `Geräteaktion: ${job.tool_profile}\nID: ${job.id}\nSHA-256: ${hash}\n${script ? '\nLokales Skript mit Vollzugriff auf Benutzerdateien und Netzwerk. Vollzugriff-Modus erforderlich.\n' : ''}\nVollständiger Auftrag:\n${payload}\n\nEinmal ausführen?`
 }
 
 function deviceName(): string {

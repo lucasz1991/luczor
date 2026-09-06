@@ -25,6 +25,41 @@ describe('Luczor API transport boundaries', () => {
     await expect(readBoundedResponseText(response, 5)).resolves.toBe('12345')
   })
 
+  it.each([
+    ['local_model_signing_key_missing', 'local_model_signing_key_missing'],
+    [undefined, undefined],
+    [{ message: 'untrusted' }, undefined],
+    ['secret/path.pem', undefined],
+    ['a'.repeat(129), undefined],
+  ])('preserves only bounded machine-readable API error codes (%j)', async (code, expectedCode) => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () =>
+          new Response(
+            JSON.stringify({
+              message: 'Signed manifest unavailable.',
+              code,
+            }),
+            { status: 503, headers: { 'X-Luczor-Correlation-Id': 'test-correlation' } }
+          )
+      )
+    )
+
+    await expect(
+      bootstrapWithApiConfig({
+        baseUrl: 'https://bound.example.test',
+        deviceKey: 'device-key',
+        clientId: 'desktop-1',
+      })
+    ).rejects.toMatchObject({
+      name: 'LuczorApiError',
+      status: 503,
+      code: expectedCode,
+      correlationId: 'test-correlation',
+    })
+  })
+
   it('rejects a declared oversized response before reading it', async () => {
     const response = new Response('123456', {
       headers: { 'Content-Length': '6' },

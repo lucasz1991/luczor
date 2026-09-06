@@ -2,12 +2,18 @@ import { invoke } from '@tauri-apps/api/core'
 import { ref } from 'vue'
 import { asString } from './shared'
 import type { ToolDef } from './types'
+import { executionGate, invokeGuarded, onExecutionInvalidated } from '@/services/executionGate'
 
 /* Public coordinate schemas and command payloads intentionally use x/y. */
 /* eslint id-length: ['error', { exceptions: ['x', 'y'] }] */
 
 /** Last screenshot captured by os_screen_capture, as a data URL (for the UI). */
 export const lastScreenshot = ref<string | null>(null)
+let captureSequence = 0
+onExecutionInvalidated(() => {
+  captureSequence++
+  lastScreenshot.value = null
+})
 
 type MonitorInfo = {
   id: number
@@ -126,6 +132,8 @@ export const osTools: ToolDef[] = [
       if (args.monitor !== undefined && monitorId !== undefined) {
         throw new Error('Choose either monitor or monitor_id.')
       }
+      const ticket = executionGate.capture()
+      const sequence = ++captureSequence
       // A failed fresh capture must not leave an older image looking current.
       lastScreenshot.value = null
       const shot = await invoke<{
@@ -137,6 +145,9 @@ export const osTools: ToolDef[] = [
       }>('capture_screen', monitorId === undefined ? undefined : { payload: { monitorId } })
       // Publish the image for the UI, but only return metadata to the model
       // (a full base64 screenshot would flood the context window).
+      executionGate.assert(ticket)
+      if (sequence !== captureSequence)
+        throw new Error('Die Bildschirmaufnahme wurde durch eine neuere Anfrage ersetzt.')
       lastScreenshot.value = `data:${shot.mime};base64,${shot.base64}`
       return {
         captured: true,
@@ -165,8 +176,12 @@ export const osTools: ToolDef[] = [
       },
       required: ['x', 'y'],
     },
-    async execute(args) {
-      await invoke('move_mouse', { payload: { x: coordinate(args.x, 'x'), y: coordinate(args.y, 'y') } })
+    async execute(args, ctx) {
+      await invokeGuarded(
+        'move_mouse',
+        { x: coordinate(args.x, 'x'), y: coordinate(args.y, 'y'), observationId: args.observation_id },
+        ctx.execution
+      )
       return { ok: true }
     },
   },
@@ -190,21 +205,24 @@ export const osTools: ToolDef[] = [
       },
       required: [],
     },
-    async execute(args) {
+    async execute(args, ctx) {
       if ((args.x === undefined) !== (args.y === undefined)) throw new Error('x and y must be supplied together.')
       const button = args.button === undefined ? 'left' : args.button
       if (typeof button !== 'string' || !['left', 'right', 'middle'].includes(button)) {
         throw new Error('button must be left, right or middle.')
       }
       if (args.double !== undefined && typeof args.double !== 'boolean') throw new Error('double must be boolean.')
-      await invoke('mouse_click', {
-        payload: {
+      await invokeGuarded(
+        'mouse_click',
+        {
           button,
           x: args.x === undefined ? null : coordinate(args.x, 'x'),
           y: args.y === undefined ? null : coordinate(args.y, 'y'),
           double: !!args.double,
+          observationId: args.observation_id,
         },
-      })
+        ctx.execution
+      )
       return { ok: true }
     },
   },
@@ -223,10 +241,10 @@ export const osTools: ToolDef[] = [
       properties: { text: { type: 'string' } },
       required: ['text'],
     },
-    async execute(args) {
+    async execute(args, ctx) {
       const text = asString(args.text)
       if (!text || [...text].length > 10_000) throw new Error('text must contain 1 to 10000 characters.')
-      await invoke('type_text', { payload: { text } })
+      await invokeGuarded('type_text', { text, observationId: args.observation_id }, ctx.execution)
       return { ok: true }
     },
   },
@@ -246,8 +264,8 @@ export const osTools: ToolDef[] = [
       properties: { key: { type: 'string' } },
       required: ['key'],
     },
-    async execute(args) {
-      await invoke('press_key', { payload: { key: asString(args.key) } })
+    async execute(args, ctx) {
+      await invokeGuarded('press_key', { key: asString(args.key), observationId: args.observation_id }, ctx.execution)
       return { ok: true }
     },
   },
@@ -273,14 +291,14 @@ export const osTools: ToolDef[] = [
       },
       required: ['amount'],
     },
-    async execute(args) {
+    async execute(args, ctx) {
       const amount = args.amount
       if (typeof amount !== 'number' || !Number.isInteger(amount) || amount === 0 || Math.abs(amount) > 100) {
         throw new Error('amount must be a non-zero integer between -100 and 100.')
       }
       const axis = asString(args.axis).trim().toLowerCase() || 'vertical'
       if (axis !== 'vertical' && axis !== 'horizontal') throw new Error('axis must be vertical or horizontal.')
-      await invoke('scroll', { payload: { amount, axis } })
+      await invokeGuarded('scroll', { amount, axis, observationId: args.observation_id }, ctx.execution)
       return { ok: true }
     },
   },
@@ -308,7 +326,7 @@ export const osTools: ToolDef[] = [
       },
       required: ['modifiers', 'key'],
     },
-    async execute(args) {
+    async execute(args, ctx) {
       const modifiers = Array.isArray(args.modifiers)
         ? args.modifiers.map(value => asString(value).trim().toLowerCase())
         : []
@@ -322,7 +340,7 @@ export const osTools: ToolDef[] = [
       }
       const key = asString(args.key).trim()
       if (!key) throw new Error('key is empty.')
-      await invoke('hotkey', { payload: { modifiers, key } })
+      await invokeGuarded('hotkey', { modifiers, key, observationId: args.observation_id }, ctx.execution)
       return { ok: true }
     },
   },
@@ -341,10 +359,10 @@ export const osTools: ToolDef[] = [
       properties: { url: { type: 'string' } },
       required: ['url'],
     },
-    async execute(args) {
+    async execute(args, ctx) {
       const url = asString(args.url).trim()
       if (!/^https?:\/\/[^\s\u0000-\u001f]+$/i.test(url)) throw new Error('Only a valid http(s) URL is allowed.')
-      await invoke('open_url', { payload: { url } })
+      await invokeGuarded('open_url', { url }, ctx.execution)
       return { ok: true }
     },
   },
@@ -419,3 +437,42 @@ export const osTools: ToolDef[] = [
     },
   },
 ]
+
+osTools.push({
+  name: 'os_observe_desktop',
+  category: 'os',
+  description:
+    'Observe the focused native window and issue a one-use target ID valid for 30 seconds. Desktop input requires this ID and fails if focus, process or geometry changed.',
+  mutating: false,
+  requiresApproval: true,
+  dataHandling: 'ephemeral',
+  risk: 'sensitive',
+  scope: 'desktop',
+  effects: ['read'],
+  parameters: {
+    type: 'object',
+    additionalProperties: false,
+    properties: {
+      window_id: { type: 'integer', minimum: 1, description: 'Optional native window ID; must currently be focused.' },
+    },
+    required: [],
+  },
+  async execute(args, ctx) {
+    return invokeGuarded('desktop_observe', { windowId: args.window_id }, ctx.execution, false)
+  },
+})
+
+for (const tool of osTools.filter(item => item.effects?.includes('input'))) {
+  tool.description +=
+    ' Requires a fresh one-use observation_id from os_observe_desktop; changed focus or geometry rejects the action.'
+  tool.parameters.properties = {
+    ...(tool.parameters.properties as Record<string, unknown>),
+    observation_id: {
+      type: 'string',
+      minLength: 1,
+      maxLength: 128,
+      description: 'One-use ID returned by os_observe_desktop.',
+    },
+  }
+  tool.parameters.required = [...((tool.parameters.required ?? []) as string[]), 'observation_id']
+}

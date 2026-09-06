@@ -48,7 +48,15 @@ Testzahlen sind nur zusammen mit Datum und Dirty-/Commit-Zustand belastbar. Der 
 - Node 22.22.0 und pnpm 10.27.0 samt Dateipins;
 - Capacity-Grenzen und einen isolierten signierten Testkatalog.
 
-Es werden keine Assets heruntergeladen. Das Produktions-Standardmanifest bleibt davon getrennt und aktiviert kein lokales Modell.
+Es werden keine Assets heruntergeladen. Das isolierte Testprofil bleibt vom Live-Katalog getrennt. Auf `https://luczor.follow-flow.de` aktiviert seit 2026-09-06 der signierte Override mit Katalog-/Policyversion `2026090601` das vorhandene Orca-Modell; Flash bleibt deaktiviert. Die Quellcode-Defaults für eine neue Installation ohne diesen Override bleiben metadata-only.
+
+## Normaler Luczor-Chat mit lokalem Standardmodell
+
+Hauptchat und Mini-Chat verwenden standardmäßig das lokale OrcaRouter-Qwen3.8-27B-Modell. Eine fehlende lokale Bereitschaft führt zu einer lokalen Diagnose; externe Verarbeitung im Hauptchat benötigt die ausdrücklich gewählte Fallbackoption und anschließend die konkrete Datenfreigabe. Der Mini-Chat bleibt lokal. Die bestehende externe Serverpolicy wurde durch die lokale Aktivierung nicht verändert.
+
+Normale App-Starts lesen die bereits installierten Runtime-/Modellpfade aus `local-model/runtime-paths.json` im jeweiligen Tauri-App-Datenverzeichnis. Eine vollständige Prozesskonfiguration kann sie für isolierte Tests überschreiben. Schema, Pfadprüfungen und Einrichtung beschreibt [desktop-release-smoke.md](docs/desktop-release-smoke.md#local-model-paths-for-normal-desktop-launches). Der signierte Katalog, die Dateihashes, die Hardwareprüfung und der lokale Benchmark bleiben erforderlich.
+
+Am 2026-09-06 bestanden zwei echte Tests über den normalen Chat mit dem Live-Katalog: `LUCZOR_LOKAL_OK` nach 247.609 ms beim Kaltstart und `LUCZOR_LOKAL_WARM_OK` nach 13.682 ms bei bereits laufender Runtime. Beide Antworten kamen von `provider=local`, behielten das Projekt und den lokalen Standard bei und erzeugten im erfassten Desktop-Netzverkehr keine externe Chat-Anfrage. Das sind einzelne Marker-Smokes auf diesem Rechner, keine allgemeine Leistungs- oder Qualitätsgarantie. Vollständiger Nachweis: [lokaler Chat als Standard](../.lmzdev/artifacts/reports/2026-09-06-local-chat-default.md).
 
 ## Testweg A: direkter lokaler Chat
 
@@ -118,7 +126,7 @@ Ein bestandener Lauf schreibt genau einen neuen Report nach:
 $AssetRoot\reports\local-model-e2e-<runId>.json
 ```
 
-Am Stichtag ist dieser Reportordner leer; der vollständige Luczor-App-E2E ist daher noch offen. Der erste Versuch vom 2026-09-06 stoppte vor GPU-/Modellstart an einem Windows-Cachepfadfehler im Laravel-Package-Manifest. Der anschließend ergänzte Bootstrap-Fix ist durch einen echten `Filesystem::replace`-Regressionstest (1 Test / 3 Assertions) belegt; erst der Wiederholungslauf kann den App-E2E schließen.
+Der Reportordner enthält den bestandenen Lauf `local-model-e2e-20260906T003548Z-bcc97a42.json`: abgeschlossen am 2026-09-06 um 00:41:38 UTC, Route `local_llama_cpp`, native Runtime `ready`, 139.335 ms und keine externe Freigabe. Der frühere Abbruch am Windows-Cachepfad im Laravel-Package-Manifest wurde durch den Bootstrap-Fix und den anschließenden echten Wiederholungslauf überholt. Dieser Runner-Nachweis verwendet isolierten Testtrust; die oben dokumentierten normalen Chat-Smokes prüfen zusätzlich den aktuellen Live-Katalog und den regulären App-Pfad.
 
 ## Gemeinsame Runtime-Sperre und Cleanup
 

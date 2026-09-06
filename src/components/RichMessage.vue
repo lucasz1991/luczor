@@ -34,7 +34,7 @@ function resolveHref(target: EventTarget | null): string | null {
 
 /** Open a link in the OS browser instead of navigating the WebView. */
 function openExternal(url: string) {
-  void invoke('open_url', { payload: { url } }).catch(error => {
+  void invoke('open_user_link', { payload: { url } }).catch(error => {
     console.warn('[richMessage] open_url failed:', error)
   })
 }

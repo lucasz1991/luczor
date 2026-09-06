@@ -159,7 +159,8 @@ export async function buildLocalRepositoryContext(
   query: string,
   taskType: string,
   limit = 6,
-  approvedForTurn = false
+  approvedForTurn = false,
+  target: 'local' | 'external' = 'external'
 ): Promise<LocalRepositoryContext> {
   const policy = await getRepositoryExternalPolicy()
   const empty = (requiresApproval = false): LocalRepositoryContext => ({
@@ -175,7 +176,7 @@ export async function buildLocalRepositoryContext(
     if (status.status !== 'ready') return empty()
     const result = await searchRepository(principalId, projectId, query, limit)
     if (!result.hits.length) return empty()
-    if (!canShareRepositoryContext(policy, approvedForTurn)) return empty(policy === 'ask')
+    if (target !== 'local' && !canShareRepositoryContext(policy, approvedForTurn)) return empty(policy === 'ask')
 
     const selected = result.hits.filter(hit => !hit.stale).slice(0, limit)
     const materialized = await readRepositorySnippets(

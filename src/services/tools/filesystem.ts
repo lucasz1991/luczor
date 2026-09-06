@@ -2,7 +2,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { getProjectWorkspace, resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
 import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
 import { asString } from './shared'
-import type { ToolDef } from './types'
+import type { ToolContext, ToolDef } from './types'
+import { executionGate } from '@/services/executionGate'
 
 type EphemeralToolDef = ToolDef & { dataHandling?: 'ephemeral' }
 
@@ -44,11 +45,18 @@ async function workspacePayload(projectId: string): Promise<{ principalId: strin
   return { principalId: await resolveWorkspacePrincipalId(), projectId }
 }
 
-async function invokeProjectFs<T>(command: string, projectId: string, payload: Record<string, unknown>): Promise<T> {
-  return invoke<T>(command, { payload: { ...(await workspacePayload(projectId)), ...payload } })
+async function invokeProjectFs<T>(command: string, ctx: ToolContext, payload: Record<string, unknown>): Promise<T> {
+  const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
+  executionGate.assert(ticket)
+  const scope = await workspacePayload(ctx.projectId)
+  executionGate.assert(ticket)
+  const result = await invoke<T>(command, { payload: { ...scope, ...payload } })
+  executionGate.assert(ticket)
+  return result
 }
 
-async function enforceRepositoryReadEgress(projectId: string): Promise<void> {
+async function enforceRepositoryReadEgress(projectId: string, target?: ToolContext['inferenceTarget']): Promise<void> {
+  if (target === 'local') return
   const workspace = await getProjectWorkspace(projectId)
   if (workspace?.isGitRepository && (await getRepositoryExternalPolicy()) === 'deny') {
     throw new Error(
@@ -112,8 +120,8 @@ export const filesystemTools: EphemeralToolDef[] = [
       required: [],
     },
     async execute(args, ctx) {
-      await enforceRepositoryReadEgress(ctx.projectId)
-      return invokeProjectFs('project_fs_list', ctx.projectId, {
+      await enforceRepositoryReadEgress(ctx.projectId, ctx.inferenceTarget)
+      return invokeProjectFs('project_fs_list', ctx, {
         path: workspaceRelativePath(args.path, '.'),
         maxDepth: boundedInteger(args.max_depth, 1, 1, 6),
         limit: boundedInteger(args.limit, 200, 1, 500),
@@ -139,8 +147,8 @@ export const filesystemTools: EphemeralToolDef[] = [
       required: ['path'],
     },
     async execute(args, ctx) {
-      await enforceRepositoryReadEgress(ctx.projectId)
-      return invokeProjectFs('project_fs_stat', ctx.projectId, { path: workspaceRelativePath(args.path) })
+      await enforceRepositoryReadEgress(ctx.projectId, ctx.inferenceTarget)
+      return invokeProjectFs('project_fs_stat', ctx, { path: workspaceRelativePath(args.path) })
     },
   },
   {
@@ -181,13 +189,13 @@ export const filesystemTools: EphemeralToolDef[] = [
       required: ['path'],
     },
     async execute(args, ctx) {
-      await enforceRepositoryReadEgress(ctx.projectId)
+      await enforceRepositoryReadEgress(ctx.projectId, ctx.inferenceTarget)
       const startLine = args.start_line == null ? null : boundedInteger(args.start_line, 1, 1, 1_000_000)
       const endLine = args.end_line == null ? null : boundedInteger(args.end_line, 1, 1, 1_000_000)
       if (startLine !== null && endLine !== null && endLine < startLine) {
         throw new Error('end_line must be greater than or equal to start_line')
       }
-      return invokeProjectFs('project_fs_read', ctx.projectId, {
+      return invokeProjectFs('project_fs_read', ctx, {
         path: workspaceRelativePath(args.path),
         maxBytes: boundedInteger(args.max_bytes, 65_536, 1, 262_144),
         startLine,
@@ -218,11 +226,11 @@ export const filesystemTools: EphemeralToolDef[] = [
       required: ['query'],
     },
     async execute(args, ctx) {
-      await enforceRepositoryReadEgress(ctx.projectId)
+      await enforceRepositoryReadEgress(ctx.projectId, ctx.inferenceTarget)
       const query = asString(args.query).trim()
       if (!query || query.length > MAX_QUERY_CHARS) throw new Error('query must contain 1 to 512 characters')
       const glob = asString(args.glob).trim()
-      return invokeProjectFs('project_fs_search', ctx.projectId, {
+      return invokeProjectFs('project_fs_search', ctx, {
         query,
         path: workspaceRelativePath(args.path, '.'),
         glob: glob || null,
@@ -261,7 +269,7 @@ export const filesystemTools: EphemeralToolDef[] = [
       if (expectedSha256 && !/^[a-f0-9]{64}$/iu.test(expectedSha256)) {
         throw new Error('expected_sha256 must be a 64 character hexadecimal SHA-256')
       }
-      return invokeProjectFs('project_fs_write', ctx.projectId, {
+      return invokeProjectFs('project_fs_write', ctx, {
         path: mutableTargetPath(args.path),
         content,
         expectedSha256: expectedSha256 || null,
@@ -288,7 +296,7 @@ export const filesystemTools: EphemeralToolDef[] = [
       required: ['path'],
     },
     async execute(args, ctx) {
-      return invokeProjectFs('project_fs_create_dir', ctx.projectId, {
+      return invokeProjectFs('project_fs_create_dir', ctx, {
         path: mutableTargetPath(args.path),
         recursive: args.recursive !== false,
       })
@@ -314,7 +322,7 @@ export const filesystemTools: EphemeralToolDef[] = [
       required: ['from_path', 'to_path'],
     },
     async execute(args, ctx) {
-      return invokeProjectFs('project_fs_move', ctx.projectId, {
+      return invokeProjectFs('project_fs_move', ctx, {
         fromPath: mutableTargetPath(args.from_path, 'from_path'),
         toPath: mutableTargetPath(args.to_path, 'to_path'),
       })
@@ -340,7 +348,7 @@ export const filesystemTools: EphemeralToolDef[] = [
       required: ['path'],
     },
     async execute(args, ctx) {
-      return invokeProjectFs('project_fs_delete', ctx.projectId, {
+      return invokeProjectFs('project_fs_delete', ctx, {
         path: mutableTargetPath(args.path),
       })
     },

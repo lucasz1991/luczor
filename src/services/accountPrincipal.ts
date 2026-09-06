@@ -11,6 +11,7 @@ const BINDING_STORE_FILE = 'luczor.account-principal.json'
 const BINDING_STATE_KEY = 'bindings_v1_encrypted'
 const BINDING_ADDITIONAL_DATA = 'luczor-account-principal-bindings-v1'
 const MAX_CREDENTIAL_BINDINGS = 32
+const VERIFICATION_RETRY_DELAY_MS = 5_000
 
 export type VerifiedAccountSnapshot = Readonly<{
   principalId: string
@@ -64,6 +65,47 @@ export class AccountPrincipalVerificationError extends Error {
 
 let bindingCryptoPromise: Promise<BindingCrypto> | null = null
 let bindingAccess: Promise<unknown> = Promise.resolve()
+let verificationGeneration = 0
+let identityChanging = false
+const pendingVerifications = new Map<string, Promise<VerifiedAccountSnapshot>>()
+const verificationRetryAfter = new Map<string, number>()
+
+function invalidateVerifications(): void {
+  verificationGeneration++
+  identityChanging = true
+  pendingVerifications.clear()
+  verificationRetryAfter.clear()
+}
+
+function resumeVerifications(): void {
+  identityChanging = false
+}
+
+function assertVerificationCurrent(generation: number): void {
+  if (identityChanging || generation !== verificationGeneration) {
+    throw new AccountPrincipalVerificationError('Die Account-Konfiguration wurde während der Verifizierung geändert.')
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('luczor:api-identity-changing', invalidateVerifications)
+  window.addEventListener('luczor:api-identity-changed', resumeVerifications)
+  import.meta.hot?.dispose(() => {
+    invalidateVerifications()
+    window.removeEventListener('luczor:api-identity-changing', invalidateVerifications)
+    window.removeEventListener('luczor:api-identity-changed', resumeVerifications)
+  })
+}
+
+function deferVerification(key: string): void {
+  verificationRetryAfter.delete(key)
+  verificationRetryAfter.set(key, Date.now() + VERIFICATION_RETRY_DELAY_MS)
+  while (verificationRetryAfter.size > MAX_CREDENTIAL_BINDINGS) {
+    const oldest = verificationRetryAfter.keys().next().value
+    if (oldest === undefined) break
+    verificationRetryAfter.delete(oldest)
+  }
+}
 
 function serializeBindingAccess<T>(operation: () => Promise<T>): Promise<T> {
   const next = bindingAccess.then(operation)
@@ -298,18 +340,63 @@ async function resolveOfflineBinding(credentialId: string, serverInstance: strin
  * closed. `null` exclusively means that no Device Key is configured.
  */
 export async function getVerifiedAccountSnapshot(): Promise<VerifiedAccountSnapshot | null> {
+  const generation = verificationGeneration
+  assertVerificationCurrent(generation)
   const config = immutableConfig(await getApiConfigSnapshot())
+  assertVerificationCurrent(generation)
   if (!config.deviceKey) return null
 
   const server = canonicalServer(config.baseUrl)
   const credentialId = await credentialIdentity(server.instance, config.deviceKey)
+  // Match the complete immutable request without retaining a plaintext key in
+  // a cache index. Different clients, deployments and credentials never share.
+  const verificationKey = await strongSha256(`${credentialId}\u0000${config.baseUrl}\u0000${config.clientId}`)
+  assertVerificationCurrent(generation)
+  const pending = pendingVerifications.get(verificationKey)
+  if (pending) return pending
+
+  if ((verificationRetryAfter.get(verificationKey) ?? 0) > Date.now()) {
+    return offlineAccountSnapshot(config, server, credentialId, generation)
+  }
+
+  const operation = verifyAccountSnapshot(config, server, credentialId, verificationKey, generation)
+  pendingVerifications.set(verificationKey, operation)
+  try {
+    return await operation
+  } finally {
+    if (pendingVerifications.get(verificationKey) === operation) pendingVerifications.delete(verificationKey)
+  }
+}
+
+async function offlineAccountSnapshot(
+  config: LuczorApiConfigSnapshot,
+  server: { origin: string; instance: string },
+  credentialId: string,
+  generation: number
+): Promise<VerifiedAccountSnapshot> {
+  // A retry delay suppresses transport only; it never grants or caches access.
+  const binding = await resolveOfflineBinding(credentialId, server.instance)
+  assertVerificationCurrent(generation)
+  return verifiedSnapshot(config, server.origin, server.instance, binding.accountId, binding.principalId)
+}
+
+async function verifyAccountSnapshot(
+  config: LuczorApiConfigSnapshot,
+  server: { origin: string; instance: string },
+  credentialId: string,
+  verificationKey: string,
+  generation: number
+): Promise<VerifiedAccountSnapshot> {
+  verificationRetryAfter.delete(verificationKey)
   try {
     const bootstrap = await bootstrapWithApiConfig(config)
+    assertVerificationCurrent(generation)
     const accountId = bootstrap.user?.id
     if (!validAccountId(accountId)) {
       throw new AccountPrincipalVerificationError('Der Server hat keine gültige authentifizierte Account-ID geliefert.')
     }
     const principalId = `account:v2:${await strongSha256(`${server.instance}\u0000${accountId}`)}`
+    assertVerificationCurrent(generation)
     await recordLiveBinding({
       credentialId,
       serverInstance: server.instance,
@@ -317,8 +404,10 @@ export async function getVerifiedAccountSnapshot(): Promise<VerifiedAccountSnaps
       principalId,
       verifiedAt: new Date().toISOString(),
     })
+    assertVerificationCurrent(generation)
     return verifiedSnapshot(config, server.origin, server.instance, accountId, principalId)
   } catch (cause) {
+    assertVerificationCurrent(generation)
     if (cause instanceof AccountPrincipalVerificationError) throw cause
     if (!isOfflineFailure(cause)) {
       throw new AccountPrincipalVerificationError(
@@ -326,8 +415,8 @@ export async function getVerifiedAccountSnapshot(): Promise<VerifiedAccountSnaps
         cause
       )
     }
-    const binding = await resolveOfflineBinding(credentialId, server.instance)
-    return verifiedSnapshot(config, server.origin, server.instance, binding.accountId, binding.principalId)
+    deferVerification(verificationKey)
+    return offlineAccountSnapshot(config, server, credentialId, generation)
   }
 }
 

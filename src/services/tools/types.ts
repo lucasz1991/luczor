@@ -13,6 +13,9 @@ export type ToolEffect = 'read' | 'write' | 'input' | 'execute'
 
 export type ToolContext = {
   projectId: string
+  signal?: AbortSignal
+  execution?: import('@/services/executionGate').ExecutionTicket
+  inferenceTarget?: 'local' | 'external'
 }
 
 export type ToolDef = {
@@ -29,7 +32,7 @@ export type ToolDef = {
   requiresApproval: boolean
   /** Local/provider result retention policy. Defaults to `syncable`. */
   dataHandling?: ToolDataHandling
-  /** Descriptive policy metadata for audit/UI and future policy engines. */
+  /** Enforced by the execution policy as well as displayed in the audit/UI. */
   risk?: ToolRisk
   scope?: ToolScope
   effects?: ToolEffect[]

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const harness = vi.hoisted(() => {
   const bindingValues = new Map<string, unknown>()
@@ -35,6 +35,8 @@ describe('verified account principal', () => {
   beforeEach(() => {
     vi.resetModules()
     vi.clearAllMocks()
+    vi.stubGlobal('window', new EventTarget())
+    vi.spyOn(window, 'addEventListener')
     harness.bindingValues.clear()
     harness.config = {
       baseUrl: 'HTTPS://Memory.Example.test:443/some/path/',
@@ -43,12 +45,20 @@ describe('verified account principal', () => {
     }
     harness.accountId = 41
     harness.getApiConfigSnapshot.mockImplementation(async () => ({ ...harness.config }))
-    harness.bootstrapWithApiConfig.mockImplementation(async () => ({
+    harness.bootstrapWithApiConfig.mockReset().mockImplementation(async () => ({
       user: { id: harness.accountId, name: 'Account', email: 'account@example.test' },
       device: { id: 'device-1', name: 'Desktop', abilities: ['settings.read'] },
       runtime_settings: { api_prefix: '/api/v1', registration_enabled: false },
       routing: { managed_by: 'server', client_model_selection: false },
     }))
+  })
+
+  afterEach(() => {
+    for (const [type, listener, options] of vi.mocked(window.addEventListener).mock.calls) {
+      if (type.startsWith('luczor:api-identity-')) window.removeEventListener(type, listener, options)
+    }
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('keeps the principal stable across Device-Key rotation and canonical URL variants', async () => {
@@ -161,5 +171,104 @@ describe('verified account principal', () => {
     harness.config.deviceKey = 'configured-key'
     harness.bootstrapWithApiConfig.mockRejectedValueOnce(new Error('offline'))
     await expect(getVerifiedAccountSnapshot()).rejects.toBeInstanceOf(AccountPrincipalVerificationError)
+  })
+
+  it('shares one pending bootstrap between concurrent consumers of the exact identity', async () => {
+    const { getVerifiedAccountSnapshot } = await import('@/services/accountPrincipal')
+    let finish!: (value: { user: { id: number } }) => void
+    harness.bootstrapWithApiConfig.mockImplementationOnce(() => new Promise(resolve => (finish = resolve)))
+
+    const requests = Array.from({ length: 20 }, () => getVerifiedAccountSnapshot())
+    await vi.waitFor(() => expect(harness.bootstrapWithApiConfig).toHaveBeenCalledTimes(1))
+    finish({ user: { id: 41 } })
+    const snapshots = await Promise.all(requests)
+
+    expect(harness.bootstrapWithApiConfig).toHaveBeenCalledTimes(1)
+    expect(new Set(snapshots).size).toBe(1)
+    expect(harness.bindingStore.save).toHaveBeenCalledTimes(1)
+  })
+
+  it('retries an unknown offline identity after five seconds without granting cached access', async () => {
+    const { getVerifiedAccountSnapshot } = await import('@/services/accountPrincipal')
+    let now = Date.now()
+    vi.spyOn(Date, 'now').mockImplementation(() => now)
+    harness.bootstrapWithApiConfig.mockRejectedValueOnce({ status: 0, message: 'network unavailable' })
+
+    await expect(getVerifiedAccountSnapshot()).rejects.toThrow('noch nicht live')
+    now += 4_999
+    await expect(getVerifiedAccountSnapshot()).rejects.toThrow('noch nicht live')
+    expect(harness.bootstrapWithApiConfig).toHaveBeenCalledTimes(1)
+    now += 1
+    await expect(getVerifiedAccountSnapshot()).resolves.toMatchObject({ accountId: 41 })
+    expect(harness.bootstrapWithApiConfig).toHaveBeenCalledTimes(2)
+  })
+
+  it('checks the protected offline binding again during the transport retry delay', async () => {
+    const { getVerifiedAccountSnapshot } = await import('@/services/accountPrincipal')
+    await getVerifiedAccountSnapshot()
+    harness.bootstrapWithApiConfig.mockRejectedValueOnce({ status: 503, message: 'maintenance' })
+    await expect(getVerifiedAccountSnapshot()).resolves.toMatchObject({ accountId: 41 })
+    harness.bindingValues.clear()
+
+    await expect(getVerifiedAccountSnapshot()).rejects.toThrow('noch nicht live')
+    expect(harness.bootstrapWithApiConfig).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([401, 403])('does not cache an HTTP %i rejection or reuse an earlier success', async status => {
+    const { getVerifiedAccountSnapshot } = await import('@/services/accountPrincipal')
+    await getVerifiedAccountSnapshot()
+    harness.bootstrapWithApiConfig.mockRejectedValueOnce({ status, message: 'denied' })
+
+    await expect(getVerifiedAccountSnapshot()).rejects.toThrow('nicht sicher')
+    await expect(getVerifiedAccountSnapshot()).resolves.toMatchObject({ accountId: 41 })
+    expect(harness.bootstrapWithApiConfig).toHaveBeenCalledTimes(3)
+  })
+
+  it.each([
+    { field: 'deviceKey', changes: { deviceKey: 'another-key' } },
+    { field: 'clientId', changes: { clientId: 'another-client' } },
+    { field: 'baseUrl', changes: { baseUrl: 'https://another.example.test' } },
+  ])('never shares a pending verification across a changed $field', async ({ changes }) => {
+    const { getVerifiedAccountSnapshot } = await import('@/services/accountPrincipal')
+    let finish!: (value: { user: { id: number } }) => void
+    harness.bootstrapWithApiConfig.mockImplementationOnce(() => new Promise(resolve => (finish = resolve)))
+    const first = getVerifiedAccountSnapshot()
+    await vi.waitFor(() => expect(harness.bootstrapWithApiConfig).toHaveBeenCalledTimes(1))
+    const original = { ...harness.config }
+    harness.config = { ...harness.config, ...changes }
+    const second = await getVerifiedAccountSnapshot()
+    finish({ user: { id: 41 } })
+
+    expect((await first)?.config).toEqual(original)
+    expect(second?.config).toEqual(harness.config)
+    expect(harness.bootstrapWithApiConfig).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears transport delay when the identity is reconfigured', async () => {
+    const { getVerifiedAccountSnapshot } = await import('@/services/accountPrincipal')
+    harness.bootstrapWithApiConfig.mockRejectedValueOnce({ status: 0, message: 'network unavailable' })
+    await expect(getVerifiedAccountSnapshot()).rejects.toThrow('noch nicht live')
+    window.dispatchEvent(new Event('luczor:api-identity-changing'))
+    await expect(getVerifiedAccountSnapshot()).rejects.toThrow('Konfiguration')
+    window.dispatchEvent(new Event('luczor:api-identity-changed'))
+
+    await expect(getVerifiedAccountSnapshot()).resolves.toMatchObject({ accountId: 41 })
+    expect(harness.bootstrapWithApiConfig).toHaveBeenCalledTimes(2)
+  })
+
+  it('rejects late results after an identity boundary without repopulating transport delay', async () => {
+    const { getVerifiedAccountSnapshot } = await import('@/services/accountPrincipal')
+    let fail!: (cause: unknown) => void
+    harness.bootstrapWithApiConfig.mockImplementationOnce(() => new Promise((_, reject) => (fail = reject)))
+    const stale = getVerifiedAccountSnapshot().catch(error => error)
+    await vi.waitFor(() => expect(harness.bootstrapWithApiConfig).toHaveBeenCalledTimes(1))
+    window.dispatchEvent(new Event('luczor:api-identity-changing'))
+    window.dispatchEvent(new Event('luczor:api-identity-changed'))
+    await expect(getVerifiedAccountSnapshot()).resolves.toMatchObject({ accountId: 41 })
+    fail({ status: 0, message: 'retired request failed' })
+    expect(await stale).toMatchObject({ message: expect.stringContaining('Konfiguration') })
+
+    await expect(getVerifiedAccountSnapshot()).resolves.toMatchObject({ accountId: 41 })
+    expect(harness.bootstrapWithApiConfig).toHaveBeenCalledTimes(3)
   })
 })

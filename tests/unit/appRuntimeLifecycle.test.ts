@@ -9,6 +9,14 @@ import {
   type RuntimeSettingsStore,
 } from '@/services/appRuntimeLifecycle'
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>(done => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
 function createHarness(remoteAllow: boolean | undefined = true) {
   const values = new Map<string, unknown>()
   const settings: RuntimeSettingsStore = {
@@ -26,6 +34,7 @@ function createHarness(remoteAllow: boolean | undefined = true) {
   let heartbeatAction: (() => void) | null = null
   const stopNotifications = vi.fn(async () => undefined)
   const stopDeviceJobs = vi.fn()
+  const stopDeviceJobChannel = vi.fn()
   const order: string[] = []
 
   const dependencies: AppRuntimeLifecycleDependencies = {
@@ -63,6 +72,7 @@ function createHarness(remoteAllow: boolean | undefined = true) {
     }),
     clearStatusHeartbeat: vi.fn(),
     startDeviceJobChannel: vi.fn(async () => stopDeviceJobs),
+    stopDeviceJobChannel,
     warn: vi.fn(),
   }
 
@@ -72,6 +82,7 @@ function createHarness(remoteAllow: boolean | undefined = true) {
     dependencies,
     stopNotifications,
     stopDeviceJobs,
+    stopDeviceJobChannel,
     order,
     triggerNotification: () => notificationAction?.(),
     triggerHotkey: () => hotkeyAction?.(),
@@ -142,7 +153,102 @@ describe('app runtime lifecycle', () => {
     expect(harness.dependencies.removeNotificationActionListener).toHaveBeenCalledWith(openNotificationCenter)
     expect(harness.dependencies.clearStatusHeartbeat).toHaveBeenCalledWith(17)
     expect(harness.stopDeviceJobs).toHaveBeenCalledOnce()
+    expect(harness.stopDeviceJobChannel).toHaveBeenCalledOnce()
     expect(harness.stopNotifications).toHaveBeenCalledOnce()
+  })
+
+  it('stops synchronously on identity-changing and restarts only after identity-changed', async () => {
+    const events = new EventTarget()
+    vi.stubGlobal('window', events)
+    try {
+      const harness = createHarness()
+      const lifecycle = createAppRuntimeLifecycle(
+        {
+          mode: ref('observe'),
+          allowUnrestricted: ref(false),
+          getActiveProjectId: () => 'project-1',
+          openProject: vi.fn(),
+          openNotificationCenter: vi.fn(),
+          togglePushToTalk: vi.fn(),
+        },
+        harness.dependencies
+      )
+      await lifecycle.start()
+      await vi.waitFor(() => expect(harness.dependencies.startDeviceJobChannel).toHaveBeenCalledOnce())
+
+      events.dispatchEvent(new Event('luczor:api-identity-changing'))
+      expect(harness.stopDeviceJobChannel).toHaveBeenCalledOnce()
+      expect(harness.stopDeviceJobs).toHaveBeenCalledOnce()
+      expect(harness.dependencies.startDeviceJobChannel).toHaveBeenCalledOnce()
+
+      events.dispatchEvent(new Event('luczor:api-identity-changed'))
+      await vi.waitFor(() => expect(harness.dependencies.startDeviceJobChannel).toHaveBeenCalledTimes(2))
+      lifecycle.stop()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('disposes late channel starts and an old stop callback cannot replace the restarted channel', async () => {
+    const events = new EventTarget()
+    vi.stubGlobal('window', events)
+    try {
+      const harness = createHarness()
+      const oldStart = deferred<() => void>()
+      const newStart = deferred<() => void>()
+      const oldStop = vi.fn()
+      const newStop = vi.fn()
+      vi.mocked(harness.dependencies.startDeviceJobChannel)
+        .mockImplementationOnce(() => oldStart.promise)
+        .mockImplementationOnce(() => newStart.promise)
+      const lifecycle = createAppRuntimeLifecycle(
+        {
+          mode: ref('observe'),
+          allowUnrestricted: ref(false),
+          getActiveProjectId: () => 'project-1',
+          openProject: vi.fn(),
+          openNotificationCenter: vi.fn(),
+          togglePushToTalk: vi.fn(),
+        },
+        harness.dependencies
+      )
+      await lifecycle.start()
+      events.dispatchEvent(new Event('luczor:api-identity-changing'))
+      events.dispatchEvent(new Event('luczor:api-identity-changed'))
+      newStart.resolve(newStop)
+      await Promise.resolve()
+      oldStart.resolve(oldStop)
+      await Promise.resolve()
+      expect(oldStop).toHaveBeenCalledOnce()
+      expect(newStop).not.toHaveBeenCalled()
+      lifecycle.stop()
+      expect(newStop).toHaveBeenCalledOnce()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('does not retain a channel whose start resolves after runtime stop', async () => {
+    const harness = createHarness()
+    const pendingStart = deferred<() => void>()
+    const lateStop = vi.fn()
+    vi.mocked(harness.dependencies.startDeviceJobChannel).mockImplementationOnce(() => pendingStart.promise)
+    const lifecycle = createAppRuntimeLifecycle(
+      {
+        mode: ref('observe'),
+        allowUnrestricted: ref(false),
+        getActiveProjectId: () => 'project-1',
+        openProject: vi.fn(),
+        openNotificationCenter: vi.fn(),
+        togglePushToTalk: vi.fn(),
+      },
+      harness.dependencies
+    )
+    await lifecycle.start()
+    lifecycle.stop()
+    pendingStart.resolve(lateStop)
+    await Promise.resolve()
+    expect(lateStop).toHaveBeenCalledOnce()
   })
 
   it('applies a remote unrestricted revocation and persists the safe mode', async () => {

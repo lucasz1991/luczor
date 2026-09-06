@@ -6,14 +6,16 @@ import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
 import { buildProjectStartContext } from '@/services/prompt/projectStartContext'
 import type { LuczorMode } from '@/services/inference/types'
 import { AgentOrchestrator } from './orchestrator'
-import { createCodexAgentAdapter } from './codexAgent'
+import { createCodexAgentAdapter, listCodexSessions } from './codexAgent'
 import { createModelAgentAdapter, type ModelAgentApprovalRequest } from './modelAgent'
-import { getAgentProjectLink, saveAgentProjectLink } from './links'
 import type { AgentJobInput, AgentPermission, AgentProjectSnapshot } from './types'
 
 export const agentHubRevision = shallowRef(0)
 export const agentExternalApprovals = shallowRef<readonly ModelAgentApprovalRequest[]>([])
-const approvalResolvers = new Map<string, (approved: boolean) => void>()
+const approvalResolvers = new Map<
+  string,
+  { resolve: (approved: boolean) => void; timer: ReturnType<typeof setTimeout> }
+>()
 const principals = new Set<string>()
 let getMode: () => LuczorMode = () => 'observe'
 let timer: ReturnType<typeof setInterval> | undefined
@@ -21,6 +23,13 @@ let checking = false
 let configurationGeneration = 0
 let stopControls: (() => void) | undefined
 let stopIdentityListener: (() => void) | undefined
+const ROLE_INSTRUCTIONS = new Map<NonNullable<AgentJobInput['role']>, string>([
+  ['planner', 'Erstelle einen prüfbaren Plan mit Grenzen, Risiken und Akzeptanzkriterien.'],
+  ['implementer', 'Setze den Auftrag konkret um und nenne die tatsächlich ausgeführten Prüfungen.'],
+  ['reviewer', 'Prüfe das Ergebnis unabhängig gegen Auftrag, Grenzen und Akzeptanzkriterien.'],
+  ['join', 'Konsolidiere die Vorgängerergebnisse widerspruchsfrei mit Nachweisen und Restgrenzen.'],
+  ['assistant', 'Bearbeite den Auftrag vollständig und trenne Ergebnis, Nachweise und offene Grenzen.'],
+])
 
 function validateControls(permission: AgentPermission) {
   if (hud.killSwitch) throw new Error('Not-Aus ist aktiv.')
@@ -28,7 +37,7 @@ function validateControls(permission: AgentPermission) {
     throw new Error('Schreibzugriff benötigt den Modus Handeln.')
 }
 
-async function validateScope(project: AgentProjectSnapshot, permission: AgentPermission) {
+export async function validateAgentScope(project: AgentProjectSnapshot, permission: AgentPermission) {
   validateControls(permission)
   if ((await resolveWorkspacePrincipalId()) !== project.principalId)
     throw new Error('Das aktive Konto hat sich geändert.')
@@ -47,13 +56,24 @@ async function validateScope(project: AgentProjectSnapshot, permission: AgentPer
 
 function requestExternalApproval(request: ModelAgentApprovalRequest): Promise<boolean> {
   return new Promise(resolve => {
-    approvalResolvers.set(request.jobId, resolve)
+    resolveAgentExternalApproval(request.jobId, false)
+    const remaining = Date.parse(request.expiresAt) - Date.now()
+    if (!Number.isFinite(remaining) || remaining <= 0) {
+      resolve(false)
+      return
+    }
+    const timer = setTimeout(() => resolveAgentExternalApproval(request.jobId, false), remaining)
+    approvalResolvers.set(request.jobId, { resolve, timer })
     agentExternalApprovals.value = [...agentExternalApprovals.value, request]
   })
 }
 
 export function resolveAgentExternalApproval(jobId: string, approved: boolean) {
-  approvalResolvers.get(jobId)?.(approved)
+  const pending = approvalResolvers.get(jobId)
+  if (pending) {
+    clearTimeout(pending.timer)
+    pending.resolve(approved)
+  }
   approvalResolvers.delete(jobId)
   agentExternalApprovals.value = agentExternalApprovals.value.filter(item => item.jobId !== jobId)
 }
@@ -64,17 +84,10 @@ export const agentHub = new AgentOrchestrator({
     createModelAgentAdapter({ id: 'local' }),
     createModelAgentAdapter({ id: 'policy', requestExternalApproval }),
   ],
-  validateScope,
+  validateScope: validateAgentScope,
   onMetadata(metadata) {
     principals.add(metadata.principalId)
     if (['completed', 'failed', 'cancelled'].includes(metadata.status)) resolveAgentExternalApproval(metadata.id, false)
-    if (metadata.status === 'completed' && metadata.adapterId === 'codex' && metadata.externalThreadId) {
-      const job = agentHub.getJob(metadata.id)
-      if (job)
-        void saveAgentProjectLink(job.project, metadata.externalThreadId, project =>
-          validateScope(project, 'read-only')
-        ).catch(() => undefined)
-    }
   },
 })
 agentHub.subscribe(() => {
@@ -104,31 +117,59 @@ export async function prepareAgentJob(input: {
   model?: string
   includeMemory?: boolean
   resume?: boolean
+  externalThreadId?: string
+  teamRunId?: string
+  teamNodeId?: string
+  expectedProject?: AgentProjectSnapshot
+  /** exact-reviewed preserves a reviewed workflow or plan, including structured predecessor results. */
+  promptAssembly?: 'project' | 'exact-reviewed'
 }) {
   if (!input.prompt.trim() || input.prompt.length > 24_000)
     throw new Error('Bitte einen Arbeitsauftrag mit 1 bis 24000 Zeichen eingeben.')
   const project = state.projects.find(item => item.id === input.projectId)
   if (!project) throw new Error('Projekt nicht gefunden.')
   const snapshot = await agentProjectSnapshot(project.id)
-  await validateScope(snapshot, input.permission)
+  if (
+    input.expectedProject &&
+    (snapshot.principalId !== input.expectedProject.principalId ||
+      snapshot.projectId !== input.expectedProject.projectId ||
+      snapshot.rootPath !== input.expectedProject.rootPath ||
+      snapshot.workspaceUpdatedAt !== input.expectedProject.workspaceUpdatedAt)
+  ) {
+    throw new Error('Das aktive Projekt entspricht nicht mehr dem freigegebenen Teamlauf.')
+  }
+  await validateAgentScope(snapshot, input.permission)
   if (input.adapterId === 'codex') {
     if (!snapshot.rootPath) throw new Error('Bitte zuerst einen Projektordner zuordnen.')
     if ((await getRepositoryExternalPolicy()) === 'deny')
       throw new Error('Die Repository-Richtlinie verbietet externe Coding-Agenten.')
   }
-  const workspace = await getProjectWorkspace(project.id, snapshot.principalId)
-  const context = await buildProjectStartContext({ project, workspace, includeMemory: input.includeMemory === true })
-  const link = input.resume && input.adapterId === 'codex' ? await getAgentProjectLink(snapshot) : undefined
-  if (input.resume && !link) throw new Error('Für diesen Projektordner besteht noch keine Codex-Verknüpfung.')
-  await validateScope(snapshot, input.permission)
+  let assembledPrompt = input.prompt
+  const role = input.role ?? 'assistant'
+  if (input.promptAssembly !== 'exact-reviewed') {
+    const workspace = await getProjectWorkspace(project.id, snapshot.principalId)
+    const context = await buildProjectStartContext({ project, workspace, includeMemory: input.includeMemory === true })
+    assembledPrompt = `${context.providerText}\n\nRollenauftrag (${role}):\n${ROLE_INSTRUCTIONS.get(role)}\n\nArbeitsauftrag:\n${input.prompt}`
+  }
+  let externalThreadId: string | undefined
+  if (input.resume && input.adapterId === 'codex') {
+    const sessions = await listCodexSessions(snapshot)
+    externalThreadId = input.externalThreadId
+      ? sessions.find(session => session.threadId === input.externalThreadId)?.threadId
+      : sessions[0]?.threadId
+    if (!externalThreadId) throw new Error('Für diesen Projektordner besteht keine passende native Codex-Sitzung.')
+  }
+  await validateAgentScope(snapshot, input.permission)
   const job = agentHub.enqueue({
     project: snapshot,
     adapterId: input.adapterId,
-    prompt: `${context.providerText}\n\nArbeitsauftrag:\n${input.prompt}`,
-    role: input.role,
+    prompt: assembledPrompt,
+    role,
     permission: input.permission,
     model: input.model?.trim() || undefined,
-    externalThreadId: link?.externalThreadId,
+    externalThreadId,
+    teamRunId: input.teamRunId,
+    teamNodeId: input.teamNodeId,
   })
   return job
 }
@@ -172,9 +213,9 @@ export function configureAgentHub(modeReader: () => LuczorMode): () => void {
           principals.delete(job.principalId)
           continue
         }
-        if (!['awaiting_approval', 'queued', 'running'].includes(job.status)) continue
+        if (!['awaiting_approval', 'queued', 'running', 'awaiting_external_approval'].includes(job.status)) continue
         try {
-          await validateScope(job.project, job.permission)
+          await validateAgentScope(job.project, job.permission)
           if (job.adapterId === 'codex' && (await getRepositoryExternalPolicy()) === 'deny')
             throw new Error('Externe Agenten gesperrt.')
         } catch {

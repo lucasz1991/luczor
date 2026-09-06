@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AgentOrchestrator } from '@/services/agents/orchestrator'
 import type {
   AgentAdapter,
@@ -63,6 +63,8 @@ function harness(options: Partial<AgentOrchestratorOptions> = {}) {
   return { orchestrator, enqueue, runs, run, metadata, validateScope }
 }
 
+afterEach(() => vi.useRealTimers())
+
 describe('project agent orchestrator', () => {
   it('requires approval for every backend and preserves the immutable account and workspace snapshot', async () => {
     const { orchestrator, enqueue, runs, run, validateScope } = harness()
@@ -103,7 +105,7 @@ describe('project agent orchestrator', () => {
     expect(orchestrator.getOutput(job.id)).toBe('')
   })
 
-  it('serializes a project while allowing bounded work on another project', async () => {
+  it('serializes workspace writes while fairly serving work on other projects', async () => {
     const { orchestrator, enqueue, runs } = harness({ maxConcurrent: 2 })
     const first = enqueue()
     const second = enqueue({ permission: 'workspace-write' })
@@ -116,7 +118,33 @@ describe('project agent orchestrator', () => {
     expect(orchestrator.getJob(fourth.id)?.status).toBe('queued')
     runs[0]!.result.resolve({ output: 'done' })
     await flush()
-    expect(runs.map(run => run.request.jobId)).toEqual([first.id, third.id, second.id])
+    expect(runs.map(run => run.request.jobId)).toEqual([first.id, third.id, fourth.id])
+    runs[1]!.result.resolve({ output: 'done' })
+    await flush()
+    expect(runs.map(run => run.request.jobId)).toEqual([first.id, third.id, fourth.id, second.id])
+  })
+
+  it('allows two read-only jobs in one workspace to run concurrently', async () => {
+    const { orchestrator, enqueue, runs } = harness({ maxConcurrent: 2 })
+    const first = enqueue()
+    const second = enqueue()
+    orchestrator.approve(first.id)
+    orchestrator.approve(second.id)
+    await flush()
+    expect(runs.map(run => run.request.jobId)).toEqual([first.id, second.id])
+    orchestrator.cancel(first.id)
+    orchestrator.cancel(second.id)
+    runs.forEach(run => run.result.resolve({ output: 'late' }))
+  })
+
+  it('expires an unapproved prompt without dispatching or retaining it', async () => {
+    vi.useFakeTimers()
+    const { orchestrator, enqueue, run } = harness({ approvalTimeoutMs: 1_000 })
+    const job = enqueue()
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(orchestrator.getJob(job.id)).toMatchObject({ status: 'cancelled', errorCode: 'approval_expired' })
+    expect(orchestrator.getPrompt(job.id)).toBe('')
+    expect(run).not.toHaveBeenCalled()
   })
 
   it('keeps the canonical workspace locked across accounts until cancelled execution actually stops', async () => {
@@ -202,7 +230,7 @@ describe('project agent orchestrator', () => {
   it('isolates project listings and clears live account content without releasing the active worker lock', async () => {
     const { orchestrator, enqueue, runs } = harness()
     const active = enqueue()
-    const waiting = enqueue()
+    const waiting = enqueue({ permission: 'workspace-write' })
     const other = enqueue({ project: { ...PROJECT, principalId: 'account-2' } })
     orchestrator.approve(active.id)
     await flush()
@@ -258,7 +286,7 @@ describe('project agent orchestrator', () => {
       throw new Error('render failure')
     })
     const first = enqueue()
-    const second = enqueue()
+    const second = enqueue({ permission: 'workspace-write' })
     orchestrator.approve(first.id)
     orchestrator.approve(second.id)
     await flush()
@@ -272,7 +300,7 @@ describe('project agent orchestrator', () => {
   it('disposes queued and running work without accepting late results or new jobs', async () => {
     const { orchestrator, enqueue, runs } = harness()
     const first = enqueue()
-    const second = enqueue()
+    const second = enqueue({ permission: 'workspace-write' })
     orchestrator.approve(first.id)
     orchestrator.approve(second.id)
     await flush()

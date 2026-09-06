@@ -5,7 +5,7 @@ import type { LuczorMode } from '@/services/openrouter.service'
 import { LuczorApi, type BootstrapResponse } from '@/services/api/luczorApi'
 import { loadAppearance } from '@/services/appearance'
 import { installDebugCapture, startDebugCollector } from '@/services/debug'
-import { startDeviceJobChannel } from '@/services/deviceJobs'
+import { startDeviceJobChannel, stopDeviceJobChannel } from '@/services/deviceJobs'
 import { NATIVE_NOTIFICATION_ACTION_EVENT, startNativeNotificationActionListener } from '@/services/notifications'
 import { loadAppState } from '@/services/persistence'
 import { loadPlans } from '@/services/plan'
@@ -64,6 +64,7 @@ export type AppRuntimeLifecycleDependencies = {
   setStatusHeartbeat: (listener: () => void, intervalMs: number) => number
   clearStatusHeartbeat: (heartbeat: number) => void
   startDeviceJobChannel: () => Promise<StopDeviceJobs>
+  stopDeviceJobChannel: () => void
   flushMemoryOutbox?: () => void | Promise<void>
   warn: (message: string, error: unknown) => void
 }
@@ -117,6 +118,7 @@ function createDefaultDependencies(): AppRuntimeLifecycleDependencies {
     setStatusHeartbeat: (listener, intervalMs) => window.setInterval(listener, intervalMs),
     clearStatusHeartbeat: heartbeat => window.clearInterval(heartbeat),
     startDeviceJobChannel,
+    stopDeviceJobChannel,
     flushMemoryOutbox: () => luczorMemory.flushPendingSync(),
     warn: (message, error) => console.warn(message, error),
   }
@@ -129,8 +131,55 @@ export function createAppRuntimeLifecycle(
   let stopDeviceJobs: StopDeviceJobs | null = null
   let stopNativeNotificationActions: StopNotificationActions | null = null
   let statusHeartbeat: number | null = null
+  let runtimeActive = false
+  let runtimeReady = false
+  let identityChanging = false
+  let deviceChannelGeneration = 0
+  let identityListenersInstalled = false
+
+  const invalidateDeviceChannel = () => {
+    deviceChannelGeneration++
+    dependencies.stopDeviceJobChannel()
+    const knownStop = stopDeviceJobs
+    stopDeviceJobs = null
+    knownStop?.()
+  }
+  const startCurrentDeviceChannel = () => {
+    if (!runtimeActive || !runtimeReady || identityChanging) return
+    const generation = ++deviceChannelGeneration
+    void dependencies
+      .startDeviceJobChannel()
+      .then(stopChannel => {
+        if (!runtimeActive || !runtimeReady || identityChanging || generation !== deviceChannelGeneration) {
+          stopChannel()
+          return
+        }
+        stopDeviceJobs?.()
+        stopDeviceJobs = stopChannel
+      })
+      .catch(error => {
+        if (runtimeActive && runtimeReady && !identityChanging && generation === deviceChannelGeneration) {
+          dependencies.warn('[device-jobs] unavailable', error)
+        }
+      })
+  }
+  const onIdentityChanging = () => {
+    identityChanging = true
+    invalidateDeviceChannel()
+  }
+  const onIdentityChanged = () => {
+    identityChanging = false
+    startCurrentDeviceChannel()
+  }
 
   async function start(): Promise<void> {
+    runtimeActive = true
+    runtimeReady = false
+    if (!identityListenersInstalled && typeof window !== 'undefined') {
+      window.addEventListener('luczor:api-identity-changing', onIdentityChanging)
+      window.addEventListener('luczor:api-identity-changed', onIdentityChanged)
+      identityListenersInstalled = true
+    }
     let localBootstrapGeneration: number | undefined
     let localManifestBoundaryReady = false
     try {
@@ -221,18 +270,22 @@ export function createAppRuntimeLifecycle(
       void dependencies.flushMemoryOutbox?.()
     }, 30_000)
 
-    void dependencies
-      .startDeviceJobChannel()
-      .then(stopChannel => {
-        stopDeviceJobs = stopChannel
-      })
-      .catch(error => dependencies.warn('[device-jobs] unavailable', error))
+    runtimeReady = true
+    startCurrentDeviceChannel()
   }
 
   function stop(): void {
+    runtimeActive = false
+    runtimeReady = false
+    identityChanging = false
+    if (identityListenersInstalled && typeof window !== 'undefined') {
+      window.removeEventListener('luczor:api-identity-changing', onIdentityChanging)
+      window.removeEventListener('luczor:api-identity-changed', onIdentityChanged)
+      identityListenersInstalled = false
+    }
+    invalidateDeviceChannel()
     dependencies.removeNotificationActionListener(options.openNotificationCenter)
     if (statusHeartbeat !== null) dependencies.clearStatusHeartbeat(statusHeartbeat)
-    stopDeviceJobs?.()
     void stopNativeNotificationActions?.()
   }
 

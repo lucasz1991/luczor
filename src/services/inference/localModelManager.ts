@@ -94,6 +94,14 @@ function safeNativeRuntimeFailure(error: unknown): string | undefined {
 export class LocalModelManager {
   private readonly health = new Map<string, LocalModelHealth>()
   private readonly active = new Map<string, { controller: AbortController; catalogBinding: LocalCatalogBinding }>()
+  private readonly waiters: Array<{
+    epoch: number
+    signal?: AbortSignal
+    onAbort?: () => void
+    resolve: () => void
+    reject: (reason: unknown) => void
+  }> = []
+  private slotOccupied = false
   private boundaryEpoch = 0
 
   constructor(
@@ -133,6 +141,17 @@ export class LocalModelManager {
     for (const [requestId, active] of this.active) {
       active.controller.abort()
       void this.transport.cancel(requestId, active.catalogBinding).catch(() => undefined)
+    }
+    for (const waiter of this.waiters.splice(0)) {
+      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort)
+      waiter.reject(
+        new LocalInferenceError(
+          'Die wartende lokale Route gehört zu einer abgelaufenen Kataloggrenze.',
+          'catalog_binding_stale',
+          false,
+          false
+        )
+      )
     }
     this.health.clear()
   }
@@ -174,6 +193,23 @@ export class LocalModelManager {
   }
 
   private async stream(
+    release: LocalModelReleaseManifest,
+    readiness: LocalReadinessEvidence,
+    catalogBinding: LocalCatalogBinding,
+    scopeDigest: string,
+    gatewayEpoch: number,
+    request: InferenceRequest
+  ): Promise<InferenceResult> {
+    const slot = this.acquireSlot(gatewayEpoch, request.signal)
+    if (slot !== true) await slot
+    try {
+      return await this.streamExclusive(release, readiness, catalogBinding, scopeDigest, gatewayEpoch, request)
+    } finally {
+      this.releaseSlot()
+    }
+  }
+
+  private async streamExclusive(
     release: LocalModelReleaseManifest,
     readiness: LocalReadinessEvidence,
     catalogBinding: LocalCatalogBinding,
@@ -236,10 +272,6 @@ export class LocalModelManager {
         false
       )
     }
-    if (this.active.size > 0) {
-      throw new LocalInferenceError('Die lokale Runtime ist ausgelastet.', 'runtime_busy', true, false)
-    }
-
     const operationEpoch = this.boundaryEpoch
     const requestId = this.requestIdFactory()
     const controller = new AbortController()
@@ -250,6 +282,7 @@ export class LocalModelManager {
       void this.transport.cancel(requestId, catalogBinding).catch(() => undefined)
     }
     request.signal?.addEventListener('abort', parentAbort, { once: true })
+    if (request.signal?.aborted) parentAbort()
     this.active.set(requestId, { controller, catalogBinding })
     let partialOutput = false
     this.health.set(release.id, {
@@ -338,5 +371,50 @@ export class LocalModelManager {
       request.signal?.removeEventListener('abort', parentAbort)
       this.active.delete(requestId)
     }
+  }
+
+  private acquireSlot(epoch: number, signal?: AbortSignal): true | Promise<void> {
+    if (signal?.aborted) throw abortError()
+    if (!this.slotOccupied) {
+      this.slotOccupied = true
+      return true
+    }
+    return new Promise<void>((resolve, reject) => {
+      const waiter = { epoch, signal, resolve, reject } as (typeof this.waiters)[number]
+      if (signal) {
+        waiter.onAbort = () => {
+          const index = this.waiters.indexOf(waiter)
+          if (index >= 0) this.waiters.splice(index, 1)
+          reject(abortError())
+        }
+        signal.addEventListener('abort', waiter.onAbort, { once: true })
+      }
+      this.waiters.push(waiter)
+    })
+  }
+
+  private releaseSlot(): void {
+    while (this.waiters.length > 0) {
+      const waiter = this.waiters.shift()!
+      if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort)
+      if (waiter.signal?.aborted) {
+        waiter.reject(abortError())
+        continue
+      }
+      if (waiter.epoch !== this.boundaryEpoch) {
+        waiter.reject(
+          new LocalInferenceError(
+            'Die wartende lokale Route gehört zu einer abgelaufenen Kataloggrenze.',
+            'catalog_binding_stale',
+            false,
+            false
+          )
+        )
+        continue
+      }
+      waiter.resolve()
+      return
+    }
+    this.slotOccupied = false
   }
 }

@@ -1,5 +1,6 @@
 import { Store } from '@tauri-apps/plugin-store'
 import type { LuczorMode } from '@/services/openrouter.service'
+import type { ToolEffect, ToolRisk, ToolScope } from '@/services/tools/types'
 
 const SETTINGS_FILE = 'luczor.settings.json'
 
@@ -33,6 +34,9 @@ export type AutoExecutionCandidate = Readonly<{
   mode: LuczorMode
   mutating: boolean
   requiresApproval: boolean
+  risk?: ToolRisk
+  scope?: ToolScope
+  effects?: ToolEffect[]
 }>
 
 /**
@@ -42,5 +46,14 @@ export type AutoExecutionCandidate = Readonly<{
  * bypassed here; the global kill switch remains enforced by the agent loop.
  */
 export function canAutoExecuteTool(policy: ExecutionPolicy, candidate: AutoExecutionCandidate): boolean {
-  return policy.autoExecuteMutatingTools && candidate.mode === 'act' && candidate.mutating && candidate.requiresApproval
+  return (
+    policy.autoExecuteMutatingTools &&
+    candidate.mode === 'act' &&
+    candidate.mutating &&
+    candidate.requiresApproval &&
+    candidate.scope === 'project' &&
+    candidate.risk !== 'critical' &&
+    !!candidate.effects?.length &&
+    candidate.effects.every(effect => effect === 'read' || effect === 'write')
+  )
 }

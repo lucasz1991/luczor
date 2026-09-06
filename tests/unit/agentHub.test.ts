@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
   policy: vi.fn(),
   context: vi.fn(),
   run: vi.fn(),
-  saveLink: vi.fn(),
+  sessions: vi.fn(),
 }))
 vi.mock('@/state/store', () => ({ state: { projects: mocks.projects } }))
 vi.mock('@/state/hud', async () => ({ hud: (await import('vue')).reactive({ killSwitch: false }) }))
@@ -21,13 +21,10 @@ vi.mock('@/services/repositoryGraph', () => ({ getRepositoryExternalPolicy: mock
 vi.mock('@/services/prompt/projectStartContext', () => ({ buildProjectStartContext: mocks.context }))
 vi.mock('@/services/agents/codexAgent', () => ({
   createCodexAgentAdapter: () => ({ id: 'codex', permissions: ['read-only', 'workspace-write'], run: mocks.run }),
+  listCodexSessions: mocks.sessions,
 }))
 vi.mock('@/services/agents/modelAgent', () => ({
   createModelAgentAdapter: ({ id }: { id: string }) => ({ id, permissions: ['read-only'], run: mocks.run }),
-}))
-vi.mock('@/services/agents/links', () => ({
-  getAgentProjectLink: async () => undefined,
-  saveAgentProjectLink: mocks.saveLink,
 }))
 
 import { agentHub, configureAgentHub, prepareAgentJob } from '@/services/agents/hub'
@@ -44,7 +41,7 @@ beforeEach(() => {
   mocks.policy.mockResolvedValue('ask')
   mocks.context.mockResolvedValue({ providerText: 'Reviewed project summary and goals' })
   mocks.run.mockResolvedValue({ output: 'Done' })
-  mocks.saveLink.mockResolvedValue(undefined)
+  mocks.sessions.mockResolvedValue([])
 })
 
 afterEach(async () => {
@@ -85,6 +82,32 @@ describe('agent hub boundaries', () => {
       return { providerText: 'Context' }
     })
     await expect(prepareAgentJob(input)).rejects.toThrow('Zuordnung')
+    expect(mocks.run).not.toHaveBeenCalled()
+  })
+
+  it('resumes only a session returned by the native project/session authority', async () => {
+    mocks.sessions.mockResolvedValue([
+      { threadId: '00000000-0000-4000-8000-000000000001', updatedAt: 10 },
+      { threadId: '00000000-0000-4000-8000-000000000002', updatedAt: 9 },
+    ])
+    const job = await prepareAgentJob({
+      ...input,
+      adapterId: 'codex',
+      resume: true,
+      externalThreadId: '00000000-0000-4000-8000-000000000002',
+    })
+    agentHub.approve(job.id)
+    await vi.waitFor(() => expect(mocks.run).toHaveBeenCalledTimes(1))
+    expect((mocks.run.mock.calls[0]![0] as AgentRunRequest).externalThreadId).toBe(
+      '00000000-0000-4000-8000-000000000002'
+    )
+  })
+
+  it('rejects a stale renderer-selected session that native session_list no longer returns', async () => {
+    mocks.sessions.mockResolvedValue([{ threadId: 'native-current', updatedAt: 10 }])
+    await expect(
+      prepareAgentJob({ ...input, adapterId: 'codex', resume: true, externalThreadId: 'stale-store-link' })
+    ).rejects.toThrow('native Codex-Sitzung')
     expect(mocks.run).not.toHaveBeenCalled()
   })
 

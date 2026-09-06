@@ -66,7 +66,8 @@ function select(id: string) {
   menu.value = false
   commandsDismissed.value = true
   emit('command', id)
-  void nextTick(() => field.value?.focus())
+  // Commands may open a modal. Let that surface keep keyboard focus.
+  if (id === 'summarize') void nextTick(() => field.value?.focus())
 }
 function closeCommands() {
   menu.value = false

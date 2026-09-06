@@ -37,6 +37,15 @@ const MAX_TOOL_CALLS: usize = 128;
 const MAX_TOOL_ARGUMENT_CHARS: usize = 1024 * 1024;
 const MAX_SIGNED_READ_TIMEOUT_MS: u64 = 120_000;
 const MAX_INFERENCE_TOTAL_SECONDS: u64 = 30 * 60;
+const MAX_RUNTIME_PATH_CONFIG_BYTES: u64 = 16 * 1024;
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimePathConfig {
+    version: u32,
+    runtime_path: PathBuf,
+    model_directory: PathBuf,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1389,7 +1398,7 @@ fn prepare_release_inner(
     cancel: Arc<AtomicBool>,
 ) -> Result<NativeReadiness, String> {
     validate_capacity(&model)?;
-    let verified_artifacts = verify_configured_artifacts(&model, &cancel)?;
+    let verified_artifacts = verify_configured_artifacts(app, &model, &cancel)?;
     let model_path = verified_artifacts.model_path.clone();
     let artifact = model
         .artifact
@@ -1449,6 +1458,7 @@ fn prepare_release_inner(
 }
 
 fn verify_configured_artifacts(
+    app: &AppHandle,
     model: &ModelRelease,
     cancel: &AtomicBool,
 ) -> Result<VerifiedArtifactFiles, String> {
@@ -1460,7 +1470,7 @@ fn verify_configured_artifacts(
         .runtime
         .as_ref()
         .ok_or("Runtime metadata is unavailable.")?;
-    let (runtime_path, model_path) = configured_paths(&model.id)?;
+    let (runtime_path, model_path) = configured_paths(app, &model.id)?;
     let mut model_guard = open_artifact_guard(&model_path)?;
     let mut runtime_guard = open_artifact_guard(&runtime_path)?;
     if model_guard
@@ -1627,19 +1637,49 @@ fn run_signed_benchmark(
     Ok(())
 }
 
-fn configured_paths(model_id: &str) -> Result<(PathBuf, PathBuf), String> {
+fn configured_paths(app: &AppHandle, model_id: &str) -> Result<(PathBuf, PathBuf), String> {
+    let config_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Local-model configuration directory is unavailable.")?
+        .join("local-model")
+        .join("runtime-paths.json");
+    configured_paths_from_sources(
+        model_id,
+        std::env::var_os("LUCZOR_LLAMA_CPP_BIN").map(PathBuf::from),
+        std::env::var_os("LUCZOR_LOCAL_MODEL_DIR").map(PathBuf::from),
+        &config_path,
+    )
+}
+
+fn configured_paths_from_sources(
+    model_id: &str,
+    runtime_environment: Option<PathBuf>,
+    model_directory_environment: Option<PathBuf>,
+    config_path: &Path,
+) -> Result<(PathBuf, PathBuf), String> {
     if !safe_id(model_id) {
         return Err("Invalid model release id.".into());
     }
-    let runtime = std::env::var_os("LUCZOR_LLAMA_CPP_BIN")
-        .map(PathBuf::from)
-        .ok_or("LUCZOR_LLAMA_CPP_BIN is not configured.")?;
-    let model_dir = std::env::var_os("LUCZOR_LOCAL_MODEL_DIR")
-        .map(PathBuf::from)
-        .ok_or("LUCZOR_LOCAL_MODEL_DIR is not configured.")?;
+    // Explicit test-launcher overrides remain a pair and never mix with saved production paths.
+    let (runtime, model_dir) = match (runtime_environment, model_directory_environment) {
+        (Some(runtime), Some(model_dir)) => (runtime, model_dir),
+        (None, None) => {
+            let config = read_runtime_path_config(config_path)?;
+            (config.runtime_path, config.model_directory)
+        }
+        _ => {
+            return Err(
+                "Both local-model runtime environment paths must be configured together.".into(),
+            )
+        }
+    };
     if !runtime.is_absolute() || !model_dir.is_absolute() {
         return Err("Local-model runtime and model directory must be absolute local paths.".into());
     }
+    reject_runtime_reparse_points(&runtime)?;
+    reject_runtime_reparse_points(&model_dir)?;
+    reject_runtime_reparse_points(&model_dir.join(format!("{model_id}.gguf")))?;
     let runtime =
         fs::canonicalize(runtime).map_err(|_| "Configured llama.cpp runtime is unavailable.")?;
     let model_dir = fs::canonicalize(model_dir)
@@ -1650,6 +1690,62 @@ fn configured_paths(model_id: &str) -> Result<(PathBuf, PathBuf), String> {
         return Err("Configured local-model files are invalid.".into());
     }
     Ok((runtime, model))
+}
+
+fn read_runtime_path_config(path: &Path) -> Result<RuntimePathConfig, String> {
+    reject_runtime_reparse_points(path)?;
+    let file = File::open(path).map_err(|_| {
+        "Local-model runtime paths are not configured. Configure local-model/runtime-paths.json or both runtime environment paths."
+    })?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| "Local-model runtime path configuration cannot be read.")?;
+    if !metadata.is_file() || metadata.len() > MAX_RUNTIME_PATH_CONFIG_BYTES {
+        return Err(
+            "Local-model runtime path configuration exceeds its size limit or is not a file."
+                .into(),
+        );
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_RUNTIME_PATH_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Local-model runtime path configuration cannot be read.")?;
+    if bytes.len() as u64 > MAX_RUNTIME_PATH_CONFIG_BYTES {
+        return Err("Local-model runtime path configuration exceeds its size limit.".into());
+    }
+    let config: RuntimePathConfig = serde_json::from_slice(&bytes)
+        .map_err(|_| "Local-model runtime path configuration has an invalid schema.")?;
+    if config.version != 1 {
+        return Err("Local-model runtime path configuration version is unsupported.".into());
+    }
+    Ok(config)
+}
+
+fn reject_runtime_reparse_points(path: &Path) -> Result<(), String> {
+    for ancestor in path.ancestors() {
+        if ancestor.as_os_str().is_empty() {
+            continue;
+        }
+        let metadata = match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err("Local-model runtime path cannot be inspected.".into()),
+        };
+        #[cfg(windows)]
+        let is_reparse_point = {
+            use std::os::windows::fs::MetadataExt;
+            metadata.file_attributes() & 0x0000_0400 != 0
+        };
+        #[cfg(not(windows))]
+        let is_reparse_point = false;
+        if metadata.file_type().is_symlink() || is_reparse_point {
+            return Err(
+                "Local-model runtime paths must not contain symbolic links or reparse points."
+                    .into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 fn ensure_model_storage(
@@ -1993,7 +2089,7 @@ fn start_runtime(
     // re-hashes both configured files. Windows also keeps read-only share
     // handles open for the complete runtime lifetime so the verified paths
     // cannot be replaced or opened for write/delete before use.
-    let verified_artifacts = verify_configured_artifacts(model, cancel)?;
+    let verified_artifacts = verify_configured_artifacts(app, model, cancel)?;
     let port = reserve_loopback_port()?;
     let api_key = Uuid::new_v4().simple().to_string();
     let key_dir = app
@@ -2999,8 +3095,9 @@ mod tests {
     };
     #[cfg(windows)]
     use super::{
-        attach_process_lifetime_guard, open_artifact_guard, sha256_open_file_cancellable,
-        storage_mount_match_len,
+        attach_process_lifetime_guard, configured_paths_from_sources, open_artifact_guard,
+        read_runtime_path_config, sha256_open_file_cancellable, storage_mount_match_len,
+        MAX_RUNTIME_PATH_CONFIG_BYTES,
     };
     use base64::Engine;
     use serde_json::json;
@@ -3024,6 +3121,142 @@ mod tests {
         include_str!("../../../tests/fixtures/local-model-manifest-test-public.pem");
     const TEST_KEY_ID: &str = "luczor-local-model-test-2026-01";
     const WEAK_RSA_1024_PUBLIC_KEY_B64: &str = "LS0tLS1CRUdJTiBQVUJMSUMgS0VZLS0tLS0KTUlHZk1BMEdDU3FHU0liM0RRRUJBUVVBQTRHTkFEQ0JpUUtCZ1FEd1pjMEJLMzZqMGEvYTZ6RGovaFpqekkyawpMaUR6VGpuVGZVSTVvUUkzazJtdkVBSi92Z042YTRqeUI5aGtDL3ptMXdLeUxjRTFMTFI4Qzd4Vk5nOG5nQUtQCndHbThITTU2VjRsUG9LYzRFWWlJM05Rc3liUGY2VzYrQU1EMFVXdlZveXVEQUEwekZvRlhtYTFURUU4c29HVGkKTFdOWTBMNkk0N08rWjZ3OFdRSURBUUFCCi0tLS0tRU5EIFBVQkxJQyBLRVktLS0tLQo=";
+
+    #[cfg(windows)]
+    struct RuntimePathFixture {
+        root: std::path::PathBuf,
+        runtime: std::path::PathBuf,
+        model_directory: std::path::PathBuf,
+        config: std::path::PathBuf,
+    }
+
+    #[cfg(windows)]
+    impl RuntimePathFixture {
+        fn new() -> Self {
+            let root =
+                std::env::temp_dir().join(format!("luczor-runtime-paths-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&root).unwrap();
+            let runtime = root.join("llama-server.exe");
+            let model_directory = root.join("models");
+            let config = root.join("runtime-paths.json");
+            fs::create_dir_all(&model_directory).unwrap();
+            fs::write(&runtime, b"fixture runtime, never executed").unwrap();
+            fs::write(model_directory.join("model-a.gguf"), b"fixture model").unwrap();
+            fs::write(
+                &config,
+                serde_json::to_vec(&json!({
+                    "version": 1,
+                    "runtime_path": runtime,
+                    "model_directory": model_directory,
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            Self {
+                root,
+                runtime,
+                model_directory,
+                config,
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    impl Drop for RuntimePathFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn runtime_paths_load_saved_config_without_launch_environment() {
+        let fixture = RuntimePathFixture::new();
+        let (runtime, model) =
+            configured_paths_from_sources("model-a", None, None, &fixture.config).unwrap();
+        assert_eq!(runtime, fs::canonicalize(&fixture.runtime).unwrap());
+        assert_eq!(
+            model,
+            fs::canonicalize(fixture.model_directory.join("model-a.gguf")).unwrap()
+        );
+        assert!(configured_paths_from_sources("../outside", None, None, &fixture.config).is_err());
+        assert_eq!(
+            configured_paths_from_sources("model-b", None, None, &fixture.config).unwrap_err(),
+            "Configured GGUF file is unavailable."
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn runtime_paths_explicit_environment_pair_wins_without_mixing_sources() {
+        let fixture = RuntimePathFixture::new();
+        fs::write(
+            &fixture.config,
+            b"invalid saved config must be ignored by explicit test launch",
+        )
+        .unwrap();
+        assert!(configured_paths_from_sources(
+            "model-a",
+            Some(fixture.runtime.clone()),
+            Some(fixture.model_directory.clone()),
+            &fixture.config
+        )
+        .is_ok());
+        assert_eq!(
+            configured_paths_from_sources(
+                "model-a",
+                Some(fixture.runtime.clone()),
+                None,
+                &fixture.config
+            )
+            .unwrap_err(),
+            "Both local-model runtime environment paths must be configured together."
+        );
+        assert_eq!(
+            configured_paths_from_sources(
+                "model-a",
+                None,
+                Some(fixture.model_directory.clone()),
+                &fixture.config
+            )
+            .unwrap_err(),
+            "Both local-model runtime environment paths must be configured together."
+        );
+        assert!(configured_paths_from_sources(
+            "model-a",
+            Some(std::path::PathBuf::from("relative.exe")),
+            Some(fixture.model_directory.clone()),
+            &fixture.config
+        )
+        .is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn runtime_paths_reject_invalid_schema_version_relative_paths_and_oversized_files() {
+        let fixture = RuntimePathFixture::new();
+        for config in [
+            json!({"version":2,"runtime_path":fixture.runtime,"model_directory":fixture.model_directory}),
+            json!({"version":1,"runtime_path":fixture.runtime,"model_directory":fixture.model_directory,"extra":"not permitted"}),
+            json!({"version":1,"runtime_path":"relative.exe","model_directory":fixture.model_directory}),
+            json!({"version":1,"runtime_path":fixture.runtime}),
+        ] {
+            fs::write(&fixture.config, serde_json::to_vec(&config).unwrap()).unwrap();
+            assert!(configured_paths_from_sources("model-a", None, None, &fixture.config).is_err());
+        }
+        fs::write(
+            &fixture.config,
+            vec![b' '; (MAX_RUNTIME_PATH_CONFIG_BYTES + 1) as usize],
+        )
+        .unwrap();
+        assert!(read_runtime_path_config(&fixture.config)
+            .unwrap_err()
+            .contains("size limit"));
+        fs::remove_file(&fixture.config).unwrap();
+        assert!(read_runtime_path_config(&fixture.config)
+            .unwrap_err()
+            .contains("not configured"));
+    }
 
     #[test]
     fn canonical_json_sorts_nested_object_keys_but_preserves_lists() {

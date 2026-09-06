@@ -93,6 +93,27 @@ describe('desktop memory account isolation', () => {
     vi.unstubAllGlobals()
   })
 
+  it('retrieves private active memories locally without remote queries or ordinary provider recall', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    await memory.remember({
+      content: 'Der bevorzugte Projekttest heißt Alpha.',
+      scope: 'private',
+      projectId: 'p1',
+      writeIntent: 'explicit',
+      importance: 1,
+      visibility: 'private',
+    })
+    const result = await memory.recallLocal({ scope: 'private', projectId: 'p1', query: 'Alpha', limit: 5 })
+    expect(result).toHaveLength(1)
+    expect(result[0]?.content).toContain('Alpha')
+    await expect(memory.recall({ scope: 'private', projectId: 'p1', query: 'Alpha' })).resolves.toEqual([])
+    harness.currentSnapshot = accountSnapshot(2, 'key-b')
+    await expect(memory.recallLocal({ scope: 'private', projectId: 'p1', query: 'Alpha' })).resolves.toEqual([])
+    expect(harness.fetch).not.toHaveBeenCalled()
+  })
+
   it('rejects a reviewed write when the principal changes while its operation snapshot is resolving', async () => {
     await setServerEnabled(false)
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')

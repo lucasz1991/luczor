@@ -95,7 +95,7 @@ describe('workspace-bound coding-agent tools', () => {
   it('writes the bridge into the binding and returns only a relative path', async () => {
     const result = await tool('agent_bridge_write').execute({ content: '# Explicit' }, CONTEXT)
 
-    expect(mocks.writeBridgeFile).toHaveBeenCalledWith('E:\\private\\luczor', '# Explicit')
+    expect(mocks.writeBridgeFile).toHaveBeenCalledWith('E:\\private\\luczor', '# Explicit', undefined)
     expect(result).toEqual({ ok: true, path: 'LUCZOR.md', workspace: 'luczor' })
     expect(JSON.stringify(result)).not.toContain('E:\\private\\luczor')
   })
@@ -117,6 +117,6 @@ describe('workspace-bound coding-agent tools', () => {
       summary: 'Lokaler Agent',
       goals: [{ title: 'Sicher binden', description: '', status: 'in_progress' }],
     })
-    expect(mocks.writeBridgeFile).toHaveBeenCalledWith('E:\\private\\luczor', '# generated bridge')
+    expect(mocks.writeBridgeFile).toHaveBeenCalledWith('E:\\private\\luczor', '# generated bridge', undefined)
   })
 })

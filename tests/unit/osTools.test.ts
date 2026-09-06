@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
 
 import { lastScreenshot, osTools } from '@/services/tools/os'
+import { executionGate, updateExecutionControls } from '@/services/executionGate'
 
 const CONTEXT = { projectId: 'computer-test' }
 const MONITORS = [
@@ -157,10 +158,19 @@ describe('native computer perception and input contracts', () => {
   })
 
   it('retains negative monitor coordinates and rounds valid fractional positions', async () => {
-    await execute('os_click', { x: -1700.6, y: 80.4, button: 'right' })
+    mocks.invoke.mockResolvedValue(undefined)
+    updateExecutionControls({ mode: 'act', killSwitch: false, scope: 'computer-test' })
+    await execute('os_click', { x: -1700.6, y: 80.4, button: 'right', observation_id: 'observed-window' })
 
     expect(mocks.invoke).toHaveBeenCalledWith('mouse_click', {
-      payload: { button: 'right', x: -1701, y: 80, double: false },
+      payload: {
+        button: 'right',
+        x: -1701,
+        y: 80,
+        double: false,
+        observationId: 'observed-window',
+        execution: { sessionId: executionGate.sessionId, generation: executionGate.snapshot().generation },
+      },
     })
   })
 })

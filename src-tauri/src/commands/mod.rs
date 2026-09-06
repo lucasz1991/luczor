@@ -1,8 +1,10 @@
 pub mod agent;
 pub mod browser;
 pub mod codex;
+mod desktop_target;
 pub mod device_jobs;
 pub mod device_key;
+pub mod execution;
 pub mod local_model;
 pub mod local_tasks;
 pub mod mini_chat;

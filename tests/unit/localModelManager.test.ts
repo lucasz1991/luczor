@@ -91,15 +91,41 @@ describe('LocalModelManager runtime safety', () => {
     })
     controller.abort()
 
-    await expect(
-      manager
-        .gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
-        .streamChatWithTools({ messages: [{ role: 'user', content: 'too early' }] })
-    ).rejects.toMatchObject({ code: 'runtime_busy' })
-
     await expect(turn).rejects.toMatchObject({ name: 'AbortError' })
     expect(cancel).toHaveBeenCalledWith('request-abort', catalogBinding)
     expect(manager.getHealth(model)).toMatchObject({ state: 'ready', consecutiveFailures: 0 })
+  })
+
+  it('queues concurrent local requests instead of failing with runtime_busy', async () => {
+    const model = await release()
+    let finishFirst!: () => void
+    const firstDone = new Promise<void>(resolve => {
+      finishFirst = resolve
+    })
+    let calls = 0
+    const transport: LocalRuntimeTransport = {
+      stream: vi.fn(async () => {
+        calls += 1
+        if (calls === 1) await firstDone
+        return successfulResult
+      }),
+      cancel: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+    }
+    const manager = new LocalModelManager(
+      transport,
+      () => new Date('2026-08-30T12:30:00Z'),
+      () => `request-${calls + 1}`
+    )
+    const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+    const first = gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'first' }] })
+    const second = gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'second' }] })
+
+    await Promise.resolve()
+    expect(transport.stream).toHaveBeenCalledTimes(1)
+    finishFirst()
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2)
+    expect(transport.stream).toHaveBeenCalledTimes(2)
   })
 
   it('treats a catalog-boundary abort as ownership invalidation instead of model failure', async () => {

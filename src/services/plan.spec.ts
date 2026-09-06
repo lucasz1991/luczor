@@ -1,15 +1,18 @@
-import { describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it } from 'vitest'
 import {
+  bindPlanPrincipal,
   buildPlanContext,
   currentPlanStep,
   emptyPlan,
   isPlanComplete,
   normalizeSteps,
   planProgress,
-  planState,
+  getPlan,
   setPlan,
   type Plan,
 } from './plan'
+
+beforeEach(() => bindPlanPrincipal('test-principal'))
 
 function plan(steps: Plan['steps']): Plan {
   return { steps, note: '', updatedAt: 0 }
@@ -108,7 +111,7 @@ describe('setPlan / buildPlanContext', () => {
       { title: 'zweiter', status: 'in_progress' },
     ])
     expect(result.repairs).toHaveLength(1)
-    expect(planState.byProject.p1?.steps.map(s => s.status)).toEqual(['in_progress', 'pending'])
+    expect(getPlan('p1').steps.map(s => s.status)).toEqual(['in_progress', 'pending'])
   })
 
   it('renders a compact context block with status glyphs', () => {

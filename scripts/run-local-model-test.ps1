@@ -433,7 +433,6 @@ $databasePath = Join-Path $testRoot 'control-plane.sqlite'
 $tokenPath = Join-Path $testRoot 'device-token.secret'
 $laravelEnvironmentName = 'local'
 $laravelEnvPath = Join-Path $adminRoot ".env.$laravelEnvironmentName"
-$trustEnvPath = Join-Path $appRoot '.env.local-model'
 $reportsRoot = Assert-SafeDirectChildDirectory $assetRootCanonical $reportsRoot
 $resultPath = Join-Path $reportsRoot ("local-model-e2e-$runId.json")
 $configCachePath = Join-Path $runRoot 'laravel-config.php'
@@ -609,11 +608,9 @@ $laravelEnvLines = @(
     }
 )
 $laravelEnv = $laravelEnvLines -join "`n"
-$trustEnv = "LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64=$publicB64`nLUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID=$($profile.signing.keyId)`n"
-if (Test-Path -LiteralPath $trustEnvPath) {
-    Assert-Condition ((Get-Content -LiteralPath $trustEnvPath -Raw).Replace("`r`n","`n") -eq $trustEnv) 'Existing .env.local-model differs; refusing to overwrite it.'
-} else { Write-Utf8NoBom $trustEnvPath $trustEnv }
-
+# The test trust anchor is passed only in the Tauri process environment below.
+# build.rs prefers these explicit values over .env.local-model, so the normal
+# desktop's production defaults are neither read, rejected nor overwritten here.
 $desktopEnvNames = @('LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64','LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID','LUCZOR_LLAMA_CPP_BIN','LUCZOR_LOCAL_MODEL_DIR','WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS','PATH')
 $envNames = @(@($laravelIsolationEnv.Keys) + $desktopEnvNames | Select-Object -Unique)
 $savedEnv = @{}

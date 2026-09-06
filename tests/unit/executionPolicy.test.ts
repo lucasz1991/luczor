@@ -51,6 +51,9 @@ describe('executionPolicy', () => {
         mode: 'act',
         mutating: true,
         requiresApproval: true,
+        scope: 'project',
+        risk: 'low',
+        effects: ['write'],
       })
     ).toBe(true)
 

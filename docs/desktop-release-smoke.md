@@ -31,6 +31,27 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/with-pin
 
 This command must fail until concrete updater endpoints, the updater public key, runtime integration and real signing secrets exist. Never add placeholders to make it pass.
 
+## Local model paths for normal desktop launches
+
+Normal desktop launches read `local-model/runtime-paths.json` inside the current app identity's Tauri `app_data_dir()`. On Windows the standard app uses `%APPDATA%\de.luczor.desktop\local-model\runtime-paths.json`; `Luczor Local Test` uses its separate `de.luczor.desktop.local-test` directory. This file is local configuration outside the checkout and contains paths only, without provider keys or signing keys.
+
+Create a UTF-8 JSON file without a BOM using exactly these three fields. The paths below are examples; replace both with absolute paths to already installed assets on the current computer:
+
+```json
+{
+  "version": 1,
+  "runtime_path": "C:/Example/llama.cpp/llama-server.exe",
+  "model_directory": "C:/Example/models"
+}
+```
+
+- `runtime_path` points to the actual runtime executable. `model_directory` contains `<model_release_id>.gguf`, using the exact release ID from the signed catalog, not the display name.
+- Only schema version `1` is accepted; missing or extra fields and files larger than 16 KiB are rejected. Paths are literal: environment-variable placeholders are not expanded. Forward slashes avoid JSON backslash escaping on Windows.
+- Both configured assets and the configuration file, including their parent directories, must be free of symbolic links, junctions and other Windows reparse points. The runtime and GGUF must exist, and the GGUF must remain within the configured model directory.
+- A complete process-environment pair, `LUCZOR_LLAMA_CPP_BIN` plus `LUCZOR_LOCAL_MODEL_DIR`, overrides the saved file. Setting only one variable fails; the app never combines environment and saved paths. The isolated test launcher supplies its own pair and continues to use its separate test profile.
+
+Restart Luczor after changing the configuration to clear existing runtime/readiness state. Test the server connection to verify the signed policy, then send a short chat request with the external-fallback option off. The catalog must enable the local release and contain matching artifact/runtime hashes and capacity requirements; preparation also verifies the files, storage, available hardware and signed benchmark thresholds. A successful connection check alone does not establish local model readiness. This path configuration does not download models or override those checks.
+
 ## Joint folder-dialog and approval smoke
 
 Use a disposable test directory containing only synthetic files. Do not select a real source repository for this QA run.

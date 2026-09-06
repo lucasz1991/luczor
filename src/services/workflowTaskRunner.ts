@@ -48,8 +48,8 @@ export type WorkflowTaskPrimitives = {
   ) => Promise<{ ok: boolean; code: number; stdout: string; stderr: string; timed_out: boolean }>
   /** Drive the in-app browser window (P24). */
   browserOpen: (url?: string) => Promise<unknown>
-  browserClick: (selector: string) => Promise<unknown>
-  browserRead: (selector?: string) => Promise<{ ok: boolean; text: string; truncated: boolean }>
+  browserClick: (selector: string, expectedUrl?: string) => Promise<unknown>
+  browserRead: (selector?: string, expectedUrl?: string) => Promise<{ ok: boolean; text: string; truncated: boolean }>
 }
 
 const MAX_RESPONSE_CHARS = 20_000
@@ -57,7 +57,13 @@ const MAX_RESPONSE_CHARS = 20_000
 export function isWorkflowTaskBundle(value: unknown): value is WorkflowTaskBundle {
   if (!value || typeof value !== 'object') return false
   const bundle = value as Record<string, unknown>
-  return typeof bundle.task_key === 'string' && typeof bundle.params === 'object' && bundle.params !== null
+  return (
+    typeof bundle.task_key === 'string' &&
+    bundle.task_key.length <= 100 &&
+    typeof bundle.params === 'object' &&
+    bundle.params !== null &&
+    !Array.isArray(bundle.params)
+  )
 }
 
 function str(value: unknown, fallback = ''): string {
@@ -113,7 +119,7 @@ export async function runWorkflowTask(
     }
 
     case 'agent.dispatch': {
-      const agent = str(params.agent, 'claude').trim() || 'claude'
+      const agent = str(params.agent, 'codex').trim() || 'codex'
       const prompt = str(params.prompt).trim()
       if (!prompt) throw new Error('agent.dispatch requires a prompt.')
       const projectDir = str(params.project_dir).trim() || undefined
@@ -132,13 +138,15 @@ export async function runWorkflowTask(
       if (!selector) throw new Error('browser.click requires a selector.')
       // Ensure the window exists (open on the current or a blank page).
       await primitives.browserOpen(str(params.url).trim() || undefined)
-      await primitives.browserClick(selector)
+      const result = await primitives.browserClick(selector, str(params.url).trim() || undefined)
+      if (!result || typeof result !== 'object' || !('ok' in result) || result.ok !== true)
+        throw new Error('Browserklick wurde nicht bestätigt.')
       return { ok: true, clicked: selector }
     }
     case 'browser.read': {
       const selector = str(params.selector).trim() || undefined
       await primitives.browserOpen(str(params.url).trim() || undefined)
-      const res = await primitives.browserRead(selector)
+      const res = await primitives.browserRead(selector, str(params.url).trim() || undefined)
       return { ok: res.ok, text: res.text.slice(0, MAX_RESPONSE_CHARS), truncated: res.truncated }
     }
 
@@ -156,7 +164,7 @@ export async function runWorkflowTask(
       return { ok: true, path: res.path, bytes: res.bytes }
     }
 
-    // SOLL P15b — sandboxed local runtimes (timeout + output cap in Rust).
+    // Local full-access runtimes: time/output bounds are not an OS sandbox.
     case 'python.run':
     case 'node.run': {
       const runtime = bundle.task_key === 'python.run' ? 'python' : 'node'

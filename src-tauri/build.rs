@@ -1,6 +1,11 @@
 use std::{env, fs, path::Path};
 
 const APP_COMMANDS: &[&str] = &[
+    "open_user_link",
+    "execution_gate_update",
+    "desktop_observe",
+    "codex_job_list",
+    "codex_session_list",
     "mini_chat_open",
     "mini_chat_action",
     "mini_chat_publish",
@@ -44,6 +49,7 @@ const APP_COMMANDS: &[&str] = &[
     "browser_click",
     "browser_read",
     "browser_report",
+    "browser_action_admit",
     "device_key_get",
     "device_key_set",
     "device_key_delete",

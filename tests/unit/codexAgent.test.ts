@@ -7,7 +7,15 @@ import {
 import type { AgentRunRequest } from '@/services/agents/types'
 
 function snapshot(status: CodexJobSnapshot['status'], output = ''): CodexJobSnapshot {
-  return { id: 'native-job', status, output, createdAt: 1, outputTruncated: false }
+  return {
+    id: 'native-job',
+    principalId: 'principal',
+    projectId: 'project',
+    status,
+    output,
+    createdAt: 1,
+    outputTruncated: false,
+  }
 }
 
 function request(controller = new AbortController()): AgentRunRequest {
@@ -32,11 +40,15 @@ function harness() {
   const invoke = vi.fn<(command: string, args?: unknown) => Promise<unknown>>()
   const externalPolicy = vi.fn<CodexAgentDependencies['externalPolicy']>().mockResolvedValue('ask')
   const wait = vi.fn(async () => undefined)
+  const captureExecution: CodexAgentDependencies['captureExecution'] = signal => ({
+    signal,
+    authorize: vi.fn(async () => ({ sessionId: 'session', generation: 7 })),
+  })
   return {
     invoke,
     externalPolicy,
     wait,
-    dependencies: { invoke: invoke as CodexAgentDependencies['invoke'], externalPolicy, wait },
+    dependencies: { invoke: invoke as CodexAgentDependencies['invoke'], externalPolicy, wait, captureExecution },
   }
 }
 
@@ -67,6 +79,7 @@ describe('native Codex agent adapter', () => {
         expectedWorkspaceUpdatedAt: 10,
         externalThreadId: input.externalThreadId,
         permission: 'read-only',
+        execution: { sessionId: 'session', generation: 7 },
       }),
     })
     expect(input.onOutput).toHaveBeenCalledWith('Partial')

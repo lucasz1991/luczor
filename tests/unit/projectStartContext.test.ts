@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { buildProjectStartContext } from '@/services/prompt/projectStartContext'
+import { luczorMemory } from '@/services/memory/luczorMemory'
 import type { MemoryRecord } from '@/services/memory/luczorMemory'
 import type { Project } from '@/state/types'
 
@@ -51,6 +52,22 @@ function memory(overrides: Partial<MemoryRecord>): MemoryRecord {
 }
 
 describe('project start context', () => {
+  it('uses only local retrieval and keeps private records out of provider context', async () => {
+    const local = vi
+      .spyOn(luczorMemory, 'recallLocal')
+      .mockResolvedValue([memory({ content: 'Private project decision', visibility: 'private' })])
+    const remote = vi.spyOn(luczorMemory, 'recall').mockRejectedValue(new Error('must stay local'))
+    try {
+      const result = await buildProjectStartContext({ project })
+      expect(local).toHaveBeenCalledTimes(2)
+      expect(remote).not.toHaveBeenCalled()
+      expect(result.providerText).not.toContain('Private project decision')
+      expect(result.sourceFragments.find(fragment => fragment.source === 'memory')?.egress).toBe('local_only')
+    } finally {
+      local.mockRestore()
+      remote.mockRestore()
+    }
+  })
   it('combines project state, workspace alias and confirmed user/project memory without local paths', async () => {
     const recall = vi
       .fn()

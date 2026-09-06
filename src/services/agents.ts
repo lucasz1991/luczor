@@ -5,6 +5,8 @@
 // in a project directory, and writes the shared LUCZOR.md bridge file.
 
 import { invoke } from '@tauri-apps/api/core'
+import { invokeGuarded, type ExecutionTicket } from '@/services/executionGate'
+import { runWorkflowAgent } from '@/services/agents/workflowAgent'
 
 export type AgentName = 'claude' | 'codex'
 export type AgentInfo = { name: string; available: boolean; path: string | null }
@@ -20,13 +22,13 @@ export type AgentRunResult = {
 
 export const detectAgents = () => invoke<AgentInfo[]>('agent_cli_detect')
 
-export const runAgentCli = (agent: AgentName, prompt: string, projectDir?: string) =>
-  invoke<AgentRunResult>('agent_cli_run', {
-    payload: { agent, prompt, project_dir: projectDir ?? null },
-  })
+export async function runAgentCli(agent: AgentName, prompt: string, projectDir?: string): Promise<AgentRunResult> {
+  const result = await runWorkflowAgent(agent, prompt, projectDir)
+  return { ...result, timed_out: false, stdout_truncated: false, stderr_truncated: false }
+}
 
-export const writeBridgeFile = (projectDir: string, content: string) =>
-  invoke<string>('agent_write_bridge', { payload: { project_dir: projectDir, content } })
+export const writeBridgeFile = (projectDir: string, content: string, execution?: ExecutionTicket) =>
+  invokeGuarded<string>('agent_write_bridge', { project_dir: projectDir, content }, execution)
 
 /** Build the LUCZOR.md bridge markdown from the current project state. */
 export function buildBridgeMarkdown(project: {

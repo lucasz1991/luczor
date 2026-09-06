@@ -17,7 +17,7 @@ const props = defineProps<{
   collapsed?: boolean
 }>()
 
-const emit = defineEmits<{ (e: 'toggle'): void }>()
+const emit = defineEmits<{ (e: 'toggle'): void; (e: 'planning'): void }>()
 
 const plan = computed(() => getPlan(props.projectId))
 const hasPlan = computed(() => plan.value.steps.length > 0)
@@ -74,10 +74,24 @@ function onClear() {
     <TaskRows v-if="!collapsed" :tasks="tasks" />
 
     <p v-if="!collapsed && plan.note" class="plan__note">{{ plan.note }}</p>
+    <button v-if="!collapsed" type="button" class="plan__review" @click="emit('planning')">
+      Im Planungsfenster ausarbeiten
+    </button>
   </section>
 </template>
 
 <style scoped>
+.plan__review {
+  display: block;
+  margin: 10px 12px 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: var(--surface-1);
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
 .plan {
   margin: 0 auto var(--s2, 8px);
   max-width: 780px;

@@ -1,4 +1,5 @@
 import { buildBridgeMarkdown, detectAgents, writeBridgeFile } from '@/services/agents'
+import { prepareAgentJob } from '@/services/agents/hub'
 import { requireProjectWorkspace } from '@/services/projectWorkspace'
 import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
 import { asString, getProject } from './shared'
@@ -56,7 +57,6 @@ export const agentTools: ToolDef[] = [
       if (workspace.isGitRepository && (await getRepositoryExternalPolicy()) === 'deny') {
         throw new Error('Die Repository-Richtlinie verbietet die Übergabe an einen externen Coding-Agenten.')
       }
-      const { prepareAgentJob } = await import('@/services/agents/hub')
       const job = await prepareAgentJob({
         projectId: ctx.projectId,
         adapterId: 'codex',
@@ -109,7 +109,7 @@ export const agentTools: ToolDef[] = [
           })),
         })
       }
-      await writeBridgeFile(workspace.rootPath, content)
+      await writeBridgeFile(workspace.rootPath, content, ctx.execution)
       return { ok: true, path: 'LUCZOR.md', workspace: workspace.displayName }
     },
   },

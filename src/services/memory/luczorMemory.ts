@@ -670,7 +670,7 @@ class OfflineMemoryStore {
     })
   }
 
-  async recall(context: MemoryContext, query: string, limit: number): Promise<MemoryRecord[]> {
+  async recall(context: MemoryContext, query: string, limit: number, includePrivate = false): Promise<MemoryRecord[]> {
     const state = await this.load()
     const now = Date.now()
     const terms = queryTerms(query)
@@ -681,7 +681,11 @@ class OfflineMemoryStore {
       )
       .filter(record => !record.expiresAt || record.expiresAt > now)
       .filter(record => !state.tombstones.some(tombstone => tombstone.recordId === record.id))
-      .filter(isProviderSafeMemoryRecord)
+      .filter(record =>
+        includePrivate
+          ? record.sensitivity !== 'secret' && !containsSensitiveMemoryData(memoryRecordDlpPayload(record))
+          : isProviderSafeMemoryRecord(record)
+      )
       .filter(record => matchesRecallQuery(record, query, terms))
       .map(record => ({ record, rank: memoryRank(record, terms) }))
       .sort((left, right) => right.rank - left.rank || right.record.updatedAt - left.record.updatedAt)
@@ -1326,6 +1330,17 @@ export class LuczorMemoryService {
       query.query,
       limit
     )
+  }
+
+  /** Device-only retrieval. No query, private record or result is sent to the context server. */
+  async recallLocal(query: RecallQuery): Promise<MemoryRecord[]> {
+    const snapshot = await this.operationSnapshot()
+    const context = this.context(query.scope ?? 'project', query, snapshot.principalId)
+    const limit = Number.isFinite(query.limit) ? Math.max(1, Math.min(20, Math.floor(query.limit!))) : 6
+    const records = await this.offline.recall(context, query.query, limit, true)
+    const current = await getVerifiedAccountSnapshot()
+    if ((current?.principalId ?? 'device-local') !== snapshot.principalId) return []
+    return fuseMemories(records, [], query.query, limit)
   }
 
   async promote(recordId: string): Promise<MemoryRecord | null> {

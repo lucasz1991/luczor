@@ -26,7 +26,7 @@ import type { HybridRoutingSettings } from '@/services/inference/hybridRouter'
 import { LocalInferenceError } from '@/services/inference/localModelManager'
 import type { InferenceGateway, LuczorMode, ToolChoice, WireMessage } from '@/services/inference/types'
 import { getTool, toOpenAITools, type ToolCategory } from '@/services/tools/registry'
-import type { ToolDataHandling } from '@/services/tools/types'
+import type { ToolDataHandling, ToolDef } from '@/services/tools/types'
 import { awaitApproval } from '@/services/approvals'
 import { canAutoExecuteTool, loadExecutionPolicy } from '@/services/executionPolicy'
 import { mutations } from '@/state/store'
@@ -35,6 +35,9 @@ import { logAgentEvent } from '@/services/api/sync'
 import { getApiConfigSnapshot } from '@/services/api/luczorApi'
 import type { AgentProgress } from '@/services/chatActivity'
 import type { ToolCallStatus } from '@/state/types'
+import { executionGate } from '@/services/executionGate'
+import { validateToolArguments } from '@/services/tools/validateArguments'
+import { isPlanningDiscussion } from '@/services/planningEntry'
 
 /** A transient caller can own tool UI without writing to the project archive. */
 export type AgentToolSession = {
@@ -96,6 +99,9 @@ export type RunAgentOptions = {
     messageCount: number
     characterCount: number
     toolsAllowed: false
+    /** Safe readiness explanation produced by the signed local routing coordinator. */
+    localReadinessMessage: string
+    messages: readonly WireMessage[]
   }) => boolean | Promise<boolean>
   /** How this user turn was produced (marks spoken input server-side). */
   inputSource?: 'keyboard' | 'push_to_talk' | 'hands_free'
@@ -113,6 +119,12 @@ type ToolOutcomeRecord = { name: string; outcome: Outcome }
 const RUNTIME_MODE_MARKER = '[LUCZOR-LAUFZEITMODUS]'
 const RUNTIME_TOOLS_MARKER = '[LUCZOR-LAUFZEITTOOLS]'
 const LEGACY_TOOL_LIST_PREFIX = 'Tatsächlich verfügbare Tools dieser Anfrage:'
+const PLANNING_CHAT_INSTRUCTION =
+  'Planung besprichst du normalerweise im Chat: Kläre Ziel und Randbedingungen, schlage übersichtliche Punkte vor und gehe offene Fragen, Varianten und Entscheidungen gemeinsam mit dem Nutzer durch. Halte den aktuellen Entwurf im Gespräch fest. Das separate Planungsfenster ist optional und wird nur auf Wunsch verwendet. Eine Planbesprechung oder Zustimmung zu einer Variante ist noch kein Ausführungsauftrag. Beginne Änderungen, Agentenaufträge oder die Umsetzung erst nach einer klaren Aufforderung dazu; Modus, Freigaben, Projektgrenzen und Not-Aus bleiben verbindlich.'
+
+function permittedDuringPlanningDiscussion(tool: ToolDef | undefined): boolean {
+  return !!tool && !tool.mutating && !(tool.effects ?? []).some(effect => effect !== 'read')
+}
 
 export function buildRuntimeModeInstruction(mode: LuczorMode): string {
   const policy =
@@ -120,7 +132,7 @@ export function buildRuntimeModeInstruction(mode: LuczorMode): string {
       ? 'AKTUELLER MODUS: BEOBACHTEN. Datenverändernde Tools sind gesperrt; nur Lesen und Vorschlagen ist erlaubt.'
       : mode === 'unrestricted'
         ? 'AKTUELLER MODUS: VOLLZUGRIFF. Erlaubte Tools laufen ohne Einzelbestätigung; der Not-Aus bleibt verbindlich.'
-        : 'AKTUELLER MODUS: HANDELN. Datenverändernde Tools sind erlaubt. Erzeuge den Tool-Aufruf direkt; die Oberfläche übernimmt eine nötige Bestätigung.'
+        : 'AKTUELLER MODUS: HANDELN. Datenverändernde Tools sind für einen entsprechenden Nutzerauftrag erlaubt. Erzeuge dann den Tool-Aufruf direkt; die Oberfläche übernimmt eine nötige Bestätigung.'
   return `${RUNTIME_MODE_MARKER} ${policy} Diese aktuelle Angabe ersetzt alle älteren Modus-Aussagen im Chatverlauf.`
 }
 
@@ -205,12 +217,22 @@ function fallbackToolResult(records: ToolOutcomeRecord[]): string {
 
 /** Only explicit execution language gets provider-level tool_choice=required. */
 export function shouldRequireToolCall(text: string): boolean {
+  if (isPlanningDiscussion(text)) return false
   const normalized = text.trim().toLocaleLowerCase('de-DE')
   if (!normalized) return false
+  const negativeRequest = normalized.replace(/[.!?]$/u, '').split(/\s+/u)
+  if (negativeRequest[0] === 'bitte') negativeRequest.shift()
+  if (negativeRequest[0] === 'noch') negativeRequest.shift()
+  if (
+    negativeRequest.length === 2 &&
+    ['nicht', 'nichts'].includes(negativeRequest[0]!) &&
+    ['umsetzen', 'ausführen', 'implementieren', 'ändern', 'speichern'].includes(negativeRequest[1]!)
+  )
+    return false
   const imperative =
-    /(?:^|[^\p{L}\p{N}_])(speichere|erstelle|lege|setze|ändere|aktualisiere|lösche|markiere|prüfe|kontrolliere|öffne|klicke|schreibe|führe|starte|stoppe|lies|lese|suche|finde|liste|scrolle|drücke|tippe|verschiebe|benenne)(?=$|[^\p{L}\p{N}_])/u
+    /(?:^|[^\p{L}\p{N}_])(speichere|erstelle|lege|setze|ändere|aktualisiere|lösche|markiere|prüfe|kontrolliere|öffne|klicke|schreibe|führe|implementiere|starte|stoppe|lies|lese|suche|finde|liste|scrolle|drücke|tippe|verschiebe|benenne)(?=$|[^\p{L}\p{N}_])/u
   const infinitive =
-    /(?:^|[^\p{L}\p{N}_])(speichern|erstellen|anlegen|setzen|ändern|aktualisieren|löschen|markieren|prüfen|kontrollieren|öffnen|klicken|schreiben|ausführen|starten|stoppen|lesen|suchen|finden|auflisten|scrollen|drücken|tippen|verschieben|umbenennen)(?=$|[^\p{L}\p{N}_])/u
+    /(?:^|[^\p{L}\p{N}_])(speichern|erstellen|anlegen|setzen|umsetzen|implementieren|ändern|aktualisieren|löschen|markieren|prüfen|kontrollieren|öffnen|klicken|schreiben|ausführen|starten|stoppen|lesen|suchen|finden|auflisten|scrollen|drücken|tippen|verschieben|umbenennen)(?=$|[^\p{L}\p{N}_])/u
   const requestCue =
     /(?:^|[^\p{L}\p{N}_])(bitte|jetzt|nun|sollst du|du sollst|kannst du|mach|mache|ok dann)(?=$|[^\p{L}\p{N}_])/u
   return (
@@ -304,7 +326,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   inferenceTarget?: 'local_llama_cpp' | 'laravel_proxy'
   routeDecisionId?: string
 }> {
-  const { projectId, mode, maxRounds = 6, signal } = opts
+  const { projectId, mode, maxRounds = 6 } = opts
+  const execution = executionGate.capture(opts.signal)
+  const signal = execution.signal
   const updateToolStatus = (id: string, status: ToolCallStatus) =>
     opts.toolSession ? opts.toolSession.update(id, status) : mutations.updateToolCallStatus(projectId, id, status)
   const recordOutcome: typeof recordPersistentOutcome = (...args) => {
@@ -313,7 +337,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   }
   opts.onProgress?.({ phase: 'routing' })
   const currentMode = () => opts.getMode?.() ?? mode
-  const allTools = toOpenAITools()
+  const latestUserMessage = [...opts.baseMessages].reverse().find(message => message.role === 'user')?.content ?? ''
+  const planningDiscussion = isPlanningDiscussion(latestUserMessage)
+  const requestedToolChoice = planningDiscussion && opts.toolChoice === 'required' ? 'auto' : opts.toolChoice
+  const allTools = toOpenAITools().filter(
+    description => !planningDiscussion || permittedDuringPlanningDiscussion(getTool(description.function.name))
+  )
   const routeInput = (externalPackage?: ExternalTurnPackage) => ({
     projectId,
     contextId: opts.contextId,
@@ -361,6 +390,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         messageCount: externalMessages.length,
         characterCount: externalMessages.reduce((sum, message) => sum + message.content.length, 0),
         toolsAllowed: false,
+        localReadinessMessage: error.message,
+        messages: externalMessages,
       })
       if (!approved) throw error
       const externalPackage: ExternalTurnPackage = {
@@ -377,6 +408,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     }
   }
   const messages: WireMessage[] = [...(resolvedRoute.replacementMessages ?? opts.baseMessages)]
+  if (planningDiscussion && !resolvedRoute.externalOneShot) {
+    messages.unshift({
+      role: 'system',
+      content: `${PLANNING_CHAT_INSTRUCTION} Dieser Turn ist eine reine Planbesprechung: nur erforderliche Lesetools, keine Änderungen oder Agentenstarts.`,
+    })
+  }
   const tools = resolvedRoute.externalOneShot ? [] : allTools
   let lastRequestId: string | undefined
   let lastModel: string | undefined
@@ -387,7 +424,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   let ephemeralDataUsed = false
   const toolOutcomes: ToolOutcomeRecord[] = []
   let reasoningRetryUsed = false
-  let nextToolChoice: ToolChoice = resolvedRoute.externalOneShot ? 'none' : (opts.toolChoice ?? 'auto')
+  let nextToolChoice: ToolChoice = resolvedRoute.externalOneShot ? 'none' : (requestedToolChoice ?? 'auto')
   const inferenceGateway = resolvedRoute.gateway
   const roundLimit = resolvedRoute.externalOneShot ? 1 : maxRounds
 
@@ -422,10 +459,15 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       // Do not expose intermediate reasoning from a round that later emits a
       // tool call. Only the final no-tool round becomes visible chat content.
       onToken: content => {
+        if (signal.aborted) return
         roundContent = content
         opts.onProgress?.({ phase: 'receiving', round: round + 1, characters: content.length })
       },
     })
+    // A provider may finish after ignoring AbortSignal. Never publish that late
+    // result or execute its tools in a replacement account/project generation.
+    if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    executionGate.assert(execution)
     lastRequestId = res.requestId ?? lastRequestId
     lastModel = res.model ?? lastModel
     lastProvider = res.provider ?? lastProvider
@@ -456,7 +498,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       }
       if (reasoningLeak && !reasoningRetryUsed) {
         reasoningRetryUsed = true
-        nextToolChoice = opts.toolChoice === 'required' ? 'required' : 'auto'
+        nextToolChoice = requestedToolChoice === 'required' ? 'required' : 'auto'
         messages.push({
           role: 'system',
           content:
@@ -525,6 +567,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         continue
       }
 
+      try {
+        if (typeof call.rawArguments === 'string') validateToolArguments(tool.parameters, JSON.parse(call.rawArguments))
+        validateToolArguments(tool.parameters, call.arguments)
+      } catch (error) {
+        toolFailures++
+        const outcome: Outcome = { ok: false, error: error instanceof Error ? error.message : String(error) }
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(projectId, call.id, call.name, 'failed', outcome, dataHandling, res.requestId)
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        continue
+      }
+
       // A saved policy change takes effect before the next tool, including
       // another tool returned by the same model round. Never keep a turn-wide
       // auto-approval snapshot after the user has revoked that setting.
@@ -551,6 +605,18 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       }
 
       // Mode enforcement: mutating tools are locked in observe mode.
+      if (planningDiscussion && !permittedDuringPlanningDiscussion(tool)) {
+        toolFailures++
+        const outcome: Outcome = {
+          ok: false,
+          error: 'Planbesprechung: Änderungen und Agentenstarts benötigen einen eigenen klaren Ausführungsauftrag.',
+        }
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        continue
+      }
+
       if (currentMode() === 'observe' && tool.mutating) {
         toolFailures++
         const outcome: Outcome = {
@@ -572,6 +638,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         mode: approvalMode,
         mutating: tool.mutating,
         requiresApproval,
+        risk: tool.risk,
+        scope: tool.scope,
+        effects: tool.effects,
       })
       if (requiresApproval && approvalMode !== 'unrestricted' && !autoExecute) {
         updateToolStatus(call.id, 'proposed')
@@ -632,7 +701,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       const toolStarted = performance.now()
       if (dataHandling === 'ephemeral') ephemeralDataUsed = true
       try {
-        const output = await tool.execute(call.arguments, { projectId })
+        executionGate.assert(execution)
+        const output = await tool.execute(call.arguments, { projectId, signal, execution, inferenceTarget: 'local' })
+        executionGate.assert(execution)
         const outcome = normalizeToolOutcome(output)
         if (outcome.ok) toolSuccesses++
         else toolFailures++
@@ -689,6 +760,7 @@ export function buildSystemPreamble(mode: LuczorMode, projectName: string, assis
     `Aktuelles Projekt: "${projectName}".`,
     buildRuntimeModeInstruction(mode),
     buildRuntimeToolInstruction(toOpenAITools(), mode),
+    PLANNING_CHAT_INSTRUCTION,
     'Bei einem klaren Auftrag zum Speichern, Erstellen, Ändern oder Prüfen rufst du das passende Tool auf. Im Handeln-Modus fragst du nicht nur textlich nach Freigabe; die Oberfläche übernimmt die Freigabe des Tool-Aufrufs.',
     'Behaupte niemals, etwas sei gespeichert, erstellt, geändert oder geprüft, bevor ein passender Tool-Aufruf erfolgreich zurückgekehrt ist. Nach Änderungen prüfst du das Ergebnis mit einem passenden Lese-Tool, sofern eines verfügbar ist, und nennst das konkrete Resultat.',
     'project_create ist ausschließlich für den ausdrücklichen Wunsch nach einem neuen, separaten Projekt. Für Änderungen am aktuellen Projekt nutzt du project_set_summary/project_upsert_goal; agent_bridge_write ist niemals ein Ersatz für Projektziele, Aufgaben oder Zusammenfassung.',

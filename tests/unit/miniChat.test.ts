@@ -3,6 +3,9 @@ import { createMiniChatController } from '@/services/miniChat/controller'
 import { miniStatus } from '@/services/miniChat/presentation'
 import { emptyMiniSnapshot } from '@/services/miniChat/types'
 import type { RunAgentOptions } from '@/services/agent'
+import { executionGate } from '@/services/executionGate'
+import { LocalInferenceError } from '@/services/inference/localModelManager'
+import { pendingPayloadApproval } from '@/services/payloadApproval'
 
 function setup(
   run = vi
@@ -114,6 +117,60 @@ describe('temporary mini chat session', () => {
     expect(controller.state.busy).toBe(false)
     expect(controller.state.messages[1]?.status).toBe('canceled')
     expect(controller.state.tools[0]?.status).toBe('canceled')
+  })
+  it('keeps Mini requests local and never provides an external packet or approval callback', async () => {
+    const { send, run } = setup()
+    await send('Prüfe C:\\Users\\Example\\notes.txt')
+    const options = run.mock.calls[0]![0]
+    expect(options).toMatchObject({ contextEgress: 'local_only', routingSettings: { preference: 'local_only' } })
+    expect(options.externalBaseMessages).toBeUndefined()
+    expect(options.externalPackage).toBeUndefined()
+    expect(options.requestExternalApproval).toBeUndefined()
+    expect(options.baseMessages.at(-1)?.content).toContain('C:\\Users\\Example\\notes.txt')
+    expect(pendingPayloadApproval.value).toBeNull()
+  })
+  it('shows local readiness failures without opening an external fallback approval', async () => {
+    const { controller, send } = setup(
+      vi
+        .fn()
+        .mockRejectedValue(
+          new LocalInferenceError(
+            'Die lokale Modellruntime ist in dieser App noch nicht eingerichtet.',
+            'local_only_blocked',
+            false,
+            false
+          )
+        )
+    )
+    await send()
+    expect(controller.state.messages.at(-1)).toMatchObject({
+      status: 'failed',
+      content: expect.stringContaining('Modellruntime ist in dieser App noch nicht eingerichtet'),
+    })
+    expect(controller.state.busy).toBe(false)
+    expect(controller.state.decision).toBeNull()
+    expect(pendingPayloadApproval.value).toBeNull()
+  })
+  it('cancels a stale result when the shared execution identity changes', async () => {
+    let release!: (value: { finalText: string }) => void
+    let signal: AbortSignal | undefined
+    const { controller, send } = setup(
+      vi.fn(async options => {
+        signal = options.signal
+        return new Promise(resolve => {
+          release = resolve
+        })
+      })
+    )
+
+    const pending = send()
+    executionGate.invalidate()
+    release({ finalText: 'Veraltetes Ergebnis' })
+    await pending
+
+    expect(signal?.aborted).toBe(true)
+    expect(controller.state.messages[1]).toMatchObject({ status: 'canceled', content: 'Abgebrochen.' })
+    expect(controller.state.busy).toBe(false)
   })
   it('clear hides old text immediately but keeps inference locked until the old run settles', async () => {
     let release!: (value: { finalText: string }) => void

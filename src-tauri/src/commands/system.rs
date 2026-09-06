@@ -18,7 +18,18 @@ use std::time::{Duration, Instant};
 use sysinfo::{Components, System, MINIMUM_CPU_UPDATE_INTERVAL};
 use tauri::WebviewWindow;
 
+use super::desktop_target::{DesktopActionGuard, DesktopObservation, InputPayload, ObservePayload};
 use super::ensure_main_webview;
+use super::execution::{admit, Guarded};
+
+#[tauri::command]
+pub async fn desktop_observe(
+    window: WebviewWindow,
+    payload: ObservePayload,
+) -> Result<DesktopObservation, String> {
+    ensure_main_webview(&window)?;
+    super::desktop_target::observe(payload)
+}
 
 /* =========================================================
  * Perception
@@ -452,9 +463,15 @@ fn move_pointer(x: i32, y: i32) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn move_mouse(window: WebviewWindow, payload: MoveMousePayload) -> Result<(), String> {
+pub async fn move_mouse(
+    window: WebviewWindow,
+    payload: InputPayload<MoveMousePayload>,
+) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
+    let payload = payload.request;
     validate_coordinates(payload.x, payload.y)?;
+    guard.point(payload.x, payload.y)?;
     move_pointer(payload.x, payload.y)
 }
 
@@ -483,12 +500,18 @@ fn validate_mouse_click(payload: &MouseClickPayload) -> Result<Button, String> {
 }
 
 #[tauri::command]
-pub async fn mouse_click(window: WebviewWindow, payload: MouseClickPayload) -> Result<(), String> {
+pub async fn mouse_click(
+    window: WebviewWindow,
+    payload: InputPayload<MouseClickPayload>,
+) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
+    let payload = payload.request;
     // Validate the complete request before constructing an input session or moving.
     let button = validate_mouse_click(&payload)?;
     let mut enigo = new_enigo()?;
     if let (Some(x), Some(y)) = (payload.x, payload.y) {
+        guard.point(x, y)?;
         move_pointer(x, y)?;
     }
     let times = if payload.double.unwrap_or(false) {
@@ -497,6 +520,7 @@ pub async fn mouse_click(window: WebviewWindow, payload: MouseClickPayload) -> R
         1
     };
     for _ in 0..times {
+        guard.current_point()?;
         enigo
             .button(button, Direction::Click)
             .map_err(|e| format!("click failed: {e}"))?;
@@ -510,8 +534,13 @@ pub struct TypeTextPayload {
 }
 
 #[tauri::command]
-pub async fn type_text(window: WebviewWindow, payload: TypeTextPayload) -> Result<(), String> {
+pub async fn type_text(
+    window: WebviewWindow,
+    payload: InputPayload<TypeTextPayload>,
+) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
+    let payload = payload.request;
     if payload.text.is_empty() {
         return Err("Empty text".into());
     }
@@ -521,9 +550,13 @@ pub async fn type_text(window: WebviewWindow, payload: TypeTextPayload) -> Resul
         return Err("Text too long".into());
     }
     let mut enigo = new_enigo()?;
-    enigo
-        .text(&payload.text)
-        .map_err(|e| format!("type_text failed: {e}"))
+    for character in payload.text.chars() {
+        guard.check()?;
+        enigo
+            .text(&character.to_string())
+            .map_err(|e| format!("type_text failed: {e}"))?;
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -562,10 +595,16 @@ fn parse_key(name: &str) -> Result<Key, String> {
 }
 
 #[tauri::command]
-pub async fn press_key(window: WebviewWindow, payload: PressKeyPayload) -> Result<(), String> {
+pub async fn press_key(
+    window: WebviewWindow,
+    payload: InputPayload<PressKeyPayload>,
+) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
+    let payload = payload.request;
     let key = parse_key(&payload.key)?;
     let mut enigo = new_enigo()?;
+    guard.check()?;
     enigo
         .key(key, Direction::Click)
         .map_err(|e| format!("press_key failed: {e}"))
@@ -608,11 +647,17 @@ fn parse_scroll_axis(value: Option<&str>) -> Result<Axis, String> {
 }
 
 #[tauri::command]
-pub async fn scroll(window: WebviewWindow, payload: ScrollPayload) -> Result<(), String> {
+pub async fn scroll(
+    window: WebviewWindow,
+    payload: InputPayload<ScrollPayload>,
+) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
+    let payload = payload.request;
     let amount = validate_scroll_amount(payload.amount)?;
     let axis = parse_scroll_axis(payload.axis.as_deref())?;
     let mut enigo = new_enigo()?;
+    guard.current_point()?;
     enigo
         .scroll(amount, axis)
         .map_err(|e| format!("scroll failed: {e}"))
@@ -657,13 +702,24 @@ fn parse_hotkey_modifiers(values: &[String]) -> Result<Vec<Key>, String> {
 }
 
 #[tauri::command]
-pub async fn hotkey(window: WebviewWindow, payload: HotkeyPayload) -> Result<(), String> {
+pub async fn hotkey(
+    window: WebviewWindow,
+    payload: InputPayload<HotkeyPayload>,
+) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
+    let payload = payload.request;
     let modifiers = parse_hotkey_modifiers(&payload.modifiers)?;
     let key = parse_key(&payload.key)?;
     let mut enigo = new_enigo()?;
     let mut pressed = Vec::new();
     for modifier in &modifiers {
+        if let Err(error) = guard.check() {
+            for pressed_key in pressed.iter().rev() {
+                let _ = enigo.key(*pressed_key, Direction::Release);
+            }
+            return Err(error);
+        }
         if let Err(error) = enigo.key(*modifier, Direction::Press) {
             for pressed_key in pressed.iter().rev() {
                 let _ = enigo.key(*pressed_key, Direction::Release);
@@ -673,7 +729,11 @@ pub async fn hotkey(window: WebviewWindow, payload: HotkeyPayload) -> Result<(),
         pressed.push(*modifier);
     }
 
-    let click_result = enigo.key(key, Direction::Click);
+    let click_result = guard.check().and_then(|()| {
+        enigo
+            .key(key, Direction::Click)
+            .map_err(|error| error.to_string())
+    });
     let mut release_error = None;
     for modifier in pressed.iter().rev() {
         if let Err(error) = enigo.key(*modifier, Direction::Release) {
@@ -697,19 +757,39 @@ pub struct OpenUrlPayload {
 }
 
 #[tauri::command]
-pub async fn open_url(window: WebviewWindow, payload: OpenUrlPayload) -> Result<(), String> {
+pub async fn open_url(
+    window: WebviewWindow,
+    payload: Guarded<OpenUrlPayload>,
+) -> Result<(), String> {
     // Both trusted local chat surfaces can open a user-clicked HTTP(S) link.
     if window.label() != super::mini_chat::MINI_LABEL {
         ensure_main_webview(&window)?;
     }
+    let gate = admit(&payload.execution, true)?;
+    let payload = payload.request;
     let url = payload.url.trim();
     if !(url.starts_with("https://") || url.starts_with("http://"))
         || url.chars().any(char::is_control)
     {
         return Err("Only valid http(s) URLs may be opened.".into());
     }
+    gate.check()?;
     webbrowser::open(url).map_err(|error| format!("open_url failed: {error}"))?;
     Ok(())
+}
+
+/// Explicit user navigation from rendered messages; never registered as an agent tool.
+#[tauri::command]
+pub async fn open_user_link(window: WebviewWindow, payload: OpenUrlPayload) -> Result<(), String> {
+    ensure_main_webview(&window)?;
+    let url = reqwest::Url::parse(payload.url.trim()).map_err(|_| "Invalid link URL.")?;
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || payload.url.chars().any(char::is_control)
+    {
+        return Err("Only HTTP(S) user links may be opened.".into());
+    }
+    webbrowser::open(url.as_str()).map_err(|_| "User link could not be opened.".into())
 }
 
 #[cfg(test)]

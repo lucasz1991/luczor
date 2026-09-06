@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use tauri::WebviewWindow;
 
 use super::ensure_main_webview;
+use super::execution::{admit, Guarded};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_TIMEOUT_SECS: u64 = 120;
@@ -44,15 +45,27 @@ pub struct WorkflowHttpResult {
 #[tauri::command]
 pub async fn wf_http_request(
     window: WebviewWindow,
-    payload: WorkflowHttpPayload,
+    payload: Guarded<WorkflowHttpPayload>,
 ) -> Result<WorkflowHttpResult, String> {
     ensure_main_webview(&window)?;
-    tauri::async_runtime::spawn_blocking(move || perform_request(payload))
-        .await
-        .map_err(|error| format!("HTTP task join failed: {error}"))?
+    // Even GET requests can disclose information or trigger poorly designed
+    // endpoints; workflow networking always needs mutation admission.
+    let gate = admit(&payload.execution, true)?;
+    let payload = payload.request;
+    tauri::async_runtime::spawn_blocking(move || {
+        gate.check()?;
+        let result = perform_request(payload, &gate)?;
+        gate.check()?;
+        Ok(result)
+    })
+    .await
+    .map_err(|error| format!("HTTP task join failed: {error}"))?
 }
 
-fn perform_request(payload: WorkflowHttpPayload) -> Result<WorkflowHttpResult, String> {
+fn perform_request(
+    payload: WorkflowHttpPayload,
+    gate: &super::execution::ExecutionLease,
+) -> Result<WorkflowHttpResult, String> {
     let method = validate_method(&payload.method)?;
     let url = validate_url(&payload.url)?;
     let timeout = Duration::from_secs(
@@ -86,7 +99,8 @@ fn perform_request(payload: WorkflowHttpPayload) -> Result<WorkflowHttpResult, S
     let client = client_builder
         .build()
         .map_err(|_| "Workflow HTTP client could not be created.".to_string())?;
-    send_request(client, method, url, headers, payload.body)
+    gate.check()?;
+    send_request(client, method, url, headers, payload.body, gate)
 }
 
 fn send_request(
@@ -95,19 +109,29 @@ fn send_request(
     url: Url,
     headers: HeaderMap,
     body: Option<String>,
+    gate: &super::execution::ExecutionLease,
 ) -> Result<WorkflowHttpResult, String> {
     let mut request = client.request(method, url).headers(headers);
     if let Some(body) = body {
         request = request.body(body);
     }
+    gate.check()?;
     let mut response = request.send().map_err(map_request_error)?;
     let status = response.status();
     let mut bytes = Vec::with_capacity(16 * 1024);
-    response
-        .by_ref()
-        .take(MAX_RESPONSE_BODY_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| format!("Workflow HTTP response read failed: {error}"))?;
+    let mut buffer = [0_u8; 8192];
+    while bytes.len() <= MAX_RESPONSE_BODY_BYTES {
+        gate.check()?;
+        let remaining = (MAX_RESPONSE_BODY_BYTES + 1 - bytes.len()).min(buffer.len());
+        let read = response
+            .read(&mut buffer[..remaining])
+            .map_err(|_| "Workflow HTTP response read failed.")?;
+        if read == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    gate.check()?;
     let truncated = bytes.len() > MAX_RESPONSE_BODY_BYTES;
     if truncated {
         bytes.truncate(MAX_RESPONSE_BODY_BYTES);

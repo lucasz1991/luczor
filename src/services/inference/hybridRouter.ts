@@ -45,6 +45,26 @@ export type RouteDecision = {
   approvalId?: string
 }
 
+/** Preparation and routing must accept exactly the same signed readiness evidence. */
+export function hasVerifiedLocalReadiness(
+  model: LocalModelReleaseManifest | undefined,
+  readiness: LocalReadinessEvidence | undefined,
+  manifestPayloadSha256: string,
+  nowMs: number
+): boolean {
+  return !!(
+    model?.artifact &&
+    model.runtime &&
+    readiness?.ready &&
+    readiness.modelReleaseId === model.id &&
+    readiness.manifestPayloadSha256 === manifestPayloadSha256 &&
+    readiness.artifactSha256 === model.artifact.sha256 &&
+    readiness.runtimeSha256 === model.runtime.sha256 &&
+    Number.isFinite(readiness.validUntilMs) &&
+    readiness.validUntilMs > nowMs
+  )
+}
+
 function availableLocally(
   model: LocalModelReleaseManifest | undefined,
   assessment: CapacityAssessment | undefined,
@@ -59,15 +79,7 @@ function availableLocally(
     !model?.enabled ||
     !model.capabilities.includes(requiredCapability) ||
     model.executionTarget !== 'local_llama_cpp' ||
-    !model.artifact ||
-    !model.runtime ||
-    !readiness?.ready ||
-    readiness.modelReleaseId !== model.id ||
-    readiness.manifestPayloadSha256 !== manifestPayloadSha256 ||
-    readiness.artifactSha256 !== model.artifact.sha256 ||
-    readiness.runtimeSha256 !== model.runtime.sha256 ||
-    !Number.isFinite(readiness.validUntilMs) ||
-    readiness.validUntilMs <= now.getTime() ||
+    !hasVerifiedLocalReadiness(model, readiness, manifestPayloadSha256, now.getTime()) ||
     !assessment ||
     assessment.modelReleaseId !== model.id ||
     !Number.isFinite(assessment.validUntilMs) ||
@@ -200,7 +212,10 @@ export function decideHybridRoute(input: {
     }
   }
 
-  if (input.settings.preference !== 'ask_external' && input.settings.preference !== 'allow_external') {
+  if (
+    !input.manifest.routing.externalAllowed ||
+    (input.settings.preference !== 'ask_external' && input.settings.preference !== 'allow_external')
+  ) {
     return {
       id: decisionId,
       policyVersion: input.manifest.policyVersion,
@@ -211,7 +226,6 @@ export function decideHybridRoute(input: {
 
   const approval = input.externalApproval
   const approvalValid =
-    input.manifest.routing.externalAllowed &&
     !!input.expectedEgressPacketHash &&
     validApproval(approval, now) &&
     approval.packetHash === input.expectedEgressPacketHash

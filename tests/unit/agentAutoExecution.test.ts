@@ -55,6 +55,7 @@ vi.mock('@/state/hud', () => ({
 vi.mock('@/services/api/sync', () => ({ logAgentEvent: mocks.logAgentEvent }))
 
 import { runAgent } from '@/services/agent'
+import { executionGate } from '@/services/executionGate'
 
 function arrangeApprovalGatedTool() {
   mocks.streamChatWithTools
@@ -75,6 +76,7 @@ function arrangeApprovalGatedTool() {
     category: 'project',
     mutating: true,
     requiresApproval: true,
+    parameters: { type: 'object', additionalProperties: true },
     execute: mocks.execute,
   })
   mocks.execute.mockResolvedValue({ ok: true })
@@ -86,6 +88,22 @@ describe('runAgent auto execution', () => {
     mocks.hud.killSwitch = false
     mocks.toOpenAITools.mockReturnValue([])
     mocks.loadExecutionPolicy.mockResolvedValue({ autoExecuteMutatingTools: true })
+  })
+
+  it('discards tokens and the final result after a project/account change even if the provider ignores abort', async () => {
+    const onToken = vi.fn()
+    const onProgress = vi.fn()
+    mocks.streamChatWithTools.mockImplementation(async options => {
+      executionGate.invalidate()
+      options.onToken('Old account response')
+      return { content: 'Old account response', toolCalls: [], rawToolCalls: [] }
+    })
+    await expect(
+      runAgent({ projectId: 'p1', baseMessages: [], mode: 'act', onToken, onProgress })
+    ).rejects.toMatchObject({ name: 'AbortError' })
+    expect(onToken).not.toHaveBeenCalled()
+    expect(onProgress).not.toHaveBeenCalledWith(expect.objectContaining({ phase: 'receiving' }))
+    expect(mocks.execute).not.toHaveBeenCalled()
   })
 
   it('bypasses only the per-call approval when policy allows the act-mode tool', async () => {
@@ -101,10 +119,13 @@ describe('runAgent auto execution', () => {
     expect(result.finalText).toBe('Erledigt.')
     expect(mocks.canAutoExecuteTool).toHaveBeenCalledWith(
       { autoExecuteMutatingTools: true },
-      { mode: 'act', mutating: true, requiresApproval: true }
+      expect.objectContaining({ mode: 'act', mutating: true, requiresApproval: true })
     )
     expect(mocks.awaitApproval).not.toHaveBeenCalled()
-    expect(mocks.execute).toHaveBeenCalledWith({ value: 1 }, { projectId: 'project-1' })
+    expect(mocks.execute).toHaveBeenCalledWith(
+      { value: 1 },
+      expect.objectContaining({ projectId: 'project-1', signal: expect.any(AbortSignal), inferenceTarget: 'local' })
+    )
   })
 
   it('keeps observe mode strict even when auto execution is enabled', async () => {
@@ -164,8 +185,8 @@ describe('runAgent auto execution', () => {
 
     expect(mocks.loadExecutionPolicy).toHaveBeenCalledTimes(2)
     expect(mocks.awaitApproval).toHaveBeenCalledExactlyOnceWith('call-2')
-    expect(mocks.execute).toHaveBeenNthCalledWith(1, { value: 1 }, { projectId: 'p1' })
-    expect(mocks.execute).toHaveBeenNthCalledWith(2, { value: 2 }, { projectId: 'p1' })
+    expect(mocks.execute).toHaveBeenNthCalledWith(1, { value: 1 }, expect.objectContaining({ projectId: 'p1' }))
+    expect(mocks.execute).toHaveBeenNthCalledWith(2, { value: 2 }, expect.objectContaining({ projectId: 'p1' }))
     expect(result.toolSuccesses).toBe(2)
   })
 

@@ -11,7 +11,7 @@ import type { LuczorMode } from '@/services/inference/types'
 import VoiceSettingsSection from '@/components/settings/VoiceSettingsSection.vue'
 import { loadDeviceKey } from '@/services/secureDeviceKey'
 import { DISABLED_API_BASE_URL, persistApiIdentity } from '@/services/apiIdentitySettings'
-import { testConnection, pushAllToServer, pullServerDefaults } from '@/services/api/sync'
+import { pushAllToServer, pullServerDefaults } from '@/services/api/sync'
 import {
   APP_NOTIFICATION_CATEGORIES,
   getApiConfig,
@@ -354,7 +354,7 @@ async function saveAll() {
   await settingsStore.save()
   Object.assign(settings, voiceValues)
   window.dispatchEvent(new Event('luczor:voice-settings-changed'))
-  if (apiIdentityChanged) void reinitializeLocalInferenceForCurrentApi().catch(() => undefined)
+  if (apiIdentityChanged) void refreshServerPolicy()
   await loadAppearance() // re-apply theme/HUD/name live
   setSavedPulse()
 }
@@ -368,22 +368,35 @@ async function resetChatSettings() {
 /* ---------------------------
  * Server (Laravel Admin API)
  * --------------------------- */
-async function persistServerConfig() {
+async function refreshServerPolicy(diagnoseUnavailable = false) {
+  try {
+    const result = await reinitializeLocalInferenceForCurrentApi({ diagnoseUnavailable })
+    if (!result.stale) ui.serverResult = result
+  } catch {
+    ui.serverResult = {
+      ok: false,
+      message: 'Die Modellrichtlinie konnte nicht geprüft werden. Bitte die Verbindung erneut testen.',
+    }
+  }
+}
+
+async function persistServerConfig(refreshPolicy = true) {
   if (!settingsStore) return
   const apiIdentityChanged = await persistApiIdentity(
     settingsStore,
     settings.luczor_api_base_url,
     settings.luczor_device_key
   )
-  if (apiIdentityChanged) void reinitializeLocalInferenceForCurrentApi().catch(() => undefined)
+  if (apiIdentityChanged && refreshPolicy) void refreshServerPolicy()
 }
 
 async function testServer() {
+  if (ui.serverBusy) return
   ui.serverResult = null
   ui.serverBusy = true
   try {
-    await persistServerConfig()
-    ui.serverResult = await testConnection()
+    await persistServerConfig(false)
+    await refreshServerPolicy(true)
   } catch (e: any) {
     ui.serverResult = { ok: false, message: e?.message ?? String(e) }
   } finally {

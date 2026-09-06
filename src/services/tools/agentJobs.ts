@@ -1,9 +1,10 @@
 import { asString } from './shared'
 import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
 import { redactAbsoluteFilesystemPaths, redactProviderSecrets } from '@/services/prompt/promptContextAssembler'
+import { agentHub, agentProjectSnapshot, prepareAgentJob } from '@/services/agents/hub'
 import type { ToolDef } from './types'
 
-/** Lazy-load the hub: the model adapters themselves depend on inference services. */
+/** Managed jobs use the same hub already initialized by the desktop entry point. */
 export const agentJobTools: ToolDef[] = [
   {
     name: 'agent_job_prepare',
@@ -39,7 +40,6 @@ export const agentJobTools: ToolDef[] = [
         const value = Object.getOwnPropertyDescriptor(args, key)?.value
         if (value !== undefined && typeof value !== 'boolean') throw new Error('Ungültige Agentenoption.')
       }
-      const { prepareAgentJob } = await import('@/services/agents/hub')
       const job = await prepareAgentJob({
         projectId: ctx.projectId,
         adapterId: args.agent as 'codex' | 'local' | 'policy',
@@ -75,7 +75,6 @@ export const agentJobTools: ToolDef[] = [
       required: ['job_id'],
     },
     async execute(args, ctx) {
-      const { agentHub, agentProjectSnapshot } = await import('@/services/agents/hub')
       const project = await agentProjectSnapshot(ctx.projectId)
       const job = agentHub.getJob(asString(args.job_id))
       if (
@@ -139,7 +138,6 @@ export const agentJobTools: ToolDef[] = [
       required: ['job_id'],
     },
     async execute(args, ctx) {
-      const { agentHub, agentProjectSnapshot } = await import('@/services/agents/hub')
       const project = await agentProjectSnapshot(ctx.projectId)
       const job = agentHub.getJob(asString(args.job_id))
       if (!job || job.projectId !== ctx.projectId || job.principalId !== project.principalId)

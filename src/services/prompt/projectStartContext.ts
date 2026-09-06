@@ -21,7 +21,7 @@ export type ProjectStartContextDependencies = {
 }
 
 const defaultDependencies: ProjectStartContextDependencies = {
-  recall: query => luczorMemory.recall(query),
+  recall: query => luczorMemory.recallLocal(query),
 }
 
 function staleness(record: MemoryRecord): string {
@@ -37,7 +37,7 @@ function memoryFragment(record: MemoryRecord, index: number): PromptFragment {
     source: 'memory',
     trust: 'untrusted_data',
     scope: record.scope === 'user' ? 'user' : 'project',
-    egress: 'allowed',
+    egress: record.visibility === 'private' || record.scope === 'private' ? 'local_only' : 'allowed',
     content: record.content,
     priority: Math.round((record.importance * 0.6 + record.confidence * 0.4) * 100),
     provenance: {
@@ -139,7 +139,7 @@ function projectFragments(project: Project, workspace?: ProjectWorkspaceBinding 
 export async function buildProjectStartContext(
   options: ProjectStartContextOptions,
   dependencies: ProjectStartContextDependencies = defaultDependencies
-): Promise<PromptContextAssembly> {
+): Promise<PromptContextAssembly & { sourceFragments: PromptFragment[] }> {
   const fragments = projectFragments(options.project, options.workspace)
   const memoryLimit = Math.max(0, Math.min(8, Math.round(options.memoryLimit ?? 5)))
 
@@ -155,13 +155,14 @@ export async function buildProjectStartContext(
     fragments.push(...[...userMemory, ...projectMemory].map(memoryFragment))
   }
 
-  return assemblePromptContext(fragments, {
+  const assembled = assemblePromptContext(fragments, {
     maxChars: 6_000,
     maxEstimatedTokens: 1_500,
     maxFragments: 16,
     maxFragmentChars: 1_400,
     ...options.assembly,
   })
+  return { ...assembled, sourceFragments: fragments }
 }
 
 export { projectFragments as projectStartFragments }

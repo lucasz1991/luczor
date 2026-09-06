@@ -8,12 +8,18 @@ import {
   prepareAgentJob,
   resolveAgentExternalApproval,
 } from '@/services/agents/hub'
-import { getAgentProjectLink } from '@/services/agents/links'
 import { listModelAgentOptions } from '@/services/agents/modelAgent'
 import { parseAgentMemorySource, importAgentMemory, type AgentMemorySource } from '@/services/agents/memoryTransfer'
-import { openCodexDesktopForProject, getCodexRuntimeStatus } from '@/services/agents/codexAgent'
+import {
+  openCodexDesktopForProject,
+  getCodexRuntimeStatus,
+  listCodexJobs,
+  listCodexSessions,
+  type CodexJobSnapshot,
+} from '@/services/agents/codexAgent'
 import type { AgentJob, AgentPermission, AgentProjectSnapshot, AgentRole } from '@/services/agents/types'
 import type { LuczorMode } from '@/services/inference/types'
+import AgentTeams from './AgentTeams.vue'
 
 const props = defineProps<{ open: boolean; projectId: string; mode: LuczorMode; killSwitch: boolean }>()
 const emit = defineEmits<{ 'update:open': [value: boolean]; 'memory-imported': [] }>()
@@ -27,6 +33,8 @@ const prompt = ref('')
 const includeMemory = ref(false)
 const resume = ref(true)
 const linkedThread = ref('')
+const codexSessions = ref<readonly { threadId: string; updatedAt?: number }[]>([])
+const nativeCodexJobs = ref<readonly CodexJobSnapshot[]>([])
 const codexAvailable = ref(false)
 const modelOptions = ref(listModelAgentOptions())
 const busy = ref(false)
@@ -64,6 +72,7 @@ function label(status: AgentJob['status']) {
     queued: 'In Warteschlange',
     running: 'Läuft',
     completed: 'Abgeschlossen',
+    awaiting_external_approval: 'Externe Paketfreigabe',
     failed: 'Fehlgeschlagen',
     cancelled: 'Abgebrochen',
   }
@@ -74,7 +83,11 @@ function output(jobId: string) {
   return agentHub.getOutput(jobId)
 }
 function pending(job: AgentJob) {
-  return ['awaiting_approval', 'queued', 'running'].includes(job.status)
+  return ['awaiting_approval', 'queued', 'running', 'awaiting_external_approval'].includes(job.status)
+}
+function formatTime(value?: number | string) {
+  const timestamp = typeof value === 'string' ? Date.parse(value) : value
+  return timestamp && Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('de-DE') : 'unbekannt'
 }
 function resetTransfer() {
   sourceText.value = ''
@@ -88,16 +101,23 @@ async function refresh() {
   const current = ++generation
   project.value = null
   linkedThread.value = ''
+  codexSessions.value = []
+  nativeCodexJobs.value = []
   error.value = ''
   try {
     const snapshot = await agentProjectSnapshot(props.projectId)
-    const [link, runtime] = await Promise.all([
-      getAgentProjectLink(snapshot),
-      getCodexRuntimeStatus().catch(() => ({ available: false })),
-    ])
+    const runtime = await getCodexRuntimeStatus().catch(() => ({ available: false, desktopAvailable: false }))
+    const [sessions, nativeJobs] = runtime.available
+      ? await Promise.all([
+          listCodexSessions(snapshot).catch(() => []),
+          listCodexJobs(snapshot.principalId, snapshot.projectId).catch(() => []),
+        ])
+      : [[], []]
     if (current !== generation || !props.open) return
     project.value = snapshot
-    linkedThread.value = link?.externalThreadId ?? ''
+    codexSessions.value = sessions
+    nativeCodexJobs.value = nativeJobs
+    linkedThread.value = sessions[0]?.threadId ?? ''
     codexAvailable.value = runtime.available
     modelOptions.value = listModelAgentOptions()
   } catch (caught) {
@@ -141,7 +161,12 @@ watch(
       .join(','),
   () => {
     const completed = jobs.value.find(job => job.status === 'completed' && job.externalThreadId)
-    if (completed?.externalThreadId) linkedThread.value = completed.externalThreadId
+    if (completed?.externalThreadId) {
+      linkedThread.value = completed.externalThreadId
+      if (!codexSessions.value.some(session => session.threadId === completed.externalThreadId)) {
+        codexSessions.value = [{ threadId: completed.externalThreadId, updatedAt: Date.now() }, ...codexSessions.value]
+      }
+    }
   }
 )
 onBeforeUnmount(() => {
@@ -154,6 +179,8 @@ function resetIdentity() {
   resetTransfer()
   prompt.value = ''
   project.value = null
+  codexSessions.value = []
+  nativeCodexJobs.value = []
   notice.value = ''
   error.value = ''
   busy.value = false
@@ -177,6 +204,7 @@ async function prepare() {
       model: model.value,
       includeMemory: includeMemory.value,
       resume: adapterId.value === 'codex' && resume.value && !!linkedThread.value,
+      externalThreadId: linkedThread.value || undefined,
     })
     if (current !== generation) {
       agentHub.cancel(job.id)
@@ -317,7 +345,14 @@ async function openDesktop() {
       <section class="agent-hub__section">
         <h3>Projektverknüpfung</h3>
         <p>{{ project?.rootPath || 'Bitte im Projekt einen lokalen Ordner zuordnen, um Codex zu nutzen.' }}</p>
-        <p v-if="linkedThread">
+        <label v-if="codexSessions.length"
+          >Verknüpfte Codex-Sitzung<select v-model="linkedThread">
+            <option v-for="session in codexSessions" :key="session.threadId" :value="session.threadId">
+              {{ session.threadId }} · {{ formatTime(session.updatedAt) }}
+            </option>
+          </select></label
+        >
+        <p v-else-if="linkedThread">
           Codex-Aufgabe: <code>{{ linkedThread }}</code>
         </p>
         <p v-else>Der erste abgeschlossene Codex-Auftrag verknüpft seine Sitzung mit diesem Luczor-Projekt.</p>
@@ -334,6 +369,19 @@ async function openDesktop() {
           <p>
             Im Projektordner <code>codex resume {{ linkedThread }}</code> ausführen und in der Codex-Sitzung
             <code>/app</code> eingeben. Die Desktop-App verwaltet ihre eigene Projektliste.
+          </p>
+        </details>
+        <details v-if="nativeCodexJobs.length">
+          <summary>Native Codex-Läufe ({{ nativeCodexJobs.length }})</summary>
+          <ul>
+            <li v-for="nativeJob in nativeCodexJobs" :key="nativeJob.id">
+              <code>{{ nativeJob.id }}</code> · {{ nativeJob.status }} · {{ formatTime(nativeJob.createdAt) }}
+              <span v-if="nativeJob.outputTruncated"> · Ausgabe gekürzt</span>
+            </li>
+          </ul>
+          <p class="agent-hub__muted">
+            Nach einem App-Neustart erscheinen nicht abgeschlossene native Läufe als unterbrochen; private Ausgaben
+            werden dabei nicht wiederhergestellt.
           </p>
         </details>
       </section>
@@ -354,6 +402,7 @@ async function openDesktop() {
               <option value="planner">Planung</option>
               <option value="implementer">Implementierung</option>
               <option value="reviewer">Review</option>
+              <option value="join">Konsolidierung</option>
             </select></label
           >
           <label
@@ -412,13 +461,18 @@ async function openDesktop() {
           </div>
           <details v-if="job.status === 'awaiting_approval'" open>
             <summary>Vollständigen Auftrag prüfen</summary>
+            <p v-if="job.approvalExpiresAt" class="agent-hub__muted">
+              Freigabe möglich bis {{ formatTime(job.approvalExpiresAt) }}
+            </p>
             <pre>{{ agentHub.getPrompt(job.id) }}</pre>
           </details>
-          <p v-if="job.status === 'failed'" role="alert">
+          <p v-if="job.status === 'failed' || job.errorCode === 'approval_expired'" role="alert">
             {{
-              job.errorCode === 'scope_changed'
-                ? 'Konto, Modus oder Projektzuordnung hat sich geändert.'
-                : 'Ausführung fehlgeschlagen. CLI-Anmeldung, Modellstatus und Projektordner prüfen.'
+              job.errorCode === 'approval_expired'
+                ? 'Die Freigabezeit ist abgelaufen; der private Auftrag wurde verworfen.'
+                : job.errorCode === 'scope_changed'
+                  ? 'Konto, Modus oder Projektzuordnung hat sich geändert.'
+                  : 'Ausführung fehlgeschlagen. CLI-Anmeldung, Modellstatus und Projektordner prüfen.'
             }}
           </p>
           <details v-if="output(job.id)" :open="job.status === 'completed'">
@@ -446,7 +500,10 @@ async function openDesktop() {
         </article>
         <article v-for="approval in approvals" :key="approval.jobId" class="agent-hub__job">
           <h4>Externe Modellanfrage prüfen</h4>
-          <p>Ziel: {{ approval.destination }} · {{ approval.characterCount }} Zeichen · ohne Werkzeuge</p>
+          <p>
+            Ziel: {{ approval.destination }} · {{ approval.characterCount }} Zeichen · ohne Werkzeuge · gültig bis
+            {{ formatTime(approval.expiresAt) }}
+          </p>
           <details>
             <summary>Übertragenen Inhalt anzeigen</summary>
             <pre v-for="(message, index) in approval.messages" :key="index"
@@ -459,6 +516,14 @@ async function openDesktop() {
           </div>
         </article>
       </section>
+      <AgentTeams
+        v-if="project"
+        :project="project"
+        :mode="mode"
+        :kill-switch="killSwitch"
+        :codex-available="codexAvailable"
+        :model-options="modelOptions"
+      />
       <section class="agent-hub__section">
         <h3>ChatGPT / Codex → Luczor</h3>
         <p>

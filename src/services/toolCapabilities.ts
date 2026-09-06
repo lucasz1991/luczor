@@ -2,7 +2,10 @@ import type { LuczorMode } from '@/services/inference/types'
 import { canAutoExecuteTool } from '@/services/executionPolicy'
 import type { ToolDef } from '@/services/tools/types'
 
-export type ToolCapability = Pick<ToolDef, 'name' | 'description' | 'mutating' | 'requiresApproval' | 'dataHandling'>
+export type ToolCapability = Pick<
+  ToolDef,
+  'name' | 'description' | 'mutating' | 'requiresApproval' | 'dataHandling' | 'risk' | 'scope' | 'effects'
+>
 export type CapabilityAccess = 'stopped' | 'observe_locked' | 'approval' | 'automatic'
 
 const titles: Record<string, string> = {
@@ -20,6 +23,10 @@ const titles: Record<string, string> = {
   fs_move: 'Datei verschieben',
   fs_delete: 'Datei löschen',
   os_environment: 'Computerumgebung analysieren',
+  os_observe_desktop: 'Eingabeziel prüfen',
+  agent_team_prepare: 'Agententeam vorbereiten',
+  agent_team_status: 'Teamstatus lesen',
+  agent_team_cancel: 'Agententeam abbrechen',
   memory_recall: 'Erinnerungen gezielt abrufen',
   os_list_windows: 'Fenster erfassen',
   os_read_clipboard: 'Zwischenablage lesen',

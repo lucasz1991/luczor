@@ -6,10 +6,10 @@ import {
   type ExternalTurnPackage,
 } from '@/services/inference/coordinator'
 import { LocalInferenceError } from '@/services/inference/localModelManager'
-import { isExecutableLocalModel } from '@/services/inference/modelManifest'
+import { taskTypeForAgentRole } from '@/services/inference/capabilities'
 import type { InferenceRequest, WireMessage } from '@/services/inference/types'
 import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
-import type { AgentAdapter, AgentRunRequest } from './types'
+import type { AgentAdapter } from './types'
 
 export type ModelAgentId = 'local' | 'policy'
 
@@ -21,6 +21,7 @@ export type ModelAgentApprovalRequest = Readonly<{
   packetHash: string
   messageCount: number
   characterCount: number
+  expiresAt: string
   toolsAllowed: false
   messages: readonly Readonly<WireMessage>[]
 }>
@@ -87,13 +88,6 @@ async function cancellable<T>(signal: AbortSignal, operation: () => Promise<T>):
   }
 }
 
-function taskTypeFor(role: AgentRunRequest['role']): string {
-  if (role === 'planner') return 'planning.agent'
-  if (role === 'implementer') return 'coding.agent'
-  if (role === 'reviewer') return 'verification.agent'
-  return 'chat.agent'
-}
-
 function sameAccount(left: VerifiedAccountSnapshot, right: VerifiedAccountSnapshot | null): boolean {
   return !!(
     right &&
@@ -110,7 +104,7 @@ function sameAccount(left: VerifiedAccountSnapshot, right: VerifiedAccountSnapsh
 export function listModelAgentOptions() {
   const status = localInferenceCoordinator.status()
   const active = status.mode === 'active' && !!status.manifest && Date.parse(status.manifest.expiresAt) > Date.now()
-  const localAvailable = active && status.manifest?.models.some(isExecutableLocalModel) === true
+  const localAvailable = active && status.admissions.some(admission => admission.admissible)
   const defaultModel = status.manifest?.models.find(model => model.id === status.manifest?.routing.defaultModelId)
   return [
     {
@@ -144,6 +138,7 @@ export function createModelAgentAdapter(
   return {
     id: options.id,
     permissions: ['read-only'],
+    exclusiveResources: ['local_gpu1'],
     async run(request) {
       const { signal } = request
       assertNotAborted(signal)
@@ -163,7 +158,7 @@ export function createModelAgentAdapter(
       if (!account || account.principalId !== request.project.principalId) {
         throw new Error('Der Agentenauftrag gehört nicht zum aktuell verifizierten Konto.')
       }
-      const taskType = taskTypeFor(request.role)
+      const taskType = taskTypeForAgentRole(request.role)
       const messages: WireMessage[] = [
         { role: 'system', content: SYSTEM_INSTRUCTION },
         { role: 'user', content: request.prompt },
@@ -204,6 +199,7 @@ export function createModelAgentAdapter(
           hashInferenceEgressRequest(inferenceRequest, account.config.clientId)
         )
         const expiresAt = new Date(dependencies.now() + 120_000).toISOString()
+        request.onPhase?.('awaiting_external_approval')
         const approved = await cancellable(signal, () =>
           Promise.resolve(
             options.requestExternalApproval!({
@@ -214,6 +210,7 @@ export function createModelAgentAdapter(
               destination: account.config.baseUrl,
               messageCount: messages.length,
               characterCount: messages.reduce((sum, message) => sum + message.content.length, 0),
+              expiresAt,
               toolsAllowed: false,
               messages: Object.freeze(messages.map(message => Object.freeze({ ...message }))),
             })
@@ -221,6 +218,7 @@ export function createModelAgentAdapter(
         )
         if (!approved) throw new Error('Die externe Paketfreigabe wurde abgelehnt.')
         if (dependencies.now() >= Date.parse(expiresAt)) throw new Error('Die externe Paketfreigabe ist abgelaufen.')
+        request.onPhase?.('running')
         const externalPackage: ExternalTurnPackage = {
           messages: messages.map(message => ({ ...message })),
           packetHash,

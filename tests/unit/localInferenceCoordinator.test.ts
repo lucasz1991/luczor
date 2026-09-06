@@ -16,6 +16,7 @@ import type { VerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import {
   LocalInferenceCoordinator,
   hashInferenceEgressRequest,
+  localPolicyDiagnostic,
   packetBoundLaravelGateway,
   type LocalInferenceCoordinatorDependencies,
 } from '@/services/inference/coordinator'
@@ -224,13 +225,237 @@ describe('local inference coordinator and approved external gateway', () => {
     })
   })
 
+  it('waits for local preparation before offering any external fallback', async () => {
+    const verified = await manifest('explicit_experiment')
+    const harness = makeHarness(verified)
+    const preparation = harness.prepareModel.getMockImplementation()!
+    const ready = await preparation(verified.routing.defaultModelId)
+    const pending = deferred<typeof ready>()
+    harness.prepareModel.mockImplementationOnce(() => pending.promise)
+    await harness.coordinator.initialize(bootstrap())
+    let settled = false
+    const route = harness.coordinator.resolveTurn({ projectId: 'project-1', taskType: 'chat' })
+    void route.then(
+      () => {
+        settled = true
+      },
+      () => {
+        settled = true
+      }
+    )
+    await vi.waitFor(() => expect(harness.prepareModel).toHaveBeenCalledTimes(1))
+    expect(settled).toBe(false)
+    expect(proxy).not.toHaveBeenCalled()
+    pending.resolve(ready)
+    expect((await route).decision?.target).toBe('local_llama_cpp')
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { modelReleaseId: 'another-release' },
+    { manifestPayloadSha256: 'f'.repeat(64) },
+    { artifactSha256: 'f'.repeat(64) },
+    { runtimeSha256: 'f'.repeat(64) },
+    { ready: false },
+    { validUntilMs: Number.POSITIVE_INFINITY },
+    { validUntilMs: 1 },
+  ])('tries the signed local fallback when default readiness is invalid: %j', async invalid => {
+    const harness = makeHarness(await manifest('promoted_preferred'))
+    const preparation = harness.prepareModel.getMockImplementation()!
+    harness.prepareModel.mockImplementationOnce(async modelId => ({ ...(await preparation(modelId)), ...invalid }))
+    await harness.coordinator.initialize(bootstrap())
+
+    const route = await harness.coordinator.resolveTurn({ projectId: 'project-1', taskType: 'chat' })
+
+    expect(route.decision?.target).toBe('local_llama_cpp')
+    expect(route.decision?.modelReleaseId).toContain('orcarouter')
+    expect(harness.prepareModel).toHaveBeenCalledTimes(2)
+    expect(harness.coordinator.modelAdmissions('chat')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          modelReleaseId: 'qwen3.8-flash-next',
+          ready: false,
+          reasons: ['readiness_mismatch'],
+        }),
+      ])
+    )
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('honors a signed external denial without requesting a futile payload approval', async () => {
+    const verified = await manifest('metadata_only_default')
+    const harness = makeHarness({ ...verified, routing: { ...verified.routing, externalAllowed: false } })
+    await harness.coordinator.initialize(bootstrap())
+
+    await expect(harness.coordinator.resolveTurn({ projectId: 'project-1', taskType: 'chat' })).rejects.toMatchObject({
+      code: 'external_policy_blocked',
+      message: expect.stringContaining('keinen externen Fallback'),
+    })
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['LUCZOR_LLAMA_CPP_BIN is not configured.', 'runtime_not_configured', 'noch nicht eingerichtet'],
+    [
+      'Local-model runtime paths are not configured. Configure local-model/runtime-paths.json or both runtime environment paths.',
+      'runtime_not_configured',
+      'noch nicht eingerichtet',
+    ],
+    [
+      'Local-model runtime path configuration has an invalid schema.',
+      'local_paths_invalid',
+      'Modellpfade sind ungültig',
+    ],
+    ['Configured GGUF file is unavailable.', 'model_files_unavailable', 'Modelldateien sind nicht verfügbar'],
+    [
+      'Configured GGUF hash does not match the signed manifest.',
+      'artifact_mismatch',
+      'passen nicht zum signierten Katalog',
+    ],
+    [
+      'Configured llama.cpp runtime hash does not match the signed manifest.',
+      'runtime_mismatch',
+      'passt nicht zum signierten Katalog',
+    ],
+    [
+      'Local benchmark did not meet the signed capacity thresholds.',
+      'benchmark_failed',
+      'Bereitschaftsprüfung nicht bestanden',
+    ],
+    [
+      'Private failure C:\\Users\\secret-user token=secret-data',
+      'local_preparation_failed',
+      'Modellvorbereitung ist fehlgeschlagen',
+    ],
+  ])('reports safe local readiness for %s', async (nativeError, reason, message) => {
+    const harness = makeHarness(await manifest('explicit_experiment'))
+    harness.prepareModel.mockRejectedValue(new Error(nativeError))
+    await harness.coordinator.initialize(bootstrap())
+
+    const failure = await harness.coordinator
+      .resolveTurn({
+        projectId: 'project-1',
+        taskType: 'chat',
+        routingSettings: { preference: 'local_only' },
+      })
+      .catch(error => error)
+    expect(failure).toBeInstanceOf(LocalInferenceError)
+    expect(failure).toMatchObject({ code: 'local_only_blocked', message: expect.stringContaining(message) })
+    expect(failure.message).not.toContain(nativeError)
+    const admissions = harness.coordinator.modelAdmissions('chat')
+    expect(admissions).toEqual(expect.arrayContaining([expect.objectContaining({ ready: false, reasons: [reason] })]))
+    expect(JSON.stringify(admissions)).not.toContain(nativeError)
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('clears readiness failures after successful local retry and after identity changes', async () => {
+    const harness = makeHarness(await manifest('explicit_experiment'))
+    harness.prepareModel.mockRejectedValueOnce('Configured GGUF file is unavailable.')
+    await harness.coordinator.initialize(bootstrap())
+    await expect(harness.coordinator.resolveTurn({ projectId: 'project-1' })).rejects.toMatchObject({
+      code: 'external_approval_required',
+      message: expect.stringContaining('Modelldateien sind nicht verfügbar'),
+    })
+    expect((await harness.coordinator.resolveTurn({ projectId: 'project-1' })).decision?.target).toBe('local_llama_cpp')
+    expect(harness.coordinator.modelAdmissions()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ ready: true, reasons: [] })])
+    )
+    await harness.coordinator.initialize(bootstrap())
+    expect(harness.coordinator.modelAdmissions()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ ready: false, reasons: ['readiness_pending'] })])
+    )
+  })
+
+  it('explains insufficient local memory before any model is prepared', async () => {
+    const harness = makeHarness(await manifest('explicit_experiment'))
+    const snapshot = hardware()
+    snapshot.memory.availableBytes = 1
+    vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue(snapshot)
+    await harness.coordinator.initialize(bootstrap())
+    await expect(
+      harness.coordinator.resolveTurn({
+        projectId: 'project-1',
+        routingSettings: { preference: 'local_only' },
+      })
+    ).rejects.toMatchObject({
+      code: 'local_only_blocked',
+      message: expect.stringContaining('zu wenig Arbeitsspeicher frei'),
+    })
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('reports the actual task capability when local chat-only models cannot prepare execution', async () => {
+    const verified = await manifest('explicit_experiment')
+    const harness = makeHarness({
+      ...verified,
+      models: verified.models.map(model => ({ ...model, capabilities: ['chat'] })),
+    })
+    await harness.coordinator.initialize(bootstrap())
+    await expect(
+      harness.coordinator.resolveTurn({
+        projectId: 'project-1',
+        taskType: 'coding.agent',
+        routingSettings: { preference: 'local_only' },
+      })
+    ).rejects.toMatchObject({
+      code: 'local_only_blocked',
+      message: expect.stringContaining('angeforderte Aufgabe nicht'),
+    })
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('discards a late native preparation error after a policy identity change', async () => {
+    const harness = makeHarness(await manifest('explicit_experiment'))
+    const pending = deferred<void>()
+    harness.prepareModel.mockImplementationOnce(async () => {
+      await pending.promise
+      throw new Error('Configured GGUF file is unavailable.')
+    })
+    await harness.coordinator.initialize(bootstrap())
+    const route = harness.coordinator.resolveTurn({ projectId: 'project-1' }).catch(error => error)
+    await vi.waitFor(() => expect(harness.prepareModel).toHaveBeenCalledTimes(1))
+    await harness.coordinator.initialize(bootstrap())
+    pending.resolve()
+    expect(await route).toMatchObject({ code: 'local_policy_unavailable' })
+    expect(harness.coordinator.modelAdmissions()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ ready: false, reasons: ['readiness_pending'] })])
+    )
+    expect(JSON.stringify(harness.coordinator.modelAdmissions())).not.toContain('model_files_unavailable')
+  })
+
   it('refreshes expired native readiness before a later turn', async () => {
     const harness = makeHarness(await manifest('explicit_experiment'))
     await harness.coordinator.initialize(bootstrap())
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    await harness.coordinator.resolveTurn({ projectId: 'project-1', taskType: 'chat' })
     expect(harness.prepareModel).toHaveBeenCalledTimes(1)
     harness.advance(11 * 60_000)
     await harness.coordinator.resolveTurn({ projectId: 'project-1', taskType: 'chat' })
     expect(harness.prepareModel).toHaveBeenCalledTimes(2)
+  })
+
+  it('prepares only the chosen candidate and exposes truthful admission state', async () => {
+    const harness = makeHarness(await manifest('promoted_preferred'))
+    await harness.coordinator.initialize(bootstrap())
+
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(harness.coordinator.modelAdmissions('chat')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ enabled: true, executable: true, admissible: true, ready: false }),
+      ])
+    )
+
+    await harness.coordinator.resolveTurn({ projectId: 'project-1', taskType: 'chat' })
+    expect(harness.prepareModel).toHaveBeenCalledTimes(1)
+    expect(harness.prepareModel).toHaveBeenCalledWith('qwen3.8-flash-next', expect.any(Object))
+    expect(harness.coordinator.modelAdmissions('chat')).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ modelReleaseId: 'qwen3.8-flash-next', admissible: true, ready: true }),
+      ])
+    )
   })
 
   it('refreshes expired policy through a fresh bootstrap so version rollouts do not require restart', async () => {
@@ -404,6 +629,207 @@ describe('local inference coordinator and approved external gateway', () => {
       LocalInferenceError
     )
     expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('repairs a failed startup for unchanged credentials and shares an overlapping retry', async () => {
+    const harness = makeHarness(await manifest('metadata_only_default'))
+    harness.coordinator.markBootstrapUnavailable()
+    const pending = deferred<BootstrapResponse>()
+    vi.mocked(harness.dependencies.bootstrap).mockReturnValueOnce(pending.promise)
+
+    const first = harness.coordinator.reinitialize()
+    const second = harness.coordinator.reinitialize()
+    expect(second).toBe(first)
+    await vi.waitFor(() => expect(harness.dependencies.bootstrap).toHaveBeenCalledOnce())
+    await expect(harness.coordinator.resolveTurn({ projectId: 'project-1' })).rejects.toThrow('gerade geladen')
+    pending.resolve(bootstrap())
+
+    await expect(first).resolves.toMatchObject({ ok: true, connected: true, stale: false, policy: { mode: 'active' } })
+    expect(harness.dependencies.fetchManifest).toHaveBeenCalledOnce()
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('shares a retry while the signed manifest is still being verified', async () => {
+    const verified = await manifest('metadata_only_default')
+    const harness = makeHarness(verified)
+    const pending = deferred<VerifiedLocalModelManifest>()
+    vi.mocked(harness.dependencies.verifyManifest).mockReturnValueOnce(pending.promise)
+    const first = harness.coordinator.reinitialize()
+    await vi.waitFor(() => expect(harness.dependencies.verifyManifest).toHaveBeenCalledOnce())
+    expect(harness.coordinator.reinitialize()).toBe(first)
+    pending.resolve(verified)
+    await expect(first).resolves.toMatchObject({ ok: true })
+    expect(harness.dependencies.bootstrap).toHaveBeenCalledOnce()
+  })
+
+  it.each(['missing', 'unavailable', 'invalid'] as const)(
+    'reports API connectivity separately from %s policy without exposing native errors',
+    async state => {
+      const harness = makeHarness(await manifest('metadata_only_default'))
+      const boot = bootstrap(state !== 'unavailable')
+      if (state === 'missing') delete boot.local_model_manifest
+      if (state === 'invalid') {
+        vi.mocked(harness.dependencies.verifyManifest).mockRejectedValueOnce(new Error('SECRET_NATIVE_CREDENTIAL'))
+      }
+      vi.mocked(harness.dependencies.bootstrap).mockResolvedValueOnce(boot)
+      const result = await harness.coordinator.reinitialize()
+      expect(result).toMatchObject({ ok: false, connected: true, stale: false, policy: { mode: 'blocked' } })
+      expect(result.message).toContain('Server verbunden.')
+      expect(result.message).toContain('Externer Fallback bleibt gesperrt.')
+      expect(JSON.stringify(result)).not.toContain('SECRET_NATIVE_CREDENTIAL')
+      expect(JSON.stringify(harness.coordinator.status())).not.toContain('SECRET_NATIVE_CREDENTIAL')
+      expect(proxy).not.toHaveBeenCalled()
+    }
+  )
+
+  it('does not let an obsolete retry report success or replace a newer account policy', async () => {
+    const harness = makeHarness(await manifest('metadata_only_default'))
+    const stale = deferred<BootstrapResponse>()
+    vi.mocked(harness.dependencies.bootstrap).mockReturnValueOnce(stale.promise)
+    const oldRequest = harness.coordinator.reinitialize()
+    await vi.waitFor(() => expect(harness.dependencies.bootstrap).toHaveBeenCalledOnce())
+    harness.coordinator.invalidateApiIdentity()
+    const newRequest = harness.coordinator.reinitialize()
+    await expect(newRequest).resolves.toMatchObject({ ok: true, stale: false })
+    stale.resolve(bootstrap(false))
+    await expect(oldRequest).resolves.toMatchObject({ ok: false, stale: true })
+    expect(harness.coordinator.status().mode).toBe('active')
+    expect(harness.dependencies.fetchManifest).toHaveBeenCalledOnce()
+  })
+
+  it.each([0, 401, 403])('reports bootstrap failure %s safely and permits a later retry', async status => {
+    const harness = makeHarness(await manifest('metadata_only_default'))
+    vi.mocked(harness.dependencies.bootstrap).mockRejectedValueOnce({ status, message: 'SECRET_HEADER' })
+    const result = await harness.coordinator.reinitialize()
+    expect(result).toMatchObject({ ok: false, connected: false, stale: false })
+    expect(result.policy.reason).toBe(status === 0 ? 'server_unreachable' : 'authentication_failed')
+    expect(JSON.stringify(result)).not.toContain('SECRET_HEADER')
+    await expect(harness.coordinator.reinitialize()).resolves.toMatchObject({ ok: true })
+  })
+
+  it('normalizes unknown diagnostics rather than exposing arbitrary errors', () => {
+    expect(JSON.stringify(localPolicyDiagnostic('blocked', 'SECRET_PRIVATE_PATH'))).not.toContain('SECRET_PRIVATE_PATH')
+    expect(localPolicyDiagnostic('loading', 'bootstrap_pending').message).not.toContain('gesperrt')
+  })
+
+  it('does not probe an unavailable manifest during ordinary startup or background recovery', async () => {
+    const harness = makeHarness(await manifest('metadata_only_default'))
+    vi.mocked(harness.dependencies.bootstrap).mockResolvedValue(bootstrap(false))
+    await harness.coordinator.initialize(bootstrap(false))
+    await harness.coordinator.reinitialize()
+    expect(harness.dependencies.accountSnapshot).not.toHaveBeenCalled()
+    expect(harness.dependencies.fetchManifest).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['local_model_signing_key_path_unsafe', 'zulässigen Pfad'],
+    ['local_model_signing_key_unreadable', 'nicht lesen'],
+    ['local_model_signing_key_invalid', 'gültiger Modell-Signaturschlüssel'],
+    ['local_model_signing_key_unsafe', 'RSA-Sicherheitsanforderungen'],
+    ['local_model_signing_public_key_pin_missing', 'fehlt der SHA-256-Fingerabdruck'],
+    ['local_model_signing_public_key_pin_invalid', 'Schlüsselfingerabdruck für die Modellrichtlinie ist ungültig'],
+    ['local_model_signing_public_key_mismatch', 'passt nicht'],
+    ['local_model_manifest_signing_failed', 'nicht signieren'],
+  ])('reports safe signing diagnostic %s only on explicit connection testing', async (code, expected) => {
+    const harness = makeHarness(await manifest('metadata_only_default'))
+    vi.mocked(harness.dependencies.bootstrap).mockResolvedValueOnce(bootstrap(false))
+    vi.mocked(harness.dependencies.fetchManifest).mockRejectedValueOnce({
+      status: 503,
+      code,
+      message: 'SECRET_PRIVATE_KEY',
+    })
+    const result = await harness.coordinator.reinitialize({ diagnoseUnavailable: true })
+    expect(result).toMatchObject({
+      ok: false,
+      connected: true,
+      stale: false,
+      policy: { mode: 'blocked', reason: code },
+    })
+    expect(result.message).toContain(expected)
+    expect(JSON.stringify(result)).not.toContain('SECRET_PRIVATE_KEY')
+    expect(harness.dependencies.fetchManifest).toHaveBeenCalledExactlyOnceWith(account().config)
+    expect(harness.dependencies.verifyManifest).not.toHaveBeenCalled()
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('keeps unexpected successful diagnostic envelopes blocked until a fresh valid bootstrap', async () => {
+    const harness = makeHarness(await manifest('metadata_only_default'))
+    vi.mocked(harness.dependencies.bootstrap).mockResolvedValueOnce(bootstrap(false))
+    const result = await harness.coordinator.reinitialize({ diagnoseUnavailable: true })
+    expect(result).toMatchObject({ ok: false, connected: true, policy: { reason: 'manifest_unavailable' } })
+    expect(harness.dependencies.verifyManifest).not.toHaveBeenCalled()
+    await expect(harness.coordinator.resolveTurn({ projectId: 'project-1' })).rejects.toMatchObject({
+      code: 'local_policy_unavailable',
+    })
+    await expect(harness.coordinator.reinitialize()).resolves.toMatchObject({ ok: true })
+    expect(harness.dependencies.verifyManifest).toHaveBeenCalledOnce()
+  })
+
+  it.each([
+    { status: 503, code: 'SECRET_UNTRUSTED_CODE', message: 'SECRET_BODY' },
+    { status: 500, code: 'local_model_signing_key_unreadable', message: 'SECRET_BODY' },
+  ])('does not trust unknown diagnostics or signing codes outside HTTP 503', async error => {
+    const harness = makeHarness(await manifest('metadata_only_default'))
+    vi.mocked(harness.dependencies.bootstrap).mockResolvedValueOnce(bootstrap(false))
+    vi.mocked(harness.dependencies.fetchManifest).mockRejectedValueOnce(error)
+    const result = await harness.coordinator.reinitialize({ diagnoseUnavailable: true })
+    expect(result.policy.reason).toBe('manifest_unavailable')
+    expect(JSON.stringify(result)).not.toContain('SECRET_')
+  })
+
+  it('requires the diagnostic account to match the authenticated bootstrap', async () => {
+    const harness = makeHarness(await manifest('metadata_only_default'))
+    vi.mocked(harness.dependencies.bootstrap).mockResolvedValueOnce(bootstrap(false))
+    vi.mocked(harness.dependencies.accountSnapshot).mockResolvedValueOnce({ ...account(), accountId: 99 })
+    const result = await harness.coordinator.reinitialize({ diagnoseUnavailable: true })
+    expect(result.policy.reason).toBe('account_verification_failed')
+    expect(harness.dependencies.fetchManifest).not.toHaveBeenCalled()
+  })
+
+  it('stops before diagnostic fetch when identity changes during account verification', async () => {
+    const harness = makeHarness(await manifest('metadata_only_default'))
+    const pending = deferred<VerifiedAccountSnapshot>()
+    vi.mocked(harness.dependencies.bootstrap).mockResolvedValueOnce(bootstrap(false))
+    vi.mocked(harness.dependencies.accountSnapshot).mockReturnValueOnce(pending.promise)
+    const result = harness.coordinator.reinitialize({ diagnoseUnavailable: true })
+    await vi.waitFor(() => expect(harness.dependencies.accountSnapshot).toHaveBeenCalledOnce())
+    harness.coordinator.invalidateApiIdentity()
+    pending.resolve(account())
+    await expect(result).resolves.toMatchObject({ ok: false, stale: true })
+    expect(harness.dependencies.fetchManifest).not.toHaveBeenCalled()
+  })
+
+  it('ignores a late diagnostic failure after a newer account becomes active', async () => {
+    const harness = makeHarness(await manifest('metadata_only_default'))
+    let rejectOld!: (reason: unknown) => void
+    vi.mocked(harness.dependencies.bootstrap).mockResolvedValueOnce(bootstrap(false))
+    vi.mocked(harness.dependencies.fetchManifest).mockReturnValueOnce(
+      new Promise((_resolve, reject) => {
+        rejectOld = reject
+      })
+    )
+    const oldResult = harness.coordinator.reinitialize({ diagnoseUnavailable: true })
+    await vi.waitFor(() => expect(harness.dependencies.fetchManifest).toHaveBeenCalledOnce())
+    harness.coordinator.invalidateApiIdentity()
+    await expect(harness.coordinator.reinitialize()).resolves.toMatchObject({ ok: true })
+    rejectOld({ status: 503, code: 'local_model_signing_key_unreadable' })
+    await expect(oldResult).resolves.toMatchObject({ ok: false, stale: true })
+    expect(harness.coordinator.status().mode).toBe('active')
+  })
+
+  it('upgrades an overlapping background recovery to one explicit diagnostic check', async () => {
+    const harness = makeHarness(await manifest('metadata_only_default'))
+    const pending = deferred<BootstrapResponse>()
+    vi.mocked(harness.dependencies.bootstrap).mockReturnValueOnce(pending.promise)
+    const background = harness.coordinator.reinitialize()
+    const explicit = harness.coordinator.reinitialize({ diagnoseUnavailable: true })
+    expect(explicit).toBe(background)
+    await vi.waitFor(() => expect(harness.dependencies.bootstrap).toHaveBeenCalledOnce())
+    pending.resolve(bootstrap(false))
+    await expect(explicit).resolves.toMatchObject({ ok: false, connected: true })
+    expect(harness.dependencies.fetchManifest).toHaveBeenCalledOnce()
   })
 
   it.each([true, false, undefined])(

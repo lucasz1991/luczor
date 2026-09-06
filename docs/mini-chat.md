@@ -31,17 +31,17 @@ verschiebbares Overlay innerhalb der Seite.
 Die Darstellung übernimmt die konzentrischen Ringe des bisherigen Live-Status.
 Farbe, Symbol und Beschriftung ergänzen sich; Bewegung ist keine Prozentanzeige.
 
-| Zustand | Darstellung | Tatsächliche Quelle |
-| --- | --- | --- |
-| Bereit | Ruhiger blauer Kreis | Keine laufende Anfrage |
-| Verarbeitet | Rotierende blaue Segmente | Agentenrunde und Empfangsstatus |
-| Führt aus | Orange Segmente | Werkzeugstatus `executing` |
-| Deine Entscheidung | Gelber Kreis mit Ausrufezeichen | Offene Freigabe |
-| Hört zu | Cyanfarbener Ausschlag | Mikrofonstatus und gemessener Pegel im Hauptfenster |
-| Spricht | Grüner Puls | Aktive Sprachausgabe |
-| Neue Antwort | Grüner Haken und Markierung | Ungelesene abgeschlossene Antwort |
-| Anfrage fehlgeschlagen | Rotes Fehlersymbol | Tatsächlich fehlgeschlagene Anfrage |
-| Not-Aus aktiv | Graues Stoppsymbol | Gemeinsamer Kill-Switch |
+| Zustand                | Darstellung                     | Tatsächliche Quelle                                 |
+| ---------------------- | ------------------------------- | --------------------------------------------------- |
+| Bereit                 | Ruhiger blauer Kreis            | Keine laufende Anfrage                              |
+| Verarbeitet            | Rotierende blaue Segmente       | Agentenrunde und Empfangsstatus                     |
+| Führt aus              | Orange Segmente                 | Werkzeugstatus `executing`                          |
+| Deine Entscheidung     | Gelber Kreis mit Ausrufezeichen | Offene Freigabe                                     |
+| Hört zu                | Cyanfarbener Ausschlag          | Mikrofonstatus und gemessener Pegel im Hauptfenster |
+| Spricht                | Grüner Puls                     | Aktive Sprachausgabe                                |
+| Neue Antwort           | Grüner Haken und Markierung     | Ungelesene abgeschlossene Antwort                   |
+| Anfrage fehlgeschlagen | Rotes Fehlersymbol              | Tatsächlich fehlgeschlagene Anfrage                 |
+| Not-Aus aktiv          | Graues Stoppsymbol              | Gemeinsamer Kill-Switch                             |
 
 Die Info-Schaltfläche erklärt diese Zustände und bietet das Zurücksetzen der
 Position. Betriebssystem und Luczor-Einstellung für reduzierte Bewegung werden
@@ -71,6 +71,11 @@ verwerfen verspätete Ergebnisse und Freigaben; die Ausführungssperre bleibt bi
 zum tatsächlichen Ende des alten Laufs erhalten. Bestehende Modus-, Projekt-,
 Routing-, externe Datenfreigabe- und Ausgabekontrollen gelten auch im Mini-Chat.
 Text wird erst nach der bestehenden Ausgabeprüfung schrittweise dargestellt.
+
+Der Mini-Chat verwendet ausschließlich die lokale Modellroute. Wenn die lokale
+Bereitschaft fehlt, zeigt er den konkreten Einrichtungs- oder Prüfungsfehler an.
+Die optionale externe Fallbackwahl des Hauptchats gilt nicht für den Mini-Chat;
+dieser erstellt kein externes Nachrichtenpaket und öffnet keine externe Freigabe.
 
 ## Lokale Prüfung
 

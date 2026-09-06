@@ -1,10 +1,13 @@
 import { invoke } from '@tauri-apps/api/core'
 import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
-import type { AgentAdapter, AgentProjectSnapshot } from './types'
+import { executionGate, executionPayload } from '@/services/executionGate'
+import type { AgentAdapter, AgentPermission, AgentProjectSnapshot } from './types'
 
 export type CodexJobSnapshot = {
   id: string
-  status: 'starting' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'timed_out'
+  principalId: string
+  projectId: string
+  status: 'starting' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled' | 'timed_out' | 'interrupted'
   externalThreadId?: string | null
   output: string
   error?: string | null
@@ -17,21 +20,52 @@ export type CodexAgentDependencies = {
   invoke: typeof invoke
   externalPolicy: typeof getRepositoryExternalPolicy
   wait: () => Promise<void>
+  captureExecution: (signal: AbortSignal) => {
+    signal: AbortSignal
+    authorize: (permission: AgentPermission) => Promise<{ sessionId: string; generation: number }>
+  }
 }
 
 const defaultDependencies: CodexAgentDependencies = {
   invoke,
   externalPolicy: getRepositoryExternalPolicy,
   wait: () => new Promise(resolve => setTimeout(resolve, 400)),
+  captureExecution(signal) {
+    const ticket = executionGate.capture(signal)
+    return {
+      signal: ticket.signal,
+      authorize: permission => executionPayload(ticket, permission === 'workspace-write'),
+    }
+  },
 }
 
 function terminal(snapshot: CodexJobSnapshot): boolean {
-  return ['completed', 'failed', 'cancelled', 'timed_out'].includes(snapshot.status)
+  return ['completed', 'failed', 'cancelled', 'timed_out', 'interrupted'].includes(snapshot.status)
 }
 
 /** Native managed jobs require an executable, not merely a shell shim. */
 export function getCodexRuntimeStatus() {
-  return invoke<{ available: boolean; desktopProjectCreation: false; transport: string }>('codex_runtime_status')
+  return invoke<{ available: boolean; desktopAvailable: boolean; desktopProjectCreation: false; transport: string }>(
+    'codex_runtime_status'
+  )
+}
+
+export function listCodexJobs(principalId: string, projectId?: string) {
+  return invoke<CodexJobSnapshot[]>('codex_job_list', { payload: { principalId, projectId } })
+}
+
+export function listCodexSessions(project: AgentProjectSnapshot) {
+  if (!project.rootPath || !Number.isFinite(project.workspaceUpdatedAt)) {
+    throw new Error('Für Codex fehlt eine aktuelle Projektordner-Zuordnung.')
+  }
+  return invoke<{ threadId: string; updatedAt?: number }[]>('codex_session_list', {
+    payload: {
+      principalId: project.principalId,
+      projectId: project.projectId,
+      expectedRootPath: project.rootPath,
+      expectedWorkspaceUpdatedAt: project.workspaceUpdatedAt,
+    },
+  })
 }
 
 /** Opens the native app at the bound project; a user still creates its task there. */
@@ -55,15 +89,18 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
     id: 'codex',
     permissions: ['read-only', 'workspace-write'],
     async run(request) {
+      const guarded = dependencies.captureExecution(request.signal)
+      const signal = guarded.signal
       if ((await dependencies.externalPolicy()) === 'deny')
         throw new Error('Die Repository-Richtlinie verbietet externe Coding-Agenten.')
-      if (request.signal.aborted) throw new DOMException('Abgebrochen', 'AbortError')
+      if (signal.aborted) throw new DOMException('Abgebrochen', 'AbortError')
       if (!request.project.rootPath || !Number.isFinite(request.project.workspaceUpdatedAt)) {
         throw new Error('Für Codex fehlt eine aktuelle Projektordner-Zuordnung.')
       }
       const scope = { principalId: request.project.principalId, projectId: request.project.projectId }
       let snapshot: CodexJobSnapshot
       try {
+        const execution = await guarded.authorize(request.permission)
         snapshot = await dependencies.invoke<CodexJobSnapshot>('codex_job_start', {
           payload: {
             ...scope,
@@ -74,9 +111,11 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
             model: request.model,
             externalThreadId: request.externalThreadId,
             timeoutSeconds: 900,
+            execution,
           },
         })
       } catch {
+        if (signal.aborted) throw new DOMException('Abgebrochen', 'AbortError')
         throw new Error('Der native Codex-Auftrag konnte nicht gestartet werden.')
       }
       const payload = { ...scope, jobId: snapshot.id }
@@ -87,9 +126,9 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
         // A cancellation request is not acknowledgement of a stopped worker.
         cancellation ??= dependencies.invoke<CodexJobSnapshot>('codex_job_cancel', { payload }).catch(() => undefined)
       }
-      request.signal.addEventListener('abort', cancel, { once: true })
+      signal.addEventListener('abort', cancel, { once: true })
       try {
-        if (request.signal.aborted) cancel()
+        if (signal.aborted) cancel()
         while (!terminal(snapshot)) {
           if (cancellation) {
             const acknowledgement = await cancellation
@@ -99,7 +138,7 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
             }
             if (!acknowledgement) cancellation = undefined
           }
-          if (!request.signal.aborted && !transportFailed) {
+          if (!signal.aborted && !transportFailed) {
             try {
               request.onOutput(snapshot.output)
             } catch {
@@ -107,7 +146,7 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
             }
           }
           await dependencies.wait()
-          if ((request.signal.aborted || transportFailed) && !cancellation) cancel()
+          if ((signal.aborted || transportFailed) && !cancellation) cancel()
           try {
             snapshot = await dependencies.invoke<CodexJobSnapshot>('codex_job_status', { payload })
           } catch {
@@ -117,7 +156,7 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
             cancel()
           }
         }
-        if (request.signal.aborted) throw new DOMException('Abgebrochen', 'AbortError')
+        if (signal.aborted) throw new DOMException('Abgebrochen', 'AbortError')
         if (transportFailed || snapshot.status !== 'completed')
           throw new Error('Codex-Auftrag wurde nicht abgeschlossen. Bitte den Laufzeitstatus prüfen.')
         return {
@@ -125,7 +164,7 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
           externalThreadId: snapshot.externalThreadId ?? undefined,
         }
       } finally {
-        request.signal.removeEventListener('abort', cancel)
+        signal.removeEventListener('abort', cancel)
       }
     },
   }

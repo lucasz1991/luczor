@@ -5,6 +5,7 @@
 
 import { agentTools } from './agents'
 import { agentJobTools } from './agentJobs'
+import { agentTeamTools } from './agentTeams'
 import { filesystemTools } from './filesystem'
 import { memoryTools } from './memory'
 import { osTools } from './os'
@@ -28,6 +29,7 @@ const TOOLS: ToolDef[] = [
   ...taskTools,
   ...agentTools,
   ...agentJobTools,
+  ...agentTeamTools,
   ...planTools,
   ...memoryTools,
 ]

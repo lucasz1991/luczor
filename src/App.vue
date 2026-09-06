@@ -6,13 +6,35 @@ import JarvisHud from './components/JarvisHud.vue'
 import PlanPanel from './components/PlanPanel.vue'
 import SidebarNav from './components/ai/SidebarNav.vue'
 import AgentHub from './components/agents/AgentHub.vue'
+import PlanningWorkspace from './components/planning/PlanningWorkspace.vue'
+import { planningHub } from '@/services/planning/hub'
+import {
+  createPlanPrincipalBinding,
+  planningCommandObjective,
+  planningDiscussionMessage,
+} from '@/services/planningEntry'
 import { configureAgentHub } from '@/services/agents/hub'
+import {
+  executionGate,
+  invalidateExecution,
+  updateExecutionControls,
+  type ExecutionTicket,
+} from '@/services/executionGate'
 import ChatComposer from './components/ai/ChatComposer.vue'
 import PromptBar from './components/ai/PromptBar.vue'
 import ThinkingState from './components/ai/ThinkingState.vue'
 import StreamingText from './components/ai/StreamingText.vue'
 import ToolChips from './components/ai/ToolChips.vue'
 import ApprovalCard from './components/ai/ApprovalCard.vue'
+import PayloadApproval from './components/ai/PayloadApproval.vue'
+import { requestPayloadApproval } from '@/services/payloadApproval'
+import { requestConfirmation } from '@/services/confirmation'
+import {
+  buildTargetContextPackages,
+  sanitizeInferenceMessagesForTarget,
+  type ContextScopeKey,
+} from '@/services/inference/contextBroker'
+import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import ContextCards from './components/ai/ContextCards.vue'
 import RecommendationCard from './components/ai/RecommendationCard.vue'
 import SelectionActions from './components/ai/SelectionActions.vue'
@@ -41,7 +63,7 @@ import { streamSpeak, stopSpeak } from '@/services/voice/speak'
 import { serverSpeechText } from '@/services/voice/messageSpeech'
 import { createVoiceInputSession, idleVoiceInput } from '@/services/voice/voiceInputSession'
 import { luczorMemory, getMemoryPrefs, type MemoryRecord } from '@/services/memory/luczorMemory'
-import { buildPromptContextDetails, inferTaskType, type PromptContextDetails } from '@/services/contextController'
+import { buildLocalPromptContextDetails, inferTaskType, type PromptContextDetails } from '@/services/contextController'
 import { LuczorApi } from '@/services/api/luczorApi'
 import { refreshStatus } from '@/services/status'
 import { appearance } from '@/services/appearance'
@@ -49,8 +71,8 @@ import { recordDebugEvent } from '@/services/debug'
 import { getSafeRecordValue } from '@/services/safeRecord'
 import { buildRecentToolOutcomeContext, toolOutcomePreview } from '@/services/toolOutcomeContext'
 import { getTool } from '@/services/tools/registry'
-import { buildPlanContext } from '@/services/plan'
-import { assemblePromptContext, type PromptFragment } from '@/services/prompt/promptContextAssembler'
+import { bindPlanPrincipal, buildPlanContext, getPlan } from '@/services/plan'
+import { type PromptFragment } from '@/services/prompt/promptContextAssembler'
 import { buildProjectStartContext } from '@/services/prompt/projectStartContext'
 import {
   bindProjectWorkspace,
@@ -97,23 +119,51 @@ const showSettings = ref(false)
 const settingsStartTab = ref<SettingsStartTab>('server')
 const showSystemPanel = ref(false)
 const showAgentHub = ref(false)
+const showPlanning = ref(false)
+const planningObjective = ref('')
+const planningRevision = ref(0)
+const stopPlanningUpdates = planningHub.subscribe(() => planningRevision.value++)
+onBeforeUnmount(stopPlanningUpdates)
+const planPrincipalBinding = createPlanPrincipalBinding(resolveWorkspacePrincipalId, bindPlanPrincipal)
+const refreshPlanPrincipal = () => {
+  void planPrincipalBinding.refresh()
+}
+window.addEventListener('luczor:api-identity-changing', planPrincipalBinding.invalidate)
+window.addEventListener('luczor:api-identity-changed', refreshPlanPrincipal)
+onBeforeUnmount(() => {
+  window.removeEventListener('luczor:api-identity-changing', planPrincipalBinding.invalidate)
+  window.removeEventListener('luczor:api-identity-changed', refreshPlanPrincipal)
+  planPrincipalBinding.dispose()
+})
 const { input, autoGrow, setInput: writeComposerInput, consumeInputSource } = useChatComposer()
 function setComposerInput(value: string, source: ComposerInputSource) {
   if (source === 'keyboard') voiceInputSession.manualInput()
   writeComposerInput(value, source)
 }
 const sending = ref(false)
+// External fallback is a conscious choice for this project in this session.
+// Capture it at turn admission so later UI changes cannot change an in-flight route.
+const allowChatExternalFallback = ref(false)
+const resetChatRouting = () => {
+  allowChatExternalFallback.value = false
+}
+window.addEventListener('luczor:api-identity-changing', resetChatRouting)
+onBeforeUnmount(() => window.removeEventListener('luczor:api-identity-changing', resetChatRouting))
 const sidebarCollapsed = ref(false)
 const promptBar = ref<InstanceType<typeof PromptBar> | null>(null)
 const chatActivities = ref<Record<string, ChatActivity>>({})
 const activeTurn = ref<{ projectId: string; messageId: string } | null>(null)
 const promptCommands = [
   { id: 'summarize', label: '/zusammenfassen', description: 'Den bisherigen Chat zusammenfassen', icon: 'spark' },
-  { id: 'plan', label: '/plan', description: 'Einen konkreten Arbeitsplan erstellen', icon: 'check' },
+  { id: 'plan', label: '/plan', description: 'Ziele, Fragen und Schritte gemeinsam im Chat besprechen', icon: 'check' },
   { id: 'context', label: '@projekt', description: 'Projektkontext ansehen', icon: 'folder' },
   { id: 'settings', label: '/modell', description: 'Modelleinstellungen öffnen', icon: 'settings' },
 ]
 function handlePromptCommand(id: string) {
+  if (id === 'plan') {
+    startPlanningChat()
+    return
+  }
   if (id === 'context') {
     showContext.value = true
     input.value = ''
@@ -124,11 +174,30 @@ function handlePromptCommand(id: string) {
     input.value = ''
     return
   }
-  setComposerInput(
-    id === 'plan'
-      ? 'Erstelle einen konkreten Arbeitsplan für dieses Projekt.'
-      : 'Fasse den bisherigen Chat und die nächsten Schritte zusammen.',
-    'keyboard'
+  setComposerInput('Fasse den bisherigen Chat und die nächsten Schritte zusammen.', 'keyboard')
+}
+function startPlanningChat() {
+  const objective = planningCommandObjective(input.value) ?? input.value.trim()
+  setComposerInput(planningDiscussionMessage(objective), 'keyboard')
+  void nextTick(() => promptBar.value?.focus())
+}
+function openPlanning(objective?: string) {
+  planningObjective.value = objective ?? ''
+  showAgentHub.value = false
+  showPlanning.value = true
+  void voiceInputSession.stop()
+}
+function planFromChecklist() {
+  const checklist = getPlan(activeProjectId.value)
+  const steps = checklist.steps.filter(step => step.status !== 'done' && step.status !== 'skipped')
+  openPlanning(
+    [
+      activeProject.value?.goal || `Arbeitsplan für ${activeProject.value?.name ?? activeProjectId.value}`,
+      ...steps.map(step => `- ${step.title}`),
+      checklist.note,
+    ]
+      .filter(Boolean)
+      .join('\n')
   )
 }
 function editSelection(instruction: string, selection: string) {
@@ -180,6 +249,7 @@ const appRuntimeLifecycle = createAppRuntimeLifecycle({
 })
 
 onMounted(() => {
+  refreshPlanPrincipal()
   window.addEventListener('luczor:voice-stop', stopAllVoice)
   window.addEventListener('luczor:voice-settings-changed', stopVoiceInputForSettings)
   return appRuntimeLifecycle.start()
@@ -360,6 +430,38 @@ const activeProjectId = computed<string>({
 })
 
 const activeProject = computed(() => projects.value.find(p => p.id === activeProjectId.value))
+watch(activeProjectId, resetChatRouting, { flush: 'sync' })
+const activePlanningSession = computed(() => {
+  void planningRevision.value
+  return planningHub.get(activeProjectId.value)
+})
+const planningBusy = computed(() => {
+  const status = activePlanningSession.value?.status
+  return status === 'analyzing' || status === 'planning' || status === 'executing'
+})
+const planningStatusLabel = computed(() => {
+  const labels = new Map([
+    ['idle', 'Ziel vorbereiten'],
+    ['analyzing', 'Projekt wird analysiert'],
+    ['planning', 'Vollständiger Plan wird erstellt'],
+    ['review', 'Plan bereit zur Prüfung'],
+    ['executing', 'Geprüfter Plan wird ausgeführt'],
+    ['completed', 'Ausführung beendet – Ergebnisse prüfen'],
+    ['failed', 'Planung oder Ausführung fehlgeschlagen'],
+    ['cancelled', 'Planung abgebrochen'],
+    ['interrupted', 'Unterbrochener Plan – erneut prüfen'],
+  ])
+  return labels.get(activePlanningSession.value?.status ?? '') ?? 'Planungsmodus'
+})
+watch(() => ({ mode: mode.value, killSwitch: hud.killSwitch, scope: activeProjectId.value }), updateExecutionControls, {
+  immediate: true,
+  flush: 'sync',
+})
+window.addEventListener('luczor:api-identity-changing', invalidateExecution)
+onBeforeUnmount(() => {
+  window.removeEventListener('luczor:api-identity-changing', invalidateExecution)
+  invalidateExecution()
+})
 const messages = computed(() => mutations.getProjectMessages(activeProjectId.value))
 const isWelcomeMessage = (message: Message) =>
   message.role === 'assistant' &&
@@ -612,17 +714,33 @@ async function persistActiveMode(value: LuczorMode) {
   }
 }
 
-function toggleMode() {
+const modeConfirmationPending = ref(false)
+const modeConfirmationError = ref('')
+
+async function toggleMode() {
+  if (modeConfirmationPending.value) return
+  modeConfirmationError.value = ''
+  const previousMode = mode.value
   const next: LuczorMode =
     mode.value === 'observe' ? 'act' : mode.value === 'act' && allowUnrestricted.value ? 'unrestricted' : 'observe'
 
   if (next === 'unrestricted') {
-    const ok = window.confirm(
+    const ticket = executionGate.capture()
+    modeConfirmationPending.value = true
+    const confirmation = await requestConfirmation(
       'VOLLZUGRIFF aktivieren?\n\n' +
         'Luczor führt dann ALLE freigeschalteten Tools (Maus, Tastatur, URLs, lokale Dateien und Coding-Agenten) OHNE Rückfrage aus. ' +
         'Dabei können gelesene lokale Daten einmalig an das aktive Modell übergeben werden. Native Projekt- und Pfadgrenzen sowie der Not-Aus bleiben aktiv.\n\nWirklich aktivieren?'
     )
-    if (!ok) {
+    modeConfirmationPending.value = false
+    if (confirmation.error) modeConfirmationError.value = confirmation.error
+    if (!confirmation.approved || !allowUnrestricted.value || mode.value !== previousMode) {
+      return
+    }
+    try {
+      executionGate.assert(ticket)
+    } catch {
+      modeConfirmationError.value = 'Die Steuerung wurde während der Bestätigung geändert. Bitte erneut auswählen.'
       return
     }
   }
@@ -653,6 +771,11 @@ const showAudit = ref(false)
 // Context panel (goals + summaries) is collapsed by default for a chat-first UI.
 const showContext = ref(false)
 const activeWorkspace = ref<ProjectWorkspaceBinding | null>(null)
+watch(
+  () => [activeWorkspace.value?.rootPath, activeWorkspace.value?.updatedAt],
+  () => invalidateExecution(),
+  { flush: 'sync' }
+)
 const workspaceBusy = ref(false)
 const workspaceMessage = ref('')
 const localGraphStatus = ref<RepositoryGraphStatus>({
@@ -789,16 +912,25 @@ async function reindexRepository() {
 
 async function removeRepositoryBinding() {
   if (localGraphBusy.value || workspaceBusy.value || !activeWorkspace.value) return
-  const confirmed = window.confirm(
-    'Lokale Projektzuordnung lösen? Die Dateien im gewählten Ordner werden nicht verändert oder gelöscht.'
-  )
-  if (!confirmed) return
+  const projectId = activeProjectId.value
+  const binding = activeWorkspace.value
+  const ticket = executionGate.capture()
   workspaceBusy.value = true
   localGraphBusy.value = true
   try {
+    const confirmation = await requestConfirmation(
+      'Lokale Projektzuordnung lösen? Die Dateien im gewählten Ordner werden nicht verändert oder gelöscht.'
+    )
+    if (confirmation.error) throw new Error(confirmation.error)
+    if (!confirmation.approved) return
+    executionGate.assert(ticket)
     const principalId = await requireRepositoryPrincipalId()
-    await unbindRepository(principalId, activeProjectId.value, true)
-    await unbindProjectWorkspace(activeProjectId.value, principalId)
+    executionGate.assert(ticket)
+    if (activeProjectId.value !== projectId || activeWorkspace.value !== binding) return
+    await unbindRepository(principalId, projectId, true)
+    executionGate.assert(ticket)
+    await unbindProjectWorkspace(projectId, principalId)
+    executionGate.assert(ticket)
     activeWorkspace.value = null
     workspaceMessage.value =
       'Die lokale Zuordnung und der Graph-Index wurden entfernt. Projektdateien blieben unverändert.'
@@ -892,9 +1024,16 @@ function sendSuggestion(text: string) {
 }
 
 /** Persist the exchange to long-term memory (project scope). */
-async function rememberExchange(pid: string, userText: string, assistantId: string) {
+async function rememberExchange(
+  pid: string,
+  userText: string,
+  assistantId: string,
+  expectedPrincipalId: string,
+  execution: ExecutionTicket
+) {
   try {
     const prefs = await getMemoryPrefs()
+    executionGate.assert(execution)
     if (!prefs.autoRemember) return
     const msg = mutations.getProjectMessages(pid).find(m => m.id === assistantId)
     const summary = safeTrim(msg?.content)
@@ -905,17 +1044,21 @@ async function rememberExchange(pid: string, userText: string, assistantId: stri
         projectId: pid,
         source: 'user',
         writeIntent: 'automatic',
+        expectedPrincipalId,
       })
     }
     if (summary && !summary.startsWith('[Fehler]') && summary !== 'Fertig.') {
+      executionGate.assert(execution)
       await luczorMemory.remember({
         content: summary,
         scope: 'project',
         projectId: pid,
         source: 'assistant',
         writeIntent: 'automatic',
+        expectedPrincipalId,
       })
     }
+    executionGate.assert(execution)
     await refreshMemoryCandidates()
     void refreshStatus()
   } catch (e) {
@@ -928,8 +1071,19 @@ async function rememberExchange(pid: string, userText: string, assistantId: stri
  * ------------------------------------------------- */
 async function send(automaticVoice = false) {
   const pid = activeProjectId.value
-  const text = input.value.trim()
-  if (!text || conversationBusy.value) return
+  const externalFallbackAllowed = allowChatExternalFallback.value
+  const rawText = input.value.trim()
+  if (!rawText || conversationBusy.value) return
+  const planningCommand = planningCommandObjective(rawText)
+  const text = planningCommand === null ? rawText : planningDiscussionMessage(planningCommand)
+  // Bind the turn before the first await. A project/account switch while the
+  // previous turn stops must not combine old input with a new project context.
+  const abort = new AbortController()
+  const turnExecution = executionGate.capture(abort.signal)
+  const prj = activeProject.value
+    ? (JSON.parse(JSON.stringify(activeProject.value)) as typeof activeProject.value)
+    : null
+  const workspace = activeWorkspace.value ? { ...activeWorkspace.value } : null
   const taskType = inferTaskType(text)
   // Capture + reset how this turn was produced (spoken vs typed).
   const inputSource = consumeInputSource()
@@ -937,13 +1091,13 @@ async function send(automaticVoice = false) {
 
   void playSfx('submit')
   await stopGenerating()
+  if (turnExecution.signal.aborted) return
   const turnSpeechGeneration = speechGeneration
 
   // user message (tag spoken input for the "Gesprochen" badge)
   const userMsg = mutations.makeMsg('user', text, pid)
   userMsg.meta = { ...(userMsg.meta ?? {}), inputSource }
   mutations.addMessage(userMsg)
-  await forceScroll('auto')
   input.value = ''
   void nextTick(() => autoGrow())
   sending.value = true
@@ -956,18 +1110,15 @@ async function send(automaticVoice = false) {
   mutations.addMessage(assistant)
   chatActivities.value[assistant.id] = createChatActivity(assistant.ts)
   activeTurn.value = { projectId: pid, messageId: assistant.id }
-  await forceScroll('auto')
-
-  await nextTick()
-  startAssistantLoading(pid, assistant.id)
-
-  const abort = new AbortController()
   abortController.value = abort
   cancelCurrent = async () => abort.abort()
 
   try {
+    await forceScroll('auto')
+    await nextTick()
+    executionGate.assert(turnExecution)
+    startAssistantLoading(pid, assistant.id)
     // Build the wire history: system preamble + visible user/assistant text.
-    const prj = activeProject.value
     const fullHistory: WireMessage[] = mutations
       .getProjectMessages(pid)
       .filter(m => m.id !== assistant.id)
@@ -1001,14 +1152,17 @@ async function send(automaticVoice = false) {
     }
 
     // Keep the active plan in front of the model across turns.
-    const planContext = buildPlanContext(pid)
+    const detailedPlan = planningHub.get(pid)
+    const planContext = detailedPlan?.plan
+      ? JSON.stringify({ revision: detailedPlan.revision, status: detailedPlan.status, plan: detailedPlan.plan })
+      : buildPlanContext(pid)
     if (planContext) {
       contextFragments.push({
         id: 'active-plan',
         source: 'project',
         trust: 'untrusted_data',
         scope: 'project',
-        egress: 'allowed',
+        egress: detailedPlan?.plan ? 'local_only' : 'allowed',
         priority: 80,
         content: planContext,
       })
@@ -1022,11 +1176,11 @@ async function send(automaticVoice = false) {
       if (prj) {
         const startContext = await buildProjectStartContext({
           project: prj,
-          workspace: activeWorkspace.value,
+          workspace,
           includeMemory: memoryPrefs.inject,
           memoryLimit: memoryPrefs.injectCount,
         })
-        contextFragments.push(...startContext.fragments)
+        contextFragments.push(...startContext.sourceFragments)
       }
     } catch (error) {
       console.warn('[prompt] start context skipped:', error)
@@ -1036,24 +1190,14 @@ async function send(automaticVoice = false) {
     // only after a fresh per-turn approval when the local policy requires it.
     try {
       if (memoryPrefs.inject) {
-        // Context Controller (server) ranks + budgets memory; local fallback.
-        promptContext = await buildPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType)
-        if (promptContext.repositoryApprovalRequired) {
-          const approved = window.confirm(
-            'Für diese Codefrage wurden passende lokale Repository-Treffer gefunden.\n\n' +
-              'Dürfen ausschließlich die ausgewählten, begrenzten und redigierten Ausschnitte für diese eine Modellanfrage verwendet werden?'
-          )
-          if (approved) {
-            promptContext = await buildPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType, true)
-          }
-        }
+        promptContext = await buildLocalPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType)
         if (promptContext.text) {
           contextFragments.push({
             id: 'query-context',
             source: 'repository',
             trust: 'untrusted_data',
             scope: 'project',
-            egress: 'allowed',
+            egress: 'local_only',
             priority: 75,
             content: promptContext.text,
           })
@@ -1063,25 +1207,62 @@ async function send(automaticVoice = false) {
       console.warn('[memory] context injection skipped:', e)
     }
 
-    const assembledContext = assemblePromptContext(contextFragments, {
-      maxChars: 9_000,
-      maxEstimatedTokens: 2_250,
-      maxFragments: 20,
-      maxFragmentChars: 1_800,
+    const accountScope = await getVerifiedAccountSnapshot()
+    executionGate.assert(turnExecution)
+    const scopeKey: ContextScopeKey = {
+      principalId: accountScope?.principalId ?? (await resolveWorkspacePrincipalId()),
+      serverInstance: accountScope?.serverInstance ?? 'device-local',
+      projectId: pid,
+      workspaceBindingId: String(workspace?.updatedAt ?? ''),
+      sessionId: assistant.id,
+      taskType,
+    }
+    if (workspace?.rootPath)
+      contextFragments.push({
+        id: 'local-workspace-path',
+        source: 'project',
+        trust: 'policy',
+        scope: 'workspace',
+        egress: 'local_only',
+        priority: 100,
+        content: `Lokaler Projektordner: ${workspace.rootPath}`,
+      })
+    const packages = await buildTargetContextPackages({
+      scopeKey,
+      fragments: contextFragments.map(fragment => ({
+        ...fragment,
+        scope: scopeKey,
+        lifecycle: 'active',
+        sensitivity: 'normal',
+        audiences: ['local_model', 'external_provider'],
+        contentHash: '',
+      })),
+      budget: { maxChars: 9_000, maxFragments: 20, maxFragmentChars: 1_800 },
     })
     const baseMessages: WireMessage[] = [
       {
         role: 'system',
         content: composeProviderSystemPrompt(
           buildSystemPreamble(mode.value, prj?.name ?? pid, appearance.assistantName),
-          assembledContext.providerText
+          packages.local.text
         ),
       },
-      ...history,
+      ...sanitizeInferenceMessagesForTarget(history, 'local_llama_cpp'),
+    ]
+    const externalBaseMessages: WireMessage[] = [
+      {
+        role: 'system',
+        content: composeProviderSystemPrompt(
+          buildSystemPreamble(mode.value, prj?.name ?? pid, appearance.assistantName),
+          packages.external.text
+        ),
+      },
+      ...sanitizeInferenceMessagesForTarget(history, 'laravel_proxy'),
     ]
 
     let streamStarted = false
 
+    executionGate.assert(turnExecution)
     if (abort.signal.aborted) throw new DOMException('Aborted', 'AbortError')
     void playSfx('loading')
     const {
@@ -1100,16 +1281,21 @@ async function send(automaticVoice = false) {
       baseMessages,
       // This list is assembled exclusively through the existing provider-safe
       // prompt path. Local-only broker fragments are never reused here.
-      externalBaseMessages: baseMessages,
-      contextEgress: 'external_allowed',
-      routingSettings: { experimentalFlashNext },
-      requestExternalApproval: ({ packetHash, destination, messageCount, characterCount }) =>
-        window.confirm(
-          'Das lokale Modell ist für diese Anfrage nicht verfügbar.\n\n' +
-            `Dürfen ${messageCount} begrenzte Nachrichten (${characterCount} Zeichen) einmalig an das externe Modell gesendet werden?\n` +
-            `Ziel: ${destination}\n` +
-            'Tools und Folgerunden sind in dieser Freigabe gesperrt.\n' +
-            `Paket: ${packetHash.slice(0, 16)}…`
+      externalBaseMessages,
+      contextEgress: externalFallbackAllowed ? 'external_allowed' : 'local_only',
+      routingSettings: {
+        preference: externalFallbackAllowed ? 'ask_external' : 'local_only',
+        experimentalFlashNext,
+      },
+      requestExternalApproval: ({ packetHash, destination, messages: outgoing }) =>
+        requestPayloadApproval(
+          {
+            title: 'Externes Modell: Nachrichten einmal freigeben',
+            destination,
+            hash: packetHash,
+            content: JSON.stringify(outgoing, null, 2),
+          },
+          turnExecution.signal
         ),
       mode: mode.value,
       getMode: () => mode.value,
@@ -1120,14 +1306,16 @@ async function send(automaticVoice = false) {
       branch: promptContext.branch,
       commitSha: promptContext.commitSha,
       inputSource,
-      signal: abort.signal,
+      signal: turnExecution.signal,
 
       onProgress: event => {
+        if (turnExecution.signal.aborted) return
         const activity = chatActivities.value[assistant.id]
         if (activity) updateChatActivity(activity, event)
       },
       // Render only content released by the existing final-answer guard.
       onToken: raw => {
+        if (turnExecution.signal.aborted) return
         if (!streamStarted) {
           streamStarted = true
           stopAssistantLoading()
@@ -1135,7 +1323,7 @@ async function send(automaticVoice = false) {
             stopSfx('loading')
           } catch {}
         }
-        if (!abort.signal.aborted) applyStreamedContent(pid, assistant.id, raw, false)
+        applyStreamedContent(pid, assistant.id, raw, false)
       },
     })
 
@@ -1144,7 +1332,8 @@ async function send(automaticVoice = false) {
     } catch {}
     stopAssistantLoading()
 
-    if (abort.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    if (turnExecution.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    executionGate.assert(turnExecution)
     applyStreamedContent(pid, assistant.id, finalText, true)
     finishChatActivity(chatActivities.value[assistant.id]!, 'done')
     // Attach the server-reported routing metadata to the assistant message.
@@ -1178,7 +1367,7 @@ async function send(automaticVoice = false) {
 
     setStatus('idle')
     if (turnSpeechGeneration === speechGeneration) void autoSpeakAssistantIfEnabled(pid, assistant.id)
-    if (!ephemeralDataUsed) void rememberExchange(pid, text, assistant.id)
+    if (!ephemeralDataUsed) void rememberExchange(pid, text, assistant.id, scopeKey.principalId, turnExecution)
   } catch (e: any) {
     try {
       stopSfx('loading')
@@ -1188,7 +1377,7 @@ async function send(automaticVoice = false) {
     const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
     const currentContent = safeTrim(current?.content)
 
-    if (e?.name === 'AbortError') {
+    if (e?.name === 'AbortError' || turnExecution.signal.aborted) {
       finishChatActivity(chatActivities.value[assistant.id]!, 'canceled')
       setStatus('idle')
       mutations.patchMessage(pid, assistant.id, {
@@ -1230,7 +1419,7 @@ const miniChat = useMiniChatHost({
   context: () => ({
     project: activeProject.value ? { id: activeProject.value.id, name: activeProject.value.name } : null,
     mode: mode.value,
-    mainBusy: sending.value,
+    mainBusy: sending.value || showPlanning.value || planningBusy.value,
   }),
   setMode: next => {
     mode.value = next
@@ -1265,12 +1454,24 @@ const miniChat = useMiniChatHost({
   },
 })
 // Voice and both composers must share admission and mute state, including hotkeys.
-const conversationBusy = computed(() => sending.value || miniChat.state.busy)
+const conversationBusy = computed(
+  () => sending.value || miniChat.state.busy || showPlanning.value || planningBusy.value
+)
 watch(conversationBusy, busy => voiceInputSession.setMuted(busy || voiceMuteDepth > 0), { flush: 'sync' })
 const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
 </script>
 
 <template>
+  <PayloadApproval />
+  <PlanningWorkspace
+    :open="showPlanning"
+    :project-id="activeProjectId"
+    :initial-objective="planningObjective"
+    :mode="mode"
+    :kill-switch="hud.killSwitch"
+    :busy="sending || miniChat.state.busy"
+    @update:open="showPlanning = $event"
+  />
   <AgentHub
     :open="showAgentHub"
     :project-id="activeProjectId"
@@ -1309,6 +1510,7 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
       @settings="openSettings()"
       @system="showSystemPanel = !showSystemPanel"
       @agents="showAgentHub = true"
+      @planning="openPlanning()"
     />
 
     <main class="main-col">
@@ -1327,11 +1529,13 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
           :class="`is-${mode}`"
           :title="modeTitle"
           :aria-label="modeTitle"
+          :disabled="modeConfirmationPending"
           @click="toggleMode"
         >
           <span class="mode-toggle__dot" />
           {{ modeLabel }}
         </button>
+        <p v-if="modeConfirmationError" class="repo-graph-message" role="alert">{{ modeConfirmationError }}</p>
 
         <button
           type="button"
@@ -1591,7 +1795,23 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
 
       <!-- Shared chat surface: real messages, safe progress events and real tool states. -->
       <ChatComposer scroll-id="messages" :follow="hasConversation">
-        <PlanPanel :project-id="activeProjectId" :collapsed="planCollapsed" @toggle="planCollapsed = !planCollapsed" />
+        <section v-if="activePlanningSession" class="planning-status" aria-label="Aktueller Planungsstand">
+          <div aria-live="polite">
+            <strong>{{ planningStatusLabel }}</strong>
+            <span v-if="activePlanningSession.plan"
+              >{{ activePlanningSession.plan.steps.length }} Schritte · Revision
+              {{ activePlanningSession.revision }}</span
+            >
+          </div>
+          <button type="button" @click="openPlanning()">Planungsfenster öffnen</button>
+          <button v-if="planningBusy" type="button" @click="planningHub.cancel(activeProjectId)">Abbrechen</button>
+        </section>
+        <PlanPanel
+          :project-id="activeProjectId"
+          :collapsed="planCollapsed"
+          @toggle="planCollapsed = !planCollapsed"
+          @planning="planFromChecklist"
+        />
         <div v-if="!hasConversation" class="ai-welcome">
           <span class="ai-welcome__mark"><AiIcon :size="32" /></span>
           <span class="ai-eyebrow">DEIN PERSÖNLICHER WORKSPACE</span>
@@ -1602,7 +1822,8 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
           </p>
           <div class="ai-starters">
             <button type="button" @click="handlePromptCommand('plan')">
-              <AiIcon name="check" /><span>Eine Aufgabe planen<small>Schritt für Schritt zum Ergebnis</small></span
+              <AiIcon name="check" /><span
+                >Gemeinsam planen<small>Ziele, Fragen und Schritte im Chat besprechen</small></span
               ><AiIcon name="arrow" /></button
             ><button
               type="button"
@@ -1740,6 +1961,10 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
       </div>
 
       <div class="ai-main-composer">
+        <label class="chat-routing-choice">
+          <input v-model="allowChatExternalFallback" type="checkbox" :disabled="conversationBusy" />
+          Externen Fallback nach Freigabe erlauben
+        </label>
         <PromptBar
           ref="promptBar"
           v-model="input"
@@ -1747,12 +1972,18 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
           :recording="isRecording"
           :listening="listening"
           :voice-busy="voiceInputView.starting || voiceInputView.finishing"
-          :model-label="'Automatische Modellwahl'"
+          :model-label="allowChatExternalFallback ? 'Lokal · Fallback nach Freigabe' : 'Lokales Modell'"
           :context-label="activeWorkspace?.displayName || activeProject?.name"
           :commands="promptCommands"
           @input="setComposerInput(input, 'keyboard')"
           @send="send"
-          @stop="miniChat.state.busy ? miniChat.stop() : stopGenerating()"
+          @stop="
+            planningBusy
+              ? planningHub.cancel(activeProjectId)
+              : miniChat.state.busy
+                ? miniChat.stop()
+                : stopGenerating()
+          "
           @record="togglePushToTalk"
           @listen="toggleListening"
           @model="openSettings()"
@@ -1790,3 +2021,47 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
 
 <style scoped src="./styles/app-shell.css"></style>
 <style scoped src="./styles/ai-workspace.css"></style>
+<style scoped>
+.chat-routing-choice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px 8px;
+  font-size: 12px;
+  color: var(--text-muted, #a5adbc);
+}
+.chat-routing-choice input {
+  accent-color: var(--accent, #81c7f5);
+}
+.planning-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  width: 100%;
+  max-width: 780px;
+  margin: 0 auto 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--surface-1);
+}
+.planning-status > div {
+  flex: 1 1 240px;
+  display: grid;
+  gap: 4px;
+}
+.planning-status span {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.planning-status button {
+  padding: 8px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+</style>
