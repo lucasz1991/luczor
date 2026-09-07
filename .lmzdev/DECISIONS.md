@@ -57,3 +57,29 @@ Record durable decisions with date, context, decision, and consequences.
 - Context: Der vollstaendige Orca-Smoke benoetigt Laravel, Tauri, eine signierte Modellrichtlinie und einen kurzlebigen Device-Key, darf aber weder Produktionsdaten noch Provider-/Voice-Secrets verwenden.
 - Decision: Der Launcher validiert feste Hashes und Groessen, verwendet eine externe SQLite-/Storage-Instanz und eine dedizierte externe RSA-Testsignierung, schreibt in `.env.local-model` ausschliesslich den oeffentlichen Trust Anchor und aktiviert im Testkatalog nur Orca; Flash sowie externe Ausfuehrung bleiben deaktiviert.
 - Consequence: Der Test ist reproduzierbar und fail closed. Token und eigene Prozesse werden im `finally` entfernt beziehungsweise beendet; der persistierte Report enthaelt keinen Klartext-Token.
+
+
+## 2026-09-06T20:43:03Z | Öffentliche Kommentare und geordnete Sprachausgabe
+- Abgeschlossene Modellrunden speichern eigene öffentliche Kommentare am Beitrag; laufender Slot bleibt nur für die aktuelle Runde. Gespeicherte laufende Phasen werden beim Laden abgebrochen, Text bleibt erhalten.
+- Status/Kommentare/Antwort teilen sich eine abbrechbare Vorlesewarteschlange mit erneuter Einstellungs-, Sitzungs- und Serverfreigabeprüfung. Private Reasoning-Inhalte werden nicht ausgegeben.
+- Projektbereiche sind absolut positionierte, unabhängig bedienbare Disclosures. Separater Debugbuild erhält die laufende Release-Sitzung.
+
+## 2026-09-07 | Mini nutzt Projektchat oder lokalen Workspace
+- Entscheidung: Die vorhandene Hauptlaufzeit bleibt Eigentuemerin beider Mini-Ansichten. Projektchat ist derselbe persistierte Verlauf; Workspace bleibt eine fluechtige, ausschliesslich lokal verarbeitete Verwaltungsunterhaltung.
+- Der aktuelle Desktop hat einen Chat je Projekt. Ein neues, paralleles Chatschema wird nicht eingefuehrt. Workspace leeren loescht keine Projektnachrichten; Auswahl und Entwuerfe sind eindeutig dem Kontext zugeordnet.
+- Uebergreifende Werkzeuge erhalten eine vom Host fixierte Konto-/Projektliste und pruefen diese samt Ausfuehrungsticket vor und nach asynchroner Arbeit. Datei-/Desktopaktionen behalten das ausgewahlte Arbeitsprojekt. Codeauftraege werden nur fuer die bestehende manuelle Agentenfreigabe vorbereitet.
+- Darstellung: native Mini-Webview und Browser-Overlay verwenden dieselben Theme-Aliase und Chatkomponenten wie das Hauptfenster. Bei offenen Entscheidungen haben erreichbare Freigabe, Composer und Not-Aus Vorrang vor gesperrten Shortcuts.
+- Buildkoordination: gemeinsamer regulaerer Release ohne Bundle im freien Zielpfad, da die laufende Debug-App ihre EXE belegt. Kein Start, Installer oder Austausch der laufenden Nutzersitzung.
+
+- 2026-09-07: Öffentliche lokale Sprachausgabe nutzt separate zielgebundene Zustimmung. V2-Stimmen kommen aus dem freigegebenen Serverkatalog; WAV je Satz bei Servertempo 1 und Client-Wiedergabetempo. Piper bleibt Standard; fehlende Stimme ohne stillen Ersatz. Wortposition ausdrücklich näherungsweise. Bestehende Debug-Sitzung bleibt offen.
+
+## 2026-09-07T00:16:27Z | Explicit specialist selection
+- Ordinary chat remains local first. External delegation is an explicit intent restricted to server-managed agent.planning/research/coding/review task types; preferring an external model never grants data egress or bypasses a signed denial. The approved external gateway remains one-shot and bound to the exact request and selected role.
+
+## 2026-09-07 | Hintergrundbereitschaft und Kontextcache
+- Nur signierter local_only-Coordinatorpfad bereitet Modelle vor; vorhandene exklusive Nativeprepwarteschlange bleibt massgeblich. Gueltige Readiness vermeidet erneute Prepareaufrufe; abgelaufene signierte Policy wird vor Nativearbeit erneuert. Kein Gateway-/Approvalcache.
+- Nur Quellfragmente fuer Projektkontext werden45Sekunden/max4Eintraege in-memory gecacht und pro Turn neu gebunden. Memory-Storeaenderungen invalidieren; bei fehlendem Memorylistener bleibt Memorycache aus. Session/Account/Projekt/Workspace/Policy-/Settingswechsel verwerfen alte Ergebnisse. Nachrichtentimestamps allein sind keine Quellrevision.
+
+
+## 2026-09-07T00:25:39Z | Process ownership versus request context
+- Native process scope binds verified principal, device, server instance, project, repository and native manifest acceptance session. Per-turn context IDs and task types stay request metadata, never process ownership keys. Real inference must disable prompt caching and send the complete request context; account/project/repository/session changes retain process isolation.

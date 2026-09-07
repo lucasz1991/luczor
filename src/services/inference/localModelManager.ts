@@ -339,9 +339,14 @@ export class LocalModelManager {
         throw abortError()
       }
 
-      // Oversized input is not model-health evidence. Native code retains the
-      // resident process, so the next shorter request must remain admissible.
-      if (error instanceof LocalInferenceError && error.code === 'runtime_context_exceeded') {
+      // Input/template role rejection is not model-health evidence. Native code
+      // retains the resident process, so the next valid request stays admissible.
+      if (
+        error instanceof LocalInferenceError &&
+        ['runtime_context_exceeded', 'runtime_chat_history_rejected', 'runtime_tool_contract_rejected'].includes(
+          error.code
+        )
+      ) {
         if (operationEpoch === this.boundaryEpoch) {
           this.health.set(release.id, { ...previous, state: 'ready', updatedAt: nowIso(this.now) })
         }

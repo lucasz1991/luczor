@@ -2,6 +2,7 @@ import type { AppState } from '@/state/types'
 import { Store } from '@tauri-apps/plugin-store'
 import { DEFAULT_STATE } from '@/state/defaults'
 import { getTool } from '@/services/tools/registry'
+import { finishChatActivity } from '@/services/chatActivity'
 
 const STORE_FILE = 'luczor.app.json'
 const KEY = 'app_state_v1'
@@ -57,6 +58,14 @@ export async function loadAppState(): Promise<AppState> {
     const loaded = await s.get<AppState>(KEY)
     if (loaded && typeof loaded === 'object') {
       const safe = stateForPersistence(loaded)
+      // A restored transcript cannot resume a process from the previous app
+      // session. Retain partial public text/comments, but settle its spinner.
+      for (const message of safe.messages ?? []) {
+        if (message.meta?.activity?.status === 'running') {
+          finishChatActivity(message.meta.activity, 'canceled')
+          message.meta.isLoading = false
+        }
+      }
       if (JSON.stringify(safe) !== JSON.stringify(loaded)) {
         // Remove historical raw arguments from the stored snapshot as well;
         // a failed cleanup write must not restore raw data into the UI.

@@ -1,5 +1,10 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, shallowRef } from 'vue'
+import ExecutionSettingsSection from '@/components/settings/ExecutionSettingsSection.vue'
+import AgentTeamResults from '@/components/ai/AgentTeamResults.vue'
+import '@/components/settings/settings.css'
+const backgroundModel = ref(true)
+const backgroundContext = ref(true)
 import {
   AgentTeamOrchestrator,
   createStandardAgentTeamDefinition,
@@ -95,7 +100,52 @@ function prepare() {
     events.value = []
     maxObserved.value = 0
     const adapter = scenario.value === 'local-queue' ? 'local' : 'codex'
-    const definition = createStandardAgentTeamDefinition({ planner: adapter, implementer: adapter, reviewer: adapter })
+    const definition =
+      scenario.value === 'hybrid'
+        ? {
+            id: 'hybrid-fixture',
+            label: 'Lokale Steuerung + externe Spezialisten (Simulation)',
+            maxParallel: 2,
+            nodes: [
+              {
+                id: 'planner',
+                label: 'Lokale Steuerung',
+                role: 'planner' as const,
+                adapterId: 'chat' as const,
+                permission: 'read-only' as const,
+                dependencies: [],
+                prompt: 'Plane den Test.',
+              },
+              {
+                id: 'research',
+                label: 'Recherchemodell (Simulation)',
+                role: 'assistant' as const,
+                adapterId: 'external_chat' as const,
+                permission: 'read-only' as const,
+                dependencies: ['planner'],
+                prompt: 'Analysiere Optionen.',
+              },
+              {
+                id: 'coding',
+                label: 'Codingmodell (Simulation)',
+                role: 'implementer' as const,
+                adapterId: 'external_chat' as const,
+                permission: 'read-only' as const,
+                dependencies: ['planner'],
+                prompt: 'Entwirf eine Lösung.',
+              },
+              {
+                id: 'reviewer',
+                label: 'Lokale Überprüfung',
+                role: 'reviewer' as const,
+                adapterId: 'chat' as const,
+                permission: 'read-only' as const,
+                dependencies: ['research', 'coding'],
+                prompt: 'Prüfe die Vorschläge.',
+              },
+            ],
+          }
+        : createStandardAgentTeamDefinition({ planner: adapter, implementer: adapter, reviewer: adapter })
     run.value = engine.prepare(definition, {
       project: {
         principalId: 'simulation',
@@ -157,6 +207,7 @@ onBeforeUnmount(() => {
           <option value="success">Erfolg · zwei Arbeitsstränge</option>
           <option value="review-fail">Fehler im Review</option>
           <option value="local-queue">Lokales Modell · eine Ressource</option>
+          <option value="hybrid">Lokale Steuerung · externe Spezialisten</option>
         </select></label
       >
       <label
@@ -168,6 +219,27 @@ onBeforeUnmount(() => {
       <button class="primary" :disabled="!terminal || !objective.trim()" @click="prepare">Testlauf vorbereiten</button>
     </section>
     <p v-if="error" class="error" role="alert">{{ error }}</p>
+    <details class="preparation-preview">
+      <summary>Neue Bereitschaftseinstellungen und Agentenbeiträge prüfen</summary>
+      <ExecutionSettingsSection
+        :auto-execute-mutating-tools="false"
+        :background-model-preparation="backgroundModel"
+        :background-context-preparation="backgroundContext"
+        @update:background-model-preparation="backgroundModel = $event"
+        @update:background-context-preparation="backgroundContext = $event"
+      />
+      <AgentTeamResults
+        :outcomes="[
+          {
+            role: 'coding',
+            model: 'Simuliertes Codingmodell',
+            output: 'Dieser Beitrag ist eine UI-Simulation; es wurde kein Modell aufgerufen.',
+            durationMs: 1500,
+            tokenUsage: { inputTokens: 100, outputTokens: 30, totalTokens: 130, rounds: 1, source: 'estimated' },
+          },
+        ]"
+      />
+    </details>
     <section v-if="run" class="run" aria-label="Teamlauf">
       <div class="run-heading">
         <div>

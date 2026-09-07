@@ -1,5 +1,5 @@
 import type { ChatActivity } from '@/services/chatActivity'
-import type { ToolCallStatus } from '@/state/types'
+import type { ChatCommentary, ToolCallStatus } from '@/state/types'
 import type { LuczorMode } from '@/services/inference/types'
 import type { TokenUsage } from '@/services/tokenUsage'
 
@@ -12,8 +12,13 @@ export type MiniMessage = {
   createdAt: number
   status: 'running' | 'done' | 'failed' | 'canceled'
   activity?: ChatActivity
+  commentary?: ChatCommentary[]
   tokenUsage?: TokenUsage
+  contextLabel?: string
 }
+export type MiniView = 'chat' | 'workspace'
+export type MiniPanel = 'agents' | 'project_folder' | 'desktop' | 'planning'
+export type MiniProject = { id: string; name: string; messageCount: number; updatedAt: number }
 export type MiniTool = { id: string; name: string; detail: string; status: ToolCallStatus }
 export type MiniDecision = {
   id: string
@@ -23,6 +28,9 @@ export type MiniDecision = {
   detail: string
 }
 export type MiniSnapshot = {
+  view: MiniView
+  projects: MiniProject[]
+  appearance?: { accent: string; assistantName: string }
   sessionId: string
   revision: number
   project: { id: string; name: string } | null
@@ -38,6 +46,9 @@ export type MiniSnapshot = {
 }
 export type MiniAction =
   | { type: 'ready' }
+  | { type: 'view'; sessionId: string; view: MiniView }
+  | { type: 'select_project'; sessionId: string; projectId: string }
+  | { type: 'workspace_open'; sessionId: string; panel: MiniPanel }
   | { type: 'send'; sessionId: string; text: string }
   | { type: 'stop'; sessionId: string }
   | { type: 'reset'; sessionId: string }
@@ -49,6 +60,8 @@ export type MiniAction =
 export const MINI_ACTION_EVENT = 'luczor://mini-action'
 export const MINI_STATE_EVENT = 'luczor://mini-state'
 export const emptyMiniSnapshot = (): MiniSnapshot => ({
+  view: 'workspace',
+  projects: [],
   sessionId: '',
   revision: 0,
   project: null,

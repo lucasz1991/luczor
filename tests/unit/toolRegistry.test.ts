@@ -121,9 +121,16 @@ const TOOL_CONTRACT = [
   { name: 'plan_update', category: 'app', mutating: false, requiresApproval: false },
   { name: 'plan_get', category: 'app', mutating: false, requiresApproval: false },
   { name: 'memory_recall', category: 'project', mutating: false, requiresApproval: false },
+  { name: 'workspace_overview', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'workspace_project_update', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'workspace_chat_read', category: 'app', mutating: false, requiresApproval: true },
+  { name: 'workspace_agent_prepare', category: 'app', mutating: true, requiresApproval: false },
+  { name: 'workspace_agent_status', category: 'app', mutating: false, requiresApproval: true },
+  { name: 'workspace_agent_cancel', category: 'app', mutating: true, requiresApproval: false },
 ] as const
 
-const TOOL_SCHEMA_SHA256 = '326c047eaf100b6b30b6860048dcf56f7142b28f338518dc2a9ffda71423d77f'
+const TOOL_SCHEMA_SHA256 = '51928fc898b0bf1a61a7c7919baef2eb0c7d48eef42e396bd42124fed4e58e3a'
+const CORE_TOOL_SCHEMA_SHA256 = '326c047eaf100b6b30b6860048dcf56f7142b28f338518dc2a9ffda71423d77f'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {
@@ -192,6 +199,43 @@ describe('tool registry contract', () => {
     for (const tool of toOpenAITools()) {
       const parameters = tool.function.parameters as { properties?: Record<string, unknown> }
       expect(Object.keys(parameters.properties ?? {})).not.toHaveLength(0)
+    }
+  })
+
+  it('keeps the original project/desktop tools unchanged while adding six guarded workspace tools', () => {
+    const coreTools = toOpenAITools().filter(tool => !getTool(tool.function.name)?.workspaceOnly)
+    expect(createHash('sha256').update(JSON.stringify(coreTools)).digest('hex')).toBe(CORE_TOOL_SCHEMA_SHA256)
+    const workspaceTools = listTools().filter(tool => tool.workspaceOnly)
+    expect(workspaceTools.map(tool => tool.name)).toEqual([
+      'workspace_overview',
+      'workspace_project_update',
+      'workspace_chat_read',
+      'workspace_agent_prepare',
+      'workspace_agent_status',
+      'workspace_agent_cancel',
+    ])
+    for (const tool of workspaceTools) {
+      expect(tool).toMatchObject({ workspaceOnly: true, dataHandling: 'ephemeral', scope: 'app' })
+      const schema = tool.parameters as { properties: Record<string, unknown>; required: string[] }
+      expect(schema.properties).not.toHaveProperty('workspaceScope')
+      expect(schema.properties).not.toHaveProperty('principalId')
+    }
+    for (const tool of workspaceTools.filter(tool => tool.name !== 'workspace_overview'))
+      expect(tool.parameters.required).toContain('project_id')
+    for (const suffix of ['prepare', 'status', 'cancel']) {
+      const source = getTool(`agent_job_${suffix}`)!
+      const scoped = getTool(`workspace_agent_${suffix}`)!
+      expect(scoped).toMatchObject({
+        mutating: source.mutating,
+        requiresApproval: source.requiresApproval,
+        risk: source.risk,
+        effects: source.effects,
+      })
+      expect(scoped.parameters).toMatchObject({
+        additionalProperties: false,
+        properties: source.parameters.properties,
+        required: [...(source.parameters.required as string[]), 'project_id'],
+      })
     }
   })
 

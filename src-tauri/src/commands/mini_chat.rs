@@ -36,6 +36,22 @@ pub enum MiniAction {
     Mode {
         mode: MiniMode,
     },
+    View {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        view: MiniView,
+    },
+    SelectProject {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "projectId")]
+        project_id: String,
+    },
+    WorkspaceOpen {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        panel: MiniWorkspacePanel,
+    },
     MainDecide {
         id: String,
         approved: bool,
@@ -49,6 +65,22 @@ pub enum MiniAction {
 pub enum MiniMode {
     Observe,
     Act,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MiniView {
+    Chat,
+    Workspace,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MiniWorkspacePanel {
+    Agents,
+    ProjectFolder,
+    Desktop,
+    Planning,
 }
 
 #[derive(Deserialize)]
@@ -73,10 +105,30 @@ fn validate_action(action: &MiniAction) -> Result<(), String> {
     if encoded.len() > 50_000 {
         return Err("Mini chat action is too large.".into());
     }
+    match action {
+        MiniAction::Send { session_id, .. }
+        | MiniAction::Stop { session_id }
+        | MiniAction::Reset { session_id }
+        | MiniAction::Decide { session_id, .. }
+        | MiniAction::View { session_id, .. }
+        | MiniAction::SelectProject { session_id, .. }
+        | MiniAction::WorkspaceOpen { session_id, .. } => validate_identifier(session_id)?,
+        _ => {}
+    }
+    if let MiniAction::SelectProject { project_id, .. } = action {
+        validate_identifier(project_id)?;
+    }
     if let MiniAction::Send { text, .. } = action {
         if text.trim().is_empty() || text.chars().count() > 12_000 {
             return Err("Die Nachricht muss zwischen 1 und 12000 Zeichen enthalten.".into());
         }
+    }
+    Ok(())
+}
+
+fn validate_identifier(value: &str) -> Result<(), String> {
+    if value.trim().is_empty() || value.chars().count() > 200 {
+        return Err("Invalid mini chat identifier.".into());
     }
     Ok(())
 }
@@ -312,6 +364,71 @@ mod tests {
             text: "x".repeat(12001)
         })
         .is_err());
+    }
+    #[test]
+    fn accepts_workspace_actions_and_preserves_the_wire_format() {
+        for payload in [
+            serde_json::json!({"type": "view", "sessionId": "session", "view": "chat"}),
+            serde_json::json!({"type": "view", "sessionId": "session", "view": "workspace"}),
+            serde_json::json!({"type": "select_project", "sessionId": "session", "projectId": "project"}),
+            serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "agents"}),
+            serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "project_folder"}),
+            serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "desktop"}),
+            serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "planning"}),
+        ] {
+            let action = serde_json::from_value::<MiniAction>(payload.clone()).unwrap();
+            assert!(validate_action(&action).is_ok());
+            assert_eq!(serde_json::to_value(action).unwrap(), payload);
+        }
+    }
+    #[test]
+    fn rejects_unknown_workspace_values_and_extra_fields() {
+        for payload in [
+            serde_json::json!({"type": "view", "sessionId": "session", "view": "unrestricted"}),
+            serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "shell"}),
+            serde_json::json!({"type": "view", "sessionId": "session", "view": "chat", "command": "whoami"}),
+            serde_json::json!({"type": "select_project", "sessionId": "session", "projectId": "project", "path": "C:/"}),
+            serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "desktop", "approved": true}),
+        ] {
+            assert!(serde_json::from_value::<MiniAction>(payload).is_err());
+        }
+    }
+    #[test]
+    fn rejects_empty_and_oversized_identifiers_for_all_session_actions() {
+        for session_id in [String::new(), " ".into(), "x".repeat(201)] {
+            for payload in [
+                serde_json::json!({"type": "send", "sessionId": session_id, "text": "Hello"}),
+                serde_json::json!({"type": "stop", "sessionId": session_id}),
+                serde_json::json!({"type": "reset", "sessionId": session_id}),
+                serde_json::json!({"type": "decide", "sessionId": session_id, "id": "decision", "approved": false}),
+                serde_json::json!({"type": "view", "sessionId": session_id, "view": "chat"}),
+                serde_json::json!({"type": "select_project", "sessionId": session_id, "projectId": "project"}),
+                serde_json::json!({"type": "workspace_open", "sessionId": session_id, "panel": "agents"}),
+            ] {
+                let action = serde_json::from_value::<MiniAction>(payload).unwrap();
+                assert!(validate_action(&action).is_err());
+            }
+        }
+        for project_id in [String::new(), " ".into(), "x".repeat(201)] {
+            assert!(validate_action(&MiniAction::SelectProject {
+                session_id: "session".into(),
+                project_id,
+            })
+            .is_err());
+        }
+        assert!(validate_action(&MiniAction::SelectProject {
+            session_id: "s".repeat(200),
+            project_id: "ä".repeat(200),
+        })
+        .is_ok());
+    }
+    #[test]
+    fn retains_the_serialized_action_size_limit() {
+        let action = MiniAction::Send {
+            session_id: "session".into(),
+            text: "\u{0000}".repeat(10_000),
+        };
+        assert!(validate_action(&action).is_err());
     }
     #[test]
     fn positions_stay_on_work_area_with_negative_monitor_coordinates() {

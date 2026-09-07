@@ -3,6 +3,7 @@ import type { PendingToolCall } from '@/state/types'
 
 /** Numeric transport progress only; no private reasoning, prompts or tool payloads. */
 export type AgentProgress = {
+  agentRole?: 'planner' | 'worker' | 'reviewer'
   phase: 'routing' | 'thinking' | 'receiving' | 'tools'
   round?: number
   characters?: number
@@ -17,16 +18,21 @@ export function createChatActivity(now = Date.now()): ChatActivity {
 }
 export function updateChatActivity(activity: ChatActivity, event: AgentProgress): void {
   if (activity.finishedAt !== undefined) return
-  const id = event.phase === 'routing' ? 'routing' : `round-${event.round ?? 1}`
+  // Each phase keeps its own row; token updates only refresh that phase.
+  const phaseId = event.phase === 'routing' ? 'routing' : `round-${event.round ?? 1}-${event.phase}`
+  const id = event.agentRole ? `${event.agentRole}-${phaseId}` : phaseId
   const current = activity.steps.find(step => step.id === id)
-  const label =
+  const phaseLabel =
     event.phase === 'routing'
       ? 'Modell vorbereiten'
       : event.phase === 'tools'
-        ? 'Tool-Aufrufe verarbeiten'
+        ? 'Werkzeuge ausführen'
         : event.phase === 'receiving'
-          ? 'Antwort empfangen'
-          : 'Anfrage verarbeiten'
+          ? 'Antwort wird geschrieben'
+          : 'Antwort vorbereiten'
+  const agentLabel =
+    event.agentRole === 'planner' ? 'Planungsagent' : event.agentRole === 'worker' ? 'Arbeitsagent' : 'Prüfagent'
+  const label = event.agentRole ? `${agentLabel}: ${phaseLabel}` : phaseLabel
   const detail =
     event.characters === undefined
       ? event.round

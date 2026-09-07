@@ -152,3 +152,99 @@ Append-only communication log. Source and runtime evidence override stale entrie
 ## 2026-09-06T04:23:09Z | Codex/root -> all | handoff
 
 - Message: Projekt-Agentenzentrale und Memory-Transfer integriert; 660 Vitest, 89 Rusttests, Typecheck/Lint/Format/Clippy gruen. Bedienung app/docs/agent-hub.md; ausfuehrlicher Bericht .lmzdev/artifacts/reports/2026-09-06-agent-hub-memory-transfer.md. Desktop saved-project API nicht verifiziert; echte Sitzungen und Projektdir-Uebergabe umgesetzt. Keine Installation/Live-Inferenz/Deployment.
+
+## 2026-09-06T20:17:07Z | Codex -> all | status
+
+- Message: Started: persistent spoken chat commentary, immediate streaming and collapsible absolute project plan
+
+## 2026-09-06T20:18:03Z | Codex/incremental_stream -> all | status
+
+- Message: Started: immediate safe envelope decoding and multi-round public stream callback contract
+
+## 2026-09-06T20:19:17Z | Codex/commentary_speech -> all | status
+
+- Message: Started: ordered cancellable automatic commentary speech with privacy rechecks
+
+## 2026-09-06T20:22:17Z | Codex/root | Handoff an parallele Streaming-/UI-Arbeit
+- Tool-Vertragsfix abgeschlossen: services/inference/toolCallHistory.ts plus agent.ts Import und prepareToolCallHistory vor Assistant-Echo, invalidIds-Guard vor Ausfuehrung unbedingt erhalten. Zugehoerige Tests in toolCallHistory/agentModeAndTools/tauriLocalRuntime/localModelManager; native Pruefung in local_model_messages.rs/local_model.rs.
+- 969 Frontend-/118 Rusttests bestanden vor euren spaeteren UI-Aenderungen. Echte native Toolreparatur mit gleicher Modell-PID bestanden. Neuer Release laeuft PID105316; eigener Debug/Vite/CDP-Testzugang beendet. Eure App.vue-/ThinkingState-/ChatActivity-/Komponenten-Aenderungen nicht veraendert und nicht im Release enthalten.
+- Vollbericht im uebergeordneten .lmzdev/artifacts/reports/2026-09-06-tool-contract-fix.md. Keine offene Ownership dieses Fixes.
+
+
+## 2026-09-06T20:22:45Z | Codex/commentary_speech -> all | handoff
+
+- Message: Added src/services/voice/commentarySpeech.ts with FIFO automatic status/comment/final speech, bounded deduplication, turn cancellation, settings and identity rechecks, and serverSpeechText privacy guard at playback. tests/unit/commentarySpeech.test.ts plus existing messageSpeech: 17 tests passed; scoped ESLint and Prettier passed on pinned Node 22.22.0. Root integrates App.vue and completes build/UI checks. No speech provider/network/server changes.
+
+## 2026-09-06T20:30:39Z | Codex/incremental_stream -> all | handoff
+
+- Message: Completed: envelope.ts now incrementally decodes root summary/content/answer/message, questions and partial bullets, buffers incomplete Unicode escapes and hides protocol/private fields; agent.ts optional onRoundComplete preserves classified public rounds before tools and no empty round reset; StreamingText renders live questions/bullets/open code; useStreamReveal flushes terminal delta without animation. Focused 52 tests plus 3 reveal/component checks passed on pinned Node22.22; owned ESLint clean with pass-on-unpruned-suppressions, Prettier and diff checks pass. Transport read-only review confirms native Channel per SSE content delta, immediate TS forwarding and Laravel per-frame flush. Existing dirty native/tool-history changes preserved. Root owns integrated persistence/speech/browser/full-suite checks. No builds, deployment or real inference run by this subagent.
+
+
+## 2026-09-06T20:43:03Z | Codex/root -> all | completed
+- Chatkommentar-/Vorlese-/Streaming-/Overlay-Arbeit integriert und verifiziert. Vollsuite 1.002 Tests; nach letzter Wiederherstellungsanpassung 62 gezielte Tests. Typecheck/Lint/Format und Browser-Fixtures grün. Debugbuild SHA256 530A8CFDEA87298DADFDB3B7FDCF0510C8C9B44222732D3F9B7329EF86418CFB erstellt, nicht gestartet.
+- Parallele native Toolvertragsänderungen erhalten. Laufende Release-App nicht beendet; keine Serveränderung, kein Commit. Bericht im Root artifacts/reports/2026-09-06-chat-commentary-continuity.md. Alle Subagent-Ownerships zurückgegeben und abgeschlossen.
+
+## 2026-09-06T22:21:06Z | Codex/mini_workspace -> all | status
+
+- Message: Started: unify main and mini design; add chat context and workspace management mode
+
+## 2026-09-06T22:22:22Z | Codex/unify_mini_theme -> all | status
+
+- Message: Started: mini overlay visual parity using shared main-chat tokens; ownership mini-chat.css and StatusOrb.vue
+
+## 2026-09-06T22:26:19Z | Codex/unify_mini_theme -> Codex/root | handoff
+- Changed only src/styles/mini-chat.css and src/components/mini/StatusOrb.vue: main gray surfaces/shared tokens, same purple accent alias, main user bubbles/prompt/approval styles, meaningful orb phase colors preserved; added agreed mode tabs/project selector/workspace action styles.
+- Verified: pinned Node22.22 Prettier check for both files, focused StatusOrb ESLint with pass-on-unpruned-suppressions, git diff --check passed. No full build, browser, native runtime or real inference by this subagent.
+- Next: parent integrates mode behavior, custom theme snapshot sync, browser layout checks and full gates. No shared theme, App, service or native file edits by this subagent.
+
+## 2026-09-06T22:55:17Z | Codex/root | Chat-Agentenmodus + Tool-Limits completed-local
+- Fertig: Agentenschalter im Hauptcomposer startet direkt lokales Planer/Arbeitsagent/Pruefer-Team; Limit-Fortsetzung per Buttons; getrennte Settings-Runden 1-64 (Default6/12). Originalauftrag, lokale Datengrenzen und Read-only-Checkpoint bleiben erhalten.
+- Verifiziert: 1066 Frontendtests/100 Dateien;122Rusttests+1ignoriert; Typecheck,ESLint,Prettier,cargo fmt,Clippy und Tauri-Build erfolgreich. Eigene CUA-Fixture-Schalter/Settings pruefbar; echter Modelllauf des neuen Teams nicht abgenommen.
+- Build E:/projekte/luczor/app/src-tauri/target/release/tauri-app.exe,14585856Bytes,SHA256 96109C1BB7FEB1CFA8ACE0D7F9B9F2E63859243418F36FF07F1C6D8B0484ADDF. Reguläre App-Identität unverändert,kein Installer oder Serverdeploy. Vorversion gesichert.
+- Laufende Debug-App PID95888 unverändert und Responding=true. Neuer Build nicht gestartet. Benutzer kann nach Beenden der alten App die neue EXE öffnen; bestehenden Konfigurations-/Modellpfad beibehalten.
+- Bericht .lmzdev/artifacts/reports/2026-09-07-chat-agent-tool-limits.md,maschineller Buildnachweis mit Suffix -build.json. Bedienung app/docs/chat-agent-mode-and-tool-limits.md. Eigener Fixture-Server1442 beendet; andere Nutzersitzungen unverändert. Keine weitere Source-Ownership offen.
+
+## 2026-09-07 | Codex/mini_workspace -> all | completed-local
+- Chat/Workspace-Umschaltung, main-owned Runtimebindung, sechs lokale Workspacewerkzeuge, native validierte Aktionen und gemeinsames Mini/Main-Design abgeschlossen. Alle Subagent-Ownerships zurueckgegeben.
+- Parallele Chat-/Streaming-/Agentenmodus-/Fortsetzungs-/Toollimit-Aenderungen erhalten. Baseline und20finaleQuelldateihashes in artifacts/temp/mini-workspace; keine Sourceaenderung nach gemeinsamem Freeze.
+- Finale Gates1066Frontend/122Rust+1ignored,Typecheck/Lint/Format/fmt/Clippy und Release no-bundle Exit0. Koordinierter Build durch Task01a074b7-2823-7b72-8e7d-f5ec1b03e7d1, SHA25696109C1BB7FEB1CFA8ACE0D7F9B9F2E63859243418F36FF07F1C6D8B0484ADDF. Kein App-Neustart; bestehende Debugsitzung erhalten.
+- Browsernachweis: gemeinsamer fertiger Projektchat, Projektwechsel, Workspace-Freigabe, Kontext-/Entwurferhalt,420x660 Layout. Keine echte native Modell-/Audio-/Desktop-Abnahme. Bericht und Bedienung aktualisiert; keine offene Sourceownership.
+
+## 2026-09-06T23:26:18Z | Codex -> all | status
+
+- Message: Started: diagnose skipped commentary speech and add active-word read-aloud status
+
+## 2026-09-07T00:09:00Z | Codex/root | Vorlesen und V2-Stimmen abgeschlossen
+- Öffentliche lokale Zwischenkommentare/Antworten dürfen nach ausdrücklicher Nutzerzustimmung vorgelesen werden. Separate an Server/Client gebundene Zustimmung aktiviert; allgemeine Settings-Datei der laufenden App blieb unverändert. FIFO, Abbruch und Datenschutzklassifikation erhalten.
+- Wortmarkierung aus tatsächlichem Audiotakt mit ausdrücklich näherungsweiser Wortposition. V2-Katalog/Auswahl/Hörprobe/Speichern inklusive Benni, Jürgen, Alba, Javert; Piper bleibt Standard.
+- Backend a00d2cbbf3bb39c7a09df77750c05239ec605700 mit privatem Backup veröffentlicht; 536 Dateien geprüft, Produktionschecks und HTTPS Health/Ready/Katalog/Benni/Piper/401/422 erfolgreich. Spätere parallele Agententeamänderungen nicht veröffentlicht.
+- 1083 Frontendtests plus 2 zusätzliche Settings-Regressionen (7 Settings-Tests im Nachlauf), 508 Backendtests/3444 Assertions, Typecheck/Lint/Format/Pint/gezieltes PHPStan bestanden. Browser mit echter Audiodatei bei Desktop/320px geprüft; keine neue native Modell-/Mikrofonabnahme.
+- Release ohne Bundle: E:/projekte/luczor/app/src-tauri/target/release/tauri-app.exe, 14590464 Bytes, SHA256 8CE0F4E164B47C7C4FA91349176688CE92C04001412DCBE969786DDD805EB232. Laufende Debug-App PID95888 erhalten. Prüftabs und eigener Vite1444 geschlossen.
+- Bericht: app/.lmzdev/artifacts/reports/2026-09-07-commentary-read-aloud.md; Bedienung: app/docs/assistant-profile-and-streaming.md. Kein offenes Arbeitspaket dieser Erweiterung; Nutzer muss zum neuen Release wechseln.
+
+## 2026-09-07T00:09:30Z | Codex/model_research -> all | status
+
+- Message: Started: explicit external specialist routing; own hybridRouter, coordinator and focused tests only
+
+## 2026-09-07T00:10:00Z | Codex/routing_review -> all | status
+
+- Message: Started: isolated background model readiness and scoped context preparation cache; root owns integration
+
+## 2026-09-07T00:16:27Z | Codex/model_research -> Codex/root | handoff
+- External specialist routing implemented only in hybridRouter.ts, coordinator.ts and localInferenceCoordinator.test.ts. Explicit intent permits agent.planning/research/coding/review only; signed policy, context egress, exact packet approval, identity and one-shot boundaries retained. Actual provider request task type is additionally bound to the selected specialist role.
+- Turn-local capacity refresh and preparation queue are skipped for explicit specialists; ordinary requests remain local first. Initial or expired signed-policy validation is retained.
+- Verified: 142 focused tests across coordinator/modelAgent/agentModeAndTools, vue-tsc --noEmit, targeted ESLint, Prettier check, git diff --check. No native inference/build/deploy by this agent. Files returned to root; next work read-only integration review.
+
+## 2026-09-07T00:24:59Z | Codex/routing_review -> all | handoff
+
+- Message: Completed background readiness and scoped source-context cache. New inference/backgroundPreparation, localBackgroundPreparation, scopedPreparationCache; new useBackgroundPreparation hook; targeted App/Settings/ExecutionSection integration and lifecycle tests. 142 tests in 8 files passed; targeted ESLint and Prettier passed; canonical typecheck passed before last isolated refinements, root reruns integrated gates. No coordinator/manager/native source changes by this agent, no real inference or process restart. See docs/background-preparation.md. All source ownership returned.
+
+## 2026-09-07T00:25:39Z | Codex/model_research -> Codex/root | resident scope handoff
+- coordinator.ts uses a runtime ownership scope bound to verified principal/device/server/project/repository and the stable native manifest acceptance session. Request taskType/contextId no longer force process replacement; request routing and egress fields remain unchanged.
+- Native contract review found cache_prompt:false only in benchmark; root was notified to add it to actual stream_completion. This agent changed only coordinator and tests.
+- Validation: 100 coordinator tests, vue-tsc --noEmit, focused ESLint/Prettier and git diff --check passed. Seven new cases cover same-project task/conversation reuse plus separate project/repository/principal/device/server/desktop-session boundaries. No real inference or native build by this agent. Ownership returned.
+
+
+## 2026-09-07T00:46:16Z | Codex/routing_review -> all | handoff
+
+- Message: Final follow-up freeze: live auto-warmup confirmed app106820 -> llama127068, health200 and same process/start across122.9s; no chat inference triggered. Initial no-process report was an early snapshot during first preparation. Hardened transient-bootstrap retry with10sgrace/60-300sbackoff and savedFlash preference; no capacity relaxation, App/Coordinator unchanged. 156focusedtests/8files, ESLint and canonicaltypecheck passed. Root repeats final integrated gate/build. Safe policyStatus returned by hook. Docs/background-preparation.md updated. No remaining source ownership.

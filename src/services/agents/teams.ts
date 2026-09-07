@@ -33,7 +33,7 @@ export type AgentTeamNodeDefinition = Readonly<{
   id: string
   label: string
   role: AgentRole
-  adapterId: 'codex' | 'local' | 'policy'
+  adapterId: 'codex' | 'local' | 'policy' | 'chat' | 'external_chat'
   permission: AgentPermission
   dependencies: readonly string[]
   prompt: string
@@ -206,7 +206,7 @@ function workspacesOverlap(left?: string, right?: string): boolean {
 
 function defaultResources(node: AgentTeamNodeDefinition): AgentTeamResourceClaims {
   const exclusive = new Set(node.resources?.exclusive ?? [])
-  if (node.adapterId === 'local' || node.adapterId === 'policy') exclusive.add('local_gpu1')
+  if (['local', 'policy', 'chat'].includes(node.adapterId)) exclusive.add('local_gpu1')
   return Object.freeze({
     workspace: node.permission === 'workspace-write' ? 'write' : (node.resources?.workspace ?? 'read'),
     exclusive: Object.freeze([...exclusive]),
@@ -224,14 +224,14 @@ function cloneDefinition(definition: AgentTeamDefinition): AgentTeamDefinition {
   const nodes: AgentTeamNodeDefinition[] = definition.nodes.map(node => {
     if (!identifier(node.id) || ids.has(node.id)) throw new Error('Teamknoten benötigen eindeutige IDs.')
     ids.add(node.id)
-    if (!ROLES.has(node.role) || !['codex', 'local', 'policy'].includes(node.adapterId)) {
+    if (!ROLES.has(node.role) || !['codex', 'local', 'policy', 'chat', 'external_chat'].includes(node.adapterId)) {
       throw new Error(`Teamknoten ${node.id} hat eine ungültige Rolle oder einen ungültigen Agenten.`)
     }
     if (!['read-only', 'workspace-write'].includes(node.permission))
       throw new Error(`Teamknoten ${node.id} hat keine gültige Freigabe.`)
     if (node.promptAssembly !== undefined && !['project', 'exact-reviewed'].includes(node.promptAssembly))
       throw new Error(`Teamknoten ${node.id} hat keine gültige Kontextzusammenstellung.`)
-    if (node.adapterId !== 'codex' && node.permission !== 'read-only') {
+    if (!['codex', 'chat'].includes(node.adapterId) && node.permission !== 'read-only') {
       throw new Error(`Modellknoten ${node.id} darf den Workspace nicht verändern.`)
     }
     if (typeof node.prompt !== 'string' || !node.prompt.trim() || node.prompt.length > 16_000) {
@@ -331,7 +331,10 @@ export class AgentTeamOrchestrator {
     if (this.disposed) throw new Error('Die Agententeam-Steuerung ist geschlossen.')
     const definition = cloneDefinition(definitionInput)
     const project = snapshotProject(input.project)
-    if (definition.nodes.some(node => node.permission === 'workspace-write') && !project.rootPath) {
+    if (
+      definition.nodes.some(node => node.permission === 'workspace-write' && node.adapterId !== 'chat') &&
+      !project.rootPath
+    ) {
       throw new Error('Für ein schreibendes Agententeam muss dem Projekt ein lokaler Ordner zugeordnet sein.')
     }
     if (

@@ -5,12 +5,13 @@ import StatusOrb from './StatusOrb.vue'
 import AiIcon from '../ai/AiIcon.vue'
 import ChatComposer from '../ai/ChatComposer.vue'
 import StreamingText from '../ai/StreamingText.vue'
+import ChatCommentary from '../ai/ChatCommentary.vue'
 import TokenCounter from '../ai/TokenCounter.vue'
 import ThinkingState from '../ai/ThinkingState.vue'
 import ApprovalCard from '../ai/ApprovalCard.vue'
 import ToolChips from '../ai/ToolChips.vue'
 import { miniStatus } from '@/services/miniChat/presentation'
-import type { MiniAction, MiniSnapshot } from '@/services/miniChat/types'
+import type { MiniAction, MiniSnapshot, MiniPanel, MiniView } from '@/services/miniChat/types'
 import type { ActivityStatus } from '../ai/types'
 import { useClipboard } from '@/composables/useClipboard'
 
@@ -21,6 +22,13 @@ const emit = defineEmits<{ action: [action: MiniAction]; hide: []; showMain: [] 
 const expanded = ref(false)
 const pinned = ref(true)
 const draft = ref('')
+const drafts = new Map<string, string>()
+const draftKey = computed(
+  () =>
+    `${props.snapshot.view}:${props.snapshot.view === 'chat' ? (props.snapshot.project?.id ?? 'none') : 'workspace'}`
+)
+const isChat = computed(() => props.snapshot.view === 'chat')
+const contextName = computed(() => (isChat.value ? 'Projektchat' : 'Workspace'))
 const awaitingSend = ref('')
 const { copy, copied, error: clipboardError } = useClipboard()
 let sendTimer: ReturnType<typeof setTimeout> | undefined
@@ -34,6 +42,7 @@ const box = ref<HTMLElement | null>(null)
 const field = ref<HTMLTextAreaElement | null>(null)
 const right = ref(20)
 const bottom = ref(20)
+let surfaceResize: ResizeObserver | undefined
 let peekTimer: ReturnType<typeof setTimeout> | undefined
 let drag: {
   startX: number
@@ -47,9 +56,12 @@ let dragged = false
 const decision = computed(() => props.snapshot.decision ?? props.snapshot.mainDecision)
 const status = computed(() => miniStatus(props.snapshot, unread.value))
 const peekVisible = computed(() => !expanded.value && (!!decision.value || !!peek.value))
-const surfaceStyle = computed(() =>
-  props.native ? undefined : { right: `${right.value}px`, bottom: `${bottom.value}px` }
-)
+const surfaceStyle = computed(() => ({
+  ...(props.native ? {} : { right: `${right.value}px`, bottom: `${bottom.value}px` }),
+  ...(props.snapshot.appearance?.accent && /^#[0-9a-f]{6}$/i.test(props.snapshot.appearance.accent)
+    ? { '--cy-bright': props.snapshot.appearance.accent }
+    : {}),
+}))
 const toolStatus: Record<string, ActivityStatus> = {
   proposed: 'waiting',
   approved: 'pending',
@@ -167,6 +179,20 @@ function reset() {
   unread.value = false
   clearPeek()
 }
+function changeView(view: MiniView) {
+  emit('action', { type: 'view', sessionId: props.snapshot.sessionId, view })
+}
+function selectProject(event: Event) {
+  emit('action', {
+    type: 'select_project',
+    sessionId: props.snapshot.sessionId,
+    projectId: (event.target as HTMLSelectElement).value,
+  })
+}
+async function openWorkspacePanel(panel: MiniPanel) {
+  emit('action', { type: 'workspace_open', sessionId: props.snapshot.sessionId, panel })
+  await windowAction('main')
+}
 function beginDrag(event: PointerEvent, orb = false) {
   if (event.button !== 0) return
   if (!orb && (event.target as Element).closest('button')) return
@@ -241,9 +267,15 @@ watch(
   }
 )
 watch(
-  () => props.snapshot.sessionId,
-  () => {
-    draft.value = ''
+  () => [props.snapshot.sessionId, draftKey.value] as const,
+  ([, key], previous) => {
+    if (previous && previous[1] !== key) {
+      drafts.set(previous[1], draft.value)
+      draft.value = drafts.get(key) ?? ''
+    } else {
+      drafts.clear()
+      draft.value = ''
+    }
     awaitingSend.value = ''
     clearTimeout(sendTimer)
     unread.value = false
@@ -274,9 +306,14 @@ watch(
 )
 onMounted(() => {
   window.addEventListener('resize', clampPosition)
+  if (!props.native && box.value) {
+    surfaceResize = new ResizeObserver(clampPosition)
+    surfaceResize.observe(box.value)
+  }
   layout()
 })
 onBeforeUnmount(() => {
+  surfaceResize?.disconnect()
   clearTimeout(peekTimer)
   clearTimeout(sendTimer)
   window.removeEventListener('resize', clampPosition)
@@ -287,7 +324,7 @@ onBeforeUnmount(() => {
   <section
     ref="box"
     class="mini-surface"
-    :class="{ 'is-native': native, 'is-expanded': expanded, 'has-peek': peekVisible }"
+    :class="{ 'is-native': native, 'is-expanded': expanded, 'has-peek': peekVisible, 'has-decision': !!decision }"
     :style="surfaceStyle"
     aria-label="Luczor Mini"
     :data-reduce-motion="snapshot.hud.reduceMotion"
@@ -306,8 +343,9 @@ onBeforeUnmount(() => {
           @keydown="moveKey"
           ><AiIcon name="grid" :size="13"
         /></span>
-        <strong>Luczor <span>Mini</span></strong
-        ><span class="mini-temp">Temporär</span>
+        <span class="ai-brand-mark"><AiIcon :size="18" /></span>
+        <strong>{{ snapshot.appearance?.assistantName || 'Luczor' }} <span>Mini</span></strong
+        ><span class="mini-temp">{{ contextName }}</span>
         <button
           type="button"
           :aria-label="pinned ? 'Immer im Vordergrund ausschalten' : 'Immer im Vordergrund einschalten'"
@@ -323,6 +361,14 @@ onBeforeUnmount(() => {
           <span aria-hidden="true">−</span>
         </button>
       </header>
+      <div class="mini-scope-tabs" role="group" aria-label="Mini-Arbeitsbereich">
+        <button type="button" :aria-pressed="isChat" @click="changeView('chat')">
+          <AiIcon name="chat" :size="14" /> Projektchat
+        </button>
+        <button type="button" :aria-pressed="!isChat" @click="changeView('workspace')">
+          <AiIcon name="grid" :size="14" /> Workspace
+        </button>
+      </div>
       <div class="mini-status-strip">
         <div class="mini-small-orb"><StatusOrb :phase="status.phase" :level="snapshot.hud.micLevel" /></div>
         <div>
@@ -340,7 +386,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <div v-if="showLegend" class="mini-legend">
-        <p><b>Blau, drehend:</b> Modell arbeitet. <b>Orange, drehend:</b> ein Tool läuft.</p>
+        <p><b>Akzentfarbe, drehend:</b> Modell arbeitet. <b>Orange, drehend:</b> ein Tool läuft.</p>
         <p>
           <b>Gelb, still:</b> deine Entscheidung. <b>Cyan:</b> Mikrofon aktiv; Ausschlag folgt dem Pegel.
           <b>Grün:</b> Sprachausgabe oder neue Antwort. <b>Rot:</b> Fehler.
@@ -348,8 +394,22 @@ onBeforeUnmount(() => {
         <p>Die Ringe zeigen Aktivität, keine geschätzten Fortschrittsprozente.</p>
         <button type="button" class="ai-button" @click="resetPosition">Unten rechts platzieren</button>
       </div>
+      <div class="mini-chat-picker">
+        <label for="mini-project">{{ isChat ? 'Chat im Projekt' : 'Arbeitsprojekt für Dateien & Desktop' }}</label>
+        <select
+          id="mini-project"
+          :value="snapshot.project?.id ?? ''"
+          :disabled="snapshot.busy || snapshot.mainBusy"
+          @change="selectProject"
+        >
+          <option v-if="!snapshot.project" value="" disabled>Projekt auswählen</option>
+          <option v-for="project in snapshot.projects" :key="project.id" :value="project.id">{{ project.name }}</option>
+        </select>
+      </div>
       <div class="mini-context">
-        <span :title="snapshot.project?.name">{{ snapshot.project?.name || 'Kein Projekt' }}</span
+        <span>{{
+          isChat ? 'Mit dem großen Chat verbunden' : `${snapshot.projects.length} Projekte · Übergeordnete Verwaltung`
+        }}</span
         ><button
           type="button"
           @click="emit('action', { type: 'mode', mode: snapshot.mode === 'observe' ? 'act' : 'observe' })"
@@ -358,16 +418,58 @@ onBeforeUnmount(() => {
           <AiIcon name="chevron" :size="10" />
         </button>
       </div>
-      <ChatComposer title="Temporäre Unterhaltung" :follow="snapshot.messages.length > 0">
+      <div v-if="!isChat" class="mini-workspace-actions">
+        <button
+          type="button"
+          :disabled="snapshot.busy || snapshot.mainBusy"
+          @click="openWorkspacePanel('project_folder')"
+        >
+          <AiIcon name="folder" :size="13" /> Projektordner
+        </button>
+        <button type="button" :disabled="snapshot.busy || snapshot.mainBusy" @click="openWorkspacePanel('agents')">
+          <AiIcon name="spark" :size="13" /> Agenten
+        </button>
+        <button type="button" :disabled="snapshot.busy || snapshot.mainBusy" @click="openWorkspacePanel('desktop')">
+          <AiIcon name="panel" :size="13" /> Desktop
+        </button>
+      </div>
+      <ChatComposer
+        :title="isChat ? 'Gemeinsamer Projektchat' : 'Temporäre Workspace-Unterhaltung'"
+        :follow="snapshot.messages.length > 0"
+      >
         <div v-if="!snapshot.messages.length" class="mini-welcome">
-          <strong>Ein kurzer Gedanke?</strong>
-          <p>Schreib hier weiter, während du in anderen Apps arbeitest.</p>
-          <small>Kein Projektverlauf · Keine automatische Erinnerung</small>
+          <strong>{{ isChat ? 'Im Projekt weiterarbeiten' : 'Dein Workspace, im Blick.' }}</strong>
+          <p>
+            {{
+              isChat
+                ? 'Derselbe Verlauf und dieselben Antworten wie im großen Luczor-Fenster.'
+                : 'Chats und Projekte überblicken, Code-Aufträge vorbereiten und den Desktop steuern.'
+            }}
+          </p>
+          <small>{{
+            isChat
+              ? 'Nachrichten bleiben in diesem Projektchat.'
+              : 'Temporäre Unterhaltung · Lokales Modell · Bestehende Freigaben'
+          }}</small>
           <div>
-            <button type="button" @click="draft = 'Hilf mir, eine Entscheidung zu treffen.'">
-              Entscheidung treffen</button
-            ><button type="button" @click="draft = 'Hilf mir, die nächsten Schritte zu sortieren.'">
-              Gedanken sortieren
+            <button
+              type="button"
+              @click="
+                draft = isChat
+                  ? 'Fasse unseren bisherigen Projektstand zusammen.'
+                  : 'Zeige mir eine Übersicht meiner Projekte, Chats und laufenden Agentenaufträge.'
+              "
+            >
+              {{ isChat ? 'Projektstand ansehen' : 'Workspace überblicken' }}</button
+            ><button
+              type="button"
+              @click="
+                draft = isChat
+                  ? 'Was ist der nächste sinnvolle Schritt in diesem Projekt?'
+                  : 'Hilf mir, einen Code-Auftrag für das ausgewählte Arbeitsprojekt vorzubereiten.'
+              "
+            >
+              {{ isChat ? 'Nächste Schritte' : 'Code-Auftrag planen' }}
             </button>
           </div>
         </div>
@@ -378,6 +480,7 @@ onBeforeUnmount(() => {
           :class="`is-${message.role}`"
         >
           <span class="mini-message-label">{{ message.role === 'user' ? 'Du' : 'Luczor' }}</span>
+          <small v-if="!isChat && message.contextLabel" class="mini-scope-note">{{ message.contextLabel }}</small>
           <p v-if="message.role === 'user'">{{ message.content }}</p>
           <template v-else>
             <ThinkingState
@@ -398,12 +501,14 @@ onBeforeUnmount(() => {
                       : 'Abgeschlossen'
               "
             />
+            <ChatCommentary :entries="message.commentary ?? []" />
             <StreamingText
               :content="message.content"
               :streaming="message.status === 'running'"
               :animate="false"
               :actions="false"
               :question="message.question"
+              :follow-ups="message.status === 'running' ? message.choices : []"
             />
             <TokenCounter :usage="message.tokenUsage" :active="message.status === 'running'" />
             <button
@@ -456,7 +561,7 @@ onBeforeUnmount(() => {
           ref="field"
           v-model="draft"
           aria-label="Nachricht im Mini-Chat"
-          placeholder="Schreib Luczor …"
+          :placeholder="isChat ? 'In diesem Projektchat schreiben …' : 'Was soll Luczor übergreifend organisieren?'"
           rows="1"
           maxlength="12000"
           @keydown="inputKey"
@@ -476,8 +581,11 @@ onBeforeUnmount(() => {
         </div>
       </form>
       <footer class="mini-footer">
-        <button type="button" @click="resetConfirm = !resetConfirm">
-          <AiIcon name="plus" :size="12" /> Neuer temporärer Chat</button
+        <button v-if="isChat" type="button" @click="changeView('workspace')">
+          <AiIcon name="grid" :size="12" /> Workspace öffnen
+        </button>
+        <button v-else type="button" @click="resetConfirm = !resetConfirm">
+          <AiIcon name="plus" :size="12" /> Workspace leeren</button
         ><button
           type="button"
           :class="{ 'is-danger': snapshot.hud.killSwitch }"

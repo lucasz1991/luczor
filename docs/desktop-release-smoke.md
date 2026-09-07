@@ -72,6 +72,29 @@ If only the requested output reservation is too large, it uses the actual remain
 
 Endpoint contract: [llama.cpp server documentation](https://github.com/ggml-org/llama.cpp/blob/5266f24da/tools/server/README.md); the installed b10809 runtime uses commit `5266f24da`.
 
+## Local chat-template role regression
+
+The native local transport combines all text system instructions, in their original
+order, into one leading system message before token counting and generation. This
+covers runtime mode, tool descriptions, planning discussion and late retry guidance.
+User/assistant messages, tool-call IDs and tool results keep their roles and order;
+the saved archive and approved external request are unchanged.
+
+Test an ordinary chat, a plan discussion and a round with two tool results on the
+installed GGUF. None should fail with `runtime_chat_history_rejected`. Repeat with
+a long older conversation to exercise context fitting. An input role rejection
+must leave the local process available for the next valid request, with no cooldown.
+Native regression fixtures are in `src-tauri/tests/fixtures/local-system-messages.json`.
+
+Also test an assistant round containing one successful call and one call with
+truncated JSON arguments. The failed call must not execute. Its history copy uses
+`{}` plus an explicit failed tool result explaining the replacement, allowing the
+model to emit corrected arguments on the next round. Valid sibling calls and
+original execution arguments must remain unchanged. Non-object JSON arguments
+are handled the same way; schema, approval and workspace checks remain mandatory.
+Native callers that bypass the agent repair receive `runtime_tool_contract_rejected`
+before template rendering, without terminating the resident model or adding cooldown.
+
 ## Joint folder-dialog and approval smoke
 
 Use a disposable test directory containing only synthetic files. Do not select a real source repository for this QA run.

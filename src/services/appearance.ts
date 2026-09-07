@@ -24,6 +24,10 @@ const ACCENTS: Record<AccentName, Accent> = {
 
 export const ACCENT_NAMES = Object.keys(ACCENTS) as AccentName[]
 
+export function appearanceAccentColor(): string {
+  return ACCENTS[appearance.accent].bright
+}
+
 export const appearance = reactive({
   accent: 'violet' as AccentName,
   hudVisible: true,

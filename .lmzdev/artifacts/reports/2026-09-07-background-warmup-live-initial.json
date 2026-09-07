@@ -1,0 +1,12 @@
+{
+  "observedAtUtc": "2026-09-07T00:42:16.5736292Z",
+  "phase": "initial-idle-observation",
+  "appPid": 106820,
+  "modelPid": 127068,
+  "parentPid": 106820,
+  "modelStartedAtUtc": "2026-09-07T00:36:09.2791510Z",
+  "modelPath": "D:\\Luczor\\local-model-test\\runtime\\llama-server.exe",
+  "healthStatusCode": 200,
+  "health": "ok",
+  "inferenceStartedByThisAgent": false
+}

@@ -117,6 +117,8 @@ export function decideHybridRoute(input: {
   now?: Date
   decisionId?: string
   requiredCapability?: string
+  /** An explicitly selected specialist route; never grants external permission. */
+  preferExternal?: boolean
 }): RouteDecision {
   const now = input.now ?? new Date()
   const decisionId = input.decisionId ?? crypto.randomUUID()
@@ -124,16 +126,18 @@ export function decideHybridRoute(input: {
   const requiredCapability = input.requiredCapability ?? 'chat'
   const flash = models.get(FLASH_NEXT_MODEL_ID)
 
-  const flashAvailable = availableLocally(
-    flash,
-    input.assessments.get(FLASH_NEXT_MODEL_ID),
-    input.health.get(FLASH_NEXT_MODEL_ID),
-    input.readiness.get(FLASH_NEXT_MODEL_ID),
-    input.manifest.payloadSha256,
-    input.settings,
-    requiredCapability,
-    now
-  )
+  const flashAvailable =
+    !input.preferExternal &&
+    availableLocally(
+      flash,
+      input.assessments.get(FLASH_NEXT_MODEL_ID),
+      input.health.get(FLASH_NEXT_MODEL_ID),
+      input.readiness.get(FLASH_NEXT_MODEL_ID),
+      input.manifest.payloadSha256,
+      input.settings,
+      requiredCapability,
+      now
+    )
   const explicitFlashExperiment =
     input.settings.experimentalFlashNext &&
     input.manifest.routing.experimentalModelIds.includes(FLASH_NEXT_MODEL_ID) &&
@@ -151,6 +155,7 @@ export function decideHybridRoute(input: {
 
   const defaultModel = models.get(input.manifest.routing.defaultModelId)
   if (
+    !input.preferExternal &&
     availableLocally(
       defaultModel,
       input.assessments.get(input.manifest.routing.defaultModelId),
@@ -177,7 +182,7 @@ export function decideHybridRoute(input: {
 
   // The signed fallback list is consulted only after the signed default is
   // unavailable. Today it contains Orca, but the ordering stays policy-owned.
-  for (const fallbackId of input.manifest.routing.fallbackModelIds) {
+  for (const fallbackId of input.preferExternal ? [] : input.manifest.routing.fallbackModelIds) {
     if (fallbackId === input.manifest.routing.defaultModelId) continue
     const candidate = models.get(fallbackId)
     if (

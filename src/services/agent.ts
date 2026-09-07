@@ -37,6 +37,9 @@ import type { AgentProgress } from '@/services/chatActivity'
 import type { ToolCallStatus } from '@/state/types'
 import { executionGate } from '@/services/executionGate'
 import { validateToolArguments } from '@/services/tools/validateArguments'
+import { INVALID_TOOL_ARGUMENTS, prepareToolCallHistory } from '@/services/inference/toolCallHistory'
+import { loadToolLimits, validToolRounds } from '@/services/toolLimits'
+import { mutationKey, type AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import { isPlanningDiscussion } from '@/services/planningEntry'
 import { createTokenUsageCounter, type TokenUsage } from '@/services/tokenUsage'
 import { looksLikeInternalReasoningLeak, publicAnswerText } from '@/services/publicAnswerStream'
@@ -86,6 +89,15 @@ export type RunAgentOptions = {
   branch?: string
   commitSha?: string
   maxRounds?: number
+  /** Explicit composer choice: start the team before ordinary tool rounds. */
+  agentMode?: boolean
+  agentTeamPreset?: import('./agents/teamPolicy').TeamPresetChoice
+  requestAgentTeamApproval?: (
+    summary: import('./agents/externalSpecialists').TeamPacketApproval
+  ) => boolean | Promise<boolean>
+  continuation?: AgentCheckpoint
+  /** Internal team nodes can only narrow tool access. */
+  toolAccess?: 'read-only' | 'none'
   signal?: AbortSignal
   /** Explicit test/integration gateway. Production callers resolve through the signed coordinator. */
   inferenceGateway?: InferenceGateway
@@ -110,12 +122,21 @@ export type RunAgentOptions = {
   inputSource?: 'keyboard' | 'push_to_talk' | 'hands_free'
   /** Streamed content of the current round (full accumulated text). */
   onToken?: (content: string) => void
+  /** Preserve a public round before its live buffer is replaced by the next one. */
+  onRoundComplete?: (event: {
+    round: number
+    content: string
+    kind: 'commentary' | 'answer'
+    /** False after any local-only tool result entered this turn's context. */
+    serverSpeechAllowed: boolean
+  }) => void
   /** Per-turn counts across all rounds; live estimates are replaced with actual usage. */
   onUsage?: (usage: TokenUsage) => void
   /** Safe UI telemetry without private model channels or tool payloads. */
   onProgress?: (event: AgentProgress) => void
   /** In-memory tool journal and approval gate for temporary conversations. */
   toolSession?: AgentToolSession
+  workspaceScope?: import('./tools/types').WorkspaceScope
 }
 
 type Outcome = { ok: boolean; output?: unknown; error?: string }
@@ -323,10 +344,25 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   inferenceTarget?: 'local_llama_cpp' | 'laravel_proxy'
   routeDecisionId?: string
   tokenUsage: TokenUsage
+  specialistOutcomes?: import('./agents/externalSpecialists').SpecialistOutcome[]
+  continuation?: AgentCheckpoint
 }> {
-  const { projectId, mode, maxRounds = 6 } = opts
+  if (opts.continuation?.toolAccess) {
+    opts = { ...opts, toolAccess: opts.toolAccess === 'none' ? 'none' : opts.continuation.toolAccess }
+  }
+  const { projectId, mode } = opts
+  const maxRounds = opts.maxRounds ?? (await loadToolLimits()).chat
+  if (!validToolRounds(maxRounds)) throw new Error('Tool-Runden müssen zwischen 1 und 64 liegen.')
   const execution = executionGate.capture(opts.signal)
   const signal = execution.signal
+  if (
+    opts.continuation &&
+    (opts.continuation.projectId !== projectId ||
+      opts.continuation.sessionId !== execution.sessionId ||
+      opts.continuation.generation !== execution.generation)
+  ) {
+    throw new Error('Die Fortsetzung gehört nicht mehr zur aktiven Projekt- und Kontositzung.')
+  }
   const updateToolStatus = (id: string, status: ToolCallStatus) =>
     opts.toolSession ? opts.toolSession.update(id, status) : mutations.updateToolCallStatus(projectId, id, status)
   const recordOutcome: typeof recordPersistentOutcome = (...args) => {
@@ -335,19 +371,30 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   }
   opts.onProgress?.({ phase: 'routing' })
   const currentMode = () => opts.getMode?.() ?? mode
-  const latestUserMessage = [...opts.baseMessages].reverse().find(message => message.role === 'user')?.content ?? ''
+  const latestUserMessage =
+    opts.continuation?.objective ??
+    [...opts.baseMessages].reverse().find(message => message.role === 'user')?.content ??
+    ''
   const planningDiscussion = isPlanningDiscussion(latestUserMessage)
   const requestedToolChoice = planningDiscussion && opts.toolChoice === 'required' ? 'auto' : opts.toolChoice
   const allTools = toOpenAITools().filter(
-    description => !planningDiscussion || permittedDuringPlanningDiscussion(getTool(description.function.name))
+    description =>
+      (!getTool(description.function.name)?.workspaceOnly || !!opts.workspaceScope) &&
+      opts.toolAccess !== 'none' &&
+      (opts.toolAccess !== 'read-only' || getTool(description.function.name)?.mutating === false) &&
+      (!planningDiscussion || permittedDuringPlanningDiscussion(getTool(description.function.name)))
   )
   const routeInput = (externalPackage?: ExternalTurnPackage) => ({
     projectId,
     contextId: opts.contextId,
     repoId: opts.repoId,
     taskType: opts.taskType,
-    contextEgress: opts.contextEgress,
-    routingSettings: opts.routingSettings,
+    contextEgress:
+      opts.agentMode || opts.continuation || opts.workspaceScope ? ('local_only' as const) : opts.contextEgress,
+    routingSettings:
+      opts.agentMode || opts.continuation || opts.workspaceScope
+        ? { ...opts.routingSettings, preference: 'local_only' as const }
+        : opts.routingSettings,
     externalPackage,
   })
   let resolvedRoute: ResolvedTurnRoute
@@ -405,7 +452,20 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       resolvedRoute = await resolveInferenceRouteForTurn(routeInput(externalPackage))
     }
   }
-  const messages: WireMessage[] = [...(resolvedRoute.replacementMessages ?? opts.baseMessages)]
+  const messages: WireMessage[] = [
+    ...(opts.continuation?.messages ?? resolvedRoute.replacementMessages ?? opts.baseMessages),
+  ]
+  const completedMutations = new Map(opts.continuation?.completedMutations ?? [])
+  const checkpoint = (): AgentCheckpoint => ({
+    projectId,
+    sessionId: execution.sessionId,
+    generation: execution.generation,
+    objective: opts.continuation?.objective ?? latestUserMessage,
+    messages: structuredClone(messages),
+    completedMutations: structuredClone([...completedMutations]),
+    ephemeralDataUsed: ephemeralDataUsed || !!opts.continuation?.ephemeralDataUsed,
+    toolAccess: opts.toolAccess,
+  })
   if (planningDiscussion && !resolvedRoute.externalOneShot) {
     messages.unshift({
       role: 'system',
@@ -419,7 +479,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   let lastUseCase: string | undefined
   let toolFailures = 0
   let toolSuccesses = 0
-  let ephemeralDataUsed = false
+  let ephemeralDataUsed = !!opts.continuation?.ephemeralDataUsed
   const toolOutcomes: ToolOutcomeRecord[] = []
   let reasoningRetryUsed = false
   let localContextAdjusted = false
@@ -436,7 +496,22 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   }
   let nextToolChoice: ToolChoice = resolvedRoute.externalOneShot ? 'none' : (requestedToolChoice ?? 'auto')
   const inferenceGateway = resolvedRoute.gateway
+  if (opts.workspaceScope && inferenceGateway.target !== 'local_llama_cpp') {
+    throw new Error('Der Workspace-Modus verwendet ausschließlich das lokale Modell.')
+  }
   const roundLimit = resolvedRoute.externalOneShot ? 1 : maxRounds
+
+  if (opts.agentMode) {
+    if (inferenceGateway.target !== 'local_llama_cpp')
+      throw new Error('Der Chat-Agentenmodus benötigt das lokale Modell.')
+    const { runChatAgentTeam } = await import('@/services/agents/chatOrchestration')
+    return runChatAgentTeam(
+      { ...opts, signal, toolAccess: planningDiscussion ? 'read-only' : opts.toolAccess },
+      inferenceGateway,
+      checkpoint(),
+      runAgent
+    )
+  }
 
   for (let round = 0; round < roundLimit; round++) {
     if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
@@ -453,7 +528,9 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     setStatus('thinking')
     opts.onProgress?.({ phase: 'thinking', round: round + 1 })
     pulse('network', 1)
-    publish('')
+    // The completed-round callback owns retention. Do not erase the visible
+    // commentary just because the next inference request has started.
+    visibleContent = ''
     updateUsage(round + 1, { messages, tools }, '')
     const res = await inferenceGateway.streamChatWithTools({
       messages,
@@ -534,6 +611,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
           '\n\nHinweis: Für diese Antwort wurden ältere Gesprächsrunden oder umfangreiche Werkzeugausgaben im Modellkontext gekürzt. Der gespeicherte Chatverlauf bleibt vollständig erhalten.'
       }
       publish(finalText)
+      opts.onRoundComplete?.({
+        round: round + 1,
+        content: finalText,
+        kind: 'answer',
+        serverSpeechAllowed: !ephemeralDataUsed,
+      })
       return {
         finalText,
         requestId: lastRequestId,
@@ -549,11 +632,23 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       }
     }
 
-    // Echo the assistant's tool-call turn back into the transcript.
+    const commentary = publicAnswerText(res.content, true).trim()
+    if (commentary) {
+      opts.onRoundComplete?.({
+        round: round + 1,
+        content: commentary,
+        kind: 'commentary',
+        serverSpeechAllowed: !ephemeralDataUsed,
+      })
+    }
+
+    // Invalid model-generated JSON must be rejected for execution, but must not
+    // poison every later request when llama.cpp renders the tool-call history.
+    const history = prepareToolCallHistory(res.rawToolCalls)
     messages.push({
       role: 'assistant',
       content: res.content ?? '',
-      tool_calls: res.rawToolCalls,
+      tool_calls: history.calls,
     })
 
     // Handle each tool call. Every call MUST get a matching tool message,
@@ -587,7 +682,21 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         continue
       }
 
+      if (
+        (tool.workspaceOnly && (!opts.workspaceScope || inferenceGateway.target !== 'local_llama_cpp')) ||
+        opts.toolAccess === 'none' ||
+        (opts.toolAccess === 'read-only' && tool.mutating)
+      ) {
+        const outcome: Outcome = { ok: false, error: 'Dieser Agent darf dieses Werkzeug nicht ausführen.' }
+        toolFailures++
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        continue
+      }
+
       try {
+        if (history.invalidIds.has(call.id)) throw new Error(INVALID_TOOL_ARGUMENTS)
         if (typeof call.rawArguments === 'string') validateToolArguments(tool.parameters, JSON.parse(call.rawArguments))
         validateToolArguments(tool.parameters, call.arguments)
       } catch (error) {
@@ -651,6 +760,25 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       }
 
       // Human-in-the-loop approval.
+      // Input and process actions may legitimately repeat at a later desktop state.
+      const reusableMutation =
+        tool.mutating && !(tool.effects ?? []).some(effect => effect === 'input' || effect === 'execute')
+      const previousMutation =
+        opts.continuation && reusableMutation
+          ? completedMutations.get(mutationKey(call.name, call.arguments))
+          : undefined
+      if (previousMutation?.ok) {
+        const outcome: Outcome = {
+          ok: true,
+          output: { alreadyCompleted: true, previousResult: previousMutation.output },
+        }
+        toolSuccesses++
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(projectId, call.id, call.name, 'executed', outcome, dataHandling, res.requestId)
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        continue
+      }
+
       // In "unrestricted" (Vollzugriff) mode the approval gate is bypassed —
       // the kill switch (checked above) remains the only hard stop.
       const approvalMode = currentMode()
@@ -722,9 +850,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       if (dataHandling === 'ephemeral') ephemeralDataUsed = true
       try {
         executionGate.assert(execution)
-        const output = await tool.execute(call.arguments, { projectId, signal, execution, inferenceTarget: 'local' })
+        const output = await tool.execute(call.arguments, {
+          projectId,
+          signal,
+          execution,
+          inferenceTarget: 'local',
+          workspaceScope: opts.workspaceScope,
+        })
         executionGate.assert(execution)
         const outcome = normalizeToolOutcome(output)
+        if (outcome.ok && reusableMutation) completedMutations.set(mutationKey(call.name, call.arguments), outcome)
         if (outcome.ok) toolSuccesses++
         else toolFailures++
         toolOutcomes.push({ name: call.name, outcome })
@@ -760,7 +895,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
 
   return {
     finalText:
-      'Maximale Anzahl an Tool-Runden erreicht. Bitte präzisiere die Aufgabe oder führe sie in kleineren Schritten aus.',
+      'Der Auftrag ist noch nicht abgeschlossen. Der bisherige Fortschritt bleibt erhalten. Du kannst weiterarbeiten oder mit einem Agententeam fortsetzen.',
     requestId: lastRequestId,
     toolFailures,
     toolSuccesses,
@@ -768,6 +903,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     inferenceTarget: inferenceGateway.target,
     routeDecisionId: resolvedRoute.decision?.id,
     tokenUsage: tokenCounter.snapshot(),
+    continuation: resolvedRoute.externalOneShot ? undefined : checkpoint(),
   }
 }
 

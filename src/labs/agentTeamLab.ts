@@ -1,4 +1,5 @@
 import { createApp } from 'vue'
+import '@/styles/theme.css'
 import AgentTeamLab from './AgentTeamLab.vue'
 
 if (!import.meta.env.DEV) throw new Error('Das Simulationslabor ist nur im lokalen Entwicklungsserver verfügbar.')

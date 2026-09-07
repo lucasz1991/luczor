@@ -59,7 +59,7 @@ const spectrum = computed(() =>
 </template>
 <style scoped>
 .status-orb {
-  --orb-color: #38bdf8;
+  --orb-color: var(--ai-accent, var(--cy-bright));
   display: block;
   width: 100%;
   aspect-ratio: 1;
@@ -71,7 +71,7 @@ const spectrum = computed(() =>
   overflow: visible;
 }
 .orb-disc {
-  fill: #0b111b;
+  fill: var(--ai-page);
   stroke: currentColor;
   stroke-opacity: 0.22;
 }
@@ -126,10 +126,10 @@ const spectrum = computed(() =>
   animation: orb-pulse 1.6s ease-in-out infinite alternate;
 }
 .is-executing {
-  --orb-color: #f59e0b;
+  --orb-color: var(--ai-orange);
 }
 .is-waiting {
-  --orb-color: #fbbf24;
+  --orb-color: var(--warn-soft);
 }
 .is-waiting .orb-core-ring {
   stroke-width: 3;
@@ -137,16 +137,16 @@ const spectrum = computed(() =>
 }
 .is-speaking,
 .is-done {
-  --orb-color: #34d399;
+  --orb-color: var(--ai-green);
 }
 .is-listening {
   --orb-color: #22d3ee;
 }
 .is-error {
-  --orb-color: #f43f5e;
+  --orb-color: var(--ai-red);
 }
 .is-stopped {
-  --orb-color: #94a3b8;
+  --orb-color: var(--ai-muted);
 }
 .is-stopped .orb-outer {
   stroke-dasharray: 8 12;

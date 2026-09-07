@@ -22,14 +22,16 @@ export function useStreamReveal(
     shown.value = target.slice(0, end)
     if (shown.value.length < target.length) timer = setTimeout(tick, 24)
   }
-  watch([content, animate, streaming], () => {
+  watch([content, animate, streaming], (_current, previous) => {
     clearTimeout(timer)
     const reduced =
       typeof window !== 'undefined' &&
       (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ||
         document.documentElement.dataset.reduceMotion === '1')
     // Transport deltas already provide the pacing; never queue a second reveal.
-    if (streaming.value || !animate.value || reduced || !content.value) {
+    // The final transport delta can arrive in the same Vue update that ends
+    // streaming. It must not accidentally start a delayed typing animation.
+    if (streaming.value || previous[2] || !animate.value || reduced || !content.value) {
       skip()
       return
     }

@@ -15,7 +15,8 @@ const props = withDefaults(
   { steps: () => [], label: 'Arbeitsschritte', startedAt: undefined, durationMs: undefined, expanded: undefined }
 )
 const manuallyExpanded = ref<boolean | null>(null)
-const open = computed(() => manuallyExpanded.value ?? props.expanded ?? props.active)
+// Finishing a turn must not hide its history. Only the user's toggle collapses it.
+const open = computed(() => manuallyExpanded.value ?? props.expanded ?? true)
 const id = useId()
 </script>
 <template>

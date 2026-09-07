@@ -11,14 +11,19 @@ export type ToolRisk = 'low' | 'sensitive' | 'critical'
 export type ToolScope = 'app' | 'project' | 'desktop' | 'network'
 export type ToolEffect = 'read' | 'write' | 'input' | 'execute'
 
+export type WorkspaceScope = { principalId: string; projectIds: readonly string[] }
+
 export type ToolContext = {
   projectId: string
   signal?: AbortSignal
   execution?: import('@/services/executionGate').ExecutionTicket
   inferenceTarget?: 'local' | 'external'
+  workspaceScope?: WorkspaceScope
 }
 
 export type ToolDef = {
+  /** Available only in a captured local workspace-management turn. */
+  workspaceOnly?: boolean
   /** Stable machine name, e.g. "project_set_summary". Sent to the model. */
   name: string
   category: ToolCategory

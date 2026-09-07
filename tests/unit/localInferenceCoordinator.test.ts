@@ -19,7 +19,9 @@ import {
   localPolicyDiagnostic,
   packetBoundLaravelGateway,
   type LocalInferenceCoordinatorDependencies,
+  type TurnRoutingInput,
 } from '@/services/inference/coordinator'
+import { decideHybridRoute } from '@/services/inference/hybridRouter'
 import {
   LocalInferenceError,
   LocalModelManager,
@@ -186,10 +188,324 @@ const basicRequest: InferenceRequest = {
   taskType: 'chat',
 }
 
+async function approvedSpecialist(taskType = 'agent.research') {
+  const request: InferenceRequest = { ...basicRequest, taskType }
+  const packetHash = await hashInferenceEgressRequest(request, 'desktop-1')
+  const input: TurnRoutingInput = {
+    projectId: 'project-1',
+    taskType,
+    intent: 'external_specialist',
+    externalPackage: {
+      messages: request.messages,
+      apiConfig: account().config,
+      packetHash,
+      approval: { approvalId: 'specialist-approval', packetHash, expiresAt: '2026-08-30T12:31:00Z' },
+    },
+  }
+  return { input, request }
+}
+
+function readyRoutingInput(verified: VerifiedLocalModelManifest): Parameters<typeof decideHybridRoute>[0] {
+  const now = new Date('2026-08-30T12:30:00Z')
+  return {
+    manifest: verified,
+    settings: { preference: 'ask_external', experimentalFlashNext: false, allowDegradedLocal: false },
+    contextEgress: 'external_allowed',
+    now,
+    assessments: new Map(
+      verified.models.map(model => [
+        model.id,
+        {
+          snapshotId: 'hardware-ready',
+          modelReleaseId: model.id,
+          status: 'eligible',
+          reasons: [],
+          assessedAtMs: now.getTime(),
+          validUntilMs: now.getTime() + 60_000,
+        },
+      ])
+    ),
+    health: new Map(
+      verified.models.map(model => [
+        model.id,
+        { modelReleaseId: model.id, state: 'ready', consecutiveFailures: 0, updatedAt: now.toISOString() },
+      ])
+    ),
+    readiness: new Map(
+      verified.models.map(model => [
+        model.id,
+        {
+          modelReleaseId: model.id,
+          manifestPayloadSha256: verified.payloadSha256,
+          artifactSha256: model.artifact!.sha256,
+          runtimeSha256: model.runtime!.sha256,
+          ready: true,
+          verifiedAtMs: now.getTime(),
+          validUntilMs: now.getTime() + 60_000,
+        },
+      ])
+    ),
+  }
+}
+
+describe('explicit specialist routing preference', () => {
+  it.each(['experimental', 'default', 'fallback'] as const)(
+    'bypasses the ready local %s only when explicitly preferred and still requires approval',
+    async candidate => {
+      const verified = await manifest(candidate === 'experimental' ? 'explicit_experiment' : 'promoted_preferred')
+      const input = readyRoutingInput(verified)
+      if (candidate === 'fallback') {
+        input.manifest = {
+          ...verified,
+          models: verified.models.map(model =>
+            model.id === verified.routing.defaultModelId ? { ...model, enabled: false } : model
+          ),
+        }
+      }
+      input.settings.experimentalFlashNext = candidate === 'experimental'
+      expect(decideHybridRoute(input).target).toBe('local_llama_cpp')
+      expect(decideHybridRoute({ ...input, preferExternal: true })).toMatchObject({
+        target: 'blocked',
+        reason: 'external_approval_required',
+      })
+      expect(
+        decideHybridRoute({
+          ...input,
+          preferExternal: true,
+          expectedEgressPacketHash: payloadHash,
+          externalApproval: { approvalId: 'approved', packetHash: payloadHash, expiresAt: '2026-08-30T12:31:00Z' },
+        })
+      ).toMatchObject({ target: 'laravel_proxy', reason: 'external_approved' })
+    }
+  )
+
+  it.each(['context', 'preference', 'policy', 'hash', 'expiry'] as const)(
+    'does not let explicit preference override the %s gate',
+    async gate => {
+      const input = readyRoutingInput(await manifest('promoted_preferred'))
+      input.preferExternal = true
+      input.expectedEgressPacketHash = payloadHash
+      input.externalApproval = { approvalId: 'approved', packetHash: payloadHash, expiresAt: '2026-08-30T12:31:00Z' }
+      if (gate === 'context') input.contextEgress = 'local_only'
+      if (gate === 'preference') input.settings.preference = 'local_only'
+      if (gate === 'policy') {
+        input.manifest = { ...input.manifest, routing: { ...input.manifest.routing, externalAllowed: false } }
+      }
+      if (gate === 'hash') input.externalApproval.packetHash = 'f'.repeat(64)
+      if (gate === 'expiry') input.externalApproval.expiresAt = '2026-08-30T12:29:00Z'
+      expect(decideHybridRoute(input)).toMatchObject({
+        target: 'blocked',
+        reason:
+          gate === 'context' || gate === 'preference'
+            ? 'local_only_blocked'
+            : gate === 'policy'
+              ? 'external_policy_blocked'
+              : 'external_approval_required',
+      })
+    }
+  )
+})
+
 describe('local inference coordinator and approved external gateway', () => {
   beforeEach(() => {
     proxy.mockReset()
     proxy.mockResolvedValue({ content: 'extern', toolCalls: [], rawToolCalls: [], finishReason: 'stop' })
+  })
+
+  it.each(['agent.planning', 'agent.research', 'agent.coding', 'agent.review'])(
+    'routes an approved %s specialist externally without preparing a local model',
+    async taskType => {
+      const harness = makeHarness(await manifest('promoted_preferred'))
+      await harness.coordinator.initialize(bootstrap())
+      vi.mocked(harness.dependencies.hardwareSnapshot).mockClear()
+      const { input, request } = await approvedSpecialist(taskType)
+
+      const route = await harness.coordinator.resolveTurn(input)
+
+      expect(route).toMatchObject({ gateway: { target: 'laravel_proxy' }, externalOneShot: true })
+      expect(harness.prepareModel).not.toHaveBeenCalled()
+      expect(harness.dependencies.hardwareSnapshot).not.toHaveBeenCalled()
+      await expect(route.gateway.streamChatWithTools(request)).resolves.toMatchObject({ content: 'extern' })
+      expect(proxy).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ taskType }))
+    }
+  )
+
+  it.each(['chat.general', 'planning.agent', 'agent.extraction', 'agent.admin', ' agent.research ', undefined])(
+    'fails closed for specialist task type %s',
+    async taskType => {
+      const harness = makeHarness(await manifest('promoted_preferred'))
+      await harness.coordinator.initialize(bootstrap())
+      await expect(
+        harness.coordinator.resolveTurn({
+          projectId: 'project-1',
+          taskType,
+          intent: 'external_specialist',
+        })
+      ).rejects.toMatchObject({ code: 'routing_intent_invalid' })
+      expect(harness.prepareModel).not.toHaveBeenCalled()
+      expect(proxy).not.toHaveBeenCalled()
+    }
+  )
+
+  it('shares one native preparation between background warmup and an immediately submitted chat', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    const ready = await harness.prepareModel.getMockImplementation()!(verified.routing.defaultModelId)
+    const pending = deferred<typeof ready>()
+    harness.prepareModel.mockImplementationOnce(() => pending.promise)
+    await harness.coordinator.initialize(bootstrap())
+    const warmup = harness.coordinator.resolveTurn({
+      projectId: '__luczor_background__',
+      contextId: 'renderer',
+      taskType: 'chat.general',
+      contextEgress: 'local_only',
+      routingSettings: { preference: 'local_only' },
+    })
+    await vi.waitFor(() => expect(harness.prepareModel).toHaveBeenCalledOnce())
+    const foreground = harness.coordinator.resolveTurn({
+      projectId: 'project-1',
+      taskType: 'chat.general',
+      contextEgress: 'local_only',
+      routingSettings: { preference: 'local_only' },
+    })
+    pending.resolve(ready)
+    const routes = await Promise.all([warmup, foreground])
+    expect(routes.every(route => route.gateway.target === 'local_llama_cpp')).toBe(true)
+    expect(harness.prepareModel).toHaveBeenCalledOnce()
+    expect(harness.requests).toHaveLength(0)
+  })
+
+  it('does not wait behind a local preparation already in progress', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    const ready = await harness.prepareModel.getMockImplementation()!(verified.routing.defaultModelId)
+    const pending = deferred<typeof ready>()
+    harness.prepareModel.mockImplementationOnce(() => pending.promise)
+    await harness.coordinator.initialize(bootstrap())
+    const localRoute = harness.coordinator.resolveTurn({ projectId: 'project-1', taskType: 'chat' })
+    await vi.waitFor(() => expect(harness.prepareModel).toHaveBeenCalledOnce())
+
+    const { input } = await approvedSpecialist()
+    await expect(harness.coordinator.resolveTurn(input)).resolves.toMatchObject({
+      gateway: { target: 'laravel_proxy' },
+    })
+    expect(harness.prepareModel).toHaveBeenCalledOnce()
+
+    pending.resolve(ready)
+    await expect(localRoute).resolves.toMatchObject({ gateway: { target: 'local_llama_cpp' } })
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('keeps an ordinary agent task local unless specialist intent is explicitly selected', async () => {
+    const harness = makeHarness(await manifest('promoted_preferred'))
+    await harness.coordinator.initialize(bootstrap())
+    const { input } = await approvedSpecialist('agent.coding')
+    delete input.intent
+    await expect(harness.coordinator.resolveTurn(input)).resolves.toMatchObject({
+      gateway: { target: 'local_llama_cpp' },
+    })
+    expect(harness.prepareModel).toHaveBeenCalledOnce()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unknown routing intent at runtime', async () => {
+    const harness = makeHarness(await manifest('promoted_preferred'))
+    await harness.coordinator.initialize(bootstrap())
+    const { input } = await approvedSpecialist()
+    await expect(
+      harness.coordinator.resolveTurn({
+        ...input,
+        intent: 'automatic_external',
+      } as unknown as TurnRoutingInput)
+    ).rejects.toMatchObject({ code: 'routing_intent_invalid' })
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('cannot skip an expired signed policy when specialist policy refresh fails', async () => {
+    const harness = makeHarness(await manifest('promoted_preferred'))
+    await harness.coordinator.initialize(bootstrap())
+    const { input } = await approvedSpecialist()
+    input.externalPackage!.approval.expiresAt = '2026-08-30T14:00:00Z'
+    harness.advance(31 * 60_000)
+    vi.mocked(harness.dependencies.bootstrap).mockRejectedValueOnce(new Error('offline'))
+    await expect(harness.coordinator.resolveTurn(input)).rejects.toMatchObject({ code: 'manifest_expired' })
+    expect(harness.dependencies.bootstrap).toHaveBeenCalledOnce()
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('requires specialist approval without reporting an unattempted local preparation failure', async () => {
+    const harness = makeHarness(await manifest('promoted_preferred'))
+    await harness.coordinator.initialize(bootstrap())
+    await expect(
+      harness.coordinator.resolveTurn({
+        projectId: 'project-1',
+        taskType: 'agent.research',
+        intent: 'external_specialist',
+      })
+    ).rejects.toMatchObject({
+      code: 'external_approval_required',
+      message: expect.stringContaining('externe Spezialist'),
+    })
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it.each(['local_context', 'local_preference', 'signed_denial', 'unavailable_policy', 'changed_identity'] as const)(
+    'keeps specialist routing blocked for %s even with an approved package',
+    async gate => {
+      const verified = await manifest('promoted_preferred')
+      const harness = makeHarness(
+        gate === 'signed_denial' ? { ...verified, routing: { ...verified.routing, externalAllowed: false } } : verified
+      )
+      await harness.coordinator.initialize(bootstrap(gate !== 'unavailable_policy'))
+      const { input } = await approvedSpecialist()
+      if (gate === 'local_context') input.contextEgress = 'local_only'
+      if (gate === 'local_preference') input.routingSettings = { preference: 'local_only' }
+      if (gate === 'changed_identity') harness.coordinator.invalidateApiIdentity()
+      await expect(harness.coordinator.resolveTurn(input)).rejects.toMatchObject({
+        code:
+          gate === 'local_context' || gate === 'local_preference'
+            ? 'local_only_blocked'
+            : gate === 'signed_denial'
+              ? 'external_policy_blocked'
+              : 'local_policy_unavailable',
+      })
+      expect(harness.prepareModel).not.toHaveBeenCalled()
+      expect(proxy).not.toHaveBeenCalled()
+    }
+  )
+
+  it('keeps the specialist approval bound to the account, exact body and single request', async () => {
+    const harness = makeHarness(await manifest('promoted_preferred'))
+    await harness.coordinator.initialize(bootstrap())
+    const { input, request } = await approvedSpecialist()
+    await expect(
+      harness.coordinator.resolveTurn({
+        ...input,
+        externalPackage: { ...input.externalPackage!, apiConfig: { ...account().config, clientId: 'another-client' } },
+      })
+    ).rejects.toMatchObject({ code: 'egress_client_mismatch' })
+
+    const route = await harness.coordinator.resolveTurn(input)
+    await expect(route.gateway.streamChatWithTools({ ...request, taskType: 'agent.coding' })).rejects.toMatchObject({
+      code: 'routing_intent_invalid',
+    })
+    await expect(
+      route.gateway.streamChatWithTools({
+        ...request,
+        messages: [{ role: 'user', content: 'changed packet' }],
+      })
+    ).rejects.toMatchObject({
+      code: 'egress_hash_mismatch',
+    })
+    expect(proxy).not.toHaveBeenCalled()
+    await route.gateway.streamChatWithTools(request)
+    await expect(route.gateway.streamChatWithTools(request)).rejects.toMatchObject({
+      code: 'external_reapproval_required',
+    })
+    expect(proxy).toHaveBeenCalledOnce()
   })
 
   it('selects signed Orca default, explicit Flash experiment, and promoted Flash default', async () => {
@@ -491,6 +807,69 @@ describe('local inference coordinator and approved external gateway', () => {
       payloadSha256: second.payloadSha256,
     })
   })
+
+  it('reuses the resident scope across task and conversation changes within one project and repository', async () => {
+    const harness = makeHarness(await manifest('explicit_experiment'))
+    await harness.coordinator.initialize(bootstrap())
+    const turns = [
+      { taskType: 'chat.general', contextId: 'conversation-1' },
+      { taskType: 'coding.agent', contextId: 'conversation-2' },
+      { taskType: 'planning.agent', contextId: 'conversation-3' },
+    ]
+    for (const turn of turns) {
+      const input = { projectId: 'project-1', repoId: 'repo-1', ...turn }
+      const route = await harness.coordinator.resolveTurn(input)
+      await route.gateway.streamChatWithTools({ ...basicRequest, ...input })
+    }
+    expect(harness.requests).toHaveLength(3)
+    expect(new Set(harness.requests.map(request => request.scopeDigest)).size).toBe(1)
+    expect(new Set(harness.requests.map(request => request.modelReleaseId)).size).toBe(1)
+    expect(harness.prepareModel).toHaveBeenCalledTimes(1)
+
+    // A verified policy refresh within the same desktop session is not a new
+    // process-ownership identity; its native catalog boundary is checked separately.
+    await harness.coordinator.initialize(bootstrap())
+    const refreshed = await harness.coordinator.resolveTurn({ projectId: 'project-1', repoId: 'repo-1' })
+    await refreshed.gateway.streamChatWithTools(basicRequest)
+    expect(harness.requests[3]?.scopeDigest).toBe(harness.requests[0]?.scopeDigest)
+  })
+
+  it.each(['project', 'repository', 'principal', 'device', 'server', 'desktop session'] as const)(
+    'isolates the resident scope when the %s boundary changes',
+    async boundary => {
+      const harness = makeHarness(await manifest('explicit_experiment'))
+      const input = { projectId: 'project-1', repoId: 'repo-1', contextId: 'conversation-1', taskType: 'chat' }
+      await harness.coordinator.initialize(bootstrap())
+      const first = await harness.coordinator.resolveTurn(input)
+      await first.gateway.streamChatWithTools(basicRequest)
+
+      const nextBootstrap = bootstrap()
+      const nextInput = { ...input }
+      if (boundary === 'project') nextInput.projectId = 'project-2'
+      if (boundary === 'repository') nextInput.repoId = 'repo-2'
+      if (boundary === 'device') nextBootstrap.device.id = 'device-2'
+      if (boundary === 'principal') {
+        nextBootstrap.user.id = 42
+        vi.mocked(harness.dependencies.accountSnapshot).mockResolvedValue({
+          ...account(),
+          principalId: `account:v2:${'c'.repeat(64)}`,
+          accountId: 42,
+        })
+      }
+      if (boundary === 'server') {
+        vi.mocked(harness.dependencies.accountSnapshot).mockResolvedValue(account('https://example.test/luczor-b'))
+      }
+      if (boundary === 'desktop session') {
+        vi.mocked(harness.dependencies.manifestSession).mockResolvedValue('00000000-0000-4000-8000-000000000002')
+      }
+      await harness.coordinator.initialize(nextBootstrap)
+      const second = await harness.coordinator.resolveTurn(nextInput)
+      await second.gateway.streamChatWithTools({ ...basicRequest, projectId: nextInput.projectId })
+      expect(harness.requests[0]?.scopeDigest).toMatch(/^[a-f0-9]{64}$/)
+      expect(harness.requests[1]?.scopeDigest).toMatch(/^[a-f0-9]{64}$/)
+      expect(harness.requests[0]?.scopeDigest).not.toBe(harness.requests[1]?.scopeDigest)
+    }
+  )
 
   it('binds scope digests to the verified account server instance including deployment path', async () => {
     const verified = await manifest('explicit_experiment')

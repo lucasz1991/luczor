@@ -11,14 +11,30 @@ import {
 
 const props = withDefaults(
   defineProps<{
+    chatToolRounds?: number
+    agentToolRounds?: number
+    backgroundModelPreparation?: boolean
+    backgroundContextPreparation?: boolean
     autoExecuteMutatingTools: boolean
     mode?: LuczorMode
     killSwitch?: boolean
     tools?: ToolCapability[]
   }>(),
-  { mode: 'observe', killSwitch: false, tools: () => [] }
+  {
+    chatToolRounds: 6,
+    agentToolRounds: 12,
+    backgroundModelPreparation: true,
+    backgroundContextPreparation: true,
+    mode: 'observe',
+    killSwitch: false,
+    tools: () => [],
+  }
 )
 const emit = defineEmits<{
+  (event: 'update:chatToolRounds', value: number): void
+  (event: 'update:agentToolRounds', value: number): void
+  (event: 'update:backgroundModelPreparation', value: boolean): void
+  (event: 'update:backgroundContextPreparation', value: boolean): void
   (event: 'update:autoExecuteMutatingTools', value: boolean): void
 }>()
 
@@ -81,6 +97,80 @@ function toggleAutoExecution(): void {
       </p>
       <p class="lz-hint">
         Nach dem Speichern gilt eine Änderung vor dem nächsten Tool-Aufruf, auch in laufenden Aufträgen.
+      </p>
+    </div>
+    <div class="lz-card">
+      <div class="lz-card__title">Im Hintergrund vorbereiten</div>
+      <div class="lz-card__head">
+        <div>
+          <div class="lz-card__title">Lokales Modell bereithalten</div>
+          <p class="lz-hint">
+            Bereitet das konfigurierte Modell beim Öffnen vor und hält es für den nächsten Auftrag bereit. Nutzt
+            Arbeitsspeicher und gegebenenfalls Grafikspeicher.
+          </p>
+        </div>
+        <button
+          type="button"
+          class="lz-switch"
+          :class="{ 'is-on': backgroundModelPreparation }"
+          :aria-pressed="backgroundModelPreparation"
+          aria-label="Lokales Modell bereithalten"
+          @click="emit('update:backgroundModelPreparation', !backgroundModelPreparation)"
+        >
+          <span />
+        </button>
+      </div>
+      <div class="lz-card__head">
+        <div>
+          <div class="lz-card__title">Projektkontext vorab vorbereiten</div>
+          <p class="lz-hint">
+            Bereitet Projektziele, erlaubte Erinnerungen und das Assistentenprofil vor. Änderungen am Projekt, Konto
+            oder den Einstellungen verwerfen den Zwischenspeicher.
+          </p>
+        </div>
+        <button
+          type="button"
+          class="lz-switch"
+          :class="{ 'is-on': backgroundContextPreparation }"
+          :aria-pressed="backgroundContextPreparation"
+          aria-label="Projektkontext vorab vorbereiten"
+          @click="emit('update:backgroundContextPreparation', !backgroundContextPreparation)"
+        >
+          <span />
+        </button>
+      </div>
+    </div>
+    <div class="lz-card">
+      <div class="lz-card__title">Tool-Limits</div>
+      <p class="lz-hint">
+        Modellrunden pro Arbeitsabschnitt (1–64). Eine Runde kann mehrere Tool-Aufrufe enthalten. Änderungen gelten ab
+        dem nächsten Abschnitt.
+      </p>
+      <label class="capability-search"
+        >Normaler Chat: maximale Tool-Runden
+        <input
+          type="number"
+          min="1"
+          max="64"
+          step="1"
+          :value="chatToolRounds"
+          @input="emit('update:chatToolRounds', Number(($event.target as HTMLInputElement).value))"
+        />
+      </label>
+      <label class="capability-search"
+        >Arbeitsagent: maximale Tool-Runden
+        <input
+          type="number"
+          min="1"
+          max="64"
+          step="1"
+          :value="agentToolRounds"
+          @input="emit('update:agentToolRounds', Number(($event.target as HTMLInputElement).value))"
+        />
+      </label>
+      <p class="lz-hint">
+        Beim Rundenlimit bleibt der Fortschritt in dieser Sitzung verfügbar: Weiterarbeiten oder mit einem Agententeam
+        fortsetzen. Das Kontextfenster des Modells bleibt davon unabhängig.
       </p>
     </div>
     <div v-if="tools.length" class="lz-card capability-catalog">

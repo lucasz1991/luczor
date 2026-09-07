@@ -15,17 +15,19 @@ describe('chat activity lifecycle', () => {
     updateChatActivity(activity, { phase: 'thinking', round: 1 })
     for (let characters = 1; characters <= 100; characters++)
       updateChatActivity(activity, { phase: 'receiving', round: 1, characters })
-    expect(activity.steps).toHaveLength(3)
+    expect(activity.steps).toHaveLength(4)
     expect(activity.steps[0]?.status).toBe('done')
-    expect(activity.steps[2]).toMatchObject({
-      label: 'Antwort empfangen',
+    expect(activity.steps[3]).toMatchObject({
+      label: 'Antwort wird geschrieben',
       status: 'running',
       detail: '100 Zeichen empfangen · Runde 1',
     })
     updateChatActivity(activity, { phase: 'tools', round: 1 })
     updateChatActivity(activity, { phase: 'thinking', round: 2 })
     expect(activity.steps[2]?.status).toBe('done')
-    expect(activity.steps[3]?.status).toBe('running')
+    expect(activity.steps[3]?.status).toBe('done')
+    expect(activity.steps[4]?.label).toBe('Werkzeuge ausführen')
+    expect(activity.steps[5]?.status).toBe('running')
     finishChatActivity(activity, 'done', 5500)
     expect(activity.finishedAt! - activity.startedAt).toBe(4500)
     expect(activity.steps.every(step => step.status === 'done')).toBe(true)

@@ -7,27 +7,43 @@ import { MINI_ACTION_EVENT, type MiniAction, type MiniDecision, type MiniSnapsho
 import type { LuczorMode } from '@/services/inference/types'
 import { setStatus } from '@/state/hud'
 import { localAssistantProfilePrompt, refreshAssistantProfile } from '@/services/assistantProfile'
+import { createMiniChatBridge, type MiniWorkspaceBinding } from '@/services/miniChat/bridge'
+import { resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
+import { executionGate } from '@/services/executionGate'
 
-type Dependencies = {
+type Dependencies = MiniWorkspaceBinding & {
   context: () => { project: { id: string; name: string } | null; mode: LuczorMode; mainBusy: boolean }
   setMode: (mode: 'observe' | 'act') => void
   telemetry: () => MiniSnapshot['hud']
   mainDecision: () => MiniDecision | null
   decideMain: (id: string, approved: boolean) => void
   killSwitch: (enabled: boolean) => void
+  appearance: () => NonNullable<MiniSnapshot['appearance']>
 }
 export function useMiniChatHost(deps: Dependencies) {
   const controller = createMiniChatController({
+    followProject: true,
     context: deps.context,
     setMode: deps.setMode,
-    preamble: buildSystemPreamble,
+    preamble: (mode, name) =>
+      `${buildSystemPreamble(mode, name)}\nDu bist im übergeordneten Luczor-Workspace. Nutze workspace_overview für die Übersicht und workspace_* für ausdrücklich adressierte Projekte, Projektchats und verwaltete Agentenaufträge. Dateien und Desktopaktionen bleiben an das Arbeitsprojekt dieser Runde gebunden. Projektwechsel erfolgen zwischen Aufträgen. Codeaufträge werden vorbereitet und vom Nutzer im Agentenfenster geprüft und gestartet. Behaupte keine Ausführung oder Ergebnisse ohne Werkzeugnachweis.`,
     run: async options => {
+      const ticket = executionGate.capture(options.signal)
+      const projectIds = deps.projects().map(project => project.id)
       try {
+        const principalId = await resolveWorkspacePrincipalId()
+        executionGate.assert(ticket)
         const profile = await refreshAssistantProfile()
+        executionGate.assert(ticket)
         if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
         const prompt = localAssistantProfilePrompt(profile)
         return await runAgent({
           ...options,
+          workspaceScope: Object.freeze({ principalId, projectIds: Object.freeze(projectIds) }),
+          contextEgress: 'local_only',
+          routingSettings: { preference: 'local_only' },
+          externalBaseMessages: undefined,
+          requestExternalApproval: undefined,
           baseMessages: options.baseMessages.map(message =>
             message.role === 'system' && prompt ? { ...message, content: `${message.content}\n\n${prompt}` } : message
           ),
@@ -37,15 +53,17 @@ export function useMiniChatHost(deps: Dependencies) {
       }
     },
   })
+  const bridge = createMiniChatBridge(controller, deps)
   const browserVisible = ref(!isTauri())
   const error = ref('')
   let unlisten: UnlistenFn | undefined
   let timer: ReturnType<typeof setTimeout> | undefined
   let disposed = false
   const snapshot = computed<MiniSnapshot>(() => ({
-    ...controller.state,
+    ...bridge.snapshot.value,
     hud: deps.telemetry(),
     mainDecision: deps.mainDecision(),
+    appearance: deps.appearance(),
   }))
   function dispatch(action: MiniAction) {
     if (action.type === 'main_decide') {
@@ -57,7 +75,7 @@ export function useMiniChatHost(deps: Dependencies) {
       if (action.enabled) controller.stop()
       return
     }
-    return controller.dispatch(action)
+    return bridge.dispatch(action)
   }
   function publish() {
     if (!isTauri() || disposed) return
@@ -82,7 +100,7 @@ export function useMiniChatHost(deps: Dependencies) {
     { deep: true }
   )
   onMounted(async () => {
-    window.addEventListener('luczor:voice-stop', controller.reset)
+    window.addEventListener('luczor:voice-stop', bridge.reset)
     if (!isTauri()) return
     try {
       const off = await listen<MiniAction>(MINI_ACTION_EVENT, event => {
@@ -101,10 +119,11 @@ export function useMiniChatHost(deps: Dependencies) {
   })
   onBeforeUnmount(() => {
     controller.reset()
+    bridge.dispose()
     publish()
     disposed = true
     unlisten?.()
-    window.removeEventListener('luczor:voice-stop', controller.reset)
+    window.removeEventListener('luczor:voice-stop', bridge.reset)
     clearTimeout(timer)
   })
   async function open() {

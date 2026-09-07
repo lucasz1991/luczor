@@ -1,5 +1,6 @@
 import { createCorrelationId, LuczorApiError, type LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
 import { apiTransportInput } from '@/services/api/transportTarget'
+import { validSpeechVoiceId } from './voiceCatalog'
 
 export const MAX_TTS_TEXT_CHARS = 4000
 export const MAX_TTS_AUDIO_BYTES = 16 * 1024 * 1024
@@ -41,7 +42,7 @@ function serverError(status: number, correlationId: string): LuczorApiError {
 export async function serverTts(
   text: string,
   config: LuczorApiConfigSnapshot,
-  options: { signal?: AbortSignal; speed?: number } = {}
+  options: { signal?: AbortSignal; speed?: number; voiceId?: string } = {}
 ): Promise<Blob> {
   if (options.signal?.aborted) throw speechAbortError()
   const clean = text.trim()
@@ -49,6 +50,8 @@ export async function serverTts(
     throw new LuczorApiError(0, `Ein Sprachabschnitt muss 1 bis ${MAX_TTS_TEXT_CHARS} Zeichen enthalten.`)
   }
   const speed = options.speed ?? 1
+  const voiceId = options.voiceId?.trim()
+  if (voiceId && !validSpeechVoiceId(voiceId)) throw new LuczorApiError(0, 'Die ausgewählte Stimmen-ID ist ungültig.')
   if (!Number.isFinite(speed) || speed < 0.5 || speed > 2) {
     throw new LuczorApiError(0, 'Die Sprechgeschwindigkeit muss zwischen 0,5 und 2 liegen.')
   }
@@ -85,7 +88,12 @@ export async function serverTts(
           Authorization: `Bearer ${config.deviceKey}`,
           'X-Luczor-Correlation-Id': correlationId,
         },
-        body: JSON.stringify({ text: clean, language: 'de', speed }),
+        body: JSON.stringify({
+          text: clean,
+          language: 'de',
+          speed,
+          ...(voiceId && voiceId !== 'piper' ? { voice_id: voiceId } : {}),
+        }),
         signal: controller.signal,
         redirect: 'error',
         credentials: 'omit',

@@ -848,6 +848,13 @@
   min-height: 0;
   min-width: 0;
 }
+.ai-answer__streamed-bullets {
+  margin-block: 12px;
+  padding-inline-start: 20px;
+  list-style: disc;
+  font-size: 14px;
+  line-height: 1.7;
+}
 .ai-chat__tabs {
   display: flex;
   gap: 4px;
@@ -1167,4 +1174,43 @@ html[data-reduce-motion='1'] :is(.ai-loading, .ai-thinking, .ai-answer, .ai-tool
 html[data-reduce-motion='1'] .ai-shimmer {
   background: none;
   color: var(--ai-muted);
+}
+
+.ai-prompt__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ai-agent-mode {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ai-agent-mode.is-active {
+  color: var(--text-primary);
+  border-color: var(--cy, #74c5d9);
+  background: var(--surface-glass);
+}
+.ai-agent-mode:focus-visible {
+  outline: 2px solid var(--cy, #74c5d9);
+  outline-offset: 2px;
+}
+.ai-agent-mode:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.ai-continuation {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
 }

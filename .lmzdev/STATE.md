@@ -89,3 +89,36 @@
 
 - Windows-Debug-Build mit 186 Frontendmodulen erfolgreich: app/src-tauri/target/debug/tauri-app.exe, 42482176 Bytes, SHA256 DD082DC77BAFA37DE0E2CDEC30AA771AA4D0C553BB2918506E423CBC94AA3F12.
 - Build erstellt, nicht installiert/gestartet; keine echte Modellinferenz oder Desktop-Sitzungsuebergabe. QA-Listener1437 beendet. Abschlussdokumentation app/docs/agent-hub.md.
+
+
+## 2026-09-06T20:43:03Z | Chatkommentare, Vorlesen und Live-Stream
+- Persistente öffentliche Zwischenkommentare und Arbeitsschritte, gemeinsamer inkrementeller Parser und FIFO-Vorlesen im Hauptchat fertig. Ziele/Checklisten absolut, unabhängig einklappbar.
+- 1.002 Frontendtests plus 62 gezielte Nachprüfungen, Typecheck, Lint, Format, Browser-Fixtures und nativer Debugbuild bestanden.
+- Neuer Debug-Testbuild erstellt; laufender Release sperrte seine EXE und blieb offen. Keine neue echte Inferenz/Audioabnahme oder Serververöffentlichung.
+- Bericht: E:/projekte/luczor/.lmzdev/artifacts/reports/2026-09-06-chat-commentary-continuity.md. Ownership abgeschlossen.
+
+## 2026-09-07 | Codex/mini_workspace | Gemeinsames Design und Chat/Workspace
+- Native Mini-Webview und Browser-Overlay uebernehmen Hauptchat-Theme, Akzent und Komponenten. Statusorb bleibt an reale oeffentliche Laufzeitphasen gebunden.
+- Projektchat ist derselbe persistierte Main-Verlauf; Workspace bleibt fluechtige lokale Verwaltung mit sechs expliziten Werkzeugen fuer Projekt-/Chatuebersicht, Metadaten und vorbereitete Agentenauftraege. Dateien/Desktop behalten das gewaehlte Arbeitsprojekt und bestehende Freigaben.
+- Gemeinsame Startsperre, Kontextkennungen, getrennte Entwuerfe und begrenzte Zustandsabbilder integriert. Workspace leeren loescht keinen Projektchat. Browsergrenzen und erreichbare Entscheidungen bei420x660 geprueft.
+- Final:1066 Frontendtests/100Dateien und122Rusttests/1ignoriert, Typecheck/Lint/Format/fmt/Clippy sowie gemeinsamer nativer Release ohne Bundle erfolgreich. EXE14.585.856Bytes, SHA256 96109C1BB7FEB1CFA8ACE0D7F9B9F2E63859243418F36FF07F1C6D8B0484ADDF. Laufende Debug-App blieb offen.
+- Keine neue echte Inferenz/Mikrofon-/native GUI-Abnahme, kein Installer/Deploy/Commit. Bedienung:docs/mini-chat.md; Bericht:artifacts/reports/2026-09-07-mini-workspace.md. Browser1430 fuer Vorschau offen; synthetische Fixture geschlossen und Viewport zurueckgesetzt.
+
+## 2026-09-07T00:09:00Z | Codex/root | Vorlesen und V2-Stimmen abgeschlossen
+- Öffentliche lokale Zwischenkommentare/Antworten dürfen nach ausdrücklicher Nutzerzustimmung vorgelesen werden. Separate an Server/Client gebundene Zustimmung aktiviert; allgemeine Settings-Datei der laufenden App blieb unverändert. FIFO, Abbruch und Datenschutzklassifikation erhalten.
+- Wortmarkierung aus tatsächlichem Audiotakt mit ausdrücklich näherungsweiser Wortposition. V2-Katalog/Auswahl/Hörprobe/Speichern inklusive Benni, Jürgen, Alba, Javert; Piper bleibt Standard.
+- Backend a00d2cbbf3bb39c7a09df77750c05239ec605700 mit privatem Backup veröffentlicht; 536 Dateien geprüft, Produktionschecks und HTTPS Health/Ready/Katalog/Benni/Piper/401/422 erfolgreich. Spätere parallele Agententeamänderungen nicht veröffentlicht.
+- 1083 Frontendtests plus 2 zusätzliche Settings-Regressionen (7 Settings-Tests im Nachlauf), 508 Backendtests/3444 Assertions, Typecheck/Lint/Format/Pint/gezieltes PHPStan bestanden. Browser mit echter Audiodatei bei Desktop/320px geprüft; keine neue native Modell-/Mikrofonabnahme.
+- Release ohne Bundle: E:/projekte/luczor/app/src-tauri/target/release/tauri-app.exe, 14590464 Bytes, SHA256 8CE0F4E164B47C7C4FA91349176688CE92C04001412DCBE969786DDD805EB232. Laufende Debug-App PID95888 erhalten. Prüftabs und eigener Vite1444 geschlossen.
+- Bericht: app/.lmzdev/artifacts/reports/2026-09-07-commentary-read-aloud.md; Bedienung: app/docs/assistant-profile-and-streaming.md. Kein offenes Arbeitspaket dieser Erweiterung; Nutzer muss zum neuen Release wechseln.
+
+## 2026-09-07T00:16:27Z | External specialist routing
+- Explicit agent specialist preference is available with unchanged egress/policy approval boundaries. 142 focused tests, typecheck, scoped lint/format/diff passed; full integration and native checks remain root-owned.
+
+## 2026-09-07 | Codex/routing_review | Hintergrundvorbereitung
+- Standardmaessige lokale Modellbereitschaft und revisions-/scopegebundener fluechtiger Projektkontextcache integriert; Startup auch ohne Projekt, signierte Policyerneuerung und Abbruch-/Invalidationsschutz. Keine native Modellgenerierung im Hintergrund.
+- Finale gezielte Pruefung142Tests/8Dateien sowie ESLint/Format gruen; Gesamtgates/Build durch Root. Bedienung und Abnahmegrenzen: docs/background-preparation.md.
+
+
+## 2026-09-07T00:25:39Z | Resident local runtime scope
+- Local runtime identity now remains stable across chat/coding/planning and conversation changes within one authenticated project/repository/desktop session. 100 coordinator tests and scoped quality gates passed; root owns native cache flag and integration.

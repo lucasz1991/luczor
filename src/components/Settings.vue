@@ -1,10 +1,12 @@
 <!-- src/components/Settings.vue -->
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, watch } from 'vue'
+import { loadLocalSpeechConsent, saveLocalSpeechConsent } from '@/services/voice/speechConsent'
 import { Store } from '@tauri-apps/plugin-store'
 import PrivacyDiagnosticsSettings from '@/components/PrivacyDiagnosticsSettings.vue'
 import AppearanceSettingsSection from '@/components/settings/AppearanceSettingsSection.vue'
 import ChatSettingsSection from '@/components/settings/ChatSettingsSection.vue'
+import { DEFAULT_TOOL_LIMITS, loadToolLimits, validToolRounds } from '@/services/toolLimits'
 import ExecutionSettingsSection from '@/components/settings/ExecutionSettingsSection.vue'
 import { listTools } from '@/services/tools/registry'
 import type { LuczorMode } from '@/services/inference/types'
@@ -45,7 +47,7 @@ const props = withDefaults(
     initialTab?: SettingsTab
     mode?: LuczorMode
     killSwitch?: boolean
-    testSpeech: (text: string, signal?: AbortSignal) => Promise<'completed' | 'cancelled'>
+    testSpeech: (text: string, signal?: AbortSignal, voiceId?: string) => Promise<'completed' | 'cancelled'>
   }>(),
   {
     initialTab: 'server',
@@ -68,10 +70,16 @@ type AppSettings = {
   // Chat
   chat_auto_speech: boolean
   chat_auto_speech_mode: ChatAutoSpeechMode
+  voice_tts_allow_local_content: boolean
+  voice_tts_voice_id: string
   client_history_token_budget: number
   local_model_flash_experiment: boolean
 
   // Tool execution
+  chat_tool_rounds: number
+  agent_tool_rounds: number
+  background_model_preparation: boolean
+  background_context_preparation: boolean
   auto_execute_mutating_tools: boolean
 
   // Local voice runtime (model binaries stay release-managed)
@@ -107,8 +115,14 @@ const DEFAULTS: AppSettings = {
 
   chat_auto_speech: true,
   chat_auto_speech_mode: 'assistant_only',
+  voice_tts_allow_local_content: false,
+  voice_tts_voice_id: '',
   client_history_token_budget: 2400,
   local_model_flash_experiment: false,
+  chat_tool_rounds: DEFAULT_TOOL_LIMITS.chat,
+  agent_tool_rounds: DEFAULT_TOOL_LIMITS.agent,
+  background_model_preparation: true,
+  background_context_preparation: true,
   auto_execute_mutating_tools: DEFAULT_EXECUTION_POLICY.autoExecuteMutatingTools,
   voice_mode: VOICE_DEFAULTS.mode,
   voice_wake_word: VOICE_DEFAULTS.wakeWord,
@@ -209,6 +223,8 @@ async function ensureStoreLoaded() {
   // Chat
   const autoSpeech = await settingsStore.get<boolean>('chat_auto_speech')
   if (typeof autoSpeech === 'boolean') settings.chat_auto_speech = autoSpeech
+  settings.voice_tts_allow_local_content = await loadLocalSpeechConsent()
+  settings.voice_tts_voice_id = (await settingsStore.get<string>('voice_tts_voice_id')) || ''
 
   const mode = await settingsStore.get<ChatAutoSpeechMode>('chat_auto_speech_mode')
   if (mode === 'off' || mode === 'assistant_only' || mode === 'all') settings.chat_auto_speech_mode = mode
@@ -216,6 +232,12 @@ async function ensureStoreLoaded() {
   if (typeof historyBudget === 'number' && !Number.isNaN(historyBudget))
     settings.client_history_token_budget = clamp(historyBudget, 400, 12000)
   settings.local_model_flash_experiment = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
+  const toolLimits = await loadToolLimits()
+  settings.chat_tool_rounds = toolLimits.chat
+  settings.agent_tool_rounds = toolLimits.agent
+  settings.background_model_preparation = (await settingsStore.get<unknown>('background_model_preparation')) !== false
+  settings.background_context_preparation =
+    (await settingsStore.get<unknown>('background_context_preparation')) !== false
   const autoExecuteMutatingTools = await settingsStore.get<unknown>(AUTO_EXECUTE_MUTATING_TOOLS_KEY)
   settings.auto_execute_mutating_tools = autoExecuteMutatingTools === true
   Object.assign(settings, voiceSettingsToStore(await getVoiceConfig()))
@@ -281,6 +303,11 @@ async function saveAll() {
 
   ui.error = null
 
+  if (!validToolRounds(settings.chat_tool_rounds) || !validToolRounds(settings.agent_tool_rounds)) {
+    ui.error = 'Tool-Limits: Bitte ganze Zahlen zwischen 1 und 64 eingeben.'
+    ui.tab = 'execution'
+    return
+  }
   const voiceDraft = {
     mode: settings.voice_mode,
     wakeWord: settings.voice_wake_word,
@@ -323,11 +350,19 @@ async function saveAll() {
   // Chat
   await settingsStore.set('chat_auto_speech', settings.chat_auto_speech)
   await settingsStore.set('chat_auto_speech_mode', settings.chat_auto_speech_mode)
+  if (apiIdentityChanged) settings.voice_tts_allow_local_content = false
+  if (apiIdentityChanged) settings.voice_tts_voice_id = ''
+  await saveLocalSpeechConsent(settings.voice_tts_allow_local_content)
+  await settingsStore.set('voice_tts_voice_id', settings.voice_tts_voice_id)
   await settingsStore.set(
     'client_history_token_budget',
     clamp(Math.round(settings.client_history_token_budget), 400, 12000)
   )
   await settingsStore.set(FLASH_EXPERIMENT_SETTING_KEY, settings.local_model_flash_experiment)
+  await settingsStore.set('chat_tool_rounds', settings.chat_tool_rounds)
+  await settingsStore.set('agent_tool_rounds', settings.agent_tool_rounds)
+  await settingsStore.set('background_model_preparation', settings.background_model_preparation)
+  await settingsStore.set('background_context_preparation', settings.background_context_preparation)
   await settingsStore.set(AUTO_EXECUTE_MUTATING_TOOLS_KEY, settings.auto_execute_mutating_tools)
   for (const [key, value] of Object.entries(voiceValues)) await settingsStore.set(key, value)
 
@@ -362,6 +397,7 @@ async function saveAll() {
 async function resetChatSettings() {
   settings.chat_auto_speech = DEFAULTS.chat_auto_speech
   settings.chat_auto_speech_mode = DEFAULTS.chat_auto_speech_mode
+  settings.voice_tts_allow_local_content = DEFAULTS.voice_tts_allow_local_content
   await saveAll()
 }
 
@@ -917,6 +953,10 @@ function iconPath(kind: string) {
               <ExecutionSettingsSection
                 v-else-if="ui.tab === 'execution'"
                 v-model:auto-execute-mutating-tools="settings.auto_execute_mutating_tools"
+                v-model:chat-tool-rounds="settings.chat_tool_rounds"
+                v-model:agent-tool-rounds="settings.agent_tool_rounds"
+                v-model:background-model-preparation="settings.background_model_preparation"
+                v-model:background-context-preparation="settings.background_context_preparation"
                 :mode="props.mode"
                 :kill-switch="props.killSwitch"
                 :tools="registeredTools"
@@ -931,6 +971,7 @@ function iconPath(kind: string) {
                 v-model:continuous-silence-ms="settings.voice_continuous_silence_ms"
                 v-model:auto-submit="settings.voice_auto_submit"
                 v-model:stt-language="settings.voice_local_stt_language"
+                v-model:voice-id="settings.voice_tts_voice_id"
                 :test-speech="props.testSpeech"
                 :device-key="settings.luczor_device_key"
                 @open-server="selectTab('server')"
@@ -941,6 +982,7 @@ function iconPath(kind: string) {
                 v-else-if="ui.tab === 'chat'"
                 v-model:auto-speech="settings.chat_auto_speech"
                 v-model:auto-speech-mode="settings.chat_auto_speech_mode"
+                v-model:allow-local-speech="settings.voice_tts_allow_local_content"
                 v-model:history-token-budget="settings.client_history_token_budget"
                 @reset="resetChatSettings"
               />

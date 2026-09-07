@@ -26,6 +26,40 @@ function setup(
 }
 
 describe('temporary mini chat session', () => {
+  it('retains completed commentary during the next round, final answer and subsequent turn', async () => {
+    let options!: RunAgentOptions
+    let release!: (value: { finalText: string }) => void
+    const { controller, send } = setup(
+      vi.fn(value => {
+        options = value
+        return new Promise(resolve => {
+          release = resolve
+        })
+      })
+    )
+    const pending = send()
+    options.onToken?.('{"summary":"Ich prüfe gerade')
+    expect(controller.state.messages[1]?.content).toBe('Ich prüfe gerade')
+    options.onRoundComplete?.({
+      round: 1,
+      kind: 'commentary',
+      content: '{"summary":"Ich prüfe die Datei."}',
+      serverSpeechAllowed: true,
+    })
+    options.onToken?.('{"answer":"Das erste Ergeb')
+    expect(controller.state.messages[1]?.commentary?.[0]?.content).toBe('Ich prüfe die Datei.')
+    expect(controller.state.messages[1]?.content).toBe('Das erste Ergeb')
+    release({ finalText: '{"answer":"Die Prüfung ist fertig."}' })
+    await pending
+    expect(controller.state.messages[1]?.commentary).toHaveLength(1)
+    expect(controller.state.messages[1]?.content).toBe('Die Prüfung ist fertig.')
+    const next = send('Weiter')
+    expect(controller.state.messages[1]?.commentary?.[0]?.content).toBe('Ich prüfe die Datei.')
+    release({ finalText: 'Nächster Schritt.' })
+    await next
+    expect(controller.state.messages[1]?.commentary).toHaveLength(1)
+  })
+
   it('shows live counts and text, hides partial envelope syntax and ignores callbacks after cancellation', async () => {
     let options!: RunAgentOptions
     let release!: (value: { finalText: string }) => void

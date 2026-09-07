@@ -41,6 +41,7 @@ export function buildLaravelProxyBody(request: InferenceRequest, clientId: strin
   body.client_id = clientId
   body.project_id = request.projectId
   body.task_type = request.taskType ?? 'chat.general'
+  if (request.agentTeamPolicyRevision) body.agent_team_policy_revision = request.agentTeamPolicyRevision
   body.context_id = request.contextId
   body.repo_id = request.repoId
   body.branch = request.branch

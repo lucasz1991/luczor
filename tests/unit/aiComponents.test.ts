@@ -25,15 +25,23 @@ describe('AI component rendering contracts', () => {
     expect(html).toContain('Nächster Schritt')
   })
 
-  it('keeps answer actions and follow-ups unavailable during streaming', async () => {
+  it('streams question and option text while keeping answer and option actions unavailable', async () => {
     const html = await renderToString(
       createSSRApp({
-        render: () => h(StreamingText, { content: 'Antwort läuft', streaming: true, followUps: ['Noch nicht senden'] }),
+        render: () =>
+          h(StreamingText, {
+            content: 'Antwort läuft',
+            streaming: true,
+            question: 'Welche Variante',
+            followUps: ['Noch nicht senden'],
+          }),
       })
     )
     expect(html).toContain('aria-busy="true"')
     expect(html).not.toContain('Antwort kopieren')
-    expect(html).not.toContain('Noch nicht senden')
+    expect(html).toContain('Welche Variante')
+    expect(html).toContain('<li>Noch nicht senden</li>')
+    expect(html).not.toContain('<button')
   })
 
   it('disables speech for private or incomplete replies and explains the reason', async () => {
@@ -64,7 +72,7 @@ describe('AI component rendering contracts', () => {
     expect(html).not.toContain('<script>payload')
   })
 
-  it('starts finished traces collapsed but supports explicit expansion', async () => {
+  it('keeps finished traces expanded unless explicitly collapsed', async () => {
     const render = (expanded?: boolean) =>
       renderToString(
         createSSRApp({
@@ -72,8 +80,9 @@ describe('AI component rendering contracts', () => {
             h(ThinkingState, { expanded, steps: [{ id: 'read', label: 'Projekt gelesen', status: 'done' }] }),
         })
       )
-    expect(await render()).toContain('aria-expanded="false"')
+    expect(await render()).toContain('aria-expanded="true"')
     expect(await render(true)).toContain('aria-expanded="true"')
+    expect(await render(false)).toContain('aria-expanded="false"')
   })
 
   it('renders empty records and screens without fabricating runtime evidence', async () => {

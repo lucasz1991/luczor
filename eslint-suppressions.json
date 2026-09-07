@@ -1,10 +1,10 @@
 {
   "src/App.vue": {
     "@typescript-eslint/no-explicit-any": {
-      "count": 24
+      "count": 21
     },
     "id-length": {
-      "count": 33
+      "count": 30
     }
   },
   "src/components/JarvisHud.vue": {
@@ -117,14 +117,8 @@
     }
   },
   "src/services/envelope.ts": {
-    "@typescript-eslint/no-explicit-any": {
-      "count": 2
-    },
     "id-length": {
-      "count": 19
-    },
-    "security/detect-object-injection": {
-      "count": 3
+      "count": 5
     }
   },
   "src/services/notifications.ts": {

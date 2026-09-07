@@ -36,9 +36,12 @@ describe('transport-driven text reveal', () => {
       expect(reveal.shown.value).toBe(content.value)
       expect(reveal.revealing.value).toBe(false)
       expect(vi.getTimerCount()).toBe(0)
+      content.value += 'Letzter großer Transportblock. '.repeat(100)
       streaming.value = false
       await nextTick()
       expect(reveal.shown.value).toBe(content.value)
+      expect(reveal.revealing.value).toBe(false)
+      expect(vi.getTimerCount()).toBe(0)
     } finally {
       app.unmount()
       vi.useRealTimers()

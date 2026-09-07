@@ -1,5 +1,6 @@
 // src/state/types.ts
 import type { TokenUsage } from '@/services/tokenUsage'
+import type { ChatActivity } from '@/services/chatActivity'
 
 export type Id = string
 
@@ -29,6 +30,10 @@ export type MessageMeta = {
   inferenceTarget?: 'local_llama_cpp' | 'laravel_proxy'
   routeDecisionId?: string
   tokenUsage?: TokenUsage
+  specialistOutcomes?: import('@/services/agents/externalSpecialists').SpecialistOutcome[]
+  /** Public intermediate rounds and progress remain with their chat message. */
+  commentary?: ChatCommentary[]
+  activity?: ChatActivity
 
   // how a user turn was produced; drives the "Gesprochen" badge
   inputSource?: 'keyboard' | 'push_to_talk' | 'hands_free'
@@ -41,6 +46,14 @@ export type MessageMeta = {
   dataHandling?: 'syncable' | 'ephemeral'
   /** False until a generated answer has a final server-egress classification. */
   serverSpeechAllowed?: boolean
+}
+
+export type ChatCommentary = {
+  id: string
+  round: number
+  content: string
+  createdAt: number
+  serverSpeechAllowed: boolean
 }
 
 export type Message = {

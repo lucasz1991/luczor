@@ -123,8 +123,12 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
     const channel = new Channel<NativeInferenceEvent>()
     let accumulated = ''
     let contextRejected = false
+    let historyRejected = false
+    let toolContractRejected = false
     channel.onmessage = event => {
       if (event.type === 'error' && event.code === 'runtime_context_exceeded') contextRejected = true
+      if (event.type === 'error' && event.code === 'runtime_chat_history_rejected') historyRejected = true
+      if (event.type === 'error' && event.code === 'runtime_tool_contract_rejected') toolContractRejected = true
       if (event.type === 'delta') {
         if (request.signal?.aborted) return
         accumulated += event.content
@@ -148,6 +152,30 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
       },
       onEvent: channel,
     }).catch(error => {
+      if (
+        toolContractRejected ||
+        /^Local llama\.cpp rejected the tool contract \(HTTP (400|500)\)\.$/.test(String(error))
+      ) {
+        throw new LocalInferenceError(
+          'Das lokale Modell konnte die Werkzeugdaten nicht verarbeiten. Bereits ausgeführte Aktionen bleiben erhalten. Das Modell bleibt geladen.',
+          'runtime_tool_contract_rejected',
+          false,
+          false
+        )
+      }
+      if (
+        historyRejected ||
+        /^Local llama\.cpp rejected the conversation role order in its chat template \(HTTP (400|500)\)\.$/.test(
+          String(error)
+        )
+      ) {
+        throw new LocalInferenceError(
+          'Das lokale Modell konnte die Nachrichtenstruktur nicht verarbeiten. Bitte die Anfrage erneut senden. Das Modell bleibt geladen.',
+          'runtime_chat_history_rejected',
+          false,
+          false
+        )
+      }
       if (
         contextRejected ||
         String(error) === 'Local llama.cpp rejected the request because the context window was exceeded (HTTP 400).'

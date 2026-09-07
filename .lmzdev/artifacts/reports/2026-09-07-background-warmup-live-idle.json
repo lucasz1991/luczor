@@ -1,0 +1,12 @@
+{
+  "observedAtUtc": "2026-09-07T00:44:19.501763Z",
+  "phase": "later-idle-observation",
+  "idleObservationSeconds": 122.9,
+  "appPid": 106820,
+  "modelPid": 127068,
+  "parentPid": 106820,
+  "sameProcessStart": true,
+  "healthStatusCode": 200,
+  "health": "ok",
+  "inferenceStartedByThisAgent": false
+}

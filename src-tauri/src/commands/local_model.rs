@@ -29,6 +29,8 @@ use super::ensure_main_webview;
 #[path = "local_model_context.rs"]
 mod context_budget;
 use context_budget::ContextUsage;
+#[path = "local_model_messages.rs"]
+mod local_messages;
 
 const PUBLIC_KEY_B64: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64");
 const EXPECTED_KEY_ID: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID");
@@ -369,6 +371,15 @@ struct LocalInferenceFailure {
 }
 
 impl LocalInferenceFailure {
+    fn is_input_rejection(&self) -> bool {
+        matches!(
+            self.code,
+            "runtime_context_exceeded"
+                | "runtime_chat_history_rejected"
+                | "runtime_tool_contract_rejected"
+        )
+    }
+
     fn stream(message: impl Into<String>) -> Self {
         Self {
             code: "runtime_stream_failed",
@@ -553,7 +564,11 @@ fn reported_token_usage(value: &Value) -> Option<InferenceTokenUsage> {
     if total_tokens > 9_007_199_254_740_991 {
         return None;
     }
-    Some(InferenceTokenUsage { input_tokens, output_tokens, total_tokens })
+    Some(InferenceTokenUsage {
+        input_tokens,
+        output_tokens,
+        total_tokens,
+    })
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -2025,7 +2040,7 @@ fn infer_blocking(
     } else if result
         .as_ref()
         .err()
-        .is_some_and(|error| error.code == "runtime_context_exceeded")
+        .is_some_and(LocalInferenceFailure::is_input_rejection)
     {
         RequestOutcome::Rejected
     } else {
@@ -2472,6 +2487,12 @@ fn stream_completion(
     cancel: Arc<AtomicBool>,
     on_event: &Channel<LocalInferenceEvent>,
 ) -> Result<LocalInferenceResult, LocalInferenceFailure> {
+    if !local_messages::valid_tool_arguments(&request.messages) {
+        return Err(LocalInferenceFailure::http(
+            400,
+            LlamaHttpFailureKind::ToolContractRejected,
+        ));
+    }
     let (port, api_key) = {
         let mut guard = state()
             .lock()
@@ -2492,12 +2513,15 @@ fn stream_completion(
         .ok_or("Capacity policy has no read-time threshold.")?;
     let mut body = json!({
         "model": request.model_release_id,
-        "messages": request.messages,
+        "messages": local_messages::normalize_system_messages(&request.messages)
+            .map_err(|()| LocalInferenceFailure::http(400, LlamaHttpFailureKind::ChatHistoryRejected))?,
         "tools": request.tools,
         "tool_choice": request.tool_choice,
         "stream": true,
         "stream_options": { "include_usage": true },
         "max_tokens": request.max_output_tokens,
+        // Keep model weights resident while each request supplies its entire conversation.
+        "cache_prompt": false,
         "chat_template_kwargs": {
             "enable_thinking": request.reasoning_mode != "off",
             "parse_tool_calls": true
@@ -2723,7 +2747,7 @@ fn finish_request(
                 guard.last_error = None;
             }
             RequestOutcome::Cancelled | RequestOutcome::Rejected => {
-                // User cancellation is not model-health evidence and must not
+                // Cancellation and rejected input are not model-health evidence and must not
                 // increase failures or trigger cooldown.
                 guard.last_error = None;
             }
@@ -3289,7 +3313,8 @@ mod tests {
     fn token_usage_requires_real_counts_and_ignores_untrusted_totals() {
         let actual = super::reported_token_usage(&serde_json::json!({
             "prompt_tokens": 123, "completion_tokens": 7, "total_tokens": 999
-        })).unwrap();
+        }))
+        .unwrap();
         assert_eq!(actual.input_tokens, 123);
         assert_eq!(actual.output_tokens, 7);
         assert_eq!(actual.total_tokens, 130);
@@ -3561,6 +3586,7 @@ mod tests {
         let failure = llama_http_failure(400, Cursor::new(body));
 
         assert_eq!(failure.code, "runtime_context_exceeded");
+        assert!(failure.is_input_rejection());
         assert!(!failure.retryable);
         assert_eq!(
             failure.public_message,
@@ -3575,6 +3601,11 @@ mod tests {
         let history_body = br#"{"error":{"code":500,"message":"Jinja Exception: Conversation roles must alternate user/assistant; prompt=TOP_SECRET","type":"server_error"}}"#;
         let history_failure = llama_http_failure(500, Cursor::new(history_body));
         assert_eq!(history_failure.code, "runtime_chat_history_rejected");
+        assert!(history_failure.is_input_rejection());
+        assert!(
+            !super::LocalInferenceFailure::http(500, LlamaHttpFailureKind::ServerFailed)
+                .is_input_rejection()
+        );
         assert!(!history_failure.retryable);
         assert_eq!(
             history_failure.public_message,

@@ -3,6 +3,7 @@ import { hud } from '@/state/hud'
 import { getApiConfigSnapshot, LuczorApiError } from '@/services/api/luczorApi'
 import { serverTts, MAX_TTS_TEXT_CHARS } from '@/services/voice/serverTts'
 import { splitSentences, stopSpeak, streamSpeak, suspendSpeech } from '@/services/voice/speak'
+import { readAlongState } from '@/services/voice/readAlong'
 
 vi.mock('@/services/api/luczorApi', async importOriginal => ({
   ...(await importOriginal<typeof import('@/services/api/luczorApi')>()),
@@ -21,6 +22,11 @@ const snapshot = vi.mocked(getApiConfigSnapshot)
 class AudioMock {
   static instances: AudioMock[] = []
   volume = 1
+  playbackRate = 1
+  currentTime = 0
+  duration = 10
+  ontimeupdate: (() => void) | null = null
+  ondurationchange: (() => void) | null = null
   onended: (() => void) | null = null
   onerror: (() => void) | null = null
   onplaying: (() => void) | null = null
@@ -49,6 +55,44 @@ async function flush() {
 }
 
 describe('server speech sessions', () => {
+  it('uses the selected V2 voice at unit synthesis speed and changes only audio playback tempo', async () => {
+    const speech = streamSpeak('Hallo Benni.', { voiceId: 'benni', rate: 1.5 })
+    await flush()
+    expect(synth).toHaveBeenCalledWith('Hallo Benni.', config, expect.objectContaining({ voiceId: 'benni', speed: 1 }))
+    expect(AudioMock.instances[0]?.playbackRate).toBe(1.5)
+    AudioMock.instances[0]?.onended?.()
+    await expect(speech).resolves.toBe('completed')
+  })
+  it('tracks actual audio time per sentence, freezes during waiting and clears on cancellation', async () => {
+    const speech = streamSpeak('Hallo Welt. Nächster Satz.', { key: 'answer-1' })
+    await flush()
+    const first = AudioMock.instances[0]!
+    expect(readAlongState.value).toMatchObject({ key: 'answer-1', phase: 'preparing', position: 0 })
+    first.onplaying?.()
+    first.currentTime = 5
+    first.ontimeupdate?.()
+    expect(readAlongState.value).toMatchObject({ phase: 'playing', position: 5 })
+    first.onwaiting?.()
+    first.currentTime = 8
+    first.ontimeupdate?.()
+    expect(readAlongState.value).toMatchObject({ phase: 'waiting', position: 5 })
+    first.onplaying?.()
+    expect(readAlongState.value).toMatchObject({ phase: 'playing', position: 8 })
+    first.onended?.()
+    await flush()
+    const second = AudioMock.instances[1]!
+    expect(readAlongState.value).toMatchObject({ phase: 'preparing', position: 12 })
+    second.onplaying?.()
+    second.currentTime = 5
+    second.ontimeupdate?.()
+    expect(readAlongState.value).toMatchObject({ phase: 'playing', position: 19 })
+    const late = second.ontimeupdate!
+    stopSpeak()
+    late()
+    expect(readAlongState.value).toBeNull()
+    expect(second.ontimeupdate).toBeNull()
+    await expect(speech).resolves.toBe('cancelled')
+  })
   beforeEach(() => {
     vi.resetAllMocks()
     AudioMock.instances = []

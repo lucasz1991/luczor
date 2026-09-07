@@ -699,12 +699,14 @@ export function assistantProfileWithApiConfig(
  * Public API
  * ========================================================= */
 export const LuczorApi = {
+  agentTeamPolicy: (signal?: AbortSignal) => request<unknown>('/agent-team-policy', { signal }),
   getConfig: getApiConfig,
   saveConfig: saveApiConfig,
   isConfigured,
 
   health: () => request<{ status?: string; time?: string }>('/health', { auth: false }),
   bootstrap: (signal?: AbortSignal) => request<BootstrapResponse>('/bootstrap', { signal }),
+  speechVoices: (signal?: AbortSignal) => request<unknown>('/voice/voices', { signal }),
   localModelManifest: () => request<Record<string, unknown>>('/local-model/manifest'),
   realtimeConfig: () => request<{ data: RealtimeConfig }>('/realtime/config'),
   runtimeSettings: () =>

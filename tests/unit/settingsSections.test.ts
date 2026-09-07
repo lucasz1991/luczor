@@ -17,6 +17,20 @@ function emittedEvents(component: Component): string[] {
 }
 
 describe('settings section contracts', () => {
+  it('offers model and context preparation enabled by default with independent controls', async () => {
+    const html = await render(ExecutionSettingsSection, { autoExecuteMutatingTools: false })
+    expect(html).toContain('Lokales Modell bereithalten')
+    expect(html).toContain('Projektkontext vorab vorbereiten')
+    expect(emittedEvents(ExecutionSettingsSection)).toEqual(
+      expect.arrayContaining(['update:backgroundModelPreparation', 'update:backgroundContextPreparation'])
+    )
+    const disabled = await render(ExecutionSettingsSection, {
+      autoExecuteMutatingTools: false,
+      backgroundModelPreparation: false,
+      backgroundContextPreparation: false,
+    })
+    expect(disabled).not.toContain('aria-pressed="true"')
+  })
   it('renders execution state and declares its typed update event', async () => {
     const html = await render(ExecutionSettingsSection, { autoExecuteMutatingTools: true })
 

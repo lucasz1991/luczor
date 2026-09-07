@@ -51,6 +51,8 @@ export type TurnRoutingInput = {
   contextId?: string
   repoId?: string
   taskType?: string
+  /** Explicit external delegation is restricted to the server-managed agent role namespace. */
+  intent?: 'external_specialist'
   contextEgress?: 'local_only' | 'external_allowed'
   routingSettings?: Partial<HybridRoutingSettings>
   externalPackage?: ExternalTurnPackage
@@ -224,6 +226,18 @@ const DEFAULT_ROUTING_SETTINGS: HybridRoutingSettings = {
   allowDegradedLocal: false,
 }
 
+const EXTERNAL_SPECIALIST_TASK_TYPES = new Set(['agent.planning', 'agent.research', 'agent.coding', 'agent.review'])
+
+function externalSpecialistUnavailableMessage(reason: RouteDecision['reason']): string {
+  if (reason === 'external_approval_required') {
+    return 'Der externe Spezialist benötigt eine ausdrückliche Freigabe dieses Nachrichtenpakets.'
+  }
+  if (reason === 'local_only_blocked') {
+    return 'Dieser Auftrag ist auf lokale Modelle beschränkt. Ein externer Spezialist ist dafür nicht freigegeben.'
+  }
+  return 'Die signierte Modellrichtlinie erlaubt für diesen Auftrag keinen externen Spezialisten.'
+}
+
 const localReadinessMessages = new Map<string, string>([
   ['model_disabled', 'Der signierte Katalog hat das lokale Modell noch nicht aktiviert.'],
   ['release_not_executable', 'Im signierten Katalog fehlen ausführbare Modell- oder Runtime-Metadaten.'],
@@ -357,13 +371,22 @@ export function packetBoundLaravelGateway(
   approvalId: string,
   approvalExpiresAt: string,
   approvedApiConfig: ApprovedProxyConfig,
-  now: () => Date = () => new Date()
+  now: () => Date = () => new Date(),
+  expectedTaskType?: string
 ): InferenceGateway {
   let consumed = false
   return Object.freeze({
     id: `laravel:approved:${approvalId}`,
     target: 'laravel_proxy' as const,
     async streamChatWithTools(request: InferenceRequest) {
+      if (expectedTaskType !== undefined && request.taskType !== expectedTaskType) {
+        throw new LocalInferenceError(
+          'Die externe Anfrage gehört nicht zur ausgewählten Spezialistenaufgabe.',
+          'routing_intent_invalid',
+          false,
+          false
+        )
+      }
       const expires = Date.parse(approvalExpiresAt)
       if (!Number.isFinite(expires) || expires <= now().getTime()) {
         throw new LocalInferenceError(
@@ -692,6 +715,18 @@ export class LocalInferenceCoordinator {
   }
 
   async resolveTurn(input: TurnRoutingInput): Promise<ResolvedTurnRoute> {
+    if (
+      input.intent !== undefined &&
+      (input.intent !== 'external_specialist' || !EXTERNAL_SPECIALIST_TASK_TYPES.has(input.taskType ?? ''))
+    ) {
+      throw new LocalInferenceError(
+        'Die externe Spezialistenroute ist nur für freigegebene Agentenaufgaben verfügbar.',
+        'routing_intent_invalid',
+        false,
+        false
+      )
+    }
+    const preferExternal = input.intent === 'external_specialist'
     let generation = this.generation
     if (this.mode !== 'active' || !this.manifest || !this.bootstrap || !this.account) {
       throw new LocalInferenceError(
@@ -722,10 +757,10 @@ export class LocalInferenceCoordinator {
     }
 
     const settings = { ...DEFAULT_ROUTING_SETTINGS, ...input.routingSettings }
-    await this.refreshCapacityIfStale(generation)
+    if (!preferExternal) await this.refreshCapacityIfStale(generation)
     this.requireActiveGeneration(generation)
     const requiredCapability = requiredCapabilityForTask(input.taskType)
-    await this.prepareFirstAdmissibleCandidate(settings, requiredCapability, generation)
+    if (!preferExternal) await this.prepareFirstAdmissibleCandidate(settings, requiredCapability, generation)
     this.requireActiveGeneration(generation)
     const externalHash = input.externalPackage?.packetHash
 
@@ -742,6 +777,7 @@ export class LocalInferenceCoordinator {
       externalApproval: input.externalPackage?.approval,
       expectedEgressPacketHash: externalHash,
       requiredCapability,
+      preferExternal,
       now: this.dependencies.now(),
     })
 
@@ -777,7 +813,8 @@ export class LocalInferenceCoordinator {
           input.externalPackage.approval.approvalId,
           input.externalPackage.approval.expiresAt,
           approvedConfig,
-          this.dependencies.now
+          this.dependencies.now,
+          preferExternal ? input.taskType : undefined
         ),
         replacementMessages: cloneMessages(input.externalPackage.messages),
         decision,
@@ -785,7 +822,9 @@ export class LocalInferenceCoordinator {
       }
     }
     throw new LocalInferenceError(
-      this.unavailableRouteMessage(settings, input.taskType, decision.reason),
+      preferExternal
+        ? externalSpecialistUnavailableMessage(decision.reason)
+        : this.unavailableRouteMessage(settings, input.taskType, decision.reason),
       decision.reason,
       false,
       false
@@ -886,7 +925,7 @@ export class LocalInferenceCoordinator {
     reason: RouteDecision['reason']
   ): string {
     const manifest = this.manifest!
-    const candidates = new Set([
+    const candidates = new Set<string>([
       ...(settings.experimentalFlashNext ? manifest.routing.experimentalModelIds : []),
       manifest.routing.defaultModelId,
       ...manifest.routing.fallbackModelIds,
@@ -945,20 +984,23 @@ export class LocalInferenceCoordinator {
     const bootstrap = this.bootstrap
     const account = this.account
     const deviceId = bootstrap?.device.id
+    const desktopSessionId = this.catalogBinding?.acceptanceSessionId
     const principalId = account?.principalId ?? ''
-    if (!principalId || !input.projectId.trim()) {
+    if (!principalId || !deviceId?.trim() || !desktopSessionId || !input.projectId.trim()) {
       throw new LocalInferenceError('Der lokale Inferenzscope ist unvollständig.', 'scope_unavailable', false, false)
     }
+    // This digest owns the resident process, not a conversation or task. Each
+    // inference still submits its full messages with native prompt caching off.
+    // The manifest session is stable across turns but changes on renderer reload.
     const digest = await sha256(
       canonicalScope({
-        schema: 'luczor-local-scope-v1',
+        schema: 'luczor-local-runtime-scope-v2',
         principalId,
-        deviceId: deviceId ?? 'none',
+        deviceId,
         serverInstance: account!.serverInstance,
+        desktopSessionId,
         projectId: input.projectId,
-        contextId: input.contextId ?? 'none',
         repoId: input.repoId ?? 'none',
-        taskType: input.taskType ?? 'chat.general',
       })
     )
     this.requireActiveGeneration(generation)

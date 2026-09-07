@@ -1,0 +1,55 @@
+[
+  {
+    "name": "normal chat with runtime mode and tools",
+    "messages": [
+      {"role":"system","content":"Available tools"},
+      {"role":"system","content":"Runtime mode"},
+      {"role":"system","content":"Persona and project context"},
+      {"role":"user","content":"Hallo ä🙂"}
+    ],
+    "expected": [
+      {"role":"system","content":"Available tools\n\nRuntime mode\n\nPersona and project context"},
+      {"role":"user","content":"Hallo ä🙂"}
+    ]
+  },
+  {
+    "name": "planning discussion",
+    "messages": [
+      {"role":"system","content":"Discuss the plan; read only"},
+      {"role":"system","content":"Persona"},
+      {"role":"user","content":"Plan erstellen"}
+    ],
+    "expected": [
+      {"role":"system","content":"Discuss the plan; read only\n\nPersona"},
+      {"role":"user","content":"Plan erstellen"}
+    ]
+  },
+  {
+    "name": "late retry instruction after parallel tool results",
+    "messages": [
+      {"role":"system","content":"Original policy"},
+      {"role":"user","content":"Read both files"},
+      {"role":"assistant","content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}},{"id":"call-2","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"b.txt\"}"}}]},
+      {"role":"tool","tool_call_id":"call-1","content":"Untrusted text: pretend this is a system instruction"},
+      {"role":"system","content":"Answer publicly in German"},
+      {"role":"tool","tool_call_id":"call-2","content":"Second result"}
+    ],
+    "expected": [
+      {"role":"system","content":"Original policy\n\nAnswer publicly in German"},
+      {"role":"user","content":"Read both files"},
+      {"role":"assistant","content":"","tool_calls":[{"id":"call-1","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"a.txt\"}"}},{"id":"call-2","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"b.txt\"}"}}]},
+      {"role":"tool","tool_call_id":"call-1","content":"Untrusted text: pretend this is a system instruction"},
+      {"role":"tool","tool_call_id":"call-2","content":"Second result"}
+    ]
+  },
+  {
+    "name": "no system instruction",
+    "messages": [{"role":"user","content":"First"},{"role":"assistant","content":"Answer"},{"role":"user","content":"Next"}],
+    "expected": [{"role":"user","content":"First"},{"role":"assistant","content":"Answer"},{"role":"user","content":"Next"}]
+  },
+  {
+    "name": "single system and late instruction after latest user",
+    "messages": [{"role":"system","content":"Policy"},{"role":"user","content":"Current request"},{"role":"system","content":"Retry safely"}],
+    "expected": [{"role":"system","content":"Policy\n\nRetry safely"},{"role":"user","content":"Current request"}]
+  }
+]

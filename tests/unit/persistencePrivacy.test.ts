@@ -33,6 +33,52 @@ describe('ephemeral tool argument persistence', () => {
     storage.save.mockResolvedValue(undefined)
   })
 
+  it('restores interrupted public commentary without leaving a running indicator', async () => {
+    const state = appState()
+    state.messages = [
+      {
+        id: 'answer',
+        projectId: 'default',
+        role: 'assistant',
+        content: 'Erstes Teilstück',
+        ts: 1,
+        createdAt: 1,
+        parsed: null,
+        visibility: 'visible',
+        meta: {
+          isLoading: true,
+          dataHandling: 'ephemeral',
+          serverSpeechAllowed: false,
+          commentary: [
+            {
+              id: 'round-1',
+              round: 1,
+              content: 'Zwischenstand bleibt erhalten.',
+              createdAt: 1,
+              serverSpeechAllowed: true,
+            },
+          ],
+          activity: {
+            startedAt: 1,
+            status: 'running',
+            steps: [{ id: 'round-2-receiving', label: 'Antwort wird geschrieben', status: 'running' }],
+          },
+        },
+      },
+    ]
+    storage.get.mockResolvedValue(state)
+    const restored = await loadAppState()
+    expect(restored.messages[0]?.content).toBe('Erstes Teilstück')
+    expect(restored.messages[0]?.meta.commentary?.[0]?.content).toBe('Zwischenstand bleibt erhalten.')
+    expect(restored.messages[0]?.meta).toMatchObject({
+      isLoading: false,
+      serverSpeechAllowed: false,
+      dataHandling: 'ephemeral',
+      activity: { status: 'canceled', steps: [{ status: 'canceled' }] },
+    })
+    expect(state.messages[0]?.meta.activity?.status).toBe('running')
+  })
+
   it('persists redacted real file/desktop tool arguments while preserving live approval details', async () => {
     const active = appState(pending('fs_write'), pending('os_type_text'), pending('agent_dispatch'))
     for (const call of active.pending.toolCallsByProject.default!) {

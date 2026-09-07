@@ -3,14 +3,21 @@ import { onExecutionInvalidated } from '@/services/executionGate'
 import { agentHub, prepareAgentJob, validateAgentScope } from './hub'
 import { executePreparedAgentJob } from './managedJob'
 import { AgentTeamOrchestrator, type AgentTeamDefinition, type AgentTeamRun, type AgentTeamRunInput } from './teams'
+import type { AgentTeamExecutor } from './teams'
 
 export const agentTeamsRevision = shallowRef(0)
 const principals = new Set<string>()
+const chatExecutors = new Map<string, AgentTeamExecutor>()
 
 export const agentTeams = new AgentTeamOrchestrator({
   maxConcurrent: 2,
   validateScope: validateAgentScope,
   async executor(request) {
+    if (request.adapterId === 'chat' || request.adapterId === 'external_chat') {
+      const execute = chatExecutors.get(request.runId)
+      if (!execute) throw new Error('Die Chatsitzung des Agententeams ist nicht mehr verfügbar.')
+      return execute(request)
+    }
     const job = await prepareAgentJob({
       projectId: request.project.projectId,
       adapterId: request.adapterId,
@@ -40,7 +47,24 @@ export const agentTeams = new AgentTeamOrchestrator({
 
 agentTeams.subscribe(() => {
   agentTeamsRevision.value++
+  for (const runId of chatExecutors.keys()) {
+    const run = agentTeams.getRun(runId)
+    if (!run || ['completed', 'failed', 'cancelled'].includes(run.status)) chatExecutors.delete(runId)
+  }
 })
+
+/** Only the trusted chat controller supplies this ephemeral executor, never model tools. */
+export function prepareChatAgentTeam(
+  definition: AgentTeamDefinition,
+  input: AgentTeamRunInput,
+  executor: AgentTeamExecutor
+): AgentTeamRun {
+  if (definition.nodes.some(node => !['chat', 'external_chat'].includes(node.adapterId)))
+    throw new Error('Ungültiges Chat-Agententeam.')
+  const run = prepareAgentTeam(definition, input)
+  chatExecutors.set(run.id, executor)
+  return run
+}
 
 export function prepareAgentTeam(definition: AgentTeamDefinition, input: AgentTeamRunInput): AgentTeamRun {
   const run = agentTeams.prepare(definition, input)

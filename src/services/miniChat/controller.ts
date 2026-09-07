@@ -2,7 +2,8 @@ import { reactive } from 'vue'
 import type { AgentToolSession, RunAgentOptions } from '@/services/agent'
 import type { LuczorMode, WireMessage } from '@/services/inference/types'
 import { createChatActivity, finishChatActivity, updateChatActivity } from '@/services/chatActivity'
-import { isEnvelopeStreamPrefix, parseEnvelope } from '@/services/envelope'
+import { presentEnvelopeStream } from '@/services/envelope'
+import { completedCommentary } from '@/services/chatCommentary'
 import type { TokenUsage } from '@/services/tokenUsage'
 import { compactHistory, normalizeConversationHistory, previewToolArguments } from '@/services/chatPresentation'
 import { executionGate } from '@/services/executionGate'
@@ -10,6 +11,7 @@ import { emptyMiniSnapshot, type MiniAction, type MiniDecision, type MiniMessage
 
 type Context = { project: { id: string; name: string } | null; mode: LuczorMode; mainBusy: boolean }
 type Dependencies = {
+  followProject?: boolean
   context: () => Context
   setMode: (mode: 'observe' | 'act') => void
   preamble: (mode: LuczorMode, name: string) => string
@@ -30,7 +32,8 @@ export function createMiniChatController(deps: Dependencies) {
     const context = deps.context()
     state.mode = context.mode
     state.mainBusy = context.mainBusy
-    if (!state.messages.length && !state.busy) state.project = context.project ? { ...context.project } : null
+    if (!state.busy && (deps.followProject || !state.messages.length))
+      state.project = context.project ? { ...context.project } : null
     touch()
   }
   function decide(id: string, approved: boolean) {
@@ -61,7 +64,11 @@ export function createMiniChatController(deps: Dependencies) {
       state.messages.length > 2 &&
       state.messages.reduce(
         (sum, message) =>
-          sum + message.content.length + (message.question?.length ?? 0) + message.choices.join('').length,
+          sum +
+          message.content.length +
+          (message.question?.length ?? 0) +
+          message.choices.join('').length +
+          (message.commentary ?? []).reduce((length, entry) => length + entry.content.length, 0),
         0
       ) > 80_000
     )
@@ -117,6 +124,7 @@ export function createMiniChatController(deps: Dependencies) {
       id: crypto.randomUUID(),
       role: 'user',
       content: text,
+      contextLabel: deps.followProject ? project.name : undefined,
       choices: [],
       createdAt: Date.now(),
       status: 'done',
@@ -129,6 +137,7 @@ export function createMiniChatController(deps: Dependencies) {
       createdAt: Date.now(),
       status: 'running',
       activity: createChatActivity(),
+      commentary: [],
     })
     state.messages.push(user, assistant)
     if (state.messages.length > 40) state.messages.splice(0, state.messages.length - 40)
@@ -172,7 +181,14 @@ export function createMiniChatController(deps: Dependencies) {
         .filter(message => message.id !== assistant.id && message.status === 'done')
         .map(message => ({
           role: message.role,
-          content: [message.content, message.question, ...message.choices].filter(Boolean).join('\n'),
+          content: [
+            message.contextLabel ? `[Arbeitsprojekt dieser Nachricht: ${message.contextLabel}]` : '',
+            message.content,
+            message.question,
+            ...message.choices,
+          ]
+            .filter(Boolean)
+            .join('\n'),
         }))
       const baseMessages: WireMessage[] = [
         {
@@ -201,8 +217,24 @@ export function createMiniChatController(deps: Dependencies) {
         },
         onToken(content) {
           if (valid()) {
-            const parsed = parseEnvelope(content)
-            assistant.content = (parsed?.summary ?? (isEnvelopeStreamPrefix(content) ? '' : content)).slice(0, 16_000)
+            const presented = presentEnvelopeStream(content)
+            assistant.content = presented.content.slice(0, 16_000)
+            assistant.question = presented.question.slice(0, 1000)
+            assistant.choices = presented.bullets.slice(0, 4).map(choice => choice.slice(0, 300))
+            touch()
+          }
+        },
+        onRoundComplete(round) {
+          if (valid() && round.kind === 'commentary') {
+            const entry = completedCommentary(round)
+            if (!entry || assistant.commentary?.some(item => item.id === entry.id)) return
+            assistant.commentary = [
+              ...(assistant.commentary ?? []),
+              { ...entry, content: entry.content.slice(0, 16_000) },
+            ]
+            assistant.content = ''
+            assistant.question = ''
+            assistant.choices = []
             touch()
           }
         },
@@ -216,10 +248,10 @@ export function createMiniChatController(deps: Dependencies) {
       executionGate.assert(turnExecution)
       if (!valid()) return
       assistant.tokenUsage = result.tokenUsage ?? assistant.tokenUsage
-      const parsed = parseEnvelope(result.finalText)
-      assistant.content = (parsed?.summary || result.finalText).slice(0, 16_000)
-      assistant.question = parsed?.question?.slice(0, 1000)
-      assistant.choices = (parsed?.bullets ?? []).slice(0, 4).map(choice => choice.slice(0, 300))
+      const presented = presentEnvelopeStream(result.finalText, true)
+      assistant.content = presented.content.slice(0, 16_000)
+      assistant.question = presented.question.slice(0, 1000)
+      assistant.choices = presented.bullets.slice(0, 4).map(choice => choice.slice(0, 300))
       assistant.status = 'done'
       boundHistory()
       if (assistant.activity) finishChatActivity(assistant.activity, 'done')
@@ -227,11 +259,16 @@ export function createMiniChatController(deps: Dependencies) {
       if (state.sessionId !== sessionId || abort !== current) return
       assistant.status = turnExecution.signal.aborted ? 'canceled' : 'failed'
       assistant.content = turnExecution.signal.aborted
-        ? 'Abgebrochen.'
-        : `Die Anfrage konnte nicht abgeschlossen werden. ${error instanceof Error ? error.message : 'Bitte erneut versuchen.'}`.slice(
-            0,
-            1800
-          )
+        ? assistant.content || 'Abgebrochen.'
+        : [
+            assistant.content,
+            `Die Anfrage konnte nicht abgeschlossen werden. ${error instanceof Error ? error.message : 'Bitte erneut versuchen.'}`.slice(
+              0,
+              1800
+            ),
+          ]
+            .filter(Boolean)
+            .join('\n\n')
       if (assistant.activity) finishChatActivity(assistant.activity, assistant.status)
     } finally {
       if (abort === current) {
@@ -261,7 +298,14 @@ export function createMiniChatController(deps: Dependencies) {
       refresh()
       return
     }
-    if (action.type === 'main_decide' || action.type === 'kill_switch') return
+    if (
+      action.type === 'main_decide' ||
+      action.type === 'kill_switch' ||
+      action.type === 'view' ||
+      action.type === 'select_project' ||
+      action.type === 'workspace_open'
+    )
+      return
     if (action.sessionId !== state.sessionId) return
     switch (action.type) {
       case 'send':

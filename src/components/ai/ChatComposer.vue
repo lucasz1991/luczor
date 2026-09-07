@@ -43,7 +43,7 @@ function scrollToBottom() {
 defineExpose({ scrollToBottom })
 </script>
 <template>
-  <section class="ai-chat" :aria-label="title || 'Chat'">
+  <section class="ai-chat" :class="{ 'ai-chat--with-overlay': !!$slots.overlay }" :aria-label="title || 'Chat'">
     <header v-if="tabs.length" class="ai-chat__tabs">
       <button
         v-for="tab in tabs"
@@ -55,6 +55,7 @@ defineExpose({ scrollToBottom })
         {{ tab.label }}
       </button>
     </header>
+    <slot name="overlay" />
     <div :id="scrollId || generatedId" ref="scroller" class="ai-chat__messages" @scroll.passive="measure">
       <div ref="thread" class="ai-thread"><slot /></div>
     </div>
@@ -64,3 +65,14 @@ defineExpose({ scrollToBottom })
     <div v-if="$slots.composer" class="ai-chat__composer"><slot name="composer" /></div>
   </section>
 </template>
+
+<style scoped>
+.ai-chat {
+  position: relative;
+  min-height: 0;
+}
+.ai-chat--with-overlay > .ai-chat__messages {
+  padding-block-start: 70px;
+  scroll-padding-block-start: 70px;
+}
+</style>

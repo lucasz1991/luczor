@@ -6,12 +6,14 @@ type ChatAutoSpeechMode = 'off' | 'assistant_only' | 'all'
 const props = defineProps<{
   autoSpeech: boolean
   autoSpeechMode: ChatAutoSpeechMode
+  allowLocalSpeech?: boolean
   historyTokenBudget: number
 }>()
 
 const emit = defineEmits<{
   (event: 'update:autoSpeech', value: boolean): void
   (event: 'update:autoSpeechMode', value: ChatAutoSpeechMode): void
+  (event: 'update:allowLocalSpeech', value: boolean): void
   (event: 'update:historyTokenBudget', value: number): void
   (event: 'reset'): void
 }>()
@@ -30,7 +32,7 @@ const historyTokenBudgetModel = computed({
   <div class="lz-section">
     <div class="lz-section__head">
       <h3>Chat</h3>
-      <p>Auto Speech liest neue Antworten automatisch vor (Streaming-TTS).</p>
+      <p>Zwischenkommentare und Antworten automatisch nacheinander vorlesen.</p>
     </div>
     <div class="lz-card">
       <div class="lz-card__head">
@@ -73,6 +75,19 @@ const historyTokenBudgetModel = computed({
           </div>
         </div>
       </div>
+
+      <label class="lz-hint">
+        <input
+          type="checkbox"
+          :checked="allowLocalSpeech"
+          @change="emit('update:allowLocalSpeech', ($event.target as HTMLInputElement).checked)"
+        />
+        Auch lokale Inhalte zum Vorlesen freigeben
+      </label>
+      <p class="lz-hint">
+        Erlaubt, sichtbare Kommentare und Antworten aus lokalen Datei- und Memory-Zugriffen an deinen eingerichteten
+        Sprachserver zu senden. Gilt nur für die Sprachausgabe; Speicherung und Synchronisierung bleiben unverändert.
+      </p>
 
       <div>
         <label class="lz-label">Lokales Chat-Historienbudget</label>

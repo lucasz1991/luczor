@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { loadSpeechVoices, type SpeechVoice } from '@/services/voice/voiceCatalog'
 import { MAX_VOICE_PHRASE_CHARS, validateVoiceSettings, type VoiceMode } from '@/services/voice/localVoice'
 import type { SpeakResult } from '@/services/voice/speak'
 import { hud } from '@/state/hud'
@@ -12,7 +13,8 @@ const props = defineProps<{
   continuousSilenceMs: number
   autoSubmit: boolean
   sttLanguage: string
-  testSpeech: (text: string, signal?: AbortSignal) => Promise<SpeakResult>
+  voiceId?: string
+  testSpeech: (text: string, signal?: AbortSignal, voiceId?: string) => Promise<SpeakResult>
 }>()
 
 const emit = defineEmits<{
@@ -22,6 +24,7 @@ const emit = defineEmits<{
   (event: 'update:continuousSilenceMs', value: number): void
   (event: 'update:autoSubmit', value: boolean): void
   (event: 'update:sttLanguage', value: string): void
+  (event: 'update:voiceId', value: string): void
   (event: 'openServer'): void
 }>()
 
@@ -54,6 +57,40 @@ const voiceValidationError = computed(() =>
 )
 
 const testing = ref(false)
+const voices = ref<SpeechVoice[]>([])
+const voicesLoading = ref(false)
+const voicesError = ref('')
+let catalogController: AbortController | null = null
+const voiceIdModel = computed({ get: () => props.voiceId ?? '', set: value => emit('update:voiceId', value) })
+const selectedVoiceMissing = computed(
+  () =>
+    !!voiceIdModel.value &&
+    voiceIdModel.value !== 'piper' &&
+    !voices.value.some(voice => voice.id === voiceIdModel.value)
+)
+async function refreshVoices() {
+  catalogController?.abort()
+  const controller = new AbortController()
+  catalogController = controller
+  voicesLoading.value = true
+  voicesError.value = ''
+  try {
+    const catalog = await loadSpeechVoices(controller.signal)
+    if (!controller.signal.aborted) voices.value = catalog
+  } catch {
+    if (!controller.signal.aborted)
+      voicesError.value = 'Stimmen konnten nicht geladen werden. Bitte gespeicherten Server und Verbindung prüfen.'
+  } finally {
+    if (catalogController === controller) voicesLoading.value = false
+  }
+}
+watch(
+  () => props.deviceKey,
+  value => {
+    if (value.trim()) void refreshVoices()
+  },
+  { immediate: true }
+)
 const testStatus = ref('')
 const visibleTestStatus = computed(() =>
   testing.value && hud.status === 'speaking' ? 'Sprachtest wird wiedergegeben …' : testStatus.value
@@ -72,7 +109,8 @@ async function toggleSpeechTest(): Promise<void> {
   try {
     const result = await props.testSpeech(
       'Hallo! Luczor verwendet jetzt den gemeinsamen Sprachdienst auf deinem Server.',
-      controller.signal
+      controller.signal,
+      voiceIdModel.value
     )
     testStatus.value = result === 'cancelled' ? 'Sprachtest abgebrochen.' : 'Sprachtest abgeschlossen.'
   } catch (error) {
@@ -83,7 +121,10 @@ async function toggleSpeechTest(): Promise<void> {
   }
 }
 
-onBeforeUnmount(() => testController?.abort())
+onBeforeUnmount(() => {
+  testController?.abort()
+  catalogController?.abort()
+})
 </script>
 
 <template>
@@ -108,13 +149,37 @@ onBeforeUnmount(() => testController?.abort())
     <div class="lz-card">
       <div class="lz-card__title">Sprachausgabe über den gemeinsamen Server</div>
       <p class="lz-hint">
-        Die deutsche Stimme wird zentral bereitgestellt. Der Sprachtest verwendet die gespeicherten
-        Server-Einstellungen. Änderungen bitte zuerst speichern.
+        Wähle eine für Luczor freigegebene V2-Stimme oder die bisherige Piper-Stimme. Die Auswahl gilt für Antworten und
+        Zwischenkommentare. Der Sprachtest nutzt die gewählte Stimme sofort; zum dauerhaften Übernehmen speichern.
+      </p>
+      <label for="voice-output-id" class="lz-label">Vorlesestimme</label>
+      <select id="voice-output-id" v-model="voiceIdModel" class="lz-input" :disabled="testing">
+        <option value="">Piper · bisherige Standardstimme</option>
+        <option v-if="voiceIdModel === 'piper'" value="piper">Piper · Standardstimme</option>
+        <option v-if="selectedVoiceMissing" :value="voiceIdModel" disabled>
+          Gespeicherte Stimme nicht im aktuellen Katalog ({{ voiceIdModel }})
+        </option>
+        <option v-for="voice in voices.filter(item => item.provider === 'pocket')" :key="voice.id" :value="voice.id">
+          {{ voice.name }} · V2
+        </option>
+      </select>
+      <button
+        type="button"
+        class="lz-btn lz-btn--ghost"
+        :disabled="voicesLoading || !deviceKey.trim()"
+        @click="refreshVoices"
+      >
+        {{ voicesLoading ? 'Stimmen werden geladen …' : 'Stimmen aktualisieren' }}
+      </button>
+      <p v-if="voicesError" class="lz-hint" role="status">{{ voicesError }}</p>
+      <p v-if="selectedVoiceMissing && !voicesLoading" class="lz-hint" role="status">
+        Die gespeicherte Stimme ist momentan nicht verfügbar. Wähle eine verfügbare Stimme; Luczor wechselt nicht
+        automatisch zu einer anderen.
       </p>
       <button
         type="button"
         class="lz-btn lz-btn--ghost"
-        :disabled="!deviceKey.trim() && !testing"
+        :disabled="(!deviceKey.trim() || selectedVoiceMissing) && !testing"
         @click="toggleSpeechTest"
       >
         {{ testing ? 'Sprachtest stoppen' : 'Sprachausgabe testen' }}

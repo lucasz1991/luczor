@@ -68,6 +68,8 @@ export type InferenceRequest = {
   toolChoice?: ToolChoice
   projectId?: string
   taskType?: string
+  /** Admin team policy displayed in the exact approved packet. */
+  agentTeamPolicyRevision?: string
   contextId?: string
   repoId?: string
   branch?: string

@@ -1,159 +1,176 @@
-// src/services/envelope.ts
-//
-// Parser for the Luczor answer envelope: { summary, question, bullets }.
-//
-// The preset model streams this JSON as its message content. We parse it
-// PROGRESSIVELY so the summary text can render live (token by token) without
-// ever showing raw JSON braces to the user, and so bullets appear as soon as
-// their array closes.
+import { publicAnswerText } from './publicAnswerStream'
 
+/** Decode public answer fields while their JSON strings are still arriving. */
 export type LuczorEnvelope = {
   summary: string
   question: string
   bullets: string[]
-  /** true once the whole JSON object parsed cleanly. */
   complete: boolean
 }
 
-function stripFences(t: string): string {
-  const m = t.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)
-  return m?.[1] ? m[1].trim() : t
+const ANSWER_FIELDS = ['summary', 'content', 'answer', 'message']
+const PUBLIC_FIELDS = [...ANSWER_FIELDS, 'question', 'bullets']
+// These identify a protocol object, but their values are never user-facing.
+const PRIVATE_FIELDS = ['analysis', 'reasoning', 'thinking', 'tool_calls', 'function_call', 'arguments']
+const ENVELOPE_FIELDS = [...PUBLIC_FIELDS, ...PRIVATE_FIELDS]
+const ESCAPES = new Map(Object.entries({ n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', '"': '"', '\\': '\\', '/': '/' }))
+
+function stripFences(text: string): string {
+  return text
+    .trimStart()
+    .replace(/^```(?:json)?\s*\n?/i, '')
+    .replace(/\s*```\s*$/, '')
 }
 
-function normalize(o: any): { summary: string; question: string; bullets: string[] } {
-  const summary = typeof o?.summary === 'string' ? o.summary : typeof o?.content === 'string' ? o.content : ''
-  const question = typeof o?.question === 'string' ? o.question : ''
-  const bullets = Array.isArray(o?.bullets)
-    ? o.bullets
-        .filter((x: any) => typeof x === 'string')
-        .map((x: string) => x.trim())
-        .filter(Boolean)
-    : []
-  return { summary: summary.trim(), question: question.trim(), bullets }
+function stableUnicode(text: string): string {
+  return /[\uD800-\uDBFF]$/.test(text) ? text.slice(0, -1) : text
 }
 
-function tryFull(t: string): { summary: string; question: string; bullets: string[] } | null {
-  const first = t.indexOf('{')
-  const last = t.lastIndexOf('}')
-  if (first === -1 || last === -1 || last <= first) return null
-  const slice = t.slice(first, last + 1)
-  try {
-    return normalize(JSON.parse(slice))
-  } catch {
-    try {
-      const repaired = slice.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']')
-      return normalize(JSON.parse(repaired))
-    } catch {
-      return null
-    }
-  }
-}
-
-const UNESCAPE: Record<string, string> = {
-  n: '\n',
-  t: '\t',
-  r: '\r',
-  '"': '"',
-  '\\': '\\',
-  '/': '/',
-}
-
-/** Extract a (possibly still-streaming, truncated) JSON string field value. */
-function extractStringField(t: string, key: 'summary' | 'question'): string | null {
-  const re = key === 'summary' ? /"summary"\s*:\s*"/ : /"question"\s*:\s*"/
-  const m = re.exec(t)
-  if (!m) return null
-
-  let out = ''
-  let esc = false
-  for (let i = m.index + m[0].length; i < t.length; i++) {
-    const c = t[i]!
-    if (esc) {
-      out += UNESCAPE[c] ?? c
-      esc = false
+/** Incomplete escapes stay buffered; decoded text never flashes as `u00e4`. */
+function readString(text: string, start: number): { value: string; end: number; complete: boolean } {
+  let value = ''
+  let index = start + 1
+  while (index < text.length) {
+    const char = text.charAt(index++)
+    if (char === '"') return { value: stableUnicode(value), end: index, complete: true }
+    if (char !== '\\') {
+      value += char
       continue
     }
-    if (c === '\\') {
-      esc = true
-      continue
+    const escape = text.charAt(index++)
+    if (!escape) break
+    if (escape === 'u') {
+      const hex = text.slice(index, index + 4)
+      if (!/^[0-9a-f]{4}$/i.test(hex)) break
+      value += String.fromCharCode(Number.parseInt(hex, 16))
+      index += 4
+    } else if (ESCAPES.has(escape)) {
+      value += ESCAPES.get(escape)
+    } else {
+      break
     }
-    if (c === '"') return out // closed string
-    out += c
   }
-  return out // truncated mid-stream -> partial value
+  return { value: stableUnicode(value), end: text.length, complete: false }
 }
 
-/** Extract bullets only once the array has fully closed. */
-function extractBullets(t: string): string[] {
-  const m = /"bullets"\s*:\s*\[/.exec(t)
-  if (!m) return []
-  const start = m.index + m[0].length - 1 // index of '['
+function whitespace(text: string, index: number): number {
+  while (index < text.length && /\s/.test(text.charAt(index))) index++
+  return index
+}
 
+/** Skip opaque values, never searching nested tool/reasoning payloads for fields. */
+function skipValue(text: string, start: number): number | null {
+  if (text.charAt(start) === '"') {
+    const string = readString(text, start)
+    return string.complete ? string.end : null
+  }
   let depth = 0
-  let inStr = false
-  let esc = false
-  for (let j = start; j < t.length; j++) {
-    const c = t[j]!
-    if (inStr) {
-      if (esc) esc = false
-      else if (c === '\\') esc = true
-      else if (c === '"') inStr = false
-      continue
-    }
-    if (c === '"') inStr = true
-    else if (c === '[') depth++
-    else if (c === ']') {
+  for (let index = start; index < text.length; index++) {
+    const char = text.charAt(index)
+    if (char === '"') {
+      const string = readString(text, index)
+      if (!string.complete) return null
+      index = string.end - 1
+    } else if (char === '{' || char === '[') depth++
+    else if (char === '}' || char === ']') {
+      if (depth === 0) return index
       depth--
-      if (depth === 0) {
-        try {
-          const arr = JSON.parse(t.slice(start, j + 1))
-          return Array.isArray(arr)
-            ? arr
-                .filter(x => typeof x === 'string')
-                .map(x => x.trim())
-                .filter(Boolean)
-            : []
-        } catch {
-          return []
-        }
-      }
-    }
+      if (depth === 0) return index + 1
+    } else if (char === ',' && depth === 0) return index
   }
-  return []
+  return null
+}
+
+function readBullets(text: string, start: number): { values: string[]; end: number | null } {
+  const values: string[] = []
+  let index = whitespace(text, start + 1)
+  while (index < text.length) {
+    if (text.charAt(index) === ']') return { values, end: index + 1 }
+    if (text.charAt(index) === '"') {
+      const string = readString(text, index)
+      if (string.value.trim()) values.push(string.value.trim())
+      if (!string.complete) return { values, end: null }
+      index = string.end
+    } else {
+      const end = skipValue(text, index)
+      if (end === null || end === index) return { values, end: null }
+      index = end
+    }
+    index = whitespace(text, index)
+    if (text.charAt(index) === ',') index = whitespace(text, index + 1)
+    else if (text.charAt(index) !== ']') return { values, end: null }
+  }
+  return { values, end: null }
+}
+
+export function isEnvelopeStreamPrefix(text: string): boolean {
+  const candidate = stripFences(text)
+  if (!candidate.startsWith('{')) return false
+  const field = candidate.slice(1).trimStart()
+  return !field || ENVELOPE_FIELDS.some(key => `"${key}"`.startsWith(field) || field.startsWith(`"${key}"`))
 }
 
 export function looksLikeEnvelope(text: string): boolean {
-  const t = (text ?? '').trim()
-  return t.startsWith('{') || t.includes('"summary"') || t.includes('"question"') || t.includes('"bullets"')
+  return isEnvelopeStreamPrefix(text)
 }
 
-/** Hold only an actual, still incomplete envelope prefix, never field names in prose. */
-export function isEnvelopeStreamPrefix(text: string): boolean {
-  const candidate = text.trimStart().replace(/^```(?:json)?\s*/i, '')
-  if (!candidate.startsWith('{')) return false
-  const field = candidate.slice(1).trimStart()
-  if (!field) return true
-  const keys = ['summary', 'question', 'bullets', 'content']
-  return keys.some(key => `"${key}"`.startsWith(field) || field.startsWith(`"${key}"`))
-}
-
-/**
- * Parse the envelope from arbitrary (possibly partial) model text.
- * Returns null if the text is plain (non-envelope) or empty.
- */
+/** Read only root fields; a partial summary, question or bullet is immediately usable. */
 export function parseEnvelope(text: string): LuczorEnvelope | null {
-  const t = stripFences((text ?? '').trim())
-  if (!t) return null
+  const candidate = stripFences(text)
+  if (!candidate.startsWith('{')) return null
+  let recognized = isEnvelopeStreamPrefix(text)
+  const values = new Map<string, string>()
+  let bullets: string[] = []
+  let index = whitespace(candidate, 1)
+  let complete = false
+  while (index < candidate.length) {
+    if (candidate.charAt(index) === '}') {
+      complete = true
+      break
+    }
+    if (candidate.charAt(index) !== '"') break
+    const key = readString(candidate, index)
+    if (!key.complete) break
+    if (ENVELOPE_FIELDS.includes(key.value)) recognized = true
+    index = whitespace(candidate, key.end)
+    if (candidate.charAt(index) !== ':') break
+    index = whitespace(candidate, index + 1)
+    if (PUBLIC_FIELDS.includes(key.value) && candidate.charAt(index) === '"') {
+      const string = readString(candidate, index)
+      values.set(key.value, string.value)
+      if (!string.complete) break
+      index = string.end
+    } else if (key.value === 'bullets' && candidate.charAt(index) === '[') {
+      const array = readBullets(candidate, index)
+      bullets = array.values
+      if (array.end === null) break
+      index = array.end
+    } else {
+      const end = skipValue(candidate, index)
+      if (end === null || end === index) break
+      index = end
+    }
+    index = whitespace(candidate, index)
+    if (candidate.charAt(index) === ',') index = whitespace(candidate, index + 1)
+    else if (candidate.charAt(index) !== '}') break
+  }
+  if (!recognized) return null
+  return {
+    summary: (ANSWER_FIELDS.map(key => values.get(key)).find(value => value !== undefined) ?? '').trim(),
+    question: (values.get('question') ?? '').trim(),
+    bullets,
+    complete,
+  }
+}
 
-  const full = tryFull(t)
-  if (full) return { ...full, complete: true }
-
-  if (!looksLikeEnvelope(t)) return null
-
-  const summary = extractStringField(t, 'summary') ?? ''
-  const question = extractStringField(t, 'question') ?? ''
-  const bullets = extractBullets(t)
-
-  if (!summary && !question && !bullets.length) return null
-  return { summary: summary.trim(), question: question.trim(), bullets, complete: false }
+/** One presentation contract for the main chat, Mini and completed commentary. */
+export function presentEnvelopeStream(raw: string, done = false) {
+  const envelope = parseEnvelope(raw)
+  const fencePrefix = ['`', '``', '```', '```j', '```js', '```jso', '```json'].includes(raw.trim())
+  return {
+    content: publicAnswerText(envelope ? envelope.summary : !done && fencePrefix ? '' : raw.trim(), done),
+    question: publicAnswerText(envelope?.question ?? '', done),
+    bullets: (envelope?.bullets ?? []).map(bullet => publicAnswerText(bullet, done)).filter(Boolean),
+    envelope,
+  }
 }

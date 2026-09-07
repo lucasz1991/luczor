@@ -24,6 +24,52 @@ const catalogBinding = {
 } as const
 
 describe('Tauri local runtime catalog boundary', () => {
+  it.each([true, false])('classifies tool contract rejection without losing residency (event: %s)', async withEvent => {
+    tauri.invoke.mockImplementationOnce(async (_command, args) => {
+      if (withEvent) {
+        args.onEvent.onmessage({ type: 'error', code: 'runtime_tool_contract_rejected', retryable: false })
+        throw 'private raw tool arguments'
+      }
+      throw 'Local llama.cpp rejected the tool contract (HTTP 500).'
+    })
+    await expect(
+      new TauriLocalRuntimeTransport().stream({} as LocalModelReleaseManifest, {
+        requestId: 'request-1',
+        modelReleaseId: 'model-1',
+        scopeDigest: 'd'.repeat(64),
+        catalogBinding,
+        messages: [{ role: 'user', content: 'test' }],
+      })
+    ).rejects.toMatchObject({
+      code: 'runtime_tool_contract_rejected',
+      retryable: false,
+      message: expect.stringContaining('Modell bleibt geladen'),
+    })
+  })
+
+  it.each([true, false])('classifies role rejection without exposing native text (event: %s)', async withEvent => {
+    tauri.invoke.mockImplementationOnce(async (_command, args) => {
+      if (withEvent) {
+        args.onEvent.onmessage({ type: 'error', code: 'runtime_chat_history_rejected', retryable: false })
+        throw 'sensitive template and prompt text'
+      }
+      throw 'Local llama.cpp rejected the conversation role order in its chat template (HTTP 500).'
+    })
+    await expect(
+      new TauriLocalRuntimeTransport().stream({} as LocalModelReleaseManifest, {
+        requestId: 'request-1',
+        modelReleaseId: 'model-1',
+        scopeDigest: 'd'.repeat(64),
+        catalogBinding,
+        messages: [{ role: 'user', content: 'test' }],
+      })
+    ).rejects.toMatchObject({
+      code: 'runtime_chat_history_rejected',
+      retryable: false,
+      message: expect.stringContaining('Modell bleibt geladen'),
+    })
+  })
+
   it('preserves measured context usage and classifies oversized input without leaking native errors', async () => {
     const request: LocalRuntimeRequest = {
       requestId: 'request-1',

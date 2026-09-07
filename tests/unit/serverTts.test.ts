@@ -11,6 +11,18 @@ const wav = () => encodeWavPCM16([new Float32Array([0, 0.1, -0.1])], 16_000)
 const response = () => new Response(new Blob([new Uint8Array(wav())]), { headers: { 'Content-Type': 'audio/wav' } })
 
 describe('shared server TTS transport', () => {
+  it('passes the explicitly selected voice and rejects malformed IDs without a request', async () => {
+    const fetchMock = vi.fn(async () => response())
+    vi.stubGlobal('fetch', fetchMock)
+    await serverTts('Hallo Benni.', config, { voiceId: 'benni', speed: 1 })
+    expect(fetchMock).toHaveBeenCalledExactlyOnceWith(
+      expect.any(String),
+      expect.objectContaining({
+        body: JSON.stringify({ text: 'Hallo Benni.', language: 'de', speed: 1, voice_id: 'benni' }),
+      })
+    )
+    await expect(serverTts('Hallo.', config, { voiceId: '../private' })).rejects.toThrow('Stimmen-ID')
+  })
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()

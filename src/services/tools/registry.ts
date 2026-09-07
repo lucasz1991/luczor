@@ -12,6 +12,7 @@ import { osTools } from './os'
 import { planTools } from './plans'
 import { projectCreationTools, projectStateTools } from './project'
 import { taskTools } from './tasks'
+import { workspaceTools } from './workspace'
 import type { ToolDef } from './types'
 
 export { lastScreenshot } from './os'
@@ -32,6 +33,7 @@ const TOOLS: ToolDef[] = [
   ...agentTeamTools,
   ...planTools,
   ...memoryTools,
+  ...workspaceTools,
 ]
 
 const BY_NAME = new Map<string, ToolDef>(TOOLS.map(tool => [tool.name, tool]))

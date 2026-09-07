@@ -1,8 +1,9 @@
 import { getApiConfigSnapshot, LuczorApiError } from '@/services/api/luczorApi'
 import { setStatus } from '@/state/hud'
 import { MAX_TTS_TEXT_CHARS, serverTts, speechAbortError } from './serverTts'
+import { beginReadAlong, endReadAlong, sentenceSpeechPosition, updateReadAlong } from './readAlong'
 
-type SpeechSession = { controller: AbortController; stopAudio?: () => void }
+type SpeechSession = { controller: AbortController; stopAudio?: () => void; readAlongOwner: number }
 let active: SpeechSession | null = null
 let suspensionDepth = 0
 
@@ -33,7 +34,14 @@ export function splitSentences(text: string): string[] {
   return result
 }
 
-function play(clip: Blob, volume: number, session: SpeechSession): Promise<void> {
+function play(
+  clip: Blob,
+  volume: number,
+  session: SpeechSession,
+  start: number,
+  length: number,
+  playbackRate = 1
+): Promise<void> {
   if (!current(session)) return Promise.resolve()
   return new Promise((resolve, reject) => {
     const source = URL.createObjectURL(clip)
@@ -46,7 +54,28 @@ function play(clip: Blob, volume: number, session: SpeechSession): Promise<void>
       return
     }
     audio.volume = volume
+    audio.playbackRate = playbackRate
     let settled = false
+    let frame: number | undefined
+    let playing = false
+    const updatePosition = () => {
+      if (current(session) && playing)
+        updateReadAlong(
+          session.readAlongOwner,
+          'playing',
+          sentenceSpeechPosition(start, length, audio.currentTime, audio.duration)
+        )
+    }
+    const tick = () => {
+      frame = undefined
+      if (settled || !playing || !current(session)) return
+      updatePosition()
+      if (typeof requestAnimationFrame === 'function') frame = requestAnimationFrame(tick)
+    }
+    const stopFrames = () => {
+      if (frame !== undefined) cancelAnimationFrame(frame)
+      frame = undefined
+    }
     const finish = (error?: Error) => {
       if (settled) return
       settled = true
@@ -54,6 +83,11 @@ function play(clip: Blob, volume: number, session: SpeechSession): Promise<void>
       audio.onerror = null
       audio.onplaying = null
       audio.onwaiting = null
+      audio.onpause = null
+      audio.ontimeupdate = null
+      audio.ondurationchange = null
+      playing = false
+      stopFrames()
       session.stopAudio = undefined
       audio.pause()
       audio.removeAttribute('src')
@@ -66,11 +100,26 @@ function play(clip: Blob, volume: number, session: SpeechSession): Promise<void>
     audio.onended = () => finish()
     audio.onerror = () => finish(new Error('Audio-Wiedergabe fehlgeschlagen.'))
     audio.onplaying = () => {
-      if (current(session)) setStatus('speaking')
+      if (current(session)) {
+        setStatus('speaking')
+        playing = true
+        stopFrames()
+        tick()
+      }
     }
     audio.onwaiting = () => {
-      if (current(session)) setStatus('thinking')
+      playing = false
+      stopFrames()
+      if (current(session)) {
+        setStatus('thinking')
+        updateReadAlong(session.readAlongOwner, 'waiting')
+      }
     }
+    audio.onpause = () => {
+      if (!settled) audio.onwaiting?.(new Event('waiting'))
+    }
+    audio.ontimeupdate = updatePosition
+    audio.ondurationchange = updatePosition
     try {
       void audio.play().catch(() => finish(new Error('Audio-Wiedergabe konnte nicht gestartet werden.')))
     } catch {
@@ -82,9 +131,10 @@ function play(clip: Blob, volume: number, session: SpeechSession): Promise<void>
 function cancelSession(session: SpeechSession | null): void {
   session?.controller.abort()
   session?.stopAudio?.()
+  if (session) endReadAlong(session.readAlongOwner)
 }
 
-export type SpeakOptions = { rate?: number; volume?: number; signal?: AbortSignal }
+export type SpeakOptions = { rate?: number; volume?: number; signal?: AbortSignal; key?: string; voiceId?: string }
 export type SpeakResult = 'completed' | 'cancelled'
 
 /** Server TTS with one prefetched sentence and a single cancellable playback owner. */
@@ -96,11 +146,16 @@ export async function streamSpeak(text: string, opts: SpeakOptions = {}): Promis
   if (opts.signal?.aborted) return 'cancelled'
   if (!sentences.length) return 'completed'
   cancelSession(active)
-  const session: SpeechSession = { controller: new AbortController() }
+  const session: SpeechSession = {
+    controller: new AbortController(),
+    readAlongOwner: beginReadAlong(opts.key ?? '', sentences.join(' ')),
+  }
   active = session
   setStatus('thinking')
   const rate = Number.isFinite(opts.rate) ? Math.max(0.5, Math.min(2, opts.rate!)) : 1
   const volume = Number.isFinite(opts.volume) ? Math.max(0, Math.min(1, opts.volume!)) : 0.9
+  const voiceId = opts.voiceId?.trim()
+  const v2 = !!voiceId && voiceId !== 'piper'
   let rejectCancellation: (error: Error) => void = () => undefined
   const cancellation = new Promise<never>((_resolve, reject) => {
     rejectCancellation = reject
@@ -117,22 +172,30 @@ export async function streamSpeak(text: string, opts: SpeakOptions = {}): Promis
     const config = Object.freeze({ ...(await Promise.race([getApiConfigSnapshot(), cancellation])) })
     if (!current(session)) return 'cancelled'
     const synth = (sentence: string) =>
-      serverTts(sentence, config, { speed: rate, signal: session.controller.signal }).then(
+      serverTts(sentence, config, {
+        speed: v2 ? 1 : rate,
+        signal: session.controller.signal,
+        ...(voiceId ? { voiceId } : {}),
+      }).then(
         clip => ({ clip, error: null }),
         (error: unknown) => ({ clip: null, error })
       )
     const iterator = sentences[Symbol.iterator]()
     let nextSentence = iterator.next()
     let pending = synth(nextSentence.value!)
+    let sentenceStart = 0
     while (!nextSentence.done && current(session)) {
       setStatus('thinking')
+      updateReadAlong(session.readAlongOwner, 'preparing', sentenceStart)
       const result = await Promise.race([pending, cancellation])
       if (!current(session)) return 'cancelled'
       if (!result.clip) throw result.error
+      const sentenceLength = nextSentence.value.length
       nextSentence = iterator.next()
       // Attach both handlers immediately: a failed prefetch can never escape as an unhandled rejection.
       if (!nextSentence.done) pending = synth(nextSentence.value)
-      await play(result.clip, volume, session)
+      await play(result.clip, volume, session, sentenceStart, sentenceLength, v2 ? rate : 1)
+      sentenceStart += sentenceLength + 1
     }
     return current(session) ? 'completed' : 'cancelled'
   } catch (error) {

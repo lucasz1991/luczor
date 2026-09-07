@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
+  runChatAgentTeam: vi.fn(),
   streamChatWithTools: vi.fn(),
   getTool: vi.fn(),
   toOpenAITools: vi.fn(),
@@ -18,6 +19,7 @@ const mocks = vi.hoisted(() => ({
   hud: { killSwitch: false },
 }))
 
+vi.mock('@/services/agents/chatOrchestration', () => ({ runChatAgentTeam: mocks.runChatAgentTeam }))
 vi.mock('@/services/openrouter.service', () => ({
   OpenRouterService: { streamChatWithTools: mocks.streamChatWithTools },
 }))
@@ -54,6 +56,7 @@ vi.mock('@/services/api/sync', () => ({ logAgentEvent: mocks.logAgentEvent }))
 
 import { buildSystemPreamble, looksLikeInternalReasoningLeak, runAgent, shouldRequireToolCall } from '@/services/agent'
 import { LocalInferenceError } from '@/services/inference/localModelManager'
+import type { InferenceRequest } from '@/services/inference/types'
 
 const toolCallResult = {
   content: 'interne Tool-Überlegung',
@@ -69,6 +72,184 @@ const toolCallResult = {
 }
 
 describe('agent mode and tool reliability', () => {
+  it('dispatches active agent mode immediately without an ordinary chat round', async () => {
+    const gateway = { id: 'local', target: 'local_llama_cpp' as const, streamChatWithTools: mocks.streamChatWithTools }
+    mocks.runChatAgentTeam.mockResolvedValue({ finalText: 'Team fertig' })
+    const response = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Bearbeite das Projekt' }],
+      mode: 'act',
+      agentMode: true,
+      inferenceGateway: gateway,
+      maxRounds: 2,
+    })
+    expect(mocks.runChatAgentTeam).toHaveBeenCalledOnce()
+    expect(mocks.streamChatWithTools).not.toHaveBeenCalled()
+    expect(response.finalText).toBe('Team fertig')
+  })
+
+  it('retains a resumable checkpoint at the limit without starting a team', async () => {
+    mocks.streamChatWithTools.mockResolvedValue(toolCallResult)
+    const first = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Lies das Projekt' }],
+      mode: 'observe',
+      maxRounds: 1,
+    })
+    expect(first.continuation?.messages.some(message => message.role === 'tool')).toBe(true)
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(1)
+    mocks.streamChatWithTools.mockResolvedValueOnce({ content: 'Fertig', toolCalls: [], rawToolCalls: [] })
+    const next = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [],
+      mode: 'observe',
+      continuation: first.continuation,
+      maxRounds: 1,
+    })
+    expect(next.finalText).toBe('Fertig')
+    expect(next.continuation).toBeUndefined()
+    await expect(
+      runAgent({
+        projectId: 'other',
+        baseMessages: [],
+        mode: 'observe',
+        continuation: first.continuation,
+        maxRounds: 1,
+      })
+    ).rejects.toThrow('Projekt- und Kontositzung')
+  })
+
+  it('does not execute a successful mutation twice when continuing', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'project',
+      mutating: true,
+      requiresApproval: false,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools.mockResolvedValue(toolCallResult)
+    const first = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Speichere das Projekt' }],
+      mode: 'act',
+      maxRounds: 1,
+    })
+    expect(first.continuation?.completedMutations).toHaveLength(1)
+    await runAgent({
+      projectId: 'project-2',
+      baseMessages: [],
+      mode: 'act',
+      continuation: first.continuation,
+      maxRounds: 1,
+    })
+    expect(mocks.execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('allows repeated desktop input after continuation because the target state can change', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'os',
+      mutating: true,
+      effects: ['input'],
+      requiresApproval: false,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools.mockResolvedValue(toolCallResult)
+    const first = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Bediene den Dialog' }],
+      mode: 'act',
+      maxRounds: 1,
+    })
+    await runAgent({
+      projectId: 'project-2',
+      baseMessages: [],
+      mode: 'act',
+      continuation: first.continuation,
+      maxRounds: 1,
+    })
+    expect(mocks.execute).toHaveBeenCalledTimes(2)
+  })
+
+  it('preserves read-only restrictions when continuing a reviewer checkpoint', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'project',
+      mutating: true,
+      requiresApproval: false,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools.mockResolvedValue(toolCallResult)
+    const first = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Prüfe das Ergebnis' }],
+      mode: 'act',
+      toolAccess: 'read-only',
+      maxRounds: 1,
+    })
+    expect(first.continuation?.toolAccess).toBe('read-only')
+    await runAgent({
+      projectId: 'project-2',
+      baseMessages: [],
+      mode: 'act',
+      continuation: first.continuation,
+      maxRounds: 1,
+    })
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
+  it('recovers in round six from malformed arguments without rerunning successful mutations', async () => {
+    const callResult = (id: string, name: string, rawArguments = '{}') => ({
+      content: '',
+      toolCalls: [
+        {
+          id,
+          name,
+          arguments: rawArguments.startsWith('{"title"') ? {} : { title: 'Valid', status: 'open' },
+          rawArguments,
+        },
+      ],
+      rawToolCalls: [{ id, type: 'function' as const, function: { name, arguments: rawArguments } }],
+    })
+    for (let i = 0; i < 4; i++) mocks.streamChatWithTools.mockResolvedValueOnce(callResult(`read-${i}`, 'fs_read'))
+    const good = callResult('summary', 'project_set_summary')
+    const bad = callResult('goal-bad', 'project_upsert_goal', '{"title":"unfinished')
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: '',
+      toolCalls: [...good.toolCalls, ...bad.toolCalls],
+      rawToolCalls: [...good.rawToolCalls, ...bad.rawToolCalls],
+    })
+    mocks.streamChatWithTools
+      .mockImplementationOnce(async (request: InferenceRequest) => {
+        const calls = request.messages.flatMap(message =>
+          message.role === 'assistant' ? (message.tool_calls ?? []) : []
+        )
+        for (const call of calls) expect(JSON.parse(call.function.arguments)).toBeTypeOf('object')
+        const failed = request.messages.find(message => message.role === 'tool' && message.tool_call_id === 'goal-bad')
+        expect(JSON.parse(failed!.content)).toMatchObject({
+          ok: false,
+          error: expect.stringContaining('nicht ausgeführt'),
+        })
+        expect(mocks.execute).toHaveBeenCalledTimes(5)
+        return callResult('goal-fixed', 'project_upsert_goal', '{"status":"open","title":"Valid"}')
+      })
+      .mockResolvedValueOnce({ content: 'Ziel gespeichert.', toolCalls: [], rawToolCalls: [] })
+    const result = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Bitte Projektziel speichern.' }],
+      mode: 'act',
+      maxRounds: 8,
+    })
+    expect(result.finalText).toBe('Ziel gespeichert.')
+    expect(result.toolFailures).toBe(1)
+    expect(result.toolSuccesses).toBe(6)
+    expect(mocks.execute).toHaveBeenCalledTimes(6)
+    expect(bad.rawToolCalls[0]!.function.arguments).toBe('{"title":"unfinished')
+  })
+
   beforeEach(() => {
     vi.resetAllMocks()
     mocks.resolveInferenceRouteForTurn.mockResolvedValue({
@@ -367,14 +548,25 @@ describe('agent mode and tool reliability', () => {
     expect(visibleTokens).toHaveBeenLastCalledWith('Hallo!')
   })
 
-  it('streams public tool commentary and starts the next answer with a clean buffer', async () => {
+  it('retains completed public commentary before the next round starts without publishing an empty buffer', async () => {
     const visibleTokens = vi.fn()
+    const completedRounds = vi.fn()
     mocks.streamChatWithTools
       .mockImplementationOnce(async args => {
         args.onToken('Ich prüfe den Projektzustand.')
-        return { ...toolCallResult, usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 } }
+        return {
+          ...toolCallResult,
+          content: 'Ich prüfe den Projektzustand.',
+          usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+        }
       })
       .mockImplementationOnce(async args => {
+        expect(completedRounds).toHaveBeenCalledWith({
+          round: 1,
+          content: 'Ich prüfe den Projektzustand.',
+          kind: 'commentary',
+          serverSpeechAllowed: true,
+        })
         args.onToken('Geprüft.')
         return {
           content: 'Geprüft.',
@@ -388,8 +580,15 @@ describe('agent mode and tool reliability', () => {
       baseMessages: [{ role: 'user', content: 'prüfen bitte' }],
       mode: 'observe',
       onToken: visibleTokens,
+      onRoundComplete: completedRounds,
     })
-    expect(visibleTokens.mock.calls).toEqual([['Ich prüfe den Projektzustand.'], [''], ['Geprüft.']])
+    expect(visibleTokens.mock.calls).toEqual([['Ich prüfe den Projektzustand.'], ['Geprüft.']])
+    expect(completedRounds).toHaveBeenLastCalledWith({
+      round: 2,
+      content: 'Geprüft.',
+      kind: 'answer',
+      serverSpeechAllowed: true,
+    })
     expect(result.tokenUsage).toMatchObject({
       inputTokens: 230,
       outputTokens: 24,
@@ -397,6 +596,28 @@ describe('agent mode and tool reliability', () => {
       rounds: 2,
       source: 'reported',
     })
+  })
+
+  it('keeps later commentary local after an ephemeral tool result and never retains private work notes', async () => {
+    const completedRounds = vi.fn()
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'project',
+      mutating: false,
+      requiresApproval: false,
+      dataHandling: 'ephemeral',
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(toolCallResult)
+      .mockResolvedValueOnce({ ...toolCallResult, content: 'Ich prüfe die lokale Auswahl.' })
+      .mockResolvedValueOnce({ content: 'Geprüft.', toolCalls: [], rawToolCalls: [] })
+    await runAgent({ projectId: 'p1', baseMessages: [], mode: 'observe', onRoundComplete: completedRounds })
+    expect(completedRounds.mock.calls.map(call => call[0])).toEqual([
+      { round: 2, content: 'Ich prüfe die lokale Auswahl.', kind: 'commentary', serverSpeechAllowed: false },
+      { round: 3, content: 'Geprüft.', kind: 'answer', serverSpeechAllowed: false },
+    ])
   })
 
   it('returns the concrete tool output instead of a generic Fertig fallback', async () => {

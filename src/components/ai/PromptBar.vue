@@ -6,6 +6,7 @@ import type { SearchItem } from './types'
 const props = withDefaults(
   defineProps<{
     modelValue: string
+    agentMode?: boolean
     busy?: boolean
     recording?: boolean
     listening?: boolean
@@ -18,6 +19,7 @@ const props = withDefaults(
   { placeholder: 'Was möchtest du als Nächstes tun?', modelLabel: 'Automatisch', commands: () => [], contextLabel: '' }
 )
 const emit = defineEmits<{
+  'update:agentMode': [value: boolean]
   'update:modelValue': [value: string]
   input: []
   send: []
@@ -92,9 +94,23 @@ defineExpose({ focus: () => field.value?.focus() })
       </button>
     </div>
     <div class="ai-prompt" :class="{ 'is-busy': busy }">
-      <button v-if="contextLabel" type="button" class="ai-prompt__context" @click="emit('context')">
-        <AiIcon name="folder" :size="13" />{{ contextLabel }}
-      </button>
+      <div class="ai-prompt__heading">
+        <button v-if="contextLabel" type="button" class="ai-prompt__context" @click="emit('context')">
+          <AiIcon name="folder" :size="13" />{{ contextLabel }}
+        </button>
+        <button
+          type="button"
+          class="ai-agent-mode"
+          :class="{ 'is-active': agentMode }"
+          :aria-pressed="!!agentMode"
+          :disabled="busy"
+          aria-label="Agentenmodus"
+          title="Aktiv: Neue Aufträge direkt mit einem Agententeam bearbeiten"
+          @click="emit('update:agentMode', !agentMode)"
+        >
+          <AiIcon name="grid" :size="13" />Agenten
+        </button>
+      </div>
       <textarea
         ref="field"
         :value="modelValue"
