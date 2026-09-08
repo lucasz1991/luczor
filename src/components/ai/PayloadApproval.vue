@@ -16,7 +16,7 @@ import { pendingPayloadApproval, resolvePayloadApproval } from '@/services/paylo
         <h2 id="payload-title">{{ pendingPayloadApproval.title }}</h2>
         <p>Ziel: {{ pendingPayloadApproval.destination }}</p>
         <p>Einmalige Freigabe · verfällt nach zwei Minuten. Der folgende Inhalt wird übertragen.</p>
-        <p>
+        <p v-if="pendingPayloadApproval.kind !== 'result'">
           Der API-Server kann konfigurierte Systemanweisungen ergänzen. Diese sind in dieser Vorschau nicht enthalten.
         </p>
         <pre tabindex="0">{{ pendingPayloadApproval.content }}</pre>

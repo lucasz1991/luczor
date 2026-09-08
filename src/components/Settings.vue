@@ -5,6 +5,7 @@ import { loadLocalSpeechConsent, saveLocalSpeechConsent } from '@/services/voice
 import { Store } from '@tauri-apps/plugin-store'
 import PrivacyDiagnosticsSettings from '@/components/PrivacyDiagnosticsSettings.vue'
 import AppearanceSettingsSection from '@/components/settings/AppearanceSettingsSection.vue'
+import AccountConnection from '@/components/settings/AccountConnection.vue'
 import ChatSettingsSection from '@/components/settings/ChatSettingsSection.vue'
 import { DEFAULT_TOOL_LIMITS, loadToolLimits, validToolRounds } from '@/services/toolLimits'
 import ExecutionSettingsSection from '@/components/settings/ExecutionSettingsSection.vue'
@@ -87,6 +88,7 @@ type AppSettings = {
   voice_wake_word: string
   voice_end_phrase: string
   voice_continuous_silence_ms: number
+  voice_end_mode: 'close_word' | 'silence' | 'either'
   voice_auto_submit: boolean
   voice_local_stt_language: string
 
@@ -128,6 +130,7 @@ const DEFAULTS: AppSettings = {
   voice_wake_word: VOICE_DEFAULTS.wakeWord,
   voice_end_phrase: VOICE_DEFAULTS.endPhrase,
   voice_continuous_silence_ms: VOICE_DEFAULTS.continuousSilenceMs,
+  voice_end_mode: 'either',
   voice_auto_submit: VOICE_DEFAULTS.autoSubmit,
   voice_local_stt_language: VOICE_DEFAULTS.localSttLanguage,
 
@@ -315,6 +318,7 @@ async function saveAll() {
     localSttLanguage: settings.voice_local_stt_language,
     continuousSilenceMs: settings.voice_continuous_silence_ms,
     autoSubmit: settings.voice_auto_submit,
+    endMode: settings.voice_end_mode,
   }
   const voiceError = validateVoiceSettings(voiceDraft)
   if (voiceError) {
@@ -438,6 +442,11 @@ async function testServer() {
   } finally {
     ui.serverBusy = false
   }
+}
+
+async function acceptAccountKey(key: string) {
+  settings.luczor_device_key = key
+  await testServer()
 }
 
 async function pullDefaults() {
@@ -700,6 +709,11 @@ function iconPath(kind: string) {
               <p v-if="ui.error" class="lz-result is-fail" role="alert">{{ ui.error }}</p>
               <!-- SERVER -->
               <div v-if="ui.tab === 'server'" class="lz-section">
+                <AccountConnection
+                  :base-url="settings.luczor_api_base_url"
+                  :client-id="ui.clientId || ''"
+                  @connected="acceptAccountKey"
+                />
                 <div class="lz-section__head">
                   <h3>Luczor Server (Admin API)</h3>
                   <p>
@@ -969,6 +983,7 @@ function iconPath(kind: string) {
                 v-model:wake-word="settings.voice_wake_word"
                 v-model:end-phrase="settings.voice_end_phrase"
                 v-model:continuous-silence-ms="settings.voice_continuous_silence_ms"
+                v-model:end-mode="settings.voice_end_mode"
                 v-model:auto-submit="settings.voice_auto_submit"
                 v-model:stt-language="settings.voice_local_stt_language"
                 v-model:voice-id="settings.voice_tts_voice_id"

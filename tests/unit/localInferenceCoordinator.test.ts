@@ -39,6 +39,10 @@ const fixture = JSON.parse(readFileSync(resolve('tests/fixtures/local-model-mani
   cases: Record<string, Record<string, unknown>>
 }
 const fixtureCases = new Map([
+  [
+    'hardware_tiers',
+    JSON.parse(readFileSync(resolve('tests/fixtures/local-model-tiers-v2.json'), 'utf8')) as Record<string, unknown>,
+  ],
   ['metadata_only_default', fixture.cases.metadata_only_default!],
   ['explicit_experiment', fixture.cases.explicit_experiment!],
   ['promoted_preferred', fixture.cases.promoted_preferred!],
@@ -307,6 +311,50 @@ describe('explicit specialist routing preference', () => {
 })
 
 describe('local inference coordinator and approved external gateway', () => {
+  it('chooses the strongest eligible tier and keeps that resident tier on subsequent requests', async () => {
+    const verified = await manifest('hardware_tiers')
+    const harness = makeHarness(verified)
+    const limited = hardware()
+    limited.memory.availableBytes = 7 * GIB
+    vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue(limited)
+    await harness.coordinator.initialize({
+      ...bootstrap(),
+      local_model_manifest: { ...bootstrap().local_model_manifest!, schema_version: 2 },
+    })
+    const input: TurnRoutingInput = { projectId: 'project-1', routingSettings: { preference: 'local_only' } }
+    const first = await harness.coordinator.resolveTurn(input)
+    expect(first.decision?.modelReleaseId).toBe('local-tier-balanced')
+    expect(harness.prepareModel).toHaveBeenCalledOnce()
+    const resident = hardware()
+    resident.memory.residentModel = {
+      modelReleaseId: 'local-tier-balanced',
+      manifestPayloadSha256: verified.payloadSha256,
+    }
+    vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue(resident)
+    harness.advance(31_000)
+    const second = await harness.coordinator.resolveTurn(input)
+    expect(second.decision?.modelReleaseId).toBe('local-tier-balanced')
+    expect(harness.prepareModel).toHaveBeenCalledOnce()
+  })
+
+  it('does not reuse renderer readiness after the native process stopped', async () => {
+    const verified = await manifest('explicit_experiment')
+    const harness = makeHarness(verified)
+    await harness.coordinator.initialize(bootstrap())
+    const input: TurnRoutingInput = { projectId: 'project-1', routingSettings: { preference: 'local_only' } }
+    await harness.coordinator.resolveTurn(input)
+    harness.dependencies.nativeStatus = vi.fn(async () => ({
+      manifestAvailable: true,
+      catalogVersion: verified.catalogVersion,
+      policyVersion: verified.policyVersion,
+      activeModelId: null,
+      state: 'stopped' as const,
+      readiness: [],
+      reasonCode: null,
+    }))
+    await harness.coordinator.resolveTurn(input)
+    expect(harness.prepareModel).toHaveBeenCalledTimes(2)
+  })
   beforeEach(() => {
     proxy.mockReset()
     proxy.mockResolvedValue({ content: 'extern', toolCalls: [], rawToolCalls: [], finishReason: 'stop' })
@@ -696,9 +744,41 @@ describe('local inference coordinator and approved external gateway', () => {
       })
     ).rejects.toMatchObject({
       code: 'local_only_blocked',
-      message: expect.stringContaining('zu wenig Arbeitsspeicher frei'),
+      message: expect.stringContaining('Zu wenig freier RAM:'),
     })
     expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('rechecks a RAM rejection on the next request and tries own-memory recovery only once per minute', async () => {
+    const harness = makeHarness(await manifest('explicit_experiment'))
+    const low = hardware()
+    low.memory.availableBytes = 1
+    vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue(low)
+    harness.dependencies.recoverMemory = vi.fn(async () => low)
+    await harness.coordinator.initialize(bootstrap())
+    const input: TurnRoutingInput = { projectId: 'project-1', routingSettings: { preference: 'local_only' } }
+    await expect(harness.coordinator.resolveTurn(input)).rejects.toMatchObject({ code: 'local_only_blocked' })
+    await expect(harness.coordinator.resolveTurn(input)).rejects.toMatchObject({ code: 'local_only_blocked' })
+    expect(harness.dependencies.recoverMemory).toHaveBeenCalledOnce()
+    vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue(hardware())
+    const route = await harness.coordinator.resolveTurn(input)
+    expect(route.gateway.target).toBe('local_llama_cpp')
+    expect(harness.prepareModel).toHaveBeenCalledOnce()
+  })
+
+  it('prepares locally after memory recovery succeeds without external fallback', async () => {
+    const harness = makeHarness(await manifest('explicit_experiment'))
+    const low = hardware()
+    low.memory.availableBytes = 1
+    vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue(low)
+    harness.dependencies.recoverMemory = vi.fn(async () => hardware())
+    await harness.coordinator.initialize(bootstrap())
+    const route = await harness.coordinator.resolveTurn({
+      projectId: 'project-1',
+      routingSettings: { preference: 'local_only' },
+    })
+    expect(route.gateway.target).toBe('local_llama_cpp')
     expect(proxy).not.toHaveBeenCalled()
   })
 

@@ -126,6 +126,41 @@ export function decideHybridRoute(input: {
   const requiredCapability = input.requiredCapability ?? 'chat'
   const flash = models.get(FLASH_NEXT_MODEL_ID)
 
+  if (input.manifest.schemaVersion === 2 && !input.preferExternal) {
+    const order = [input.manifest.routing.defaultModelId, ...input.manifest.routing.fallbackModelIds]
+    order.sort(
+      (left, right) =>
+        Number(!!input.assessments.get(right)?.memory?.resident) -
+        Number(!!input.assessments.get(left)?.memory?.resident)
+    )
+    for (const modelId of order) {
+      if (
+        availableLocally(
+          models.get(modelId),
+          input.assessments.get(modelId),
+          input.health.get(modelId),
+          input.readiness.get(modelId),
+          input.manifest.payloadSha256,
+          input.settings,
+          requiredCapability,
+          now
+        )
+      ) {
+        return {
+          id: decisionId,
+          policyVersion: input.manifest.policyVersion,
+          target: 'local_llama_cpp',
+          modelReleaseId: modelId,
+          reason:
+            modelId === input.manifest.routing.defaultModelId
+              ? 'promoted_local_selected'
+              : 'stable_local_fallback_selected',
+          capacityAssessmentId: input.assessments.get(modelId)?.snapshotId,
+        }
+      }
+    }
+  }
+
   const flashAvailable =
     !input.preferExternal &&
     availableLocally(

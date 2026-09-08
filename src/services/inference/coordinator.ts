@@ -31,9 +31,12 @@ import {
 import {
   beginNativeManifestAcceptance,
   getNativeHardwareSnapshot,
+  getNativeLocalModelStatus,
+  recoverNativeModelMemory,
   prepareNativeLocalModel,
   tauriManifestVerifier,
   TauriLocalRuntimeTransport,
+  type NativeLocalModelStatus,
 } from '@/services/inference/tauriLocalRuntime'
 import type { ApprovedProxyConfig, InferenceGateway, InferenceRequest, WireMessage } from '@/services/inference/types'
 
@@ -213,6 +216,8 @@ export type LocalInferenceCoordinatorDependencies = {
   fetchManifest: (config: LuczorApiConfigSnapshot) => Promise<Record<string, unknown>>
   verifyManifest: typeof verifyLocalModelManifest
   hardwareSnapshot: () => Promise<HardwareSnapshot>
+  recoverMemory?: () => Promise<HardwareSnapshot>
+  nativeStatus?: () => Promise<NativeLocalModelStatus>
   prepareModel: (modelReleaseId: string, catalogBinding: LocalCatalogBinding) => Promise<LocalReadinessEvidence>
   accountSnapshot: () => Promise<VerifiedAccountSnapshot | null>
   manifestSession: (acceptanceGeneration: number) => Promise<string>
@@ -315,7 +320,7 @@ function exactDiscovery(input: BootstrapResponse['local_model_manifest']): Disco
   }
   if (
     input.url !== '/api/v1/local-model/manifest' ||
-    input.schema_version !== 1 ||
+    ![1, 2].includes(input.schema_version) ||
     !Number.isSafeInteger(input.catalog_version) ||
     input.catalog_version < 1 ||
     !Number.isSafeInteger(input.policy_version) ||
@@ -437,6 +442,7 @@ export type LocalModelAdmission = Readonly<{
   enabled: boolean
   executable: boolean
   capacity: CapacityAssessment['status'] | 'unknown'
+  memory?: CapacityAssessment['memory']
   ready: boolean
   health: ReturnType<LocalModelManager['getHealth']>['state']
   admissible: boolean
@@ -451,6 +457,7 @@ export class LocalInferenceCoordinator {
   private bootstrap?: BootstrapResponse
   private account?: VerifiedAccountSnapshot
   private assessments = new Map<string, CapacityAssessment>()
+  private lastMemoryRecoveryAt = -Infinity
   private readiness = new Map<string, LocalReadinessEvidence>()
   private preparationFailures = new Map<string, string>()
   private catalogBinding?: LocalCatalogBinding
@@ -598,10 +605,12 @@ export class LocalInferenceCoordinator {
           enabled: model.enabled,
           executable,
           capacity: assessment?.status ?? 'unknown',
+          memory: assessment?.memory,
           ready,
           health: health.state,
           admissible:
             this.mode === 'active' &&
+            model.enabled &&
             executable &&
             model.capabilities.includes(requiredCapability) &&
             capacityAccepted &&
@@ -611,6 +620,27 @@ export class LocalInferenceCoordinator {
         })
       })
     )
+  }
+
+  reconcileNativeStatus(native: NativeLocalModelStatus): void {
+    if (
+      !this.manifest ||
+      native.catalogVersion !== this.manifest.catalogVersion ||
+      native.policyVersion !== this.manifest.policyVersion
+    )
+      return
+    for (const model of this.manifest.models) {
+      const evidence = native.readiness.find(item => item.modelReleaseId === model.id)
+      const running = native.activeModelId === model.id && (native.state === 'ready' || native.state === 'busy')
+      if (
+        running &&
+        hasVerifiedLocalReadiness(model, evidence, this.manifest.payloadSha256, this.dependencies.now().getTime())
+      ) {
+        this.readiness.set(model.id, evidence!)
+      } else {
+        this.readiness.delete(model.id)
+      }
+    }
   }
 
   async initialize(bootstrap: BootstrapResponse, expectedPendingGeneration?: number): Promise<boolean> {
@@ -687,10 +717,11 @@ export class LocalInferenceCoordinator {
           assessModelCapacity({
             snapshot,
             modelReleaseId: model.id,
+            manifestPayloadSha256: verified.payloadSha256,
             policy: capacity.policy,
             artifactSizeBytes: capacity.artifactSizeBytes,
             now: this.dependencies.now(),
-            validForMs: Math.max(1_000, Date.parse(verified.expiresAt) - this.dependencies.now().getTime()),
+            validForMs: 30_000,
           })
         )
       }
@@ -757,10 +788,18 @@ export class LocalInferenceCoordinator {
     }
 
     const settings = { ...DEFAULT_ROUTING_SETTINGS, ...input.routingSettings }
+    if (!preferExternal && this.dependencies.nativeStatus) {
+      const native = await this.dependencies.nativeStatus()
+      this.requireActiveGeneration(generation)
+      this.reconcileNativeStatus(native)
+    }
     if (!preferExternal) await this.refreshCapacityIfStale(generation)
     this.requireActiveGeneration(generation)
     const requiredCapability = requiredCapabilityForTask(input.taskType)
     if (!preferExternal) await this.prepareFirstAdmissibleCandidate(settings, requiredCapability, generation)
+    // A cold start/benchmark can outlive the short hardware snapshot. Re-measure
+    // after preparation so its own newly allocated RAM is counted as resident.
+    if (!preferExternal) await this.refreshCapacityIfStale(generation)
     this.requireActiveGeneration(generation)
     const externalHash = input.externalPackage?.packetHash
 
@@ -894,6 +933,13 @@ export class LocalInferenceCoordinator {
     const ids = [
       ...new Set([...experimental, this.manifest.routing.defaultModelId, ...this.manifest.routing.fallbackModelIds]),
     ]
+    if (this.manifest.schemaVersion === 2) {
+      ids.sort(
+        (left, right) =>
+          Number(!!this.assessments.get(right)?.memory?.resident) -
+          Number(!!this.assessments.get(left)?.memory?.resident)
+      )
+    }
     for (const modelId of ids) {
       const model = this.manifest.models.find(candidate => candidate.id === modelId)
       const assessment = this.assessments.get(modelId)
@@ -930,7 +976,9 @@ export class LocalInferenceCoordinator {
       manifest.routing.defaultModelId,
       ...manifest.routing.fallbackModelIds,
     ])
-    const diagnostics = this.modelAdmissions(taskType)
+    const admissions = this.modelAdmissions(taskType).filter(model => candidates.has(model.modelReleaseId))
+    const enabledCandidates = admissions.filter(model => model.enabled)
+    const diagnostics = (enabledCandidates.length ? enabledCandidates : admissions)
       .filter(model => candidates.has(model.modelReleaseId))
       .flatMap(model => {
         if (!model.enabled) return ['model_disabled']
@@ -940,7 +988,24 @@ export class LocalInferenceCoordinator {
         }
         return model.reasons.filter(item => item !== 'readiness_pending' || model.reasons.length === 1)
       })
-    const messages = [...new Set(diagnostics.map(code => localReadinessMessages.get(code)).filter(Boolean))]
+    const messages = [
+      ...new Set(
+        diagnostics
+          .map(code => {
+            if (code === 'available_ram_below_minimum') {
+              const memory = enabledCandidates
+                .map(model => this.assessments.get(model.modelReleaseId)?.memory)
+                .find(item => item && !item.resident && item.availableBytes < item.requiredAvailableBytes)
+              if (memory) {
+                const gib = (bytes: number) => (bytes / 1024 ** 3).toLocaleString('de-DE', { maximumFractionDigits: 1 })
+                return `Zu wenig freier RAM: ${gib(memory.availableBytes)} GiB verfügbar, ${gib(memory.requiredAvailableBytes)} GiB für den Modellstart benötigt. Luczor prüft den Speicher beim nächsten Versuch erneut.`
+              }
+            }
+            return localReadinessMessages.get(code)
+          })
+          .filter(Boolean)
+      ),
+    ]
     const local = messages.slice(0, 3).join(' ') || localReadinessMessages.get('readiness_pending')!
     const external =
       reason === 'external_approval_required'
@@ -958,11 +1023,30 @@ export class LocalInferenceCoordinator {
     const stale = manifest.models.some(model => {
       const capacity = executableCapacity(model)
       const assessment = this.assessments.get(model.id)
-      return capacity && (!assessment || assessment.validUntilMs <= now)
+      return capacity && (!assessment || assessment.validUntilMs <= now || assessment.status === 'ineligible')
     })
     if (!stale) return
-    const snapshot = await this.dependencies.hardwareSnapshot()
+    let snapshot = await this.dependencies.hardwareSnapshot()
     if (!this.isCurrent(generation) || this.manifest?.payloadSha256 !== manifest.payloadSha256) return
+    const memoryBlocked = manifest.models.some(
+      model =>
+        model.enabled &&
+        isExecutableLocalModel(model) &&
+        snapshot.memory.availableBytes < (model.capacityPolicy.minAvailableRamBytes ?? 0) &&
+        !(
+          snapshot.memory.residentModel?.modelReleaseId === model.id &&
+          snapshot.memory.residentModel.manifestPayloadSha256 === manifest.payloadSha256
+        )
+    )
+    if (memoryBlocked && this.dependencies.recoverMemory && now - this.lastMemoryRecoveryAt >= 60_000) {
+      this.lastMemoryRecoveryAt = now
+      try {
+        snapshot = await this.dependencies.recoverMemory()
+      } catch {
+        /* Reassess the measured snapshot if trimming is unavailable. */
+      }
+      if (!this.isCurrent(generation) || this.manifest?.payloadSha256 !== manifest.payloadSha256) return
+    }
     for (const model of manifest.models) {
       const capacity = executableCapacity(model)
       if (!capacity) continue
@@ -971,10 +1055,11 @@ export class LocalInferenceCoordinator {
         assessModelCapacity({
           snapshot,
           modelReleaseId: model.id,
+          manifestPayloadSha256: manifest.payloadSha256,
           policy: capacity.policy,
           artifactSizeBytes: capacity.artifactSizeBytes,
           now: this.dependencies.now(),
-          validForMs: Math.max(1_000, Date.parse(manifest.expiresAt) - this.dependencies.now().getTime()),
+          validForMs: 30_000,
         })
       )
     }
@@ -1055,6 +1140,8 @@ export const localInferenceCoordinator = new LocalInferenceCoordinator({
   fetchManifest: config => localModelManifestWithApiConfig(config),
   verifyManifest: verifyLocalModelManifest,
   hardwareSnapshot: getNativeHardwareSnapshot,
+  recoverMemory: recoverNativeModelMemory,
+  nativeStatus: getNativeLocalModelStatus,
   prepareModel: prepareNativeLocalModel,
   accountSnapshot: getVerifiedAccountSnapshot,
   manifestSession: beginNativeManifestAcceptance,

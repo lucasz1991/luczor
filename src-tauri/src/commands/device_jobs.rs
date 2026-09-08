@@ -81,7 +81,8 @@ fn ensure_allowed_tool_profile(profile: &str) -> Result<(), String> {
         | "desktop.input.type_text"
         | "desktop.input.press_key"
         | "desktop.open_url"
-        | "workflow.task" => Ok(()),
+        | "workflow.task"
+        | "workspace.chat" => Ok(()),
         _ => Err("Device job tool profile is not supported by this app build.".into()),
     }
 }
@@ -238,6 +239,8 @@ mod tests {
     fn device_job_tool_profile_allowlist_is_closed_natively() {
         assert!(ensure_allowed_tool_profile("desktop.open_url").is_ok());
         assert!(ensure_allowed_tool_profile("workflow.task").is_ok());
+        assert!(ensure_allowed_tool_profile("workspace.chat").is_ok());
+        assert!(ensure_allowed_tool_profile("workspace.shell").is_err());
         assert!(ensure_allowed_tool_profile("agent_cli_run").is_err());
         assert!(ensure_allowed_tool_profile("").is_err());
     }

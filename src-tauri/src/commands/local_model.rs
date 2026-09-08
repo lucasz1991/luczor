@@ -411,6 +411,8 @@ impl From<&str> for LocalInferenceFailure {
 
 static STATE: OnceLock<Mutex<ManagerState>> = OnceLock::new();
 static RUNTIME_KEY_CLEANUP: OnceLock<Result<(), String>> = OnceLock::new();
+#[cfg(windows)]
+static LAST_MEMORY_TRIM: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn state() -> &'static Mutex<ManagerState> {
     STATE.get_or_init(|| Mutex::new(ManagerState::default()))
@@ -475,6 +477,14 @@ pub struct CpuSnapshot {
 pub struct MemorySnapshot {
     total_bytes: u64,
     available_bytes: u64,
+    resident_model: Option<ResidentMemorySnapshot>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResidentMemorySnapshot {
+    model_release_id: String,
+    manifest_payload_sha256: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1127,6 +1137,9 @@ fn rotate_manifest_session(
 }
 
 fn validate_manifest(payload: &ManifestPayload) -> Result<(), String> {
+    if payload.schema_version == 2 {
+        return validate_tier_manifest(payload);
+    }
     if payload.schema_version != 1 || payload.catalog_version == 0 || payload.policy_version == 0 {
         return Err("Local-model manifest version is invalid.".into());
     }
@@ -1165,6 +1178,68 @@ fn validate_manifest(payload: &ManifestPayload) -> Result<(), String> {
         return Err("Local-model promotion metadata is inconsistent.".into());
     }
     validate_routing(&payload.routing, &payload.models)
+}
+
+fn validate_tier_manifest(payload: &ManifestPayload) -> Result<(), String> {
+    let ids: HashSet<&str> = payload
+        .models
+        .iter()
+        .map(|model| model.id.as_str())
+        .collect();
+    let policy = &payload.routing;
+    if payload.catalog_version == 0
+        || payload.policy_version == 0
+        || payload.models.len() != 5
+        || ids.len() != 5
+    {
+        return Err("Local model tier catalog must contain five distinct models.".into());
+    }
+    for model in &payload.models {
+        validate_model(model)?;
+        let role = if model.id == policy.preferred_model_id {
+            "preferred"
+        } else {
+            "fallback"
+        };
+        if !model.promoted || model.release_channel != "stable" || model.routing_role != role {
+            return Err("Local model tier promotion or routing role is invalid.".into());
+        }
+    }
+    let fallbacks: HashSet<&str> = policy
+        .fallback_model_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let required = [
+        "model_enabled",
+        "artifact_verified",
+        "runtime_verified",
+        "capacity_qualified",
+        "health_eligible",
+    ];
+    if !ids.contains(policy.preferred_model_id.as_str())
+        || policy.default_model_id != policy.preferred_model_id
+        || policy.fallback_model_ids.len() != 4
+        || fallbacks.len() != 4
+        || fallbacks.contains(policy.preferred_model_id.as_str())
+        || !fallbacks.is_subset(&ids)
+        || !policy.experimental_model_ids.is_empty()
+        || policy.strategy != "local_first"
+        || !policy.local_first
+        || !policy.experimental_opt_in_required
+        || policy.external_execution_target != "laravel_proxy"
+        || !policy.external_requires_explicit_approval
+        || !policy.no_silent_external_fallback
+        || required.iter().any(|item| {
+            !policy
+                .required_local_state
+                .iter()
+                .any(|value| value == item)
+        })
+    {
+        return Err("Local model tier routing is unsafe or inconsistent.".into());
+    }
+    Ok(())
 }
 
 fn validate_model(model: &ModelRelease) -> Result<(), String> {
@@ -1346,10 +1421,37 @@ fn persist_versions_in_connection(
     Ok(())
 }
 
+/// Trim only Luczor's own pageable working set, never the resident model or other apps.
+#[tauri::command]
+pub async fn local_model_recover_memory(window: WebviewWindow) -> Result<HardwareSnapshot, String> {
+    ensure_main_webview(&window)?;
+    tauri::async_runtime::spawn_blocking(|| {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::{
+                ProcessStatus::K32EmptyWorkingSet, Threading::GetCurrentProcess,
+            };
+            let mut last = LAST_MEMORY_TRIM
+                .lock()
+                .map_err(|_| "Memory recovery is unavailable.".to_string())?;
+            if last.is_none_or(|at| at.elapsed() >= Duration::from_secs(60)) {
+                // The pseudo-handle refers exclusively to this process and must not be closed.
+                unsafe {
+                    K32EmptyWorkingSet(GetCurrentProcess());
+                }
+                *last = Some(Instant::now());
+            }
+        }
+        collect_hardware_snapshot()
+    })
+    .await
+    .map_err(|_| "Memory recovery task failed.".to_string())?
+}
+
 fn collect_hardware_snapshot() -> Result<HardwareSnapshot, String> {
-    let mut system = System::new_all();
+    let mut system = System::new();
     system.refresh_memory();
-    system.refresh_cpu_usage();
+    system.refresh_cpu_all();
     let accelerators = gpu_snapshot();
     let disks = Disks::new_with_refreshed_list();
     let storage = disks
@@ -1394,6 +1496,16 @@ fn collect_hardware_snapshot() -> Result<HardwareSnapshot, String> {
         memory: MemorySnapshot {
             total_bytes: system.total_memory(),
             available_bytes: system.available_memory(),
+            resident_model: state().lock().ok().and_then(|mut manager| {
+                let runtime = manager.runtime.as_mut()?;
+                if !managed_child_is_running(runtime.child.as_mut()) {
+                    return None;
+                }
+                Some(ResidentMemorySnapshot {
+                    model_release_id: runtime.model_id.clone(),
+                    manifest_payload_sha256: runtime.prepared_manifest_hash.clone()?,
+                })
+            }),
         },
         accelerators,
         storage,
@@ -1586,6 +1698,7 @@ fn refresh_resident_runtime(
 fn verify_configured_artifacts(
     app: &AppHandle,
     model: &ModelRelease,
+    catalog_binding: &CatalogBindingInput,
     cancel: &AtomicBool,
 ) -> Result<VerifiedArtifactFiles, String> {
     let artifact = model
@@ -1596,7 +1709,7 @@ fn verify_configured_artifacts(
         .runtime
         .as_ref()
         .ok_or("Runtime metadata is unavailable.")?;
-    let (runtime_path, model_path) = configured_paths(app, &model.id)?;
+    let (runtime_path, model_path) = configured_paths(app, model, catalog_binding)?;
     let mut model_guard = open_artifact_guard(&model_path)?;
     let mut runtime_guard = open_artifact_guard(&runtime_path)?;
     if model_guard
@@ -1636,7 +1749,7 @@ fn validate_capacity(model: &ModelRelease) -> Result<(), String> {
     if snapshot.memory.available_bytes < min_ram {
         return Err("Available RAM is below the signed model threshold.".into());
     }
-    if let Some(min_vram) = policy.min_vram_bytes {
+    if let Some(min_vram) = policy.min_vram_bytes.filter(|value| *value > 0) {
         if !snapshot
             .accelerators
             .iter()
@@ -1763,19 +1876,55 @@ fn run_signed_benchmark(
     Ok(())
 }
 
-fn configured_paths(app: &AppHandle, model_id: &str) -> Result<(PathBuf, PathBuf), String> {
+fn shared_artifact_ids(model: &ModelRelease, models: &[ModelRelease]) -> Vec<String> {
+    let mut ids = vec![model.id.clone()];
+    if let Some(artifact) = &model.artifact {
+        for candidate in models {
+            if candidate.id != model.id
+                && candidate.artifact.as_ref().is_some_and(|other| {
+                    other.sha256 == artifact.sha256 && other.size_bytes == artifact.size_bytes
+                })
+            {
+                ids.push(candidate.id.clone());
+            }
+        }
+    }
+    ids
+}
+
+fn configured_paths(
+    app: &AppHandle,
+    model: &ModelRelease,
+    catalog_binding: &CatalogBindingInput,
+) -> Result<(PathBuf, PathBuf), String> {
+    let ids = {
+        let guard = state()
+            .lock()
+            .map_err(|_| "Local model manager is unavailable.")?;
+        let catalog = require_catalog_binding(&guard, catalog_binding)?;
+        shared_artifact_ids(model, &catalog.payload.models)
+    };
     let config_path = app
         .path()
         .app_data_dir()
         .map_err(|_| "Local-model configuration directory is unavailable.")?
         .join("local-model")
         .join("runtime-paths.json");
-    configured_paths_from_sources(
-        model_id,
-        std::env::var_os("LUCZOR_LLAMA_CPP_BIN").map(PathBuf::from),
-        std::env::var_os("LUCZOR_LOCAL_MODEL_DIR").map(PathBuf::from),
-        &config_path,
-    )
+    for id in ids {
+        let result = configured_paths_from_sources(
+            &id,
+            std::env::var_os("LUCZOR_LLAMA_CPP_BIN").map(PathBuf::from),
+            std::env::var_os("LUCZOR_LOCAL_MODEL_DIR").map(PathBuf::from),
+            &config_path,
+        );
+        match result {
+            // Only a missing file may resolve to an identical signed sibling.
+            // Invalid paths, symlinks or runtime errors must still fail closed.
+            Err(error) if error == "Configured GGUF file is unavailable." => continue,
+            other => return other,
+        }
+    }
+    Err("Configured GGUF file is unavailable.".into())
 }
 
 fn configured_paths_from_sources(
@@ -2209,11 +2358,14 @@ fn start_runtime(
     catalog_binding: &CatalogBindingInput,
     cancel: &AtomicBool,
 ) -> Result<ManagedRuntime, String> {
+    // A process may have exited since its readiness check; every replacement
+    // must still satisfy the signed cold-start memory requirement.
+    validate_capacity(model)?;
     // A readiness record proves a prior check, but every new process start
     // re-hashes both configured files. Windows also keeps read-only share
     // handles open for the complete runtime lifetime so the verified paths
     // cannot be replaced or opened for write/delete before use.
-    let verified_artifacts = verify_configured_artifacts(app, model, cancel)?;
+    let verified_artifacts = verify_configured_artifacts(app, model, catalog_binding, cancel)?;
     ensure_model_storage(
         &verified_artifacts.model_path,
         model
@@ -3336,9 +3488,9 @@ mod tests {
         parse_rfc3339_millis, persist_versions_in_connection, read_bounded_error_body,
         require_catalog_binding, rotate_manifest_session, safe_id, signed_read_timeout,
         storage_class_eligible, valid_hash, valid_manifest_session_id, valid_manifest_trust_domain,
-        validate_discovery_binding, verify_envelope_with_trust, versions_are_monotone,
-        BenchmarkThresholds, CatalogBindingInput, LlamaHttpFailureKind, ManagerState,
-        SignedEnvelope, VerifiedCatalog, MAX_ERROR_RESPONSE_BYTES,
+        validate_discovery_binding, validate_manifest, verify_envelope_with_trust,
+        versions_are_monotone, BenchmarkThresholds, CatalogBindingInput, LlamaHttpFailureKind,
+        ManagerState, ManifestPayload, SignedEnvelope, VerifiedCatalog, MAX_ERROR_RESPONSE_BYTES,
     };
     #[cfg(windows)]
     use super::{
@@ -3697,6 +3849,39 @@ mod tests {
         );
         let canonical = canonical_json(&envelope.payload).unwrap();
         assert_eq!(canonical, GOLDEN_CANONICAL.trim_end().as_bytes());
+    }
+
+    #[test]
+    fn five_tier_catalog_preserves_signed_routing_boundaries() {
+        let mut payload: ManifestPayload = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/local-model-tiers-v2.json"
+        ))
+        .unwrap();
+        assert!(validate_manifest(&payload).is_ok());
+        payload.routing.external_requires_explicit_approval = false;
+        assert!(validate_manifest(&payload).is_err());
+        payload.routing.external_requires_explicit_approval = true;
+        payload.routing.fallback_model_ids[0] = payload.routing.default_model_id.clone();
+        assert!(validate_manifest(&payload).is_err());
+        payload.schema_version = 1;
+        assert!(validate_manifest(&payload).is_err());
+    }
+
+    #[test]
+    fn starter_tiers_share_only_identical_signed_artifact_files() {
+        let mut payload: ManifestPayload = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/local-model-tiers-v2.json"
+        ))
+        .unwrap();
+        let model = payload.models[0].clone();
+        let same = super::shared_artifact_ids(&model, &payload.models);
+        assert_eq!(same.len(), 5);
+        assert_eq!(same[0], model.id);
+        payload.models[1].artifact.as_mut().unwrap().sha256 = "f".repeat(64);
+        payload.models[2].artifact.as_mut().unwrap().size_bytes += 1;
+        payload.models[3].artifact = None;
+        let remaining = super::shared_artifact_ids(&model, &payload.models);
+        assert_eq!(remaining, vec![model.id, payload.models[4].id.clone()]);
     }
 
     #[test]

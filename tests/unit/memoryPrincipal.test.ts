@@ -78,7 +78,10 @@ async function setServerEnabled(enabled: boolean): Promise<void> {
 
 describe('desktop memory account isolation', () => {
   beforeEach(() => {
-    vi.useRealTimers()
+    // Every service instance owns a debounced background sync. Keep those
+    // timers scoped to their test so a previous instance cannot consume the
+    // next test's transport mock while the full suite is running under load.
+    vi.useFakeTimers()
     vi.resetModules()
     vi.clearAllMocks()
     harness.files.clear()
@@ -89,8 +92,112 @@ describe('desktop memory account isolation', () => {
   })
 
   afterEach(() => {
+    vi.clearAllTimers()
     vi.useRealTimers()
     vi.unstubAllGlobals()
+  })
+
+  it('persists explicit named priorities and debounces identical confirmed observations into one server write', async () => {
+    await setServerEnabled(true)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const input = {
+      content: 'Antworten immer auf Deutsch.',
+      scope: 'user' as const,
+      priority: 'high' as const,
+      writeIntent: 'confirmed' as const,
+    }
+    const first = await memory.remember(input)
+    const duplicate = await memory.remember(input)
+    expect(duplicate.id).toBe(first.id)
+    expect(harness.fetch).not.toHaveBeenCalled()
+    await memory.flushPendingSync()
+    expect(harness.fetch).toHaveBeenCalledOnce()
+    const sent = JSON.parse(String(harness.fetch.mock.calls[0]?.[1]?.body))
+    expect(sent).toMatchObject({ priority: 'high', importance: 0.8, write_id: first.id })
+    await memory.remember(input)
+    await memory.flushPendingSync()
+    expect(harness.fetch).toHaveBeenCalledOnce()
+    const changed = await memory.remember({ ...input, priority: 'critical' })
+    expect(changed.id).not.toBe(first.id)
+    await memory.flushPendingSync()
+    expect(harness.fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('ranks equally relevant local evidence by priority inside the selected account and project', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    await memory.remember({
+      content: 'Navigation Hintergrund.',
+      projectId: 'p1',
+      priority: 'background',
+      writeIntent: 'explicit',
+    })
+    const important = await memory.remember({
+      content: 'Navigation wichtig.',
+      projectId: 'p1',
+      priority: 'critical',
+      writeIntent: 'explicit',
+    })
+    await memory.remember({
+      content: 'Navigation anderes Projekt.',
+      projectId: 'p2',
+      priority: 'critical',
+      writeIntent: 'explicit',
+    })
+    const hits = await memory.recallLocal({ query: 'Navigation', projectId: 'p1' })
+    expect(hits).toHaveLength(2)
+    expect(hits[0]?.id).toBe(important.id)
+    const report = await memory.analyze('project', { projectId: 'p1' })
+    expect(report.local).toMatchObject({ analyzed: 2, priorities: { background: 1, critical: 1 }, changed_records: 0 })
+    harness.currentSnapshot = accountSnapshot(2, 'key-b')
+    expect((await memory.analyze('project', { projectId: 'p1' })).local.analyzed).toBe(0)
+    expect(await memory.recallLocal({ query: 'Navigation', projectId: 'p1' })).toEqual([])
+  })
+
+  it('captures bounded intermediate candidates early, throttles bursts and rejects account switches', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const checkpoint = {
+      content: 'Die öffentliche Planung wurde in drei übersichtliche Schritte eingeteilt.',
+      scope: 'project' as const,
+      projectId: 'p1',
+      sessionId: 'turn-one',
+      expectedPrincipalId: harness.currentSnapshot.principalId,
+    }
+    const first = await memory.captureCheckpoint(checkpoint)
+    expect(first).toMatchObject({ status: 'candidate', visibility: 'private', writeIntent: 'automatic' })
+    expect(await memory.captureCheckpoint({ ...checkpoint, content: checkpoint.content + ' Weiter.' })).toBeNull()
+    expect(
+      await memory.captureCheckpoint({ ...checkpoint, content: checkpoint.content + ' Fertig.', final: true })
+    ).not.toBeNull()
+    expect(await memory.listCandidates('p1')).toHaveLength(2)
+    await memory.flushPendingSync()
+    expect(harness.fetch).not.toHaveBeenCalled()
+    harness.currentSnapshot = accountSnapshot(2, 'key-b')
+    await expect(memory.captureCheckpoint(checkpoint)).rejects.toThrow('account changed')
+    expect(await memory.listCandidates('p1')).toEqual([])
+  })
+
+  it('keeps scoped local analysis when an older backend has no analysis endpoint', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    await memory.remember({ content: 'Eine bestätigte lokale Entscheidung.', projectId: 'p1', writeIntent: 'explicit' })
+    await setServerEnabled(true)
+    harness.fetch.mockResolvedValue(jsonResponse({ message: 'Not Found' }, 404))
+    await expect(memory.analyze('project', { projectId: 'p1' })).resolves.toMatchObject({
+      local: { analyzed: 1 },
+      server: null,
+      serverUnavailable: true,
+    })
+    harness.fetch.mockImplementationOnce(async () => {
+      harness.currentSnapshot = accountSnapshot(2, 'key-b')
+      return jsonResponse({}, 404)
+    })
+    await expect(memory.analyze('project', { projectId: 'p1' })).rejects.toThrow('account changed during analysis')
   })
 
   it('retrieves private active memories locally without remote queries or ordinary provider recall', async () => {
@@ -544,7 +651,9 @@ describe('desktop memory account isolation', () => {
       return jsonResponse({ data: [] })
     })
     await expect(memory.recall({ projectId: 'project-1', query: 'Navigation' })).resolves.toEqual([
-      expect.objectContaining({ id: original.id, tags: ['Entwurf', 'Geprüft'] }),
+      // Metadata edits create a new immutable write instead of changing a
+      // payload already associated with the original server write ID.
+      expect.objectContaining({ id: expect.not.stringMatching(original.id), tags: ['Geprüft'] }),
     ])
   })
 

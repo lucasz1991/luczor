@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { loadSpeechVoices, type SpeechVoice } from '@/services/voice/voiceCatalog'
-import { MAX_VOICE_PHRASE_CHARS, validateVoiceSettings, type VoiceMode } from '@/services/voice/localVoice'
+import {
+  MAX_VOICE_PHRASE_CHARS,
+  validateVoiceSettings,
+  type VoiceMode,
+  type VoiceEndMode,
+} from '@/services/voice/localVoice'
 import type { SpeakResult } from '@/services/voice/speak'
 import { hud } from '@/state/hud'
 
@@ -12,6 +17,7 @@ const props = defineProps<{
   endPhrase: string
   continuousSilenceMs: number
   autoSubmit: boolean
+  endMode?: VoiceEndMode
   sttLanguage: string
   voiceId?: string
   testSpeech: (text: string, signal?: AbortSignal, voiceId?: string) => Promise<SpeakResult>
@@ -23,6 +29,7 @@ const emit = defineEmits<{
   (event: 'update:endPhrase', value: string): void
   (event: 'update:continuousSilenceMs', value: number): void
   (event: 'update:autoSubmit', value: boolean): void
+  (event: 'update:endMode', value: VoiceEndMode): void
   (event: 'update:sttLanguage', value: string): void
   (event: 'update:voiceId', value: string): void
   (event: 'openServer'): void
@@ -32,6 +39,7 @@ const voiceModeModel = computed({
   get: () => props.voiceMode,
   set: value => emit('update:voiceMode', value),
 })
+const endModeModel = computed({ get: () => props.endMode ?? 'either', set: value => emit('update:endMode', value) })
 const wakeWordModel = computed({
   get: () => props.wakeWord,
   set: value => emit('update:wakeWord', value),
@@ -190,10 +198,18 @@ onBeforeUnmount(() => {
       <div class="lz-card__title">Spracheingabe und Diktatabschluss</div>
       <p class="lz-hint">
         Wake-Word startet das Diktat nach dem Startwort. Dauer-Zuhören beginnt direkt und schließt das Diktat nach der
-        eingestellten Stille ab. Das bestätigte Close-Word beendet in beiden Modi das aktuelle Diktat und sendet den
-        fertigen Eingabetext automatisch.
+        eingestellten Stille ab. Der gewählte Diktatabschluss gilt auch nach dem Wake-Word. Ein aktiviertes Close-Word
+        beendet das aktuelle Diktat und sendet den fertigen Eingabetext automatisch.
       </p>
       <div class="lz-grid2">
+        <div>
+          <label for="voice-end-mode" class="lz-label">Diktat beenden</label>
+          <select id="voice-end-mode" v-model="endModeModel" class="lz-input" :disabled="voiceMode === 'push_to_talk'">
+            <option value="either">Close-Word oder Sprechpause</option>
+            <option value="close_word">Nur Close-Word</option>
+            <option value="silence">Nur Sprechpause</option>
+          </select>
+        </div>
         <div>
           <label for="voice-input-mode" class="lz-label">Eingabe-Modus</label>
           <select id="voice-input-mode" v-model="voiceModeModel" class="lz-input">
@@ -239,9 +255,9 @@ onBeforeUnmount(() => {
             min="1"
             max="30"
             step="1"
-            :disabled="voiceMode !== 'continuous'"
+            :disabled="voiceMode === 'push_to_talk' || endModeModel === 'close_word'"
           />
-          <p class="lz-hint">Im Modus Dauer-Zuhören: 1 bis 30 Sekunden, Standard 5 Sekunden.</p>
+          <p class="lz-hint">Für Wake-Word und Dauer-Zuhören: 1 bis 30 Sekunden, Standard 5 Sekunden.</p>
         </div>
         <div>
           <label for="voice-stt-language" class="lz-label">Sprache der lokalen Erkennung (STT)</label>
@@ -257,7 +273,7 @@ onBeforeUnmount(() => {
           :class="{ 'is-on': autoSubmit }"
           role="switch"
           :aria-checked="autoSubmit"
-          :disabled="voiceMode !== 'continuous'"
+          :disabled="voiceMode === 'push_to_talk' || endModeModel === 'close_word'"
           aria-labelledby="voice-auto-submit-label"
           aria-describedby="voice-auto-submit-hint"
           @click="emit('update:autoSubmit', !autoSubmit)"
@@ -266,8 +282,9 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <p id="voice-auto-submit-hint" class="lz-hint">
-        Nur für Dauer-Zuhören, standardmäßig aus: Eine Sprechpause lässt den Text zum Prüfen stehen. Das bestätigte
-        Close-Word sendet unabhängig von diesem Schalter automatisch. Gesendete Texte können Agentenaktionen auslösen.
+        Für Wake-Word und Dauer-Zuhören, standardmäßig aus: Eine Sprechpause lässt den Text zum Prüfen stehen. Ein
+        aktiviertes Close-Word sendet unabhängig von diesem Schalter automatisch. Gesendete Texte können Agentenaktionen
+        auslösen.
       </p>
     </div>
   </div>

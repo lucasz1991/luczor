@@ -21,6 +21,7 @@ import { cleanSttTranscript } from './transcript'
 import { HandsFreeMachine, type StrategyConfig, type VoiceCompletionReason } from './voiceStrategy'
 import { BargeInDetector } from './bargeIn'
 import { findWakeWord } from './voicePhrases'
+import { matchAudioTrigger, type AudioTriggers } from './audioTriggers'
 
 export { findWakeWord } from './voicePhrases'
 export type { VoicePhraseMatch as WakeWordMatch } from './voicePhrases'
@@ -30,6 +31,7 @@ export type VoiceEngineMode = 'continuous' | 'wakeword'
 export type VoiceEngineState = 'stopped' | 'listening' | 'armed' | 'dictating' | 'transcribing' | 'muted' | 'error'
 
 export type VoiceEngineOptions = {
+  audioTriggers?: AudioTriggers
   mode: VoiceEngineMode
   wakeWord?: string
   /** Transcribe a captured utterance (WAV base64) to text. */
@@ -493,6 +495,20 @@ export class VoiceEngine {
     try {
       const wav = chunksToWavBase64(job.frames, job.sampleRate)
       job.frames = [] // Do not retain raw frames in addition to the bounded WAV during native inference.
+      if (opts.audioTriggers?.enabled && this.machine) {
+        const waiting = opts.mode === 'wakeword' && this.machine.state === 'armed'
+        if (job.final) {
+          const kind = waiting ? 'wake' : 'close'
+          const allowClose = opts.handsFree?.endMode !== 'silence'
+          if ((waiting || allowClose) && matchAudioTrigger(wav, opts.audioTriggers, kind)) {
+            if (waiting) this.machine.activate(Date.now())
+            else this.machine.finalize('close_word')
+            return
+          }
+        }
+        // In audio mode ambient speech never reaches STT while waiting for the recorded cue.
+        if (waiting) return
+      }
       const text = cleanSttTranscript(await opts.transcribe(wav, 'audio/wav'))
       if (!this.valid(generation, opts, epoch) || this.muted) return
       if (!job.final) {

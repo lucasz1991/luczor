@@ -1,6 +1,6 @@
 // Exact normalized token matching. Only the product name has a fixed STT alias
 // vocabulary; unrelated words never receive edit-distance/fuzzy matching.
-const LUCZOR_SINGLE_ALIASES = new Set(['luczor', 'luxor', 'lucor', 'lutzor', 'lukzor', 'luksor', 'luczer'])
+const LUCZOR_SINGLE_ALIASES = new Set(['luczor', 'luxor', 'lucor', 'lutzor', 'lukzor', 'luksor', 'luczer', 'luxua'])
 
 type Token = { normalized: string; start: number; end: number }
 export type VoicePhraseMatch = { start: number; end: number; matched: string }

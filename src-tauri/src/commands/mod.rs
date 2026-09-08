@@ -13,6 +13,7 @@ pub mod project_workspace;
 pub mod repository_graph;
 pub mod system;
 pub mod voice;
+pub mod voice_input;
 pub mod workflow_http;
 
 mod process;

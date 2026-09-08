@@ -5,6 +5,7 @@ import { pendingVoicePhraseSuffix, splitOnVoicePhrase } from './voicePhrases'
 export type HandsFreeStrategy = 'continuous' | 'safeword'
 
 export type StrategyConfig = {
+  endMode?: 'close_word' | 'silence' | 'either'
   strategy: HandsFreeStrategy
   triggerPhrase: string
   endPhrase: string
@@ -45,6 +46,12 @@ export class HandsFreeMachine {
     this.onPartial?.('')
   }
 
+  activate(at: number): void {
+    this.reset()
+    this.touchSpeech(at)
+    this.setState('dictating')
+  }
+
   /** Finalize committed text only. An unconfirmed partial control remains ordinary speech. */
   finalize(reason: VoiceCompletionReason = 'manual'): void {
     const text = this.buffer.trim()
@@ -80,7 +87,7 @@ export class HandsFreeMachine {
 
   /** The engine also pauses tick while audio or final transcription is pending. */
   tick(now: number): void {
-    if (this.state !== 'dictating' || this.cfg.strategy !== 'continuous' || !this.buffer.trim()) return
+    if (this.state !== 'dictating' || this.cfg.endMode === 'close_word') return
     const silence = Number.isFinite(this.cfg.continuousSilenceMs) ? this.cfg.continuousSilenceMs : 5000
     if (Number.isFinite(now) && now - this.lastSpeechAt >= Math.max(1000, silence)) this.finalize('silence')
   }
@@ -92,7 +99,9 @@ export class HandsFreeMachine {
   }
 
   private visibleText(text: string): string {
-    return this.cfg.endPhrase ? pendingVoicePhraseSuffix(text, this.cfg.endPhrase).before : text.trim()
+    return this.cfg.endPhrase && this.cfg.endMode !== 'silence'
+      ? pendingVoicePhraseSuffix(text, this.cfg.endPhrase).before
+      : text.trim()
   }
 
   private reduceSegment(text: string): SegmentResult {
@@ -120,7 +129,8 @@ export class HandsFreeMachine {
     }
 
     // Also inspect the activation utterance, including a close phrase split over finals.
-    const close = this.cfg.endPhrase ? splitOnVoicePhrase(draft.text, this.cfg.endPhrase) : null
+    const close =
+      this.cfg.endPhrase && this.cfg.endMode !== 'silence' ? splitOnVoicePhrase(draft.text, this.cfg.endPhrase) : null
     if (close) {
       return {
         draft: { state: 'armed', text: '', wakeTail: '' },

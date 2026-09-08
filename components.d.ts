@@ -11,6 +11,7 @@ export {}
 /* prettier-ignore */
 declare module 'vue' {
   export interface GlobalComponents {
+    AccountConnection: typeof import('./src/components/settings/AccountConnection.vue')['default']
     AgentHub: typeof import('./src/components/agents/AgentHub.vue')['default']
     AgentScreen: typeof import('./src/components/ai/AgentScreen.vue')['default']
     AgentTeamResults: typeof import('./src/components/ai/AgentTeamResults.vue')['default']
@@ -20,6 +21,7 @@ declare module 'vue' {
     AppearanceSettingsSection: typeof import('./src/components/settings/AppearanceSettingsSection.vue')['default']
     ApprovalCard: typeof import('./src/components/ai/ApprovalCard.vue')['default']
     AssistantProfileStatus: typeof import('./src/components/AssistantProfileStatus.vue')['default']
+    AudioTriggerSettings: typeof import('./src/components/ai/AudioTriggerSettings.vue')['default']
     ChatCommentary: typeof import('./src/components/ai/ChatCommentary.vue')['default']
     ChatComposer: typeof import('./src/components/ai/ChatComposer.vue')['default']
     ChatProjectOverlay: typeof import('./src/components/ChatProjectOverlay.vue')['default']
@@ -57,6 +59,7 @@ declare module 'vue' {
     ThinkingState: typeof import('./src/components/ai/ThinkingState.vue')['default']
     TokenCounter: typeof import('./src/components/ai/TokenCounter.vue')['default']
     ToolChips: typeof import('./src/components/ai/ToolChips.vue')['default']
+    VoiceInputSettings: typeof import('./src/components/ai/VoiceInputSettings.vue')['default']
     VoiceSettingsSection: typeof import('./src/components/settings/VoiceSettingsSection.vue')['default']
   }
 }

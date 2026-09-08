@@ -526,7 +526,7 @@ html.mini-window,
   font-size: 9px;
   color: var(--ai-faint);
 }
-.mini-composer button {
+.mini-composer > div:not(.voice-input-settings) > button {
   border-radius: 50%;
   background: var(--ai-ink);
   color: var(--ai-page);
@@ -535,7 +535,7 @@ html.mini-window,
   flex-shrink: 0;
   padding: 0;
 }
-.mini-composer button[type='button'] {
+.mini-composer > div:not(.voice-input-settings) > button[type='button'] {
   border-radius: 9px;
 }
 .mini-footer {

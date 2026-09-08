@@ -129,3 +129,11 @@
 - Antwort und Zwischenkommentare teilen eine Auswahlleiste mit „Auswahl vorlesen“. Browser bestätigte genau eine Auswahl-Anfrage, laufzeitbasierte Wortmarkierung und anschließendes Entfernen der Auswahl.
 - Fallback-Control in den kompakten Promptkopf verschoben. Beide Hinweise unter dem Composer entfernt; 1096px und 320px ohne horizontalen Überlauf.
 - 113 Testdateien / 1.246 Tests, Typecheck, ESLint, Prettier, Diffcheck und Releasebuild ohne Bundle bestanden. EXE 14.625.280 Bytes, SHA256 34359240E360022639C852C23A8EA38190BB9A99C819A750B134B6EF3827FD72. Laufende Debug-App PID114596 blieb geöffnet und reagiert.
+
+## 2026-09-08 | Codex/root | Spracheingabe und Audio-Auslöser completed-local
+- Einstellungen in Haupt- und Mini-Eingabefeld; Wake-/Close-Word oder Sprechpause (1-30 s), optionales Senden; Wake-Stillefehler behoben. Mini diktierte zuvor ins Hauptfeld und erhält jetzt eine eigene Sitzung.
+- Audio-Start/-Stoppwort aufnehmen, lokal speichern/anhören/löschen und separat probieren; lokaler MFCC/DTW-Abgleich ersetzt Steuertext im Audiomodus. Einzelne Auslöser mit Pause sprechen. Keine Aufnahmen des Nutzers erstellt; persönliche Mikrofonabnahme offen.
+- STT-Vorbereitung vor Mikrofonstart; schmaler nativer Mini-Voice-Store/STT/Status/Claim, keine allgemeinen Store-/Zugangsdatenrechte. Geteilte Mikrofonbelegung und bestehende Sende-/TTS-Grenzen erhalten.
+- Verifiziert: eigene volle Frontendsuite 1259 Tests plus neue Mini-Store-Regression; Koordination meldet final 1262 Frontendtests/29 native Modelltests und Clippy. Voice-Grenztest, Typecheck, fokussiertes Lint/Format sowie Browser Main/Mini Desktop/320px grün. Gesamt-ESLint mit vorhandenen store.ts Namensbefunden nicht als grün ausgewiesen.
+- Gemeinsamer Releasebuild: app/src-tauri/target/release/tauri-app.exe, 14660096 Bytes, SHA256 ED32C32EBD458B2A380566725BDF768C8F28D92A415882453F747B334B2A48E0. Nicht gestartet; kein Serverdeploy für diese Desktopänderung.
+- Berichte: app/.lmzdev/artifacts/reports/2026-09-08-voice-input.md und -build.json; Bedienung: app/docs/voice-input-and-audio-triggers.md. Eigene Browsertabs und Vite1446 geschlossen. Voice-Dateien freigegeben; local_model.rs bleibt beim koordinierten Modell-Task.

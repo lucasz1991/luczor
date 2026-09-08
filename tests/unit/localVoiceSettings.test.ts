@@ -20,7 +20,7 @@ const fake = vi.hoisted(() => ({
   invoke: vi.fn(),
   manifest: vi.fn(),
 }))
-vi.mock('@tauri-apps/api/core', () => ({ invoke: fake.invoke }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: fake.invoke, isTauri: () => false }))
 vi.mock('@tauri-apps/plugin-store', () => ({
   Store: { load: async () => ({ get: async (key: string) => fake.settings.get(key) }) },
 }))
@@ -50,6 +50,7 @@ describe('visible and runtime voice settings share one contract', () => {
       endPhrase: VOICE_DEFAULTS.endPhrase,
       continuousSilenceMs: VOICE_DEFAULTS.continuousSilenceMs,
       autoSubmit: false,
+      endMode: 'either',
     })
   })
 
@@ -101,6 +102,7 @@ describe('visible and runtime voice settings share one contract', () => {
       endPhrase: configured.endPhrase,
       continuousSilenceMs: 8000,
       autoSubmit: true,
+      endMode: 'either',
     })
   })
 

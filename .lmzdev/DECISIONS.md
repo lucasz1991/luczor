@@ -89,3 +89,8 @@ Record durable decisions with date, context, decision, and consequences.
 - Normale Ausgaben werden als ein vollständiger TTS-Clip vorbereitet. Eine Aufteilung erfolgt ausschließlich oberhalb des 4.000-Zeichen-Serverlimits an Wortgrenzen; Satzzeichen sind keine Clipgrenze.
 - Die aktive Wortmarkierung bleibt eine aus der echten Clip-Laufzeit berechnete Näherung. Eine markierte Passage kann über die bestehende Auswahlleiste genau einmal vorgelesen werden und benötigt weiterhin die zielgebundene Freigabe für lokale Inhalte.
 - Die externe Fallback-Freigabe sitzt im oberen Promptkopf. Sie ändert keine Freigabe- oder Egressregeln. Allgemeine Composer-Hinweise entfallen auf ausdrücklichen Nutzerwunsch; Controls sind kompakter und zugänglich beschriftet.
+
+## 2026-09-08 | Persönliche Audio-Auslöser
+- Auf ausdrücklichen Nutzerwunsch ersetzen eigene lokale Audioaufnahmen optional die textbasierten Steuerwörter. Vergleich über begrenzte MFCC/DTW-Templates vor Whisper; keine Serverübertragung, Sprecheridentifizierung oder Behauptung eines trainierten Wake-Word-Modells.
+- Aufnahmen werden einzeln gesprochen, auf Länge/Signal geprüft und lokal getrennt von allgemeinen Einstellungen gespeichert. Ähnliche Referenzen werden abgelehnt; Probe ohne Senden. Verbesserte Erkennung ist mikrofonabhängig und muss persönlich getestet werden.
+- Close-Word sendet weiterhin, Stille sendet nur nach bestehender separater Zustimmung; Timer nun auch in Wake-Word. Mini erhält eng begrenzte Voice-Kommandos statt allgemeinen Store- oder Credential-Zugriff.

@@ -69,6 +69,8 @@ vi.mock('@/services/notifications', () => ({
 }))
 const native = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }))
+const webChat = vi.hoisted(() => ({ run: vi.fn() }))
+vi.mock('@/services/webWorkspaceJob', () => ({ runWebWorkspaceJob: webChat.run }))
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -124,6 +126,7 @@ describe('device job transport startup', () => {
     api.startDeviceJob.mockReset().mockResolvedValue(undefined)
     api.completeDeviceJob.mockReset().mockResolvedValue(undefined)
     native.invoke.mockReset().mockResolvedValue(undefined)
+    webChat.run.mockReset().mockResolvedValue({ ok: true, text: 'Personal response' })
     notifications.catchUp.mockReset().mockResolvedValue(undefined)
     notifications.handleRealtime.mockReset().mockResolvedValue(undefined)
     pusherHarness.FakePusher.instances.length = 0
@@ -143,7 +146,11 @@ describe('device job transport startup', () => {
     stop = await startDeviceJobChannel()
     await Promise.resolve()
 
-    expect(api.nextDeviceJob).toHaveBeenCalledWith('client-1')
+    expect(api.nextDeviceJob).toHaveBeenCalledWith(
+      'client-1',
+      expect.objectContaining({ clientId: 'client-1' }),
+      expect.any(AbortSignal)
+    )
     expect(notifications.catchUp).toHaveBeenCalled()
     expect(api.realtimeConfig).not.toHaveBeenCalled()
     expect(getDeviceJobChannelState()).toMatchObject({
@@ -315,6 +322,54 @@ describe('device job transport startup', () => {
     expect(window.confirm).not.toHaveBeenCalled()
   })
 
+  it('runs a verified personal web chat in Observe while workspace tools remain blocked', async () => {
+    const { startDeviceJobChannel } = await import('@/services/deviceJobs')
+    const { updateExecutionControls } = await import('@/services/executionGate')
+    updateExecutionControls({ mode: 'observe', killSwitch: false, scope: 'p1' })
+    const job = {
+      id: 'personal',
+      status: 'approval_required',
+      tool_profile: 'workspace.chat',
+      payload: { scope: 'personal' },
+    }
+    api.nextDeviceJob.mockResolvedValueOnce({ data: job })
+    stop = await startDeviceJobChannel()
+    await vi.waitFor(() => expect(api.completeDeviceJob).toHaveBeenCalled())
+    expect(native.invoke).toHaveBeenCalledWith('verify_device_job', { payload: job })
+    expect(api.approveDeviceJob).toHaveBeenCalledWith(
+      'personal',
+      'client-1',
+      true,
+      undefined,
+      expect.any(Object),
+      expect.any(AbortSignal)
+    )
+    expect(api.startDeviceJob).toHaveBeenCalledWith('personal', 'client-1', expect.any(Object), expect.any(AbortSignal))
+    expect(webChat.run).toHaveBeenCalledWith(
+      job.payload,
+      expect.anything(),
+      expect.any(Function),
+      'personal',
+      expect.objectContaining({ baseUrl: 'https://luczor.example', clientId: 'client-1' })
+    )
+    expect(api.completeDeviceJob).toHaveBeenCalledWith(
+      'personal',
+      'client-1',
+      true,
+      { ok: true, text: 'Personal response' },
+      undefined,
+      expect.objectContaining({ baseUrl: 'https://luczor.example', clientId: 'client-1', deviceKey: 'device-key' }),
+      expect.any(AbortSignal)
+    )
+    stop()
+    api.startDeviceJob.mockClear()
+    api.nextDeviceJob.mockResolvedValueOnce({ data: { ...job, id: 'workspace', payload: { scope: 'workspace' } } })
+    stop = await startDeviceJobChannel()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(api.startDeviceJob).not.toHaveBeenCalled()
+    expect(webChat.run).toHaveBeenCalledTimes(1)
+  })
+
   it('previews the complete signed workflow and records ok:false as a failure', async () => {
     const { startDeviceJobChannel } = await import('@/services/deviceJobs')
     const { updateExecutionControls } = await import('@/services/executionGate')
@@ -338,7 +393,9 @@ describe('device job transport startup', () => {
       'client-1',
       false,
       expect.objectContaining({ ok: false, status: 503 }),
-      expect.any(String)
+      expect.any(String),
+      expect.any(Object),
+      expect.any(AbortSignal)
     )
   })
 
@@ -389,7 +446,14 @@ describe('device job transport startup', () => {
     expect(api.approveDeviceJob).not.toHaveBeenCalled()
     answer.resolve('Abbrechen')
     await vi.waitFor(() =>
-      expect(api.approveDeviceJob).toHaveBeenCalledWith('cancel-dialog', 'client-1', false, 'Rejected on local device')
+      expect(api.approveDeviceJob).toHaveBeenCalledWith(
+        'cancel-dialog',
+        'client-1',
+        false,
+        'Rejected on local device',
+        expect.any(Object),
+        expect.any(AbortSignal)
+      )
     )
     expect(api.startDeviceJob).not.toHaveBeenCalled()
     expect(native.invoke).not.toHaveBeenCalledWith('open_url', expect.anything())

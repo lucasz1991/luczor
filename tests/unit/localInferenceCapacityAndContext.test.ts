@@ -23,6 +23,38 @@ function hardware(storage: HardwareSnapshot['storage']): HardwareSnapshot {
 }
 
 describe('local inference capacity and scoped context', () => {
+  it('does not charge resident model memory twice and binds residency to the signed catalog', () => {
+    const snapshot = hardware([
+      {
+        id: 'disk',
+        mountLabel: 'disk',
+        busType: 'sata',
+        mediaType: 'ssd',
+        removable: false,
+        availableBytes: 100 * GIB,
+      },
+    ])
+    snapshot.memory.availableBytes = GIB
+    snapshot.memory.residentModel = { modelReleaseId: 'local', manifestPayloadSha256: 'catalog-a' }
+    const input = {
+      snapshot,
+      modelReleaseId: 'local',
+      manifestPayloadSha256: 'catalog-a',
+      artifactSizeBytes: GIB,
+      policy: {
+        minTotalRamBytes: 16 * GIB,
+        minAvailableRamBytes: 8 * GIB,
+        minVramBytes: GIB,
+        minStorageFreeBytes: GIB,
+        storageClass: 'fixed_storage' as const,
+      },
+    }
+    expect(assessModelCapacity(input).reasons).not.toContain('available_ram_below_minimum')
+    expect(assessModelCapacity({ ...input, manifestPayloadSha256: 'catalog-b' }).reasons).toContain(
+      'available_ram_below_minimum'
+    )
+    expect(assessModelCapacity({ ...input, modelReleaseId: 'other' }).reasons).toContain('available_ram_below_minimum')
+  })
   it('selects generic fixed NVMe and rejects USB without drive-letter rules', () => {
     const storage: HardwareSnapshot['storage'] = [
       {

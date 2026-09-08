@@ -2,6 +2,7 @@ import type { ComposerInputSource } from '@/composables/useChatComposer'
 import type { VoiceConfig, HandsFreeStrategyConfig } from './localVoice'
 import type { VoiceEngineOptions, VoiceEngineState } from './voiceEngine'
 import { createDictationDraft } from './dictationDraft'
+import type { AudioTriggers } from './audioTriggers'
 
 export type VoiceInputMode = 'push_to_talk' | 'hands_free'
 export type VoiceInputView = {
@@ -33,7 +34,13 @@ type Dependencies = {
   writeInput(text: string, source: ComposerInputSource): void
   scope(): string
   busy(): boolean
-  config(): Promise<{ voice: VoiceConfig; handsFree: HandsFreeStrategyConfig; bargeIn: boolean }>
+  config(): Promise<{
+    voice: VoiceConfig
+    handsFree: HandsFreeStrategyConfig
+    bargeIn: boolean
+    audioTriggers?: AudioTriggers
+  }>
+  prepare?(): Promise<void>
   transcribe(wav: string, language: string): Promise<string>
   stopOutput(): void
   submit(): Promise<void>
@@ -102,12 +109,17 @@ export function createVoiceInputSession(deps: Dependencies) {
     const scope = deps.scope()
     const current = () => ownGeneration === generation && deps.scope() === scope
     const mayWrite = () => current() && !externallyMuted && !submitting && !deps.busy()
-    update({ mode, starting: true, notice: 'Mikrofon wird geöffnet …' })
+    update({ mode, starting: true, notice: 'Lokale Spracherkennung wird vorbereitet …' })
+    let microphoneStage = false
     try {
       await stopping
       if (!current()) return
       const settings = await deps.config()
       if (!current()) return
+      await deps.prepare?.()
+      if (!current()) return
+      update({ notice: 'Mikrofon wird geöffnet …' })
+      microphoneStage = true
       const source: ComposerInputSource = mode === 'push_to_talk' ? 'push_to_talk' : 'hands_free'
       const handsFree =
         mode === 'push_to_talk'
@@ -115,17 +127,33 @@ export function createVoiceInputSession(deps: Dependencies) {
               strategy: 'continuous' as const,
               triggerPhrase: '',
               endPhrase: '',
+              endMode: 'close_word' as const,
               continuousSilenceMs: Number.MAX_SAFE_INTEGER,
             }
-          : settings.handsFree
+          : settings.audioTriggers?.enabled
+            ? { ...settings.handsFree, triggerPhrase: '', endPhrase: '' }
+            : settings.handsFree
+      const endNotice = [
+        handsFree.endMode !== 'silence'
+          ? settings.audioTriggers?.enabled
+            ? 'Dein aufgenommenes Stoppwort beendet und sendet.'
+            : `„${handsFree.endPhrase}“ beendet und sendet.`
+          : '',
+        handsFree.endMode !== 'close_word'
+          ? `${handsFree.continuousSilenceMs / 1000} Sekunden Pause beenden das Diktat${settings.handsFree.autoSubmit ? ' und senden es' : ' zum Prüfen'}.`
+          : '',
+      ]
+        .filter(Boolean)
+        .join(' ')
       const readyNotice =
         mode === 'push_to_talk'
           ? 'Diktat läuft. Aufnahme stoppen beendet den Text ohne Absenden.'
           : handsFree.strategy === 'safeword'
-            ? `Bereit: „${handsFree.triggerPhrase}“ startet, „${handsFree.endPhrase}“ beendet und sendet den Text.`
-            : `Diktat läuft. „${handsFree.endPhrase}“ beendet und sendet den Text. Eine längere Pause beendet das Diktat.`
+            ? `Bereit: ${settings.audioTriggers?.enabled ? 'Dein aufgenommenes Startwort startet. Danach kurz pausieren und diktieren.' : `„${handsFree.triggerPhrase}“ startet.`} ${endNotice}`
+            : `Diktat läuft. ${endNotice}`
 
       await deps.engine.start({
+        audioTriggers: mode === 'hands_free' ? settings.audioTriggers : undefined,
         mode: handsFree.strategy === 'safeword' ? 'wakeword' : 'continuous',
         wakeWord: settings.voice.wakeWord,
         handsFree,
@@ -196,7 +224,9 @@ export function createVoiceInputSession(deps: Dependencies) {
         error:
           error instanceof Error && error.name === 'NotAllowedError'
             ? 'Mikrofonzugriff wurde nicht freigegeben. Bitte die Mikrofonberechtigung prüfen.'
-            : 'Die lokale Spracheingabe konnte nicht gestartet werden. Bitte Mikrofon und Voice-Einstellungen prüfen.',
+            : !microphoneStage
+              ? 'Lokale Spracherkennung konnte nicht vorbereitet werden. Bitte Sprachaufnahmen und Einstellungen prüfen; eine fehlende Whisper-Installation einmal im Hauptfenster über die Spracheingabe vorbereiten.'
+              : 'Die lokale Spracheingabe konnte nicht gestartet werden. Bitte Mikrofon und Voice-Einstellungen prüfen.',
       })
     }
   }

@@ -57,10 +57,10 @@ export type LocalModelReleaseManifest = {
 export type LocalModelRoutingPolicy = {
   strategy: 'local_first'
   localFirst: true
-  preferredModelId: typeof FLASH_NEXT_MODEL_ID
-  defaultModelId: typeof FLASH_NEXT_MODEL_ID | typeof ORCAROUTER_FALLBACK_MODEL_ID
-  fallbackModelIds: [typeof ORCAROUTER_FALLBACK_MODEL_ID]
-  experimentalModelIds: Array<typeof FLASH_NEXT_MODEL_ID>
+  preferredModelId: string
+  defaultModelId: string
+  fallbackModelIds: string[]
+  experimentalModelIds: string[]
   experimentalOptInRequired: true
   externalExecutionTarget: 'laravel_proxy'
   externalAllowed: boolean
@@ -72,7 +72,7 @@ export type LocalModelRoutingPolicy = {
 }
 
 export type LocalModelManifestPayload = {
-  schemaVersion: 1
+  schemaVersion: 1 | 2
   catalogVersion: number
   policyVersion: number
   generatedAt: string
@@ -222,7 +222,7 @@ function runtime(value: unknown, modelId: string): ModelRuntimeManifest | null {
   }
 }
 
-function capacityPolicy(value: unknown, modelId: string): LocalModelCapacityPolicy {
+function capacityPolicy(value: unknown, modelId: string, tierCatalog = false): LocalModelCapacityPolicy {
   const item = record(value, `${modelId}.capacity_policy`)
   exactKeys(
     item,
@@ -258,14 +258,15 @@ function capacityPolicy(value: unknown, modelId: string): LocalModelCapacityPoli
   return {
     minTotalRamBytes: nullableInteger(item.min_total_ram_bytes, `${modelId}.min_total_ram_bytes`),
     minAvailableRamBytes: nullableInteger(item.min_available_ram_bytes, `${modelId}.min_available_ram_bytes`),
-    minVramBytes: nullableInteger(item.min_vram_bytes, `${modelId}.min_vram_bytes`),
+    minVramBytes:
+      tierCatalog && item.min_vram_bytes === 0 ? 0 : nullableInteger(item.min_vram_bytes, `${modelId}.min_vram_bytes`),
     minStorageFreeBytes: nullableInteger(item.min_storage_free_bytes, `${modelId}.min_storage_free_bytes`),
     maxStartupSeconds: nullableInteger(item.max_startup_seconds, `${modelId}.max_startup_seconds`),
     benchmarkThresholds,
   }
 }
 
-function parseModel(value: unknown): LocalModelReleaseManifest {
+function parseModel(value: unknown, tierCatalog = false): LocalModelReleaseManifest {
   const item = record(value, 'model')
   exactKeys(
     item,
@@ -290,7 +291,7 @@ function parseModel(value: unknown): LocalModelReleaseManifest {
     'model'
   )
   const id = requiredString(item.id, 'model.id', SAFE_ID)
-  if (id !== FLASH_NEXT_MODEL_ID && id !== ORCAROUTER_FALLBACK_MODEL_ID) {
+  if (!tierCatalog && id !== FLASH_NEXT_MODEL_ID && id !== ORCAROUTER_FALLBACK_MODEL_ID) {
     throw new Error(`Unbekanntes lokales Modell: ${id}.`)
   }
   if (item.execution_target !== 'local_llama_cpp') throw new Error(`Unbekanntes Ausführungsziel für ${id}.`)
@@ -314,7 +315,7 @@ function parseModel(value: unknown): LocalModelReleaseManifest {
     contextLimit: nullableInteger(item.context_limit, `${id}.context_limit`),
     artifact: artifact(item.artifact, id),
     runtime: runtime(item.runtime, id),
-    capacityPolicy: capacityPolicy(item.capacity_policy, id),
+    capacityPolicy: capacityPolicy(item.capacity_policy, id, tierCatalog),
     healthPolicy: {
       cooldownMs: integer(health.cooldown_ms, `${id}.health_policy.cooldown_ms`, 1_000),
       maxConsecutiveFailures: integer(
@@ -333,7 +334,7 @@ function parseModel(value: unknown): LocalModelReleaseManifest {
   return parsed
 }
 
-function parseRouting(value: unknown): LocalModelRoutingPolicy {
+function parseRouting(value: unknown, tierModels?: LocalModelReleaseManifest[]): LocalModelRoutingPolicy {
   const item = record(value, 'routing')
   exactKeys(
     item,
@@ -358,14 +359,30 @@ function parseRouting(value: unknown): LocalModelRoutingPolicy {
   const fallbacks = stringList(item.fallback_model_ids, 'routing.fallback_model_ids')
   const experimental = stringList(item.experimental_model_ids, 'routing.experimental_model_ids')
   const state = stringList(item.required_local_state, 'routing.required_local_state')
+  const tierIds = tierModels?.map(model => model.id)
+  const modelOrderValid = tierIds
+    ? typeof item.preferred_model_id === 'string' &&
+      tierIds.includes(item.preferred_model_id) &&
+      item.default_model_id === item.preferred_model_id &&
+      fallbacks.length === 4 &&
+      new Set(fallbacks).size === 4 &&
+      fallbacks.every(id => tierIds.includes(id) && id !== item.preferred_model_id) &&
+      experimental.length === 0 &&
+      tierModels!.every(
+        model =>
+          model.promoted &&
+          model.releaseChannel === 'stable' &&
+          model.routingRole === (model.id === item.preferred_model_id ? 'preferred' : 'fallback')
+      )
+    : item.preferred_model_id === FLASH_NEXT_MODEL_ID &&
+      (item.default_model_id === FLASH_NEXT_MODEL_ID || item.default_model_id === ORCAROUTER_FALLBACK_MODEL_ID) &&
+      fallbacks.length === 1 &&
+      fallbacks[0] === ORCAROUTER_FALLBACK_MODEL_ID &&
+      experimental.every(id => id === FLASH_NEXT_MODEL_ID)
   if (
     item.strategy !== 'local_first' ||
     item.local_first !== true ||
-    item.preferred_model_id !== FLASH_NEXT_MODEL_ID ||
-    (item.default_model_id !== FLASH_NEXT_MODEL_ID && item.default_model_id !== ORCAROUTER_FALLBACK_MODEL_ID) ||
-    fallbacks.length !== 1 ||
-    fallbacks[0] !== ORCAROUTER_FALLBACK_MODEL_ID ||
-    experimental.some(modelId => modelId !== FLASH_NEXT_MODEL_ID) ||
+    !modelOrderValid ||
     item.experimental_opt_in_required !== true ||
     item.external_execution_target !== 'laravel_proxy' ||
     item.external_requires_explicit_approval !== true ||
@@ -377,10 +394,10 @@ function parseRouting(value: unknown): LocalModelRoutingPolicy {
   return {
     strategy: 'local_first',
     localFirst: true,
-    preferredModelId: FLASH_NEXT_MODEL_ID,
-    defaultModelId: item.default_model_id,
-    fallbackModelIds: [ORCAROUTER_FALLBACK_MODEL_ID],
-    experimentalModelIds: experimental as Array<typeof FLASH_NEXT_MODEL_ID>,
+    preferredModelId: requiredString(item.preferred_model_id, 'preferred_model_id', SAFE_ID),
+    defaultModelId: requiredString(item.default_model_id, 'default_model_id', SAFE_ID),
+    fallbackModelIds: fallbacks,
+    experimentalModelIds: experimental,
     experimentalOptInRequired: true,
     externalExecutionTarget: 'laravel_proxy',
     externalAllowed: requiredBoolean(item.external_allowed, 'routing.external_allowed'),
@@ -409,27 +426,29 @@ function decodeEnvelope(input: unknown): {
     'payload'
   )
   if (!Array.isArray(payloadWire.models)) throw new Error('Ungültiger Modellkatalog.')
-  const models = payloadWire.models.map(parseModel)
-  if (models.length !== 2 || new Set(models.map(item => item.id)).size !== 2) {
+  const schemaVersion = integer(payloadWire.schema_version, 'schema_version', 1)
+  if (schemaVersion !== 1 && schemaVersion !== 2) throw new Error('Nicht unterstützte Manifest-Schemaversion.')
+  const models = payloadWire.models.map(model => parseModel(model, schemaVersion === 2))
+  const expectedCount = schemaVersion === 2 ? 5 : 2
+  if (models.length !== expectedCount || new Set(models.map(item => item.id)).size !== expectedCount) {
     throw new Error('Der lokale Modellkatalog ist unvollständig oder mehrdeutig.')
   }
-  const schemaVersion = integer(payloadWire.schema_version, 'schema_version', 1)
-  if (schemaVersion !== 1) throw new Error('Nicht unterstützte Manifest-Schemaversion.')
-  const routing = parseRouting(payloadWire.routing)
+  const routing = parseRouting(payloadWire.routing, schemaVersion === 2 ? models : undefined)
   const flash = models.find(item => item.id === FLASH_NEXT_MODEL_ID)
   const fallback = models.find(item => item.id === ORCAROUTER_FALLBACK_MODEL_ID)
   if (
-    !flash ||
-    !fallback ||
-    flash.routingRole !== 'preferred' ||
-    fallback.routingRole !== 'fallback' ||
-    (flash.promoted ? flash.releaseChannel !== 'stable' : flash.releaseChannel !== 'experimental') ||
-    !fallback.promoted ||
-    fallback.releaseChannel !== 'stable' ||
-    (flash.promoted && routing.defaultModelId !== FLASH_NEXT_MODEL_ID) ||
-    (!flash.promoted && routing.defaultModelId !== ORCAROUTER_FALLBACK_MODEL_ID) ||
-    (flash.promoted && routing.experimentalModelIds.includes(FLASH_NEXT_MODEL_ID)) ||
-    (!flash.promoted && !routing.experimentalModelIds.includes(FLASH_NEXT_MODEL_ID))
+    schemaVersion === 1 &&
+    (!flash ||
+      !fallback ||
+      flash.routingRole !== 'preferred' ||
+      fallback.routingRole !== 'fallback' ||
+      (flash.promoted ? flash.releaseChannel !== 'stable' : flash.releaseChannel !== 'experimental') ||
+      !fallback.promoted ||
+      fallback.releaseChannel !== 'stable' ||
+      (flash.promoted && routing.defaultModelId !== FLASH_NEXT_MODEL_ID) ||
+      (!flash.promoted && routing.defaultModelId !== ORCAROUTER_FALLBACK_MODEL_ID) ||
+      (flash.promoted && routing.experimentalModelIds.includes(FLASH_NEXT_MODEL_ID)) ||
+      (!flash.promoted && !routing.experimentalModelIds.includes(FLASH_NEXT_MODEL_ID)))
   ) {
     throw new Error('Default-, Promotion- und Experimentstatus des Modellmanifests widersprechen sich.')
   }
@@ -439,7 +458,7 @@ function decodeEnvelope(input: unknown): {
     payloadSha256: hash(wire.payload_sha256, 'payload_sha256'),
     signature: requiredString(wire.signature, 'signature'),
     payload: {
-      schemaVersion: 1,
+      schemaVersion,
       catalogVersion: integer(payloadWire.catalog_version, 'catalog_version', 1),
       policyVersion: integer(payloadWire.policy_version, 'policy_version', 1),
       generatedAt: requiredString(payloadWire.generated_at, 'generated_at'),
@@ -460,7 +479,8 @@ export function isExecutableLocalModel(model: LocalModelReleaseManifest): boolea
     model.contextLimit &&
     policy.minAvailableRamBytes &&
     policy.minTotalRamBytes &&
-    policy.minVramBytes &&
+    policy.minVramBytes !== null &&
+    policy.minVramBytes >= 0 &&
     policy.minStorageFreeBytes &&
     policy.maxStartupSeconds &&
     policy.benchmarkThresholds &&

@@ -3,14 +3,17 @@ import { LuczorApi } from '@/services/api/luczorApi'
 import { Store } from '@tauri-apps/plugin-store'
 import { cleanSttTranscript } from './transcript'
 import { normalizeVoiceControlPhrase } from './voicePhrases'
+import { voiceInputStore, isMiniVoice } from './voiceInputStore'
 
 export type VoiceMode = 'push_to_talk' | 'continuous' | 'wakeword'
+export type VoiceEndMode = 'close_word' | 'silence' | 'either'
 export type VoiceConfig = { mode: VoiceMode; wakeWord: string; localSttLanguage: string }
 export type ResolvedVoiceSettings = VoiceConfig & {
   endPhrase: string
   continuousSilenceMs: number
   /** Optional silence-based submission; a confirmed close word always sends. */
   autoSubmit: boolean
+  endMode?: VoiceEndMode
 }
 export const VOICE_DEFAULTS: Readonly<ResolvedVoiceSettings> = Object.freeze({
   mode: 'wakeword',
@@ -19,6 +22,7 @@ export const VOICE_DEFAULTS: Readonly<ResolvedVoiceSettings> = Object.freeze({
   localSttLanguage: 'de',
   continuousSilenceMs: 5000,
   autoSubmit: false,
+  endMode: 'either',
 })
 export const MAX_VOICE_PHRASE_CHARS = 80
 
@@ -30,6 +34,7 @@ export type StoredVoiceSettings = {
   voice_local_stt_language?: unknown
   voice_continuous_silence_ms?: unknown
   voice_auto_submit?: unknown
+  voice_end_mode?: unknown
   hands_free_strategy?: unknown
 }
 
@@ -69,6 +74,8 @@ export function resolveVoiceSettings(stored: StoredVoiceSettings): ResolvedVoice
     localSttLanguage: phraseSetting(stored.voice_local_stt_language, VOICE_DEFAULTS.localSttLanguage),
     continuousSilenceMs,
     autoSubmit: stored.voice_auto_submit === true,
+    endMode:
+      stored.voice_end_mode === 'close_word' || stored.voice_end_mode === 'silence' ? stored.voice_end_mode : 'either',
   }
 }
 
@@ -105,6 +112,7 @@ export function voiceSettingsToStore(config: ResolvedVoiceSettings) {
     voice_local_stt_language: config.localSttLanguage,
     voice_continuous_silence_ms: config.continuousSilenceMs,
     voice_auto_submit: config.autoSubmit,
+    voice_end_mode: config.endMode ?? 'either',
   }
 }
 export type VoiceRuntimeStatus = {
@@ -123,7 +131,7 @@ function reportVoiceEvent(level: 'warn' | 'error', event: string, detail: unknow
 }
 
 export async function getVoiceConfig(): Promise<ResolvedVoiceSettings> {
-  const settings = await Store.load('luczor.settings.json')
+  const settings = await voiceInputStore('luczor.settings.json')
   const [voiceMode, wakeWord, triggerPhrase, endPhrase, language, silence, autoSubmit, legacyStrategy] =
     await Promise.all([
       settings.get('voice_mode'),
@@ -144,10 +152,12 @@ export async function getVoiceConfig(): Promise<ResolvedVoiceSettings> {
     voice_continuous_silence_ms: silence,
     voice_auto_submit: autoSubmit,
     hands_free_strategy: legacyStrategy,
+    voice_end_mode: await settings.get('voice_end_mode'),
   })
 }
 
 export type HandsFreeStrategyConfig = {
+  endMode?: VoiceEndMode
   strategy: 'continuous' | 'safeword'
   triggerPhrase: string
   endPhrase: string
@@ -165,7 +175,18 @@ export function handsFreeFromVoice(config: ResolvedVoiceSettings): HandsFreeStra
     endPhrase: config.endPhrase,
     continuousSilenceMs: config.continuousSilenceMs,
     autoSubmit: config.autoSubmit,
+    endMode: config.endMode ?? 'either',
   }
+}
+
+export async function saveVoiceConfig(config: ResolvedVoiceSettings): Promise<void> {
+  const error = validateVoiceSettings(config)
+  if (error) throw new Error(error)
+  const settings = await voiceInputStore('luczor.settings.json')
+  const values = voiceSettingsToStore(resolveVoiceSettings(voiceSettingsToStore(config)))
+  for (const [key, value] of Object.entries(values)) await settings.set(key, value)
+  await settings.save()
+  window.dispatchEvent(new Event('luczor:voice-settings-changed'))
 }
 
 export async function getHandsFreeConfig(): Promise<HandsFreeStrategyConfig> {
@@ -185,7 +206,7 @@ function parseVoiceError(error: unknown): Error {
 
 export async function voiceRuntimeStatus(): Promise<VoiceRuntimeStatus> {
   try {
-    return await invoke<VoiceRuntimeStatus>('voice_runtime_status')
+    return await invoke<VoiceRuntimeStatus>(isMiniVoice() ? 'voice_input_status' : 'voice_runtime_status')
   } catch (error) {
     throw parseVoiceError(error)
   }
@@ -196,6 +217,10 @@ export async function ensureVoiceRuntime(capability: 'stt' | 'tts' = 'stt'): Pro
   const existing = await voiceRuntimeStatus()
   const ready = (status: VoiceRuntimeStatus) => (capability === 'tts' ? status.tts_ready : status.stt_ready)
   if (ready(existing)) return existing
+  if (isMiniVoice())
+    throw new Error(
+      'Lokale Spracherkennung fehlt. Bitte einmal im Hauptfenster die Spracheingabe starten, um sie vorzubereiten.'
+    )
   installPromise ??= (async () => {
     try {
       const manifest = await LuczorApi.voiceManifest()
@@ -233,6 +258,12 @@ export async function getSttEngine(): Promise<SttEngine> {
 
 export async function localStt(base64: string, language?: string): Promise<string> {
   await ensureVoiceRuntime()
+  if (isMiniVoice()) {
+    const result = await invoke<{ text: string }>('voice_input_stt', {
+      payload: { base64, language: language ?? 'de' },
+    })
+    return cleanSttTranscript(result.text)
+  }
   const engine = await getSttEngine()
   const language_ = language ?? 'de'
   const run = async (command: string): Promise<string> => {

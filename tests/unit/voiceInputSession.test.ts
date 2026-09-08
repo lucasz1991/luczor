@@ -14,7 +14,9 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-function setup(options: { input?: string; autoSubmit?: boolean; busy?: () => boolean } = {}) {
+function setup(
+  options: { input?: string; autoSubmit?: boolean; busy?: () => boolean; prepare?: () => Promise<void> } = {}
+) {
   let input = options.input ?? ''
   let scope = 'project-one'
   let busy = false
@@ -52,6 +54,7 @@ function setup(options: { input?: string; autoSubmit?: boolean; busy?: () => boo
     scope: () => scope,
     busy: options.busy ?? (() => busy),
     config,
+    prepare: options.prepare,
     transcribe,
     stopOutput,
     submit,
@@ -84,6 +87,30 @@ function setup(options: { input?: string; autoSubmit?: boolean; busy?: () => boo
 }
 
 describe('local speech to visible composer integration', () => {
+  it('prepares STT before opening the microphone and does not start after cancellation', async () => {
+    const preparation = deferred<void>()
+    const prepare = vi.fn(() => preparation.promise)
+    const test = setup({ prepare })
+    const starting = test.session.start('hands_free')
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce())
+    expect(test.view().notice).toContain('Spracherkennung wird vorbereitet')
+    expect(test.engine.start).not.toHaveBeenCalled()
+    await test.session.stop()
+    preparation.resolve()
+    await starting
+    expect(test.engine.start).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('wake-word silence respects auto-submit %s', async autoSubmit => {
+    const test = setup({ autoSubmit })
+    await test.session.start('hands_free')
+    const callbacks = test.callbacks[0]!
+    const machine = new HandsFreeMachine(test.configValue.handsFree, callbacks.onCommand, callbacks.onPartial)
+    machine.pushSegment('Luczor bitte Termin prüfen', 1000)
+    machine.tick(6000)
+    expect(test.input()).toBe('bitte Termin prüfen')
+    expect(test.submit).toHaveBeenCalledTimes(autoSubmit ? 1 : 0)
+  })
   it.each(['', 'Vorhandener Text:'])(
     'sends a confirmed close word once with the visible prefix "%s" even when silence auto-submit is disabled',
     async prefix => {

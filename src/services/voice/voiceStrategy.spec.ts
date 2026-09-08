@@ -77,6 +77,54 @@ describe('splitOnPhrase', () => {
 })
 
 describe('safeword strategy', () => {
+  it('finishes after silence, rearms and ignores ambient speech', () => {
+    const capture = collector()
+    const machine = new HandsFreeMachine({ ...base, endMode: 'either' }, capture.onCommand)
+    machine.pushSegment('Luczor start bitte den Termin prüfen', 1000)
+    machine.tick(5999)
+    expect(capture.commands).toEqual([])
+    machine.tick(6000)
+    machine.tick(9000)
+    expect(capture.commands).toEqual(['bitte den Termin prüfen'])
+    expect(capture.reasons).toEqual(['silence'])
+    expect(machine.state).toBe('armed')
+    machine.pushSegment('Hintergrundgespräch', 10000)
+    machine.tick(16000)
+    expect(capture.commands).toHaveLength(1)
+  })
+
+  it('only-close ignores pauses and only-silence treats close words as text', () => {
+    const capture = collector()
+    const close = new HandsFreeMachine({ ...base, endMode: 'close_word' }, capture.onCommand)
+    close.pushSegment('Luczor start Termin prüfen', 1000)
+    close.tick(99999)
+    expect(capture.commands).toEqual([])
+    close.pushSegment('Luczor stopp', 100000)
+    expect(capture.reasons).toEqual(['close_word'])
+    const silence = new HandsFreeMachine({ ...base, endMode: 'silence' }, capture.onCommand)
+    silence.pushSegment('Luczor start das Wort Luczor stopp erklären', 1000)
+    expect(capture.commands).toHaveLength(1)
+    silence.tick(6000)
+    expect(capture.commands[1]).toBe('das Wort Luczor stopp erklären')
+    expect(capture.reasons[1]).toBe('silence')
+  })
+
+  it('rearms after an empty wake activation times out without sending', () => {
+    const capture = collector()
+    const machine = new HandsFreeMachine({ ...base, endMode: 'either' }, capture.onCommand)
+    machine.pushSegment('Luczor start', 1000)
+    machine.tick(6000)
+    expect(machine.state).toBe('armed')
+    expect(capture.commands).toEqual([])
+  })
+
+  it('accepts the product alias observed in the installed Whisper base audio smoke', () => {
+    const capture = collector()
+    const machine = new HandsFreeMachine({ ...base, triggerPhrase: 'luczor' }, capture.onCommand)
+    machine.pushSegment('Luxua, bitte den Termin für morgen prüfen. Luxua stopp.', 1000)
+    expect(capture.commands).toEqual(['bitte den Termin für morgen prüfen.'])
+    expect(capture.reasons).toEqual(['close_word'])
+  })
   it('ignores ambient speech until the activation phrase, then dictates until the end phrase', () => {
     const capture = collector()
     const machine = new HandsFreeMachine(base, capture.onCommand, capture.onPartial)

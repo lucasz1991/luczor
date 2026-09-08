@@ -267,3 +267,15 @@ Append-only communication log. Source and runtime evidence override stale entrie
 - Verified: 113 Testdateien / 1.246 Tests; Typecheck, ESLint, Prettier, Diffcheck; echte Server-WAVs für mehrsätzigen Text und Auswahl; Browser 1096/320px; nativer Releasebuild ohne Bundle.
 - Artifact: `src-tauri/target/release/tauri-app.exe`, 14.625.280 Bytes, SHA256 34359240E360022639C852C23A8EA38190BB9A99C819A750B134B6EF3827FD72. Bericht: `.lmzdev/artifacts/reports/2026-09-07-commentary-read-aloud.md`.
 - Boundary: Keine Backendänderung, kein Serverdeploy, kein App-Neustart. Laufende Debug-App PID114596 erhalten. Eigener Browserprüftab und Vite1446 geschlossen.
+
+## 2026-09-08T02:48:29Z | Codex/root -> all | status
+
+- Message: Started: input-field voice settings and wake/close/silence lifecycle
+
+## 2026-09-08 | Codex/root | Spracheingabe und Audio-Auslöser completed-local
+- Einstellungen in Haupt- und Mini-Eingabefeld; Wake-/Close-Word oder Sprechpause (1-30 s), optionales Senden; Wake-Stillefehler behoben. Mini diktierte zuvor ins Hauptfeld und erhält jetzt eine eigene Sitzung.
+- Audio-Start/-Stoppwort aufnehmen, lokal speichern/anhören/löschen und separat probieren; lokaler MFCC/DTW-Abgleich ersetzt Steuertext im Audiomodus. Einzelne Auslöser mit Pause sprechen. Keine Aufnahmen des Nutzers erstellt; persönliche Mikrofonabnahme offen.
+- STT-Vorbereitung vor Mikrofonstart; schmaler nativer Mini-Voice-Store/STT/Status/Claim, keine allgemeinen Store-/Zugangsdatenrechte. Geteilte Mikrofonbelegung und bestehende Sende-/TTS-Grenzen erhalten.
+- Verifiziert: eigene volle Frontendsuite 1259 Tests plus neue Mini-Store-Regression; Koordination meldet final 1262 Frontendtests/29 native Modelltests und Clippy. Voice-Grenztest, Typecheck, fokussiertes Lint/Format sowie Browser Main/Mini Desktop/320px grün. Gesamt-ESLint mit vorhandenen store.ts Namensbefunden nicht als grün ausgewiesen.
+- Gemeinsamer Releasebuild: app/src-tauri/target/release/tauri-app.exe, 14660096 Bytes, SHA256 ED32C32EBD458B2A380566725BDF768C8F28D92A415882453F747B334B2A48E0. Nicht gestartet; kein Serverdeploy für diese Desktopänderung.
+- Berichte: app/.lmzdev/artifacts/reports/2026-09-08-voice-input.md und -build.json; Bedienung: app/docs/voice-input-and-audio-triggers.md. Eigene Browsertabs und Vite1446 geschlossen. Voice-Dateien freigegeben; local_model.rs bleibt beim koordinierten Modell-Task.

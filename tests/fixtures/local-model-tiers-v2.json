@@ -1,0 +1,293 @@
+{
+  "schema_version": 2,
+  "catalog_version": 2026083001,
+  "policy_version": 2026083001,
+  "generated_at": "2026-08-30T14:00:00+02:00",
+  "expires_at": "2026-08-30T15:00:00+02:00",
+  "models": [
+    {
+      "id": "local-tier-light",
+      "display_name": "Test Tier 1",
+      "execution_target": "local_llama_cpp",
+      "release_channel": "stable",
+      "routing_role": "fallback",
+      "promoted": true,
+      "enabled": true,
+      "capabilities": [
+        "chat",
+        "reasoning",
+        "planning",
+        "execution_preparation"
+      ],
+      "context_limit": 32768,
+      "artifact": {
+        "url": "https://models.example.test/orcarouter-qwen3.8-27b-q4-k-m.gguf",
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "size_bytes": 2000000000,
+        "format": "gguf",
+        "quantization": "Q4_K_M",
+        "storage_class": "fixed_storage"
+      },
+      "runtime": {
+        "id": "llama.cpp",
+        "version": "b6000",
+        "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "min_context_tokens": 4096,
+        "max_context_tokens": 32768
+      },
+      "capacity_policy": {
+        "min_total_ram_bytes": 4294967296,
+        "min_available_ram_bytes": 2147483648,
+        "min_vram_bytes": 8589934592,
+        "min_storage_free_bytes": 4294967296,
+        "max_startup_seconds": 90,
+        "benchmark_thresholds": {
+          "min_prefill_tokens_per_second": 8,
+          "min_decode_tokens_per_second": 4,
+          "max_first_token_ms": 3000
+        }
+      },
+      "health_policy": {
+        "cooldown_ms": 300000,
+        "max_consecutive_failures": 2
+      },
+      "chat_template_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+      "evaluation_report_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+      "license": "test-fixture-only"
+    },
+    {
+      "id": "local-tier-compact",
+      "display_name": "Test Tier 2",
+      "execution_target": "local_llama_cpp",
+      "release_channel": "stable",
+      "routing_role": "fallback",
+      "promoted": true,
+      "enabled": true,
+      "capabilities": [
+        "chat",
+        "reasoning",
+        "planning",
+        "execution_preparation"
+      ],
+      "context_limit": 32768,
+      "artifact": {
+        "url": "https://models.example.test/orcarouter-qwen3.8-27b-q4-k-m.gguf",
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "size_bytes": 2000000000,
+        "format": "gguf",
+        "quantization": "Q4_K_M",
+        "storage_class": "fixed_storage"
+      },
+      "runtime": {
+        "id": "llama.cpp",
+        "version": "b6000",
+        "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "min_context_tokens": 4096,
+        "max_context_tokens": 32768
+      },
+      "capacity_policy": {
+        "min_total_ram_bytes": 8589934592,
+        "min_available_ram_bytes": 4294967296,
+        "min_vram_bytes": 8589934592,
+        "min_storage_free_bytes": 4294967296,
+        "max_startup_seconds": 90,
+        "benchmark_thresholds": {
+          "min_prefill_tokens_per_second": 8,
+          "min_decode_tokens_per_second": 4,
+          "max_first_token_ms": 3000
+        }
+      },
+      "health_policy": {
+        "cooldown_ms": 300000,
+        "max_consecutive_failures": 2
+      },
+      "chat_template_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+      "evaluation_report_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+      "license": "test-fixture-only"
+    },
+    {
+      "id": "local-tier-balanced",
+      "display_name": "Test Tier 3",
+      "execution_target": "local_llama_cpp",
+      "release_channel": "stable",
+      "routing_role": "fallback",
+      "promoted": true,
+      "enabled": true,
+      "capabilities": [
+        "chat",
+        "reasoning",
+        "planning",
+        "execution_preparation"
+      ],
+      "context_limit": 32768,
+      "artifact": {
+        "url": "https://models.example.test/orcarouter-qwen3.8-27b-q4-k-m.gguf",
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "size_bytes": 2000000000,
+        "format": "gguf",
+        "quantization": "Q4_K_M",
+        "storage_class": "fixed_storage"
+      },
+      "runtime": {
+        "id": "llama.cpp",
+        "version": "b6000",
+        "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "min_context_tokens": 4096,
+        "max_context_tokens": 32768
+      },
+      "capacity_policy": {
+        "min_total_ram_bytes": 12884901888,
+        "min_available_ram_bytes": 6442450944,
+        "min_vram_bytes": 8589934592,
+        "min_storage_free_bytes": 4294967296,
+        "max_startup_seconds": 90,
+        "benchmark_thresholds": {
+          "min_prefill_tokens_per_second": 8,
+          "min_decode_tokens_per_second": 4,
+          "max_first_token_ms": 3000
+        }
+      },
+      "health_policy": {
+        "cooldown_ms": 300000,
+        "max_consecutive_failures": 2
+      },
+      "chat_template_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+      "evaluation_report_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+      "license": "test-fixture-only"
+    },
+    {
+      "id": "local-tier-performance",
+      "display_name": "Test Tier 4",
+      "execution_target": "local_llama_cpp",
+      "release_channel": "stable",
+      "routing_role": "fallback",
+      "promoted": true,
+      "enabled": true,
+      "capabilities": [
+        "chat",
+        "reasoning",
+        "planning",
+        "execution_preparation"
+      ],
+      "context_limit": 32768,
+      "artifact": {
+        "url": "https://models.example.test/orcarouter-qwen3.8-27b-q4-k-m.gguf",
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "size_bytes": 2000000000,
+        "format": "gguf",
+        "quantization": "Q4_K_M",
+        "storage_class": "fixed_storage"
+      },
+      "runtime": {
+        "id": "llama.cpp",
+        "version": "b6000",
+        "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "min_context_tokens": 4096,
+        "max_context_tokens": 32768
+      },
+      "capacity_policy": {
+        "min_total_ram_bytes": 17179869184,
+        "min_available_ram_bytes": 8589934592,
+        "min_vram_bytes": 8589934592,
+        "min_storage_free_bytes": 4294967296,
+        "max_startup_seconds": 90,
+        "benchmark_thresholds": {
+          "min_prefill_tokens_per_second": 8,
+          "min_decode_tokens_per_second": 4,
+          "max_first_token_ms": 3000
+        }
+      },
+      "health_policy": {
+        "cooldown_ms": 300000,
+        "max_consecutive_failures": 2
+      },
+      "chat_template_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+      "evaluation_report_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+      "license": "test-fixture-only"
+    },
+    {
+      "id": "orcarouter-qwen3.8-27b-uncensored-q4-k-m",
+      "display_name": "Test Tier 5",
+      "execution_target": "local_llama_cpp",
+      "release_channel": "stable",
+      "routing_role": "preferred",
+      "promoted": true,
+      "enabled": true,
+      "capabilities": [
+        "chat",
+        "reasoning",
+        "planning",
+        "execution_preparation"
+      ],
+      "context_limit": 32768,
+      "artifact": {
+        "url": "https://models.example.test/orcarouter-qwen3.8-27b-q4-k-m.gguf",
+        "sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+        "size_bytes": 2000000000,
+        "format": "gguf",
+        "quantization": "Q4_K_M",
+        "storage_class": "fixed_storage"
+      },
+      "runtime": {
+        "id": "llama.cpp",
+        "version": "b6000",
+        "sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+        "min_context_tokens": 4096,
+        "max_context_tokens": 32768
+      },
+      "capacity_policy": {
+        "min_total_ram_bytes": 34359738368,
+        "min_available_ram_bytes": 17179869184,
+        "min_vram_bytes": 8589934592,
+        "min_storage_free_bytes": 4294967296,
+        "max_startup_seconds": 90,
+        "benchmark_thresholds": {
+          "min_prefill_tokens_per_second": 8,
+          "min_decode_tokens_per_second": 4,
+          "max_first_token_ms": 3000
+        }
+      },
+      "health_policy": {
+        "cooldown_ms": 300000,
+        "max_consecutive_failures": 2
+      },
+      "chat_template_hash": "7777777777777777777777777777777777777777777777777777777777777777",
+      "evaluation_report_hash": "8888888888888888888888888888888888888888888888888888888888888888",
+      "license": "test-fixture-only"
+    }
+  ],
+  "routing": {
+    "strategy": "local_first",
+    "local_first": true,
+    "preferred_model_id": "orcarouter-qwen3.8-27b-uncensored-q4-k-m",
+    "default_model_id": "orcarouter-qwen3.8-27b-uncensored-q4-k-m",
+    "fallback_model_ids": [
+      "local-tier-performance",
+      "local-tier-balanced",
+      "local-tier-compact",
+      "local-tier-light"
+    ],
+    "experimental_model_ids": [],
+    "experimental_opt_in_required": true,
+    "external_execution_target": "laravel_proxy",
+    "external_allowed": true,
+    "external_requires_explicit_approval": true,
+    "no_silent_external_fallback": true,
+    "required_local_state": [
+      "model_enabled",
+      "artifact_verified",
+      "runtime_verified",
+      "capacity_qualified",
+      "health_eligible"
+    ],
+    "decision_reasons": [
+      "local_preferred",
+      "local_fallback_capacity",
+      "local_fallback_health",
+      "local_unavailable",
+      "external_approval_required",
+      "external_policy_rejected"
+    ],
+    "egress_policy_version": "1"
+  }
+}

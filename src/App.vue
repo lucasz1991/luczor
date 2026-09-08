@@ -68,7 +68,9 @@ import { presentEnvelopeStream } from '@/services/envelope'
 import { resolveApproval, rejectAllApprovals, hasPendingApproval } from '@/services/approvals'
 import { Store } from '@tauri-apps/plugin-store'
 import { VoiceEngine } from '@/services/voice/voiceEngine'
-import { getVoiceConfig, handsFreeFromVoice, localStt } from '@/services/voice/localVoice'
+import { ensureVoiceRuntime, getVoiceConfig, handsFreeFromVoice, localStt } from '@/services/voice/localVoice'
+import { useVoiceInputOwnership } from '@/composables/useVoiceInputOwnership'
+import { loadAudioTriggers } from '@/services/voice/audioTriggers'
 import { streamSpeak, stopSpeak } from '@/services/voice/speak'
 import { serverSpeechText } from '@/services/voice/messageSpeech'
 import { createCommentarySpeechQueue } from '@/services/voice/commentarySpeech'
@@ -78,6 +80,7 @@ import ReadAloudText from '@/components/ai/ReadAloudText.vue'
 import { loadLocalSpeechConsent } from '@/services/voice/speechConsent'
 import { createVoiceInputSession, idleVoiceInput } from '@/services/voice/voiceInputSession'
 import { luczorMemory, getMemoryPrefs, type MemoryRecord } from '@/services/memory/luczorMemory'
+import { MEMORY_PRIORITIES, memoryPriority } from '@/services/memory/memoryPriority'
 import { buildLocalPromptContextDetails, inferTaskType, type PromptContextDetails } from '@/services/contextController'
 import { LuczorApi } from '@/services/api/luczorApi'
 import {
@@ -562,16 +565,16 @@ onBeforeUnmount(() => {
 })
 const messages = computed(() => mutations.getProjectMessages(activeProjectId.value))
 const projectActivity = computed<Record<string, boolean>>(() => {
-  const active: Record<string, boolean> = {}
+  const active = new Map<string, boolean>()
   for (const message of state.messages) {
     if (!message.projectId || message.visibility === 'hidden') continue
-    if (message.meta?.isLoading || message.meta?.activity?.status === 'running') active[message.projectId] = true
+    if (message.meta?.isLoading || message.meta?.activity?.status === 'running') active.set(message.projectId, true)
   }
   for (const [projectId, calls] of Object.entries(state.pending?.toolCallsByProject ?? {})) {
-    if (calls?.some(call => ['approved', 'executing'].includes(call.status))) active[projectId] = true
+    if (calls?.some(call => ['approved', 'executing'].includes(call.status))) active.set(projectId, true)
   }
-  if (planningBusy.value) active[activeProjectId.value] = true
-  return active
+  if (planningBusy.value) active.set(activeProjectId.value, true)
+  return Object.fromEntries(active)
 })
 const projectItems = computed(() =>
   projects.value.map(project => ({ id: project.id, label: project.name, busy: !!projectActivity.value[project.id] }))
@@ -677,6 +680,22 @@ function renameProject(id: string, name: string) {
   scheduleSave(state)
 }
 
+const editingProjectTitle = ref(false)
+const projectTitleDraft = ref('')
+function beginProjectTitleEdit() {
+  projectTitleDraft.value = activeProject.value?.name ?? ''
+  editingProjectTitle.value = true
+  void nextTick(() => document.getElementById('project-title-input')?.focus())
+}
+function finishProjectTitleEdit() {
+  if (!editingProjectTitle.value) return
+  editingProjectTitle.value = false
+  if (projectTitleDraft.value.trim()) renameProject(activeProjectId.value, projectTitleDraft.value)
+}
+watch(activeProjectId, () => {
+  editingProjectTitle.value = false
+})
+
 function newChat() {
   void voiceInputSession.stop()
   void stopGenerating()
@@ -760,10 +779,14 @@ const voiceInputSession = createVoiceInputSession({
   scope: () => activeProjectId.value,
   busy: () => conversationBusy.value,
   async config() {
-    const [voice, tts] = await Promise.all([getVoiceConfig(), getTtsConfig()])
-    return { voice, handsFree: handsFreeFromVoice(voice), bargeIn: tts.interruptMode === 'on_speech' }
+    const [voice, tts, audioTriggers] = await Promise.all([getVoiceConfig(), getTtsConfig(), loadAudioTriggers()])
+    return { voice, handsFree: handsFreeFromVoice(voice), bargeIn: tts.interruptMode === 'on_speech', audioTriggers }
   },
   transcribe: (wav, language) => localStt(wav, language),
+  prepare: async () => {
+    await claimVoiceInput()
+    await ensureVoiceRuntime('stt')
+  },
   stopOutput: stopVoiceOutput,
   submit: () => send(true),
   changed: view => {
@@ -774,6 +797,11 @@ const voiceInputSession = createVoiceInputSession({
 function stopAllVoice() {
   void voiceInputSession.stop()
   stopVoiceOutput()
+}
+const claimVoiceInput = useVoiceInputOwnership(stopAllVoice)
+
+async function startConfiguredVoice(mode: 'push_to_talk' | 'hands_free') {
+  await voiceInputSession.start(mode)
 }
 
 function stopVoiceInputForSettings() {
@@ -794,7 +822,7 @@ async function toggleListening() {
 }
 
 const voiceInputLabel = computed(() => {
-  if (voiceInputView.value.starting) return 'Mikrofon wird geöffnet'
+  if (voiceInputView.value.starting) return 'Spracheingabe wird vorbereitet'
   if (voiceInputView.value.finishing) return 'Diktat wird abgeschlossen'
   switch (voiceInputView.value.status) {
     case 'armed':
@@ -965,6 +993,34 @@ const localGraphMessage = ref('')
 const repositoryExternalPolicy = ref<RepositoryExternalPolicy>('deny')
 const memoryCandidates = ref<MemoryRecord[]>([])
 const memoryCandidateBusyId = ref('')
+const memoryAnalysisBusy = ref(false)
+const memoryAnalysisMessage = ref('')
+watch(activeProjectId, () => {
+  memoryAnalysisMessage.value = ''
+})
+
+async function analyzeProjectMemories() {
+  if (memoryAnalysisBusy.value) return
+  memoryAnalysisBusy.value = true
+  memoryAnalysisMessage.value = ''
+  const projectId = activeProjectId.value
+  try {
+    const principalId = await requireRepositoryPrincipalId()
+    const result = await luczorMemory.analyze('project', { projectId })
+    if (projectId !== activeProjectId.value || principalId !== (await requireRepositoryPrincipalId())) return
+    const report = result.local
+    memoryAnalysisMessage.value = [
+      `${report.analyzed} Erinnerungen geprüft · ${report.duplicates.length} mögliche Duplikatgruppen · ${report.possible_conflicts.length} mögliche Widersprüche.`,
+      ...(result.serverUnavailable ? ['Serveranalyse momentan nicht verfügbar; lokale Prüfung angezeigt.'] : []),
+      ...report.recommendations,
+    ].join(' ')
+  } catch {
+    if (projectId === activeProjectId.value)
+      memoryAnalysisMessage.value = 'Die Erinnerungsanalyse ist gerade nicht verfügbar.'
+  } finally {
+    memoryAnalysisBusy.value = false
+  }
+}
 
 function workspacePathLabel(path: string): string {
   return path.replace(/^\\\\\?\\UNC\\/iu, '\\\\').replace(/^\\\\\?\\/u, '')
@@ -1303,6 +1359,24 @@ async function send(
     activeTurn.value = { projectId: pid, messageId: assistant.id }
     abortController.value = abort
     cancelCurrent = async () => abort.abort()
+    let checkpointMemoryPrincipal = ''
+    let latestPublicCheckpoint = ''
+
+    const retainMemoryCheckpoint = (content: string, final = false) => {
+      if (!checkpointMemoryPrincipal || !content.trim()) return
+      void luczorMemory
+        .captureCheckpoint({
+          content,
+          scope: 'project',
+          projectId: pid,
+          sessionId: assistant.id,
+          expectedPrincipalId: checkpointMemoryPrincipal,
+          final,
+        })
+        .catch(() => {
+          // Memory is best-effort; never replace a chat result with a checkpoint error.
+        })
+    }
 
     try {
       await forceScroll('auto')
@@ -1406,6 +1480,7 @@ async function send(
         taskType,
       }
       const principalScopeId = JSON.stringify([scopeKey.serverInstance, scopeKey.principalId])
+      checkpointMemoryPrincipal = scopeKey.principalId
       let taskCreateRecoveryReady = true
       const pendingTaskCreateVerifications = await loadPendingTaskCreates(principalScopeId, pid).catch(error => {
         taskCreateRecoveryReady = false
@@ -1559,6 +1634,10 @@ async function send(
           if (turnExecution.signal.aborted || round.kind !== 'commentary') return
           const entry = completedCommentary(round)
           if (!entry) return
+          if (entry.serverSpeechAllowed) {
+            latestPublicCheckpoint = entry.content
+            retainMemoryCheckpoint(entry.content)
+          }
           const current = mutations.getProjectMessages(pid).find(message => message.id === assistant.id)
           const previous = current?.meta.commentary ?? []
           if (previous.some(item => item.id === entry.id)) return
@@ -1685,6 +1764,7 @@ async function send(
         meta: { ...(current?.meta ?? {}), isLoading: false } as any,
       })
     } finally {
+      retainMemoryCheckpoint(latestPublicCheckpoint, true)
       try {
         stopSfx('loading')
       } catch {}
@@ -1854,7 +1934,26 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
       <div class="header">
         <div class="header__identity">
           <span class="header__eyebrow">Aktiver Raum</span>
-          <div class="header__title">{{ activeProject?.name }}</div>
+          <input
+            v-if="editingProjectTitle"
+            id="project-title-input"
+            v-model="projectTitleDraft"
+            class="ai-sidebar__rename"
+            aria-label="Projektname bearbeiten"
+            maxlength="160"
+            @blur="finishProjectTitleEdit"
+            @keydown.enter.prevent="finishProjectTitleEdit"
+            @keydown.esc.prevent="editingProjectTitle = false"
+          />
+          <button v-else type="button" class="header__title" title="Projekt umbenennen" @click="beginProjectTitleEdit">
+            {{ activeProject?.name }}
+            <span
+              v-if="projectActivity[activeProjectId]"
+              class="ai-sidebar__activity"
+              role="status"
+              aria-label="KI arbeitet"
+            />
+          </button>
           <div class="header__workspace">
             {{ activeWorkspace ? `@project · ${activeWorkspace.displayName}` : '@project · kein Ordner' }}
           </div>
@@ -2125,7 +2224,18 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
                   <div class="info-head">
                     <span class="tac-label">Memory-Kandidaten</span>
                     <span class="info-stat">{{ memoryCandidates.length }} offen</span>
+                    <button
+                      type="button"
+                      class="lz-btn lz-btn--ghost"
+                      :disabled="memoryAnalysisBusy"
+                      @click="analyzeProjectMemories"
+                    >
+                      {{ memoryAnalysisBusy ? 'Prüft…' : 'Erinnerungen analysieren' }}
+                    </button>
                   </div>
+                  <p v-if="memoryAnalysisMessage" class="memory-candidates-help" role="status">
+                    {{ memoryAnalysisMessage }}
+                  </p>
                   <p class="memory-candidates-help">
                     Automatisch erkannte Inhalte bleiben lokal und werden erst nach deiner Bestätigung dauerhaft
                     übernommen.
@@ -2136,7 +2246,7 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
                       :key="candidate.id"
                       title="Als Erinnerung behalten?"
                       :description="candidate.content"
-                      :evidence="`${candidate.source === 'assistant' ? 'Assistent' : 'Du'} · ${formatChatTime(candidate.updatedAt)}`"
+                      :evidence="`${MEMORY_PRIORITIES[memoryPriority(candidate.importance)].label} · ${candidate.source === 'assistant' ? 'Assistent' : 'Du'} · ${formatChatTime(candidate.updatedAt)}`"
                       :busy="!!memoryCandidateBusyId"
                       @accept="acceptMemoryCandidate(candidate)"
                       @dismiss="rejectMemoryCandidate(candidate)"
@@ -2379,6 +2489,8 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
           "
           @record="togglePushToTalk"
           @listen="toggleListening"
+          @voice-start="startConfiguredVoice"
+          @voice-stop="voiceInputSession.stop()"
           @model="openSettings()"
           @context="showContext = !showContext"
           @command="handlePromptCommand"

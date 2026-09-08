@@ -28,6 +28,8 @@ const titles: Record<string, string> = {
   agent_team_status: 'Teamstatus lesen',
   agent_team_cancel: 'Agententeam abbrechen',
   memory_recall: 'Erinnerungen gezielt abrufen',
+  memory_analyze: 'Erinnerungen prüfen und ordnen',
+  memory_remember: 'Erinnerung mit Priorität speichern',
   os_list_windows: 'Fenster erfassen',
   os_read_clipboard: 'Zwischenablage lesen',
   os_screen_capture: 'Bildschirm aufnehmen',

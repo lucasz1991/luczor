@@ -204,7 +204,10 @@ pub async fn local_stt(
         .map_err(|error| structured_error("task_join", &error.to_string()))?
 }
 
-fn local_stt_sync(app: &AppHandle, payload: LocalSttPayload) -> Result<LocalSttResponse, String> {
+pub(super) fn local_stt_sync(
+    app: &AppHandle,
+    payload: LocalSttPayload,
+) -> Result<LocalSttResponse, String> {
     let runtime = ready_runtime(app, "stt_binary", "stt_model")?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(normalize_base64(&payload.base64))
@@ -475,7 +478,7 @@ fn ready_runtime(app: &AppHandle, first: &str, second: &str) -> Result<RuntimeSt
     Ok(state)
 }
 
-fn status(app: &AppHandle) -> VoiceRuntimeStatus {
+pub(super) fn status(app: &AppHandle) -> VoiceRuntimeStatus {
     match read_state(app) {
         Ok(Some(state)) => {
             let stt_ready = state

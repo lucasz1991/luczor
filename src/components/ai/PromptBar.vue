@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import AiIcon from './AiIcon.vue'
+import VoiceInputSettings from './VoiceInputSettings.vue'
 import SearchList from './SearchList.vue'
 import type { SearchItem } from './types'
 const props = withDefaults(
@@ -28,6 +29,8 @@ const emit = defineEmits<{
   stop: []
   record: []
   listen: []
+  'voice-start': [mode: 'push_to_talk' | 'hands_free']
+  'voice-stop': []
   model: []
   context: []
   command: [id: string]
@@ -101,6 +104,13 @@ defineExpose({ focus: () => field.value?.focus() })
           <AiIcon name="folder" :size="13" />{{ contextLabel }}
         </button>
         <div class="ai-prompt__controls">
+          <VoiceInputSettings
+            class="voice-input-settings--composer"
+            :busy="busy || voiceBusy"
+            :active="listening || recording"
+            @start="emit('voice-start', $event)"
+            @stop="emit('voice-stop')"
+          />
           <button
             type="button"
             class="ai-agent-mode"
@@ -157,7 +167,7 @@ defineExpose({ focus: () => field.value?.focus() })
             type="button"
             class="ai-icon-button"
             :class="{ 'is-active': listening }"
-            :aria-label="listening ? 'Dauer-Zuhören stoppen' : 'Dauer-Zuhören starten'"
+            :aria-label="listening ? 'Zuhören stoppen' : 'Zuhören mit Spracheinstellungen starten'"
             :aria-pressed="!!listening"
             :disabled="voiceBusy || (busy && !listening)"
             @click="emit('listen')"

@@ -81,6 +81,17 @@ export function presentLocalModelStatus(
   }
 
   const admission = coordinator.admissions.find(item => item.modelReleaseId === model?.id)
+  if (admission?.memory) {
+    const memory = admission.memory
+    const gib = (bytes: number) => (bytes / 1024 ** 3).toLocaleString('de-DE', { maximumFractionDigits: 1 })
+    view.checks.push({
+      label: 'Arbeitsspeicher',
+      value: memory.resident
+        ? `${gib(memory.availableBytes)} GiB frei · Modell bereits geladen`
+        : `${gib(memory.availableBytes)} GiB frei · ${gib(memory.requiredAvailableBytes)} GiB zum Laden benötigt`,
+      verified: memory.resident || memory.availableBytes >= memory.requiredAvailableBytes,
+    })
+  }
   const evidence = native.readiness.find(item => item.modelReleaseId === model?.id)
   const verified = hasVerifiedLocalReadiness(model, evidence, manifest.payloadSha256, nowMs)
   view.prepared = !!(model?.enabled && admission?.executable && verified)
@@ -176,7 +187,11 @@ type StatusDependencies = {
 export async function readLocalModelStatus(
   dependencies: StatusDependencies = {
     coordinator: () => localInferenceCoordinator.status(),
-    native: getNativeLocalModelStatus,
+    native: async () => {
+      const status = await getNativeLocalModelStatus()
+      localInferenceCoordinator.reconcileNativeStatus(status)
+      return status
+    },
     now: Date.now,
   }
 ): Promise<LocalModelStatusView> {

@@ -3,6 +3,13 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import StatusOrb from './StatusOrb.vue'
 import AiIcon from '../ai/AiIcon.vue'
+import VoiceInputSettings from '../ai/VoiceInputSettings.vue'
+import { createVoiceInputSession, idleVoiceInput, type VoiceInputMode } from '@/services/voice/voiceInputSession'
+import { VoiceEngine } from '@/services/voice/voiceEngine'
+import { ensureVoiceRuntime, getVoiceConfig, handsFreeFromVoice, localStt } from '@/services/voice/localVoice'
+import { useVoiceInputOwnership } from '@/composables/useVoiceInputOwnership'
+import { stopSpeak } from '@/services/voice/speak'
+import { loadAudioTriggers } from '@/services/voice/audioTriggers'
 import ChatComposer from '../ai/ChatComposer.vue'
 import StreamingText from '../ai/StreamingText.vue'
 import ChatCommentary from '../ai/ChatCommentary.vue'
@@ -85,12 +92,64 @@ const disabled = computed(
     !!props.connectionError ||
     !!awaitingSend.value
 )
+const voiceView = ref(idleVoiceInput())
+const miniVoice = createVoiceInputSession({
+  engine: new VoiceEngine(),
+  readInput: () => draft.value,
+  writeInput: text => {
+    draft.value = text
+  },
+  scope: () => props.snapshot.sessionId,
+  busy: () => disabled.value,
+  config: async () => {
+    const voice = await getVoiceConfig()
+    return { voice, handsFree: handsFreeFromVoice(voice), bargeIn: false, audioTriggers: await loadAudioTriggers() }
+  },
+  prepare: async () => {
+    await claimVoiceInput()
+    await ensureVoiceRuntime('stt')
+  },
+  transcribe: localStt,
+  stopOutput: stopSpeak,
+  submit: async () => {
+    send()
+  },
+  changed: value => {
+    voiceView.value = value
+  },
+})
+const claimVoiceInput = useVoiceInputOwnership(() => {
+  void miniVoice.stop()
+})
+async function toggleVoice(mode: VoiceInputMode) {
+  if (voiceView.value.mode === mode) await miniVoice.finish()
+  else await miniVoice.start(mode)
+}
+watch(
+  () => props.snapshot.sessionId,
+  () => {
+    void miniVoice.stop()
+  },
+  { flush: 'sync' }
+)
+watch(
+  () => disabled.value || props.snapshot.hud.status === 'speaking' || props.snapshot.hud.killSwitch,
+  muted => miniVoice.setMuted(muted),
+  { flush: 'sync' }
+)
+onBeforeUnmount(() => {
+  void miniVoice.stop()
+})
 const error = computed(() => props.connectionError || windowError.value || props.snapshot.notice)
-const compactWorking = computed(() =>
-  ['thinking', 'executing', 'listening', 'speaking'].includes(status.value.phase) || props.snapshot.busy || props.snapshot.mainBusy
+const compactWorking = computed(
+  () =>
+    ['thinking', 'executing', 'listening', 'speaking'].includes(status.value.phase) ||
+    props.snapshot.busy ||
+    props.snapshot.mainBusy
 )
 
 async function windowAction(action: string) {
+  if (action === 'hide') await miniVoice.stop()
   if (!props.native) {
     if (action === 'hide') emit('hide')
     if (action === 'main') emit('showMain')
@@ -170,7 +229,8 @@ async function attachFile(event: Event) {
   input.value = ''
   if (!file) return
   if (file.size > 1_000_000) {
-    windowError.value = 'Die Datei ist zu groß für den Mini-Chat. Bitte nutze maximal 1 MB oder öffne sie im Projektordner.'
+    windowError.value =
+      'Die Datei ist zu groß für den Mini-Chat. Bitte nutze maximal 1 MB oder öffne sie im Projektordner.'
     return
   }
   try {
@@ -445,19 +505,19 @@ onBeforeUnmount(() => {
       <div class="mini-quick-controls" role="group" aria-label="Mini-Chat Funktionen">
         <button
           type="button"
-          :aria-pressed="snapshot.voice.wakeWord"
-          :disabled="snapshot.voice.busy"
-          @click="emit('action', { type: 'voice_wake_word', sessionId: snapshot.sessionId })"
+          :aria-pressed="voiceView.mode === 'hands_free'"
+          :disabled="voiceView.starting || voiceView.finishing || (disabled && !voiceView.mode)"
+          @click="toggleVoice('hands_free')"
         >
-          <AiIcon name="sound" :size="13" /> {{ snapshot.voice.wakeWord ? 'Wake Word aktiv' : 'Wake Word' }}
+          <AiIcon name="sound" :size="13" /> {{ voiceView.mode === 'hands_free' ? 'Zuhören stoppen' : 'Zuhören' }}
         </button>
         <button
           type="button"
-          :aria-pressed="snapshot.voice.recording"
-          :disabled="snapshot.voice.busy"
-          @click="emit('action', { type: 'voice_push_to_talk', sessionId: snapshot.sessionId })"
+          :aria-pressed="voiceView.mode === 'push_to_talk'"
+          :disabled="voiceView.starting || voiceView.finishing || (disabled && !voiceView.mode)"
+          @click="toggleVoice('push_to_talk')"
         >
-          <AiIcon name="mic" :size="13" /> {{ snapshot.voice.recording ? 'Diktat läuft' : 'Sprache' }}
+          <AiIcon name="mic" :size="13" /> {{ voiceView.mode === 'push_to_talk' ? 'Diktat beenden' : 'Diktieren' }}
         </button>
         <label class="mini-upload">
           <AiIcon name="upload" :size="13" /> Datei
@@ -610,6 +670,15 @@ onBeforeUnmount(() => {
         {{ clipboardError || 'Antwort kopiert' }}
       </p>
       <form class="mini-composer" @submit.prevent="send()">
+        <VoiceInputSettings
+          :busy="disabled || voiceView.starting || voiceView.finishing"
+          :active="!!voiceView.mode"
+          @start="miniVoice.start($event)"
+          @stop="miniVoice.stop()"
+        />
+        <p v-if="voiceView.error || voiceView.notice" :role="voiceView.error ? 'alert' : 'status'">
+          {{ voiceView.error || voiceView.notice }}
+        </p>
         <textarea
           ref="field"
           v-model="draft"
@@ -618,6 +687,7 @@ onBeforeUnmount(() => {
           rows="1"
           maxlength="12000"
           @keydown="inputKey"
+          @input="miniVoice.manualInput()"
         />
         <div>
           <small>Enter senden · Shift + Enter neue Zeile</small

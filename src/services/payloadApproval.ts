@@ -3,6 +3,7 @@ import { shallowRef } from 'vue'
 export type PayloadApproval = Readonly<{
   id: string
   title: string
+  kind?: 'inference' | 'result'
   destination: string
   hash: string
   content: string

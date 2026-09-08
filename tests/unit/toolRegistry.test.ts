@@ -145,6 +145,8 @@ const TOOL_CONTRACT = [
   { name: 'plan_update', category: 'app', mutating: false, requiresApproval: false },
   { name: 'plan_get', category: 'app', mutating: false, requiresApproval: false },
   { name: 'memory_recall', category: 'project', mutating: false, requiresApproval: false },
+  { name: 'memory_analyze', category: 'project', mutating: false, requiresApproval: false },
+  { name: 'memory_remember', category: 'project', mutating: true, requiresApproval: true },
   { name: 'workspace_overview', category: 'app', mutating: false, requiresApproval: false },
   { name: 'workspace_project_update', category: 'app', mutating: true, requiresApproval: true },
   { name: 'workspace_chat_read', category: 'app', mutating: false, requiresApproval: true },
@@ -153,8 +155,8 @@ const TOOL_CONTRACT = [
   { name: 'workspace_agent_cancel', category: 'app', mutating: true, requiresApproval: false },
 ] as const
 
-const TOOL_SCHEMA_SHA256 = 'c05b45a2902b7588455914bcb83a48c2d39863aad954d21ed01f713e434b1e52'
-const CORE_TOOL_SCHEMA_SHA256 = '2a7c25e43257b4e61ecde77ea87725bdd62c73ac60d8145c3224905614c3b39a'
+const TOOL_SCHEMA_SHA256 = 'a0f927448838a5d5d8afbea812a555828068232fa45fe7889b5ea926d93fb166'
+const CORE_TOOL_SCHEMA_SHA256 = '46368d756e34c850e9858d36a974d12689bef170ae16d7084050abb4e72719a9'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {

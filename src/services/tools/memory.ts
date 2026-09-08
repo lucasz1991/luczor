@@ -1,4 +1,5 @@
 import { luczorMemory } from '@/services/memory/luczorMemory'
+import { memoryPriority, MEMORY_PRIORITIES } from '@/services/memory/memoryPriority'
 import { redactAbsoluteFilesystemPaths, redactProviderSecrets } from '@/services/prompt/promptContextAssembler'
 import type { ToolDef } from './types'
 
@@ -90,6 +91,8 @@ export const memoryTools: ToolDef[] = [
           content,
           type: compactText(record.type, 80),
           source: compactText(record.source, 80),
+          priority: memoryPriority(record.importance),
+          priority_label: MEMORY_PRIORITIES[memoryPriority(record.importance)].label,
           tags: record.tags.slice(0, 8).map(tag => compactText(tag, 80)),
           ...(record.featureKey ? { feature_key: compactText(record.featureKey, 120) } : {}),
         }
@@ -101,6 +104,121 @@ export const memoryTools: ToolDef[] = [
         memories.push(item)
       }
       return { scope, memories, truncated }
+    },
+  },
+  {
+    name: 'memory_analyze',
+    category: 'project',
+    description:
+      'Analyze memory quality for the active project or current user: priority counts, exact duplicates, expired facts and possible conflicting feature versions. Read-only and bounded; does not infer new facts, promote candidates or delete history. Age is only a review hint.',
+    mutating: false,
+    requiresApproval: false,
+    dataHandling: 'ephemeral',
+    risk: 'low',
+    scope: 'project',
+    effects: ['read'],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        scope: {
+          type: 'string',
+          enum: ['project', 'user'],
+          description: 'Active project by default; user for personal memory only.',
+        },
+      },
+    },
+    async execute(args, ctx) {
+      if (!args || typeof args !== 'object' || Array.isArray(args) || Object.keys(args).some(key => key !== 'scope')) {
+        throw new Error('memory_analyze accepts only scope.')
+      }
+      const scope = args.scope ?? 'project'
+      if (scope !== 'project' && scope !== 'user') throw new Error('scope must be project or user.')
+      if (scope === 'project' && !ctx.projectId?.trim()) throw new Error('An active project is required.')
+      const report = await luczorMemory.analyze(scope, scope === 'project' ? { projectId: ctx.projectId } : {})
+      // IDs are useful for an explicit review, but do not expose unrestricted
+      // server metadata or allow a large legacy group to exhaust tool context.
+      const compact = (entry: typeof report.local | null) =>
+        entry
+          ? {
+              scope: entry.scope,
+              analyzed: entry.analyzed,
+              truncated: entry.truncated,
+              priorities: entry.priorities,
+              candidate_count: entry.candidate_count,
+              expired_count: entry.expired_count,
+              review_count: entry.review_count,
+              changed_records: 0,
+              duplicate_groups: entry.duplicates.length,
+              possible_conflict_groups: entry.possible_conflicts.length,
+              recommendations: entry.recommendations.slice(0, 3).map(value => compactText(value, 220)),
+            }
+          : null
+      return { local: compact(report.local), server: compact(report.server) }
+    },
+  },
+  {
+    name: 'memory_remember',
+    category: 'project',
+    description:
+      'Save one concise, evidence-backed preference or decision after the user approves this exact memory. Use the requested priority. Project memories stay in the active project; user scope is personal account memory. Never save secrets or raw repository/screen content, invent facts, or treat an assistant guess as confirmed evidence.',
+    mutating: true,
+    requiresApproval: true,
+    dataHandling: 'ephemeral',
+    risk: 'sensitive',
+    scope: 'project',
+    effects: ['write'],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        content: { type: 'string', minLength: 1, maxLength: 1600 },
+        scope: { type: 'string', enum: ['project', 'user'] },
+        priority: { type: 'string', enum: ['background', 'normal', 'high', 'critical'] },
+      },
+      required: ['content', 'priority'],
+    },
+    async execute(args, ctx) {
+      if (
+        !args ||
+        typeof args !== 'object' ||
+        Array.isArray(args) ||
+        Object.keys(args).some(key => !['content', 'scope', 'priority'].includes(key))
+      ) {
+        throw new Error('memory_remember accepts only content, scope and priority.')
+      }
+      if (typeof args.content !== 'string' || !args.content.trim() || args.content.length > 1600)
+        throw new Error('Memory content must contain 1 to 1600 characters.')
+      const scope = args.scope ?? 'project'
+      if (scope !== 'project' && scope !== 'user') throw new Error('scope must be project or user.')
+      if (scope === 'project' && !ctx.projectId?.trim()) throw new Error('An active project is required.')
+      const priority = args.priority
+      if (priority !== 'background' && priority !== 'normal' && priority !== 'high' && priority !== 'critical')
+        throw new Error('Unknown memory priority.')
+      const record = await luczorMemory.remember({
+        content: args.content.trim(),
+        scope,
+        ...(scope === 'project' ? { projectId: ctx.projectId } : {}),
+        priority,
+        source: 'user',
+        writeIntent: 'confirmed',
+        retention: 'durable',
+      })
+      return {
+        id: record.id,
+        priority,
+        priority_label: MEMORY_PRIORITIES[memoryPriority(record.importance)].label,
+        status: record.status,
+        saved_locally: record.sensitivity !== 'secret',
+        server_sync:
+          record.sensitivity === 'secret'
+            ? 'session_only'
+            : record.synced
+              ? 'synced'
+              : record.visibility === 'private'
+                ? 'local_only'
+                : 'queued',
+      }
     },
   },
 ]

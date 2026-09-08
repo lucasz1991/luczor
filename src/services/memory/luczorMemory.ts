@@ -4,6 +4,8 @@
 import { Store } from '@tauri-apps/plugin-store'
 import { invoke } from '@tauri-apps/api/core'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
+import { memoryImportance, memoryPriority, MEMORY_PRIORITIES, type MemoryPriority } from './memoryPriority'
+import { analyzeMemoryRecords, type MemoryAnalysis } from './memoryAnalysis'
 import {
   DEFAULT_FETCH_TIMEOUT_MS,
   fetchBoundedResponseWithTimeout,
@@ -45,6 +47,7 @@ export type MemoryRecord = {
   sensitivity: MemorySensitivity
   writeIntent: MemoryWriteIntent
   importance: number
+  priority?: MemoryPriority
   confidence: number
   source: string
   tags: string[]
@@ -81,6 +84,7 @@ export type RememberInput = {
   provenance?: Record<string, unknown>
   visibility?: MemoryVisibility
   importance?: number
+  priority?: MemoryPriority
   confidence?: number
   writeIntent?: MemoryWriteIntent
   retention?: MemoryRetention
@@ -604,9 +608,13 @@ class OfflineMemoryStore {
           item.contentHash === record.contentHash &&
           item.dataset === record.dataset &&
           item.status === record.status &&
-          item.featureKey === record.featureKey
+          item.featureKey === record.featureKey &&
+          (!enqueueServer || sameSyncedWrite(item, record))
       )
       if (duplicate) {
+        // A persisted write ID is immutable. Repeated capture must not mutate
+        // provenance/priority and replay a different fingerprint under that ID.
+        if (enqueueServer) return duplicate
         duplicate.content = record.content
         duplicate.updatedAt = record.updatedAt
         duplicate.expiresAt = record.expiresAt
@@ -733,9 +741,10 @@ class OfflineMemoryStore {
         .map(record => record.featureKey)
     )
     const recalledLocalIds = new Set(local.map(record => record.id))
+    const recalledContent = new Set(local.map(record => normalizeRecallContent(record.content)))
     const currentLocal = scopedRecords.filter(
       record =>
-        recalledLocalIds.has(record.id) &&
+        (recalledLocalIds.has(record.id) || recalledContent.has(normalizeRecallContent(record.content))) &&
         record.status === 'active' &&
         (!record.expiresAt || record.expiresAt > Date.now()) &&
         !blockedIds.has(record.id) &&
@@ -855,7 +864,33 @@ class OfflineMemoryStore {
   async dueOutbox(principalId: string, limit = 20): Promise<MemoryOutboxEvent[]> {
     const state = await this.load()
     const now = Date.now()
-    return state.outbox.filter(event => event.principalId === principalId && event.nextAttemptAt <= now).slice(0, limit)
+    const importance = new Map(state.records.map(record => [record.id, record.importance]))
+    return state.outbox
+      .filter(event => event.principalId === principalId && event.nextAttemptAt <= now)
+      .sort(
+        (left, right) =>
+          Number(right.operation === 'delete') - Number(left.operation === 'delete') ||
+          (importance.get(right.recordId) ?? 0) - (importance.get(left.recordId) ?? 0) ||
+          left.createdAt - right.createdAt
+      )
+      .slice(0, limit)
+  }
+
+  async analyze(context: MemoryContext): Promise<MemoryAnalysis> {
+    const state = await this.load()
+    return analyzeMemoryRecords(
+      state.records.filter(
+        record =>
+          record.principalId === context.principalId &&
+          record.dataset === context.dataset &&
+          record.sensitivity !== 'secret' &&
+          !containsSensitiveMemoryData(memoryRecordDlpPayload(record)) &&
+          !state.tombstones.some(
+            tombstone => tombstone.principalId === context.principalId && tombstone.recordId === record.id
+          )
+      ),
+      context.scope as 'user' | 'project'
+    )
   }
 
   async recordForOutbox(recordId: string, principalId: string): Promise<MemoryRecord | undefined> {
@@ -1054,6 +1089,12 @@ class ServerMemoryBackend {
       type: record.type,
       visibility: record.visibility,
       importance: record.importance,
+      // Keep the exact numeric weight for older writes and stable fingerprints.
+      // Named priorities are encoded in this same canonical importance value.
+      priority:
+        record.priority && MEMORY_PRIORITIES[record.priority].importance === record.importance
+          ? record.priority
+          : undefined,
       confidence: record.confidence,
       retention: record.retention,
       sensitivity: record.sensitivity,
@@ -1121,6 +1162,7 @@ class ServerMemoryBackend {
           sensitivity: 'normal' as MemorySensitivity,
           writeIntent: 'confirmed' as MemoryWriteIntent,
           importance: clamp(Number(item.importance ?? 0.5)),
+          priority: memoryPriority(Number(item.importance ?? 0.5)),
           confidence: clamp(Number(item.confidence ?? 0.5)),
           source: String(item.source ?? 'server'),
           tags: Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === 'string') : [],
@@ -1184,6 +1226,13 @@ class ServerMemoryBackend {
       session_id: context.sessionId,
     })
   }
+
+  analyze(context: MemoryContext): Promise<{ data: MemoryAnalysis }> {
+    return this.call('/memory/analyze', {
+      scope: context.scope,
+      project_id: context.scope === 'project' ? context.projectId : undefined,
+    })
+  }
 }
 
 export class LuczorMemoryService {
@@ -1191,6 +1240,9 @@ export class LuczorMemoryService {
   private flushing: Promise<void> | null = null
   private sessionSecrets: MemoryRecord[] = []
   private migratedLegacyPrincipals = new Set<string>()
+  private syncTimer: ReturnType<typeof setTimeout> | null = null
+  private syncRequestedDuringFlush = false
+  private checkpoints = new Map<string, { content: string; at: number }>()
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -1261,7 +1313,8 @@ export class LuczorMemoryService {
       retention: plan.retention,
       sensitivity: plan.sensitivity,
       writeIntent: plan.writeIntent,
-      importance: clamp(input.importance ?? score(content)),
+      importance: memoryImportance(input.priority, input.importance ?? score(content)),
+      priority: input.priority ?? memoryPriority(input.importance ?? score(content)),
       confidence: plan.confidence,
       source: input.source ?? 'user',
       tags: input.tags ?? [],
@@ -1295,8 +1348,87 @@ export class LuczorMemoryService {
       return record
     }
     const stored = await this.offline.remember(record, !plan.localOnly)
-    if (!plan.localOnly) void this.flushPendingSync()
+    if (!plan.localOnly && snapshot.config && (await memoryUseServer())) this.scheduleSync(stored.importance >= 0.95)
     return stored
+  }
+
+  /** Public intermediate text only, bound to the originally admitted account. */
+  async captureCheckpoint(input: {
+    content: string
+    scope: 'user' | 'project'
+    projectId?: string
+    sessionId: string
+    expectedPrincipalId: string
+    final?: boolean
+  }): Promise<MemoryRecord | null> {
+    if (input.scope === 'project' && !input.projectId?.trim())
+      throw new Error('A project is required for its checkpoint.')
+    const snapshot = await this.operationSnapshot()
+    if (snapshot.principalId !== input.expectedPrincipalId)
+      throw new Error('The selected memory account changed before the checkpoint.')
+    const content = input.content.trim().slice(0, 1500)
+    if (content.length < 40) return null
+    const key = JSON.stringify([snapshot.principalId, input.scope, input.projectId ?? null, input.sessionId])
+    const previous = this.checkpoints.get(key)
+    if (previous?.content === content || (!input.final && previous && Date.now() - previous.at < 15_000)) return null
+    this.checkpoints.set(key, { content, at: Date.now() })
+    if (this.checkpoints.size > 100) this.checkpoints.delete(this.checkpoints.keys().next().value!)
+    try {
+      return await this.remember({
+        ...input,
+        content,
+        source: 'assistant',
+        writeIntent: 'automatic',
+        priority: 'normal',
+        retention: 'session',
+        tags: ['checkpoint'],
+        sourceRef: input.sessionId,
+      })
+    } catch (error) {
+      this.checkpoints.delete(key)
+      throw error
+    }
+  }
+
+  private scheduleSync(immediate = false): void {
+    if (immediate) {
+      void this.flushPendingSync()
+      return
+    }
+    // Coalesce bursts; local encryption and durable outbox are already saved.
+    if (this.syncTimer !== null) return
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = null
+      void this.flushPendingSync()
+    }, 250)
+  }
+
+  async analyze(
+    scope: 'user' | 'project',
+    ids: { projectId?: string } = {}
+  ): Promise<{ local: MemoryAnalysis; server: MemoryAnalysis | null; serverUnavailable?: boolean }> {
+    if (scope === 'project' && !ids.projectId?.trim()) throw new Error('A project is required for memory analysis.')
+    const snapshot = await this.operationSnapshot()
+    const context = this.context(scope, scope === 'project' ? ids : {}, snapshot.principalId)
+    const local = await this.offline.analyze(context)
+    const backend = await this.server(snapshot)
+    let server: MemoryAnalysis | null = null
+    let serverUnavailable = false
+    if (backend) {
+      try {
+        const response = await backend.analyze(context)
+        server = response.data ?? null
+        serverUnavailable = !server
+      } catch {
+        // Older backends and offline devices still have useful local analysis.
+        // The account boundary below applies equally to this fallback.
+        serverUnavailable = true
+      }
+    }
+    const current = await getVerifiedAccountSnapshot()
+    if ((current?.principalId ?? 'device-local') !== snapshot.principalId)
+      throw new Error('The selected memory account changed during analysis.')
+    return { local, server, ...(serverUnavailable ? { serverUnavailable: true } : {}) }
   }
 
   async recall(query: RecallQuery): Promise<MemoryRecord[]> {
@@ -1409,9 +1541,20 @@ export class LuczorMemoryService {
   }
 
   async flushPendingSync(): Promise<void> {
-    if (this.flushing) return this.flushing
+    if (this.syncTimer !== null) {
+      clearTimeout(this.syncTimer)
+      this.syncTimer = null
+    }
+    if (this.flushing) {
+      this.syncRequestedDuringFlush = true
+      return this.flushing
+    }
     this.flushing = this.flushOutbox().finally(() => {
       this.flushing = null
+      if (this.syncRequestedDuringFlush) {
+        this.syncRequestedDuringFlush = false
+        this.scheduleSync()
+      }
     })
     return this.flushing
   }
@@ -1659,6 +1802,25 @@ function queueRemoteDelete(state: MemoryState, record: MemoryRecord): void {
   state.outbox.push(newOutboxEvent(record.id, 'delete', record.principalId))
 }
 
+function sameSyncedWrite(left: MemoryRecord, right: MemoryRecord): boolean {
+  const payload = (record: MemoryRecord) => ({
+    importance: record.importance,
+    confidence: record.confidence,
+    source: record.source,
+    visibility: record.visibility,
+    retention: record.retention,
+    sensitivity: record.sensitivity,
+    writeIntent: record.writeIntent,
+    type: record.type,
+    tags: record.tags,
+    meta: record.meta,
+    provenance: Object.fromEntries(
+      Object.entries(record.provenance ?? {}).filter(([key]) => key !== 'captured_at' && key !== 'observation_count')
+    ),
+  })
+  return JSON.stringify(payload(left)) === JSON.stringify(payload(right))
+}
+
 function fuseMemories(local: MemoryRecord[], server: MemoryRecord[], query: string, limit: number): MemoryRecord[] {
   const byContent = new Map<string, MemoryRecord>()
   for (const record of [...local, ...server]) {
@@ -1666,7 +1828,12 @@ function fuseMemories(local: MemoryRecord[], server: MemoryRecord[], query: stri
     // Compare the actual normalized content instead of trusting transport hashes.
     const key = normalizeRecallContent(record.content)
     const existing = byContent.get(key)
-    if (!existing || record.confidence + record.importance > existing.confidence + existing.importance) {
+    if (
+      !existing ||
+      record.confidence + record.importance > existing.confidence + existing.importance ||
+      (record.confidence + record.importance === existing.confidence + existing.importance &&
+        record.updatedAt >= existing.updatedAt)
+    ) {
       byContent.set(key, record)
     }
   }

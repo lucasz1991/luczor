@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { VoiceEngine, type VoiceEngineOptions } from '@/services/voice/voiceEngine'
 import { setStatus } from '@/state/hud'
+const audioMatch = vi.hoisted(() => vi.fn(() => false))
+vi.mock('@/services/voice/audioTriggers', () => ({ matchAudioTrigger: audioMatch }))
 
 vi.mock('@/state/hud', () => ({ setMicLevel: vi.fn(), pulse: vi.fn(), setStatus: vi.fn() }))
 vi.mock('@/services/voice/wav', () => ({
@@ -99,6 +101,7 @@ function shortSegment(engine: VoiceEngine) {
 
 beforeEach(() => {
   vi.useFakeTimers()
+  audioMatch.mockReset().mockReturnValue(false)
   FakeAudioContext.instances = []
   FakeAudioContext.suspended = false
   FakeAudioContext.resumePromise = Promise.resolve()
@@ -115,6 +118,38 @@ afterEach(async () => {
 })
 
 describe('local STT live snapshots', () => {
+  it('routes recorded audio cues without transcribing ambient speech or adding control words to the draft', async () => {
+    const engine = newEngine()
+    const opts = options({
+      mode: 'wakeword',
+      audioTriggers: { enabled: true },
+      handsFree: {
+        strategy: 'safeword',
+        triggerPhrase: '',
+        endPhrase: '',
+        endMode: 'either',
+        continuousSilenceMs: 5000,
+      },
+    })
+    await engine.start(opts)
+    shortSegment(engine)
+    await flush()
+    expect(opts.transcribe).not.toHaveBeenCalled()
+    audioMatch.mockReturnValueOnce(true)
+    shortSegment(engine)
+    await flush()
+    expect(opts.transcribe).not.toHaveBeenCalled()
+    shortSegment(engine)
+    await flush()
+    expect(opts.onPartial).toHaveBeenLastCalledWith('Hallo')
+    audioMatch.mockReturnValueOnce(true)
+    shortSegment(engine)
+    await flush()
+    expect(opts.onCommand).toHaveBeenCalledExactlyOnceWith('Hallo', 'close_word')
+    shortSegment(engine)
+    await flush()
+    expect(opts.transcribe).toHaveBeenCalledOnce()
+  })
   it('preserves committed segments when an empty final retracts only the latest preview', async () => {
     const engine = newEngine()
     const opts = options({

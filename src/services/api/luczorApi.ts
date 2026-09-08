@@ -56,7 +56,7 @@ export type BootstrapResponse = {
   }
   local_model_manifest?: {
     url: '/api/v1/local-model/manifest'
-    schema_version: 1
+    schema_version: 1 | 2
     catalog_version: number
     policy_version: number
     key_id: string
@@ -294,6 +294,7 @@ export async function fetchWithTimeout(
   init: RequestInit = {},
   timeoutMs = DEFAULT_FETCH_TIMEOUT_MS
 ): Promise<Response> {
+  if (init.signal?.aborted) throw abortError(init.signal)
   const deadline = abortDeadline(init.signal, timeoutMs)
 
   try {
@@ -383,6 +384,7 @@ export async function fetchBoundedResponseWithTimeout(
   timeoutMs = DEFAULT_FETCH_TIMEOUT_MS,
   maxBytes = MAX_API_RESPONSE_BYTES
 ): Promise<{ response: Response; text: string }> {
+  if (init.signal?.aborted) throw abortError(init.signal)
   const deadline = abortDeadline(init.signal, timeoutMs)
   try {
     const operation = (async () => {
@@ -573,11 +575,14 @@ export function syncPullAll(options: SyncPullAllOptions = {}): Promise<SyncPullA
   return collectSyncPullPages(page => request<SyncPullResponse>('/sync/pull', { query: syncPullQuery(page) }), options)
 }
 
-async function request<T>(path: string, opts: RequestOptions = {}): Promise<T> {
-  return requestWithConfig<T>(path, opts, await getApiConfigSnapshot())
+async function request<T>(path: string, opts: RequestOptions = {}, config?: LuczorApiConfigSnapshot): Promise<T> {
+  if (opts.signal?.aborted) throw abortError(opts.signal)
+  return requestWithConfig<T>(path, opts, config ?? (await getApiConfigSnapshot()))
 }
 
 async function requestWithConfig<T>(path: string, opts: RequestOptions, cfg: LuczorApiConfigSnapshot): Promise<T> {
+  // An identity change may have invalidated the caller while configuration was loading.
+  if (opts.signal?.aborted) throw abortError(opts.signal)
   const requestCorrelationId = createCorrelationId()
   if (!cfg.baseUrl) {
     emitDebug('error', 'api_config_missing', { path })
@@ -734,23 +739,41 @@ export const LuczorApi = {
       method: 'POST',
       body: { client_id: clientId, name },
     }),
-  nextDeviceJob: (clientId: string) =>
-    request<{ data: DeviceJob | null }>('/devices/jobs/next', { query: { client_id: clientId } }),
-  approveDeviceJob: (id: string, clientId: string, approved: boolean, reason?: string) =>
-    request<{ data: DeviceJob }>(`/devices/jobs/${encodeURIComponent(id)}/approve`, {
-      method: 'POST',
-      body: { client_id: clientId, approved, reason },
-    }),
-  startDeviceJob: (id: string, clientId: string) =>
-    request<{ data: DeviceJob }>(`/devices/jobs/${encodeURIComponent(id)}/start`, {
-      method: 'POST',
-      body: { client_id: clientId },
-    }),
-  completeDeviceJob: (id: string, clientId: string, ok: boolean, result?: Record<string, unknown>, error?: string) =>
-    request<{ data: DeviceJob }>(`/devices/jobs/${encodeURIComponent(id)}/complete`, {
-      method: 'POST',
-      body: { client_id: clientId, ok, result, error },
-    }),
+  nextDeviceJob: (clientId: string, config?: LuczorApiConfigSnapshot, signal?: AbortSignal) =>
+    request<{ data: DeviceJob | null }>('/devices/jobs/next', { query: { client_id: clientId }, signal }, config),
+  approveDeviceJob: (
+    id: string,
+    clientId: string,
+    approved: boolean,
+    reason?: string,
+    config?: LuczorApiConfigSnapshot,
+    signal?: AbortSignal
+  ) =>
+    request<{ data: DeviceJob }>(
+      `/devices/jobs/${encodeURIComponent(id)}/approve`,
+      { method: 'POST', body: { client_id: clientId, approved, reason }, signal },
+      config
+    ),
+  startDeviceJob: (id: string, clientId: string, config?: LuczorApiConfigSnapshot, signal?: AbortSignal) =>
+    request<{ data: DeviceJob }>(
+      `/devices/jobs/${encodeURIComponent(id)}/start`,
+      { method: 'POST', body: { client_id: clientId }, signal },
+      config
+    ),
+  completeDeviceJob: (
+    id: string,
+    clientId: string,
+    ok: boolean,
+    result?: Record<string, unknown>,
+    error?: string,
+    config?: LuczorApiConfigSnapshot,
+    signal?: AbortSignal
+  ) =>
+    request<{ data: DeviceJob }>(
+      `/devices/jobs/${encodeURIComponent(id)}/complete`,
+      { method: 'POST', body: { client_id: clientId, ok, result, error }, signal },
+      config
+    ),
   reverbAuth: (socketId: string, channelName: string, clientId: string, sessionToken: string) =>
     request<{ auth: string }>('/reverb/auth', {
       method: 'POST',

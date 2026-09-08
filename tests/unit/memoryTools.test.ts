@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MemoryRecord } from '@/services/memory/luczorMemory'
 
-const mocks = vi.hoisted(() => ({ recall: vi.fn() }))
-vi.mock('@/services/memory/luczorMemory', () => ({ luczorMemory: { recall: mocks.recall } }))
+const mocks = vi.hoisted(() => ({ recall: vi.fn(), analyze: vi.fn(), remember: vi.fn() }))
+vi.mock('@/services/memory/luczorMemory', () => ({ luczorMemory: mocks }))
 
 import { memoryTools } from '@/services/tools/memory'
 
@@ -44,7 +44,7 @@ describe('provider-safe explicit memory recall tool', () => {
   })
 
   it('exposes one read-only ephemeral search without model-selected project or account identifiers', () => {
-    expect(memoryTools).toHaveLength(1)
+    expect(memoryTools).toHaveLength(3)
     expect(tool).toMatchObject({
       name: 'memory_recall',
       mutating: false,
@@ -73,6 +73,8 @@ describe('provider-safe explicit memory recall tool', () => {
           content: 'Antworten kurz halten.',
           type: 'preference',
           source: 'user',
+          priority: 'high',
+          priority_label: 'Wichtig',
           tags: ['Stil'],
           feature_key: 'answer.length',
         },
@@ -148,5 +150,40 @@ describe('provider-safe explicit memory recall tool', () => {
     })
     mocks.recall.mockRejectedValueOnce(new Error('verified account unavailable'))
     await expect(tool.execute({ query: 'Navigation' }, CONTEXT)).rejects.toThrow('verified account unavailable')
+  })
+
+  it('analyzes only the selected personal scope without a model-selected account or project', async () => {
+    const analyze = memoryTools.find(item => item.name === 'memory_analyze')!
+    mocks.analyze.mockResolvedValue({
+      local: {
+        scope: 'user',
+        analyzed: 0,
+        truncated: false,
+        priorities: {},
+        duplicates: [],
+        possible_conflicts: [],
+        candidate_count: 0,
+        expired_count: 0,
+        review_count: 0,
+        recommendations: [],
+      },
+      server: null,
+    })
+    await analyze.execute({ scope: 'user' }, CONTEXT)
+    expect(mocks.analyze).toHaveBeenCalledExactlyOnceWith('user', {})
+    await expect(analyze.execute({ scope: 'user', user_id: 2 }, CONTEXT)).rejects.toThrow()
+  })
+
+  it('requires explicit approval for a durable prioritized save and keeps the current project', async () => {
+    const remember = memoryTools.find(item => item.name === 'memory_remember')!
+    expect(remember).toMatchObject({ mutating: true, requiresApproval: true, dataHandling: 'ephemeral' })
+    mocks.remember.mockResolvedValue(memory())
+    await remember.execute({ content: 'Antworten kurz halten.', priority: 'high' }, CONTEXT)
+    expect(mocks.remember).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ projectId: 'project-1', scope: 'project', priority: 'high', writeIntent: 'confirmed' })
+    )
+    await expect(
+      remember.execute({ content: 'Andere Daten', priority: 'critical', projectId: 'p2' }, CONTEXT)
+    ).rejects.toThrow()
   })
 })

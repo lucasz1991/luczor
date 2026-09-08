@@ -191,4 +191,19 @@ describe('Luczor API transport boundaries', () => {
 
     await expect(outcome).resolves.toMatchObject({ name: 'AbortError' })
   })
+
+  it('does not invoke either transport with an already aborted signal', async () => {
+    const fetchMock = vi.fn(async () => new Response('{}'))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    controller.abort()
+
+    await expect(fetchWithTimeout('https://bound.example.test', { signal: controller.signal })).rejects.toMatchObject({
+      name: 'AbortError',
+    })
+    await expect(
+      fetchBoundedResponseWithTimeout('https://bound.example.test', { signal: controller.signal })
+    ).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
 })

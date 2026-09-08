@@ -18,6 +18,7 @@ export type HardwareSnapshot = {
   memory: {
     totalBytes: number
     availableBytes: number
+    residentModel?: { modelReleaseId: string; manifestPayloadSha256: string } | null
   }
   accelerators: Array<{
     id: string
@@ -68,6 +69,7 @@ export type CapacityAssessment = {
   selectedStorageId?: string
   assessedAtMs: number
   validUntilMs: number
+  memory?: { availableBytes: number; requiredAvailableBytes: number; resident: boolean }
   benchmark?: {
     prefillTokensPerSecond: number
     decodeTokensPerSecond: number
@@ -119,6 +121,7 @@ export function selectModelStorage(
 export function assessModelCapacity(input: {
   snapshot: HardwareSnapshot
   modelReleaseId: string
+  manifestPayloadSha256?: string
   policy: ModelCapacityPolicy
   artifactSizeBytes: number
   now?: Date
@@ -130,15 +133,22 @@ export function assessModelCapacity(input: {
   if (finiteNonNegative(snapshot.memory.totalBytes) < finiteNonNegative(policy.minTotalRamBytes)) {
     reasons.push('total_ram_below_minimum')
   }
-  if (finiteNonNegative(snapshot.memory.availableBytes) < finiteNonNegative(policy.minAvailableRamBytes)) {
+  const resident =
+    !!input.manifestPayloadSha256 &&
+    snapshot.memory.residentModel?.modelReleaseId === input.modelReleaseId &&
+    snapshot.memory.residentModel.manifestPayloadSha256 === input.manifestPayloadSha256
+  if (!resident && finiteNonNegative(snapshot.memory.availableBytes) < finiteNonNegative(policy.minAvailableRamBytes)) {
     reasons.push('available_ram_below_minimum')
   }
 
   const accepted = new Set(policy.acceptedAccelerators ?? ['cuda', 'vulkan', 'metal'])
   const accelerators = snapshot.accelerators.filter(item => accepted.has(item.backend))
-  if (!accelerators.length) {
+  if (!accelerators.length && finiteNonNegative(policy.minVramBytes) > 0) {
     reasons.push('accelerator_unavailable')
-  } else if (!accelerators.some(item => finiteNonNegative(item.totalBytes) >= finiteNonNegative(policy.minVramBytes))) {
+  } else if (
+    finiteNonNegative(policy.minVramBytes) > 0 &&
+    !accelerators.some(item => finiteNonNegative(item.totalBytes) >= finiteNonNegative(policy.minVramBytes))
+  ) {
     reasons.push('vram_below_minimum')
   }
 
@@ -167,5 +177,10 @@ export function assessModelCapacity(input: {
     selectedStorageId: storage.id,
     assessedAtMs: now.getTime(),
     validUntilMs: validUntil.getTime(),
+    memory: {
+      availableBytes: snapshot.memory.availableBytes,
+      requiredAvailableBytes: policy.minAvailableRamBytes,
+      resident,
+    },
   }
 }

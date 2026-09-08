@@ -33,9 +33,9 @@ export type NativeLocalModelStatus = {
   manifestAvailable: boolean
   catalogVersion?: number
   policyVersion?: number
-  activeModelId?: string
+  activeModelId?: string | null
   state: 'unavailable' | 'stopped' | 'starting' | 'ready' | 'busy' | 'cooldown' | 'error'
-  reasonCode?: string
+  reasonCode?: string | null
   readiness: LocalReadinessEvidence[]
 }
 
@@ -108,6 +108,10 @@ export async function getNativeLocalModelStatus(): Promise<NativeLocalModelStatu
 
 export async function getNativeHardwareSnapshot(): Promise<HardwareSnapshot> {
   return invoke<HardwareSnapshot>('local_model_hardware_snapshot')
+}
+
+export async function recoverNativeModelMemory(): Promise<HardwareSnapshot> {
+  return invoke<HardwareSnapshot>('local_model_recover_memory')
 }
 
 export async function prepareNativeLocalModel(

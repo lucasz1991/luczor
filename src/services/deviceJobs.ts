@@ -1,6 +1,6 @@
 import Pusher from 'pusher-js'
 import { invoke } from '@tauri-apps/api/core'
-import { LuczorApi, getApiConfig, type DeviceJob } from '@/services/api/luczorApi'
+import { LuczorApi, getApiConfig, type DeviceJob, type LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
 import { runWorkflowAgent } from '@/services/agents/workflowAgent'
 import { executionGate, invokeGuarded, type ExecutionTicket } from '@/services/executionGate'
 import { requestConfirmation } from '@/services/confirmation'
@@ -15,7 +15,7 @@ let stop: (() => void) | null = null
 const inFlight = new Set<string>()
 let pollInFlight: { session: number; promise: Promise<void> } | null = null
 let sessionCounter = 0
-type ChannelSession = { id: number; isCurrent: () => boolean; signal: AbortSignal }
+type ChannelSession = { id: number; isCurrent: () => boolean; signal: AbortSignal; config: LuczorApiConfigSnapshot }
 
 export type DeviceJobChannelState = {
   running: boolean
@@ -98,7 +98,7 @@ export async function startDeviceJobChannel(): Promise<() => void> {
 
   let config: Awaited<ReturnType<typeof getApiConfig>>
   try {
-    config = await getApiConfig()
+    config = Object.freeze({ ...(await getApiConfig()) })
   } catch (error) {
     if (!isCurrent()) return stopThis
     deactivate(false)
@@ -121,6 +121,7 @@ export async function startDeviceJobChannel(): Promise<() => void> {
     id: session,
     isCurrent,
     signal: controller.signal,
+    config,
   }
   let realtimeRetryTimer: number | null = null
   let realtimeAttempt = 0
@@ -222,7 +223,7 @@ async function pullPendingBatch(clientId: string, session: ChannelSession): Prom
   try {
     for (let count = 0; count < 25; count++) {
       if (!session.isCurrent()) return
-      const response = await LuczorApi.nextDeviceJob(clientId)
+      const response = await LuczorApi.nextDeviceJob(clientId, session.config, session.signal)
       if (!session.isCurrent()) return
       if (!response.data) break
       if (!(await safeProcessJob(clientId, response.data, session))) break
@@ -292,7 +293,12 @@ async function connectRealtime(
       },
     })
     const channel = pusher.subscribe(channelName)
-    const current: ChannelSession = { id: session, isCurrent: () => isActive() && session === sessionCounter, signal }
+    const current: ChannelSession = {
+      id: session,
+      isCurrent: () => isActive() && session === sessionCounter,
+      signal,
+      config,
+    }
     channel.bind('device.job.created', (job: DeviceJob) => {
       if (current.isCurrent()) void safeProcessJob(config.clientId, job, current)
     })
@@ -372,9 +378,11 @@ async function processJob(clientId: string, incoming: DeviceJob, session: Channe
   if (inFlight.has(key)) return
   inFlight.add(key)
   const ticket = executionGate.capture(session.signal)
-  const mutating = !['desktop.capture_screen', 'desktop.clipboard.read', 'desktop.windows.list'].includes(
-    job.tool_profile
-  )
+  // Only the signed personal chat scope has no tools; workspace jobs still require Act.
+  const personalChat = job.tool_profile === 'workspace.chat' && job.payload?.scope === 'personal'
+  const mutating =
+    !personalChat &&
+    !['desktop.capture_screen', 'desktop.clipboard.read', 'desktop.windows.list'].includes(job.tool_profile)
   const assertCurrent = () => {
     if (!session.isCurrent()) throw new Error('Gerätekanalsitzung wurde beendet.')
     executionGate.assert(ticket, mutating)
@@ -391,18 +399,33 @@ async function processJob(clientId: string, incoming: DeviceJob, session: Channe
     if (confirmation.error) throw new Error(confirmation.error)
     const approved = confirmation.approved
     if (job.status === 'approval_required') {
-      await LuczorApi.approveDeviceJob(job.id, clientId, approved, approved ? undefined : 'Rejected on local device')
+      await LuczorApi.approveDeviceJob(
+        job.id,
+        clientId,
+        approved,
+        approved ? undefined : 'Rejected on local device',
+        session.config,
+        ticket.signal
+      )
       assertCurrent()
     }
     if (!approved) {
       if (job.status === 'approval_required') return
-      await LuczorApi.completeDeviceJob(job.id, clientId, false, undefined, 'Rejected on local device')
+      await LuczorApi.completeDeviceJob(
+        job.id,
+        clientId,
+        false,
+        undefined,
+        'Rejected on local device',
+        session.config,
+        ticket.signal
+      )
       return
     }
-    await LuczorApi.startDeviceJob(job.id, clientId)
+    await LuczorApi.startDeviceJob(job.id, clientId, session.config, ticket.signal)
     assertCurrent()
     try {
-      const result = await executeProfile(job, ticket, assertCurrent)
+      const result = await executeProfile(job, ticket, assertCurrent, session.config)
       assertCurrent()
       const success = result.ok !== false
       await LuczorApi.completeDeviceJob(
@@ -410,7 +433,9 @@ async function processJob(clientId: string, incoming: DeviceJob, session: Channe
         clientId,
         success,
         result,
-        success ? undefined : 'Die Aktion meldete einen Fehler.'
+        success ? undefined : 'Die Aktion meldete einen Fehler.',
+        session.config,
+        ticket.signal
       )
     } catch (error) {
       if (!session.isCurrent() || ticket.signal.aborted) return
@@ -419,7 +444,9 @@ async function processJob(clientId: string, incoming: DeviceJob, session: Channe
         clientId,
         false,
         undefined,
-        error instanceof Error ? error.message : String(error)
+        error instanceof Error ? error.message : String(error),
+        session.config,
+        ticket.signal
       )
     }
   } finally {
@@ -437,7 +464,8 @@ function errorMessage(error: unknown): string {
 async function executeProfile(
   job: DeviceJob,
   ticket: ExecutionTicket,
-  assertCurrent: () => void
+  assertCurrent: () => void,
+  config: LuczorApiConfigSnapshot
 ): Promise<Record<string, unknown>> {
   const payload = job.payload
   switch (job.tool_profile) {
@@ -472,6 +500,11 @@ async function executeProfile(
     case 'workflow.task': {
       if (!isWorkflowTaskBundle(payload)) throw new Error('Malformed workflow.task bundle.')
       return runWorkflowTask(payload, workflowPrimitives(ticket, assertCurrent))
+    }
+    case 'workspace.chat': {
+      const { runWebWorkspaceJob } = await import('@/services/webWorkspaceJob')
+      assertCurrent()
+      return runWebWorkspaceJob(payload, ticket, assertCurrent, job.id, config)
     }
     default:
       throw new Error(`Unsupported signed tool profile: ${job.tool_profile}`)
