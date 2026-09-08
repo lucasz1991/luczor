@@ -49,9 +49,9 @@ export default defineConfig({
   clearScreen: false,
   envPrefix: ['VITE_', 'TAURI_'],
   server: {
-    port: 1420,
+    port: Number(process.env.LUCZOR_DEV_PORT || 1420),
     strictPort: true,
-    host: HOST || false,
+    host: process.env.LUCZOR_DEV_BIND_HOST || HOST || false,
     // The packaged WebView uses its server-approved Tauri origin. Vite relays
     // only the fixed Luczor API so localhost development needs no production CORS expansion.
     proxy: {
@@ -75,7 +75,7 @@ export default defineConfig({
       ? {
           protocol: 'ws',
           host: HOST,
-          port: 1421,
+          port: Number(process.env.LUCZOR_DEV_PORT || 1420),
         }
       : undefined,
     watch: {

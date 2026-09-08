@@ -14,6 +14,10 @@ Tauri-2-/Vue-3-Desktop-Client für Luczor. Die App besitzt Chat, lokale Inferenz
 
 ## Entwicklung
 
+Linux und macOS: `bash scripts/setup-desktop.sh --install`, danach `pnpm tauri dev`.
+Der Desktop-Start verwendet automatisch einen freien Port. Installation auf neuen
+Geräten und native Pakete: [Linux-/macOS-Einrichtung](docs/linux-macos-setup.md).
+
 ```powershell
 $version = (Get-Content .nvmrc -Raw).Trim()
 nvm install $version 64
