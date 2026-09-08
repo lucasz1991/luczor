@@ -50,7 +50,7 @@ export function localBackgroundPreparationPolicy(settings?: BackgroundRoutingSet
     active: status.mode === 'active',
     mode: status.mode,
     reason: status.reason,
-    fingerprint: manifest?.payloadSha256,
+    fingerprint: manifest ? `${manifest.payloadSha256}:resources:${status.appliedResourceRevision ?? 0}` : undefined,
     expiresAt: manifest ? Date.parse(manifest.expiresAt) : undefined,
     readyModelId,
   }

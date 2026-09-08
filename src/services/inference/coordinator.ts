@@ -1,4 +1,5 @@
 import type { BootstrapResponse, LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
+import { onLocalResourcesApplied } from './resources'
 import { localModelManifestWithApiConfig, LuczorApi } from '@/services/api/luczorApi'
 import {
   deriveLocalModelManifestTrustDomain,
@@ -251,10 +252,23 @@ const localReadinessMessages = new Map<string, string>([
   ['total_ram_below_minimum', 'Der Arbeitsspeicher unterschreitet die signierte Modellanforderung.'],
   ['available_ram_below_minimum', 'Für das lokale Modell ist gerade zu wenig Arbeitsspeicher frei.'],
   ['accelerator_unavailable', 'Für das lokale Modell ist keine geeignete GPU verfügbar.'],
+  [
+    'accelerator_runtime_unavailable',
+    'Die geprüfte Modellruntime kann keine GPU gemäß den Modellanforderungen nutzen.',
+  ],
   ['vram_below_minimum', 'Der GPU-Speicher unterschreitet die signierte Modellanforderung.'],
   ['storage_unavailable', 'Für das lokale Modell ist kein geeigneter Speicherplatz verfügbar.'],
+  ['runtime_startup_ram_pressure', 'Der Modellstart wurde zum Schutz des verfügbaren Arbeitsspeichers beendet.'],
   ['fixed_nvme_storage_required', 'Das lokale Modell benötigt geeigneten internen NVMe-Speicher.'],
   ['resource_pressure', 'Die aktuelle Systemauslastung lässt das lokale Modell nicht zu.'],
+  [
+    'cpu_mode_disallowed_by_manifest',
+    'Dieses Modell benötigt laut signierter Freigabe eine GPU. Bitte Automatik oder GPU-Modus wählen.',
+  ],
+  [
+    'runtime_gpu_required_no_offload',
+    'Die signierte Freigabe verlangt GPU-Nutzung, aber keine Modellschicht wurde ausgelagert.',
+  ],
   ['thermal_limit', 'Die Temperaturgrenze verhindert momentan die lokale Modellnutzung.'],
   ['health_cooldown', 'Das lokale Modell wartet nach einem Fehler auf einen erneuten Versuch.'],
   ['health_error', 'Die lokale Modellruntime befindet sich im Fehlerzustand.'],
@@ -268,6 +282,30 @@ const localReadinessMessages = new Map<string, string>([
   ['benchmark_failed', 'Das lokale Modell hat die vorgeschriebene Bereitschaftsprüfung nicht bestanden.'],
   ['readiness_mismatch', 'Die lokale Bereitschaftsbestätigung ist veraltet oder passt nicht zum signierten Modell.'],
   ['readiness_pending', 'Die Bereitschaft des lokalen Modells ist noch nicht bestätigt.'],
+  ['resource_config_pending', 'Die neuen Ressourceneinstellungen werden nach dem laufenden Auftrag angewandt.'],
+  ['resource_config_busy', 'Der laufende Auftrag verwendet noch die bisherigen Ressourceneinstellungen.'],
+  [
+    'resource_revision_mismatch',
+    'Die Ressourcenverteilung hat sich geändert; die Modellbereitschaft wird erneut geprüft.',
+  ],
+  ['resource_revision_required', 'Die Modellvorbereitung benötigt die aktuelle Ressourcenverteilung.'],
+  [
+    'resource_gpu_selection_changed',
+    'Die gespeicherte Grafikkarte hat sich geändert. Bitte die Geräteauswahl aktualisieren.',
+  ],
+  [
+    'resource_gpu_selection_ambiguous',
+    'Die Grafikkartenauswahl ist nicht eindeutig. Bitte die automatische Auswahl verwenden.',
+  ],
+  ['resource_gpu_selection_unavailable', 'Eine ausgewählte Grafikkarte ist nicht verfügbar.'],
+  [
+    'resource_thread_controls_unavailable',
+    'Diese Runtime unterstützt die gewählten Threadoptionen nicht. Bitte Automatik verwenden.',
+  ],
+  ['ram_budget_insufficient', 'Der freie Arbeitsspeicher reicht für Modell, Kontext und Sicherheitsreserve nicht aus.'],
+  ['runtime_gpu_measurement_unavailable', 'Die tatsächliche GPU-Auslagerung konnte noch nicht bestätigt werden.'],
+  ['runtime_gpu_capacity_unavailable', 'Der freie Grafikspeicher reicht unter Berücksichtigung der Reserve nicht aus.'],
+  ['gpu_full_offload_not_verified', 'Die vollständige GPU-Auslagerung wurde nicht bestätigt.'],
   [
     'local_preparation_failed',
     'Die lokale Modellvorbereitung ist fehlgeschlagen. Bitte die lokale Einrichtung prüfen.',
@@ -305,10 +343,19 @@ function preparationFailureReason(error: unknown): string {
     ['Total RAM is below the signed model threshold.', 'total_ram_below_minimum'],
     ['Available RAM is below the signed model threshold.', 'available_ram_below_minimum'],
     ['GPU VRAM is below the signed model threshold.', 'vram_below_minimum'],
+    ['No compatible GPU runtime satisfies the signed model capacity policy.', 'accelerator_runtime_unavailable'],
+    [
+      'Local runtime startup stopped to protect available RAM (runtime_startup_ram_pressure).',
+      'runtime_startup_ram_pressure',
+    ],
+    ['Model storage does not satisfy the signed storage class or free-space threshold.', 'storage_unavailable'],
     ['Local benchmark did not meet the signed capacity thresholds.', 'benchmark_failed'],
     ['Local benchmark request failed.', 'benchmark_failed'],
   ])
-  return reasons.get(nativeMessage) ?? 'local_preparation_failed'
+  return (
+    reasons.get(nativeMessage) ??
+    (localReadinessMessages.has(nativeMessage) ? nativeMessage : 'local_preparation_failed')
+  )
 }
 
 function exactDiscovery(input: BootstrapResponse['local_model_manifest']): Discovery {
@@ -350,6 +397,7 @@ function executableCapacity(model: LocalModelReleaseManifest) {
       minTotalRamBytes: policy.minTotalRamBytes,
       minAvailableRamBytes: policy.minAvailableRamBytes,
       minVramBytes: policy.minVramBytes,
+      acceleratorMemoryScope: policy.acceleratorMemoryScope,
       minStorageFreeBytes: policy.minStorageFreeBytes,
       storageClass: model.artifact.storageClass,
     },
@@ -462,10 +510,22 @@ export class LocalInferenceCoordinator {
   private preparationFailures = new Map<string, string>()
   private catalogBinding?: LocalCatalogBinding
   private generation = 0
+  private resourceEpoch = 0
+  private resourceRevision = 0
   private preparationTail: Promise<void> = Promise.resolve()
   private recovery?: { generation: number; diagnoseUnavailable: boolean; promise: Promise<InferenceConnectionResult> }
 
   constructor(private readonly dependencies: LocalInferenceCoordinatorDependencies) {}
+
+  resourcesApplied(revision: number): void {
+    if (revision <= this.resourceRevision) return
+    this.dependencies.manager.invalidateResourceBoundary()
+    this.resourceRevision = revision
+    this.resourceEpoch += 1
+    this.assessments.clear()
+    this.readiness.clear()
+    this.preparationFailures.clear()
+  }
 
   beginBootstrap(): number {
     this.dependencies.manager.invalidateCatalogBoundary()
@@ -570,12 +630,14 @@ export class LocalInferenceCoordinator {
   status(): {
     mode: CoordinatorMode
     reason: string
+    appliedResourceRevision?: number
     manifest?: VerifiedLocalModelManifest
     admissions: readonly LocalModelAdmission[]
   } {
     return {
       mode: this.mode,
       reason: this.reason,
+      appliedResourceRevision: this.resourceRevision,
       manifest: this.manifest,
       admissions: this.modelAdmissions(),
     }
@@ -629,11 +691,16 @@ export class LocalInferenceCoordinator {
       native.policyVersion !== this.manifest.policyVersion
     )
       return
+    if ((native.resourceConfig?.appliedRevision ?? 0) < this.resourceRevision) return
+    if (native.resourceConfig && native.resourceConfig.appliedRevision !== this.resourceRevision) {
+      this.resourcesApplied(native.resourceConfig.appliedRevision)
+    }
     for (const model of this.manifest.models) {
       const evidence = native.readiness.find(item => item.modelReleaseId === model.id)
       const running = native.activeModelId === model.id && (native.state === 'ready' || native.state === 'busy')
       if (
         running &&
+        (evidence?.resourceRevision ?? 0) === this.resourceRevision &&
         hasVerifiedLocalReadiness(model, evidence, this.manifest.payloadSha256, this.dependencies.now().getTime())
       ) {
         this.readiness.set(model.id, evidence!)
@@ -799,7 +866,7 @@ export class LocalInferenceCoordinator {
     if (!preferExternal) await this.prepareFirstAdmissibleCandidate(settings, requiredCapability, generation)
     // A cold start/benchmark can outlive the short hardware snapshot. Re-measure
     // after preparation so its own newly allocated RAM is counted as resident.
-    if (!preferExternal) await this.refreshCapacityIfStale(generation)
+    if (!preferExternal) await this.refreshCapacityIfStale(generation, false)
     this.requireActiveGeneration(generation)
     const externalHash = input.externalPackage?.packetHash
 
@@ -887,6 +954,7 @@ export class LocalInferenceCoordinator {
   private async prepareIfEligibleExclusive(modelId: string, generation: number, allowDegraded: boolean): Promise<void> {
     if (!this.isCurrent(generation) || !this.manifest || !this.catalogBinding) return
     const manifestHash = this.manifest.payloadSha256
+    const resourceEpoch = this.resourceEpoch
     const catalogBinding = this.catalogBinding
     const model = this.manifest.models.find(candidate => candidate.id === modelId)
     const current = this.readiness.get(modelId)
@@ -901,17 +969,21 @@ export class LocalInferenceCoordinator {
       const readiness = await this.dependencies.prepareModel(modelId, catalogBinding)
       if (
         this.isCurrent(generation) &&
+        this.resourceEpoch === resourceEpoch &&
         this.manifest?.payloadSha256 === manifestHash &&
         this.catalogBinding === catalogBinding
       ) {
-        if (hasVerifiedLocalReadiness(model, readiness, manifestHash, this.dependencies.now().getTime())) {
+        if ((readiness.resourceRevision ?? 0) < this.resourceRevision) {
+          this.preparationFailures.set(modelId, 'resource_revision_mismatch')
+        } else if (hasVerifiedLocalReadiness(model, readiness, manifestHash, this.dependencies.now().getTime())) {
+          this.resourceRevision = readiness.resourceRevision ?? 0
           this.readiness.set(modelId, readiness)
         } else {
           this.preparationFailures.set(modelId, 'readiness_mismatch')
         }
       }
     } catch (error) {
-      if (this.isCurrent(generation)) {
+      if (this.isCurrent(generation) && this.resourceEpoch === resourceEpoch) {
         this.readiness.delete(modelId)
         this.preparationFailures.set(modelId, preparationFailureReason(error))
       }
@@ -1016,14 +1088,30 @@ export class LocalInferenceCoordinator {
     return `${local} ${external}`
   }
 
-  private async refreshCapacityIfStale(generation: number): Promise<void> {
+  private async refreshCapacityIfStale(generation: number, recheckRejected = true): Promise<void> {
     if (!this.isCurrent(generation) || !this.manifest) return
     const manifest = this.manifest
     const now = this.dependencies.now().getTime()
+    const residentCandidate = manifest.models.some(model => {
+      const assessment = this.assessments.get(model.id)
+      return (
+        model.enabled &&
+        isExecutableLocalModel(model) &&
+        assessment?.memory?.resident &&
+        assessment.status === 'eligible' &&
+        hasVerifiedLocalReadiness(model, this.readiness.get(model.id), manifest.payloadSha256, now)
+      )
+    })
     const stale = manifest.models.some(model => {
+      if (!model.enabled) return false
       const capacity = executableCapacity(model)
       const assessment = this.assessments.get(model.id)
-      return capacity && (!assessment || assessment.validUntilMs <= now || assessment.status === 'ineligible')
+      return (
+        capacity &&
+        (!assessment ||
+          assessment.validUntilMs <= now ||
+          (recheckRejected && !residentCandidate && assessment.status === 'ineligible'))
+      )
     })
     if (!stale) return
     let snapshot = await this.dependencies.hardwareSnapshot()
@@ -1038,7 +1126,17 @@ export class LocalInferenceCoordinator {
           snapshot.memory.residentModel.manifestPayloadSha256 === manifest.payloadSha256
         )
     )
-    if (memoryBlocked && this.dependencies.recoverMemory && now - this.lastMemoryRecoveryAt >= 60_000) {
+    const residentRelease = manifest.models.find(model => model.id === snapshot.memory.residentModel?.modelReleaseId)
+    const residentInCurrentCatalog =
+      residentRelease?.enabled &&
+      isExecutableLocalModel(residentRelease) &&
+      snapshot.memory.residentModel?.manifestPayloadSha256 === manifest.payloadSha256
+    if (
+      memoryBlocked &&
+      !residentInCurrentCatalog &&
+      this.dependencies.recoverMemory &&
+      now - this.lastMemoryRecoveryAt >= 60_000
+    ) {
       this.lastMemoryRecoveryAt = now
       try {
         snapshot = await this.dependencies.recoverMemory()
@@ -1147,6 +1245,11 @@ export const localInferenceCoordinator = new LocalInferenceCoordinator({
   manifestSession: beginNativeManifestAcceptance,
   manager: defaultManager,
   now: () => new Date(),
+})
+
+onLocalResourcesApplied(state => {
+  localInferenceCoordinator.resourcesApplied(state.appliedRevision)
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('luczor:resources-applied'))
 })
 
 export async function beginLocalInferenceBootstrap(): Promise<number> {

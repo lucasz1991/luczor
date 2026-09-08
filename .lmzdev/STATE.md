@@ -137,3 +137,34 @@
 - Verifiziert: eigene volle Frontendsuite 1259 Tests plus neue Mini-Store-Regression; Koordination meldet final 1262 Frontendtests/29 native Modelltests und Clippy. Voice-Grenztest, Typecheck, fokussiertes Lint/Format sowie Browser Main/Mini Desktop/320px grün. Gesamt-ESLint mit vorhandenen store.ts Namensbefunden nicht als grün ausgewiesen.
 - Gemeinsamer Releasebuild: app/src-tauri/target/release/tauri-app.exe, 14660096 Bytes, SHA256 ED32C32EBD458B2A380566725BDF768C8F28D92A415882453F747B334B2A48E0. Nicht gestartet; kein Serverdeploy für diese Desktopänderung.
 - Berichte: app/.lmzdev/artifacts/reports/2026-09-08-voice-input.md und -build.json; Bedienung: app/docs/voice-input-and-audio-triggers.md. Eigene Browsertabs und Vite1446 geschlossen. Voice-Dateien freigegeben; local_model.rs bleibt beim koordinierten Modell-Task.
+
+## 2026-09-08T11:16:16Z | Codex/agent_team_recovery | completed-local
+- Team-Teilrollen, gebundene Dateitools, kurze datenorientierte Rollenaufträge und tatsächliche Rundennummern integriert. Readiness-/Timeouttexte unterscheiden Ursachen.
+- Neues lesendes os_system_diagnostics mit strikt begrenztem nativen Collector; 89 Frontendtests, 3 Rusttests, Typecheck/Lint bestanden. Windows-Sicherheitscollector separat live geprüft; keine Modellchat-/GPU-/Native-UI-Abnahme.
+- Bericht: ../.lmzdev/artifacts/reports/2026-09-08-agent-team-recovery-and-diagnostics.md (ab Workspace-Root). Ownership an Root zurückgegeben.
+
+## 2026-09-08T11:18:45Z | Native GPU-Auswahl und Resident-Lease
+- Native Auswahl aus verifizierten llama.cpp-Geraeten, VRAM-Fit, gemessene GPU/Hybrid/CPU-Statuswerte, optionale signierte Bibliothekspins und residentOnly-Erneuerung lokal implementiert. 52 fokussierte Modelltests, Clippy, Format und Diffcheck bestanden. Root fuehrt Gesamtgates/Release/Hardwareabnahme zusammen. Bericht: ../.lmzdev/artifacts/reports/2026-09-08-local-model-gpu-runtime.md.
+
+## 2026-09-08 | Codex/root | Agententeam-Recovery und GPU completed-local
+- Gateway erneuert abgelaufene Bereitschaft ausschließlich am passenden residenten Modell, ohne Kaltstart oder Client-Verlängerung. Scope, Abbruch, Cooldown und signierte Grenzen bleiben erhalten.
+- Teilteams, konkreter Rollenstatus, Vorgängerübergaben und echte Rundenzählung umgesetzt; Projektdateiwerkzeuge ohne Ordnerbindung gesperrt. Neuer begrenzter lesender Windows-Systemdiagnosecollector integriert.
+- CUDA-/Vulkan-/Metal-Auswahl nach geprüftem Runtimegerät, VRAM-Fit, begrenzter CPU-Fallback und gemessener Berechnungsstatus. Die bestehende RTX3090 war bereits in Benutzung; kein CPU-only-Befund und kein gemessener Geschwindigkeitsgewinn.
+- 1312 Frontendtests, 142 Rusttests plus1bestehendignoriert, fokussiert48Backendtests/427Assertions und22Teamtests/132Assertions bestanden. Backendvollsuite578bestanden/5bestehendeWindows-POSIX-Schlüsseltestsfehlgeschlagen/4001Assertions; nicht pauschal grün. Statische Gates und Builds bestanden.
+- Release: app/src-tauri/target/release/tauri-app.exe,14809600Bytes,SHA256 F23CE4F71525E0F68D58C60417EBD304C2DDC43EB545D6DFD0E8CA28E5473E0A. Nicht gestartet; Nutzer-App unverändert. Neuer GPU-Smoke vor Modellstart wegen bestehender Nutzer-Runtime gestoppt. Kein Serverdeploy und kein vollständiger neuer nativer Agentenlauf.
+- Hauptbericht: E:/projekte/luczor/.lmzdev/artifacts/reports/2026-09-08-agent-teams-gpu.md; Build-JSON daneben. Bedienung app/docs/agent-teams-and-gpu.md. Root und alle Teilagenten geben Source-Ownership frei. Kein eigener Commit; vorhandene Zwischencommits erhalten.
+
+## 2026-09-08T11:52:02Z | Native Modellspeicherklassifizierung completed-local
+- Neues lokales Windows-IOCTL-Modul klassifiziert tatsächliches Modellvolume mit Disk-Extents statt Indexannahmen; mehrere Partitionen, NVMe/SSD/HDD/USB, extended-length und Unknown-Grenzen. Ein Worker, 3s Deadline, kein Shellfallback/Dateiinhalt/Schreiben.
+- 6 UnitTests und expliziter nativer readonlySmoke auf C/extendedC/D/E bestanden: C/D NVMe, E SSD via USB. CargoFeatures ohne Versionswechsel. Integration/Clippy/Gesamtabnahme bei gpu_runtime/Root.
+- Bericht im Workspace: .lmzdev/artifacts/reports/2026-09-08-native-model-storage-probe.md. Ownership neuesModul/CargoFeatures freigegeben.
+
+## 2026-09-08T12:22:56Z | Native DXGI GPU inventory completed-local
+- New bounded metadata-only Windows adapter inventory supplements AMD/Intel without claiming Vulkan; dedicated VRAM, reserved system RAM and shared upper limit remain separate. NVIDIA stays NVML when available; no index/name identity guesses.
+- 8 focused Rust tests and 1 explicit read-only RTX3090 probe passed, scoped format/diff clean. No model start. Full native gates at gpu_runtime; real AMD/Intel acceptance remains open.
+- Report: ../.lmzdev/artifacts/reports/2026-09-08-native-dxgi-inventory.md. Ownership returned.
+
+## 2026-09-08T14:09:39Z | Device-local resources UI completed-local
+- Separate resource controls in Execution settings with auto/GPU-preferred/CPU modes, manual GPU(s), threads, RAM/VRAM reserve targets, requested/applied/pending state. Save uses native-backed Rootservice, not synced Store keys or API reinitialization.
+- 36 UI/status/scheduler-controller integration tests passed; scoped ESLint/Prettier/diff passed. Root performs visual fixture review on own CUA; no native acceptance by this agent.
+- Report: ../.lmzdev/artifacts/reports/2026-09-08-device-resource-settings-ui.md. Source ownership returned; own Vite1448 PID86184 handed to Root for review/cleanup.

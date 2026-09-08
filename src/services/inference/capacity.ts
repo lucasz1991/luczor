@@ -1,5 +1,25 @@
 export type AcceleratorBackend = 'cuda' | 'vulkan' | 'metal' | 'cpu' | 'unknown'
-export type StorageBusType = 'nvme' | 'sata' | 'scsi' | 'usb' | 'unknown'
+export type StorageBusType =
+  | 'nvme'
+  | 'sata'
+  | 'scsi'
+  | 'usb'
+  | 'atapi'
+  | 'ata'
+  | 'ieee1394'
+  | 'ssa'
+  | 'fibre'
+  | 'raid'
+  | 'iscsi'
+  | 'sas'
+  | 'sd'
+  | 'mmc'
+  | 'virtual'
+  | 'file_backed_virtual'
+  | 'storage_spaces'
+  | 'scm'
+  | 'ufs'
+  | 'unknown'
 export type StorageMediaType = 'ssd' | 'hdd' | 'unknown'
 export type StorageClass = 'fixed_nvme_required' | 'fixed_storage'
 
@@ -11,9 +31,11 @@ export type HardwareSnapshot = {
   arch: string
   cpu: {
     logicalCores: number
-    physicalCores?: number
+    availableLogicalCores?: number
+    physicalCores?: number | null
     features: string[]
-    loadPercent: number
+    /** A first CPU sample has no elapsed interval and therefore no measured load. */
+    loadPercent: number | null
   }
   memory: {
     totalBytes: number
@@ -24,8 +46,12 @@ export type HardwareSnapshot = {
     id: string
     backend: AcceleratorBackend
     name: string
-    totalBytes?: number
-    availableBytes?: number
+    totalBytes?: number | null
+    availableBytes?: number | null
+    detectionSource?: 'nvml' | 'dxgi'
+    dedicatedSystemBytes?: number | null
+    /** Hardware limit only; never add this to VRAM or available system RAM. */
+    sharedSystemLimitBytes?: number | null
   }>
   storage: Array<{
     id: string
@@ -35,11 +61,14 @@ export type HardwareSnapshot = {
     removable: boolean
     availableBytes: number
   }>
+  /** Omitted: no configured location. Null: configured location could not be resolved. */
+  configuredModelStorageId?: string | null
   thermal?: { cpuC?: number; gpuC?: number }
   runtime?: { id: string; version: string; devices: string[] }
 }
 
 export type ModelCapacityPolicy = {
+  acceleratorMemoryScope?: 'single_device' | 'compatible_group'
   minTotalRamBytes: number
   minAvailableRamBytes: number
   minVramBytes: number
@@ -69,6 +98,8 @@ export type CapacityAssessment = {
   selectedStorageId?: string
   assessedAtMs: number
   validUntilMs: number
+  /** Physical inventory admits preparation only; native runtime and readiness are still required. */
+  acceleratorVerification?: 'runtime_required'
   memory?: { availableBytes: number; requiredAvailableBytes: number; resident: boolean }
   benchmark?: {
     prefillTokensPerSecond: number
@@ -87,27 +118,34 @@ function finiteNonNegative(value: unknown): number {
   return Number.isFinite(number) && number >= 0 ? number : 0
 }
 
-function storagePriority(busType: StorageBusType): number {
-  if (busType === 'nvme') return 0
-  if (busType === 'sata') return 1
-  if (busType === 'scsi') return 2
+function storagePriority(storage: HardwareSnapshot['storage'][number]): number {
+  // Media matters more than bus: a SATA HDD must not outrank a fixed SCSI SSD.
+  if (storage.busType === 'nvme' && storage.mediaType === 'ssd') return 0
+  if (storage.mediaType === 'ssd') return 1
+  if (storage.mediaType === 'hdd') return 2
   return 3
 }
 
 export function selectModelStorage(
   storage: HardwareSnapshot['storage'],
   policy: Pick<ModelCapacityPolicy, 'minStorageFreeBytes' | 'storageClass'>,
-  artifactSizeBytes: number
+  artifactSizeBytes: number,
+  configuredStorageId?: string | null
 ): StorageSelection {
   const requiredBytes = Math.max(finiteNonNegative(policy.minStorageFreeBytes), finiteNonNegative(artifactSizeBytes))
   const fixed = storage.filter(
-    item => !item.removable && item.busType !== 'usb' && finiteNonNegative(item.availableBytes) >= requiredBytes
+    item =>
+      (configuredStorageId === undefined || item.id === configuredStorageId) &&
+      !item.removable &&
+      item.busType !== 'usb' &&
+      Number.isFinite(item.availableBytes) &&
+      item.availableBytes >= requiredBytes
   )
   const eligible = policy.storageClass === 'fixed_nvme_required' ? fixed.filter(item => item.busType === 'nvme') : fixed
 
   const selected = [...eligible].sort(
     (left, right) =>
-      storagePriority(left.busType) - storagePriority(right.busType) ||
+      storagePriority(left) - storagePriority(right) ||
       right.availableBytes - left.availableBytes ||
       left.id.localeCompare(right.id)
   )[0]
@@ -143,20 +181,48 @@ export function assessModelCapacity(input: {
 
   const accepted = new Set(policy.acceptedAccelerators ?? ['cuda', 'vulkan', 'metal'])
   const accelerators = snapshot.accelerators.filter(item => accepted.has(item.backend))
-  if (!accelerators.length && finiteNonNegative(policy.minVramBytes) > 0) {
+  // DXGI discovers physical adapters, not an executable Vulkan/CUDA backend.
+  // Under automatic backend selection, defer that proof to signed native
+  // preparation. An explicit backend restriction must not be relaxed here.
+  const inventoryCandidates = snapshot.accelerators.filter(
+    item => policy.acceptedAccelerators === undefined && item.backend === 'unknown' && item.detectionSource === 'dxgi'
+  )
+  const minimumVram = finiteNonNegative(policy.minVramBytes)
+  const knownVramSufficient =
+    accelerators.some(item => finiteNonNegative(item.totalBytes) >= minimumVram) ||
+    (policy.acceleratorMemoryScope === 'compatible_group' &&
+      [...accepted].some(backend => {
+        const seen = new Set<string>()
+        return (
+          accelerators
+            .filter(item => item.backend === backend && !seen.has(item.id) && !!seen.add(item.id))
+            .reduce((total, item) => total + finiteNonNegative(item.totalBytes), 0) >= minimumVram
+        )
+      }))
+  const inventoryVramSufficient = inventoryCandidates.some(item => finiteNonNegative(item.totalBytes) >= minimumVram)
+  const runtimeVerificationRequired =
+    minimumVram > 0 &&
+    ((!knownVramSufficient && inventoryVramSufficient) || policy.acceleratorMemoryScope === 'compatible_group')
+  if (!accelerators.length && !inventoryCandidates.length && minimumVram > 0) {
     reasons.push('accelerator_unavailable')
-  } else if (
-    finiteNonNegative(policy.minVramBytes) > 0 &&
-    !accelerators.some(item => finiteNonNegative(item.totalBytes) >= finiteNonNegative(policy.minVramBytes))
-  ) {
+  } else if (minimumVram > 0 && !knownVramSufficient && !inventoryVramSufficient) {
     reasons.push('vram_below_minimum')
   }
 
-  const storage = selectModelStorage(snapshot.storage, policy, input.artifactSizeBytes)
+  const storage = selectModelStorage(
+    snapshot.storage,
+    policy,
+    input.artifactSizeBytes,
+    snapshot.configuredModelStorageId
+  )
   if (storage.reason) reasons.push(storage.reason)
 
   const degraded: CapacityReason[] = []
-  if (policy.maxCpuLoadPercent != null && snapshot.cpu.loadPercent > policy.maxCpuLoadPercent) {
+  if (
+    policy.maxCpuLoadPercent != null &&
+    snapshot.cpu.loadPercent != null &&
+    snapshot.cpu.loadPercent > policy.maxCpuLoadPercent
+  ) {
     degraded.push('resource_pressure')
   }
   if (
@@ -177,6 +243,7 @@ export function assessModelCapacity(input: {
     selectedStorageId: storage.id,
     assessedAtMs: now.getTime(),
     validUntilMs: validUntil.getTime(),
+    ...(runtimeVerificationRequired ? { acceleratorVerification: 'runtime_required' as const } : {}),
     memory: {
       availableBytes: snapshot.memory.availableBytes,
       requiredAvailableBytes: policy.minAvailableRamBytes,

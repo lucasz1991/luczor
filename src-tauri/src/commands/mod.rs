@@ -12,6 +12,7 @@ pub mod notifications;
 pub mod project_workspace;
 pub mod repository_graph;
 pub mod system;
+mod system_diagnostics;
 pub mod voice;
 pub mod voice_input;
 pub mod workflow_http;
@@ -88,6 +89,7 @@ mod tests {
 
         let main_runtime = include_str!("../../permissions/main-runtime.toml");
         for command in [
+            "system_diagnostics",
             "codex_runtime_status",
             "codex_desktop_open",
             "codex_job_start",

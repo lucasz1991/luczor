@@ -35,6 +35,42 @@ function coordinate(value: unknown, name: 'x' | 'y'): number {
 
 export const osTools: ToolDef[] = [
   {
+    name: 'os_system_diagnostics',
+    category: 'os',
+    description:
+      'Read a bounded local device snapshot: OS, CPU/RAM/swap, disk capacity, optional top eight process names by RAM and CPU, plus Windows Defender, firewall profile and latest installed hotfix status. No project folder is needed. Unavailable sources mean unknown; hotfix metadata does not prove updates are current. This tool never changes settings, scans files or runs a configurable command.',
+    mutating: false,
+    requiresApproval: true,
+    dataHandling: 'ephemeral',
+    risk: 'sensitive',
+    scope: 'desktop',
+    effects: ['read'],
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        include_processes: {
+          type: 'boolean',
+          description: 'Include bounded process names and usage only. Defaults to true; no command lines or paths.',
+        },
+      },
+      required: [],
+    },
+    async execute(args, ctx) {
+      if (
+        Object.keys(args).some(key => key !== 'include_processes') ||
+        (args.include_processes !== undefined && typeof args.include_processes !== 'boolean')
+      )
+        throw new Error('Only the boolean include_processes option is supported.')
+      return invokeGuarded(
+        'system_diagnostics',
+        { includeProcesses: args.include_processes !== false },
+        ctx.execution,
+        false
+      )
+    },
+  },
+  {
     name: 'os_read_clipboard',
     category: 'os',
     description: 'Read the current text content of the system clipboard.',

@@ -13,6 +13,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 import {
   beginNativeManifestAcceptance,
+  getNativeHardwareSnapshot,
   prepareNativeLocalModel,
   TauriLocalRuntimeTransport,
 } from '@/services/inference/tauriLocalRuntime'
@@ -24,6 +25,48 @@ const catalogBinding = {
 } as const
 
 describe('Tauri local runtime catalog boundary', () => {
+  it('shares concurrent hardware scans, isolates results, and refreshes on the next call', async () => {
+    let complete!: (value: unknown) => void
+    tauri.invoke.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          complete = resolve
+        })
+    )
+    const first = getNativeHardwareSnapshot()
+    const second = getNativeHardwareSnapshot()
+    expect(tauri.invoke).toHaveBeenCalledOnce()
+    complete({ snapshotId: 'first', memory: { availableBytes: 1 } })
+    const [left, right] = await Promise.all([first, second])
+    left.memory.availableBytes = 2
+    expect(right.memory.availableBytes).toBe(1)
+    tauri.invoke.mockResolvedValueOnce({ snapshotId: 'next' })
+    await expect(getNativeHardwareSnapshot()).resolves.toMatchObject({ snapshotId: 'next' })
+    expect(tauri.invoke).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not keep a rejected hardware scan for subsequent requests', async () => {
+    tauri.invoke.mockRejectedValueOnce(new Error('scan failed'))
+    const first = getNativeHardwareSnapshot()
+    const second = getNativeHardwareSnapshot()
+    await expect(first).rejects.toThrow('scan failed')
+    await expect(second).rejects.toThrow('scan failed')
+    tauri.invoke.mockResolvedValueOnce({ snapshotId: 'recovered' })
+    await expect(getNativeHardwareSnapshot()).resolves.toMatchObject({ snapshotId: 'recovered' })
+    expect(tauri.invoke).toHaveBeenCalledTimes(2)
+  })
+
+  it('renews only a resident runtime within a turn without enabling a cold prepare', async () => {
+    tauri.invoke.mockResolvedValueOnce({ ready: true })
+    await new TauriLocalRuntimeTransport().prepare('model-1', catalogBinding)
+    expect(tauri.invoke).toHaveBeenCalledWith('local_model_prepare', {
+      modelReleaseId: 'model-1',
+      catalogBinding,
+      residentOnly: true,
+      resourceRevision: 0,
+    })
+  })
+
   it.each([true, false])('classifies tool contract rejection without losing residency (event: %s)', async withEvent => {
     tauri.invoke.mockImplementationOnce(async (_command, args) => {
       if (withEvent) {
@@ -112,6 +155,9 @@ describe('Tauri local runtime catalog boundary', () => {
   beforeEach(() => {
     tauri.invoke.mockReset()
     tauri.invoke.mockImplementation(async command => {
+      if (command === 'local_model_get_resource_config') {
+        return { appliedRevision: 4, revision: 4, pending: false }
+      }
       if (command === 'local_model_prepare') {
         return {
           modelReleaseId: 'model-1',
@@ -172,6 +218,7 @@ describe('Tauri local runtime catalog boundary', () => {
     expect(tauri.invoke).toHaveBeenCalledWith('local_model_prepare', {
       modelReleaseId: 'model-1',
       catalogBinding: binding,
+      resourceRevision: 4,
     })
     expect(tauri.invoke).toHaveBeenCalledWith(
       'local_model_infer',

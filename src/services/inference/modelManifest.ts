@@ -19,9 +19,12 @@ export type ModelRuntimeManifest = {
   sha256: string
   minContextTokens: number
   maxContextTokens: number
+  backend?: 'auto' | 'cpu' | 'cuda' | 'vulkan' | 'metal'
+  files?: Array<{ name: string; sha256: string }>
 }
 
 export type LocalModelCapacityPolicy = {
+  acceleratorMemoryScope?: 'single_device' | 'compatible_group'
   minTotalRamBytes: number | null
   minAvailableRamBytes: number | null
   minVramBytes: number | null
@@ -209,8 +212,43 @@ function artifact(value: unknown, modelId: string): ModelArtifactManifest | null
 function runtime(value: unknown, modelId: string): ModelRuntimeManifest | null {
   if (value === null) return null
   const item = record(value, `${modelId}.runtime`)
-  exactKeys(item, ['id', 'version', 'sha256', 'min_context_tokens', 'max_context_tokens'], `${modelId}.runtime`)
+  exactKeys(
+    item,
+    [
+      'id',
+      'version',
+      'sha256',
+      'min_context_tokens',
+      'max_context_tokens',
+      ...('backend' in item ? ['backend'] : []),
+      ...('files' in item ? ['files'] : []),
+    ],
+    `${modelId}.runtime`
+  )
   if (item.id !== 'llama.cpp') throw new Error(`Unbekannte Runtime für ${modelId}.`)
+  let backend: ModelRuntimeManifest['backend']
+  if ('backend' in item) {
+    if (typeof item.backend !== 'string' || !['auto', 'cpu', 'cuda', 'vulkan', 'metal'].includes(item.backend)) {
+      throw new Error(`Unbekanntes Runtime-Backend für ${modelId}.`)
+    }
+    backend = item.backend as ModelRuntimeManifest['backend']
+  }
+  let files: ModelRuntimeManifest['files']
+  if ('files' in item) {
+    if (!Array.isArray(item.files) || item.files.length > 128)
+      throw new Error(`Ungültige Runtime-Dateien für ${modelId}.`)
+    const names = new Set<string>()
+    files = item.files.map(value => {
+      const file = record(value, `${modelId}.runtime.files`)
+      exactKeys(file, ['name', 'sha256'], `${modelId}.runtime.files`)
+      const name = requiredString(file.name, 'runtime.file.name', /^[A-Za-z0-9][A-Za-z0-9._+-]{0,159}$/)
+      if (!/\.(dll|so|dylib)$/i.test(name) || names.has(name.toLowerCase())) {
+        throw new Error(`Ungültiger oder doppelter Runtime-Dateiname für ${modelId}.`)
+      }
+      names.add(name.toLowerCase())
+      return { name, sha256: hash(file.sha256, 'runtime.file.sha256') }
+    })
+  }
   const minimum = integer(item.min_context_tokens, `${modelId}.runtime.min_context_tokens`, 1)
   const maximum = integer(item.max_context_tokens, `${modelId}.runtime.max_context_tokens`, minimum)
   return {
@@ -219,6 +257,8 @@ function runtime(value: unknown, modelId: string): ModelRuntimeManifest | null {
     sha256: hash(item.sha256, `${modelId}.runtime.sha256`),
     minContextTokens: minimum,
     maxContextTokens: maximum,
+    ...(backend === undefined ? {} : { backend }),
+    ...(files === undefined ? {} : { files }),
   }
 }
 
@@ -233,10 +273,18 @@ function capacityPolicy(value: unknown, modelId: string, tierCatalog = false): L
       'min_storage_free_bytes',
       'max_startup_seconds',
       'benchmark_thresholds',
+      ...(Object.hasOwn(item, 'accelerator_memory_scope') ? ['accelerator_memory_scope'] : []),
     ],
     `${modelId}.capacity_policy`
   )
   let benchmarkThresholds: LocalModelCapacityPolicy['benchmarkThresholds'] = null
+  if (
+    Object.hasOwn(item, 'accelerator_memory_scope') &&
+    (typeof item.accelerator_memory_scope !== 'string' ||
+      !['single_device', 'compatible_group'].includes(item.accelerator_memory_scope))
+  ) {
+    throw new Error(`Ungültige GPU-Speicherzuordnung für ${modelId}.`)
+  }
   if (item.benchmark_thresholds !== null) {
     const benchmark = record(item.benchmark_thresholds, `${modelId}.benchmark_thresholds`)
     exactKeys(
@@ -257,6 +305,9 @@ function capacityPolicy(value: unknown, modelId: string, tierCatalog = false): L
   }
   return {
     minTotalRamBytes: nullableInteger(item.min_total_ram_bytes, `${modelId}.min_total_ram_bytes`),
+    ...(Object.hasOwn(item, 'accelerator_memory_scope')
+      ? { acceleratorMemoryScope: item.accelerator_memory_scope as 'single_device' | 'compatible_group' }
+      : {}),
     minAvailableRamBytes: nullableInteger(item.min_available_ram_bytes, `${modelId}.min_available_ram_bytes`),
     minVramBytes:
       tierCatalog && item.min_vram_bytes === 0 ? 0 : nullableInteger(item.min_vram_bytes, `${modelId}.min_vram_bytes`),

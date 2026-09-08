@@ -10,6 +10,7 @@ import {
   parseTeamPolicy,
   roleValue,
   SPECIALIST_ROLES,
+  specialistReadinessMessage,
   type SpecialistRole,
   type TeamPresetChoice,
   type TeamPolicy,
@@ -115,9 +116,17 @@ export async function prepareExternalSpecialists(
     packet => packet.id === (input.preset === 'server' || !input.preset ? policy.default_preset : input.preset)
   )
   if (!preset) throw new Error('Das gewählte Agententeam-Profil ist nicht verfügbar.')
-  const roles = SPECIALIST_ROLES.filter(role => roleValue(preset.roles, role).target === 'external')
-  if (roles.some(role => !roleValue(policy.models_by_role, role).ready))
-    throw new Error('Die Agentenmodelle sind im Admin noch nicht vollständig eingerichtet.')
+  const requestedRoles = SPECIALIST_ROLES.filter(role => roleValue(preset.roles, role).target === 'external')
+  const roles = requestedRoles.filter(role => {
+    const models = roleValue(policy.models_by_role, role)
+    return models.ready === true && models.candidates.length > 0
+  })
+  const unavailableRoles = requestedRoles.filter(role => !roles.includes(role))
+  const unavailableReasons = unavailableRoles.map(role => specialistReadinessMessage(policy, role))
+  if (requestedRoles.length && !roles.length)
+    throw new Error(
+      `Für keine angefragte externe Rolle ist ein Modell bereit. ${unavailableReasons.join('; ')}. Agentenmodelle und Provider im Admin prüfen.`
+    )
   if (
     !input.messages.length ||
     input.messages.some(
@@ -192,6 +201,8 @@ export async function prepareExternalSpecialists(
   }
   return {
     roles,
+    unavailableRoles,
+    unavailableReasons,
     preset,
     promptCharacters: (role: SpecialistRole) =>
       JSON.stringify(packets.find(packet => packet.role === role)?.request.messages ?? []).length,

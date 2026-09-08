@@ -1,3 +1,5 @@
+import { localResources } from '@/services/inference/resources'
+
 // src/services/agent.ts
 //
 // The agentic loop.
@@ -75,6 +77,8 @@ function pulseForCategory(category: ToolCategory) {
 }
 
 export type RunAgentOptions = {
+  /** Trusted parent workflow only; never persisted or exposed to model tools. */
+  resourceWork?: import('@/services/inference/resources').LocalResourceWork
   projectId: string
   /** Conversation so far as wire messages (system + user/assistant history). */
   baseMessages: WireMessage[]
@@ -478,6 +482,14 @@ function recordPersistentOutcome(
 }
 
 export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
+  const signal =
+    opts.signal && opts.interruptionSignal
+      ? AbortSignal.any([opts.signal, opts.interruptionSignal])
+      : (opts.signal ?? opts.interruptionSignal)
+  return localResources.run(work => runAgentWithResources({ ...opts, resourceWork: work }), signal, opts.resourceWork)
+}
+
+async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentResult> {
   if (opts.continuation?.toolAccess) {
     opts = { ...opts, toolAccess: opts.toolAccess === 'none' ? 'none' : opts.continuation.toolAccess }
   }

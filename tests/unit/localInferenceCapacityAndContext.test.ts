@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest'
-import { assessModelCapacity, selectModelStorage, type HardwareSnapshot } from '@/services/inference/capacity'
+import {
+  assessModelCapacity,
+  selectModelStorage,
+  type HardwareSnapshot,
+  type ModelCapacityPolicy,
+} from '@/services/inference/capacity'
 import {
   buildScopedContextPackage,
   sanitizeInferenceMessagesForTarget,
@@ -22,7 +27,289 @@ function hardware(storage: HardwareSnapshot['storage']): HardwareSnapshot {
   }
 }
 
+function gpuCapacityInput(accelerators: HardwareSnapshot['accelerators'], policy: Partial<ModelCapacityPolicy> = {}) {
+  const snapshot = hardware([
+    {
+      id: 'fixed-ssd',
+      mountLabel: 'fixed-ssd',
+      busType: 'nvme',
+      mediaType: 'ssd',
+      removable: false,
+      availableBytes: 100 * GIB,
+    },
+  ])
+  snapshot.accelerators = accelerators
+  return {
+    snapshot,
+    modelReleaseId: 'local',
+    artifactSizeBytes: GIB,
+    policy: {
+      minTotalRamBytes: 16 * GIB,
+      minAvailableRamBytes: 8 * GIB,
+      minVramBytes: 16 * GIB,
+      minStorageFreeBytes: GIB,
+      storageClass: 'fixed_storage' as const,
+      ...policy,
+    },
+  }
+}
+
 describe('local inference capacity and scoped context', () => {
+  it.each([undefined, 'single_device'] as const)(
+    'does not pool two 8 GiB GPUs for a 16 GiB minimum under scope %s',
+    acceleratorMemoryScope => {
+      const input = gpuCapacityInput(
+        [
+          { id: 'cuda-0', backend: 'cuda', name: 'GPU 0', totalBytes: 8 * GIB },
+          { id: 'cuda-1', backend: 'cuda', name: 'GPU 1', totalBytes: 8 * GIB },
+        ],
+        acceleratorMemoryScope === undefined ? {} : { acceleratorMemoryScope }
+      )
+      expect(assessModelCapacity(input)).toMatchObject({
+        status: 'ineligible',
+        reasons: ['vram_below_minimum'],
+      })
+      input.snapshot.accelerators[0]!.totalBytes = 16 * GIB
+      expect(assessModelCapacity(input)).toMatchObject({ status: 'eligible', reasons: [] })
+    }
+  )
+
+  it.each(['cuda', 'vulkan', 'metal'] as const)(
+    'admits two distinct 8 GiB %s GPUs only for a signed compatible group and pending native verification',
+    backend => {
+      const input = gpuCapacityInput(
+        [
+          { id: 'gpu-0', backend, name: 'GPU 0', totalBytes: 8 * GIB },
+          { id: 'gpu-1', backend, name: 'GPU 1', totalBytes: 8 * GIB },
+        ],
+        { acceleratorMemoryScope: 'compatible_group' }
+      )
+      expect(assessModelCapacity(input)).toMatchObject({
+        status: 'eligible',
+        reasons: [],
+        acceleratorVerification: 'runtime_required',
+      })
+      input.snapshot.memory.totalBytes = 15 * GIB
+      input.snapshot.memory.availableBytes = 7 * GIB
+      expect(assessModelCapacity(input)).toMatchObject({
+        status: 'ineligible',
+        reasons: ['total_ram_below_minimum', 'available_ram_below_minimum'],
+      })
+    }
+  )
+
+  it.each<{ label: string; accelerators: HardwareSnapshot['accelerators'] }>([
+    {
+      label: 'mixed executable backends',
+      accelerators: [
+        { id: 'cuda-0', backend: 'cuda', name: 'GPU 0', totalBytes: 8 * GIB },
+        { id: 'vulkan-0', backend: 'vulkan', name: 'GPU 1', totalBytes: 8 * GIB },
+      ],
+    },
+    {
+      label: 'duplicate physical IDs within one backend',
+      accelerators: [
+        { id: 'cuda-0', backend: 'cuda', name: 'GPU 0', totalBytes: 8 * GIB },
+        { id: 'cuda-0', backend: 'cuda', name: 'GPU 0 duplicate', totalBytes: 8 * GIB },
+      ],
+    },
+    {
+      label: 'the same physical ID exposed through two backends',
+      accelerators: [
+        { id: 'gpu-0', backend: 'cuda', name: 'GPU 0 CUDA', totalBytes: 8 * GIB },
+        { id: 'gpu-0', backend: 'vulkan', name: 'GPU 0 Vulkan', totalBytes: 8 * GIB },
+      ],
+    },
+    {
+      label: 'shared system RAM and dedicated host memory',
+      accelerators: [
+        { id: 'gpu-0', backend: 'vulkan', name: 'GPU 0', totalBytes: 4 * GIB, sharedSystemLimitBytes: 8 * GIB },
+        { id: 'gpu-1', backend: 'vulkan', name: 'GPU 1', totalBytes: 4 * GIB, dedicatedSystemBytes: 8 * GIB },
+      ],
+    },
+    {
+      label: 'unverified DXGI adapters',
+      accelerators: [
+        { id: 'dxgi-0', backend: 'unknown', name: 'GPU 0', totalBytes: 8 * GIB, detectionSource: 'dxgi' },
+        { id: 'dxgi-1', backend: 'unknown', name: 'GPU 1', totalBytes: 8 * GIB, detectionSource: 'dxgi' },
+      ],
+    },
+    {
+      label: 'unknown or non-finite dedicated VRAM',
+      accelerators: [
+        { id: 'gpu-0', backend: 'cuda', name: 'GPU 0', totalBytes: 8 * GIB },
+        { id: 'gpu-1', backend: 'cuda', name: 'GPU 1', totalBytes: null },
+        { id: 'gpu-2', backend: 'cuda', name: 'GPU 2', totalBytes: Infinity },
+      ],
+    },
+  ])('does not pool $label under compatible_group', ({ accelerators }) => {
+    const result = assessModelCapacity(gpuCapacityInput(accelerators, { acceleratorMemoryScope: 'compatible_group' }))
+    expect(result).toMatchObject({ status: 'ineligible', reasons: ['vram_below_minimum'] })
+  })
+
+  it('keeps an explicit backend restriction when another backend has enough group VRAM', () => {
+    const input = gpuCapacityInput(
+      [
+        { id: 'cuda-0', backend: 'cuda', name: 'CUDA GPU', totalBytes: 8 * GIB },
+        { id: 'vulkan-0', backend: 'vulkan', name: 'Vulkan GPU 0', totalBytes: 8 * GIB },
+        { id: 'vulkan-1', backend: 'vulkan', name: 'Vulkan GPU 1', totalBytes: 8 * GIB },
+      ],
+      { acceleratorMemoryScope: 'compatible_group', acceptedAccelerators: ['cuda'] }
+    )
+    expect(assessModelCapacity(input)).toMatchObject({ status: 'ineligible', reasons: ['vram_below_minimum'] })
+  })
+
+  it('defers a DXGI adapter backend to native verification without counting shared RAM as VRAM', () => {
+    const snapshot = hardware([
+      {
+        id: 'disk',
+        mountLabel: 'disk',
+        busType: 'nvme',
+        mediaType: 'ssd',
+        removable: false,
+        availableBytes: 100 * GIB,
+      },
+    ])
+    snapshot.accelerators = [
+      {
+        id: 'dxgi-adapter',
+        backend: 'unknown',
+        name: 'Physical GPU',
+        detectionSource: 'dxgi',
+        totalBytes: 16 * GIB,
+        availableBytes: null,
+        dedicatedSystemBytes: 0,
+        sharedSystemLimitBytes: 16 * GIB,
+      },
+    ]
+    const input = {
+      snapshot,
+      modelReleaseId: 'local',
+      artifactSizeBytes: GIB,
+      policy: {
+        minTotalRamBytes: GIB,
+        minAvailableRamBytes: GIB,
+        minVramBytes: 12 * GIB,
+        minStorageFreeBytes: GIB,
+        storageClass: 'fixed_storage' as const,
+      },
+    }
+    expect(assessModelCapacity(input)).toMatchObject({
+      status: 'eligible',
+      acceleratorVerification: 'runtime_required',
+    })
+    expect(
+      assessModelCapacity({ ...input, policy: { ...input.policy, acceptedAccelerators: ['cuda'] } })
+    ).toMatchObject({ status: 'ineligible', reasons: ['accelerator_unavailable'] })
+    snapshot.accelerators[0]!.totalBytes = 0
+    expect(assessModelCapacity(input)).toMatchObject({ status: 'ineligible', reasons: ['vram_below_minimum'] })
+    snapshot.accelerators[0]!.totalBytes = 16 * GIB
+    delete snapshot.accelerators[0]!.detectionSource
+    expect(assessModelCapacity(input)).toMatchObject({ status: 'ineligible', reasons: ['accelerator_unavailable'] })
+  })
+
+  it('prefers a fixed SSD to a roomier HDD regardless of the bus label', () => {
+    const storage: HardwareSnapshot['storage'] = [
+      {
+        id: 'hdd',
+        mountLabel: 'disk1',
+        busType: 'sata',
+        mediaType: 'hdd',
+        removable: false,
+        availableBytes: 900 * GIB,
+      },
+      {
+        id: 'ssd',
+        mountLabel: 'disk2',
+        busType: 'scsi',
+        mediaType: 'ssd',
+        removable: false,
+        availableBytes: 100 * GIB,
+      },
+    ]
+    const policy = { minStorageFreeBytes: GIB, storageClass: 'fixed_storage' as const }
+    expect(selectModelStorage(storage, policy, GIB)).toEqual({ id: 'ssd' })
+    expect(selectModelStorage(storage, policy, GIB, 'hdd')).toEqual({ id: 'hdd' })
+    expect(selectModelStorage(storage, policy, GIB, 'missing')).toEqual({ reason: 'storage_unavailable' })
+    expect(selectModelStorage(storage, policy, GIB, null)).toEqual({ reason: 'storage_unavailable' })
+  })
+
+  it('does not admit a configured USB model location using another internal NVMe disk', () => {
+    const snapshot = hardware([
+      {
+        id: 'usb',
+        mountLabel: 'external',
+        busType: 'usb',
+        mediaType: 'ssd',
+        removable: false,
+        availableBytes: 900 * GIB,
+      },
+      {
+        id: 'nvme',
+        mountLabel: 'internal',
+        busType: 'nvme',
+        mediaType: 'ssd',
+        removable: false,
+        availableBytes: 100 * GIB,
+      },
+    ])
+    snapshot.configuredModelStorageId = 'usb'
+    const result = assessModelCapacity({
+      snapshot,
+      modelReleaseId: 'local',
+      artifactSizeBytes: GIB,
+      policy: {
+        minTotalRamBytes: GIB,
+        minAvailableRamBytes: GIB,
+        minVramBytes: 0,
+        minStorageFreeBytes: GIB,
+        storageClass: 'fixed_storage',
+      },
+    })
+    expect(result.status).toBe('ineligible')
+    expect(result.reasons).toContain('storage_unavailable')
+    expect(result.selectedStorageId).toBeUndefined()
+  })
+
+  it('rejects unknown free space even when a release has no storage reserve', () => {
+    const storage: HardwareSnapshot['storage'] = [
+      { id: 'bad', mountLabel: 'disk', busType: 'nvme', mediaType: 'ssd', removable: false, availableBytes: NaN },
+    ]
+    expect(selectModelStorage(storage, { minStorageFreeBytes: 0, storageClass: 'fixed_storage' }, 0)).toEqual({
+      reason: 'storage_unavailable',
+    })
+  })
+
+  it('distinguishes an unmeasured first CPU sample from measured resource pressure', () => {
+    const snapshot = hardware([
+      {
+        id: 'disk',
+        mountLabel: 'disk',
+        busType: 'nvme',
+        mediaType: 'ssd',
+        removable: false,
+        availableBytes: 100 * GIB,
+      },
+    ])
+    const input = {
+      snapshot,
+      modelReleaseId: 'local',
+      artifactSizeBytes: GIB,
+      policy: {
+        minTotalRamBytes: GIB,
+        minAvailableRamBytes: GIB,
+        minVramBytes: 0,
+        minStorageFreeBytes: GIB,
+        storageClass: 'fixed_storage' as const,
+        maxCpuLoadPercent: 90,
+      },
+    }
+    snapshot.cpu.loadPercent = null
+    expect(assessModelCapacity(input).reasons).not.toContain('resource_pressure')
+    snapshot.cpu.loadPercent = 96
+    expect(assessModelCapacity(input)).toMatchObject({ status: 'degraded', reasons: ['resource_pressure'] })
+  })
+
   it('does not charge resident model memory twice and binds residency to the signed catalog', () => {
     const snapshot = hardware([
       {

@@ -114,6 +114,7 @@ const TOOL_CONTRACT = [
   { name: 'fs_create_dir', category: 'app', mutating: true, requiresApproval: true },
   { name: 'fs_move', category: 'app', mutating: true, requiresApproval: true },
   { name: 'fs_delete', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'os_system_diagnostics', category: 'os', mutating: false, requiresApproval: true },
   { name: 'os_read_clipboard', category: 'os', mutating: false, requiresApproval: true },
   { name: 'os_list_windows', category: 'os', mutating: false, requiresApproval: true },
   { name: 'os_screen_capture', category: 'os', mutating: false, requiresApproval: true },
@@ -155,8 +156,8 @@ const TOOL_CONTRACT = [
   { name: 'workspace_agent_cancel', category: 'app', mutating: true, requiresApproval: false },
 ] as const
 
-const TOOL_SCHEMA_SHA256 = 'a0f927448838a5d5d8afbea812a555828068232fa45fe7889b5ea926d93fb166'
-const CORE_TOOL_SCHEMA_SHA256 = '46368d756e34c850e9858d36a974d12689bef170ae16d7084050abb4e72719a9'
+const TOOL_SCHEMA_SHA256 = '19f3bc470228b0c89d0dac6177ea129a8f94e52184d3b4912771b1a5c775b0ed'
+const CORE_TOOL_SCHEMA_SHA256 = 'fe694b20d5a15a37be6027618d76aca6bc92c7e858784aae272ae776edb1f6c8'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {

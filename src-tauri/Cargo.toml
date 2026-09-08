@@ -66,9 +66,19 @@ keyring = "4.1.6"
 tauri-plugin-single-instance = "2.4.3"
 
 [target.'cfg(windows)'.dependencies]
+# Reuse xcap's locked Windows bindings for native adapter inventory (no shell).
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_IO",
+    "Win32_System_Ioctl",
+    "Win32_System_WindowsProgramming",
     "Win32_System_JobObjects",
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
@@ -94,3 +104,8 @@ lto = true        # Enables link-time-optimizations.
 opt-level = "s"   # Prioritizes small binary size. Use `3` if you prefer speed.
 panic = "abort"   # Higher performance by disabling panic handlers.
 strip = true      # Ensures debug symbols are removed.
+
+# Full GGUF verification is CPU-bound on processors without SHA extensions.
+# Preserve the complete cancellable hash while optimizing only its hot path.
+[profile.release.package.sha2]
+opt-level = 3

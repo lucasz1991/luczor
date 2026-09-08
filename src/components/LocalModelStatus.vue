@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from 'vue'
-import { readLocalModelStatus, type LocalModelStatusView } from '@/services/localModelStatus'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { readLocalModelStatus, localResourceModeLabels, type LocalModelStatusView } from '@/services/localModelStatus'
+import LocalResourceSummary from './LocalResourceSummary.vue'
 
 const props = withDefaults(defineProps<{ active?: boolean }>(), { active: true })
 const status = ref<LocalModelStatusView | null>(null)
+const calculation = computed(() => status.value?.checks.find(check => check.label === 'Modellberechnung'))
 const refreshing = ref(false)
 let refreshTimer: ReturnType<typeof setTimeout> | undefined
 let generation = 0
@@ -50,6 +52,19 @@ onBeforeUnmount(() => {
       {{ status?.label ?? 'Modellstatus wird gelesen …' }}
     </p>
     <p v-if="status" class="local-model-status__detail">{{ status.detail }}</p>
+    <div v-if="status?.resourceConfig" class="local-model-status__configuration" aria-live="polite">
+      <span
+        >Gewählt: <strong>{{ localResourceModeLabels[status.resourceConfig.requested.mode] }}</strong></span
+      >
+      <span
+        >Angewandt: <strong>{{ localResourceModeLabels[status.resourceConfig.applied.mode] }}</strong></span
+      >
+      <p v-if="status.resourceConfig.pending">Neue Verteilung vorgemerkt · laufende Aufträge werden zuerst beendet.</p>
+    </div>
+    <p v-if="calculation" class="local-model-status__calculation" :data-verified="calculation.verified">
+      Berechnung: <strong>{{ calculation.value }}</strong>
+    </p>
+    <LocalResourceSummary v-if="status" :checks="status.checks" />
     <div v-if="status" class="local-model-status__readiness">
       <span
         >Vorbereitet: <b>{{ status.prepared ? 'Ja' : 'Nicht bestätigt' }}</b></span
@@ -132,6 +147,18 @@ onBeforeUnmount(() => {
 .local-model-status__readiness {
   display: grid;
   gap: 5px;
+}
+.local-model-status__configuration {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+}
+.local-model-status__configuration p {
+  flex-basis: 100%;
+  color: var(--text-muted);
 }
 .local-model-status__readiness b {
   font-weight: 500;

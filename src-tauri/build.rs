@@ -17,6 +17,7 @@ const APP_COMMANDS: &[&str] = &[
     "list_windows",
     "list_monitors",
     "system_metrics",
+    "system_diagnostics",
     "move_mouse",
     "mouse_click",
     "type_text",
@@ -85,6 +86,11 @@ const APP_COMMANDS: &[&str] = &[
     "local_model_infer",
     "local_model_cancel",
     "local_model_stop",
+    "local_model_get_resource_config",
+    "local_model_set_resource_config",
+    "local_model_apply_resource_config",
+    "local_model_begin_resource_work",
+    "local_model_end_resource_work",
 ];
 
 fn main() {

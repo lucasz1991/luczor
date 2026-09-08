@@ -23,6 +23,7 @@ const titles: Record<string, string> = {
   fs_move: 'Datei verschieben',
   fs_delete: 'Datei löschen',
   os_environment: 'Computerumgebung analysieren',
+  os_system_diagnostics: 'Gerätesicherheit und Leistung prüfen',
   os_observe_desktop: 'Eingabeziel prüfen',
   agent_team_prepare: 'Agententeam vorbereiten',
   agent_team_status: 'Teamstatus lesen',

@@ -1,4 +1,5 @@
 import type { ExecutionTicket } from '@/services/executionGate'
+import { localResources } from '@/services/inference/resources'
 import type { ManagedAgentJobObserver } from '@/services/agents/managedJob'
 import type { AgentTeamDefinition, AgentTeamRun, AgentTeamRunInput } from '@/services/agents/teams'
 import type {
@@ -319,6 +320,8 @@ export class PlanningController implements PlanningHub {
     if (this.operations.has(projectId))
       throw new Error('Für dieses Projekt läuft bereits eine Planung oder Ausführung.')
     const operation = this.beginOperation(projectId)
+    let resourceLease:
+      Awaited<ReturnType<typeof import('@/services/inference/resources').localResources.acquireGroup>> | undefined
     try {
       this.assertOperation(projectId, operation, false)
       const project = await this.dependencies.projectSnapshot(projectId)
@@ -339,6 +342,8 @@ export class PlanningController implements PlanningHub {
         output: '',
       })
       operation.sessionId = session.id
+      resourceLease = await localResources.acquireGroup(`team:${session.id}`, operation.ticket.signal)
+      this.assertOperation(projectId, operation, false)
       this.sessions.set(projectId, session)
       this.notify()
 
@@ -397,7 +402,11 @@ export class PlanningController implements PlanningHub {
       this.failCurrentOperation(projectId, operation, error)
       throw error
     } finally {
-      if (this.operations.get(projectId) === operation) this.operations.delete(projectId)
+      try {
+        await resourceLease?.release()
+      } finally {
+        if (this.operations.get(projectId) === operation) this.operations.delete(projectId)
+      }
     }
   }
 

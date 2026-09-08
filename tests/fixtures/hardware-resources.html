@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Luczor · Ressourcenanzeige · Beispieldaten</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --text-primary: #eeedf3;
+        --text-muted: #aba8b8;
+        --border-soft: #353340;
+      }
+      body {
+        margin: 0;
+        background: #17171d;
+        color: var(--text-primary);
+        font:
+          14px/1.6 system-ui,
+          sans-serif;
+      }
+      main {
+        width: min(100% - 40px, 1040px);
+        margin: 40px auto;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+      }
+      header p {
+        margin: 0;
+        color: var(--text-muted);
+      }
+      article {
+        box-sizing: border-box;
+        margin: 28px 0;
+        border: 1px solid var(--border-soft);
+        padding: 20px;
+        border-radius: 10px;
+      }
+      h2 {
+        font-size: 15px;
+        margin: 0 0 16px;
+      }
+      .compact {
+        width: min(100%, 320px);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Automatische Ressourcennutzung</h1>
+        <p>UI-Prüfung mit Beispieldaten · keine Live-Messung, kein Modellstart</p>
+      </header>
+      <article>
+        <h2>Desktop · angewandte Einstellungen</h2>
+        <div id="wide"></div>
+      </article>
+      <article class="compact">
+        <h2>320 px · Prüfung läuft</h2>
+        <div id="compact"></div>
+      </article>
+      <article>
+        <h2>Geräteeinstellungen · interaktive Beispieldaten</h2>
+        <div id="settings-wide"></div>
+      </article>
+      <article class="compact">
+        <h2>320 px · Änderung vorgemerkt</h2>
+        <div id="settings-compact"></div>
+      </article>
+    </main>
+    <script type="module" src="./hardwareResourcesFixture.ts"></script>
+  </body>
+</html>

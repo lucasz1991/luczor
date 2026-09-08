@@ -1,4 +1,5 @@
 import { shallowRef } from 'vue'
+import { localResources, type LocalResourceWork } from '@/services/inference/resources'
 import { onExecutionInvalidated } from '@/services/executionGate'
 import { agentHub, prepareAgentJob, validateAgentScope } from './hub'
 import { executePreparedAgentJob } from './managedJob'
@@ -8,9 +9,14 @@ import type { AgentTeamExecutor } from './teams'
 export const agentTeamsRevision = shallowRef(0)
 const principals = new Set<string>()
 const chatExecutors = new Map<string, AgentTeamExecutor>()
+const resourceParents = new Map<string, LocalResourceWork>()
 
 export const agentTeams = new AgentTeamOrchestrator({
   maxConcurrent: 2,
+  async acquireResources(runId, signal) {
+    const lease = await localResources.acquireGroup(`team:${runId}`, signal, resourceParents.get(runId))
+    return lease.release
+  },
   validateScope: validateAgentScope,
   async executor(request) {
     if (request.adapterId === 'chat' || request.adapterId === 'external_chat') {
@@ -47,6 +53,10 @@ export const agentTeams = new AgentTeamOrchestrator({
 
 agentTeams.subscribe(() => {
   agentTeamsRevision.value++
+  for (const runId of resourceParents.keys()) {
+    const run = agentTeams.getRun(runId)
+    if (!run || ['completed', 'failed', 'cancelled'].includes(run.status)) resourceParents.delete(runId)
+  }
   for (const runId of chatExecutors.keys()) {
     const run = agentTeams.getRun(runId)
     if (!run || ['completed', 'failed', 'cancelled'].includes(run.status)) chatExecutors.delete(runId)
@@ -68,6 +78,7 @@ export function prepareChatAgentTeam(
 
 export function prepareAgentTeam(definition: AgentTeamDefinition, input: AgentTeamRunInput): AgentTeamRun {
   const run = agentTeams.prepare(definition, input)
+  if (input.resourceWork) resourceParents.set(run.id, input.resourceWork)
   principals.add(run.project.principalId)
   return run
 }

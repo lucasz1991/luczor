@@ -58,6 +58,7 @@ export type AgentTeamDefinition = Readonly<{
 }>
 
 export type AgentTeamRunInput = Readonly<{
+  resourceWork?: import('@/services/inference/resources').LocalResourceWork
   project: AgentProjectSnapshot
   objective: string
   approvalMode: AgentTeamApprovalMode
@@ -123,6 +124,7 @@ export type AgentTeamExecutionRequest = Readonly<{
 export type AgentTeamExecutor = (request: AgentTeamExecutionRequest) => Promise<AgentRunResult>
 
 export type AgentTeamOrchestratorOptions = Readonly<{
+  acquireResources?: (runId: string, signal: AbortSignal) => Promise<() => Promise<void>>
   executor: AgentTeamExecutor
   validateScope?: (project: AgentProjectSnapshot, permission: AgentPermission) => void | Promise<void>
   maxConcurrent?: number
@@ -151,6 +153,9 @@ type InternalNode = {
 }
 
 type InternalRun = {
+  resourceController?: AbortController
+  resourceLease?: Promise<() => Promise<void>>
+  resourcesReleased?: boolean
   id: string
   definition: AgentTeamDefinition
   project: AgentProjectSnapshot
@@ -180,6 +185,22 @@ const DEFAULT_NODE_TIMEOUT = 15 * 60_000
 const DEFAULT_APPROVAL_TIMEOUT = 10 * 60_000
 const DEFAULT_RUN_DEADLINE = 45 * 60_000
 const MAX_OBJECTIVE_CHARACTERS = 24_000
+
+async function waitForResources<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
+  signal.throwIfAborted()
+  let abort: () => void = () => undefined
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => {
+        abort = () => reject(signal.reason ?? new DOMException('Abgebrochen', 'AbortError'))
+        signal.addEventListener('abort', abort, { once: true })
+      }),
+    ])
+  } finally {
+    signal.removeEventListener('abort', abort)
+  }
+}
 
 function integer(value: number | undefined, fallback: number, minimum: number, maximum: number, label: string): number {
   const selected = value ?? fallback
@@ -436,6 +457,7 @@ export class AgentTeamOrchestrator {
     const run = this.runs.get(id)
     if (!run || ['completed', 'failed', 'cancelled', 'cancelling'].includes(run.status)) return false
     this.clearRunTimers(run)
+    run.resourceController?.abort()
     run.status = 'cancelling'
     run.finalStatus = 'cancelled'
     for (const node of run.nodes.values()) {
@@ -586,6 +608,11 @@ export class AgentTeamOrchestrator {
     let timeout: ReturnType<typeof setTimeout> | undefined
     try {
       await this.options.validateScope?.(run.project, node.definition.permission)
+      if (this.options.acquireResources) {
+        run.resourceController ??= new AbortController()
+        run.resourceLease ??= this.options.acquireResources(run.id, run.resourceController.signal)
+        await waitForResources(run.resourceLease, controller.signal)
+      }
       if (controller.signal.aborted || run.status !== 'running') throw new DOMException('Abgebrochen', 'AbortError')
       phase = 'prompt'
       const prompt = this.compilePrompt(run, node)
@@ -782,6 +809,11 @@ export class AgentTeamOrchestrator {
     if (run.finalStatus) run.status = run.finalStatus
     else if ([...run.nodes.values()].every(node => node.status === 'completed')) run.status = 'completed'
     else run.status = 'failed'
+    if (!run.resourcesReleased) {
+      run.resourcesReleased = true
+      run.resourceController?.abort()
+      void run.resourceLease?.then(release => release()).catch(() => undefined)
+    }
     this.prune()
     this.notify()
   }
@@ -805,6 +837,7 @@ export class AgentTeamOrchestrator {
   private expireRun(id: string): void {
     const run = this.runs.get(id)
     if (!run || run.status !== 'running') return
+    run.resourceController?.abort()
     run.errorCode = 'run_timeout'
     run.finalStatus = 'failed'
     run.status = 'cancelling'

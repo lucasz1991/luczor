@@ -311,6 +311,90 @@ describe('explicit specialist routing preference', () => {
 })
 
 describe('local inference coordinator and approved external gateway', () => {
+  it('never replaces current resource readiness with a late status from an older revision', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    await harness.coordinator.initialize(bootstrap())
+    const evidence = await harness.prepareModel(verified.routing.defaultModelId)
+    const config = {
+      mode: 'auto' as const,
+      gpuDeviceIds: null,
+      threads: null,
+      threadsBatch: null,
+      ramReserveBytes: null,
+      vramReserveBytes: null,
+    }
+    const native = (revision: number) => ({
+      manifestAvailable: true,
+      catalogVersion: verified.catalogVersion,
+      policyVersion: verified.policyVersion,
+      activeModelId: evidence.modelReleaseId,
+      state: 'ready' as const,
+      resourceConfig: {
+        requested: config,
+        applied: config,
+        revision,
+        appliedRevision: revision,
+        pending: false,
+        reasonCode: null,
+      },
+      readiness: [{ ...evidence, resourceRevision: revision }],
+    })
+    harness.coordinator.reconcileNativeStatus(native(2))
+    expect(
+      harness.coordinator.modelAdmissions().find(item => item.modelReleaseId === evidence.modelReleaseId)?.ready
+    ).toBe(true)
+    harness.coordinator.reconcileNativeStatus(native(1))
+    harness.coordinator.resourcesApplied(1)
+    harness.coordinator.reconcileNativeStatus({ ...native(1), readiness: [] })
+    expect(
+      harness.coordinator.modelAdmissions().find(item => item.modelReleaseId === evidence.modelReleaseId)?.ready
+    ).toBe(true)
+  })
+
+  it('rejects old preparation evidence after an applied resource revision', async () => {
+    const harness = makeHarness(await manifest('promoted_preferred'))
+    await harness.coordinator.initialize(bootstrap())
+    harness.coordinator.resourcesApplied(2)
+    await expect(
+      harness.coordinator.resolveTurn({ projectId: 'project-1', routingSettings: { preference: 'local_only' } })
+    ).rejects.toMatchObject({ code: 'local_only_blocked' })
+    expect(harness.coordinator.modelAdmissions().filter(item => item.ready)).toEqual([])
+  })
+
+  it('prepares a physical DXGI candidate but blocks routing when native backend verification fails', async () => {
+    const harness = makeHarness(await manifest('promoted_preferred'))
+    const snapshot = hardware()
+    snapshot.accelerators = [
+      {
+        id: 'dxgi-physical',
+        name: 'Physical GPU',
+        backend: 'unknown',
+        detectionSource: 'dxgi',
+        totalBytes: 32 * GIB,
+        availableBytes: null,
+        sharedSystemLimitBytes: 32 * GIB,
+      },
+    ]
+    vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue(snapshot)
+    harness.prepareModel.mockRejectedValue(
+      new Error('No compatible GPU runtime satisfies the signed model capacity policy.')
+    )
+    await harness.coordinator.initialize(bootstrap())
+    await expect(
+      harness.coordinator.resolveTurn({ projectId: 'project-1', routingSettings: { preference: 'local_only' } })
+    ).rejects.toMatchObject({ code: 'local_only_blocked' })
+    expect(harness.prepareModel).toHaveBeenCalled()
+    expect(harness.coordinator.modelAdmissions('chat').some(model => model.ready)).toBe(false)
+    expect(
+      harness.coordinator
+        .modelAdmissions('chat')
+        .some(model => model.reasons.includes('accelerator_runtime_unavailable'))
+    ).toBe(true)
+    expect(harness.requests).toEqual([])
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
   it('chooses the strongest eligible tier and keeps that resident tier on subsequent requests', async () => {
     const verified = await manifest('hardware_tiers')
     const harness = makeHarness(verified)
@@ -330,11 +414,20 @@ describe('local inference coordinator and approved external gateway', () => {
       modelReleaseId: 'local-tier-balanced',
       manifestPayloadSha256: verified.payloadSha256,
     }
+    resident.memory.availableBytes = GIB
+    harness.dependencies.recoverMemory = vi.fn(async () => resident)
     vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue(resident)
     harness.advance(31_000)
     const second = await harness.coordinator.resolveTurn(input)
     expect(second.decision?.modelReleaseId).toBe('local-tier-balanced')
     expect(harness.prepareModel).toHaveBeenCalledOnce()
+    expect(harness.dependencies.recoverMemory).not.toHaveBeenCalled()
+    vi.mocked(harness.dependencies.hardwareSnapshot).mockClear()
+    harness.advance(2_000)
+    const third = await harness.coordinator.resolveTurn(input)
+    expect(third.decision?.modelReleaseId).toBe('local-tier-balanced')
+    expect(harness.dependencies.hardwareSnapshot).not.toHaveBeenCalled()
+    expect(harness.dependencies.recoverMemory).not.toHaveBeenCalled()
   })
 
   it('does not reuse renderer readiness after the native process stopped', async () => {
@@ -662,6 +755,16 @@ describe('local inference coordinator and approved external gateway', () => {
   it.each([
     ['LUCZOR_LLAMA_CPP_BIN is not configured.', 'runtime_not_configured', 'noch nicht eingerichtet'],
     [
+      'Local runtime startup stopped to protect available RAM (runtime_startup_ram_pressure).',
+      'runtime_startup_ram_pressure',
+      'zum Schutz des verfügbaren Arbeitsspeichers',
+    ],
+    [
+      'Model storage does not satisfy the signed storage class or free-space threshold.',
+      'storage_unavailable',
+      'kein geeigneter Speicherplatz',
+    ],
+    [
       'Local-model runtime paths are not configured. Configure local-model/runtime-paths.json or both runtime environment paths.',
       'runtime_not_configured',
       'noch nicht eingerichtet',
@@ -713,6 +816,29 @@ describe('local inference coordinator and approved external gateway', () => {
     expect(proxy).not.toHaveBeenCalled()
   })
 
+  it.each([
+    ['resource_revision_mismatch', 'Ressourcenverteilung hat sich geändert'],
+    ['resource_gpu_selection_changed', 'gespeicherte Grafikkarte hat sich geändert'],
+    ['ram_budget_insufficient', 'Modell, Kontext und Sicherheitsreserve'],
+    ['runtime_gpu_measurement_unavailable', 'GPU-Auslagerung konnte noch nicht bestätigt'],
+    ['gpu_full_offload_not_verified', 'vollständige GPU-Auslagerung wurde nicht bestätigt'],
+  ])('explains resource preparation failure %s without claiming CPU execution', async (code, message) => {
+    const harness = makeHarness(await manifest('explicit_experiment'))
+    harness.prepareModel.mockRejectedValue(new Error(code))
+    await harness.coordinator.initialize(bootstrap())
+    await expect(
+      harness.coordinator.resolveTurn({
+        projectId: 'project-1',
+        taskType: 'chat',
+        routingSettings: { preference: 'local_only' },
+      })
+    ).rejects.toMatchObject({ code: 'local_only_blocked', message: expect.stringContaining(message) })
+    expect(harness.coordinator.modelAdmissions('chat')).toEqual(
+      expect.arrayContaining([expect.objectContaining({ ready: false, reasons: [code] })])
+    )
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
   it('clears readiness failures after successful local retry and after identity changes', async () => {
     const harness = makeHarness(await manifest('explicit_experiment'))
     harness.prepareModel.mockRejectedValueOnce('Configured GGUF file is unavailable.')
@@ -758,8 +884,11 @@ describe('local inference coordinator and approved external gateway', () => {
     harness.dependencies.recoverMemory = vi.fn(async () => low)
     await harness.coordinator.initialize(bootstrap())
     const input: TurnRoutingInput = { projectId: 'project-1', routingSettings: { preference: 'local_only' } }
+    vi.mocked(harness.dependencies.hardwareSnapshot).mockClear()
     await expect(harness.coordinator.resolveTurn(input)).rejects.toMatchObject({ code: 'local_only_blocked' })
+    expect(harness.dependencies.hardwareSnapshot).toHaveBeenCalledOnce()
     await expect(harness.coordinator.resolveTurn(input)).rejects.toMatchObject({ code: 'local_only_blocked' })
+    expect(harness.dependencies.hardwareSnapshot).toHaveBeenCalledTimes(2)
     expect(harness.dependencies.recoverMemory).toHaveBeenCalledOnce()
     vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue(hardware())
     const route = await harness.coordinator.resolveTurn(input)

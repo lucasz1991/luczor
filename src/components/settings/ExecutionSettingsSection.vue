@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
+import LocalResourceSettings from '@/components/LocalResourceSettings.vue'
 import type { LuczorMode } from '@/services/inference/types'
 import {
   capabilityAccess,
@@ -99,6 +100,7 @@ function toggleAutoExecution(): void {
         Nach dem Speichern gilt eine Änderung vor dem nächsten Tool-Aufruf, auch in laufenden Aufträgen.
       </p>
     </div>
+    <LocalResourceSettings />
     <div class="lz-card">
       <div class="lz-card__title">Im Hintergrund vorbereiten</div>
       <div class="lz-card__head">

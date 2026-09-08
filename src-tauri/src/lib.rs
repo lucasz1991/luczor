@@ -18,6 +18,12 @@ pub fn run() {
     }
 
     let app = builder
+        .on_page_load(|webview, payload| {
+            commands::local_model::resource_config::on_main_navigation(
+                webview.label(),
+                matches!(payload.event(), tauri::webview::PageLoadEvent::Started),
+            );
+        })
         .manage(commands::mini_chat::MiniChatState::default())
         .manage(commands::codex::CodexJobs::default())
         .plugin(tauri_plugin_dialog::init())
@@ -61,6 +67,7 @@ pub fn run() {
             commands::system::list_windows,
             commands::system::list_monitors,
             commands::system::system_metrics,
+            commands::system::system_diagnostics,
             commands::system::move_mouse,
             commands::system::mouse_click,
             commands::system::type_text,
@@ -130,6 +137,11 @@ pub fn run() {
             commands::local_model::local_model_infer,
             commands::local_model::local_model_cancel,
             commands::local_model::local_model_stop,
+            commands::local_model::resource_config::local_model_get_resource_config,
+            commands::local_model::resource_config::local_model_set_resource_config,
+            commands::local_model::resource_config::local_model_apply_resource_config,
+            commands::local_model::resource_config::local_model_begin_resource_work,
+            commands::local_model::resource_config::local_model_end_resource_work,
         ])
         .on_window_event(|window, event| {
             #[cfg(desktop)]

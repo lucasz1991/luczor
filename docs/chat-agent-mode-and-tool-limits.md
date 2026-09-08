@@ -1,6 +1,6 @@
 # Agentenmodus und Tool-Limits
 
-Im Hauptchat sitzt **Agenten** oben rechts im Eingabefeld. Der Schalter ist beim App-Start aus. Ist er aktiv, beginnt der nächste Auftrag direkt als lokales Agententeam. Planung, Bearbeitung und Prüfung laufen nacheinander mit demselben lokalen Modell. Einzelne Tool-Freigaben, der aktuelle Ausführungsmodus und Not-Aus gelten weiterhin.
+Im Hauptchat sitzt **Agenten** oben rechts im Eingabefeld. Der Schalter ist beim App-Start aus. Ist er aktiv, beginnt der nächste Auftrag direkt als Agententeam. Das lokale Modell steuert Planung, Bearbeitung und Prüfung; je nach Teamkonfiguration kommen getrennte externe Spezialisten hinzu. Einzelne Tool-Freigaben, der aktuelle Ausführungsmodus und Not-Aus gelten weiterhin. Details zu Teilteams, Geräteanalyse und GPU-Ausführung stehen in [Agententeams und GPU](agent-teams-and-gpu.md).
 
 Unter **Einstellungen → Ausführung & Freigaben → Tool-Limits** lassen sich zwei Werte speichern:
 
@@ -15,7 +15,7 @@ Erreicht ein Arbeitsabschnitt sein Rundenlimit, erscheinen **Weiterarbeiten** un
 
 Fortsetzungen behalten Tool-Ergebnisse und erfolgreich ausgeführte Änderungen im Arbeitsspeicher. Bereits erfolgreich ausgeführte identische Datenänderungen werden bei einer Wiederholung erkannt. Computer-Eingaben und Prozessaktionen bleiben wiederholbar, da sich ihr Zielzustand geändert haben kann. Es werden keine versteckten Tool-Transkripte in das Chatarchiv geschrieben. Projekt-, Konto- oder Berechtigungswechsel verwerfen die verfügbaren Fortsetzungen; ein App-Neustart ebenfalls. Alte, bereits archivierte Limitmeldungen aus früheren Versionen besitzen keinen nachträglich rekonstruierbaren Checkpoint.
 
-Planungs- und Prüfagenten erhalten keine Schreibrechte. Eine fortgesetzte Prüfung bleibt lesend. Teams und Fortsetzungen verwenden lokale Inferenz; die Fallback-Freigabe des normalen Chats überträgt diese Kontexte nicht an einen externen Anbieter.
+Planungs- und Prüfagenten erhalten keine Schreibrechte. Eine fortgesetzte Prüfung bleibt lesend. Der lokale Kontrollpfad verarbeitet Werkzeuge und Fortsetzungen. Externe Spezialisten erhalten ausschließlich ihr separat freigegebenes Textpaket; die Fallback-Freigabe des normalen Chats überträgt Teamkontexte nicht automatisch an einen externen Anbieter.
 
 ## Prüfung
 

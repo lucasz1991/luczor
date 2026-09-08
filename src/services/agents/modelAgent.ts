@@ -1,4 +1,5 @@
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
+import { localResources } from '@/services/inference/resources'
 import {
   hashInferenceEgressRequest,
   localInferenceCoordinator,
@@ -140,131 +141,137 @@ export function createModelAgentAdapter(
     permissions: ['read-only'],
     exclusiveResources: ['local_gpu1'],
     async run(request) {
-      const { signal } = request
-      assertNotAborted(signal)
-      if (request.permission !== 'read-only') {
-        throw new Error('Modellagenten erstellen Analyse und Vorschläge; Dateischreiben benötigt einen Coding-Agenten.')
-      }
-      if (request.model?.trim()) {
-        throw new Error(
-          'Die Modellwahl wird durch die signierte lokale beziehungsweise die Serverrichtlinie festgelegt.'
-        )
-      }
-      if (!request.prompt.trim() || request.prompt.length > MAX_PROMPT_CHARS) {
-        throw new Error(`Der Agentenauftrag muss zwischen 1 und ${MAX_PROMPT_CHARS} Zeichen enthalten.`)
-      }
-
-      const account = await cancellable(signal, () => dependencies.accountSnapshot())
-      if (!account || account.principalId !== request.project.principalId) {
-        throw new Error('Der Agentenauftrag gehört nicht zum aktuell verifizierten Konto.')
-      }
-      const taskType = taskTypeForAgentRole(request.role)
-      const messages: WireMessage[] = [
-        { role: 'system', content: SYSTEM_INSTRUCTION },
-        { role: 'user', content: request.prompt },
-      ]
-      const inferenceRequest: InferenceRequest = {
-        messages,
-        projectId: request.project.projectId,
-        contextId: request.jobId,
-        taskType,
-        tools: [],
-        toolChoice: 'none',
-        signal,
-      }
-      const externalAllowed =
-        options.id === 'policy' && (await cancellable(signal, dependencies.externalPolicy)) !== 'deny'
-      const routeInput = (externalPackage?: ExternalTurnPackage) => ({
-        projectId: request.project.projectId,
-        contextId: request.jobId,
-        taskType,
-        contextEgress: externalAllowed ? ('external_allowed' as const) : ('local_only' as const),
-        routingSettings: { preference: externalAllowed ? ('ask_external' as const) : ('local_only' as const) },
-        externalPackage,
-      })
-      let externalApproved = false
-      let route
-      try {
-        route = await cancellable(signal, () => dependencies.resolveRoute(routeInput()))
-      } catch (error) {
-        if (
-          !(error instanceof LocalInferenceError) ||
-          error.code !== 'external_approval_required' ||
-          !externalAllowed ||
-          !options.requestExternalApproval
-        ) {
-          throw error
-        }
-        const packetHash = await cancellable(signal, () =>
-          hashInferenceEgressRequest(inferenceRequest, account.config.clientId)
-        )
-        const expiresAt = new Date(dependencies.now() + 120_000).toISOString()
-        request.onPhase?.('awaiting_external_approval')
-        const approved = await cancellable(signal, () =>
-          Promise.resolve(
-            options.requestExternalApproval!({
-              jobId: request.jobId,
-              projectId: request.project.projectId,
-              taskType,
-              packetHash,
-              destination: account.config.baseUrl,
-              messageCount: messages.length,
-              characterCount: messages.reduce((sum, message) => sum + message.content.length, 0),
-              expiresAt,
-              toolsAllowed: false,
-              messages: Object.freeze(messages.map(message => Object.freeze({ ...message }))),
-            })
-          )
-        )
-        if (!approved) throw new Error('Die externe Paketfreigabe wurde abgelehnt.')
-        if (dependencies.now() >= Date.parse(expiresAt)) throw new Error('Die externe Paketfreigabe ist abgelaufen.')
-        request.onPhase?.('running')
-        const externalPackage: ExternalTurnPackage = {
-          messages: messages.map(message => ({ ...message })),
-          packetHash,
-          apiConfig: Object.freeze({ ...account.config }),
-          approval: { approvalId: crypto.randomUUID(), packetHash, expiresAt },
-        }
-        route = await cancellable(signal, () => dependencies.resolveRoute(routeInput(externalPackage)))
-        externalApproved = true
-      }
-
-      if (!sameAccount(account, await cancellable(signal, dependencies.accountSnapshot))) {
-        throw new Error('Das Konto oder die Serververbindung hat sich während des Agentenstarts geändert.')
-      }
-      if (route.gateway.target === 'laravel_proxy') {
-        if (
-          !externalApproved ||
-          !route.externalOneShot ||
-          (await cancellable(signal, dependencies.externalPolicy)) === 'deny'
-        ) {
-          throw new Error(
-            'Eine gültige externe Paketfreigabe und Richtlinie sind für diesen Agentenauftrag erforderlich.'
-          )
-        }
-      }
-
-      let output = ''
-      // The gateway owns native cancellation. Keep the orchestration slot until
-      // it has acknowledged stopping the local worker, rather than racing it.
-      assertNotAborted(signal)
-      const result = await route.gateway.streamChatWithTools({
-        ...inferenceRequest,
-        messages: route.replacementMessages ?? messages,
-        onToken: content => {
-          if (signal.aborted) return
-          const next = content.slice(0, MAX_OUTPUT_CHARS)
-          if (next === output) return
-          output = next
-          request.onOutput(next)
-        },
-      })
-      assertNotAborted(signal)
-      if (result.toolCalls.length || result.rawToolCalls.length) {
-        throw new Error('Das Modell hat unzulässige Werkzeugaufrufe geliefert; es wurde kein Werkzeug ausgeführt.')
-      }
-      if (!result.content.trim()) throw new Error('Der Modellagent hat kein verwertbares Ergebnis geliefert.')
-      return { output: result.content.slice(0, MAX_OUTPUT_CHARS) }
+      return localResources.run(
+        () => runWithResources(request),
+        request.signal,
+        request.teamRunId ? localResources.group(`team:${request.teamRunId}`) : undefined
+      )
     },
+  }
+
+  async function runWithResources(request: Parameters<AgentAdapter['run']>[0]) {
+    const { signal } = request
+    assertNotAborted(signal)
+    if (request.permission !== 'read-only') {
+      throw new Error('Modellagenten erstellen Analyse und Vorschläge; Dateischreiben benötigt einen Coding-Agenten.')
+    }
+    if (request.model?.trim()) {
+      throw new Error('Die Modellwahl wird durch die signierte lokale beziehungsweise die Serverrichtlinie festgelegt.')
+    }
+    if (!request.prompt.trim() || request.prompt.length > MAX_PROMPT_CHARS) {
+      throw new Error(`Der Agentenauftrag muss zwischen 1 und ${MAX_PROMPT_CHARS} Zeichen enthalten.`)
+    }
+
+    const account = await cancellable(signal, () => dependencies.accountSnapshot())
+    if (!account || account.principalId !== request.project.principalId) {
+      throw new Error('Der Agentenauftrag gehört nicht zum aktuell verifizierten Konto.')
+    }
+    const taskType = taskTypeForAgentRole(request.role)
+    const messages: WireMessage[] = [
+      { role: 'system', content: SYSTEM_INSTRUCTION },
+      { role: 'user', content: request.prompt },
+    ]
+    const inferenceRequest: InferenceRequest = {
+      messages,
+      projectId: request.project.projectId,
+      contextId: request.jobId,
+      taskType,
+      tools: [],
+      toolChoice: 'none',
+      signal,
+    }
+    const externalAllowed =
+      options.id === 'policy' && (await cancellable(signal, dependencies.externalPolicy)) !== 'deny'
+    const routeInput = (externalPackage?: ExternalTurnPackage) => ({
+      projectId: request.project.projectId,
+      contextId: request.jobId,
+      taskType,
+      contextEgress: externalAllowed ? ('external_allowed' as const) : ('local_only' as const),
+      routingSettings: { preference: externalAllowed ? ('ask_external' as const) : ('local_only' as const) },
+      externalPackage,
+    })
+    let externalApproved = false
+    let route
+    try {
+      route = await cancellable(signal, () => dependencies.resolveRoute(routeInput()))
+    } catch (error) {
+      if (
+        !(error instanceof LocalInferenceError) ||
+        error.code !== 'external_approval_required' ||
+        !externalAllowed ||
+        !options.requestExternalApproval
+      ) {
+        throw error
+      }
+      const packetHash = await cancellable(signal, () =>
+        hashInferenceEgressRequest(inferenceRequest, account.config.clientId)
+      )
+      const expiresAt = new Date(dependencies.now() + 120_000).toISOString()
+      request.onPhase?.('awaiting_external_approval')
+      const approved = await cancellable(signal, () =>
+        Promise.resolve(
+          options.requestExternalApproval!({
+            jobId: request.jobId,
+            projectId: request.project.projectId,
+            taskType,
+            packetHash,
+            destination: account.config.baseUrl,
+            messageCount: messages.length,
+            characterCount: messages.reduce((sum, message) => sum + message.content.length, 0),
+            expiresAt,
+            toolsAllowed: false,
+            messages: Object.freeze(messages.map(message => Object.freeze({ ...message }))),
+          })
+        )
+      )
+      if (!approved) throw new Error('Die externe Paketfreigabe wurde abgelehnt.')
+      if (dependencies.now() >= Date.parse(expiresAt)) throw new Error('Die externe Paketfreigabe ist abgelaufen.')
+      request.onPhase?.('running')
+      const externalPackage: ExternalTurnPackage = {
+        messages: messages.map(message => ({ ...message })),
+        packetHash,
+        apiConfig: Object.freeze({ ...account.config }),
+        approval: { approvalId: crypto.randomUUID(), packetHash, expiresAt },
+      }
+      route = await cancellable(signal, () => dependencies.resolveRoute(routeInput(externalPackage)))
+      externalApproved = true
+    }
+
+    if (!sameAccount(account, await cancellable(signal, dependencies.accountSnapshot))) {
+      throw new Error('Das Konto oder die Serververbindung hat sich während des Agentenstarts geändert.')
+    }
+    if (route.gateway.target === 'laravel_proxy') {
+      if (
+        !externalApproved ||
+        !route.externalOneShot ||
+        (await cancellable(signal, dependencies.externalPolicy)) === 'deny'
+      ) {
+        throw new Error(
+          'Eine gültige externe Paketfreigabe und Richtlinie sind für diesen Agentenauftrag erforderlich.'
+        )
+      }
+    }
+
+    let output = ''
+    // The gateway owns native cancellation. Keep the orchestration slot until
+    // it has acknowledged stopping the local worker, rather than racing it.
+    assertNotAborted(signal)
+    const result = await route.gateway.streamChatWithTools({
+      ...inferenceRequest,
+      messages: route.replacementMessages ?? messages,
+      onToken: content => {
+        if (signal.aborted) return
+        const next = content.slice(0, MAX_OUTPUT_CHARS)
+        if (next === output) return
+        output = next
+        request.onOutput(next)
+      },
+    })
+    assertNotAborted(signal)
+    if (result.toolCalls.length || result.rawToolCalls.length) {
+      throw new Error('Das Modell hat unzulässige Werkzeugaufrufe geliefert; es wurde kein Werkzeug ausgeführt.')
+    }
+    if (!result.content.trim()) throw new Error('Der Modellagent hat kein verwertbares Ergebnis geliefert.')
+    return { output: result.content.slice(0, MAX_OUTPUT_CHARS) }
   }
 }

@@ -14,6 +14,7 @@ import type {
 } from '@/services/inference/modelManifest'
 import type { InferenceResult, WireToolCall } from '@/services/inference/types'
 import { readReportedTokenUsage } from '@/services/tokenUsage'
+import { localResources, type LocalResourceConfigState } from './resources'
 
 type NativeInferenceEvent =
   | { type: 'started'; requestId: string }
@@ -29,7 +30,41 @@ type NativeInferenceResult = {
   usage?: InferenceResult['usage']
 }
 
+export type NativeResourcePlan = {
+  resourceRevision?: number
+  requestedMode?: LocalResourceConfigState['requested']['mode']
+  schemaVersion: 1
+  profile: 'memory_saving' | 'balanced' | 'throughput'
+  logicalCores: number
+  physicalCores: number | null
+  availableLogicalCores: number
+  threads: number
+  threadsBatch: number
+  reservedLogicalCores: number
+  totalRamBytes: number
+  availableRamBytes: number
+  ramHeadroomBytes: number
+  batchSize: number
+  microBatchSize: number
+  contextTokens: number
+  mmap: boolean
+  loadMode?: 'mmap' | 'buffered' | 'runtime_default'
+  parallelSlots: 1
+  applied: boolean
+  reasonCodes: string[]
+}
+
+export type NativeModelStorage = {
+  storageType: 'nvme' | 'ssd' | 'hdd' | 'mixed' | 'unknown'
+  busTypes: string[]
+  fixed: boolean | null
+  availableBytes: number | null
+  totalBytes: number | null
+  reasonCode: string | null
+}
+
 export type NativeLocalModelStatus = {
+  resourceConfig?: LocalResourceConfigState
   manifestAvailable: boolean
   catalogVersion?: number
   policyVersion?: number
@@ -37,6 +72,22 @@ export type NativeLocalModelStatus = {
   state: 'unavailable' | 'stopped' | 'starting' | 'ready' | 'busy' | 'cooldown' | 'error'
   reasonCode?: string | null
   readiness: LocalReadinessEvidence[]
+  resourcePlan?: NativeResourcePlan | null
+  modelStorage?: NativeModelStorage | null
+  acceleration?: {
+    resourceRevision?: number
+    requestedMode?: LocalResourceConfigState['requested']['mode']
+    deviceIds?: string[]
+    fallbackReasonCode?: string | null
+    backend: 'cpu' | 'cuda' | 'vulkan' | 'metal' | 'unknown'
+    deviceNames: string[]
+    offloadedLayers: number | null
+    totalLayers: number | null
+    gpuMemoryBytes: number | null
+    mode: 'gpu' | 'hybrid' | 'cpu' | 'unknown'
+    verified: boolean
+    reasonCode: string | null
+  } | null
 }
 
 let manifestAcceptanceSessionId: string | null = null
@@ -106,9 +157,7 @@ export async function getNativeLocalModelStatus(): Promise<NativeLocalModelStatu
   return invoke<NativeLocalModelStatus>('local_model_status')
 }
 
-export async function getNativeHardwareSnapshot(): Promise<HardwareSnapshot> {
-  return invoke<HardwareSnapshot>('local_model_hardware_snapshot')
-}
+export { getLocalResourceHardware as getNativeHardwareSnapshot } from './resources'
 
 export async function recoverNativeModelMemory(): Promise<HardwareSnapshot> {
   return invoke<HardwareSnapshot>('local_model_recover_memory')
@@ -118,11 +167,27 @@ export async function prepareNativeLocalModel(
   modelReleaseId: string,
   catalogBinding: LocalCatalogBinding
 ): Promise<LocalReadinessEvidence> {
-  return invoke<LocalReadinessEvidence>('local_model_prepare', { modelReleaseId, catalogBinding })
+  const resourceRevision = (await localResources.get()).appliedRevision
+  return invoke<LocalReadinessEvidence>('local_model_prepare', { modelReleaseId, catalogBinding, resourceRevision })
 }
 
 /** Actual OpenAI-compatible llama.cpp path; endpoint, API key and files stay native. */
 export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
+  prepare(
+    modelReleaseId: string,
+    catalogBinding: LocalCatalogBinding,
+    resourceRevision = 0
+  ): Promise<LocalReadinessEvidence> {
+    // Lease renewal within an agent turn may inspect the resident process only.
+    // Cold starts/benchmarks remain in the coordinator's explicit prepare phase.
+    return invoke<LocalReadinessEvidence>('local_model_prepare', {
+      modelReleaseId,
+      catalogBinding,
+      resourceRevision,
+      residentOnly: true,
+    })
+  }
+
   async stream(_release: LocalModelReleaseManifest, request: LocalRuntimeRequest): Promise<InferenceResult> {
     const channel = new Channel<NativeInferenceEvent>()
     let accumulated = ''
@@ -146,6 +211,7 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
         scopeDigest: request.scopeDigest,
         modelReleaseId: request.modelReleaseId,
         catalogBinding: request.catalogBinding,
+        resourceRevision: request.resourceRevision ?? 0,
         useCase: request.taskType ?? 'chat.general',
         messages: request.messages,
         tools: request.tools ?? [],

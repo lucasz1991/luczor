@@ -27,6 +27,40 @@ describe('native computer perception and input contracts', () => {
     lastScreenshot.value = null
   })
 
+  it('allows guarded diagnostics in observe mode and omits process data on request', async () => {
+    updateExecutionControls({ mode: 'observe', killSwitch: false, scope: 'computer-test' })
+    mocks.invoke.mockImplementation(async command =>
+      command === 'system_diagnostics' ? { status: 'partial', processes_included: false } : undefined
+    )
+    expect(await execute('os_system_diagnostics', { include_processes: false })).toMatchObject({
+      status: 'partial',
+      processes_included: false,
+    })
+    expect(mocks.invoke).toHaveBeenCalledWith('system_diagnostics', {
+      payload: { includeProcesses: false, execution: expect.any(Object) },
+    })
+    expect(osTools.find(tool => tool.name === 'os_system_diagnostics')).toMatchObject({
+      mutating: false,
+      requiresApproval: true,
+      dataHandling: 'ephemeral',
+    })
+  })
+
+  it('rejects configurable diagnostic commands or paths before native admission', async () => {
+    for (const args of [{ command: 'whoami' }, { path: 'C:/' }, { include_processes: 'true' }])
+      await expect(execute('os_system_diagnostics', args)).rejects.toThrow('Only the boolean')
+    expect(mocks.invoke).not.toHaveBeenCalled()
+  })
+
+  it('rejects results if the execution scope changes during diagnostics', async () => {
+    updateExecutionControls({ mode: 'observe', killSwitch: false, scope: 'computer-test' })
+    mocks.invoke.mockImplementation(async command => {
+      if (command === 'system_diagnostics') executionGate.invalidate()
+      return { status: 'ready' }
+    })
+    await expect(execute('os_system_diagnostics')).rejects.toThrow()
+  })
+
   it('reports native multi-monitor geometry without screenshots or CSS screen assumptions', async () => {
     mocks.invoke.mockImplementation(async command => {
       if (command === 'list_monitors') return MONITORS

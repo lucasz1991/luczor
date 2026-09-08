@@ -14,6 +14,7 @@ export type LocalModelHealth = {
 }
 
 export type LocalReadinessEvidence = {
+  resourceRevision?: number
   modelReleaseId: string
   manifestPayloadSha256: string
   artifactSha256: string
@@ -30,6 +31,7 @@ export type LocalCatalogBinding = Readonly<{
 }>
 
 export type LocalRuntimeRequest = InferenceRequest & {
+  resourceRevision?: number
   requestId: string
   modelReleaseId: string
   scopeDigest: string
@@ -40,6 +42,11 @@ export type LocalRuntimeRequest = InferenceRequest & {
 }
 
 export interface LocalRuntimeTransport {
+  prepare?(
+    modelReleaseId: string,
+    catalogBinding: LocalCatalogBinding,
+    resourceRevision?: number
+  ): Promise<LocalReadinessEvidence>
   stream(release: LocalModelReleaseManifest, request: LocalRuntimeRequest): Promise<InferenceResult>
   cancel(requestId: string, catalogBinding: LocalCatalogBinding): Promise<void>
   stop(modelReleaseId: string, catalogBinding: LocalCatalogBinding): Promise<void>
@@ -153,6 +160,13 @@ export class LocalModelManager {
     this.health.clear()
   }
 
+  /** Called after the native workflow barrier has applied new resource settings. */
+  invalidateResourceBoundary(): void {
+    if (this.active.size || this.slotOccupied || this.waiters.length) throw new Error('resource_config_busy')
+    this.boundaryEpoch += 1
+    this.health.clear()
+  }
+
   gateway(
     release: LocalModelReleaseManifest,
     readiness: LocalReadinessEvidence,
@@ -161,11 +175,12 @@ export class LocalModelManager {
   ): InferenceGateway {
     const fixedBinding = Object.freeze({ ...catalogBinding })
     const gatewayEpoch = this.boundaryEpoch
+    const lease = { current: { ...readiness } }
     return Object.freeze({
       id: `local:${release.id}`,
       target: 'local_llama_cpp' as const,
       streamChatWithTools: (request: InferenceRequest) =>
-        this.stream(release, readiness, fixedBinding, scopeDigest, gatewayEpoch, request),
+        this.stream(release, lease, fixedBinding, scopeDigest, gatewayEpoch, request),
     })
   }
 
@@ -191,7 +206,7 @@ export class LocalModelManager {
 
   private async stream(
     release: LocalModelReleaseManifest,
-    readiness: LocalReadinessEvidence,
+    lease: { current: LocalReadinessEvidence },
     catalogBinding: LocalCatalogBinding,
     scopeDigest: string,
     gatewayEpoch: number,
@@ -200,7 +215,7 @@ export class LocalModelManager {
     const slot = this.acquireSlot(gatewayEpoch, request.signal)
     if (slot !== true) await slot
     try {
-      return await this.streamExclusive(release, readiness, catalogBinding, scopeDigest, gatewayEpoch, request)
+      return await this.streamExclusive(release, lease, catalogBinding, scopeDigest, gatewayEpoch, request)
     } finally {
       this.releaseSlot()
     }
@@ -208,7 +223,7 @@ export class LocalModelManager {
 
   private async streamExclusive(
     release: LocalModelReleaseManifest,
-    readiness: LocalReadinessEvidence,
+    lease: { current: LocalReadinessEvidence },
     catalogBinding: LocalCatalogBinding,
     scopeDigest: string,
     gatewayEpoch: number,
@@ -230,19 +245,12 @@ export class LocalModelManager {
         false
       )
     }
-    if (
-      !readiness.ready ||
-      readiness.modelReleaseId !== release.id ||
-      readiness.manifestPayloadSha256 !== catalogBinding.manifestPayloadSha256 ||
-      readiness.artifactSha256 !== release.artifact.sha256 ||
-      readiness.runtimeSha256 !== release.runtime.sha256 ||
-      !Number.isFinite(readiness.validUntilMs) ||
-      readiness.validUntilMs <= this.now().getTime()
-    ) {
+    const previous = this.getHealth(release)
+    if (previous.state === 'cooldown') {
       throw new LocalInferenceError(
-        'Lokale Artifact-/Runtime-Readiness fehlt oder ist abgelaufen.',
-        'readiness_unavailable',
-        false,
+        'Das lokale Modell befindet sich in der Abkühlphase.',
+        'model_cooldown',
+        true,
         false
       )
     }
@@ -259,16 +267,67 @@ export class LocalModelManager {
     ) {
       throw new LocalInferenceError('Die lokale Katalogbindung ist ungültig.', 'catalog_binding_invalid', false, false)
     }
-
-    const previous = this.getHealth(release)
-    if (previous.state === 'cooldown') {
+    let readiness = lease.current
+    // A long agent turn retains its gateway. Renew an expired native lease only
+    // after acquiring the model slot; never extend a timestamp in the renderer.
+    const matchesRelease = (evidence: LocalReadinessEvidence) =>
+      (evidence.resourceRevision ?? 0) === (lease.current.resourceRevision ?? 0) &&
+      evidence.ready &&
+      evidence.modelReleaseId === release.id &&
+      evidence.manifestPayloadSha256 === catalogBinding.manifestPayloadSha256 &&
+      evidence.artifactSha256 === release.artifact!.sha256 &&
+      evidence.runtimeSha256 === release.runtime!.sha256 &&
+      Number.isFinite(evidence.validUntilMs)
+    if (matchesRelease(readiness) && readiness.validUntilMs <= this.now().getTime() && this.transport.prepare) {
+      if (request.signal?.aborted) throw abortError()
+      try {
+        readiness = await this.transport.prepare(release.id, catalogBinding, lease.current.resourceRevision ?? 0)
+      } catch {
+        if (request.signal?.aborted) throw abortError()
+        if (gatewayEpoch !== this.boundaryEpoch) {
+          throw new LocalInferenceError(
+            'Die lokale Katalogbindung wurde erneuert.',
+            'catalog_binding_stale',
+            false,
+            false
+          )
+        }
+        throw new LocalInferenceError(
+          'Die lokale Bereitschaft konnte nicht erneuert werden. Der bisherige Fortschritt bleibt erhalten.',
+          'readiness_refresh_failed',
+          true,
+          false
+        )
+      }
+      if (request.signal?.aborted) throw abortError()
+      if (gatewayEpoch !== this.boundaryEpoch) {
+        throw new LocalInferenceError(
+          'Die lokale Katalogbindung wurde erneuert.',
+          'catalog_binding_stale',
+          false,
+          false
+        )
+      }
+    }
+    if (
+      !readiness.ready ||
+      (readiness.resourceRevision ?? 0) !== (lease.current.resourceRevision ?? 0) ||
+      readiness.modelReleaseId !== release.id ||
+      readiness.manifestPayloadSha256 !== catalogBinding.manifestPayloadSha256 ||
+      readiness.artifactSha256 !== release.artifact.sha256 ||
+      readiness.runtimeSha256 !== release.runtime.sha256 ||
+      !Number.isFinite(readiness.validUntilMs) ||
+      readiness.validUntilMs <= this.now().getTime()
+    ) {
       throw new LocalInferenceError(
-        'Das lokale Modell befindet sich in der Abkühlphase.',
-        'model_cooldown',
-        true,
+        'Lokale Artifact-/Runtime-Readiness fehlt oder ist abgelaufen.',
+        'readiness_unavailable',
+        false,
         false
       )
     }
+    lease.current = { ...readiness }
+
     const operationEpoch = this.boundaryEpoch
     const requestId = this.requestIdFactory()
     const controller = new AbortController()
@@ -294,6 +353,7 @@ export class LocalModelManager {
       requestId,
       modelReleaseId: release.id,
       scopeDigest,
+      resourceRevision: readiness.resourceRevision ?? 0,
       catalogBinding,
       signal: controller.signal,
       onToken: accumulated => {

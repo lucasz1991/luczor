@@ -36,6 +36,33 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('local background preparation adapter', () => {
+  it('prepares once after an applied resource change without waiting for the previous retry delay', async () => {
+    const current = { ...status(), appliedResourceRevision: 1 }
+    dependencies.status.mockReturnValue(current)
+    dependencies.resolve.mockResolvedValue({
+      gateway: { target: 'local_llama_cpp' },
+      decision: { modelReleaseId: 'primary' },
+    })
+    const manager = createLocalBackgroundPreparation()
+    const input = {
+      enabled: true,
+      busy: false,
+      scope: { principalId: 'p', serverInstance: 's', projectId: 'project', sessionId: 'session', generation: 1 },
+    }
+    manager.update(input)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(dependencies.resolve).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(dependencies.resolve).toHaveBeenCalledOnce()
+    current.appliedResourceRevision = 2
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(dependencies.resolve).toHaveBeenCalledTimes(2)
+    current.admissions[0]!.ready = true
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(dependencies.resolve).toHaveBeenCalledTimes(2)
+    manager.stop()
+  })
+
   it('retries only transient blocked bootstrap states, without overriding signed policy rejection', () => {
     expect(canRetryBackgroundPolicy({ active: false, mode: 'blocked', reason: 'server_unreachable' })).toBe(true)
     expect(canRetryBackgroundPolicy({ active: false, mode: 'loading', reason: 'bootstrap_pending' })).toBe(false)

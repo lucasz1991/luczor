@@ -23,6 +23,20 @@ use super::ensure_main_webview;
 use super::execution::{admit, Guarded};
 
 #[tauri::command]
+pub async fn system_diagnostics(
+    window: WebviewWindow,
+    payload: Guarded<super::system_diagnostics::DiagnosticsPayload>,
+) -> Result<super::system_diagnostics::DiagnosticsReport, String> {
+    ensure_main_webview(&window)?;
+    let lease = admit(&payload.execution, false)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        super::system_diagnostics::collect(payload.request, lease)
+    })
+    .await
+    .map_err(|_| "System diagnostic worker could not finish.".to_string())?
+}
+
+#[tauri::command]
 pub async fn desktop_observe(
     window: WebviewWindow,
     payload: ObservePayload,

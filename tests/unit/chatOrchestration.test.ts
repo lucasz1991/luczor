@@ -1,11 +1,18 @@
 import { expect, it, vi } from 'vitest'
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import type { RunAgentOptions } from '@/services/agent'
-const { prepareSpecialists } = vi.hoisted(() => ({ prepareSpecialists: vi.fn() }))
+const { prepareSpecialists, projectSnapshot } = vi.hoisted(() => ({
+  prepareSpecialists: vi.fn(),
+  projectSnapshot: vi.fn(async (): Promise<import('@/services/agents/types').AgentProjectSnapshot> => ({
+    projectId: 'p',
+    projectName: 'Project',
+    principalId: 'account',
+  })),
+}))
 vi.mock('@/services/agents/externalSpecialists', () => ({ prepareExternalSpecialists: prepareSpecialists }))
 vi.mock('@/services/toolLimits', () => ({ loadToolLimits: async () => ({ chat: 6, agent: 17 }) }))
 vi.mock('@/services/agents/hub', () => ({
-  agentProjectSnapshot: async () => ({ projectId: 'p', projectName: 'Project', principalId: 'account' }),
+  agentProjectSnapshot: projectSnapshot,
 }))
 vi.mock('@/services/agents/teamHub', async () => {
   const { AgentTeamOrchestrator } = await import('@/services/agents/teams')
@@ -90,6 +97,89 @@ it('stops scheduling dependent agents after cancellation', async () => {
     )
   ).rejects.toMatchObject({ name: 'AbortError' })
   expect(execute).toHaveBeenCalledTimes(1)
+})
+
+it('keeps device analysis available without advertising unusable project filesystem tools', async () => {
+  const execute = vi.fn(async (options: RunAgentOptions) => {
+    expect(options.disabledTools).toEqual(expect.arrayContaining(['fs_list', 'fs_read', 'fs_search', 'fs_write']))
+    expect(options.disabledTools).not.toContain('os_environment')
+    expect(JSON.stringify(options.baseMessages)).toContain('Kein lokaler Projektordner ist gebunden')
+    return result
+  })
+  await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'observe' },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+  expect(execute).toHaveBeenCalledTimes(3)
+  expect(JSON.stringify(execute.mock.calls[0]![0].baseMessages)).toContain(
+    'die eigentliche Datenerhebung übernimmt unmittelbar der Arbeitsagent'
+  )
+})
+
+it('retains caller restrictions and filesystem access for a bound workspace', async () => {
+  projectSnapshot.mockResolvedValueOnce({
+    projectId: 'p',
+    projectName: 'Project',
+    principalId: 'account',
+    rootPath: 'E:/private',
+  })
+  const execute = vi.fn(async (options: RunAgentOptions) => {
+    expect(options.disabledTools).toContain('os_environment')
+    expect(options.disabledTools).not.toContain('fs_read')
+    expect(JSON.stringify(options.baseMessages)).not.toContain('E:/private')
+    return result
+  })
+  await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'observe', disabledTools: ['os_environment'] },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+  expect(execute).toHaveBeenCalledTimes(3)
+})
+
+it('numbers reviewer progress after the actual worker rounds instead of the configured maximum', async () => {
+  const progress: Array<{ agentRole?: string; round?: number }> = []
+  const execute = vi.fn(async (options: RunAgentOptions) => {
+    const rounds = execute.mock.calls.length === 2 ? 3 : 1
+    options.onProgress?.({ phase: 'thinking', round: rounds })
+    return { ...result, tokenUsage: { ...result.tokenUsage, rounds } }
+  })
+  await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'observe', onProgress: event => progress.push(event) },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+  expect(progress.map(event => [event.agentRole, event.round])).toEqual([
+    ['planner', 1],
+    ['worker', 4],
+    ['reviewer', 5],
+  ])
+})
+
+it('distinguishes unavailable readiness from a confirmed runtime failure and preserves the worker result', async () => {
+  const execute = vi.fn(async () =>
+    execute.mock.calls.length === 3
+      ? {
+          ...result,
+          continuation: checkpoint,
+          interrupted: { code: 'readiness_unavailable', message: 'Readiness unavailable' },
+        }
+      : { ...result, finalText: 'Gesicherte Messwerte' }
+  )
+  const response = await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'observe' },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+  expect(response.finalText).toContain('Gesicherte Messwerte')
+  expect(response.finalText).toContain('geprüfte Modellbereitschaft')
+  expect(response.finalText).not.toContain('lokalen Modellstörung')
+  expect(response.continuation?.toolAccess).toBe('read-only')
 })
 
 it('returns the saved checkpoint when the worker model fails before producing a result', async () => {

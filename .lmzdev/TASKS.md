@@ -39,3 +39,25 @@
 | Flüssige Ganztext-Sprachausgabe, Auswahl vorlesen und Fallback-Control im Promptkopf | Codex/root | completed-local | 2026-09-07 |
 
 - [x] 2026-09-08: Voice-Composer und lokale Audio-Auslöser completed-local; Bericht artifacts/reports/2026-09-08-voice-input.md.
+
+| Agententeam-Recovery und eng begrenzte lokale Systemdiagnostik | Codex/agent_team_recovery | completed-local; ownership returned | 2026-09-08T11:16:16Z |
+
+| Native GPU execution selection, measured status, support-file pins and resident-only lease | Codex/gpu_runtime | completed-local; root owns integration/release | 2026-09-08T11:18:45Z |
+
+## 2026-09-08 | Codex/root | Agententeam/GPU Abschluss
+- [x] Root: residente Lease-Erneuerung, TS-Vertrag, gemessener GPU-Status, Integration und Release lokal abgeschlossen.
+- [x] agent_team_recovery: Teilteams, Projektbindung, Runden, Diagnosecollector und Tests abgeschlossen; Ownership zurück.
+- [x] gpu_runtime: geprüfte Backendauswahl, Begleitdateipins, Offloadmessung, native Tests und Clippy abgeschlossen; Ownership zurück.
+- [x] backend_team_gpu: Routingbereitschaft, explizite Rollenreparatur, Runtimevertrag und Adminanzeige abgeschlossen; Ownership zurück.
+- [ ] Auslieferungsabnahme: neue EXE nach Nutzer-Chatende starten, echten langen Agenten-/GPU-Lauf prüfen. Produktionsbackend und externe Rollen noch nicht ausgerollt.
+- [ ] Separater vorhandener Backendbefund: Windows-Unterstützung der ManagedLocalModelKey-Pfad-/Rechteprüfung sicher klären; fünf Baseline-Tests bleiben rot. Keine Sicherheitsprüfung abgeschwächt.
+
+| Native Datenträgerklassifizierung nach echtem Modellvolumen | Codex/agent_team_recovery | in-progress; only new local_model_storage.rs and approved windows-sys features | 2026-09-08T11:37:20Z |
+
+| Native Datenträgerklassifizierung nach echtem Modellvolumen | Codex/agent_team_recovery | completed-local; ownership returned | 2026-09-08T11:52:02Z |
+
+| Bounded native DXGI GPU inventory | Codex/agent_team_recovery | in-progress; new local_model_accelerators.rs plus approved Windows dependency only; integration gpu_runtime-owned | 2026-09-08 |
+
+| Bounded native DXGI GPU inventory | Codex/agent_team_recovery | completed-local; 8 unit tests plus 1 real readonly probe passed; ownership returned | 2026-09-08T12:22:56Z |
+
+| Device-local resource settings and status UI, independent workflow review | Codex/agent_team_recovery | completed-local; 36 focused tests passed; source ownership returned, final native/browser gates at Root | 2026-09-08T14:09:39Z |

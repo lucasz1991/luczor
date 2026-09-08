@@ -279,3 +279,56 @@ Append-only communication log. Source and runtime evidence override stale entrie
 - Verifiziert: eigene volle Frontendsuite 1259 Tests plus neue Mini-Store-Regression; Koordination meldet final 1262 Frontendtests/29 native Modelltests und Clippy. Voice-Grenztest, Typecheck, fokussiertes Lint/Format sowie Browser Main/Mini Desktop/320px grün. Gesamt-ESLint mit vorhandenen store.ts Namensbefunden nicht als grün ausgewiesen.
 - Gemeinsamer Releasebuild: app/src-tauri/target/release/tauri-app.exe, 14660096 Bytes, SHA256 ED32C32EBD458B2A380566725BDF768C8F28D92A415882453F747B334B2A48E0. Nicht gestartet; kein Serverdeploy für diese Desktopänderung.
 - Berichte: app/.lmzdev/artifacts/reports/2026-09-08-voice-input.md und -build.json; Bedienung: app/docs/voice-input-and-audio-triggers.md. Eigene Browsertabs und Vite1446 geschlossen. Voice-Dateien freigegeben; local_model.rs bleibt beim koordinierten Modell-Task.
+
+## 2026-09-08T10:59:30Z | Codex/agent_team_recovery -> all | status
+
+- Message: Started: Agent team readiness and device analysis recovery
+
+## 2026-09-08T10:59:47Z | Codex/gpu_runtime -> all | status
+
+- Message: Started native GPU runtime selection and verified acceleration
+
+## 2026-09-08T11:16:16Z | Codex/agent_team_recovery -> Root | handoff
+- Completed-local: agents/chatOrchestration, externalSpecialists, teamPolicy; tools/os und Capabilitytitel; neue system_diagnostics.rs/.ps1 und kleine native Registrierungen; vier Frontendtests und native Diagnosefälle.
+- Verified: 89 Vitesttests/4Dateien, 3 Rusttests, scoped ESLint und Typecheck, fester Windowscollector echt lesend. Bericht unter Workspace-.lmzdev/artifacts/reports/2026-09-08-agent-team-recovery-and-diagnostics.md.
+- All source ownership returned. Root owns aggregate gates/build/live model and deployment acceptance. No app restart or production deployment by this agent.
+
+## 2026-09-08T11:18:45Z | Codex/gpu_runtime -> root | handoff
+- Ownership local_model.rs und neue local_model_gpu.rs completed-local/frozen. 52 fokussierte Tests, Clippyalltargets, fmt/diff gruen. Manifest backend/files und acceleration mit Root/Backend-Agent abgestimmt; residentOnly additiv. Root uebernimmt gemeinsamen Release und Hardware-Smoke. Kein Modellstart durch diesen Agenten. Bericht ../../.lmzdev/artifacts/reports/2026-09-08-local-model-gpu-runtime.md.
+
+## 2026-09-08 | Codex/root | Agententeam-Recovery und GPU completed-local
+- Gateway erneuert abgelaufene Bereitschaft ausschließlich am passenden residenten Modell, ohne Kaltstart oder Client-Verlängerung. Scope, Abbruch, Cooldown und signierte Grenzen bleiben erhalten.
+- Teilteams, konkreter Rollenstatus, Vorgängerübergaben und echte Rundenzählung umgesetzt; Projektdateiwerkzeuge ohne Ordnerbindung gesperrt. Neuer begrenzter lesender Windows-Systemdiagnosecollector integriert.
+- CUDA-/Vulkan-/Metal-Auswahl nach geprüftem Runtimegerät, VRAM-Fit, begrenzter CPU-Fallback und gemessener Berechnungsstatus. Die bestehende RTX3090 war bereits in Benutzung; kein CPU-only-Befund und kein gemessener Geschwindigkeitsgewinn.
+- 1312 Frontendtests, 142 Rusttests plus1bestehendignoriert, fokussiert48Backendtests/427Assertions und22Teamtests/132Assertions bestanden. Backendvollsuite578bestanden/5bestehendeWindows-POSIX-Schlüsseltestsfehlgeschlagen/4001Assertions; nicht pauschal grün. Statische Gates und Builds bestanden.
+- Release: app/src-tauri/target/release/tauri-app.exe,14809600Bytes,SHA256 F23CE4F71525E0F68D58C60417EBD304C2DDC43EB545D6DFD0E8CA28E5473E0A. Nicht gestartet; Nutzer-App unverändert. Neuer GPU-Smoke vor Modellstart wegen bestehender Nutzer-Runtime gestoppt. Kein Serverdeploy und kein vollständiger neuer nativer Agentenlauf.
+- Hauptbericht: E:/projekte/luczor/.lmzdev/artifacts/reports/2026-09-08-agent-teams-gpu.md; Build-JSON daneben. Bedienung app/docs/agent-teams-and-gpu.md. Root und alle Teilagenten geben Source-Ownership frei. Kein eigener Commit; vorhandene Zwischencommits erhalten.
+
+## 2026-09-08T11:37:20Z | Codex/agent_team_recovery -> all | status
+- New bounded read-only storage probe maps canonical model path to volume disk extents; no model start, no data migration. Ownership new local_model_storage.rs and four windows-sys feature additions only. Integration is gpu_runtime-owned.
+
+## 2026-09-08T11:52:02Z | Codex/agent_team_recovery -> Root,gpu_runtime | handoff
+- Scopecompleted/frozen: neue commands/local_model_storage.rs, vier genehmigte windows-sysFeatureflags. gpu_runtime integriert über local_model.rs::storage_probe.
+- Verified:6StorageUnitTests plus1expliziterreadonlyHardwaretestbestanden; C/extendedC/D NVMe, E USBSSD; Format/Diffcheck. KeinModellstart/Dateischreiben/Prozessstop.
+- Report:Workspace-.lmzdev/artifacts/reports/2026-09-08-native-model-storage-probe.md. Optionaler tatsächlicherGGUF-Metadatencheck viaenv ist imLive-Testvorbereitet; gpu_runtimeführtihnimGesamtgateaus. AlleSourceownershipzurück.
+
+## 2026-09-08T11:53:05Z | Codex/agent_team_recovery -> Root | final storage evidence
+- gpu_runtime confirmed actualGGUF metadata probe:ready,NVMe,fixed=true,removable=false,total998980411392bytes,available769688969216bytes. No model content or inference. Sharedgate reported155Rustpassed/3ignored plus1explicitstorageSmoke,Clippyalltargets green. Reportupdated; sourceownershipremainsfree.
+
+## 2026-09-08T12:15:13Z | Codex/agent_team_recovery -> all | status
+
+- Message: Started: bounded DXGI adapter inventory, no model starts
+
+## 2026-09-08T12:22:56Z | Codex/agent_team_recovery -> Root,gpu_runtime | handoff
+- Completed new local_model_accelerators.rs plus approved direct windows=0.62.2 dependency and matching Cargo.lock reference; gpu_runtime integrated local_model.rs fields/snapshot helper.
+- Verified: 8 focused Rust tests, 1 explicit read-only DXGI RTX3090 probe, scoped rustfmt/diff. No model start or process termination. Source frozen/free; full Rust/Clippy at gpu_runtime.
+- Report under workspace .lmzdev/artifacts/reports/2026-09-08-native-dxgi-inventory.md; real AMD/Intel acceptance remains open.
+
+## 2026-09-08T13:51:11Z | Codex/agent_team_recovery -> all | status
+
+- Message: Started: device-local resources settings UI and measured runtime status
+
+## 2026-09-08T14:09:39Z | Codex/agent_team_recovery -> Root | handoff
+- UI scope complete: new LocalResourceSettings.vue; ExecutionSettingsSection, LocalResourceSummary, LocalModelStatus and status presenter; UI/status tests, three new real scheduler/controller integration cases, actual-component synthetic fixture.
+- 36 focused tests plus scoped ESLint/Prettier/diff passed. Full build typecheck pending output. Root accepted independent workflow findings and owns cleanup fixes/native implementation.
+- Own browser provider unavailable; Root now checking fixture with its CUA Tab9. Leave own Vite PID86184 on port1448 for Root cleanup. Report workspace .lmzdev/artifacts/reports/2026-09-08-device-resource-settings-ui.md. All source frozen and returned.

@@ -94,3 +94,22 @@ Record durable decisions with date, context, decision, and consequences.
 - Auf ausdrücklichen Nutzerwunsch ersetzen eigene lokale Audioaufnahmen optional die textbasierten Steuerwörter. Vergleich über begrenzte MFCC/DTW-Templates vor Whisper; keine Serverübertragung, Sprecheridentifizierung oder Behauptung eines trainierten Wake-Word-Modells.
 - Aufnahmen werden einzeln gesprochen, auf Länge/Signal geprüft und lokal getrennt von allgemeinen Einstellungen gespeichert. Ähnliche Referenzen werden abgelehnt; Probe ohne Senden. Verbesserte Erkennung ist mikrofonabhängig und muss persönlich getestet werden.
 - Close-Word sendet weiterhin, Stille sendet nur nach bestehender separater Zustimmung; Timer nun auch in Wake-Word. Mini erhält eng begrenzte Voice-Kommandos statt allgemeinen Store- oder Credential-Zugriff.
+
+## 2026-09-08T11:16:16Z | Lokale Geräteanalyse und Teilteams
+- Nicht gebundene Projektdateien werden im Team nicht als ausführbare Werkzeuge angeboten; Gerätemetadaten brauchen keinen Projektordner. Ein fehlendes externes Rollenmodell blockiert andere freigegebene Rollen nicht.
+- Systemdiagnose bleibt lesend, lokal/ephemeral, ohne freie Shellparameter oder sensible Datei-/Prozessargumente. Fehlende Sicherheitsquellen werden als unbekannt behandelt. Backend-Reasoncodes werden über feste lokale Texte erklärt.
+
+## 2026-09-08T11:18:45Z | GPU-Auswahl und nachgewiesene Ausfuehrung
+- Fehlende explizite GPU-CLI-Flags beweisen keinen CPU-Betrieb; GPU/Hybridstatus benoetigt Startup-Offloadzaehler. Die Auswahl verwendet den verifizierten Build und --fit bei unveraendertem Kontext. Ein CPU-Neustart ist nur ohne signierte GPU-Pflicht und innerhalb desselben Startupbudgets erlaubt. Resident-only-Erneuerung darf niemals einen Kaltstart oder Benchmark ausloesen und stoppt keinen anderen Modellprozess.
+
+## 2026-09-08T11:52:02Z | Speicherhardware nur nach echtem Volumenmapping
+- Lokale Windows-VolumeGUID/DiskExtents/StorageProperty-Abfragen ersetzen Speichertyp-/Busannahmen für die signierte NVMe-Zulassung. Alle Extents müssen passen; unbekannt bleibt unbekannt. USBSSD bleibt auch bei Windowsfixed=true ein USB-Bus.
+- Treiber-I/O hat einen bounded Caller und einen einzigen Worker; Best-effort CancelSynchronousIo beendet nur eigene I/O, ausstehende Buffer bleiben gültig. Keine Datenmigration oder Performancebehauptung aus Klassifizierungsdaten.
+
+## 2026-09-08T12:22:56Z | GPU inventory is not inference readiness
+- DXGI backend stays unknown and free VRAM null. SharedSystemMemory is an upper limit, not extra dedicated/free memory; process budgets are not exported as global free VRAM. Runtime policy checks still decide inference eligibility.
+- One DXGI worker with two-second caller deadline retains its permit if a driver stalls; no forced thread cancellation. NVIDIA stays NVML; partial NVML multi-GPU coverage may conservatively under-report NVIDIA rather than guess identity.
+
+## 2026-09-08T14:09:39Z | Separate device resources save and actual runtime status
+- Resource edits use an independent native-backed save action, keeping API identity/bootstrap unchanged. Reset stages an editable draft; concurrency requires explicit reload, not automatic overwrite. Applied config is distinct from measured GPU computation.
+- DXGI shared-system limits are not free VRAM. UI reserve values are protective targets rather than OS memory locks; native hardware and signed constraints remain authoritative.

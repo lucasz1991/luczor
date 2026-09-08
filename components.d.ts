@@ -37,6 +37,8 @@ declare module 'vue' {
     JarvisHud: typeof import('./src/components/JarvisHud.vue')['default']
     LoadingState: typeof import('./src/components/ai/LoadingState.vue')['default']
     LocalModelStatus: typeof import('./src/components/LocalModelStatus.vue')['default']
+    LocalResourceSettings: typeof import('./src/components/LocalResourceSettings.vue')['default']
+    LocalResourceSummary: typeof import('./src/components/LocalResourceSummary.vue')['default']
     MiniChatSurface: typeof import('./src/components/mini/MiniChatSurface.vue')['default']
     MiniChatWindow: typeof import('./src/components/mini/MiniChatWindow.vue')['default']
     PayloadApproval: typeof import('./src/components/ai/PayloadApproval.vue')['default']

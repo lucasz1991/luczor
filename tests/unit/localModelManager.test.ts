@@ -64,6 +64,86 @@ const successfulResult: InferenceResult = {
 }
 
 describe('LocalModelManager runtime safety', () => {
+  it('rejects a readiness renewal from a different resource configuration', async () => {
+    const model = await release()
+    const old = { ...readiness(model), resourceRevision: 3 }
+    const transport: LocalRuntimeTransport = {
+      prepare: vi.fn(async () => ({ ...old, resourceRevision: 4, validUntilMs: Date.parse('2026-08-30T12:50:00Z') })),
+      stream: vi.fn(async () => successfulResult),
+      cancel: vi.fn(),
+      stop: vi.fn(),
+    }
+    const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:41:00Z'))
+    const gateway = manager.gateway(model, old, catalogBinding, 'b'.repeat(64))
+    await expect(
+      gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'continue' }] })
+    ).rejects.toMatchObject({ code: 'readiness_unavailable' })
+    expect(transport.prepare).toHaveBeenCalledWith(model.id, catalogBinding, 3)
+    expect(transport.stream).not.toHaveBeenCalled()
+  })
+  it('renews an expired native lease between rounds and reuses the renewed evidence', async () => {
+    const model = await release()
+    let clock = Date.parse('2026-08-30T12:30:00Z')
+    const prepare = vi.fn(async () => ({ ...readiness(model), verifiedAtMs: clock, validUntilMs: clock + 60_000 }))
+    const transport: LocalRuntimeTransport = {
+      prepare,
+      stream: vi.fn(async () => successfulResult),
+      cancel: vi.fn(),
+      stop: vi.fn(),
+    }
+    const manager = new LocalModelManager(transport, () => new Date(clock))
+    const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+    const request = { messages: [{ role: 'user' as const, content: 'continue the existing task' }] }
+    await gateway.streamChatWithTools(request)
+    expect(prepare).not.toHaveBeenCalled()
+    clock += 11 * 60_000
+    await gateway.streamChatWithTools(request)
+    await gateway.streamChatWithTools(request)
+    expect(prepare).toHaveBeenCalledExactlyOnceWith(model.id, catalogBinding, 0)
+    expect(transport.stream).toHaveBeenCalledTimes(3)
+    expect(transport.stop).not.toHaveBeenCalled()
+  })
+
+  it.each(['catalog', 'abort', 'mismatched', 'expired', 'failure'])(
+    'never infers after %s during lease renewal',
+    async outcome => {
+      const model = await release()
+      const controller = new AbortController()
+      const clock = Date.parse('2026-08-30T12:41:00Z')
+      const prepare = vi.fn(async () => {
+        if (outcome === 'catalog') manager.invalidateCatalogBoundary()
+        if (outcome === 'abort') controller.abort()
+        if (outcome === 'failure') throw new Error('private runtime diagnostics')
+        return {
+          ...readiness(model),
+          validUntilMs: outcome === 'expired' ? clock - 1 : clock + 60_000,
+          artifactSha256: outcome === 'mismatched' ? 'c'.repeat(64) : model.artifact!.sha256,
+        }
+      })
+      const transport: LocalRuntimeTransport = { prepare, stream: vi.fn(), cancel: vi.fn(), stop: vi.fn() }
+      const manager = new LocalModelManager(transport, () => new Date(clock))
+      const turn = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64)).streamChatWithTools({
+        messages: [{ role: 'user', content: 'continue' }],
+        signal: controller.signal,
+      })
+      await expect(turn).rejects.toMatchObject(
+        outcome === 'abort'
+          ? { name: 'AbortError' }
+          : {
+              code:
+                outcome === 'catalog'
+                  ? 'catalog_binding_stale'
+                  : outcome === 'failure'
+                    ? 'readiness_refresh_failed'
+                    : 'readiness_unavailable',
+            }
+      )
+      expect(transport.stream).not.toHaveBeenCalled()
+      expect(transport.stop).not.toHaveBeenCalled()
+      expect(manager.getHealth(model).consecutiveFailures).toBe(0)
+    }
+  )
+
   it.each(['runtime_context_exceeded', 'runtime_chat_history_rejected', 'runtime_tool_contract_rejected'])(
     'keeps the model admissible after %s instead of cooling down or stopping it',
     async code => {
@@ -199,6 +279,7 @@ describe('LocalModelManager runtime safety', () => {
   it('enters the signed cooldown only after consecutive runtime failures', async () => {
     const model = await release()
     const transport: LocalRuntimeTransport = {
+      prepare: vi.fn(),
       stream: vi.fn(async () => {
         throw new Error('runtime failure')
       }),
@@ -206,9 +287,10 @@ describe('LocalModelManager runtime safety', () => {
       stop: vi.fn(async () => undefined),
     }
     let request = 0
+    let clock = Date.parse('2026-08-30T12:39:59Z')
     const manager = new LocalModelManager(
       transport,
-      () => new Date('2026-08-30T12:30:00Z'),
+      () => new Date(clock),
       () => `request-${++request}`
     )
     const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
@@ -222,10 +304,12 @@ describe('LocalModelManager runtime safety', () => {
       state: 'cooldown',
       consecutiveFailures: model.healthPolicy.maxConsecutiveFailures,
     })
+    clock += 2_000
     await expect(
       gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'no retry' }] })
     ).rejects.toMatchObject({ code: 'model_cooldown' })
     expect(transport.stream).toHaveBeenCalledTimes(model.healthPolicy.maxConsecutiveFailures)
+    expect(transport.prepare).not.toHaveBeenCalled()
   })
 
   it('surfaces only allow-listed native runtime diagnostics', async () => {

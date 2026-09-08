@@ -26,11 +26,23 @@ use uuid::Uuid;
 
 use super::ensure_main_webview;
 
+#[path = "local_model_accelerators.rs"]
+mod accelerator_inventory;
 #[path = "local_model_context.rs"]
 mod context_budget;
 use context_budget::ContextUsage;
+#[path = "local_model_gpu.rs"]
+mod gpu_runtime;
 #[path = "local_model_messages.rs"]
 mod local_messages;
+#[path = "local_model_acceptance.rs"]
+mod resource_acceptance;
+#[path = "local_model_resource_config.rs"]
+pub mod resource_config;
+#[path = "local_model_resources.rs"]
+mod resource_runtime;
+#[path = "local_model_storage.rs"]
+mod storage_probe;
 #[path = "local_model_trust.rs"]
 mod trust;
 
@@ -46,6 +58,8 @@ const MAX_TOOL_ARGUMENT_CHARS: usize = 1024 * 1024;
 const MAX_SIGNED_READ_TIMEOUT_MS: u64 = 120_000;
 const MAX_INFERENCE_TOTAL_SECONDS: u64 = 30 * 60;
 const MAX_RUNTIME_PATH_CONFIG_BYTES: u64 = 16 * 1024;
+const RESIDENT_RENEWAL_UNAVAILABLE: &str =
+    "Resident local model is unavailable for readiness renewal.";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,11 +143,36 @@ struct RuntimeArtifact {
     sha256: String,
     min_context_tokens: u32,
     max_context_tokens: u32,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "gpu_runtime::deserialize_present_option"
+    )]
+    backend: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "gpu_runtime::deserialize_present_option"
+    )]
+    files: Option<Vec<RuntimeSupportFile>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct RuntimeSupportFile {
+    name: String,
+    sha256: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct CapacityPolicy {
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "gpu_runtime::deserialize_present_option"
+    )]
+    accelerator_memory_scope: Option<String>,
     min_total_ram_bytes: Option<u64>,
     min_available_ram_bytes: Option<u64>,
     min_vram_bytes: Option<u64>,
@@ -184,6 +223,8 @@ struct VerifiedCatalog {
 
 #[derive(Debug)]
 struct ManagedRuntime {
+    resource_revision: u64,
+    benchmark: Option<resource_acceptance::BenchmarkMeasurement>,
     child: Option<Child>,
     model_id: String,
     scope: RuntimeScope,
@@ -191,7 +232,11 @@ struct ManagedRuntime {
     port: u16,
     api_key: String,
     api_key_file: PathBuf,
+    acceleration: Arc<Mutex<gpu_runtime::RuntimeAcceleration>>,
+    resource_plan: resource_runtime::ResourcePlan,
+    model_storage: ModelStorage,
     _runtime_guard: File,
+    _support_guards: Vec<File>,
     _model_guard: File,
     _process_lifetime_guard: ProcessLifetimeGuard,
 }
@@ -223,6 +268,7 @@ struct VerifiedArtifactFiles {
     runtime_path: PathBuf,
     model_path: PathBuf,
     runtime_guard: File,
+    support_guards: Vec<File>,
     model_guard: File,
 }
 
@@ -277,6 +323,7 @@ impl Drop for ManagedRuntime {
 
 #[derive(Debug, Clone)]
 struct ReadinessRecord {
+    resource_revision: u64,
     manifest_hash: String,
     artifact_hash: String,
     runtime_hash: String,
@@ -286,6 +333,9 @@ struct ReadinessRecord {
 
 #[derive(Debug, Default)]
 struct ManagerState {
+    resource_settings: resource_config::ResourceSettings,
+    resource_settings_loaded: bool,
+    resource_work_leases: HashSet<String>,
     catalog: Option<VerifiedCatalog>,
     runtime: Option<ManagedRuntime>,
     readiness: HashMap<String, ReadinessRecord>,
@@ -430,6 +480,7 @@ pub struct ManifestVerificationResult {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativeReadiness {
+    resource_revision: u64,
     model_release_id: String,
     manifest_payload_sha256: String,
     artifact_sha256: String,
@@ -442,12 +493,16 @@ pub struct NativeReadiness {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalModelStatus {
+    resource_config: resource_config::LocalResourceConfigState,
     manifest_available: bool,
     catalog_version: Option<u64>,
     policy_version: Option<u64>,
     active_model_id: Option<String>,
     state: String,
     reason_code: Option<String>,
+    acceleration: Option<gpu_runtime::RuntimeAcceleration>,
+    resource_plan: Option<resource_runtime::ResourcePlan>,
+    model_storage: Option<ModelStorage>,
     readiness: Vec<NativeReadiness>,
 }
 
@@ -463,15 +518,18 @@ pub struct HardwareSnapshot {
     memory: MemorySnapshot,
     accelerators: Vec<AcceleratorSnapshot>,
     storage: Vec<StorageSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    configured_model_storage_id: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CpuSnapshot {
     logical_cores: usize,
+    available_logical_cores: usize,
     physical_cores: Option<usize>,
     features: Vec<String>,
-    load_percent: f32,
+    load_percent: Option<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -497,6 +555,9 @@ pub struct AcceleratorSnapshot {
     name: String,
     total_bytes: Option<u64>,
     available_bytes: Option<u64>,
+    detection_source: String,
+    dedicated_system_bytes: Option<u64>,
+    shared_system_limit_bytes: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -510,6 +571,30 @@ pub struct StorageSnapshot {
     available_bytes: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelStorage {
+    storage_type: String,
+    bus_types: Vec<String>,
+    fixed: Option<bool>,
+    available_bytes: Option<u64>,
+    total_bytes: Option<u64>,
+    reason_code: Option<String>,
+}
+
+impl From<&storage_probe::StorageSnapshot> for ModelStorage {
+    fn from(snapshot: &storage_probe::StorageSnapshot) -> Self {
+        Self {
+            storage_type: snapshot.storage_type.clone(),
+            bus_types: snapshot.bus_types.clone(),
+            fixed: snapshot.fixed,
+            available_bytes: snapshot.available_bytes,
+            total_bytes: snapshot.total_bytes,
+            reason_code: snapshot.reason_code.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CatalogBindingInput {
@@ -521,6 +606,7 @@ pub struct CatalogBindingInput {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalInferenceRequest {
+    resource_revision: Option<u64>,
     request_id: String,
     scope_digest: String,
     model_release_id: String,
@@ -744,11 +830,15 @@ fn validate_discovery_binding(
 }
 
 #[tauri::command]
-pub async fn local_model_status(window: WebviewWindow) -> Result<LocalModelStatus, String> {
+pub async fn local_model_status(
+    window: WebviewWindow,
+    app: AppHandle,
+) -> Result<LocalModelStatus, String> {
     ensure_main_webview(&window)?;
     let mut guard = state()
         .lock()
         .map_err(|_| "Local model manager is unavailable.".to_string())?;
+    resource_config::ensure_loaded(&app, &mut guard)?;
     // A retained process handle is not proof that llama.cpp is still alive.
     // Do not cancel or detach an in-flight operation from this status read;
     // normal preparation/request cleanup still owns the runtime lifetime.
@@ -765,6 +855,7 @@ pub async fn local_model_status(window: WebviewWindow) -> Result<LocalModelStatu
         .iter()
         .filter(|(_, item)| item.valid_until_ms > now)
         .map(|(model_id, item)| NativeReadiness {
+            resource_revision: item.resource_revision,
             model_release_id: model_id.clone(),
             manifest_payload_sha256: item.manifest_hash.clone(),
             artifact_sha256: item.artifact_hash.clone(),
@@ -800,12 +891,28 @@ pub async fn local_model_status(window: WebviewWindow) -> Result<LocalModelStatu
         "stopped"
     };
     Ok(LocalModelStatus {
+        resource_config: guard.resource_settings.state.clone(),
         manifest_available: guard.catalog.is_some(),
         catalog_version,
         policy_version,
         active_model_id,
         state: state_name.into(),
         reason_code: guard.last_error.clone(),
+        acceleration: guard.runtime.as_ref().and_then(|runtime| {
+            runtime
+                .acceleration
+                .lock()
+                .ok()
+                .map(|status| status.clone())
+        }),
+        resource_plan: guard
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.resource_plan.clone()),
+        model_storage: guard
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.model_storage.clone()),
         readiness,
     })
 }
@@ -817,9 +924,10 @@ fn managed_child_is_running(child: Option<&mut Child>) -> bool {
 #[tauri::command]
 pub async fn local_model_hardware_snapshot(
     window: WebviewWindow,
+    app: AppHandle,
 ) -> Result<HardwareSnapshot, String> {
     ensure_main_webview(&window)?;
-    tauri::async_runtime::spawn_blocking(collect_hardware_snapshot)
+    tauri::async_runtime::spawn_blocking(move || collect_hardware_snapshot(Some(&app)))
         .await
         .map_err(|error| error.to_string())?
 }
@@ -830,10 +938,21 @@ pub async fn local_model_prepare(
     app: AppHandle,
     model_release_id: String,
     catalog_binding: CatalogBindingInput,
+    resident_only: Option<bool>,
+    resource_revision: Option<u64>,
 ) -> Result<NativeReadiness, String> {
     ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(move || {
-        prepare_release(&app, &model_release_id, &catalog_binding)
+        let started = Instant::now();
+        let result = prepare_release(
+            &app,
+            &model_release_id,
+            &catalog_binding,
+            resident_only.unwrap_or(false),
+            resource_revision,
+        );
+        resource_acceptance::record_opt_in(&app, started.elapsed(), &result);
+        result
     })
     .await
     .map_err(|error| error.to_string())?
@@ -848,6 +967,12 @@ pub async fn local_model_infer(
 ) -> Result<LocalInferenceResult, String> {
     ensure_main_webview(&window)?;
     validate_inference_request(&request)?;
+    {
+        let mut guard = state()
+            .lock()
+            .map_err(|_| "Local model manager is unavailable.")?;
+        resource_config::ensure_loaded(&app, &mut guard)?;
+    }
     tauri::async_runtime::spawn_blocking(move || infer_blocking(&app, request, on_event))
         .await
         .map_err(|error| error.to_string())?
@@ -1117,6 +1242,9 @@ fn rotate_manifest_session(
     }
     if let Some(previous) = guard.manifest_session_id.replace(session_id.to_string()) {
         guard.retired_manifest_sessions.insert(previous);
+        // A new main-renderer session cannot complete the old renderer's work.
+        // First registration preserves leases obtained before initial bootstrap.
+        guard.resource_work_leases.clear();
     }
     if let Some(cancel) = guard.cancel.take() {
         cancel.store(true, Ordering::SeqCst);
@@ -1239,6 +1367,17 @@ fn validate_tier_manifest(payload: &ManifestPayload) -> Result<(), String> {
 }
 
 fn validate_model(model: &ModelRelease) -> Result<(), String> {
+    if model
+        .capacity_policy
+        .accelerator_memory_scope
+        .as_deref()
+        .is_some_and(|scope| !matches!(scope, "single_device" | "compatible_group"))
+    {
+        return Err("Signed accelerator memory scope is invalid.".into());
+    }
+    if let Some(runtime) = &model.runtime {
+        gpu_runtime::validate_runtime_metadata(runtime)?;
+    }
     if !safe_id(&model.id)
         || model.execution_target != "local_llama_cpp"
         || !matches!(model.release_channel.as_str(), "experimental" | "stable")
@@ -1419,9 +1558,12 @@ fn persist_versions_in_connection(
 
 /// Trim only Luczor's own pageable working set, never the resident model or other apps.
 #[tauri::command]
-pub async fn local_model_recover_memory(window: WebviewWindow) -> Result<HardwareSnapshot, String> {
+pub async fn local_model_recover_memory(
+    window: WebviewWindow,
+    app: AppHandle,
+) -> Result<HardwareSnapshot, String> {
     ensure_main_webview(&window)?;
-    tauri::async_runtime::spawn_blocking(|| {
+    tauri::async_runtime::spawn_blocking(move || {
         #[cfg(windows)]
         {
             use windows_sys::Win32::System::{
@@ -1438,45 +1580,63 @@ pub async fn local_model_recover_memory(window: WebviewWindow) -> Result<Hardwar
                 *last = Some(Instant::now());
             }
         }
-        collect_hardware_snapshot()
+        collect_hardware_snapshot(Some(&app))
     })
     .await
     .map_err(|_| "Memory recovery task failed.".to_string())?
 }
 
-fn collect_hardware_snapshot() -> Result<HardwareSnapshot, String> {
-    let mut system = System::new();
-    system.refresh_memory();
-    system.refresh_cpu_all();
+fn collect_hardware_snapshot(app: Option<&AppHandle>) -> Result<HardwareSnapshot, String> {
+    let hardware = resource_runtime::sample_hardware()?;
     let accelerators = gpu_snapshot();
     let disks = Disks::new_with_refreshed_list();
-    let storage = disks
+    let storage_started = Instant::now();
+    let storage: Vec<_> = disks
         .list()
         .iter()
-        .enumerate()
-        .map(|(index, disk)| {
-            let media = match disk.kind() {
-                DiskKind::SSD => "ssd",
-                DiskKind::HDD => "hdd",
-                _ => "unknown",
+        .map(|disk| {
+            // Bound aggregate hardware inspection as well as each individual driver.
+            let evidence = (storage_started.elapsed() < Duration::from_secs(3))
+                .then(|| storage_probe::inspect_storage(disk.mount_point()));
+            let media = match evidence.as_ref().map(|item| item.storage_type.as_str()) {
+                Some("nvme" | "ssd") => "ssd",
+                Some("hdd") => "hdd",
+                Some("mixed") => "unknown",
+                _ => match disk.kind() {
+                    DiskKind::SSD => "ssd",
+                    DiskKind::HDD => "hdd",
+                    _ => "unknown",
+                },
             };
-            // sysinfo exposes media kind, not the physical bus. Never promote
-            // SSD to NVMe: a USB SSD would otherwise satisfy Flash policy.
-            let bus = if disk.is_removable() {
-                "usb"
-            } else {
-                "unknown"
-            };
+            let bus = evidence
+                .as_ref()
+                .filter(|item| item.bus_types.len() == 1)
+                .map(|item| item.bus_types[0].as_str())
+                .unwrap_or("unknown");
             StorageSnapshot {
-                id: format!("disk-{index}"),
+                id: storage_mount_id(disk.mount_point()),
                 mount_label: disk.mount_point().to_string_lossy().into_owned(),
                 bus_type: bus.into(),
                 media_type: media.into(),
-                removable: disk.is_removable(),
-                available_bytes: disk.available_space(),
+                removable: evidence
+                    .as_ref()
+                    .and_then(|item| item.removable)
+                    .unwrap_or(disk.is_removable()),
+                available_bytes: evidence
+                    .as_ref()
+                    .and_then(|item| item.available_bytes)
+                    .unwrap_or(disk.available_space()),
             }
         })
         .collect();
+    let configured_model_storage_id = match_configured_storage(
+        configured_model_directory(app),
+        disks
+            .list()
+            .iter()
+            .map(|disk| disk.mount_point().to_path_buf())
+            .collect(),
+    );
     Ok(HardwareSnapshot {
         schema_version: 1,
         snapshot_id: Uuid::new_v4().to_string(),
@@ -1484,14 +1644,15 @@ fn collect_hardware_snapshot() -> Result<HardwareSnapshot, String> {
         platform: std::env::consts::OS.into(),
         arch: std::env::consts::ARCH.into(),
         cpu: CpuSnapshot {
-            logical_cores: system.cpus().len(),
-            physical_cores: system.physical_core_count(),
+            logical_cores: hardware.logical_cores,
+            available_logical_cores: hardware.available_logical_cores,
+            physical_cores: hardware.physical_cores,
             features: Vec::new(),
-            load_percent: system.global_cpu_usage().clamp(0.0, 100.0),
+            load_percent: hardware.cpu_load,
         },
         memory: MemorySnapshot {
-            total_bytes: system.total_memory(),
-            available_bytes: system.available_memory(),
+            total_bytes: hardware.total_ram_bytes,
+            available_bytes: hardware.available_ram_bytes,
             resident_model: state().lock().ok().and_then(|mut manager| {
                 let runtime = manager.runtime.as_mut()?;
                 if !managed_child_is_running(runtime.child.as_mut()) {
@@ -1505,17 +1666,85 @@ fn collect_hardware_snapshot() -> Result<HardwareSnapshot, String> {
         },
         accelerators,
         storage,
+        configured_model_storage_id,
     })
 }
 
+fn match_configured_storage(
+    configured: Option<Option<PathBuf>>,
+    mounts: Vec<PathBuf>,
+) -> Option<Option<String>> {
+    configured.map(|path| {
+        path.and_then(|path| {
+            mounts
+                .iter()
+                .filter_map(|mount| {
+                    storage_mount_match_len(&path, mount).map(|length| (mount, length))
+                })
+                .max_by_key(|(_, length)| *length)
+                .map(|(mount, _)| storage_mount_id(mount))
+        })
+    })
+}
+
+fn storage_mount_id(mount: &Path) -> String {
+    let normalized = normalize_storage_mount_path(mount).unwrap_or_else(|| mount.to_path_buf());
+    format!(
+        "disk-{}",
+        &sha256_bytes(normalized.to_string_lossy().as_bytes())[..16]
+    )
+}
+
+/// None means never configured; Some(None) is an explicit but unresolved path.
+fn configured_model_directory(app: Option<&AppHandle>) -> Option<Option<PathBuf>> {
+    let directory = match (
+        std::env::var_os("LUCZOR_LLAMA_CPP_BIN"),
+        std::env::var_os("LUCZOR_LOCAL_MODEL_DIR"),
+    ) {
+        (Some(_), Some(directory)) => Some(PathBuf::from(directory)),
+        (None, None) => {
+            let app = app?;
+            let config_path = app
+                .path()
+                .app_data_dir()
+                .ok()?
+                .join("local-model")
+                .join("runtime-paths.json");
+            if !config_path.exists() {
+                return None;
+            }
+            read_runtime_path_config(&config_path)
+                .ok()
+                .map(|config| config.model_directory)
+        }
+        _ => None,
+    };
+    Some(directory.and_then(|directory| {
+        if !directory.is_absolute() || reject_runtime_reparse_points(&directory).is_err() {
+            return None;
+        }
+        fs::canonicalize(directory)
+            .ok()
+            .filter(|path| path.is_dir())
+    }))
+}
+
 fn gpu_snapshot() -> Vec<AcceleratorSnapshot> {
+    let mut devices = nvml_gpu_snapshot();
+    devices.extend(accelerator_inventory::supplemental_snapshot(
+        !devices.is_empty(),
+    ));
+    devices
+}
+
+fn nvml_gpu_snapshot() -> Vec<AcceleratorSnapshot> {
     let Ok(nvml) = Nvml::init() else {
         return Vec::new();
     };
     let Ok(count) = nvml.device_count() else {
         return Vec::new();
     };
-    (0..count)
+    (0..count.min(32))
         .filter_map(|index| {
             let device = nvml.device_by_index(index).ok()?;
             let memory = device.memory_info().ok();
@@ -1525,6 +1754,9 @@ fn gpu_snapshot() -> Vec<AcceleratorSnapshot> {
                 name: device.name().unwrap_or_else(|_| "NVIDIA GPU".into()),
                 total_bytes: memory.as_ref().map(|item| item.total),
                 available_bytes: memory.as_ref().map(|item| item.free),
+                detection_source: "nvml".into(),
+                dedicated_system_bytes: None,
+                shared_system_limit_bytes: None,
             })
         })
         .collect()
@@ -1534,13 +1766,21 @@ fn prepare_release(
     app: &AppHandle,
     model_id: &str,
     catalog_binding: &CatalogBindingInput,
+    resident_only: bool,
+    resource_revision: Option<u64>,
 ) -> Result<NativeReadiness, String> {
     if !safe_id(model_id) {
         return Err("Invalid model release id.".into());
     }
     let operation_id = format!("prepare-{}", Uuid::new_v4().simple());
+    {
+        let mut guard = state()
+            .lock()
+            .map_err(|_| "Local model manager is unavailable.")?;
+        resource_config::ensure_loaded(app, &mut guard)?;
+    }
     let (catalog, model, cancel) =
-        claim_prepare_operation(model_id, &operation_id, catalog_binding)?;
+        claim_prepare_operation(model_id, &operation_id, catalog_binding, resource_revision)?;
     let result = prepare_release_inner(
         app,
         catalog,
@@ -1548,15 +1788,47 @@ fn prepare_release(
         &operation_id,
         catalog_binding,
         cancel.clone(),
+        resident_only,
     );
     let outcome = if cancel.load(Ordering::SeqCst) {
         RequestOutcome::Cancelled
     } else if result.is_ok() {
         RequestOutcome::Success
+    } else if resident_only
+        && result
+            .as_ref()
+            .err()
+            .is_some_and(|error| error == RESIDENT_RENEWAL_UNAVAILABLE)
+    {
+        // A lease request for a missing/different resident is a precondition
+        // rejection. In particular, preserve another model's running process.
+        RequestOutcome::Rejected
     } else {
         RequestOutcome::Failed
     };
-    let mut runtime = release_operation(&operation_id, catalog_binding, outcome);
+    let failure_code = result.as_ref().err().and_then(|error| {
+        if error == resource_runtime::STARTUP_RAM_PRESSURE {
+            return Some("runtime_startup_ram_pressure");
+        }
+        [
+            "resource_gpu_selection_changed",
+            "resource_gpu_selection_ambiguous",
+            "resource_gpu_selection_unavailable",
+            "resource_threads_invalid",
+            "resource_ram_reserve_invalid",
+            "resource_vram_reserve_invalid",
+            "resource_thread_controls_unavailable",
+            "ram_budget_insufficient",
+            "runtime_gpu_measurement_unavailable",
+            "runtime_gpu_required_no_offload",
+            "cpu_mode_disallowed_by_manifest",
+            "runtime_gpu_capacity_unavailable",
+            "gpu_full_offload_not_verified",
+        ]
+        .into_iter()
+        .find(|code| *code == error)
+    });
+    let mut runtime = release_operation(&operation_id, catalog_binding, outcome, failure_code);
     if let Some(runtime) = runtime.as_mut() {
         runtime.stop();
     }
@@ -1567,11 +1839,13 @@ fn claim_prepare_operation(
     model_id: &str,
     operation_id: &str,
     catalog_binding: &CatalogBindingInput,
+    resource_revision: Option<u64>,
 ) -> Result<(VerifiedCatalog, ModelRelease, Arc<AtomicBool>), String> {
     let cancel = Arc::new(AtomicBool::new(false));
     let mut guard = state()
         .lock()
         .map_err(|_| "Local model manager is unavailable.".to_string())?;
+    resource_config::require_revision(&guard, resource_revision)?;
     let catalog = require_catalog_binding(&guard, catalog_binding)?.clone();
     if parse_rfc3339_millis(&catalog.payload.expires_at)? <= now_ms()? {
         return Err("Verified local-model manifest has expired.".into());
@@ -1598,6 +1872,7 @@ fn prepare_release_inner(
     operation_id: &str,
     catalog_binding: &CatalogBindingInput,
     cancel: Arc<AtomicBool>,
+    resident_only: bool,
 ) -> Result<NativeReadiness, String> {
     let artifact = model
         .artifact
@@ -1611,6 +1886,7 @@ fn prepare_release_inner(
     // This evidence lives on the process that passed the signed benchmark, and
     // its artifact handles remain locked throughout the resident lifetime.
     if !refresh_resident_runtime(&model, operation_id, catalog_binding, &cancel)? {
+        require_cold_start_allowed(resident_only)?;
         validate_capacity(&model)?;
         ensure_runtime(app, &model, None, operation_id, catalog_binding, &cancel)?;
         run_signed_benchmark(&model, operation_id, catalog_binding, &cancel)?;
@@ -1619,6 +1895,12 @@ fn prepare_release_inner(
     let valid_until =
         (verified_at + 10 * 60_000).min(parse_rfc3339_millis(&catalog.payload.expires_at)?);
     let readiness = ReadinessRecord {
+        resource_revision: state()
+            .lock()
+            .map_err(|_| "Local model manager is unavailable.")?
+            .resource_settings
+            .state
+            .applied_revision,
         manifest_hash: catalog.payload_hash.clone(),
         artifact_hash: artifact.sha256.clone(),
         runtime_hash: runtime.sha256.clone(),
@@ -1641,6 +1923,7 @@ fn prepare_release_inner(
         guard.readiness.insert(model.id.clone(), readiness.clone());
     }
     Ok(NativeReadiness {
+        resource_revision: readiness.resource_revision,
         model_release_id: model.id,
         manifest_payload_sha256: readiness.manifest_hash,
         artifact_sha256: readiness.artifact_hash,
@@ -1649,6 +1932,13 @@ fn prepare_release_inner(
         verified_at_ms: verified_at as i64,
         valid_until_ms: valid_until as i64,
     })
+}
+
+fn require_cold_start_allowed(resident_only: bool) -> Result<(), String> {
+    if resident_only {
+        return Err(RESIDENT_RENEWAL_UNAVAILABLE.into());
+    }
+    Ok(())
 }
 
 fn refresh_resident_runtime(
@@ -1665,9 +1955,11 @@ fn refresh_resident_runtime(
         if !operation_owns_catalog_binding(&guard, operation_id, catalog_binding) {
             return Err("Local-model preparation lost its catalog binding.".into());
         }
+        let resource_revision = guard.resource_settings.state.applied_revision;
         match guard.runtime.as_mut() {
             Some(resident)
                 if resident.model_id == model.id
+                    && resident.resource_revision == resource_revision
                     && resident.prepared_manifest_hash.as_deref()
                         == Some(catalog_binding.manifest_payload_sha256.as_str()) =>
             {
@@ -1722,16 +2014,21 @@ fn verify_configured_artifacts(
     if sha256_open_file_cancellable(&mut runtime_guard, cancel)? != runtime.sha256 {
         return Err("Configured llama.cpp runtime hash does not match the signed manifest.".into());
     }
+    let support_guards = gpu_runtime::verify_support_files(&runtime_path, runtime, cancel)?;
     Ok(VerifiedArtifactFiles {
         runtime_path,
         model_path,
         runtime_guard,
+        support_guards,
         model_guard,
     })
 }
 
 fn validate_capacity(model: &ModelRelease) -> Result<(), String> {
-    let snapshot = collect_hardware_snapshot()?;
+    // Capacity admission only needs current RAM here; disk and GPU checks use
+    // the actual verified model/runtime paths later in the startup boundary.
+    let mut system = System::new();
+    system.refresh_memory();
     let policy = &model.capacity_policy;
     let min_total_ram = policy
         .min_total_ram_bytes
@@ -1739,21 +2036,14 @@ fn validate_capacity(model: &ModelRelease) -> Result<(), String> {
     let min_ram = policy
         .min_available_ram_bytes
         .ok_or("Capacity policy has no RAM threshold.")?;
-    if snapshot.memory.total_bytes < min_total_ram {
+    if system.total_memory() < min_total_ram {
         return Err("Total RAM is below the signed model threshold.".into());
     }
-    if snapshot.memory.available_bytes < min_ram {
+    if system.available_memory() < min_ram {
         return Err("Available RAM is below the signed model threshold.".into());
     }
-    if let Some(min_vram) = policy.min_vram_bytes.filter(|value| *value > 0) {
-        if !snapshot
-            .accelerators
-            .iter()
-            .any(|gpu| gpu.total_bytes.is_some_and(|value| value >= min_vram))
-        {
-            return Err("GPU VRAM is below the signed model threshold.".into());
-        }
-    }
+    // GPU thresholds are checked against the selected, verified runtime device
+    // at startup. NVML alone cannot prove or disprove Vulkan/Metal availability.
     Ok(())
 }
 
@@ -1866,6 +2156,21 @@ fn run_signed_benchmark(
     let decode = decode_tps
         .filter(|value| value.is_finite() && *value > 0.0)
         .ok_or("Local benchmark did not report a valid decode throughput.")?;
+    {
+        let mut guard = state()
+            .lock()
+            .map_err(|_| "Local model manager is unavailable.")?;
+        if !operation_owns_catalog_binding(&guard, operation_id, catalog_binding) {
+            return Err("Local-model benchmark lost its catalog binding.".into());
+        }
+        if let Some(runtime) = guard.runtime.as_mut() {
+            runtime.benchmark = Some(resource_acceptance::BenchmarkMeasurement {
+                prompt_tokens_per_second: prompt,
+                decode_tokens_per_second: decode,
+                first_token_ms: first,
+            });
+        }
+    }
     if !benchmark_qualifies(thresholds, prompt, decode, first) {
         return Err("Local benchmark did not meet the signed capacity thresholds.".into());
     }
@@ -2023,7 +2328,7 @@ fn ensure_model_storage(
     path: &Path,
     artifact: &ModelArtifact,
     signed_min_storage_free_bytes: u64,
-) -> Result<(), String> {
+) -> Result<ModelStorage, String> {
     let disks = Disks::new_with_refreshed_list();
     let disk = disks
         .list()
@@ -2034,18 +2339,25 @@ fn ensure_model_storage(
         .max_by_key(|(_, length)| *length)
         .map(|(disk, _)| disk)
         .ok_or("Model storage could not be classified.")?;
+    let evidence = storage_probe::inspect_storage(path);
     let required = signed_min_storage_free_bytes.max(artifact.size_bytes);
-    let proven_bus = if disk.is_removable() {
+    let removable = !evidence.fixed.unwrap_or(!disk.is_removable())
+        || evidence.removable.unwrap_or(disk.is_removable());
+    let proven_bus = if evidence.bus_types.iter().any(|bus| bus == "usb") {
         "usb"
+    } else if evidence.fixed_nvme() {
+        "nvme"
     } else {
         "unknown"
     };
-    if !storage_class_eligible(&artifact.storage_class, disk.is_removable(), proven_bus)
-        || disk.available_space() < required
-    {
-        return Err("Model storage is removable or has insufficient free space.".into());
+    let eligible = storage_class_eligible(&artifact.storage_class, removable, proven_bus);
+    if !eligible || evidence.available_bytes.unwrap_or(disk.available_space()) < required {
+        return Err(
+            "Model storage does not satisfy the signed storage class or free-space threshold."
+                .into(),
+        );
     }
-    Ok(())
+    Ok(ModelStorage::from(&evidence))
 }
 
 fn storage_mount_match_len(path: &Path, mount_point: &Path) -> Option<usize> {
@@ -2087,7 +2399,7 @@ fn normalize_storage_mount_path(path: &Path) -> Option<PathBuf> {
 
 fn storage_class_eligible(storage_class: &str, removable: bool, proven_bus: &str) -> bool {
     match storage_class {
-        "fixed_storage" => !removable,
+        "fixed_storage" => !removable && proven_bus != "usb",
         "fixed_nvme_required" => !removable && proven_bus == "nvme",
         _ => false,
     }
@@ -2229,6 +2541,7 @@ fn claim_inference_operation(
     let mut guard = state()
         .lock()
         .map_err(|_| "Local model manager is unavailable.".to_string())?;
+    let resource_revision = resource_config::require_revision(&guard, request.resource_revision)?;
     let catalog = require_catalog_binding(&guard, &request.catalog_binding)?.clone();
     let now = now_ms()?;
     if parse_rfc3339_millis(&catalog.payload.expires_at)? <= now {
@@ -2270,6 +2583,7 @@ fn claim_inference_operation(
         .get(&model.id)
         .ok_or("Local model has no verified readiness evidence.")?;
     if readiness.valid_until_ms <= now
+        || readiness.resource_revision != resource_revision
         || readiness.manifest_hash != catalog.payload_hash
         || readiness.artifact_hash != artifact.sha256
         || readiness.runtime_hash != runtime.sha256
@@ -2296,8 +2610,10 @@ fn ensure_runtime(
         if !operation_owns_catalog_binding(&guard, operation_id, catalog_binding) {
             return Err("Local operation no longer owns the runtime.".into());
         }
+        let resource_revision = guard.resource_settings.state.applied_revision;
         let reuse = if let Some(runtime) = guard.runtime.as_mut() {
-            runtime.reuse(&model.id, scope_digest)?
+            runtime.resource_revision == resource_revision
+                && runtime.reuse(&model.id, scope_digest)?
         } else {
             false
         };
@@ -2354,16 +2670,11 @@ fn start_runtime(
     catalog_binding: &CatalogBindingInput,
     cancel: &AtomicBool,
 ) -> Result<ManagedRuntime, String> {
-    // A process may have exited since its readiness check; every replacement
-    // must still satisfy the signed cold-start memory requirement.
     validate_capacity(model)?;
-    // A readiness record proves a prior check, but every new process start
-    // re-hashes both configured files. Windows also keeps read-only share
-    // handles open for the complete runtime lifetime so the verified paths
-    // cannot be replaced or opened for write/delete before use.
-    let verified_artifacts = verify_configured_artifacts(app, model, catalog_binding, cancel)?;
-    ensure_model_storage(
-        &verified_artifacts.model_path,
+    // Every process replacement retains the signed hashes and immutable read guards.
+    let artifacts = verify_configured_artifacts(app, model, catalog_binding, cancel)?;
+    let model_storage = ensure_model_storage(
+        &artifacts.model_path,
         model
             .artifact
             .as_ref()
@@ -2372,6 +2683,187 @@ fn start_runtime(
             .capacity_policy
             .min_storage_free_bytes
             .ok_or("Capacity policy has no storage threshold.")?,
+    )?;
+    require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)?;
+    let metadata = model
+        .runtime
+        .as_ref()
+        .ok_or("Runtime metadata is unavailable.")?;
+    let settings = state()
+        .lock()
+        .map_err(|_| "Local model manager is unavailable.")?
+        .resource_settings
+        .clone();
+    let config = &settings.state.applied;
+    let mut plan = gpu_runtime::choose_acceleration(
+        &artifacts.runtime_path,
+        metadata,
+        model.capacity_policy.min_vram_bytes.unwrap_or_default(),
+        model
+            .capacity_policy
+            .accelerator_memory_scope
+            .as_deref()
+            .unwrap_or("single_device"),
+        model
+            .artifact
+            .as_ref()
+            .map_or(0, |artifact| artifact.size_bytes),
+        config,
+        &settings.applied_bindings,
+        settings.state.applied_revision,
+        cancel,
+    )?;
+    plan.status.resource_revision = settings.state.applied_revision;
+    plan.status.requested_mode = config.mode.clone();
+    if config.mode == "gpu" && !plan.uses_gpu() && plan.status.fallback_reason_code.is_none() {
+        plan.status.fallback_reason_code = Some("gpu_mode_auto_fallback_unavailable".into());
+    }
+    require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)?;
+    let gpu_required = model
+        .capacity_policy
+        .min_vram_bytes
+        .is_some_and(|bytes| bytes > 0);
+    if gpu_required && !plan.uses_gpu() {
+        return Err("No compatible GPU runtime satisfies the signed model capacity policy.".into());
+    }
+    let timeout = Duration::from_secs(
+        model
+            .capacity_policy
+            .max_startup_seconds
+            .ok_or("Model startup threshold is unavailable.")?,
+    );
+    let started = Instant::now();
+    let mut result = start_runtime_attempt(
+        app,
+        model,
+        scope_digest,
+        operation_id,
+        catalog_binding,
+        cancel,
+        &artifacts,
+        &plan,
+        &model_storage,
+        timeout,
+    );
+    if plan.require_full_offload
+        && result.as_ref().err().is_some_and(|error| {
+            matches!(
+                error.as_str(),
+                "runtime_gpu_capacity_unavailable" | "gpu_full_offload_not_verified"
+            )
+        })
+        && !cancel.load(Ordering::SeqCst)
+        && started.elapsed() < timeout
+    {
+        let automatic =
+            gpu_runtime::auto_fallback(&plan, result.as_ref().err().map_or("", String::as_str));
+        result = start_runtime_attempt(
+            app,
+            model,
+            scope_digest,
+            operation_id,
+            catalog_binding,
+            cancel,
+            &artifacts,
+            &automatic,
+            &model_storage,
+            timeout.saturating_sub(started.elapsed()),
+        );
+    }
+    match result {
+        Err(error)
+            if plan.uses_gpu()
+                && error != resource_runtime::STARTUP_RAM_PRESSURE
+                && error == "runtime_gpu_capacity_unavailable"
+                && !gpu_required
+                && !cancel.load(Ordering::SeqCst)
+                && started.elapsed() < timeout =>
+        {
+            // One owned-process retry only, before any user inference. A CPU fallback
+            // must still meet the original signed RAM and benchmark requirements.
+            require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)?;
+            validate_capacity(model)?;
+            let mut cpu = gpu_runtime::AccelerationPlan::cpu("runtime_gpu_start_failed")
+                .with_options(plan.runtime_options.clone());
+            cpu.status.resource_revision = settings.state.applied_revision;
+            cpu.status.requested_mode = config.mode.clone();
+            cpu.status.fallback_reason_code = Some(
+                if config.mode == "gpu" {
+                    "gpu_mode_auto_fallback_cpu"
+                } else {
+                    "runtime_gpu_capacity_cpu_fallback"
+                }
+                .into(),
+            );
+            start_runtime_attempt(
+                app,
+                model,
+                scope_digest,
+                operation_id,
+                catalog_binding,
+                cancel,
+                &artifacts,
+                &cpu,
+                &model_storage,
+                timeout.saturating_sub(started.elapsed()),
+            )
+        }
+        other => other,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start_runtime_attempt(
+    app: &AppHandle,
+    model: &ModelRelease,
+    scope_digest: Option<&str>,
+    operation_id: &str,
+    catalog_binding: &CatalogBindingInput,
+    cancel: &AtomicBool,
+    artifacts: &VerifiedArtifactFiles,
+    plan: &gpu_runtime::AccelerationPlan,
+    model_storage: &ModelStorage,
+    timeout: Duration,
+) -> Result<ManagedRuntime, String> {
+    let runtime_guard = artifacts
+        .runtime_guard
+        .try_clone()
+        .map_err(|_| "Runtime guard could not be retained.")?;
+    let model_guard = artifacts
+        .model_guard
+        .try_clone()
+        .map_err(|_| "Model guard could not be retained.")?;
+    let support_guards = artifacts
+        .support_guards
+        .iter()
+        .map(|file| {
+            file.try_clone()
+                .map_err(|_| "Runtime support guard could not be retained.")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let context = model
+        .context_limit
+        .ok_or("Model context limit is unavailable.")?;
+    // This is a cold-start snapshot: resident lease refreshes never enter here.
+    // Recompute it for a CPU fallback after the failed owned GPU process exited.
+    let hardware = resource_runtime::sample_hardware()?;
+    let settings = state()
+        .lock()
+        .map_err(|_| "Local model manager is unavailable.")?
+        .resource_settings
+        .clone();
+    let resource_plan = resource_runtime::plan_resources_configured(
+        &hardware,
+        context,
+        model
+            .artifact
+            .as_ref()
+            .map_or(0, |artifact| artifact.size_bytes),
+        &plan.status.backend,
+        &plan.runtime_options,
+        &settings.state.applied,
+        plan.gpu_budget_bytes,
+        settings.state.applied_revision,
     )?;
     let port = reserve_loopback_port()?;
     let api_key = Uuid::new_v4().simple().to_string();
@@ -2387,14 +2879,11 @@ fn start_runtime(
     require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)?;
     let api_key_file = key_dir.join(format!("{}.key", Uuid::new_v4()));
     write_private_file(&api_key_file, api_key.as_bytes())?;
-    let context = model
-        .context_limit
-        .ok_or("Model context limit is unavailable.")?;
-    let mut command = Command::new(&verified_artifacts.runtime_path);
+    let mut command = Command::new(&artifacts.runtime_path);
     command
         .args([
             "--model",
-            verified_artifacts.model_path.to_string_lossy().as_ref(),
+            artifacts.model_path.to_string_lossy().as_ref(),
             "--alias",
             &model.id,
             "--host",
@@ -2411,10 +2900,15 @@ fn start_runtime(
             &context.to_string(),
             "--no-cache-prompt",
         ])
+        .args(&plan.arguments)
+        .args(resource_plan.arguments())
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
+    if let Some(directory) = artifacts.runtime_path.parent() {
+        command.current_dir(directory);
+    }
     copy_minimal_environment(&mut command);
     configure_process(&mut command);
     if let Err(error) = require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)
@@ -2437,7 +2931,13 @@ fn start_runtime(
             return Err(error);
         }
     };
+    let acceleration = Arc::new(Mutex::new(plan.status.clone()));
+    if let Some(stderr) = child.stderr.take() {
+        gpu_runtime::monitor_startup(stderr, acceleration.clone());
+    }
     let mut runtime = ManagedRuntime {
+        resource_revision: settings.state.applied_revision,
+        benchmark: None,
         child: Some(child),
         model_id: model.id.clone(),
         scope: scope_digest.map_or(RuntimeScope::Prepared, |digest| {
@@ -2447,20 +2947,48 @@ fn start_runtime(
         port,
         api_key,
         api_key_file,
-        _runtime_guard: verified_artifacts.runtime_guard,
-        _model_guard: verified_artifacts.model_guard,
+        acceleration,
+        resource_plan,
+        model_storage: model_storage.clone(),
+        _runtime_guard: runtime_guard,
+        _support_guards: support_guards,
+        _model_guard: model_guard,
         _process_lifetime_guard: process_lifetime_guard,
     };
-    let timeout = Duration::from_secs(
-        model
-            .capacity_policy
-            .max_startup_seconds
-            .ok_or("Model startup threshold is unavailable.")?,
-    );
+    let health_started = Instant::now();
     if let Err(error) = await_health(&mut runtime, timeout, cancel) {
+        let capacity_failure = gpu_runtime::capacity_failure(&runtime.acceleration);
+        runtime.stop();
+        return Err(
+            if capacity_failure && error != resource_runtime::STARTUP_RAM_PRESSURE {
+                "runtime_gpu_capacity_unavailable".into()
+            } else {
+                error
+            },
+        );
+    }
+    if let Err(error) = gpu_runtime::finish_measurement(
+        &runtime.acceleration,
+        plan,
+        timeout.saturating_sub(health_started.elapsed()),
+        cancel,
+    ) {
         runtime.stop();
         return Err(error);
     }
+    if model
+        .capacity_policy
+        .min_vram_bytes
+        .is_some_and(|bytes| bytes > 0)
+        && runtime
+            .acceleration
+            .lock()
+            .is_ok_and(|status| status.offloaded_layers == Some(0))
+    {
+        runtime.stop();
+        return Err("runtime_gpu_required_no_offload".into());
+    }
+    runtime.resource_plan.confirm_started();
     Ok(runtime)
 }
 
@@ -2471,10 +2999,19 @@ fn await_health(
 ) -> Result<(), String> {
     let client = local_http_client(Duration::from_secs(2), Duration::from_secs(2))?;
     let started = Instant::now();
+    let mut ram_guard =
+        resource_runtime::StartupMemoryGuard::new(runtime.resource_plan.total_ram_bytes());
+    let mut ram_snapshot = System::new();
     while started.elapsed() < timeout {
         if cancel.load(Ordering::SeqCst) {
             return Err("Local runtime startup was cancelled.".into());
         }
+        ram_snapshot.refresh_memory();
+        ram_guard.observe(
+            ram_snapshot.total_memory(),
+            ram_snapshot.available_memory(),
+            Instant::now(),
+        )?;
         let child = runtime
             .child
             .as_mut()
@@ -2922,6 +3459,7 @@ fn release_operation(
     operation_id: &str,
     catalog_binding: &CatalogBindingInput,
     outcome: RequestOutcome,
+    failure_code: Option<&str>,
 ) -> Option<ManagedRuntime> {
     let mut guard = state().lock().ok()?;
     if !operation_owns_catalog_binding(&guard, operation_id, catalog_binding) {
@@ -2935,7 +3473,7 @@ fn release_operation(
             None
         }
         RequestOutcome::Failed => {
-            guard.last_error = Some("local_prepare_failed".into());
+            guard.last_error = Some(failure_code.unwrap_or("local_prepare_failed").into());
             guard.runtime.take()
         }
     }
@@ -3436,6 +3974,44 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn resource_work_leases_survive_catalog_refresh_but_not_renderer_replacement() {
+        let first = "7ae16b61-de39-4ed8-96f3-dd132abeb149";
+        let second = "ed69ed15-e99b-4128-8fd0-70ed08419b85";
+        let mut manager = super::ManagerState::default();
+        manager.resource_work_leases.insert("initial-work".into());
+        super::rotate_manifest_session(&mut manager, first).unwrap();
+        assert_eq!(manager.resource_work_leases.len(), 1);
+        super::begin_manifest_acceptance(&mut manager, first, 1).unwrap();
+        assert_eq!(manager.resource_work_leases.len(), 1);
+        super::rotate_manifest_session(&mut manager, second).unwrap();
+        assert!(manager.resource_work_leases.is_empty());
+    }
+    #[test]
+    fn signed_accelerator_scope_is_optional_and_rejects_null_or_unknown_values() {
+        let envelope: super::SignedEnvelope = serde_json::from_str(GOLDEN_ENVELOPE).unwrap();
+        let mut payload = envelope.payload;
+        let legacy = super::parse_manifest_payload(&payload).unwrap();
+        assert!(legacy.models[0]
+            .capacity_policy
+            .accelerator_memory_scope
+            .is_none());
+        for scope in [
+            serde_json::json!(null),
+            serde_json::json!("sum_everything"),
+            serde_json::json!(12),
+        ] {
+            payload["models"][0]["capacity_policy"]["accelerator_memory_scope"] = scope;
+            assert!(super::parse_manifest_payload(&payload)
+                .and_then(|p| super::validate_manifest(&p))
+                .is_err());
+        }
+        payload["models"][0]["capacity_policy"]["accelerator_memory_scope"] =
+            serde_json::json!("compatible_group");
+        assert!(super::parse_manifest_payload(&payload)
+            .and_then(|p| super::validate_manifest(&p))
+            .is_ok());
+    }
+    #[test]
     fn retained_exited_child_is_not_a_ready_runtime() {
         assert!(!super::managed_child_is_running(None));
         #[cfg(windows)]
@@ -3585,6 +4161,8 @@ mod tests {
             }
         };
         let mut resident = ManagedRuntime {
+            resource_revision: 0,
+            benchmark: None,
             child: Some(child),
             model_id: "model-a".into(),
             scope: RuntimeScope::Prepared,
@@ -3592,6 +4170,32 @@ mod tests {
             port: 0,
             api_key: String::new(),
             api_key_file: fixture.root.join("unused.key"),
+            acceleration: std::sync::Arc::new(std::sync::Mutex::new(
+                super::gpu_runtime::AccelerationPlan::cpu("fixture").status,
+            )),
+            resource_plan: super::resource_runtime::plan_resources(
+                &super::resource_runtime::ResourceSnapshot {
+                    logical_cores: 1,
+                    physical_cores: Some(1),
+                    available_logical_cores: 1,
+                    cpu_load: None,
+                    total_ram_bytes: 8 * 1024 * 1024 * 1024,
+                    available_ram_bytes: 4 * 1024 * 1024 * 1024,
+                },
+                1024,
+                1,
+                "cpu",
+                &super::resource_runtime::RuntimeOptions::default(),
+            ),
+            model_storage: super::ModelStorage {
+                storage_type: "unknown".into(),
+                bus_types: Vec::new(),
+                fixed: None,
+                available_bytes: None,
+                total_bytes: None,
+                reason_code: None,
+            },
+            _support_guards: Vec::new(),
             _runtime_guard: open_artifact_guard(&fixture.runtime).unwrap(),
             _model_guard: open_artifact_guard(&fixture.model_directory.join("model-a.gguf"))
                 .unwrap(),
@@ -3632,6 +4236,58 @@ mod tests {
         assert_eq!(
             configured_paths_from_sources("model-b", None, None, &fixture.config).unwrap_err(),
             "Configured GGUF file is unavailable."
+        );
+    }
+
+    #[test]
+    fn resident_only_renewal_cannot_enter_cold_start_or_benchmark_work() {
+        let mut cold_work = 0;
+        let result = super::require_cold_start_allowed(true).map(|()| {
+            cold_work += 1;
+        });
+        assert_eq!(result.unwrap_err(), super::RESIDENT_RENEWAL_UNAVAILABLE);
+        assert_eq!(cold_work, 0);
+        super::require_cold_start_allowed(false)
+            .map(|()| {
+                cold_work += 1;
+            })
+            .unwrap();
+        assert_eq!(cold_work, 1);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn configured_storage_never_substitutes_an_unrelated_faster_drive() {
+        let mounts = vec![
+            Path::new(r"C:\").to_path_buf(),
+            Path::new(r"D:\").to_path_buf(),
+        ];
+        assert_eq!(super::match_configured_storage(None, mounts.clone()), None);
+        assert_eq!(
+            super::match_configured_storage(Some(None), mounts.clone()),
+            Some(None)
+        );
+        assert_eq!(
+            super::match_configured_storage(
+                Some(Some(Path::new(r"E:\models").to_path_buf())),
+                mounts.clone()
+            ),
+            Some(None)
+        );
+        assert_eq!(
+            super::match_configured_storage(
+                Some(Some(Path::new(r"\\?\D:\models").to_path_buf())),
+                mounts
+            ),
+            Some(Some(super::storage_mount_id(Path::new(r"D:\"))))
+        );
+        assert_eq!(
+            super::storage_mount_id(Path::new(r"\\?\d:\")),
+            super::storage_mount_id(Path::new(r"D:\"))
+        );
+        assert_ne!(
+            super::storage_mount_id(Path::new(r"C:\")),
+            super::storage_mount_id(Path::new(r"D:\"))
         );
     }
 
@@ -4131,6 +4787,8 @@ mod tests {
 
         assert!(storage_class_eligible("fixed_storage", false, "unknown"));
         assert!(!storage_class_eligible("fixed_storage", true, "usb"));
+        // Windows USB SSDs may report DRIVE_FIXED and non-removable media.
+        assert!(!storage_class_eligible("fixed_storage", false, "usb"));
         assert!(!storage_class_eligible(
             "fixed_nvme_required",
             false,

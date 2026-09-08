@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-system-diagnostics"
+description = "Enables the system_diagnostics command without any pre-configured scope."
+commands.allow = ["system_diagnostics"]
+
+[[permission]]
+identifier = "deny-system-diagnostics"
+description = "Denies the system_diagnostics command without any pre-configured scope."
+commands.deny = ["system_diagnostics"]
