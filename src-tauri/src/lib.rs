@@ -53,6 +53,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::execution::execution_gate_update,
+            commands::execution::wf_execution_cancel,
+            commands::workflow_watch::wf_watch_start,
+            commands::workflow_watch::wf_watch_stop,
+            commands::workflow_watch::wf_watch_drain,
+            commands::workflow_watch::wf_watch_ack,
             commands::system::desktop_observe,
             commands::codex::codex_job_list,
             commands::codex::codex_session_list,

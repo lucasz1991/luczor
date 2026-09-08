@@ -171,6 +171,8 @@ pub struct FsWritePayload {
     path: String,
     content: String,
     expected_sha256: Option<String>,
+    #[serde(default)]
+    origin_run_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -520,13 +522,22 @@ pub async fn project_fs_write(
             payload.expected_workspace_updated_at,
             &gate,
             |root, gate| {
-                write_text_locked(
+                let result = write_text_locked(
                     root,
                     &payload.path,
                     &payload.content,
                     payload.expected_sha256.as_deref(),
                     Some(gate),
-                )
+                )?;
+                if let Some(origin) = &payload.origin_run_id {
+                    super::workflow_watch::record_write(
+                        root,
+                        &payload.path,
+                        &result.sha256,
+                        origin,
+                    );
+                }
+                Ok(result)
             },
         )
     })
@@ -990,7 +1001,7 @@ fn validate_path_segment(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn is_secret_path(relative: &Path) -> bool {
+pub(crate) fn is_secret_path(relative: &Path) -> bool {
     let parts = relative
         .components()
         .filter_map(|component| match component {

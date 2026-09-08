@@ -22,6 +22,8 @@ pub enum ExecutionMode {
 pub struct ExecutionPermit {
     pub session_id: String,
     pub generation: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_execution_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -37,6 +39,7 @@ pub struct ExecutionPolicy {
 struct GateState {
     policy: Option<ExecutionPolicy>,
     retired: HashSet<String>,
+    cancelled_workflows: HashSet<String>,
 }
 
 impl GateState {
@@ -67,6 +70,7 @@ impl GateState {
                 self.retired.insert(current.session_id.clone());
             }
         }
+        self.cancelled_workflows.clear();
         self.policy = Some(next.clone());
         Ok(next)
     }
@@ -87,6 +91,11 @@ impl GateState {
         if policy.kill_switch {
             return Err("Not-Aus is active; native execution is blocked.".into());
         }
+        if let Some(id) = &permit.workflow_execution_id {
+            if uuid::Uuid::parse_str(id).is_err() || self.cancelled_workflows.contains(id) {
+                return Err("Workflow execution was cancelled or is invalid.".into());
+            }
+        }
         if write && policy.mode == ExecutionMode::Observe {
             return Err("Native mutation is blocked in Observe mode.".into());
         }
@@ -97,6 +106,34 @@ impl GateState {
         }
         Ok(())
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorkflowCancelPayload {
+    execution_id: String,
+}
+
+#[tauri::command]
+pub fn wf_execution_cancel(
+    window: WebviewWindow,
+    payload: Guarded<WorkflowCancelPayload>,
+) -> Result<(), String> {
+    ensure_main_webview(&window)?;
+    uuid::Uuid::parse_str(&payload.request.execution_id)
+        .map_err(|_| "Invalid workflow execution id.")?;
+    let mut state = GATE
+        .get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| "Execution gate unavailable.")?;
+    state.check(&payload.execution, false, false)?;
+    if state.cancelled_workflows.len() >= 4096 {
+        return Err("Workflow cancellation ledger is full; rotate the execution session.".into());
+    }
+    state
+        .cancelled_workflows
+        .insert(payload.request.execution_id);
+    Ok(())
 }
 
 static GATE: OnceLock<Mutex<GateState>> = OnceLock::new();
@@ -223,6 +260,7 @@ mod tests {
         let permit = ExecutionPermit {
             session_id: session.clone(),
             generation: 1,
+            workflow_execution_id: None,
         };
         let lease = admit(&permit, true).unwrap();
         let worker = std::thread::spawn(move || {
@@ -253,6 +291,7 @@ mod tests {
         let permit = ExecutionPermit {
             session_id: session.clone(),
             generation: 1,
+            workflow_execution_id: None,
         };
         let mut gate = GateState::default();
         assert!(gate.check(&permit, false, false).is_err());
@@ -288,7 +327,8 @@ mod tests {
             .check(
                 &ExecutionPermit {
                     session_id: next,
-                    generation: 1
+                    generation: 1,
+                    workflow_execution_id: None,
                 },
                 false,
                 false
@@ -304,6 +344,7 @@ mod tests {
         let permit = ExecutionPermit {
             session_id: session.clone(),
             generation: 1,
+            workflow_execution_id: None,
         };
         assert!(gate.check(&permit, true, true).is_err());
         gate.update(policy(&session, 2, ExecutionMode::Unrestricted, false))
@@ -318,5 +359,26 @@ mod tests {
                 true
             )
             .is_ok());
+    }
+
+    #[test]
+    fn workflow_cancellation_stops_only_the_targeted_execution() {
+        let session = uuid::Uuid::new_v4().to_string();
+        let cancelled = uuid::Uuid::new_v4().to_string();
+        let mut gate = GateState::default();
+        gate.update(policy(&session, 1, ExecutionMode::Act, false))
+            .unwrap();
+        gate.cancelled_workflows.insert(cancelled.clone());
+        let permit = ExecutionPermit {
+            session_id: session,
+            generation: 1,
+            workflow_execution_id: Some(cancelled),
+        };
+        assert!(gate.check(&permit, true, false).is_err());
+        let other = ExecutionPermit {
+            workflow_execution_id: Some(uuid::Uuid::new_v4().to_string()),
+            ..permit
+        };
+        assert!(gate.check(&other, true, false).is_ok());
     }
 }

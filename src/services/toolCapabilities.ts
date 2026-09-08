@@ -55,6 +55,19 @@ const titles: Record<string, string> = {
   task_complete: 'Aufgabe abschließen',
   plan_update: 'Arbeitsplan ändern',
   plan_get: 'Arbeitsplan lesen',
+  workflow_catalog: 'Workflow-Aufgabenbibliothek lesen',
+  workflow_list: 'Workflows auflisten',
+  workflow_get: 'Workflow und Versionen lesen',
+  workflow_validate: 'Workflow prüfen',
+  workflow_create: 'Workflow erstellen',
+  workflow_update: 'Workflow verbessern',
+  workflow_run_start: 'Workflow starten oder testen',
+  workflow_run_get: 'Workflow-Ergebnisse lesen',
+  workflow_run_cancel: 'Workflow abbrechen',
+  workflow_trigger_list: 'Workflow-Auslöser lesen',
+  workflow_trigger_save: 'Workflow-Auslöser konfigurieren',
+  workflow_trigger_delete: 'Workflow-Auslöser entfernen',
+  workflow_automation_configure: 'Workflow-Automatisierung freigeben',
 }
 
 export function capabilityTitle(tool: ToolCapability): string {
@@ -64,6 +77,7 @@ export function capabilityTitle(tool: ToolCapability): string {
 export function capabilityGroup(tool: ToolCapability): string {
   if (tool.name === 'local_model_status') return 'Lokales Modell'
   if (tool.name.startsWith('memory_')) return 'Erinnerungen'
+  if (tool.name.startsWith('workflow_')) return 'Workflows'
   if (tool.name.startsWith('os_')) return 'Computer'
   if (tool.name.startsWith('fs_') || tool.name === 'workspace_get') return 'Dateien'
   if (tool.name.startsWith('agent_')) return 'Coding-Agenten'

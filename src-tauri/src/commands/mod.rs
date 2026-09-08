@@ -16,6 +16,7 @@ mod system_diagnostics;
 pub mod voice;
 pub mod voice_input;
 pub mod workflow_http;
+pub mod workflow_watch;
 
 mod process;
 

@@ -35,7 +35,7 @@ export function useMiniChatHost(deps: Dependencies) {
     context: deps.context,
     setMode: deps.setMode,
     preamble: (mode, name) =>
-      `${buildSystemPreamble(mode, name)}\nDu bist im übergeordneten Luczor-Workspace. Nutze workspace_overview für die Übersicht und workspace_* für ausdrücklich adressierte Projekte, Projektchats und verwaltete Agentenaufträge. Dateien und Desktopaktionen bleiben an das Arbeitsprojekt dieser Runde gebunden. Projektwechsel erfolgen zwischen Aufträgen. Codeaufträge werden vorbereitet und vom Nutzer im Agentenfenster geprüft und gestartet. Behaupte keine Ausführung oder Ergebnisse ohne Werkzeugnachweis.`,
+      `${buildSystemPreamble(mode, name)}\nDu bist im übergeordneten Luczor-Workspace. Nutze workspace_overview für die Übersicht und workspace_* für ausdrücklich adressierte Projekte, Projektchats und verwaltete Agentenaufträge. Für workflow_* muss project_id immer ausdrücklich das vom Nutzer bestimmte verfügbare Zielprojekt benennen; frage bei unklarem Zielprojekt nach. Ein Workflow-Erstellungs- oder Verbesserungsauftrag startet keinen Lauf und aktiviert keinen Auslöser. Dateien und Desktopaktionen bleiben an das Arbeitsprojekt dieser Runde gebunden. Projektwechsel erfolgen zwischen Aufträgen. Codeaufträge werden vorbereitet und vom Nutzer im Agentenfenster geprüft und gestartet. Behaupte keine Ausführung oder Ergebnisse ohne Werkzeugnachweis.`,
     run: async options => {
       const ticket = executionGate.capture(options.signal)
       const projectIds = deps.projects().map(project => project.id)

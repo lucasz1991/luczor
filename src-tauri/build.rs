@@ -3,6 +3,11 @@ use std::{env, fs, path::Path};
 const APP_COMMANDS: &[&str] = &[
     "open_user_link",
     "execution_gate_update",
+    "wf_execution_cancel",
+    "wf_watch_start",
+    "wf_watch_stop",
+    "wf_watch_drain",
+    "wf_watch_ack",
     "desktop_observe",
     "codex_job_list",
     "codex_session_list",

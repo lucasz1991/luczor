@@ -24,11 +24,17 @@ export type WorkflowTaskBundle = {
     step_key: string
     execution_id?: string
     definition_id?: number
+    child_definition_id?: number
+    child_revision?: number
     revision?: number
     project_id?: string | null
     device_id?: string
     file_scope?: 'legacy' | 'workspace'
     workspace_root_id?: string | null
+    workspace_root_path?: string | null
+    input_sources?: string[]
+    output_keys?: string[]
+    automatic?: boolean
     grant?: unknown
   }
 }
@@ -104,7 +110,36 @@ export async function runWorkflowTask(
   switch (bundle.task_key) {
     case 'llm': {
       if (!primitives.runLlm) throw new Error('workflow_llm_executor_unavailable')
-      return primitives.runLlm(params as import('@/services/workflows/llm').WorkflowLlmInput)
+      // Laravel resolves input_bindings into payload target fields; retain those values as data-only model inputs.
+      const controlKeys = new Set([
+        'instruction',
+        'input_bindings',
+        'output_format',
+        'output_schema',
+        'inference',
+        'timeout_seconds',
+        'max_output_chars',
+        'title',
+        'list',
+        'routes',
+        'device_id',
+        'project_id',
+        'file_scope',
+        'workspace_root_id',
+        'workspace_root_path',
+      ])
+      const inputs = Object.fromEntries(Object.entries(params).filter(([key]) => !controlKeys.has(key)))
+      return primitives.runLlm({
+        ...params,
+        input_bindings: {
+          ...(params.input_bindings &&
+          typeof params.input_bindings === 'object' &&
+          !Array.isArray(params.input_bindings)
+            ? params.input_bindings
+            : {}),
+          ...inputs,
+        },
+      } as import('@/services/workflows/llm').WorkflowLlmInput)
     }
     case 'browser.open':
     case 'browser.open_url': {

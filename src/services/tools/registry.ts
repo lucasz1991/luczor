@@ -14,6 +14,7 @@ import { planTools } from './plans'
 import { projectCreationTools, projectStateTools } from './project'
 import { taskTools } from './tasks'
 import { workspaceTools } from './workspace'
+import { workflowTools } from './workflows'
 import type { ToolDef } from './types'
 
 export { lastScreenshot } from './os'
@@ -34,6 +35,7 @@ const TOOLS: ToolDef[] = [
   ...agentJobTools,
   ...agentTeamTools,
   ...planTools,
+  ...workflowTools,
   ...memoryTools,
   ...workspaceTools,
 ]

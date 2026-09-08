@@ -196,3 +196,26 @@ describe('unknown tasks fail honestly', () => {
     await expect(runWorkflowTask(bundle('shell.rm_rf'), primitives())).rejects.toThrow(/Unsupported/)
   })
 })
+
+describe('real workflow inference inputs', () => {
+  it('passes resolved top-level binding values as model data without granting tools', async () => {
+    const runLlm = vi.fn(async () => ({ ok: true, text: 'Antwort' }))
+    const runtime = { ...primitives(), runLlm }
+    await runWorkflowTask(
+      bundle('llm', {
+        instruction: 'Fasse zusammen',
+        context: ['Memory evidence'],
+        output_format: 'text',
+        timeout_seconds: 45,
+      }),
+      runtime
+    )
+    expect(runLlm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        instruction: 'Fasse zusammen',
+        timeout_seconds: 45,
+        input_bindings: { context: ['Memory evidence'] },
+      })
+    )
+  })
+})

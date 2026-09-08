@@ -45,7 +45,10 @@ export type WorkflowTask = {
   mutating: boolean
   requires_approval: boolean
   allowed_in_definition: boolean
-  params: Record<string, { type: string; default?: unknown; min?: number; max?: number; required?: boolean }>
+  params: Record<
+    string,
+    { type: string; default?: unknown; min?: number; max?: number; required?: boolean; enum?: string[] }
+  >
 }
 export type WorkflowRunStep = {
   id: number
@@ -63,6 +66,7 @@ export type WorkflowRun = {
   public_id: string
   workflow_definition_id: number
   workflow_revision_id?: number | null
+  definition_version?: number | null
   project_external_id?: string | null
   status: string
   sandbox: boolean
@@ -75,8 +79,13 @@ export type WorkflowRun = {
   duration_ms?: number | null
 }
 export const WORKFLOW_TRIGGER_KINDS = [
-  'schedule', 'webhook', 'task.completed', 'workflow.completed',
-  'github.push', 'github.pull_request', 'workspace.file_changed',
+  'schedule',
+  'webhook',
+  'task.completed',
+  'workflow.completed',
+  'github.push',
+  'github.pull_request',
+  'workspace.file_changed',
 ] as const
 export type WorkflowTriggerKind = (typeof WORKFLOW_TRIGGER_KINDS)[number]
 export type WorkflowTrigger = {
@@ -102,14 +111,32 @@ export type WorkflowWrite = {
   operation_id?: string
 }
 export const WORKFLOW_STATUS_LABELS: Record<string, string> = {
-  active: 'Aktiv', draft: 'Entwurf', paused: 'Pausiert', queued: 'Eingereiht', ready: 'Bereit',
-  running: 'Läuft', completed: 'Abgeschlossen', failed: 'Fehlgeschlagen', cancelled: 'Abgebrochen',
-  cancelling: 'Abbruch läuft', cancel_requested: 'Abbruch läuft', skipped: 'Übersprungen',
-  awaiting_approval: 'Freigabe erforderlich', waiting_device: 'Wartet auf Gerät',
-  awaiting_device: 'Wartet auf Gerät', waiting_project: 'Wartet auf Projekt',
-  waiting: 'Wartet', outcome_unknown: 'Ausgang unklar', approval_required: 'Freigabe erforderlich',
+  active: 'Aktiv',
+  draft: 'Entwurf',
+  paused: 'Pausiert',
+  queued: 'Eingereiht',
+  ready: 'Bereit',
+  running: 'Läuft',
+  completed: 'Abgeschlossen',
+  failed: 'Fehlgeschlagen',
+  cancelled: 'Abgebrochen',
+  cancelling: 'Abbruch läuft',
+  cancel_requested: 'Abbruch läuft',
+  skipped: 'Übersprungen',
+  awaiting_approval: 'Freigabe erforderlich',
+  waiting_device: 'Wartet auf Gerät',
+  waiting_for_device: 'Wartet auf Gerät',
+  awaiting_device: 'Wartet auf Gerät',
+  waiting_project: 'Wartet auf Projekt',
+  waiting: 'Wartet',
+  outcome_unknown: 'Ausgang unklar',
+  approval_required: 'Freigabe erforderlich',
 }
-export function workflowStatusLabel(status: string): string { return WORKFLOW_STATUS_LABELS[status] ?? status }
+export function workflowStatusLabel(status: string): string {
+  return Object.hasOwn(WORKFLOW_STATUS_LABELS, status)
+    ? (Reflect.get(WORKFLOW_STATUS_LABELS, status) as string)
+    : status
+}
 export function isTerminalWorkflow(status: string): boolean {
   return ['completed', 'failed', 'cancelled'].includes(status)
 }

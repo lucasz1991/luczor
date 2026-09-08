@@ -1,7 +1,18 @@
 import { computed, ref, watch } from 'vue'
+import { executionGate } from '@/services/executionGate'
 import { boundMiniMessages } from './projectChat'
 import type { createMiniChatController } from './controller'
-import type { MiniAction, MiniMessage, MiniPanel, MiniProject, MiniSnapshot, MiniTool, MiniView } from './types'
+import type {
+  MiniAction,
+  MiniMessage,
+  MiniPanel,
+  MiniProject,
+  MiniSnapshot,
+  MiniTool,
+  MiniView,
+  MiniWorkflowAction,
+  MiniWorkflowReference,
+} from './types'
 
 export type MiniChatBinding = {
   key: string
@@ -17,6 +28,8 @@ export type MiniWorkspaceBinding = {
   stopChat: () => void | Promise<void>
   selectProject: (id: string) => void | Promise<void>
   openPanel: (panel: MiniPanel) => void | Promise<void>
+  openWorkflow?: (reference: MiniWorkflowReference) => void | Promise<void>
+  runWorkflow?: (reference: MiniWorkflowReference, action: MiniWorkflowAction) => void | Promise<void>
   togglePushToTalk?: () => void | Promise<void>
   toggleWakeWord?: () => void | Promise<void>
   setAgentMode?: (enabled: boolean) => void | Promise<void>
@@ -83,6 +96,47 @@ export function createMiniChatBridge(
     }
     if (action.type === 'agent_mode') {
       await deps.setAgentMode?.(action.enabled)
+      return
+    }
+    if (action.type === 'workflow_open' || action.type === 'workflow_improve' || action.type === 'workflow_action') {
+      if (view.value !== 'chat' || busy.value || controller.state.mainBusy) return
+      const chat = deps.chat()
+      const reference = chat.messages
+        .find(message => message.id === action.messageId && message.role === 'assistant')
+        ?.workflows?.find(workflow => workflow.id === action.workflowId && workflow.projectId === chat.project?.id)
+      if (!reference || !Number.isSafeInteger(action.workflowId) || action.workflowId <= 0 || !chat.project) return
+      if (
+        action.type === 'workflow_action' &&
+        (controller.state.mode === 'observe' ||
+          !['test', 'start', 'stop'].includes(action.action) ||
+          (action.action === 'stop' &&
+            (typeof reference.runId !== 'string' || !/^[a-f0-9-]{36}$/iu.test(reference.runId))))
+      )
+        return
+      const projectId = chat.project.id
+      const epoch = sessionId.value
+      selecting.value = true
+      try {
+        if (action.type === 'workflow_open') await deps.openWorkflow?.({ ...reference })
+        else if (action.type === 'workflow_action') {
+          executionGate.assert(executionGate.capture(), true)
+          await deps.runWorkflow?.({ ...reference }, action.action)
+        } else {
+          const run =
+            typeof reference.runId === 'string' && /^[a-f0-9-]{36}$/iu.test(reference.runId)
+              ? ` und den Lauf ${reference.runId}`
+              : ' und relevante letzte Läufe'
+          await deps.sendChat(
+            `Verbessere mit mir Workflow ID ${reference.id} im aktuellen Projekt. Lies zuerst die aktuelle Definition${run}. Begründe Änderungen anhand meines Ziels und vorhandener Ergebnisse. Starte erst auf meinen ausdrücklichen Auftrag.`,
+            projectId
+          )
+        }
+      } catch (error) {
+        if (sessionId.value === epoch)
+          notice.value = error instanceof Error ? error.message : 'Workflow-Aktion fehlgeschlagen.'
+      } finally {
+        selecting.value = false
+      }
       return
     }
     if (action.type === 'select_project' || action.type === 'workspace_open') {

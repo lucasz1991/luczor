@@ -15,6 +15,7 @@ const emit = defineEmits<{
   system: []
   agents: []
   planning: []
+  workflows: []
   'update:collapsed': [value: boolean]
 }>()
 const query = ref('')
@@ -63,12 +64,26 @@ function cancelRename() {
     <button class="ai-sidebar__action" type="button" title="Agenten und Erinnerungsübertragung" @click="emit('agents')">
       <AiIcon name="spark" /><span>Agenten & Erinnerungen</span>
     </button>
-    <button class="ai-sidebar__action" type="button" title="Optionales Planungsfenster öffnen" @click="emit('planning')">
+    <button
+      class="ai-sidebar__action"
+      type="button"
+      title="Optionales Planungsfenster öffnen"
+      @click="emit('planning')"
+    >
       <AiIcon name="check" /><span>Planungsfenster</span>
     </button>
-    <div class="ai-sidebar__section"><span>Projekte</span><span>{{ items.length }}</span></div>
+    <button class="ai-sidebar__action" type="button" title="Workflows, Auslöser und Läufe" @click="emit('workflows')">
+      <AiIcon name="tool" /><span>Workflows</span>
+    </button>
+    <div class="ai-sidebar__section">
+      <span>Projekte</span><span>{{ items.length }}</span>
+    </div>
     <label v-if="!collapsed" class="ai-search__field"
-      ><AiIcon name="search" /><input v-model="query" type="search" aria-label="Projekte suchen" placeholder="Projekte suchen"
+      ><AiIcon name="search" /><input
+        v-model="query"
+        type="search"
+        aria-label="Projekte suchen"
+        placeholder="Projekte suchen"
     /></label>
     <nav class="ai-sidebar__items">
       <div
@@ -98,7 +113,12 @@ function cancelRename() {
             @blur="commitRename(item)"
           />
           <span v-else>{{ item.label }}</span>
-          <span v-if="item.busy" class="ai-sidebar__activity" aria-label="AI läuft" title="In diesem Projekt läuft gerade eine AI" />
+          <span
+            v-if="item.busy"
+            class="ai-sidebar__activity"
+            aria-label="AI läuft"
+            title="In diesem Projekt läuft gerade eine AI"
+          />
         </button>
         <button
           v-if="!collapsed && editingId !== item.id"

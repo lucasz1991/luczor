@@ -146,6 +146,19 @@ const TOOL_CONTRACT = [
   { name: 'agent_team_cancel', category: 'app', mutating: true, requiresApproval: false },
   { name: 'plan_update', category: 'app', mutating: false, requiresApproval: false },
   { name: 'plan_get', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'workflow_catalog', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'workflow_list', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'workflow_get', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'workflow_validate', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'workflow_create', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'workflow_update', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'workflow_run_start', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'workflow_run_get', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'workflow_run_cancel', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'workflow_trigger_list', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'workflow_trigger_save', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'workflow_trigger_delete', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'workflow_automation_configure', category: 'app', mutating: true, requiresApproval: true },
   { name: 'memory_recall', category: 'project', mutating: false, requiresApproval: false },
   { name: 'memory_analyze', category: 'project', mutating: false, requiresApproval: false },
   { name: 'memory_remember', category: 'project', mutating: true, requiresApproval: true },
@@ -157,7 +170,7 @@ const TOOL_CONTRACT = [
   { name: 'workspace_agent_cancel', category: 'app', mutating: true, requiresApproval: false },
 ] as const
 
-const TOOL_SCHEMA_SHA256 = '323156dda2610ec6e2ac00fc92f1a1819d75cfdd1e2e151a70a9edfecc11ea9a'
+const TOOL_SCHEMA_SHA256 = '201598dee8b59909a0081690e5fa10234c3f92b90aa8331f020da9bbe0fd043d'
 const CORE_TOOL_SCHEMA_SHA256 = 'fe694b20d5a15a37be6027618d76aca6bc92c7e858784aae272ae776edb1f6c8'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
@@ -258,7 +271,10 @@ describe('tool registry contract', () => {
 
   it('keeps the original project/desktop tools unchanged while adding six guarded workspace tools', () => {
     const coreTools = toOpenAITools().filter(
-      tool => !getTool(tool.function.name)?.workspaceOnly && tool.function.name !== 'local_model_status'
+      tool =>
+        !getTool(tool.function.name)?.workspaceOnly &&
+        tool.function.name !== 'local_model_status' &&
+        !tool.function.name.startsWith('workflow_')
     )
     expect(createHash('sha256').update(JSON.stringify(coreTools)).digest('hex')).toBe(CORE_TOOL_SCHEMA_SHA256)
     const workspaceTools = listTools().filter(tool => tool.workspaceOnly)

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wf-watch-start"
+description = "Enables the wf_watch_start command without any pre-configured scope."
+commands.allow = ["wf_watch_start"]
+
+[[permission]]
+identifier = "deny-wf-watch-start"
+description = "Denies the wf_watch_start command without any pre-configured scope."
+commands.deny = ["wf_watch_start"]

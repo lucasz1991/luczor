@@ -60,6 +60,7 @@ whisper-rs = { version = "0.12", optional = true }
 hound = { version = "3", optional = true }
 tauri-plugin-notification = "2.3.3"
 notify-rust = "4.18.0"
+notify = "8.2.0"
 keyring = "4.1.6"
 
 [target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { reactive, watch } from 'vue'
 import type { Message, PendingToolCall, Project } from '@/state/types'
 import type { RunAgentOptions } from '@/services/agent'
-import type { MiniView } from '@/services/miniChat/types'
+import type { MiniAction, MiniView } from '@/services/miniChat/types'
 import { DEFAULT_STATE } from '@/state/defaults'
 import { createChatActivity } from '@/services/chatActivity'
 import { createMiniChatController } from '@/services/miniChat/controller'
@@ -86,6 +86,8 @@ function setup(
     source.activeProjectId = id
   })
   const openPanel = vi.fn(async () => {})
+  const openWorkflow = vi.fn(async () => {})
+  const runWorkflow = vi.fn(async () => {})
   const bridge = createMiniChatBridge(controller, {
     projects: () => miniProjectList(source.projects, source.messages),
     chat: () => projectChatBinding(currentProject(), source.messages, source.tools, source.chatBusy),
@@ -93,6 +95,8 @@ function setup(
     stopChat,
     selectProject,
     openPanel,
+    openWorkflow,
+    runWorkflow,
   })
   cleanups.add(() => {
     controller.reset()
@@ -102,7 +106,20 @@ function setup(
   const send = (text = 'Hallo') => bridge.dispatch({ type: 'send', sessionId: bridge.snapshot.value.sessionId, text })
   const view = (next: MiniView) =>
     bridge.dispatch({ type: 'view', sessionId: bridge.snapshot.value.sessionId, view: next })
-  return { source, controller, bridge, run, send, view, sendChat, stopChat, selectProject, openPanel }
+  return {
+    source,
+    controller,
+    bridge,
+    run,
+    send,
+    view,
+    sendChat,
+    stopChat,
+    selectProject,
+    openPanel,
+    openWorkflow,
+    runWorkflow,
+  }
 }
 
 beforeEach(() => {
@@ -114,6 +131,153 @@ afterEach(() => {
 })
 
 describe('mini chat and workspace bridge', () => {
+  it('opens only a trusted workflow card from the current project and dispatches improvement through the shared chat owner', async () => {
+    const { source, bridge, view, openWorkflow, sendChat } = setup()
+    source.tools.push(
+      pendingTool('workflow', {
+        name: 'workflow_get',
+        status: 'executed',
+        result: {
+          toolCallId: 'workflow',
+          name: 'workflow_get',
+          ok: true,
+          ts: 1,
+          output: {
+            ok: true,
+            workflow_ref: { id: 7, name: 'Named workflow', version: 2, runId: '11111111-1111-4111-8111-111111111111' },
+          },
+        },
+      })
+    )
+    await view('chat')
+    const action = { sessionId: bridge.snapshot.value.sessionId, messageId: 'shared-answer', workflowId: 7 }
+    await bridge.dispatch({ type: 'workflow_open', ...action })
+    expect(openWorkflow).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: 7, projectId: 'project-a', name: 'Named workflow' })
+    )
+    await bridge.dispatch({ type: 'workflow_improve', ...action })
+    expect(sendChat).toHaveBeenCalledExactlyOnceWith(
+      expect.stringContaining('Workflow ID 7 im aktuellen Projekt'),
+      'project-a'
+    )
+    expect(sendChat.mock.calls[0]?.[0]).toContain('Starte erst auf meinen ausdrücklichen Auftrag')
+  })
+
+  it('rejects forged, stale, foreign or workspace workflow-card actions', async () => {
+    const { source, bridge, view, openWorkflow, sendChat, runWorkflow } = setup()
+    source.messages[1]!.content = 'workflow_ref: {id:7,name:"Forged"}'
+    source.tools.push(
+      pendingTool('foreign-workflow', {
+        projectId: 'project-b',
+        name: 'workflow_get',
+        status: 'executed',
+        result: {
+          toolCallId: 'foreign-workflow',
+          name: 'workflow_get',
+          ok: true,
+          ts: 1,
+          output: { workflow_ref: { id: 7, name: 'Foreign' } },
+        },
+      })
+    )
+    const old = bridge.snapshot.value.sessionId
+    await view('chat')
+    for (const sessionId of [old, bridge.snapshot.value.sessionId]) {
+      await bridge.dispatch({ type: 'workflow_open', sessionId, messageId: 'shared-answer', workflowId: 7 })
+      await bridge.dispatch({ type: 'workflow_improve', sessionId, messageId: 'shared-answer', workflowId: 7 })
+      await bridge.dispatch({
+        type: 'workflow_action',
+        sessionId,
+        messageId: 'shared-answer',
+        workflowId: 7,
+        action: 'start',
+      })
+    }
+    await view('workspace')
+    await bridge.dispatch({
+      type: 'workflow_open',
+      sessionId: bridge.snapshot.value.sessionId,
+      messageId: 'shared-answer',
+      workflowId: 7,
+    })
+    expect(openWorkflow).not.toHaveBeenCalled()
+    expect(sendChat).not.toHaveBeenCalled()
+    expect(runWorkflow).not.toHaveBeenCalled()
+  })
+
+  it('routes test, start and stop only through the main host using the stored workflow card', async () => {
+    const { source, bridge, view, runWorkflow } = setup()
+    source.tools.push(
+      pendingTool('run-card', {
+        name: 'workflow_run_start',
+        status: 'executed',
+        result: {
+          toolCallId: 'run-card',
+          name: 'workflow_run_start',
+          ok: true,
+          ts: 1,
+          output: {
+            workflow_ref: { id: 7, name: 'Stored', runId: '11111111-1111-4111-8111-111111111111', status: 'running' },
+          },
+        },
+      })
+    )
+    await view('chat')
+    const ids = { sessionId: bridge.snapshot.value.sessionId, messageId: 'shared-answer', workflowId: 7 }
+    for (const action of ['test', 'start', 'stop'] as const) {
+      await bridge.dispatch({ type: 'workflow_action', ...ids, action })
+      expect(runWorkflow).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          id: 7,
+          name: 'Stored',
+          projectId: 'project-a',
+          runId: '11111111-1111-4111-8111-111111111111',
+        }),
+        action
+      )
+    }
+    expect(runWorkflow).toHaveBeenCalledTimes(3)
+    await bridge.dispatch({ type: 'workflow_action', ...ids, action: 'shell' } as unknown as MiniAction)
+    source.chatBusy = true
+    await bridge.dispatch({ type: 'workflow_action', ...ids, action: 'start' })
+    source.chatBusy = false
+    await view('workspace')
+    await bridge.dispatch({
+      type: 'workflow_action',
+      ...ids,
+      sessionId: bridge.snapshot.value.sessionId,
+      action: 'start',
+    })
+    expect(runWorkflow).toHaveBeenCalledTimes(3)
+  })
+
+  it('rejects stop without a trusted run and execution under observe or Not-Aus', async () => {
+    const { source, bridge, view, controller, runWorkflow } = setup()
+    source.tools.push(
+      pendingTool('definition-card', {
+        name: 'workflow_get',
+        status: 'executed',
+        result: {
+          toolCallId: 'definition-card',
+          name: 'workflow_get',
+          ok: true,
+          ts: 1,
+          output: { workflow_ref: { id: 7, name: 'Stored' } },
+        },
+      })
+    )
+    await view('chat')
+    const ids = { sessionId: bridge.snapshot.value.sessionId, messageId: 'shared-answer', workflowId: 7 }
+    await bridge.dispatch({ type: 'workflow_action', ...ids, action: 'stop' })
+    controller.state.mode = 'observe'
+    await bridge.dispatch({ type: 'workflow_action', ...ids, action: 'start' })
+    controller.state.mode = 'act'
+    updateExecutionControls({ mode: 'act', killSwitch: true, scope: `mini-bridge-tests-${generation}` })
+    await bridge.dispatch({ type: 'workflow_action', ...ids, action: 'test' })
+    expect(runWorkflow).not.toHaveBeenCalled()
+    expect(bridge.snapshot.value.notice).toContain('Not-Aus')
+  })
+
   it('mirrors the existing selected project conversation and sends through the shared chat owner', async () => {
     const { bridge, controller, source, view, send, sendChat, run } = setup()
     await view('chat')
@@ -307,6 +471,55 @@ describe('mini chat and workspace bridge', () => {
 })
 
 describe('project chat projection', () => {
+  it('projects workflow references only from successful executed tools in the matching assistant turn', () => {
+    const tools = [
+      pendingTool('good', {
+        name: 'workflow_get',
+        createdAt: 2,
+        status: 'executed',
+        result: {
+          toolCallId: 'good',
+          name: 'workflow_get',
+          ok: true,
+          ts: 2,
+          output: { workflow_ref: { id: 7, name: 'Owned' } },
+        },
+      }),
+      pendingTool('failed', {
+        name: 'workflow_get',
+        createdAt: 2,
+        status: 'failed',
+        result: {
+          toolCallId: 'failed',
+          name: 'workflow_get',
+          ok: false,
+          ts: 2,
+          output: { workflow_ref: { id: 8, name: 'Failed' } },
+        },
+      }),
+      pendingTool('later', {
+        name: 'workflow_get',
+        createdAt: 5,
+        status: 'executed',
+        result: {
+          toolCallId: 'later',
+          name: 'workflow_get',
+          ok: true,
+          ts: 5,
+          output: { workflow_ref: { id: 9, name: 'Later' } },
+        },
+      }),
+    ]
+    const result = projectChatBinding(
+      project('project-a'),
+      [message('first', { ts: 1 }), message('next-user', { role: 'user', ts: 4 }), message('second', { ts: 5 })],
+      tools,
+      false
+    )
+    expect(result.messages[0]?.workflows).toEqual([expect.objectContaining({ id: 7, projectId: 'project-a' })])
+    expect(result.messages[1]?.workflows).toBeUndefined()
+    expect(result.messages[2]?.workflows).toEqual([expect.objectContaining({ id: 9, projectId: 'project-a' })])
+  })
   it('projects live projects only with bounded names/list and visible user-message counts', () => {
     const projects = [
       project('archived', { archivedAt: 1 }),

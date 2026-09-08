@@ -345,3 +345,28 @@ Append-only communication log. Source and runtime evidence override stale entrie
 - Endgültiger Appbuild: app/src-tauri/target/release/tauri-app.exe, 15028736 Bytes, SHA256 A3B67B72355FE9CBB2404478D1831384BBC0E3328AB4D2F833BCAC78BDE64D0A. Native Rebuild4m14s, kein Bundle.
 - Backend unverändert, kein Serverdeploy erforderlich. Bestehende Debug-App erhalten; eigene Browser/Vite1452 bereinigt. Keine native Hörprobe oder neues Benutzerchat-Ende-zu-Ende behauptet. Keine eigene Commitoperation.
 - Bericht: artifacts/reports/2026-09-08-progressive-read-aloud.md; maschinenlesbarer Buildnachweis daneben. Alle Quellen zurückgegeben.
+
+## 2026-09-08 | Codex/backend_workflows -> root | frontend review handoff
+- Independent source review confirmed workflow tools are registered for project chats and Mini workspace rounds; Mini forces local inference and captures an allowed-project snapshot, while workflow access requires explicit workspace project selection and rechecks account/execution boundaries.
+- Added workflowToolAccess.test.ts and workflowTools.test.ts: 13 regressions for project/account/observe/cancellation boundaries, CAS forwarding, raw operation response recovery and hash-only ledger privacy, local webhook secret retention, save-vs-start separation, bound run device and cross-workflow cancellation rejection.
+- Narrow tools/workflows.ts fix: model-facing workflow DTO excludes the recursive automation preview, avoiding depth/size failures and duplicate nested graphs in chat history. Local grant preparation retains full API preview.
+- Verified pinned Node22.22.0: combined access/tools/operations/capabilities/workspace selection 52 tests passed; full vue-tsc noEmit, scoped ESLint/Prettier and diff check passed.
+- Source ownership returned. Root informed of cached WorkflowController API signal after mode/gate change and actual backend waiting_for_device label mismatch; root owns those fixes. No native/provider/live acceptance claimed.
+
+## 2026-09-08 | Codex/backend_workflows -> root | final integration corrections
+- Scoped lint cleanup without suppressions: Reflect reads/writes retain existing JSON field validation; own-property status lookup avoids inherited labels; descriptive timezone/test identifiers.
+- Registry contract includes all13 workflow tools with exact schema fingerprint201598dee8b59909a0081690e5fa10234c3f92b90aa8331f020da9bbe0fd043d; original preexisting core fingerprint remains unchanged.
+- Imported workflow card metadata is now type-checked, bounded and explicitly projected; nonstring summary fields no longer crash the chat view. Four focused regressions added.
+- Complete Vitest passed144 files/1703 tests before final historical-version addition; that final addition passed44 targeted tests with registry/presentation/tools. Backend frozen-version DTO regression passed14 tests/85 assertions with scoped PHPStan/Pint.
+- Pending-operation identity now includes server and device in the hashed scope. Historical run references use new backend definition_version from run snapshot, never the current saved definition version; legacy unknown version remains null/omitted.
+- Earlier vue-tsc --noEmit at solution root was a no-op because tsconfig uses references; root explicitly informed, real --build --force now being verified. All edited source ownership returned; no live deployment or commit.
+
+## 2026-09-08 | Codex/workflow_plan_review -> root | Mini workflow action bridge
+- Mini project-chat workflow cards now receive their explicit project ID and hostOnly=true. Test/start/stop emit only session, message and workflow IDs plus a closed action enum; no direct Mini API polling or native workflow tool invocation.
+- Main-owned bridge rechecks the stored successful-tool card, current project/view/session, busy state and execution gate; stop requires the trusted run ID. Open/improve retain the existing main-owner routes and fixed project-scoped improvement prompt. App.vue implements the optional runWorkflow callback.
+- Native MiniAction validates workflow_action with Test/Start/Stop, rejects extra approval/run/project fields, and applies existing identifier and wire-size bounds. No Mini capabilities expanded.
+- Pinned Node22.22.0 verification: 40 Mini tests, scoped ESLint/Prettier and diff check passed. Native Mini selection: 8 tests passed. Full vue-tsc --build --force ran and found only two ToolResult fixtures outside Mini in workflowPresentation.test.ts (missing toolCallId/name), reported to root for correction and a final rerun.
+- Five Mini ToolResult test fixtures now satisfy the actual type contract. Source ownership returns after final typecheck confirmation. No deployment, commit or real native UI acceptance claimed.
+
+## 2026-09-08 | Codex/root | Workflow integration completed-local
+- Combined implementation/release verified. All root and subagent source ownership released; see E:/projekte/luczor/.lmzdev/artifacts/reports/2026-09-08-dynamic-workflows-implementation.md for final evidence and acceptance boundaries. No deployment or own commit.

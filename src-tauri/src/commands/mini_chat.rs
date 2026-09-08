@@ -52,6 +52,31 @@ pub enum MiniAction {
         session_id: String,
         panel: MiniWorkspacePanel,
     },
+    WorkflowOpen {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "messageId")]
+        message_id: String,
+        #[serde(rename = "workflowId")]
+        workflow_id: u64,
+    },
+    WorkflowImprove {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "messageId")]
+        message_id: String,
+        #[serde(rename = "workflowId")]
+        workflow_id: u64,
+    },
+    WorkflowAction {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "messageId")]
+        message_id: String,
+        #[serde(rename = "workflowId")]
+        workflow_id: u64,
+        action: MiniWorkflowAction,
+    },
     MainDecide {
         id: String,
         approved: bool,
@@ -69,6 +94,14 @@ pub enum MiniMode {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
+pub enum MiniWorkflowAction {
+    Test,
+    Start,
+    Stop,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MiniView {
     Chat,
     Workspace,
@@ -81,6 +114,7 @@ pub enum MiniWorkspacePanel {
     ProjectFolder,
     Desktop,
     Planning,
+    Workflows,
 }
 
 #[derive(Deserialize)]
@@ -112,11 +146,35 @@ fn validate_action(action: &MiniAction) -> Result<(), String> {
         | MiniAction::Decide { session_id, .. }
         | MiniAction::View { session_id, .. }
         | MiniAction::SelectProject { session_id, .. }
+        | MiniAction::WorkflowOpen { session_id, .. }
+        | MiniAction::WorkflowImprove { session_id, .. }
+        | MiniAction::WorkflowAction { session_id, .. }
         | MiniAction::WorkspaceOpen { session_id, .. } => validate_identifier(session_id)?,
         _ => {}
     }
     if let MiniAction::SelectProject { project_id, .. } = action {
         validate_identifier(project_id)?;
+    }
+    if let MiniAction::WorkflowOpen {
+        message_id,
+        workflow_id,
+        ..
+    }
+    | MiniAction::WorkflowImprove {
+        message_id,
+        workflow_id,
+        ..
+    }
+    | MiniAction::WorkflowAction {
+        message_id,
+        workflow_id,
+        ..
+    } = action
+    {
+        validate_identifier(message_id)?;
+        if *workflow_id == 0 || *workflow_id > 9_007_199_254_740_991 {
+            return Err("Invalid mini workflow identifier.".into());
+        }
     }
     if let MiniAction::Send { text, .. } = action {
         if text.trim().is_empty() || text.chars().count() > 12_000 {
@@ -375,6 +433,12 @@ mod tests {
             serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "project_folder"}),
             serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "desktop"}),
             serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "planning"}),
+            serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "workflows"}),
+            serde_json::json!({"type": "workflow_open", "sessionId": "session", "messageId": "message", "workflowId": 7}),
+            serde_json::json!({"type": "workflow_improve", "sessionId": "session", "messageId": "message", "workflowId": 7}),
+            serde_json::json!({"type": "workflow_action", "sessionId": "session", "messageId": "message", "workflowId": 7, "action": "test"}),
+            serde_json::json!({"type": "workflow_action", "sessionId": "session", "messageId": "message", "workflowId": 7, "action": "start"}),
+            serde_json::json!({"type": "workflow_action", "sessionId": "session", "messageId": "message", "workflowId": 7, "action": "stop"}),
         ] {
             let action = serde_json::from_value::<MiniAction>(payload.clone()).unwrap();
             assert!(validate_action(&action).is_ok());
@@ -389,6 +453,11 @@ mod tests {
             serde_json::json!({"type": "view", "sessionId": "session", "view": "chat", "command": "whoami"}),
             serde_json::json!({"type": "select_project", "sessionId": "session", "projectId": "project", "path": "C:/"}),
             serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "desktop", "approved": true}),
+            serde_json::json!({"type": "workflow_open", "sessionId": "session", "messageId": "message", "workflowId": 7, "projectId": "foreign"}),
+            serde_json::json!({"type": "workflow_improve", "sessionId": "session", "messageId": "message", "workflowId": 7, "text": "injected"}),
+            serde_json::json!({"type": "workflow_action", "sessionId": "session", "messageId": "message", "workflowId": 7, "action": "shell"}),
+            serde_json::json!({"type": "workflow_action", "sessionId": "session", "messageId": "message", "workflowId": 7, "action": "start", "approved": true}),
+            serde_json::json!({"type": "workflow_action", "sessionId": "session", "messageId": "message", "workflowId": 7, "action": "stop", "runId": "foreign"}),
         ] {
             assert!(serde_json::from_value::<MiniAction>(payload).is_err());
         }
@@ -404,6 +473,9 @@ mod tests {
                 serde_json::json!({"type": "view", "sessionId": session_id, "view": "chat"}),
                 serde_json::json!({"type": "select_project", "sessionId": session_id, "projectId": "project"}),
                 serde_json::json!({"type": "workspace_open", "sessionId": session_id, "panel": "agents"}),
+                serde_json::json!({"type": "workflow_open", "sessionId": session_id, "messageId": "message", "workflowId": 7}),
+                serde_json::json!({"type": "workflow_improve", "sessionId": session_id, "messageId": "message", "workflowId": 7}),
+                serde_json::json!({"type": "workflow_action", "sessionId": session_id, "messageId": "message", "workflowId": 7, "action": "start"}),
             ] {
                 let action = serde_json::from_value::<MiniAction>(payload).unwrap();
                 assert!(validate_action(&action).is_err());
@@ -421,6 +493,37 @@ mod tests {
             project_id: "ä".repeat(200),
         })
         .is_ok());
+    }
+    #[test]
+    fn rejects_workflow_actions_with_invalid_card_identifiers() {
+        for workflow_id in [0, 9_007_199_254_740_992] {
+            assert!(validate_action(&MiniAction::WorkflowOpen {
+                session_id: "session".into(),
+                message_id: "message".into(),
+                workflow_id,
+            })
+            .is_err());
+            assert!(validate_action(&MiniAction::WorkflowAction {
+                session_id: "session".into(),
+                message_id: "message".into(),
+                workflow_id,
+                action: MiniWorkflowAction::Start,
+            })
+            .is_err());
+        }
+        assert!(validate_action(&MiniAction::WorkflowImprove {
+            session_id: "session".into(),
+            message_id: " ".into(),
+            workflow_id: 1,
+        })
+        .is_err());
+        assert!(validate_action(&MiniAction::WorkflowAction {
+            session_id: "session".into(),
+            message_id: " ".into(),
+            workflow_id: 1,
+            action: MiniWorkflowAction::Stop,
+        })
+        .is_err());
     }
     #[test]
     fn retains_the_serialized_action_size_limit() {

@@ -1,6 +1,7 @@
 import type { Message, PendingToolCall, Project } from '@/state/types'
 import type { MiniChatBinding } from './bridge'
 import type { MiniProject, MiniMessage } from './types'
+import { workflowReferences } from '@/services/workflows/presentation'
 
 export function boundMiniMessages(messages: MiniMessage[]): MiniMessage[] {
   const bounded = messages.slice(-40).map(message => ({
@@ -9,6 +10,15 @@ export function boundMiniMessages(messages: MiniMessage[]): MiniMessage[] {
     question: message.question?.slice(0, 1000),
     choices: message.choices.slice(0, 4).map(choice => choice.slice(0, 300)),
     commentary: message.commentary?.slice(-12).map(entry => ({ ...entry, content: entry.content.slice(0, 4000) })),
+    workflows: message.workflows?.slice(0, 8).map(reference => ({
+      id: reference.id,
+      projectId: reference.projectId,
+      name: reference.name.slice(0, 160),
+      version: reference.version,
+      runId: reference.runId?.slice(0, 64),
+      status: reference.status?.slice(0, 60),
+      summary: reference.summary?.slice(0, 1000),
+    })),
     activity: message.activity
       ? {
           ...message.activity,
@@ -25,7 +35,11 @@ export function boundMiniMessages(messages: MiniMessage[]): MiniMessage[] {
   return bounded
 }
 
-export function miniProjectList(projects: Project[], messages: Message[], activity: Record<string, boolean> = {}): MiniProject[] {
+export function miniProjectList(
+  projects: Project[],
+  messages: Message[],
+  activity: Record<string, boolean> = {}
+): MiniProject[] {
   return projects
     .filter(project => !project.archivedAt)
     .slice(0, 200)
@@ -86,6 +100,19 @@ export function projectChatBinding(
         ?.slice(-12)
         .map(entry => ({ ...entry, content: entry.content.slice(0, 4000) })),
       tokenUsage: message.meta.tokenUsage,
+      workflows:
+        message.role === 'assistant' && project
+          ? workflowReferences(
+              tools.filter(call => {
+                const nextUser = visible.find(item => item.role === 'user' && item.ts > message.ts)
+                return (
+                  call.projectId === project.id &&
+                  call.createdAt >= message.ts &&
+                  (!nextUser || call.createdAt < nextUser.ts)
+                )
+              })
+            ).map(reference => ({ ...reference, projectId: project.id }))
+          : undefined,
     })),
     tools: tools
       .filter(tool => tool.projectId === project?.id)

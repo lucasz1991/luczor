@@ -10,6 +10,7 @@ import {
   REALTIME_NOTIFICATION_EVENT,
 } from '@/services/notifications'
 import { isWorkflowTaskBundle, runWorkflowTask, type WorkflowTaskPrimitives } from '@/services/workflowTaskRunner'
+import { isDurableWorkflowJob, runWorkflowDeviceJob } from '@/services/workflows/execution'
 
 let stop: (() => void) | null = null
 const inFlight = new Set<string>()
@@ -394,6 +395,10 @@ async function processJob(clientId: string, incoming: DeviceJob, session: Channe
     // Approval is local, complete and bound to a private immutable copy of the signed payload.
     const preview = await deviceJobApprovalPreview(job)
     assertCurrent()
+    if (isDurableWorkflowJob(job)) {
+      await runWorkflowDeviceJob(job, session.config, ticket, assertCurrent, preview)
+      return
+    }
     const confirmation = await requestConfirmation(preview, 'Luczor – Geräteauftrag freigeben')
     assertCurrent()
     if (confirmation.error) throw new Error(confirmation.error)

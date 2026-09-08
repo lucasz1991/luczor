@@ -2,6 +2,10 @@ import type { ChatActivity } from '@/services/chatActivity'
 import type { ChatCommentary, ToolCallStatus } from '@/state/types'
 import type { LuczorMode } from '@/services/inference/types'
 import type { TokenUsage } from '@/services/tokenUsage'
+import type { WorkflowChatReference } from '@/services/workflows/presentation'
+
+export type MiniWorkflowReference = WorkflowChatReference & { projectId: string }
+export type MiniWorkflowAction = 'test' | 'start' | 'stop'
 
 export type MiniMessage = {
   id: string
@@ -15,9 +19,10 @@ export type MiniMessage = {
   commentary?: ChatCommentary[]
   tokenUsage?: TokenUsage
   contextLabel?: string
+  workflows?: MiniWorkflowReference[]
 }
 export type MiniView = 'chat' | 'workspace'
-export type MiniPanel = 'agents' | 'project_folder' | 'desktop' | 'planning'
+export type MiniPanel = 'agents' | 'project_folder' | 'desktop' | 'planning' | 'workflows'
 export type MiniProject = { id: string; name: string; messageCount: number; updatedAt: number; busy?: boolean }
 export type MiniTool = { id: string; name: string; detail: string; status: ToolCallStatus }
 export type MiniDecision = {
@@ -55,6 +60,14 @@ export type MiniAction =
   | { type: 'view'; sessionId: string; view: MiniView }
   | { type: 'select_project'; sessionId: string; projectId: string }
   | { type: 'workspace_open'; sessionId: string; panel: MiniPanel }
+  | { type: 'workflow_open' | 'workflow_improve'; sessionId: string; messageId: string; workflowId: number }
+  | {
+      type: 'workflow_action'
+      sessionId: string
+      messageId: string
+      workflowId: number
+      action: MiniWorkflowAction
+    }
   | { type: 'send'; sessionId: string; text: string }
   | { type: 'voice_push_to_talk'; sessionId: string }
   | { type: 'voice_wake_word'; sessionId: string }

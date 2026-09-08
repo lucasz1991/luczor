@@ -352,6 +352,9 @@ export function createMiniChatController(deps: Dependencies) {
       action.type === 'kill_switch' ||
       action.type === 'view' ||
       action.type === 'select_project' ||
+      action.type === 'workflow_open' ||
+      action.type === 'workflow_improve' ||
+      action.type === 'workflow_action' ||
       action.type === 'workspace_open'
     )
       return

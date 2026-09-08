@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wf-watch-ack"
+description = "Enables the wf_watch_ack command without any pre-configured scope."
+commands.allow = ["wf_watch_ack"]
+
+[[permission]]
+identifier = "deny-wf-watch-ack"
+description = "Denies the wf_watch_ack command without any pre-configured scope."
+commands.deny = ["wf_watch_ack"]

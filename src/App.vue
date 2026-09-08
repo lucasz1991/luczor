@@ -14,6 +14,10 @@ import ChatProjectOverlay from './components/ChatProjectOverlay.vue'
 import SidebarNav from './components/ai/SidebarNav.vue'
 import AgentHub from './components/agents/AgentHub.vue'
 import PlanningWorkspace from './components/planning/PlanningWorkspace.vue'
+import WorkflowWorkspace from './components/workflows/WorkflowWorkspace.vue'
+import WorkflowChatCards from './components/workflows/WorkflowChatCards.vue'
+import { workflowReferences, type WorkflowChatReference } from '@/services/workflows/presentation'
+import { useWorkflowWatchers } from '@/composables/useWorkflowWatchers'
 import { planningHub } from '@/services/planning/hub'
 import {
   createPlanPrincipalBinding,
@@ -145,6 +149,9 @@ const settingsStartTab = ref<SettingsStartTab>('server')
 const showSystemPanel = ref(false)
 const showAgentHub = ref(false)
 const showPlanning = ref(false)
+const showWorkflows = ref(false)
+const selectedWorkflowId = ref<number>()
+const selectedWorkflowRunId = ref<string>()
 const planningObjective = ref('')
 const planningRevision = ref(0)
 const stopPlanningUpdates = planningHub.subscribe(() => planningRevision.value++)
@@ -247,6 +254,29 @@ function messageTools(message: Message) {
   return calls
     .filter(call => call.createdAt >= message.ts && (!nextUser || call.createdAt < nextUser.ts))
     .map(presentLocalToolResult)
+}
+function messageWorkflows(message: Message) {
+  const calls = getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, message.projectId) ?? []
+  const nextUser = messages.value.find(item => item.role === 'user' && item.ts > message.ts)
+  return workflowReferences(
+    calls.filter(call => call.createdAt >= message.ts && (!nextUser || call.createdAt < nextUser.ts))
+  )
+}
+function openWorkflows(reference?: WorkflowChatReference) {
+  selectedWorkflowId.value = reference?.id
+  selectedWorkflowRunId.value = reference?.runId
+  showPlanning.value = false
+  showAgentHub.value = false
+  showWorkflows.value = true
+}
+function discussWorkflow(text: string) {
+  setComposerInput(text, 'keyboard')
+  void nextTick(() => promptBar.value?.focus())
+}
+function improveWorkflow(reference: WorkflowChatReference) {
+  discussWorkflow(
+    `Verbessere mit mir Workflow „${reference.name}“ (ID ${reference.id}). Lies zuerst die aktuelle Definition${reference.runId ? ` und den Lauf ${reference.runId}` : ' und relevante letzte Läufe'}. Begründe die Änderungen anhand meines Ziels und vorhandener Ergebnisse. Starte erst auf meinen Auftrag.`
+  )
 }
 function finishActiveTurn(status: 'done' | 'failed' | 'canceled') {
   const turn = activeTurn.value
@@ -1820,8 +1850,33 @@ const miniChat = useMiniChatHost({
   openPanel: async panel => {
     if (panel === 'agents') showAgentHub.value = true
     else if (panel === 'planning') openPlanning()
+    else if (panel === 'workflows') openWorkflows()
     else if (panel === 'desktop') openSettings('execution')
     else await addProject()
+  },
+  openWorkflow: async reference => {
+    if (reference.projectId !== activeProjectId.value) throw new Error('Workflow-Projekt wurde gewechselt.')
+    openWorkflows(reference)
+  },
+  runWorkflow: async (reference, action) => {
+    if (reference.projectId !== activeProjectId.value || sending.value || hud.killSwitch)
+      throw new Error('Workflow-Aktion ist derzeit gesperrt.')
+    const ticket = executionGate.capture()
+    const { workflowTools } = await import('@/services/tools/workflows')
+    executionGate.assert(ticket, true)
+    const tool = workflowTools.find(
+      item => item.name === (action === 'stop' ? 'workflow_run_cancel' : 'workflow_run_start')
+    )!
+    const result = (await tool.execute(
+      {
+        workflow_id: reference.id,
+        ...(action === 'stop' ? { run_id: reference.runId } : { sandbox: action === 'test' }),
+      },
+      { projectId: reference.projectId, execution: ticket }
+    )) as { ok: boolean; error?: string; workflow_ref?: WorkflowChatReference }
+    executionGate.assert(ticket, true)
+    if (!result.ok) throw new Error(result.error ?? 'Workflow-Aktion fehlgeschlagen.')
+    if (result.workflow_ref) openWorkflows(result.workflow_ref)
   },
   togglePushToTalk,
   toggleWakeWord: toggleListening,
@@ -1890,10 +1945,22 @@ useIdleOptimization({
 })
 watch(conversationBusy, busy => voiceInputSession.setMuted(busy || voiceMuteDepth > 0), { flush: 'sync' })
 const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
+useWorkflowWatchers()
 </script>
 
 <template>
   <PayloadApproval />
+  <WorkflowWorkspace
+    :open="showWorkflows"
+    :project-id="activeProjectId"
+    :mode="mode"
+    :kill-switch="hud.killSwitch"
+    :busy="sending || miniChat.state.busy"
+    :initial-workflow-id="selectedWorkflowId"
+    :initial-run-id="selectedWorkflowRunId"
+    @update:open="showWorkflows = $event"
+    @discuss="discussWorkflow"
+  />
   <PlanningWorkspace
     :open="showPlanning"
     :project-id="activeProjectId"
@@ -1943,6 +2010,7 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
       @system="showSystemPanel = !showSystemPanel"
       @agents="showAgentHub = true"
       @planning="openPlanning()"
+      @workflows="openWorkflows()"
     />
 
     <main class="main-col">
@@ -2344,6 +2412,14 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
                 ><ToolChips :tools="messageTools(m)"
               /></ThinkingState>
               <ToolChips v-else :tools="messageTools(m)" />
+              <WorkflowChatCards
+                :workflows="messageWorkflows(m)"
+                :project-id="activeProjectId"
+                :disabled="sending || hud.killSwitch"
+                :read-only="mode === 'observe'"
+                @open="openWorkflows"
+                @discuss="improveWorkflow"
+              />
               <SelectionActions :disabled="sending" @action="editSelection" @speak="speakSelectedText">
                 <ChatCommentary :entries="m.meta.commentary ?? []" :message-id="m.id" />
                 <StreamingText

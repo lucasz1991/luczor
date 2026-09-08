@@ -17,6 +17,7 @@ import TokenCounter from '../ai/TokenCounter.vue'
 import ThinkingState from '../ai/ThinkingState.vue'
 import ApprovalCard from '../ai/ApprovalCard.vue'
 import ToolChips from '../ai/ToolChips.vue'
+import WorkflowChatCards from '../workflows/WorkflowChatCards.vue'
 import { miniStatus } from '@/services/miniChat/presentation'
 import type { MiniAction, MiniSnapshot, MiniPanel, MiniView } from '@/services/miniChat/types'
 import type { ActivityStatus } from '../ai/types'
@@ -277,6 +278,10 @@ async function openWorkspacePanel(panel: MiniPanel) {
   emit('action', { type: 'workspace_open', sessionId: props.snapshot.sessionId, panel })
   await windowAction('main')
 }
+async function openWorkflow(messageId: string, workflowId: number) {
+  emit('action', { type: 'workflow_open', sessionId: props.snapshot.sessionId, messageId, workflowId })
+  await windowAction('main')
+}
 function beginDrag(event: PointerEvent, orb = false) {
   if (event.button !== 0) return
   if (!orb && (event.target as Element).closest('button')) return
@@ -502,6 +507,9 @@ onBeforeUnmount(() => {
           <AiIcon name="chevron" :size="10" />
         </button>
       </div>
+      <p v-if="!isChat" class="mini-scope-note">
+        Für Workflows das Zielprojekt ausdrücklich nennen. Erstellen und Verbessern startet keinen Lauf.
+      </p>
       <div class="mini-quick-controls" role="group" aria-label="Mini-Chat Funktionen">
         <button
           type="button"
@@ -541,6 +549,9 @@ onBeforeUnmount(() => {
         </button>
         <button type="button" :disabled="snapshot.busy || snapshot.mainBusy" @click="openWorkspacePanel('agents')">
           <AiIcon name="spark" :size="13" /> Agenten
+        </button>
+        <button type="button" :disabled="snapshot.busy || snapshot.mainBusy" @click="openWorkspacePanel('workflows')">
+          <AiIcon name="grid" :size="13" /> Workflows
         </button>
         <button type="button" :disabled="snapshot.busy || snapshot.mainBusy" @click="openWorkspacePanel('desktop')">
           <AiIcon name="panel" :size="13" /> Desktop
@@ -624,6 +635,34 @@ onBeforeUnmount(() => {
               :follow-ups="message.status === 'running' ? message.choices : []"
             />
             <TokenCounter :usage="message.tokenUsage" :active="message.status === 'running'" />
+            <WorkflowChatCards
+              v-if="isChat && message.workflows?.length"
+              :workflows="message.workflows"
+              :project-id="snapshot.project?.id ?? ''"
+              :host-only="true"
+              :disabled="disabled"
+              :read-only="snapshot.mode === 'observe' || snapshot.hud.killSwitch"
+              @open="reference => openWorkflow(message.id, reference.id)"
+              @action="
+                (reference, action) =>
+                  emit('action', {
+                    type: 'workflow_action',
+                    sessionId: snapshot.sessionId,
+                    messageId: message.id,
+                    workflowId: reference.id,
+                    action,
+                  })
+              "
+              @discuss="
+                reference =>
+                  emit('action', {
+                    type: 'workflow_improve',
+                    sessionId: snapshot.sessionId,
+                    messageId: message.id,
+                    workflowId: reference.id,
+                  })
+              "
+            />
             <button
               v-if="message.content && message.status === 'done'"
               type="button"
