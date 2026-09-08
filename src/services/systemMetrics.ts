@@ -1,6 +1,25 @@
 import { invoke } from '@tauri-apps/api/core'
 
+export type LocalNetworkCounters = {
+  sent_bytes: number
+  received_bytes: number
+  requests: number
+  active_requests: number
+  failed_requests: number
+}
+
+export type DiskMetrics = {
+  mount: string
+  kind: 'ssd' | 'hdd' | 'unknown'
+  total_bytes: number
+  used_bytes: number
+  busy_percent: number | null
+  read_percent: number | null
+  write_percent: number | null
+}
+
 export type SystemMetrics = {
+  disk?: DiskMetrics | null
   cpu_percent: number
   ram_percent: number
   ram_used_mb: number
@@ -20,6 +39,7 @@ export type SystemMetrics = {
   model_gpu_percent?: number | null
   /** False means no owned local-model process; null means process state is unavailable. */
   model_running?: boolean | null
+  network_local?: LocalNetworkCounters
 }
 
 export async function readSystemMetrics(): Promise<SystemMetrics> {

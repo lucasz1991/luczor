@@ -127,6 +127,7 @@ const TOOL_CONTRACT = [
   { name: 'os_open_url', category: 'os', mutating: true, requiresApproval: true },
   { name: 'os_environment', category: 'os', mutating: false, requiresApproval: true },
   { name: 'os_observe_desktop', category: 'os', mutating: false, requiresApproval: true },
+  { name: 'local_model_status', category: 'app', mutating: false, requiresApproval: false },
   { name: 'project_create', category: 'project', mutating: true, requiresApproval: true },
   { name: 'chat_create', category: 'app', mutating: true, requiresApproval: true },
   { name: 'chat_list', category: 'app', mutating: false, requiresApproval: false },
@@ -156,7 +157,7 @@ const TOOL_CONTRACT = [
   { name: 'workspace_agent_cancel', category: 'app', mutating: true, requiresApproval: false },
 ] as const
 
-const TOOL_SCHEMA_SHA256 = '19f3bc470228b0c89d0dac6177ea129a8f94e52184d3b4912771b1a5c775b0ed'
+const TOOL_SCHEMA_SHA256 = '323156dda2610ec6e2ac00fc92f1a1819d75cfdd1e2e151a70a9edfecc11ea9a'
 const CORE_TOOL_SCHEMA_SHA256 = 'fe694b20d5a15a37be6027618d76aca6bc92c7e858784aae272ae776edb1f6c8'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
@@ -248,14 +249,17 @@ describe('tool registry contract', () => {
     const fingerprint = createHash('sha256').update(JSON.stringify(toOpenAITools())).digest('hex')
 
     expect(fingerprint).toBe(TOOL_SCHEMA_SHA256)
-    for (const tool of toOpenAITools()) {
+    for (const tool of toOpenAITools().filter(item => item.function.name !== 'local_model_status')) {
       const parameters = tool.function.parameters as { properties?: Record<string, unknown> }
       expect(Object.keys(parameters.properties ?? {})).not.toHaveLength(0)
     }
+    expect(getTool('local_model_status')!.parameters).toMatchObject({ properties: {}, additionalProperties: false })
   })
 
   it('keeps the original project/desktop tools unchanged while adding six guarded workspace tools', () => {
-    const coreTools = toOpenAITools().filter(tool => !getTool(tool.function.name)?.workspaceOnly)
+    const coreTools = toOpenAITools().filter(
+      tool => !getTool(tool.function.name)?.workspaceOnly && tool.function.name !== 'local_model_status'
+    )
     expect(createHash('sha256').update(JSON.stringify(coreTools)).digest('hex')).toBe(CORE_TOOL_SCHEMA_SHA256)
     const workspaceTools = listTools().filter(tool => tool.workspaceOnly)
     expect(workspaceTools.map(tool => tool.name)).toEqual([

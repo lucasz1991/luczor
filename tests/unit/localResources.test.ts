@@ -45,6 +45,45 @@ function setup() {
 afterEach(() => vi.useRealTimers())
 
 describe('device resource workflow barrier', () => {
+  it('waits for idle work to drain before native user admission and pauses through nested rounds', async () => {
+    const { controller, deps } = setup()
+    let drain = () => {}
+    const releaseForeground = vi.fn()
+    const admission = vi.fn(
+      () =>
+        new Promise<{ release(): void }>(resolve => {
+          drain = () => resolve({ release: releaseForeground })
+        })
+    )
+    controller.setForegroundAdmission(admission)
+    const waiting = controller.acquire()
+    await Promise.resolve()
+    expect(deps.begin).not.toHaveBeenCalled()
+    drain()
+    const outer = await waiting
+    const inner = await controller.acquire(undefined, outer.work)
+    await outer.release()
+    expect(releaseForeground).not.toHaveBeenCalled()
+    expect(admission).toHaveBeenCalledOnce()
+    await inner.release()
+    expect(releaseForeground).toHaveBeenCalledOnce()
+    expect(controller.hasWork()).toBe(false)
+  })
+
+  it('idle leases bypass foreground admission while acquisition failures release their foreground pause', async () => {
+    const { controller, deps } = setup()
+    const release = vi.fn()
+    const admission = vi.fn(async () => ({ release }))
+    controller.setForegroundAdmission(admission)
+    await controller.runBackground(async () => {
+      expect(controller.hasWork()).toBe(true)
+    }, new AbortController().signal)
+    expect(admission).not.toHaveBeenCalled()
+    deps.begin.mockRejectedValueOnce(new Error('native unavailable'))
+    await expect(controller.acquire()).rejects.toThrow('native unavailable')
+    expect(release).toHaveBeenCalledOnce()
+    expect(controller.hasWork()).toBe(false)
+  })
   it('shares final release confirmation between concurrent callers without duplicate native end', async () => {
     const { controller, deps, nativeLeases } = setup()
     const lease = await controller.acquire()

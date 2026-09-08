@@ -31,20 +31,28 @@ export async function trackMemoryActivity<T>(
   kind: MemoryOperation,
   operation: (markFailed: () => void) => T | PromiseLike<T>
 ): Promise<T> {
-  const activeKey = kind === 'read' ? 'activeReads' : 'activeWrites'
-  const completedKey = kind === 'read' ? 'reads' : 'writes'
-  const failedKey = kind === 'read' ? 'failedReads' : 'failedWrites'
   let failed = false
-  activity[activeKey]++
+  if (kind === 'read') activity.activeReads++
+  else activity.activeWrites++
   try {
-    const result = await operation(() => { failed = true })
-    if (!failed) activity[completedKey]++
+    const result = await operation(() => {
+      failed = true
+    })
+    if (!failed) {
+      if (kind === 'read') activity.reads++
+      else activity.writes++
+    }
     return result
   } catch (error) {
     failed = true
     throw error
   } finally {
-    if (failed) activity[failedKey]++
-    activity[activeKey]--
+    if (kind === 'read') {
+      if (failed) activity.failedReads++
+      activity.activeReads--
+    } else {
+      if (failed) activity.failedWrites++
+      activity.activeWrites--
+    }
   }
 }

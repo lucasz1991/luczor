@@ -298,10 +298,7 @@ export async function fetchWithTimeout(
   const deadline = abortDeadline(init.signal, timeoutMs)
 
   try {
-    return await Promise.race([
-      apiTransportFetch(input, { ...init, signal: deadline.signal }),
-      deadline.cancellation,
-    ])
+    return await Promise.race([apiTransportFetch(input, { ...init, signal: deadline.signal }), deadline.cancellation])
   } finally {
     deadline.dispose()
   }
@@ -403,7 +400,7 @@ function emitDebug(level: 'warn' | 'error', event: string, detail: unknown): voi
   window.dispatchEvent(new CustomEvent('luczor:debug', { detail: { level, event, detail } }))
 }
 
-type RequestOptions = {
+export type RequestOptions = {
   method?: string
   body?: unknown
   /** Set false for the public /health endpoint. */
@@ -580,7 +577,7 @@ async function request<T>(path: string, opts: RequestOptions = {}, config?: Lucz
   return requestWithConfig<T>(path, opts, config ?? (await getApiConfigSnapshot()))
 }
 
-async function requestWithConfig<T>(path: string, opts: RequestOptions, cfg: LuczorApiConfigSnapshot): Promise<T> {
+export async function requestWithConfig<T>(path: string, opts: RequestOptions, cfg: LuczorApiConfigSnapshot): Promise<T> {
   // An identity change may have invalidated the caller while configuration was loading.
   if (opts.signal?.aborted) throw abortError(opts.signal)
   const requestCorrelationId = createCorrelationId()

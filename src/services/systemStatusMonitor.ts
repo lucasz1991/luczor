@@ -5,6 +5,7 @@ export type SystemStatusAvailability = 'idle' | 'loading' | 'live' | 'unavailabl
 export type SystemStatusResources = { cpu: number | null; ram: number | null; gpu: number | null }
 export type SystemStatusPoint = SystemStatusResources & {
   at: number
+  disk?: { busy: number | null; read: number | null; write: number | null }
   app: SystemStatusResources
   model: SystemStatusResources
 }
@@ -77,12 +78,14 @@ export function createSystemStatusMonitor(options: MonitorOptions = {}) {
         if (!current() || sample === null) return
         const at = now()
         state.sample = {
+          disk: sample.disk ? { ...sample.disk } : null,
           cpu_percent: sample.cpu_percent,
           ram_percent: sample.ram_percent,
           ram_used_mb: sample.ram_used_mb,
           ram_total_mb: sample.ram_total_mb,
           gpu_percent: sample.gpu_percent,
           gpu_source: sample.gpu_source,
+          network_local: sample.network_local ? { ...sample.network_local } : undefined,
           cpu_temp_c: sample.cpu_temp_c,
           gpu_temp_c: sample.gpu_temp_c,
           app_cpu_percent: percent(sample.app_cpu_percent),
@@ -99,6 +102,15 @@ export function createSystemStatusMonitor(options: MonitorOptions = {}) {
         state.availability = 'live'
         append({
           at,
+          ...(sample.disk
+            ? {
+                disk: {
+                  busy: percent(sample.disk.busy_percent),
+                  read: percent(sample.disk.read_percent),
+                  write: percent(sample.disk.write_percent),
+                },
+              }
+            : {}),
           cpu: percent(sample.cpu_percent),
           ram: percent(sample.ram_percent),
           gpu: percent(sample.gpu_percent),

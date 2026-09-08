@@ -24,6 +24,7 @@ const titles: Record<string, string> = {
   fs_delete: 'Datei löschen',
   os_environment: 'Computerumgebung analysieren',
   os_system_diagnostics: 'Gerätesicherheit und Leistung prüfen',
+  local_model_status: 'Lokalen Modellstatus prüfen',
   os_observe_desktop: 'Eingabeziel prüfen',
   agent_team_prepare: 'Agententeam vorbereiten',
   agent_team_status: 'Teamstatus lesen',
@@ -61,6 +62,7 @@ export function capabilityTitle(tool: ToolCapability): string {
 }
 
 export function capabilityGroup(tool: ToolCapability): string {
+  if (tool.name === 'local_model_status') return 'Lokales Modell'
   if (tool.name.startsWith('memory_')) return 'Erinnerungen'
   if (tool.name.startsWith('os_')) return 'Computer'
   if (tool.name.startsWith('fs_') || tool.name === 'workspace_get') return 'Dateien'

@@ -26,6 +26,16 @@ use uuid::Uuid;
 
 use super::ensure_main_webview;
 
+#[path = "local_model_idle.rs"]
+mod idle_inference;
+#[path = "local_model_network.rs"]
+mod local_network;
+pub(crate) use local_network::LocalNetworkSnapshot;
+
+pub(crate) fn network_snapshot() -> LocalNetworkSnapshot {
+    local_network::snapshot()
+}
+
 #[path = "local_model_accelerators.rs"]
 mod accelerator_inventory;
 #[path = "local_model_context.rs"]
@@ -60,6 +70,9 @@ const MAX_INFERENCE_TOTAL_SECONDS: u64 = 30 * 60;
 const MAX_RUNTIME_PATH_CONFIG_BYTES: u64 = 16 * 1024;
 const RESIDENT_RENEWAL_UNAVAILABLE: &str =
     "Resident local model is unavailable for readiness renewal.";
+const IDLE_CONTEXT_USE_CASE: &str = "context.optimize";
+const IDLE_RESIDENT_UNAVAILABLE: &str =
+    "Background local optimization requires an already resident model in the same scope.";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -340,6 +353,7 @@ struct ManagerState {
     runtime: Option<ManagedRuntime>,
     readiness: HashMap<String, ReadinessRecord>,
     active_request_id: Option<String>,
+    active_idle_optimization: bool,
     cancel: Option<Arc<AtomicBool>>,
     failures: HashMap<String, u32>,
     cooldown_until_ms: HashMap<String, i128>,
@@ -644,6 +658,46 @@ pub struct LocalInferenceResult {
     request_id: String,
     context_usage: Option<ContextUsage>,
     usage: Option<InferenceTokenUsage>,
+    diagnostics: RuntimeDiagnostics,
+}
+
+#[derive(Debug, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeDiagnostics {
+    cached_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    prompt_ms: Option<f64>,
+    predicted_ms: Option<f64>,
+    prompt_tokens_per_second: Option<f64>,
+    output_tokens_per_second: Option<f64>,
+}
+
+impl RuntimeDiagnostics {
+    fn observe(&mut self, value: &Value) {
+        let count = |pointer: &str| {
+            value
+                .pointer(pointer)
+                .and_then(Value::as_u64)
+                .filter(|n| *n <= 9_007_199_254_740_991)
+        };
+        let metric = |pointer: &str| {
+            value
+                .pointer(pointer)
+                .and_then(Value::as_f64)
+                .filter(|n| n.is_finite() && *n >= 0.0)
+        };
+        self.cached_tokens = count("/usage/prompt_tokens_details/cached_tokens")
+            .or_else(|| count("/timings/cache_n"))
+            .or(self.cached_tokens);
+        self.reasoning_tokens =
+            count("/usage/completion_tokens_details/reasoning_tokens").or(self.reasoning_tokens);
+        self.prompt_ms = metric("/timings/prompt_ms").or(self.prompt_ms);
+        self.predicted_ms = metric("/timings/predicted_ms").or(self.predicted_ms);
+        self.prompt_tokens_per_second =
+            metric("/timings/prompt_per_second").or(self.prompt_tokens_per_second);
+        self.output_tokens_per_second =
+            metric("/timings/predicted_per_second").or(self.output_tokens_per_second);
+    }
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -1016,18 +1070,26 @@ pub async fn local_model_cancel(
             .lock()
             .map_err(|_| "Local model manager is unavailable.".to_string())?;
         require_catalog_binding(&guard, &catalog_binding)?;
-        if guard.active_request_id.as_deref() != Some(request_id.as_str()) {
-            return Ok(());
-        }
-        if let Some(cancel) = guard.cancel.as_ref() {
-            cancel.store(true, Ordering::SeqCst);
-        }
-        guard.runtime.take()
+        cancel_active_operation(&mut guard, &request_id)
     };
     if let Some(runtime) = runtime.as_mut() {
         runtime.stop();
     }
     Ok(())
+}
+
+fn cancel_active_operation(guard: &mut ManagerState, request_id: &str) -> Option<ManagedRuntime> {
+    if guard.active_request_id.as_deref() != Some(request_id) {
+        return None;
+    }
+    if let Some(cancel) = guard.cancel.as_ref() {
+        cancel.store(true, Ordering::SeqCst);
+    }
+    if guard.active_idle_optimization {
+        None
+    } else {
+        guard.runtime.take()
+    }
 }
 
 #[tauri::command]
@@ -1237,6 +1299,7 @@ fn begin_manifest_acceptance(
         cancel.store(true, Ordering::SeqCst);
     }
     guard.active_request_id = None;
+    guard.active_idle_optimization = false;
     guard.catalog = None;
     guard.readiness.clear();
     guard.failures.clear();
@@ -1276,6 +1339,7 @@ fn rotate_manifest_session(
         cancel.store(true, Ordering::SeqCst);
     }
     guard.active_request_id = None;
+    guard.active_idle_optimization = false;
     guard.catalog = None;
     guard.readiness.clear();
     guard.failures.clear();
@@ -1887,6 +1951,7 @@ fn claim_prepare_operation(
         .cloned()
         .ok_or("Requested local model is unavailable.")?;
     guard.active_request_id = Some(operation_id.to_string());
+    guard.active_idle_optimization = false;
     guard.cancel = Some(cancel.clone());
     Ok((catalog, model, cancel))
 }
@@ -1997,11 +2062,12 @@ fn refresh_resident_runtime(
     let Some((port, api_key)) = endpoint else {
         return Ok(false);
     };
-    let healthy = local_http_client(Duration::from_secs(2), Duration::from_secs(2))?
-        .get(format!("http://127.0.0.1:{port}/health"))
-        .bearer_auth(api_key)
-        .send()
-        .is_ok_and(|response| response.status().is_success());
+    let healthy = local_network::send(
+        local_http_client(Duration::from_secs(2), Duration::from_secs(2))?
+            .get(format!("http://127.0.0.1:{port}/health"))
+            .bearer_auth(api_key),
+    )
+    .is_ok_and(|response| response.status().is_success());
     require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)?;
     if !healthy {
         return Err("Resident local runtime health check failed.".into());
@@ -2111,15 +2177,16 @@ fn run_signed_benchmark(
     });
     let read_timeout = signed_read_timeout(thresholds.max_first_token_ms)?;
     let started = Instant::now();
-    let response = local_http_client(
-        read_timeout,
-        Duration::from_secs(MAX_INFERENCE_TOTAL_SECONDS),
-    )?
-    .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-    .bearer_auth(api_key)
-    .header("Content-Type", "application/json")
-    .body(serde_json::to_vec(&body).map_err(|error| error.to_string())?)
-    .send()
+    let response = local_network::send(
+        local_http_client(
+            read_timeout,
+            Duration::from_secs(MAX_INFERENCE_TOTAL_SECONDS),
+        )?
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth(api_key)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_vec(&body).map_err(|error| error.to_string())?),
+    )
     .map_err(|_| "Local benchmark request failed.".to_string())?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
@@ -2469,6 +2536,15 @@ fn validate_inference_request(request: &LocalInferenceRequest) -> Result<(), Str
     if encoded.len() > 8 * 1024 * 1024 {
         return Err("Local inference request exceeds the native size limit.".into());
     }
+    if request.use_case == IDLE_CONTEXT_USE_CASE
+        && (!request.tools.is_empty()
+            || request.tool_choice != "none"
+            || request.reasoning_mode != "off"
+            || request.max_output_tokens > 768
+            || encoded.len() > 64 * 1024)
+    {
+        return Err("Background local optimization exceeds its native read-only bounds.".into());
+    }
     Ok(())
 }
 
@@ -2481,14 +2557,21 @@ fn infer_blocking(
     // claim are one native critical section. A pre-reload request therefore
     // cannot carry an old model snapshot across a session rotation.
     let (model, cancel) = claim_inference_operation(&request)?;
-    if let Err(error) = ensure_runtime(
-        app,
-        &model,
-        Some(&request.scope_digest),
-        &request.request_id,
-        &request.catalog_binding,
-        &cancel,
-    ) {
+    let prepared = if request.use_case == IDLE_CONTEXT_USE_CASE {
+        // claim_inference_operation already checked the resident runtime under
+        // the same lock as ownership. Idle work must never enter cold start.
+        Ok(())
+    } else {
+        ensure_runtime(
+            app,
+            &model,
+            Some(&request.scope_digest),
+            &request.request_id,
+            &request.catalog_binding,
+            &cancel,
+        )
+    };
+    if let Err(error) = prepared {
         let outcome = if cancel.load(Ordering::SeqCst) {
             RequestOutcome::Cancelled
         } else {
@@ -2616,9 +2699,37 @@ fn claim_inference_operation(
     {
         return Err("Local model readiness evidence is stale or mismatched.".into());
     }
+    if request.use_case == IDLE_CONTEXT_USE_CASE {
+        require_idle_resident(
+            &mut guard,
+            &model,
+            &request.scope_digest,
+            resource_revision,
+            &catalog.payload_hash,
+        )?;
+    }
     guard.active_request_id = Some(request.request_id.clone());
+    guard.active_idle_optimization = request.use_case == IDLE_CONTEXT_USE_CASE;
     guard.cancel = Some(cancel.clone());
     Ok((model, cancel))
+}
+
+fn require_idle_resident(
+    guard: &mut ManagerState,
+    model: &ModelRelease,
+    scope: &str,
+    resource_revision: u64,
+    manifest_hash: &str,
+) -> Result<(), String> {
+    let runtime = guard.runtime.as_mut().ok_or(IDLE_RESIDENT_UNAVAILABLE)?;
+    if runtime.resource_revision != resource_revision
+        || runtime.prepared_manifest_hash.as_deref() != Some(manifest_hash)
+        || !runtime.reuse(&model.id, Some(scope))?
+    {
+        return Err(IDLE_RESIDENT_UNAVAILABLE.into());
+    }
+    verified_runtime_endpoint(runtime)?;
+    Ok(())
 }
 
 fn ensure_runtime(
@@ -3054,11 +3165,12 @@ fn await_health(
             std::thread::sleep(Duration::from_millis(200));
             continue;
         }
-        if client
-            .get(format!("http://127.0.0.1:{}/health", runtime.port))
-            .bearer_auth(&runtime.api_key)
-            .send()
-            .is_ok_and(|response| response.status().is_success())
+        if local_network::send(
+            client
+                .get(format!("http://127.0.0.1:{}/health", runtime.port))
+                .bearer_auth(&runtime.api_key),
+        )
+        .is_ok_and(|response| response.status().is_success())
         {
             if loopback_listener_owned_by(runtime.port, child_id)? {
                 return Ok(());
@@ -3255,20 +3367,39 @@ fn stream_completion(
             if started.elapsed() > Duration::from_secs(60) {
                 return Err("Local context preparation timed out.".into());
             }
-            let response = tokenizer_client
-                .post(format!(
-                    "http://127.0.0.1:{port}/v1/chat/completions/input_tokens"
-                ))
-                .bearer_auth(&api_key)
-                .header("Content-Type", "application/json")
-                .body(serde_json::to_vec(candidate).map_err(|_| "Local context encoding failed.")?)
-                .send()
+            let encoded =
+                serde_json::to_vec(candidate).map_err(|_| "Local context encoding failed.")?;
+            let bytes = if request.use_case == IDLE_CONTEXT_USE_CASE {
+                let (status, bytes) = idle_inference::post(
+                    port,
+                    &api_key,
+                    idle_inference::Endpoint::InputTokens,
+                    encoded,
+                    &cancel,
+                    Duration::from_secs(15),
+                    MAX_ERROR_RESPONSE_BYTES,
+                )?;
+                if !(200..300).contains(&status) {
+                    return Err(llama_http_failure(status, std::io::Cursor::new(bytes)));
+                }
+                bytes
+            } else {
+                let response = local_network::send(
+                    tokenizer_client
+                        .post(format!(
+                            "http://127.0.0.1:{port}/v1/chat/completions/input_tokens"
+                        ))
+                        .bearer_auth(&api_key)
+                        .header("Content-Type", "application/json")
+                        .body(encoded),
+                )
                 .map_err(|_| "Local tokenizer request failed.")?;
-            if !response.status().is_success() {
-                return Err(llama_http_failure(response.status().as_u16(), response));
-            }
-            let bytes = read_bounded_error_body(response)
-                .ok_or("Local tokenizer response exceeded its size limit.")?;
+                if !response.status().is_success() {
+                    return Err(llama_http_failure(response.status().as_u16(), response));
+                }
+                read_bounded_error_body(response)
+                    .ok_or("Local tokenizer response exceeded its size limit.")?
+            };
             let value: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| "Local tokenizer response is invalid.")?;
             value["input_tokens"]
@@ -3278,15 +3409,33 @@ fn stream_completion(
         || LocalInferenceFailure::http(400, LlamaHttpFailureKind::ContextWindowExceeded),
     )?;
     require_runtime_operation_checkpoint(&request.request_id, &request.catalog_binding, &cancel)?;
-    let response = local_http_client(
-        signed_read_timeout(thresholds.max_first_token_ms)?,
-        Duration::from_secs(MAX_INFERENCE_TOTAL_SECONDS),
-    )?
-    .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-    .bearer_auth(api_key)
-    .header("Content-Type", "application/json")
-    .body(serde_json::to_vec(&body).map_err(|error| error.to_string())?)
-    .send()
+    if request.use_case == IDLE_CONTEXT_USE_CASE {
+        let (status, bytes) = idle_inference::post(
+            port,
+            &api_key,
+            idle_inference::Endpoint::Completion,
+            serde_json::to_vec(&body).map_err(|_| "Local context encoding failed.")?,
+            &cancel,
+            signed_read_timeout(thresholds.max_first_token_ms)?,
+            128 * 1024,
+        )?;
+        if !(200..300).contains(&status) {
+            return Err(llama_http_failure(status, std::io::Cursor::new(bytes)));
+        }
+        let mut result = parse_sse(std::io::Cursor::new(bytes), request, cancel, on_event)?;
+        result.context_usage = Some(usage);
+        return Ok(result);
+    }
+    let response = local_network::send(
+        local_http_client(
+            signed_read_timeout(thresholds.max_first_token_ms)?,
+            Duration::from_secs(MAX_INFERENCE_TOTAL_SECONDS),
+        )?
+        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .bearer_auth(api_key)
+        .header("Content-Type", "application/json")
+        .body(serde_json::to_vec(&body).map_err(|error| error.to_string())?),
+    )
     .map_err(|_| "Local llama.cpp request failed.".to_string())?;
     if !response.status().is_success() {
         let status = response.status().as_u16();
@@ -3311,6 +3460,7 @@ fn parse_sse(
     let mut tools: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
     let mut completed = false;
     let mut usage = None;
+    let mut diagnostics = RuntimeDiagnostics::default();
     loop {
         if cancel.load(Ordering::SeqCst) {
             return Err("Local inference was cancelled.".into());
@@ -3338,6 +3488,7 @@ fn parse_sse(
         }
         let value: Value = serde_json::from_str(data)
             .map_err(|_| "Local llama.cpp emitted invalid SSE JSON.".to_string())?;
+        diagnostics.observe(&value);
         // The terminal usage frame may contain an empty choices array.
         if let Some(reported) = value.get("usage").and_then(reported_token_usage) {
             usage = Some(reported);
@@ -3425,6 +3576,7 @@ fn parse_sse(
         request_id: request.request_id.clone(),
         context_usage: None,
         usage,
+        diagnostics,
     })
 }
 
@@ -3441,6 +3593,7 @@ fn finish_request(
             return;
         }
         guard.active_request_id = None;
+        guard.active_idle_optimization = false;
         guard.cancel = None;
         match outcome {
             RequestOutcome::Success => {
@@ -3492,6 +3645,7 @@ fn release_operation(
         return None;
     }
     guard.active_request_id = None;
+    guard.active_idle_optimization = false;
     guard.cancel = None;
     match outcome {
         RequestOutcome::Success | RequestOutcome::Cancelled | RequestOutcome::Rejected => {
@@ -4060,6 +4214,18 @@ mod tests {
     }
 
     #[test]
+    fn diagnostics_merge_only_reported_numeric_fields() {
+        let mut data = super::RuntimeDiagnostics::default();
+        data.observe(&serde_json::json!({"timings": {"cache_n": 8, "prompt_ms": 12.5, "predicted_per_second": -1}, "reasoning_content": "private"}));
+        data.observe(&serde_json::json!({"usage": {"prompt_tokens_details": {"cached_tokens": 0}, "completion_tokens_details": {"reasoning_tokens": 3}}}));
+        assert_eq!(data.cached_tokens, Some(0));
+        assert_eq!(data.prompt_ms, Some(12.5));
+        assert_eq!(data.output_tokens_per_second, None);
+        assert_eq!(data.reasoning_tokens, Some(3));
+        assert!(!serde_json::to_string(&data).unwrap().contains("private"));
+    }
+
+    #[test]
     fn token_usage_requires_real_counts_and_ignores_untrusted_totals() {
         let actual = super::reported_token_usage(&serde_json::json!({
             "prompt_tokens": 123, "completion_tokens": 7, "total_tokens": 999
@@ -4243,6 +4409,40 @@ mod tests {
             .try_wait()
             .unwrap()
             .is_none());
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut manager = ManagerState {
+            runtime: Some(resident),
+            active_request_id: Some("idle-request".into()),
+            active_idle_optimization: true,
+            cancel: Some(cancel.clone()),
+            ..Default::default()
+        };
+        assert!(super::cancel_active_operation(&mut manager, "old-request").is_none());
+        assert!(!cancel.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(super::cancel_active_operation(&mut manager, "idle-request").is_none());
+        assert!(cancel.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(manager.active_request_id.as_deref(), Some("idle-request"));
+        assert_eq!(
+            manager
+                .runtime
+                .as_ref()
+                .unwrap()
+                .child
+                .as_ref()
+                .unwrap()
+                .id(),
+            pid
+        );
+        assert!(manager
+            .runtime
+            .as_mut()
+            .unwrap()
+            .reuse("model-a", Some("project-a"))
+            .unwrap());
+        // Normal request cancellation still hands the owned child to hard stop.
+        manager.active_idle_optimization = false;
+        let mut resident = super::cancel_active_operation(&mut manager, "idle-request").unwrap();
+        assert!(manager.runtime.is_none());
         resident.stop();
         assert!(!resident.reuse("model-a", Some("project-a")).unwrap());
     }
@@ -4279,6 +4479,62 @@ mod tests {
             })
             .unwrap();
         assert_eq!(cold_work, 1);
+    }
+
+    #[test]
+    fn idle_context_request_is_bounded_and_cannot_cold_start_missing_residency() {
+        let value = json!({
+            "resourceRevision": 0,
+            "requestId": "idle-request",
+            "scopeDigest": "a".repeat(64),
+            "modelReleaseId": "model-a",
+            "catalogBinding": {
+                "acceptanceSessionId": "00000000-0000-4000-8000-000000000001",
+                "acceptanceGeneration": 1,
+                "manifestPayloadSha256": "a".repeat(64)
+            },
+            "useCase": "context.optimize",
+            "messages": [{"role": "user", "content": "Public fixture"}],
+            "tools": [], "toolChoice": "none", "maxOutputTokens": 768,
+            "reasoningMode": "off"
+        });
+        let request: super::LocalInferenceRequest = serde_json::from_value(value).unwrap();
+        assert!(super::validate_inference_request(&request).is_ok());
+        for changed in [
+            json!({"tools": [{"type": "function"}]}),
+            json!({"toolChoice": "auto"}),
+            json!({"reasoningMode": "auto"}),
+            json!({"maxOutputTokens": 769}),
+            json!({"messages": [{"role": "user", "content": "x".repeat(65536)}]}),
+        ] {
+            let mut invalid = request.clone();
+            if let Some(tools) = changed.get("tools") {
+                invalid.tools = tools.as_array().unwrap().clone();
+            }
+            if let Some(choice) = changed.get("toolChoice") {
+                invalid.tool_choice = choice.as_str().unwrap().into();
+            }
+            if let Some(mode) = changed.get("reasoningMode") {
+                invalid.reasoning_mode = mode.as_str().unwrap().into();
+            }
+            if let Some(max) = changed.get("maxOutputTokens") {
+                invalid.max_output_tokens = max.as_u64().unwrap() as u32;
+            }
+            if let Some(messages) = changed.get("messages") {
+                invalid.messages = messages.as_array().unwrap().clone();
+            }
+            assert!(super::validate_inference_request(&invalid).is_err());
+        }
+        let envelope: SignedEnvelope = serde_json::from_str(GOLDEN_ENVELOPE).unwrap();
+        let payload = parse_manifest_payload(&envelope.payload).unwrap();
+        let mut manager = ManagerState::default();
+        assert_eq!(
+            super::require_idle_resident(&mut manager, &payload.models[0], "scope", 0, "hash")
+                .unwrap_err(),
+            super::IDLE_RESIDENT_UNAVAILABLE
+        );
+        assert!(manager.runtime.is_none());
+        assert!(manager.active_request_id.is_none());
     }
 
     #[cfg(windows)]

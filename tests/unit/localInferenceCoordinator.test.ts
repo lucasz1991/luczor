@@ -311,6 +311,52 @@ describe('explicit specialist routing preference', () => {
 })
 
 describe('local inference coordinator and approved external gateway', () => {
+  it('keeps the last verified repository scope for resident-only optimization without preparing again', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    await harness.coordinator.initialize(bootstrap())
+    const foreground = await harness.coordinator.resolveTurn({
+      projectId: 'project-1',
+      repoId: 'repo-1',
+      routingSettings: { preference: 'local_only' },
+    })
+    await foreground.gateway.streamChatWithTools(basicRequest)
+    harness.prepareModel.mockClear()
+    const idle = await harness.coordinator.residentOptimizationGateway('project-1', harness.requests[0]!.modelReleaseId)
+    await idle.streamChatWithTools({ ...basicRequest, taskType: 'context.optimize' })
+    expect(harness.requests).toHaveLength(2)
+    expect(harness.requests[1]?.scopeDigest).toBe(harness.requests[0]?.scopeDigest)
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+  })
+
+  it('idle routing cannot prepare a cold model, refresh policy or choose a provider fallback', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    await harness.coordinator.initialize(bootstrap())
+    await expect(
+      harness.coordinator.residentOptimizationGateway('p1', verified.routing.defaultModelId)
+    ).rejects.toMatchObject({ code: 'idle_model_not_ready' })
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    const evidence = await harness.prepareModel(verified.routing.defaultModelId)
+    harness.prepareModel.mockClear()
+    harness.coordinator.reconcileNativeStatus({
+      manifestAvailable: true,
+      catalogVersion: verified.catalogVersion,
+      policyVersion: verified.policyVersion,
+      activeModelId: evidence.modelReleaseId,
+      state: 'ready',
+      readiness: [evidence],
+    })
+    const gateway = await harness.coordinator.residentOptimizationGateway('p1', evidence.modelReleaseId)
+    expect(gateway.target).toBe('local_llama_cpp')
+    await gateway.streamChatWithTools(basicRequest)
+    expect(harness.requests).toHaveLength(1)
+    harness.advance(10 * 60_000)
+    await expect(harness.coordinator.residentOptimizationGateway('p1', evidence.modelReleaseId)).rejects.toMatchObject({
+      code: 'idle_model_not_ready',
+    })
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+  })
   it('never replaces current resource readiness with a late status from an older revision', async () => {
     const verified = await manifest('promoted_preferred')
     const harness = makeHarness(verified)

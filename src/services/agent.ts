@@ -260,6 +260,14 @@ export type AgentInterruption = {
   code: string
   message: string
   round?: number
+  diagnostic?: {
+    target: 'local_llama_cpp' | 'laravel_proxy'
+    model?: string
+    finishReason: string
+    durationMs: number
+    receivedCharacters: number
+    outputTokens?: number
+  }
 }
 
 export type AgentRunEvaluation = {
@@ -792,15 +800,22 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
         },
       ]
     }
+    const diagnostic = interruption.diagnostic
     const finalText = [
       `Die lokale Modellrunde ${round} wurde vor dem Abschluss unterbrochen: ${interruption.message}`,
+      diagnostic
+        ? `Diagnose: ${interruption.code}; Abschluss: ${diagnostic.finishReason}; Dauer: ${(diagnostic.durationMs / 1000).toFixed(1)} s; öffentliche Zeichen: ${diagnostic.receivedCharacters}${diagnostic.outputTokens !== undefined ? `; gemeldete Ausgabetokens: ${diagnostic.outputTokens}` : ''}.`
+        : '',
+      diagnostic && toolOutcomes.length ? fallbackToolResult(toolOutcomes) : '',
       toolOutcomes.length
         ? `Der bisherige Arbeitsfortschritt bleibt erhalten (${toolSuccesses} Tool-Aufrufe erfolgreich, ${toolFailures} fehlgeschlagen).`
         : retainedMutationCount
           ? `Der Fortsetzungsstand bleibt erhalten; ${retainedMutationCount} bereits erfolgreiche Änderungen bleiben vor identischer Wiederholung geschützt.`
           : 'Der Auftrag wurde in einen bereinigten Fortsetzungsstand überführt.',
       'Du kannst direkt weiterarbeiten; Luczor liest dabei den aktuellen Zustand erneut ein und wiederholt bereits erfolgreiche Änderungen nicht.',
-    ].join('\n\n')
+    ]
+      .filter(Boolean)
+      .join('\n\n')
     if (typeof window !== 'undefined') {
       window.dispatchEvent(
         new CustomEvent('luczor:debug', {
@@ -830,7 +845,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
       finalText,
       // The failed inference did not return a request id. Reusing the previous
       // successful round's id would assign this interruption to the wrong run.
-      requestId: undefined,
+      requestId: diagnostic ? lastRequestId : undefined,
       model: lastModel,
       provider: lastProvider,
       useCase: lastUseCase,
@@ -885,6 +900,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
     visibleContent = ''
     updateUsage(round + 1, { messages, tools }, '')
     let res
+    const inferenceStarted = performance.now()
     try {
       res = await inferenceGateway.streamChatWithTools({
         messages,
@@ -982,11 +998,38 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
         })
         continue
       }
-      let finalText = reasoningLeak
-        ? toolOutcomes.length
-          ? fallbackToolResult(toolOutcomes)
-          : 'Ich konnte keine sichere, nutzergerichtete Antwort erzeugen. Bitte versuche die Anfrage erneut.'
-        : content || fallbackToolResult(toolOutcomes)
+      if (!content || reasoningLeak) {
+        if (resolvedRoute.externalOneShot)
+          throw new LocalInferenceError(
+            'Das externe Modell lieferte keine öffentliche Antwort.',
+            'external_empty_response',
+            false,
+            false
+          )
+        const code = reasoningLeak ? 'runtime_unsafe_response' : 'runtime_empty_response'
+        lastRequestId = res.requestId
+        const finishReason = ['stop', 'length', 'tool_calls', 'content_filter', 'error'].includes(res.finishReason)
+          ? res.finishReason
+          : 'unknown'
+        return partialResultAfterInferenceFailure(undefined, round + 1, {
+          code,
+          round: round + 1,
+          message: reasoningLeak
+            ? 'Nach der Antwortkorrektur lag weiterhin keine sicher darstellbare Nutzerantwort vor.'
+            : finishReason === 'length'
+              ? 'Das Ausgabelimit wurde erreicht, ohne eine öffentliche Antwort oder nutzbare Werkzeugaufrufe zu liefern.'
+              : 'Das Modell beendete die Runde ohne öffentliche Antwort und ohne nutzbare Werkzeugaufrufe.',
+          diagnostic: {
+            target: inferenceGateway.target,
+            model: res.model,
+            finishReason,
+            durationMs: Math.max(0, Math.round(performance.now() - inferenceStarted)),
+            receivedCharacters: content.length,
+            ...(res.usage ? { outputTokens: res.usage.outputTokens } : {}),
+          },
+        })
+      }
+      let finalText = content
       if (localContextAdjusted) {
         finalText +=
           '\n\nHinweis: Für diese Antwort wurden ältere Gesprächsrunden oder umfangreiche Werkzeugausgaben im Modellkontext gekürzt. Der gespeicherte Chatverlauf bleibt vollständig erhalten.'

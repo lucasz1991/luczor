@@ -45,6 +45,31 @@ afterEach(() => {
 })
 
 describe('system status telemetry values', () => {
+  it('tracks SSD activity separately from process scopes and keeps missing counter gaps', async () => {
+    const disk = {
+      mount: 'E:',
+      kind: 'ssd' as const,
+      total_bytes: 1000,
+      used_bytes: 420,
+      busy_percent: 0,
+      read_percent: null,
+      write_percent: 15,
+    }
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce(metrics({ disk }))
+      .mockResolvedValueOnce(metrics({ disk: null }))
+    const monitor = createMonitor({ read })
+    monitor.setActive(true)
+    await monitor.refresh()
+    disk.used_bytes = 900
+    expect(monitor.state.sample?.disk?.used_bytes).toBe(420)
+    expect(monitor.state.history[0]?.disk).toEqual({ busy: 0, read: null, write: 15 })
+    await monitor.refresh()
+    expect(monitor.state.sample?.disk).toBeNull()
+    expect(monitor.state.history[1]?.disk).toBeUndefined()
+  })
+
   it.each([null, undefined, NaN, Infinity, -Infinity, '', '20', {}, true])('keeps %j unavailable', value => {
     expect(percent(value)).toBeNull()
   })

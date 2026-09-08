@@ -12,6 +12,11 @@ import { roleValue, SPECIALIST_LABELS, type SpecialistRole } from './teamPolicy'
 
 type Result = Awaited<ReturnType<typeof runAgent>>
 
+/** A diagnostic fallback is not an agent result that dependent nodes can review. */
+function hasUnusableModelResponse(result: Result | undefined): boolean {
+  return ['runtime_empty_response', 'runtime_unsafe_response'].includes(result?.interrupted?.code ?? '')
+}
+
 const NESTED_AGENT_START_TOOLS = [
   'agent_dispatch',
   'agent_job_prepare',
@@ -31,6 +36,10 @@ const WORKSPACE_FILE_TOOLS = [
 ] as const
 
 function interruptionReason(code: string): string {
+  if (code === 'runtime_empty_response')
+    return 'Das Modell hat keine verwertbare öffentliche Antwort oder Werkzeugaufrufe geliefert. Die Ursache ist damit noch nicht belegt.'
+  if (code === 'runtime_unsafe_response')
+    return 'Die Modellantwort konnte auch nach der Korrekturrunde nicht sicher als öffentliche Antwort verwendet werden.'
   if (['readiness_unavailable', 'readiness_refresh_failed'].includes(code))
     return 'Die geprüfte Modellbereitschaft war für diese Runde nicht mehr verfügbar. Das belegt allein keinen Modellabsturz.'
   if (['team_node_interrupted', 'run_timeout', 'node_timeout'].includes(code))
@@ -123,6 +132,7 @@ export async function runChatAgentTeam(
     ]),
   ]
   const teamInstructions = [
+    'Wenn eine lokale Modellstörung geprüft werden muss, nutze local_model_status für die tatsächlich gebundene Runtime und Bereitschaft. Vermute keinen localhost-Port und speichere keine privaten Endpoints oder Zugangsdaten als Projektfakten. Ein laufender Prozess allein bestätigt keine erfolgreiche Modellantwort.',
     'Arbeite am konkreten Nutzerauftrag. Nutze vorhandene Kontextdaten und erfolgreiche Werkzeugergebnisse, statt bekannte Angaben erneut abzufragen.',
     'Bei Geräteanalyse bezieht sich „dieses Gerät“ auf den lokalen Computer, sofern der Nutzer kein anderes Ziel nennt. Beginne mit dem zugelassenen lesenden Werkzeug os_system_diagnostics für Sicherheit/Leistung, os_environment für Fenster/Monitore. Ein Projektordner ist dafür keine Voraussetzung.',
     'Ein Analyse- oder Optimierungsplan erlaubt keine Änderungen am Gerät. Bestätige Sicherheits-, Leistungs- oder Hardwareeigenschaften nur anhand tatsächlich gelesener Daten. Fehlt ein passendes Werkzeug, benenne genau den nicht prüfbaren Punkt; erfinde keine Messungen.',
@@ -308,6 +318,12 @@ export async function runChatAgentTeam(
       if (worker && result.continuation) latestWorkerCheckpoint = structuredClone(result.continuation)
       if (result.ephemeralDataUsed) checkpoint.ephemeralDataUsed = true
       if (result.ephemeralDataUsed) latestWorkerCheckpoint.ephemeralDataUsed = true
+      if (hasUnusableModelResponse(result)) {
+        // Keep the typed result above for recovery. Throwing stops dependent
+        // nodes; the scheduler's generic code must not replace its diagnosis.
+        request.onOutput(result.finalText)
+        throw new Error('Der Agentenknoten hat keine verwertbare Modellantwort geliefert.')
+      }
       return { output: result.finalText }
     }
   )
@@ -341,25 +357,39 @@ export async function runChatAgentTeam(
   const plannerAttempt = results.get('planner')
   const workerAttempt = results.get('worker')
   const reviewerAttempt = results.get('reviewer')
+  // A scheduler deadline or scope failure remains authoritative even if an
+  // in-flight model returns an unusable response while cancellation settles.
+  const plannerResponseFailure =
+    plannerNode?.errorCode === 'execution_failed' && hasUnusableModelResponse(plannerAttempt)
+      ? plannerAttempt
+      : undefined
+  const workerResponseFailure =
+    workerNode?.errorCode === 'execution_failed' && hasUnusableModelResponse(workerAttempt) ? workerAttempt : undefined
+  const reviewerResponseFailure =
+    reviewerNode?.errorCode === 'execution_failed' && hasUnusableModelResponse(reviewerAttempt)
+      ? reviewerAttempt
+      : undefined
   const planner = plannerNode?.status === 'completed' ? plannerAttempt : undefined
   const worker = workerNode?.status === 'completed' ? workerAttempt : undefined
   const reviewer = reviewerNode?.status === 'completed' ? reviewerAttempt : undefined
   const final = reviewer && !reviewer.interrupted ? reviewer : (worker ?? reviewer)
   if (!final) {
     if (planner && finalRun.status === 'failed' && workerNode?.status !== 'completed') {
-      const code = workerNode?.errorCode ?? finalRun.errorCode ?? 'execution_failed'
+      const workerInterruption = workerResponseFailure?.interrupted
+      const code = workerInterruption?.code ?? workerNode?.errorCode ?? finalRun.errorCode ?? 'execution_failed'
       let finalText = `Der Arbeitsagent wurde vor dem Abschluss unterbrochen (${code}). Der vor dem Teamstart gesicherte Fortschritt bleibt erhalten. Bereits ausgelöste Änderungen können trotzdem ausgeführt worden sein. Lies beim Fortsetzen zuerst den aktuellen Projekt- und Aufgabenstand neu ein, bevor du weitere Änderungen vornimmst.`
+      if (workerResponseFailure) finalText = `${workerResponseFailure.finalText}\n\n${finalText}`
       if (notices.length) finalText += '\n\n' + [...new Set(notices)].join('\n')
       return {
-        ...planner,
+        ...(workerResponseFailure ?? planner),
         finalText,
         requestId: undefined,
-        model: undefined,
-        provider: undefined,
+        model: workerResponseFailure?.model,
+        provider: workerResponseFailure?.provider,
         useCase: undefined,
         routeDecisionId: undefined,
         continuation: workerAttempt?.continuation ?? latestWorkerCheckpoint,
-        interrupted: {
+        interrupted: workerInterruption ?? {
           code,
           message: 'Der Arbeitsagent wurde vor dem Abschluss unterbrochen.',
         },
@@ -372,11 +402,17 @@ export async function runChatAgentTeam(
       }
     }
     if (finalRun.status === 'failed' && plannerNode?.status !== 'completed') {
-      const code = plannerNode?.errorCode ?? finalRun.errorCode ?? 'execution_failed'
+      const plannerInterruption = plannerResponseFailure?.interrupted
+      const code = plannerInterruption?.code ?? plannerNode?.errorCode ?? finalRun.errorCode ?? 'execution_failed'
+      let finalText = `Der Planungsagent wurde vor dem ersten Ergebnis unterbrochen (${code}). Der gesicherte Auftrag bleibt erhalten. Du kannst das Agententeam erneut starten; Luczor baut den Modellkontext dabei neu auf.`
+      if (plannerResponseFailure) finalText = `${plannerResponseFailure.finalText}\n\n${finalText}`
+      if (notices.length) finalText += '\n\n' + [...new Set(notices)].join('\n')
       return {
-        finalText: `Der Planungsagent wurde vor dem ersten Ergebnis unterbrochen (${code}). Der gesicherte Auftrag bleibt erhalten. Du kannst das Agententeam erneut starten; Luczor baut den Modellkontext dabei neu auf.`,
-        continuation: checkpoint,
-        interrupted: {
+        finalText,
+        model: plannerResponseFailure?.model,
+        provider: plannerResponseFailure?.provider,
+        continuation: plannerAttempt?.continuation ?? checkpoint,
+        interrupted: plannerInterruption ?? {
           code,
           message: 'Der Planungsagent wurde vor dem ersten Ergebnis unterbrochen.',
         },
@@ -393,10 +429,10 @@ export async function runChatAgentTeam(
   }
   const reviewerFailure =
     !reviewer && finalRun.status === 'failed' && reviewerNode?.status !== 'completed'
-      ? {
+      ? (reviewerResponseFailure?.interrupted ?? {
           code: reviewerNode?.errorCode ?? finalRun.errorCode ?? 'execution_failed',
           message: 'Der Prüfagent wurde vor dem Abschluss unterbrochen.',
-        }
+        })
       : undefined
   const reviewContinuationSource =
     reviewer?.continuation ??
@@ -417,6 +453,7 @@ export async function runChatAgentTeam(
     : finalRun.status === 'completed'
       ? final.finalText
       : `${final.finalText}\n\nDie Teamprüfung wurde nicht abgeschlossen (${finalRun.errorCode ?? finalRun.status}).`
+  if (reviewerResponseFailure) finalText += `\n\n${reviewerResponseFailure.finalText}`
   if (notices.length) finalText += '\n\n' + [...new Set(notices)].join('\n')
   const responseRequestId =
     interruption || worker?.continuation

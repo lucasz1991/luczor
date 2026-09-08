@@ -49,6 +49,7 @@ import AiIcon from './components/ai/AiIcon.vue'
 import MiniChatSurface from './components/mini/MiniChatSurface.vue'
 import { useMiniChatHost } from '@/composables/useMiniChatHost'
 import { useBackgroundPreparation } from '@/composables/useBackgroundPreparation'
+import { useIdleOptimization } from '@/composables/useIdleOptimization'
 import { miniStatus } from '@/services/miniChat/presentation'
 import {
   activityLabel,
@@ -1879,6 +1880,11 @@ const conversationBusy = computed(
 const backgroundPreparation = useBackgroundPreparation({
   project: () => activeProject.value,
   workspace: () => activeWorkspace.value,
+  busy: () => conversationBusy.value || hud.killSwitch,
+  draft: () => input.value,
+})
+useIdleOptimization({
+  project: () => activeProject.value,
   busy: () => conversationBusy.value || hud.killSwitch,
   draft: () => input.value,
 })

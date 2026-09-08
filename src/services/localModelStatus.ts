@@ -12,6 +12,7 @@ export type LocalModelStatusView = {
   label: string
   detail: string
   modelName: string
+  modelId?: string
   prepared: boolean
   operational: boolean
   checks: StatusCheck[]
@@ -215,6 +216,7 @@ export function presentLocalModelStatus(
     manifest.models.find(item => item.id === native.activeModelId) ??
     manifest.models.find(item => item.id === manifest.routing.defaultModelId)
   view.modelName = model?.displayName ?? 'Lokales Modell'
+  if (model) view.modelId = model.id
   const catalogValid =
     native.manifestAvailable &&
     native.catalogVersion === manifest.catalogVersion &&

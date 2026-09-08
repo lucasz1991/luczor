@@ -1,3 +1,4 @@
+import { localModelDiagnostics, type RuntimeDiagnostics } from './localModelDiagnostics'
 import { Channel, invoke } from '@tauri-apps/api/core'
 import type { HardwareSnapshot } from '@/services/inference/capacity'
 import { LocalInferenceError } from '@/services/inference/localModelManager'
@@ -28,6 +29,7 @@ type NativeInferenceResult = {
   requestId: string
   contextUsage?: InferenceResult['contextUsage']
   usage?: InferenceResult['usage']
+  diagnostics?: RuntimeDiagnostics
 }
 
 export type NativeResourcePlan = {
@@ -115,6 +117,7 @@ export async function beginNativeManifestAcceptance(acceptanceGeneration: number
     throw new Error('Native manifest acceptance generation is invalid.')
   }
   const sessionId = await registerNativeManifestAcceptanceSession()
+  localModelDiagnostics.clear()
   await invoke('local_model_begin_manifest_acceptance', { sessionId, acceptanceGeneration })
   return sessionId
 }
@@ -189,18 +192,21 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
   }
 
   async stream(_release: LocalModelReleaseManifest, request: LocalRuntimeRequest): Promise<InferenceResult> {
+    const observation = localModelDiagnostics.begin(request.modelReleaseId, request.messages)
     const channel = new Channel<NativeInferenceEvent>()
     let accumulated = ''
     let contextRejected = false
     let historyRejected = false
     let toolContractRejected = false
     channel.onmessage = event => {
+      if (event.requestId && event.requestId !== request.requestId) return
       if (event.type === 'error' && event.code === 'runtime_context_exceeded') contextRejected = true
       if (event.type === 'error' && event.code === 'runtime_chat_history_rejected') historyRejected = true
       if (event.type === 'error' && event.code === 'runtime_tool_contract_rejected') toolContractRejected = true
       if (event.type === 'delta') {
         if (request.signal?.aborted) return
         accumulated += event.content
+        observation.delta(accumulated)
         request.onToken?.(accumulated)
       }
     }
@@ -222,6 +228,7 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
       },
       onEvent: channel,
     }).catch(error => {
+      observation.fail(request.signal?.aborted === true)
       if (
         toolContractRejected ||
         /^Local llama\.cpp rejected the tool contract \(HTTP (400|500)\)\.$/.test(String(error))
@@ -259,6 +266,8 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
       }
       throw error
     })
+    if (request.signal?.aborted) observation.fail(true)
+    else observation.finish(result, result.diagnostics)
     return {
       content: result.content,
       contextUsage: result.contextUsage,

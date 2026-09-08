@@ -64,6 +64,38 @@ const successfulResult: InferenceResult = {
 }
 
 describe('LocalModelManager runtime safety', () => {
+  it('bounds idle inference to a tool-free local request and never renews its expired readiness', async () => {
+    const model = await release()
+    let now = Date.parse('2026-08-30T12:30:00Z')
+    const transport: LocalRuntimeTransport = {
+      prepare: vi.fn(),
+      stream: vi.fn(async () => successfulResult),
+      cancel: vi.fn(),
+      stop: vi.fn(),
+    }
+    const manager = new LocalModelManager(transport, () => new Date(now))
+    const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64), true)
+    await gateway.streamChatWithTools({
+      messages: [],
+      tools: ['untrusted'],
+      toolChoice: 'required',
+      taskType: 'chat.general',
+    })
+    expect(transport.stream).toHaveBeenCalledExactlyOnceWith(
+      model,
+      expect.objectContaining({
+        tools: [],
+        toolChoice: 'none',
+        taskType: 'context.optimize',
+        maxOutputTokens: 768,
+        reasoningMode: 'off',
+      })
+    )
+    now += 11 * 60_000
+    await expect(gateway.streamChatWithTools({ messages: [] })).rejects.toMatchObject({ code: 'readiness_unavailable' })
+    expect(transport.prepare).not.toHaveBeenCalled()
+    expect(vi.mocked(transport.stream).mock.calls).toHaveLength(1)
+  })
   it('rejects a readiness renewal from a different resource configuration', async () => {
     const model = await release()
     const old = { ...readiness(model), resourceRevision: 3 }

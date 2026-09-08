@@ -25,6 +25,9 @@ use super::desktop_target::{DesktopActionGuard, DesktopObservation, InputPayload
 use super::ensure_main_webview;
 use super::execution::{admit, Guarded};
 
+#[path = "system_disk.rs"]
+mod system_disk;
+
 #[cfg(windows)]
 #[path = "system_gpu.rs"]
 mod system_gpu;
@@ -262,7 +265,9 @@ pub struct SystemMetrics {
     pub model_ram_used_mb: Option<u64>,
     pub model_gpu_percent: Option<f32>,
     pub model_running: Option<bool>,
+    pub disk: Option<system_disk::DiskSample>,
     pub gpu_source: &'static str,
+    pub network_local: super::local_model::LocalNetworkSnapshot,
 }
 
 static METRICS_CACHE: OnceLock<Mutex<Option<(Instant, SystemMetrics)>>> = OnceLock::new();
@@ -294,6 +299,7 @@ fn collect_system_metrics() -> Result<SystemMetrics, String> {
     let process_refresh = ProcessRefreshKind::new().with_memory().with_cpu();
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh);
     let before = process_samples(&system);
+    let disk_sampler = system_disk::DiskSampler::start();
     let model_before = super::local_model::managed_runtime_process_id();
     #[cfg(windows)]
     let gpu_sampler = system_gpu::WindowsGpuSampler::start();
@@ -344,8 +350,14 @@ fn collect_system_metrics() -> Result<SystemMetrics, String> {
             );
             (
                 measured.total_percent,
-                scopes.app.as_ref().and(measured.app_percent),
-                scopes.model.as_ref().and(measured.model_percent),
+                measured
+                    .total_percent
+                    .and(scopes.app.as_ref())
+                    .and(measured.app_percent),
+                measured
+                    .total_percent
+                    .and(scopes.model.as_ref())
+                    .and(measured.model_percent),
             )
         } else {
             (None, None, None)
@@ -361,6 +373,7 @@ fn collect_system_metrics() -> Result<SystemMetrics, String> {
     };
 
     let metrics = SystemMetrics {
+        disk: disk_sampler.map(|sampler| sampler.finish()),
         cpu_percent: clamp_percent(system.global_cpu_usage()),
         ram_percent: clamp_percent(ram_percent),
         ram_used_mb: used_memory / 1024 / 1024,
@@ -378,6 +391,7 @@ fn collect_system_metrics() -> Result<SystemMetrics, String> {
         model_gpu_percent,
         model_running: scopes.model_running,
         gpu_source,
+        network_local: super::local_model::network_snapshot(),
     };
     *cached = Some((Instant::now(), metrics.clone()));
     Ok(metrics)

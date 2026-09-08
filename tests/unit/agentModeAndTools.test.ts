@@ -1512,7 +1512,7 @@ describe('agent mode and tool reliability', () => {
     ])
   })
 
-  it('returns the concrete tool output instead of a generic Fertig fallback', async () => {
+  it('retains tool evidence but marks an empty final model response as incomplete', async () => {
     mocks.streamChatWithTools
       .mockResolvedValueOnce(toolCallResult)
       .mockResolvedValueOnce({ content: '', toolCalls: [], rawToolCalls: [] })
@@ -1526,6 +1526,55 @@ describe('agent mode and tool reliability', () => {
     expect(result.finalText).toContain('project_get_state wurde erfolgreich ausgeführt')
     expect(result.finalText).toContain('"name":"Projekt 2"')
     expect(result.finalText).not.toBe('Fertig.')
+    expect(result.interrupted?.code).toBe('runtime_empty_response')
+    expect(result.continuation).toBeDefined()
+  })
+
+  it('does not turn a first-round empty response into success or retry it blindly', async () => {
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: '',
+      toolCalls: [],
+      rawToolCalls: [],
+      finishReason: 'length',
+      requestId: 'empty-response',
+      model: 'local-test-model',
+      usage: { inputTokens: 18, outputTokens: 128, totalTokens: 146 },
+    })
+    const result = await runAgent({
+      projectId: 'p1',
+      baseMessages: [{ role: 'user', content: 'Analysiere den Stand' }],
+      mode: 'observe',
+      inferenceGateway: { id: 'local-test', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(result.interrupted).toMatchObject({
+      code: 'runtime_empty_response',
+      round: 1,
+      diagnostic: {
+        target: 'local_llama_cpp',
+        model: 'local-test-model',
+        finishReason: 'length',
+        receivedCharacters: 0,
+        outputTokens: 128,
+      },
+    })
+    expect(result.requestId).toBe('empty-response')
+    expect(result.finalText).toContain('Ausgabelimit')
+    expect(result.continuation?.objective).toBe('Analysiere den Stand')
+    expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
+  it('does not persist arbitrary finish metadata or attribute an empty round to an earlier request', async () => {
+    mocks.streamChatWithTools.mockResolvedValueOnce(toolCallResult).mockResolvedValueOnce({
+      content: '',
+      toolCalls: [],
+      rawToolCalls: [],
+      finishReason: 'Authorization Bearer PRIVATE',
+    })
+    const result = await runAgent({ projectId: 'p1', baseMessages: [], mode: 'observe' })
+    expect(result.requestId).toBeUndefined()
+    expect(result.interrupted?.diagnostic?.finishReason).toBe('unknown')
+    expect(JSON.stringify(result)).not.toContain('PRIVATE')
   })
 
   it('keeps ephemeral tool content out of durable history and server telemetry', async () => {

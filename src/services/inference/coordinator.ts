@@ -512,6 +512,7 @@ export class LocalInferenceCoordinator {
   private generation = 0
   private resourceEpoch = 0
   private resourceRevision = 0
+  private localScope?: { projectId: string; digest: string }
   private preparationTail: Promise<void> = Promise.resolve()
   private recovery?: { generation: number; diagnoseUnavailable: boolean; promise: Promise<InferenceConnectionResult> }
 
@@ -812,6 +813,40 @@ export class LocalInferenceCoordinator {
     }
   }
 
+  /** Local idle work never refreshes a catalog, prepares a runtime or selects a fallback. */
+  async residentOptimizationGateway(projectId: string, modelId: string): Promise<InferenceGateway> {
+    const generation = this.generation
+    this.requireActiveGeneration(generation)
+    const manifest = this.manifest!
+    const release = manifest.models.find(model => model.id === modelId)
+    const readiness = this.readiness.get(modelId)
+    if (
+      Date.parse(manifest.expiresAt) <= this.dependencies.now().getTime() + 65_000 ||
+      !hasVerifiedLocalReadiness(
+        release,
+        readiness,
+        manifest.payloadSha256,
+        this.dependencies.now().getTime() + 65_000
+      ) ||
+      !release ||
+      !readiness ||
+      ['busy', 'cooldown', 'error', 'degraded'].includes(this.dependencies.manager.getHealth(release).state)
+    ) {
+      throw new LocalInferenceError(
+        'Leerlaufoptimierung wartet auf ein bereits bereites lokales Modell.',
+        'idle_model_not_ready',
+        false,
+        false
+      )
+    }
+    const digest =
+      this.localScope?.projectId === projectId
+        ? this.localScope.digest
+        : await this.scopeDigest({ projectId }, generation)
+    this.requireActiveGeneration(generation)
+    return this.dependencies.manager.gateway(release, readiness, this.catalogBinding!, digest, true)
+  }
+
   async resolveTurn(input: TurnRoutingInput): Promise<ResolvedTurnRoute> {
     if (
       input.intent !== undefined &&
@@ -892,6 +927,7 @@ export class LocalInferenceCoordinator {
       const readiness = this.readiness.get(decision.modelReleaseId)
       if (!release || !readiness) throw new Error('Selected local release lost readiness.')
       const scopeDigest = await this.scopeDigest(input, generation)
+      this.localScope = { projectId: input.projectId, digest: scopeDigest }
       const catalogBinding = this.catalogBinding
       if (!catalogBinding) throw new Error('Selected local release lost its native catalog binding.')
       return {
@@ -1191,6 +1227,7 @@ export class LocalInferenceCoordinator {
   }
 
   private clearPolicyState(): void {
+    this.localScope = undefined
     this.bootstrap = undefined
     this.discovery = undefined
     this.manifest = undefined

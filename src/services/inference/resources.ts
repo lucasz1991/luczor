@@ -29,7 +29,14 @@ export const DEFAULT_LOCAL_RESOURCE_CONFIG: Readonly<LocalResourceConfig> = Obje
 })
 
 export type LocalResourceWork = Readonly<{ leaseId: string; resourceRevision: number }>
-type WorkLease = { work: LocalResourceWork; references: number; native: boolean; closing?: boolean }
+type WorkLease = {
+  work: LocalResourceWork
+  references: number
+  native: boolean
+  closing?: boolean
+  releaseForeground?: () => void
+}
+type ForegroundAdmission = (signal?: AbortSignal) => Promise<{ release(): void }>
 type DeferredCleanup = {
   lease: WorkLease
   attempts: number
@@ -74,8 +81,21 @@ export class LocalResourceController {
   private applying?: Promise<LocalResourceConfigState>
   private retry?: ReturnType<typeof setTimeout>
   private last?: LocalResourceConfigState
+  private foregroundAdmission?: ForegroundAdmission
 
   constructor(private readonly dependencies: ResourceDependencies) {}
+
+  /** Main-renderer background owner. The returned disposer only removes its own hook. */
+  setForegroundAdmission(admit: ForegroundAdmission): () => void {
+    this.foregroundAdmission = admit
+    return () => {
+      if (this.foregroundAdmission === admit) this.foregroundAdmission = undefined
+    }
+  }
+
+  hasWork(): boolean {
+    return this.leases.size > 0
+  }
 
   private publish(state: LocalResourceConfigState): LocalResourceConfigState {
     if (this.last && (state.revision < this.last.revision || state.appliedRevision < this.last.appliedRevision)) {
@@ -133,6 +153,7 @@ export class LocalResourceController {
     this.cleanups.delete(lease.work.leaseId)
     lease.references = 0
     this.leases.delete(lease.work.leaseId)
+    lease.releaseForeground?.()
     // A completed job must retain its result even if applying the next configuration fails.
     if (lease.native && this.last?.pending) await this.flush().catch(() => undefined)
   }
@@ -238,7 +259,8 @@ export class LocalResourceController {
 
   async acquire(
     signal?: AbortSignal,
-    parent?: LocalResourceWork
+    parent?: LocalResourceWork,
+    priority: 'foreground' | 'background' = 'foreground'
   ): Promise<{ work: LocalResourceWork; release(): Promise<void> }> {
     signal?.throwIfAborted()
     const inherited = parent && this.leases.get(parent.leaseId)
@@ -249,25 +271,31 @@ export class LocalResourceController {
       lease = inherited
       lease.references += 1
     } else {
-      let work: LocalResourceWork
-      const leaseId = crypto.randomUUID()
-      const native = this.dependencies.enabled()
-      if (!native) work = { leaseId, resourceRevision: 0 }
-      else {
-        for (;;) {
-          signal?.throwIfAborted()
-          try {
-            work = await this.dependencies.begin(leaseId)
-            break
-          } catch (error) {
-            if (!pendingError(error)) throw error
-            await this.flush()
-            await waitForChange(signal)
+      const foreground = priority === 'foreground' ? await this.foregroundAdmission?.(signal) : undefined
+      try {
+        let work: LocalResourceWork
+        const leaseId = crypto.randomUUID()
+        const native = this.dependencies.enabled()
+        if (!native) work = { leaseId, resourceRevision: 0 }
+        else {
+          for (;;) {
+            signal?.throwIfAborted()
+            try {
+              work = await this.dependencies.begin(leaseId)
+              break
+            } catch (error) {
+              if (!pendingError(error)) throw error
+              await this.flush()
+              await waitForChange(signal)
+            }
           }
         }
+        lease = { work: Object.freeze(work), references: 1, native, releaseForeground: foreground?.release }
+        this.leases.set(leaseId, lease)
+      } catch (error) {
+        foreground?.release()
+        throw error
       }
-      lease = { work: Object.freeze(work), references: 1, native }
-      this.leases.set(leaseId, lease)
     }
     let released = false
     let releasing: Promise<void> | undefined
@@ -307,6 +335,17 @@ export class LocalResourceController {
       return await operation(lease.work)
     } finally {
       if (group && this.groups.get(group) === lease.work) this.groups.delete(group)
+      await lease.release()
+    }
+  }
+
+  /** Trusted idle scheduler only; never exposed to tools or persisted configuration. */
+  async runBackground<T>(operation: (work: LocalResourceWork) => Promise<T>, signal: AbortSignal): Promise<T> {
+    const lease = await this.acquire(signal, undefined, 'background')
+    try {
+      signal.throwIfAborted()
+      return await operation(lease.work)
+    } finally {
       await lease.release()
     }
   }

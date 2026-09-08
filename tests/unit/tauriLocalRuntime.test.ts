@@ -1,3 +1,4 @@
+import { localModelDiagnostics } from '@/services/inference/localModelDiagnostics'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { LocalModelReleaseManifest } from '@/services/inference/modelManifest'
 import type { LocalRuntimeRequest } from '@/services/inference/localModelManager'
@@ -25,6 +26,37 @@ const catalogBinding = {
 } as const
 
 describe('Tauri local runtime catalog boundary', () => {
+  it('connects public stream and final reported telemetry to the analysis without retaining private channels', async () => {
+    localModelDiagnostics.clear()
+    tauri.invoke.mockImplementationOnce(async (_command, args) => {
+      args.onEvent.onmessage({ type: 'delta', requestId: 'different-request', content: 'wrong run' })
+      args.onEvent.onmessage({ type: 'delta', requestId: 'request-1', content: '<think>private</think>Public' })
+      expect(localModelDiagnostics.state.runs[0]?.output).toBe('Public')
+      return {
+        content: '<think>private</think>Public answer',
+        rawToolCalls: [],
+        finishReason: 'stop',
+        requestId: 'request-1',
+        usage: { inputTokens: 40, outputTokens: 8, totalTokens: 48 },
+        diagnostics: { cachedTokens: 0, outputTokensPerSecond: 12.5 },
+      }
+    })
+    await new TauriLocalRuntimeTransport().stream({} as LocalModelReleaseManifest, {
+      requestId: 'request-1',
+      modelReleaseId: 'model-1',
+      scopeDigest: 'd'.repeat(64),
+      catalogBinding,
+      messages: [{ role: 'user', content: 'private input' }],
+    })
+    expect(localModelDiagnostics.state.runs[0]).toMatchObject({
+      output: 'Public answer',
+      state: 'done',
+      usage: { inputTokens: 40, outputTokens: 8 },
+      runtime: { cachedTokens: 0, outputTokensPerSecond: 12.5 },
+    })
+    expect(JSON.stringify(localModelDiagnostics.state)).not.toContain('private')
+  })
+
   it('shares concurrent hardware scans, isolates results, and refreshes on the next call', async () => {
     let complete!: (value: unknown) => void
     tauri.invoke.mockImplementationOnce(

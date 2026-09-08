@@ -18,7 +18,19 @@
 export type WorkflowTaskBundle = {
   task_key: string
   params: Record<string, unknown>
-  workflow: { run: string; step_id: number; step_key: string }
+  workflow: {
+    run: string
+    step_id: number
+    step_key: string
+    execution_id?: string
+    definition_id?: number
+    revision?: number
+    project_id?: string | null
+    device_id?: string
+    file_scope?: 'legacy' | 'workspace'
+    workspace_root_id?: string | null
+    grant?: unknown
+  }
 }
 
 export type WorkflowTaskPrimitives = {
@@ -37,6 +49,7 @@ export type WorkflowTaskPrimitives = {
     prompt: string,
     projectDir?: string
   ) => Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>
+  runLlm?: (input: import('@/services/workflows/llm').WorkflowLlmInput) => Promise<Record<string, unknown>>
   /** Read/write a file inside the confined workflow files root (P15b). */
   fileRead: (path: string) => Promise<{ content: string; bytes: number; truncated: boolean }>
   fileWrite: (path: string, content: string) => Promise<{ path: string; bytes: number }>
@@ -89,6 +102,10 @@ export async function runWorkflowTask(
   const params = bundle.params ?? {}
 
   switch (bundle.task_key) {
+    case 'llm': {
+      if (!primitives.runLlm) throw new Error('workflow_llm_executor_unavailable')
+      return primitives.runLlm(params as import('@/services/workflows/llm').WorkflowLlmInput)
+    }
     case 'browser.open':
     case 'browser.open_url': {
       const raw = str(params.url).trim()

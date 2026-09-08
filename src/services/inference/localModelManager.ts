@@ -1,3 +1,4 @@
+import { localModelDiagnostics } from './localModelDiagnostics'
 import type { InferenceGateway, InferenceRequest, InferenceResult } from '@/services/inference/types'
 import type { LocalModelReleaseManifest } from '@/services/inference/modelManifest'
 import { stripReasoningBlocks } from '@/services/publicAnswerStream'
@@ -141,6 +142,7 @@ export class LocalModelManager {
 
   /** Abort old JS turns before the native catalog/session boundary rotates. */
   invalidateCatalogBoundary(): void {
+    localModelDiagnostics.clear()
     this.boundaryEpoch += 1
     for (const [requestId, active] of this.active) {
       active.controller.abort()
@@ -171,7 +173,8 @@ export class LocalModelManager {
     release: LocalModelReleaseManifest,
     readiness: LocalReadinessEvidence,
     catalogBinding: LocalCatalogBinding,
-    scopeDigest: string
+    scopeDigest: string,
+    idleOptimization = false
   ): InferenceGateway {
     const fixedBinding = Object.freeze({ ...catalogBinding })
     const gatewayEpoch = this.boundaryEpoch
@@ -180,7 +183,7 @@ export class LocalModelManager {
       id: `local:${release.id}`,
       target: 'local_llama_cpp' as const,
       streamChatWithTools: (request: InferenceRequest) =>
-        this.stream(release, lease, fixedBinding, scopeDigest, gatewayEpoch, request),
+        this.stream(release, lease, fixedBinding, scopeDigest, gatewayEpoch, request, idleOptimization),
     })
   }
 
@@ -210,12 +213,21 @@ export class LocalModelManager {
     catalogBinding: LocalCatalogBinding,
     scopeDigest: string,
     gatewayEpoch: number,
-    request: InferenceRequest
+    request: InferenceRequest,
+    idleOptimization = false
   ): Promise<InferenceResult> {
     const slot = this.acquireSlot(gatewayEpoch, request.signal)
     if (slot !== true) await slot
     try {
-      return await this.streamExclusive(release, lease, catalogBinding, scopeDigest, gatewayEpoch, request)
+      return await this.streamExclusive(
+        release,
+        lease,
+        catalogBinding,
+        scopeDigest,
+        gatewayEpoch,
+        request,
+        idleOptimization
+      )
     } finally {
       this.releaseSlot()
     }
@@ -227,7 +239,8 @@ export class LocalModelManager {
     catalogBinding: LocalCatalogBinding,
     scopeDigest: string,
     gatewayEpoch: number,
-    request: InferenceRequest
+    request: InferenceRequest,
+    idleOptimization = false
   ): Promise<InferenceResult> {
     if (gatewayEpoch !== this.boundaryEpoch) {
       throw new LocalInferenceError(
@@ -278,7 +291,12 @@ export class LocalModelManager {
       evidence.artifactSha256 === release.artifact!.sha256 &&
       evidence.runtimeSha256 === release.runtime!.sha256 &&
       Number.isFinite(evidence.validUntilMs)
-    if (matchesRelease(readiness) && readiness.validUntilMs <= this.now().getTime() && this.transport.prepare) {
+    if (
+      !idleOptimization &&
+      matchesRelease(readiness) &&
+      readiness.validUntilMs <= this.now().getTime() &&
+      this.transport.prepare
+    ) {
       if (request.signal?.aborted) throw abortError()
       try {
         readiness = await this.transport.prepare(release.id, catalogBinding, lease.current.resourceRevision ?? 0)
@@ -334,7 +352,8 @@ export class LocalModelManager {
     const parentAbort = () => {
       controller.abort()
       // Tauri invoke cannot consume AbortSignal directly. Propagate the abort
-      // immediately so native code kills the scope-bound llama.cpp process.
+      // immediately. Native idle requests drop their HTTP task while retaining
+      // residency; ordinary cancellation keeps its existing stop semantics.
       void this.transport.cancel(requestId, catalogBinding).catch(() => undefined)
     }
     request.signal?.addEventListener('abort', parentAbort, { once: true })
@@ -350,6 +369,15 @@ export class LocalModelManager {
 
     const runtimeRequest: LocalRuntimeRequest = {
       ...request,
+      ...(idleOptimization
+        ? {
+            taskType: 'context.optimize',
+            tools: [],
+            toolChoice: 'none' as const,
+            maxOutputTokens: 768,
+            reasoningMode: 'off' as const,
+          }
+        : {}),
       requestId,
       modelReleaseId: release.id,
       scopeDigest,

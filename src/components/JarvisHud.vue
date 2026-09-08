@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch, watchEffect } from 'vue'
 import { hud, type ConnState } from '@/state/hud'
 import type { OrbPhase } from '@/services/miniChat/presentation'
 import { lastScreenshot } from '@/services/tools/registry'
@@ -8,14 +8,44 @@ import { appearance } from '@/services/appearance'
 import { createSystemStatusMonitor, percent } from '@/services/systemStatusMonitor'
 import AiIcon from './ai/AiIcon.vue'
 import SystemStopButton from './SystemStopButton.vue'
+import SystemActivityCharts from './SystemActivityCharts.vue'
 
-const props = withDefaults(defineProps<{ embedded?: boolean; active?: boolean; assistantPhase?: OrbPhase }>(), {
-  embedded: false,
-  active: true,
-})
+const props = withDefaults(
+  defineProps<{
+    embedded?: boolean
+    active?: boolean
+    assistantPhase?: OrbPhase
+    section?: 'resources' | 'localmodel' | 'memory' | 'network' | 'details'
+  }>(),
+  {
+    embedded: false,
+    active: true,
+    assistantPhase: undefined,
+    section: 'resources',
+  }
+)
+type Indicator = 'ok' | 'active' | 'warning' | 'unknown'
+const emit = defineEmits<{
+  indicators: [value: { resources: Indicator; memory: Indicator; network: Indicator; details: Indicator }]
+}>()
+const flowIndicators = ref<{ memory: Indicator; network: Indicator }>({ memory: 'unknown', network: 'unknown' })
+const resourceView = ref<'circles' | 'history'>('circles')
 const collapsed = ref(false)
 const monitor = createSystemStatusMonitor()
 const metrics = monitor.state
+watchEffect(() =>
+  emit('indicators', {
+    resources: metrics.availability === 'live' ? 'ok' : metrics.availability === 'stale' ? 'warning' : 'unknown',
+    memory: flowIndicators.value.memory,
+    network:
+      flowIndicators.value.network === 'active'
+        ? 'active'
+        : hud.sync.server === 'offline'
+          ? 'warning'
+          : flowIndicators.value.network,
+    details: hud.killSwitch ? 'warning' : metrics.sample?.model_running === true ? 'ok' : 'unknown',
+  })
+)
 watch(
   () => props.active && !collapsed.value,
   active => monitor.setActive(active),
@@ -76,7 +106,7 @@ const freshness = computed(() => {
       return 'Messwerte werden gelesen …'
   }
 })
-type ResourceKey = 'cpu' | 'ram' | 'gpu'
+type ResourceKey = 'cpu' | 'ram' | 'gpu' | 'disk'
 type Scope = 'system' | 'app' | 'model'
 const scopes = [
   { key: 'system' as const, label: 'Rechner', detail: 'Gesamter Rechner' },
@@ -96,13 +126,20 @@ const gpuProcessUnavailable = computed(
     (percent(metrics.sample.app_gpu_percent) === null ||
       (metrics.sample.model_running === true && percent(metrics.sample.model_gpu_percent) === null))
 )
-function chart(key: ResourceKey, scope: Scope) {
+function chart(key: ResourceKey, scope: Scope): { path: string; last: { x: number; y: number } | null } {
   let path = ''
   let connected = false
   let last: { x: number; y: number } | null = null
   metrics.history.forEach((point, index) => {
     const values = scope === 'system' ? point : scope === 'app' ? point.app : point.model
-    const value = key === 'cpu' ? values.cpu : key === 'ram' ? values.ram : values.gpu
+    const value =
+      key === 'disk'
+        ? ((scope === 'system' ? point.disk?.busy : scope === 'app' ? point.disk?.read : point.disk?.write) ?? null)
+        : key === 'cpu'
+          ? values.cpu
+          : key === 'ram'
+            ? values.ram
+            : values.gpu
     if (value === null) {
       connected = false
       last = null
@@ -123,7 +160,10 @@ function resource(key: ResourceKey, label: string, detail: string, values: unkno
     detail,
     series: scopes.map((scope, index) => ({
       ...scope,
-      value: scope.key === 'model' && metrics.sample?.model_running === false ? null : percent(values.at(index)),
+      value:
+        key !== 'disk' && scope.key === 'model' && metrics.sample?.model_running === false
+          ? null
+          : percent(values.at(index)),
       chart: chart(key, scope.key),
     })),
   }
@@ -146,8 +186,31 @@ const hardware = computed(() => {
       s?.app_gpu_percent,
       s?.model_gpu_percent,
     ]),
+    {
+      ...resource('disk', s?.disk?.kind === 'ssd' ? 'SSD' : 'Disk', 'Aktivität des App-Laufwerks', [
+        s?.disk?.busy_percent,
+        s?.disk?.read_percent,
+        s?.disk?.write_percent,
+      ]),
+      series: resource('disk', 'SSD', '', [
+        s?.disk?.busy_percent,
+        s?.disk?.read_percent,
+        s?.disk?.write_percent,
+      ]).series.map((series, index) => ({
+        ...series,
+        detail: ['Aktive Zeit des App-Laufwerks', 'Lesezeit des App-Laufwerks', 'Schreibzeit des App-Laufwerks'][
+          index
+        ]!,
+      })),
+    },
   ]
 })
+const storageUsed = computed(() =>
+  metrics.sample?.disk?.total_bytes
+    ? Math.min(100, (metrics.sample.disk.used_bytes / metrics.sample.disk.total_bytes) * 100)
+    : null
+)
+const gib = (bytes: number) => (bytes / 1024 ** 3).toLocaleString('de-DE', { maximumFractionDigits: 1 })
 const formatPercent = (value: number) => value.toLocaleString('de-DE', { maximumFractionDigits: 1 })
 const connectionLabels: Record<ConnState, string> = {
   online: 'Verbunden',
@@ -204,9 +267,8 @@ const position = computed(() =>
       <AiIcon name="spark" /> Systemstatus <AiIcon :name="collapsed ? 'plus' : 'close'" />
     </button>
     <div v-if="!collapsed" class="status-dashboard__body">
-      <div class="status-overview" :data-tone="phase.tone">
+      <div v-show="section === 'localmodel'" class="status-overview" :data-tone="phase.tone">
         <div class="status-overview__text">
-          <span class="status-caption">Luczor</span>
           <h3 role="status"><i class="phase-dot" />{{ phase.label }}</h3>
           <p>{{ phase.detail }}</p>
           <div
@@ -221,107 +283,170 @@ const position = computed(() =>
             <AiIcon name="mic" :size="13" /><span><i :style="{ width: `${hud.micLevel * 100}%` }" /></span>
           </div>
         </div>
-        <svg
-          class="status-map"
-          :class="{ 'is-working': active && phase.moving }"
-          viewBox="0 0 180 130"
-          fill="none"
-          aria-hidden="true"
-        >
-          <path class="map-guide" d="M14 65h32m88 0h32M90 12v23m0 60v23" />
-          <path class="map-layer map-layer--back" d="m90 42 45 25-45 25-45-25Z" />
-          <path class="map-layer map-layer--middle" d="m90 29 45 25-45 25-45-25Z" />
-          <path class="map-layer map-layer--front" d="m90 16 45 25-45 25-45-25Z" />
-          <path class="map-spark" d="m90 28 4 9 11 4-11 4-4 9-4-9-11-4 11-4Z" />
-          <circle class="map-node" :data-state="hud.sync.server" cx="14" cy="65" r="3" />
-          <circle class="map-node" :data-state="hud.sync.cognee" cx="166" cy="65" r="3" />
-          <circle class="map-node" :data-state="hud.killSwitch ? 'offline' : 'unknown'" cx="90" cy="118" r="3" />
-        </svg>
       </div>
-      <div class="resource-heading">
-        <h4>Geräteressourcen</h4>
-        <span :data-stale="metrics.availability === 'stale'">{{ freshness }}</span>
-      </div>
-      <div class="resource-grid" :class="{ 'is-stale': metrics.availability === 'stale' }">
-        <article v-for="meter in hardware" :key="meter.key" class="resource">
-          <h5>{{ meter.label }}</h5>
-          <dl class="resource-values">
-            <div v-for="series in meter.series" :key="series.key" :data-scope="series.key" :title="series.detail">
-              <dt><i />{{ series.label }}</dt>
-              <dd
-                :aria-label="
-                  series.value === null
-                    ? series.key === 'model' && metrics.sample?.model_running === false
-                      ? 'Nicht aktiv'
-                      : 'Nicht verfügbar'
-                    : undefined
-                "
+      <div v-show="section === 'resources'" class="resource-pane">
+        <div class="resource-heading">
+          <div class="resource-mode" role="group" aria-label="Ressourcendarstellung">
+            <button type="button" :aria-pressed="resourceView === 'circles'" @click="resourceView = 'circles'">
+              Kreise</button
+            ><button type="button" :aria-pressed="resourceView === 'history'" @click="resourceView = 'history'">
+              Verlauf
+            </button>
+          </div>
+          <span :data-stale="metrics.availability === 'stale'">{{ freshness }}</span>
+        </div>
+        <div class="resource-grid" :class="{ 'is-stale': metrics.availability === 'stale' }">
+          <article v-for="meter in hardware" :key="meter.key" class="resource">
+            <h5 :class="{ 'ai-sr-only': resourceView === 'circles' }">{{ meter.label }}</h5>
+            <div v-if="resourceView === 'circles'" class="resource-dial-wrap">
+              <svg class="resource-dial" viewBox="0 0 120 120" aria-hidden="true">
+                <g
+                  v-for="(series, index) in meter.series"
+                  :key="series.key"
+                  :data-scope="series.key"
+                  transform="rotate(135 60 60)"
+                >
+                  <circle
+                    class="dial-track"
+                    cx="60"
+                    cy="60"
+                    :r="49 - index * 10"
+                    pathLength="100"
+                    stroke-dasharray="75 100"
+                  />
+                  <circle
+                    v-if="series.value !== null"
+                    class="dial-value"
+                    cx="60"
+                    cy="60"
+                    :r="49 - index * 10"
+                    pathLength="100"
+                    :stroke-dasharray="`${series.value * 0.75} 100`"
+                  />
+                </g>
+                <text x="60" y="63" text-anchor="middle">{{ meter.label }}</text>
+              </svg>
+              <span
+                v-for="(series, index) in meter.series"
+                :key="series.key"
+                class="dial-badge"
+                :data-scope="series.key"
+                :style="{ top: `${15 + index * 21}%` }"
+                tabindex="0"
+                :aria-label="`${meter.label} · ${series.detail}: ${series.value === null ? 'nicht verfügbar oder nicht aktiv' : formatPercent(series.value) + ' Prozent'}`"
+                :data-tip="series.detail"
+                >{{ series.value === null ? '—' : formatPercent(series.value) + ' %' }}</span
               >
-                {{ series.value === null ? '—' : formatPercent(series.value)
-                }}<small v-if="series.value !== null">%</small>
-              </dd>
             </div>
-          </dl>
-          <svg class="resource__chart" viewBox="0 0 180 74" preserveAspectRatio="none" aria-hidden="true">
-            <path class="chart-baseline" d="M4 8H176M4 68H176" />
-            <g v-for="series in meter.series" :key="series.key" :data-scope="series.key">
-              <path class="chart-line" :d="series.chart.path" />
-              <circle v-if="series.chart.last" :cx="series.chart.last.x" :cy="series.chart.last.y" r="2.3" />
-            </g>
-          </svg>
-          <span class="resource__detail">{{ meter.detail }}</span>
-        </article>
-      </div>
-      <p class="resource-note">
-        {{
-          metrics.history.length > 1
-            ? 'Letzte Messungen · ca. 3,5 s Abstand · Skala 0–100 %'
-            : 'Der Verlauf entsteht aus den Messungen während dieser Ansicht.'
-        }}
-      </p>
-      <div class="resource-context">
-        <span>{{ modelStatus }}</span
-        ><span v-if="gpuProcessUnavailable">GPU-Prozessmessung teilweise nicht verfügbar.</span>
-      </div>
-      <details class="resource-explanation">
-        <summary>Zuordnung der Werte</summary>
-        <p>
-          Rechner umfasst alle Anwendungen. App zeigt Luczor und seine Unterprozesse ohne den verwalteten Modellprozess.
-          Modell zeigt den zugehörigen lokalen Prozess und seine Unterprozesse. RAM-Werte enthalten gemeinsam genutzte
-          Speicherseiten und sind nicht addierbar.
+            <div v-else class="resource-history">
+              <div class="history-values">
+                <span
+                  v-for="series in meter.series"
+                  :key="series.key"
+                  :data-scope="series.key"
+                  :title="series.detail"
+                  >{{ series.value === null ? '—' : formatPercent(series.value) + ' %' }}</span
+                >
+              </div>
+              <svg class="resource__chart" viewBox="0 0 180 74" preserveAspectRatio="none" aria-hidden="true">
+                <path class="chart-baseline" d="M4 8H176M4 68H176" />
+                <g v-for="series in meter.series" :key="series.key" :data-scope="series.key">
+                  <path class="chart-line" :d="series.chart.path" />
+                  <circle v-if="series.chart.last" :cx="series.chart.last.x" :cy="series.chart.last.y" r="2.3" />
+                </g>
+              </svg>
+            </div>
+            <div v-if="meter.key === 'disk'" class="disk-capacity">
+              <template v-if="metrics.sample?.disk && storageUsed !== null"
+                ><span>{{ metrics.sample.disk.mount }} · {{ formatPercent(storageUsed) }} % belegt</span>
+                <div
+                  class="disk-capacity-bar"
+                  role="meter"
+                  aria-label="Datenträgerbelegung"
+                  :aria-valuenow="storageUsed"
+                  :aria-valuemin="0"
+                  :aria-valuemax="100"
+                >
+                  <i :style="{ width: `${storageUsed}%` }" />
+                </div>
+                <span
+                  >{{ gib(metrics.sample.disk.used_bytes) }} / {{ gib(metrics.sample.disk.total_bytes) }} GiB</span
+                ></template
+              ><span v-else>Belegung nicht verfügbar</span>
+            </div>
+          </article>
+        </div>
+        <p v-if="resourceView === 'history'" class="resource-note">
+          {{
+            metrics.history.length > 1
+              ? 'Letzte Messungen · ca. 3,5 s Abstand · Skala 0–100 %'
+              : 'Der Verlauf entsteht aus den Messungen während dieser Ansicht.'
+          }}
         </p>
-        <p>
-          GPU zeigt pro Bereich die höchste Windows-GPU-Engine-Auslastung. Fehlt diese Messung, kann für den
-          Rechner die höchste Geräteauslastung einer NVIDIA-Karte angezeigt werden. Die Kurven werden nicht
-          addiert. Ein Strich bedeutet nicht verfügbar oder nicht aktiv.
-        </p>
-      </details>
-      <div class="connection-grid">
-        <div v-for="connection in connections" :key="connection.label" class="connection">
-          <span>{{ connection.label }}</span
-          ><strong
-            ><i class="connection-dot" :data-state="connection.state" />{{ connectionLabels[connection.state] }}</strong
+        <div class="resource-context">
+          <span v-if="gpuProcessUnavailable">GPU-Prozessmessung teilweise nicht verfügbar.</span>
+        </div>
+        <details class="resource-explanation">
+          <summary>Zuordnung der Werte</summary>
+          <p>
+            Rechner umfasst alle Anwendungen. App zeigt Luczor und seine Unterprozesse ohne den verwalteten
+            Modellprozess. Modell zeigt den zugehörigen lokalen Prozess und seine Unterprozesse. RAM-Werte enthalten
+            gemeinsam genutzte Speicherseiten und sind nicht addierbar.
+          </p>
+          <p>
+            GPU zeigt pro Bereich die höchste Windows-GPU-Engine-Auslastung. Fehlt diese Messung, kann für den Rechner
+            die höchste Geräteauslastung einer NVIDIA-Karte angezeigt werden. Die Kurven werden nicht addiert. Ein
+            Strich bedeutet nicht verfügbar oder nicht aktiv. SSD zeigt aktive Zeit, Lesezeit und Schreibzeit des
+            App-Laufwerks (grün/violett/amber), darunter dessen Speicherbelegung. Diese Zeitanteile überlappen und sind
+            keine App-/Modellanteile.
+          </p>
+        </details>
+      </div>
+      <p v-show="section === 'localmodel'" class="resource-note">{{ modelStatus }}</p>
+      <SystemActivityCharts
+        v-show="section === 'memory' || section === 'network'"
+        :view="section === 'memory' ? 'memory' : 'network'"
+        :active="active && !collapsed"
+        :native-network="metrics.sample?.network_local"
+        :native-live="metrics.availability === 'live'"
+        @indicators="flowIndicators = $event"
+      />
+      <div v-show="section === 'details'">
+        <div class="connection-grid">
+          <div v-for="connection in connections" :key="connection.label" class="connection">
+            <span>{{ connection.label }}</span
+            ><strong
+              ><i class="connection-dot" :data-state="connection.state" />{{
+                connectionLabels[connection.state]
+              }}</strong
+            >
+          </div>
+        </div>
+        <div class="sync-line">
+          <span>{{ hud.sync.pending }} zur Synchronisierung ausstehend</span
+          ><button
+            type="button"
+            class="quiet-button"
+            :disabled="syncing || hud.sync.server !== 'online'"
+            @click="doSync"
           >
+            {{ syncing ? 'Synchronisiert …' : 'Synchronisieren' }}
+          </button>
         </div>
-      </div>
-      <div class="sync-line">
-        <span>{{ hud.sync.pending }} zur Synchronisierung ausstehend</span
-        ><button type="button" class="quiet-button" :disabled="syncing || hud.sync.server !== 'online'" @click="doSync">
-          {{ syncing ? 'Synchronisiert …' : 'Synchronisieren' }}
-        </button>
-      </div>
-      <p v-if="syncMessage" class="sync-result" role="status">{{ syncMessage }}</p>
-      <div class="status-controls">
-        <div class="last-tool">
-          <span class="status-caption">Letztes Tool</span
-          ><span :title="hud.lastTool || undefined">{{ hud.lastTool || 'Noch kein Tool ausgeführt' }}</span>
+        <p v-if="syncMessage" class="sync-result" role="status">{{ syncMessage }}</p>
+        <div class="status-controls">
+          <div class="last-tool">
+            <span class="status-caption">Letztes Tool</span
+            ><span :title="hud.lastTool || undefined">{{ hud.lastTool || 'Noch kein Tool ausgeführt' }}</span>
+          </div>
+          <SystemStopButton v-if="!embedded" />
         </div>
-        <SystemStopButton v-if="!embedded" />
+        <details v-if="lastScreenshot" class="last-capture">
+          <summary>Letzte Bildschirmaufnahme</summary>
+          <img :src="lastScreenshot" alt="Zuletzt vom Bildschirm-Tool aufgenommener Bildschirm" />
+        </details>
+        <slot name="details" />
       </div>
-      <details v-if="lastScreenshot" class="last-capture">
-        <summary>Letzte Bildschirmaufnahme</summary>
-        <img :src="lastScreenshot" alt="Zuletzt vom Bildschirm-Tool aufgenommener Bildschirm" />
-      </details>
     </div>
   </section>
 </template>
@@ -379,8 +504,8 @@ const position = computed(() =>
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  min-height: 140px;
-  padding-bottom: 16px;
+  min-height: 72px;
+  padding-bottom: 8px;
 }
 [data-tone='accent'] {
   --status-color: var(--ai-accent);
@@ -406,7 +531,7 @@ const position = computed(() =>
   align-items: center;
   gap: 10px;
   margin: 7px 0;
-  font-size: 26px;
+  font-size: 15px;
   font-weight: 500;
   letter-spacing: -0.04em;
   line-height: 1.2;
@@ -414,6 +539,7 @@ const position = computed(() =>
 .status-overview p {
   margin: 0;
   color: var(--ai-muted);
+  font-size: 11px;
 }
 .phase-dot,
 .connection-dot {
@@ -490,8 +616,81 @@ const position = computed(() =>
   align-items: baseline;
   gap: 12px;
   flex-wrap: wrap;
-  padding: 16px 0 14px;
-  border-top: 1px solid var(--ai-line);
+  padding: 10px 0 22px;
+}
+.resource-mode {
+  display: flex;
+  padding: 3px;
+  border-radius: 7px;
+  background: var(--ai-canvas);
+}
+.resource-mode button {
+  border: 0;
+  border-radius: 5px;
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--ai-muted);
+  font-size: 11px;
+}
+.resource-mode button[aria-pressed='true'] {
+  background: var(--ai-hover);
+  color: var(--ai-ink);
+}
+.resource-dial-wrap {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 180 / 152;
+  margin: auto;
+}
+.dial-badge {
+  position: absolute;
+  right: 0;
+  min-width: 40px;
+  padding: 3px 6px;
+  border: 1px solid color-mix(in srgb, var(--scope-color) 35%, transparent);
+  border-radius: 5px;
+  background: var(--ai-surface);
+  color: var(--scope-color);
+  font: 500 11px/1.4 var(--ai-font);
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  cursor: default;
+}
+.dial-badge:focus-visible {
+  outline: 2px solid var(--scope-color);
+  outline-offset: 3px;
+}
+.dial-badge::after {
+  content: attr(data-tip);
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 7px);
+  right: 0;
+  width: max-content;
+  max-width: 165px;
+  padding: 7px 9px;
+  border-radius: 5px;
+  background: var(--ai-hover);
+  color: var(--ai-ink);
+  font-weight: 400;
+  z-index: 2;
+  text-align: left;
+}
+.dial-badge:is(:hover, :focus-visible)::after {
+  display: block;
+}
+.history-values {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.history-values span {
+  color: var(--scope-color);
+}
+.resource-history {
+  min-height: 152px;
 }
 .resource-heading h4 {
   font-size: 12px;
@@ -508,12 +707,12 @@ const position = computed(() =>
 }
 .resource-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
+  gap: 18px;
 }
 .resource {
   min-width: 0;
-  padding: 0 16px;
-  border-left: 1px solid var(--ai-line);
+  padding: 0;
 }
 .resource:first-child {
   padding-left: 0;
@@ -526,6 +725,28 @@ const position = computed(() =>
   margin: 0 0 13px;
   font-size: 12px;
   font-weight: 600;
+}
+.resource-dial {
+  display: block;
+  width: 82%;
+  margin: 0;
+  overflow: visible;
+}
+.resource-dial circle {
+  fill: none;
+  stroke-width: 5;
+  stroke-linecap: round;
+}
+.dial-track {
+  stroke: var(--ai-line);
+}
+.dial-value {
+  stroke: var(--scope-color);
+}
+.resource-dial text {
+  fill: var(--ai-ink);
+  font: 500 12px var(--ai-font);
+  letter-spacing: 0.06em;
 }
 [data-scope='system'] {
   --scope-color: var(--ai-green);
@@ -620,6 +841,7 @@ const position = computed(() =>
   margin: 12px 0 8px;
 }
 .resource-context {
+  margin-top: 16px;
   display: flex;
   flex-wrap: wrap;
   gap: 4px 12px;
@@ -747,11 +969,11 @@ const position = computed(() =>
 }
 @media (max-width: 480px) {
   .status-overview {
-    min-height: 115px;
+    min-height: 65px;
     gap: 4px;
   }
   .status-overview h3 {
-    font-size: 22px;
+    font-size: 15px;
   }
   .status-overview p {
     font-size: 11px;
@@ -761,7 +983,7 @@ const position = computed(() =>
     height: 96px;
   }
   .resource {
-    padding: 0 10px;
+    padding: 0 6px;
   }
   .resource-values > div {
     display: grid;
@@ -781,6 +1003,33 @@ const position = computed(() =>
   }
   .sync-line {
     align-items: flex-start;
+  }
+}
+.disk-capacity {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 10px;
+  color: var(--ai-muted);
+  font-variant-numeric: tabular-nums;
+}
+.disk-capacity-bar {
+  height: 3px;
+  background: var(--ai-line);
+  overflow: hidden;
+  border-radius: 2px;
+}
+.disk-capacity-bar i {
+  display: block;
+  height: 100%;
+  background: var(--ai-green);
+}
+@media (max-width: 480px) {
+  .resource {
+    padding: 0;
+  }
+  .resource-dial-wrap {
+    max-width: 230px;
   }
 }
 </style>

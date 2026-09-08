@@ -14,13 +14,14 @@ export async function runWorkflowAgent(
   agent: string,
   prompt: string,
   projectDir?: string,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  explicitProjectId?: string
 ): Promise<WorkflowAgentResult> {
   if (agent.trim().toLowerCase() !== 'codex') {
     throw new Error('Dieser Workflow-Agent ist nicht als verwalteter Luczor-Agent verfügbar.')
   }
   if (!prompt.trim() || prompt.length > 24_000) throw new Error('Der Workflow-Agentenauftrag ist ungültig.')
-  const projectId = state.global.ui?.lastProjectId ?? state.projects.find(project => !project.archivedAt)?.id
+  const projectId = explicitProjectId ?? state.global.ui?.lastProjectId ?? state.projects.find(project => !project.archivedAt)?.id
   const project = state.projects.find(item => item.id === projectId && !item.archivedAt)
   if (!project) throw new Error('Für den Workflow ist kein aktives Projekt verfügbar.')
   const snapshot = await agentProjectSnapshot(project.id)
