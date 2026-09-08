@@ -4,9 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import { loadPendingTaskCreates, replacePendingTaskCreates } from '@/services/agents/taskCreateRecoveryLedger'
 import Settings from './components/Settings.vue'
-import JarvisHud from './components/JarvisHud.vue'
-import LocalModelStatus from './components/LocalModelStatus.vue'
-import AssistantProfileStatus from './components/AssistantProfileStatus.vue'
+import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import TokenCounter from './components/ai/TokenCounter.vue'
 import AgentTeamResults from './components/ai/AgentTeamResults.vue'
 import ChatCommentary from './components/ai/ChatCommentary.vue'
@@ -61,7 +59,6 @@ import {
 } from '@/services/chatActivity'
 import { presentLocalToolResult } from '@/services/toolProgressPresentation'
 import type { Message } from '@/state/types'
-import SpotlightSurface from './components/vengeance/SpotlightSurface.vue'
 import { type LuczorMode, type WireMessage } from './services/openrouter.service'
 import { runAgent, buildSystemPreamble, shouldRequireToolCall, type AgentRunEvaluation } from '@/services/agent'
 import { presentEnvelopeStream } from '@/services/envelope'
@@ -71,10 +68,11 @@ import { VoiceEngine } from '@/services/voice/voiceEngine'
 import { ensureVoiceRuntime, getVoiceConfig, handsFreeFromVoice, localStt } from '@/services/voice/localVoice'
 import { useVoiceInputOwnership } from '@/composables/useVoiceInputOwnership'
 import { loadAudioTriggers } from '@/services/voice/audioTriggers'
-import { streamSpeak, stopSpeak } from '@/services/voice/speak'
+import { streamSpeak, stopSpeak, type SpeakOptions } from '@/services/voice/speak'
 import { serverSpeechText } from '@/services/voice/messageSpeech'
 import { createCommentarySpeechQueue } from '@/services/voice/commentarySpeech'
-import { commentaryForSpeech, completedCommentary } from '@/services/chatCommentary'
+import { createProgressiveCommentary } from '@/services/voice/progressiveCommentary'
+import { completedCommentary } from '@/services/chatCommentary'
 import { readAlongState } from '@/services/voice/readAlong'
 import ReadAloudText from '@/components/ai/ReadAloudText.vue'
 import { loadLocalSpeechConsent } from '@/services/voice/speechConsent'
@@ -371,9 +369,11 @@ const speechOutputLabel = computed(() => {
   return `Wird vorgelesen · ${Math.round((playback.position / Math.max(1, playback.text.length)) * 100)} %`
 })
 let speechGeneration = 0
+const speechControllers = new Set<AbortController>()
 let activeSpeechScope: { id: string; projectId: string; generation: number } | null = null
 const commentarySpeech = createCommentarySpeechQueue({
-  speak: (text, { signal, key }) => speakWithVoiceMuted(text, signal, true, key),
+  speak: (text, { signal, key, source, beforeChunk }) =>
+    speakWithVoiceMuted(text, signal, true, key, undefined, { source, beforeChunk }),
   allowLocalContent: getLocalSpeechConsent,
   onBlocked: () => {
     speechError.value =
@@ -396,6 +396,7 @@ const commentarySpeech = createCommentarySpeechQueue({
 
 function stopVoiceOutput() {
   speechGeneration += 1
+  for (const controller of speechControllers) controller.abort()
   activeSpeechScope = null
   commentarySpeech.cancel()
   speechPending.value = false
@@ -476,16 +477,6 @@ function evaluateAgentRun(run: AgentRunEvaluation) {
       interruption_code: run.interrupted?.code,
     },
   }).catch(e => console.warn('[evaluation] deferred:', e))
-}
-
-function autoSpeakAssistantIfEnabled(pid: string, assistantId: string) {
-  const scope = activeSpeechScope
-  if (!scope || scope.projectId !== pid) return
-  void commentarySpeech.enqueueMessage({
-    scope: scope.id,
-    key: `${assistantId}:answer`,
-    readMessage: () => mutations.getProjectMessages(pid).find(message => message.id === assistantId),
-  })
 }
 
 /* -------------------------------------------------
@@ -844,24 +835,44 @@ async function speakWithVoiceMuted(
   signal?: AbortSignal,
   queued = false,
   key = '',
-  voiceId?: string
+  voiceId?: string,
+  progressive: Pick<SpeakOptions, 'source' | 'beforeChunk'> = {}
 ): Promise<'completed' | 'cancelled'> {
   if (signal?.aborted) return 'cancelled'
   if (!queued) stopVoiceOutput()
   const ownGeneration = speechGeneration
+  const controller = new AbortController()
+  speechControllers.add(controller)
+  const callerAbort = () => controller.abort()
+  signal?.addEventListener('abort', callerAbort, { once: true })
+  let abortSettings!: () => void
+  const cancelledSettings = new Promise<null>(resolve => {
+    abortSettings = () => resolve(null)
+    controller.signal.addEventListener('abort', abortSettings, { once: true })
+  })
   speechError.value = ''
   speechPending.value = true
   voiceMuteDepth += 1
   voiceInputSession.setMuted(true)
   try {
-    const tts = await getTtsConfig()
-    if (ownGeneration !== speechGeneration || signal?.aborted) return 'cancelled'
-    return await streamSpeak(text, { rate: tts.rate, volume: tts.volume, signal, key, voiceId: voiceId ?? tts.voiceId })
+    const tts = await Promise.race([getTtsConfig(), cancelledSettings])
+    if (!tts || ownGeneration !== speechGeneration || controller.signal.aborted) return 'cancelled'
+    return await streamSpeak(text, {
+      rate: tts.rate,
+      volume: tts.volume,
+      signal: controller.signal,
+      key,
+      voiceId: voiceId ?? tts.voiceId,
+      ...progressive,
+    })
   } catch (error) {
     if (ownGeneration !== speechGeneration || signal?.aborted) return 'cancelled'
     speechError.value = error instanceof Error ? error.message : 'Die Server-Sprachausgabe ist fehlgeschlagen.'
     throw error
   } finally {
+    controller.signal.removeEventListener('abort', abortSettings)
+    signal?.removeEventListener('abort', callerAbort)
+    speechControllers.delete(controller)
     if (ownGeneration === speechGeneration) speechPending.value = false
     voiceMuteDepth = Math.max(0, voiceMuteDepth - 1)
     voiceInputSession.setMuted(voiceMuteDepth > 0 || conversationBusy.value)
@@ -1355,6 +1366,12 @@ async function send(
     mutations.addMessage(assistant)
     const speechScope = `${pid}:${assistant.id}:${turnSpeechGeneration}`
     activeSpeechScope = { id: speechScope, projectId: pid, generation: turnSpeechGeneration }
+    const progressiveSpeech = createProgressiveCommentary({
+      scope: speechScope,
+      answerKey: `${assistant.id}:answer`,
+      queue: commentarySpeech,
+      readMessage: () => mutations.getProjectMessages(pid).find(message => message.id === assistant.id),
+    })
     void commentarySpeech.enqueueStatus({ scope: speechScope, key: 'context', text: 'Kontext vorbereiten' })
     activeTurn.value = { projectId: pid, messageId: assistant.id }
     abortController.value = abort
@@ -1648,17 +1665,7 @@ async function send(
             parsed: null,
             meta: { commentary: [...previous, entry], question: '', summary: '', bullets: [] },
           })
-          void commentarySpeech.enqueueMessage({
-            scope: speechScope,
-            key: `${assistant.id}:${entry.id}`,
-            readMessage: () =>
-              commentaryForSpeech(
-                mutations
-                  .getProjectMessages(pid)
-                  .find(message => message.id === assistant.id)
-                  ?.meta.commentary?.find(item => item.id === entry.id)
-              ),
-          })
+          progressiveSpeech.completeCommentary(entry)
         },
         onUsage: usage => {
           if (turnExecution.signal.aborted) return
@@ -1675,6 +1682,7 @@ async function send(
             } catch {}
           }
           applyStreamedContent(pid, assistant.id, raw, false)
+          if (turnSpeechGeneration === speechGeneration) progressiveSpeech.update()
         },
       })
 
@@ -1735,10 +1743,11 @@ async function send(
       for (const evaluation of evaluations) evaluateAgentRun(evaluation)
 
       setStatus('idle')
-      if (turnSpeechGeneration === speechGeneration) void autoSpeakAssistantIfEnabled(pid, assistant.id)
+      if (turnSpeechGeneration === speechGeneration) progressiveSpeech.completeAnswer()
       if (!ephemeralDataUsed && !continuation && !interrupted)
         void rememberExchange(pid, text, assistant.id, scopeKey.principalId, turnExecution)
     } catch (e: any) {
+      progressiveSpeech.cancel()
       try {
         stopSfx('loading')
       } catch {}
@@ -2498,31 +2507,13 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
       </div>
     </main>
 
-    <SpotlightSurface id="system-panel" class="system-panel" :class="{ 'is-open': showSystemPanel }">
-      <div class="system-panel__head">
-        <div>
-          <span class="system-panel__eyebrow">Systemkern</span>
-          <strong>Live-Status</strong>
-        </div>
-        <span class="system-panel__state"><i /> {{ liveStatus.label }}</span>
-        <button
-          type="button"
-          class="system-panel__close"
-          aria-label="Systembereich schließen"
-          @click="showSystemPanel = false"
-        >
-          ×
-        </button>
-      </div>
-      <LocalModelStatus :active="showSystemPanel" />
-      <AssistantProfileStatus :active="showSystemPanel" />
-      <JarvisHud embedded />
-      <button type="button" class="ai-button" @click="miniChat.open()">Als Luczor Mini öffnen</button>
-      <div class="system-panel__foot">
-        <span>{{ activeProject?.name }}</span>
-        <span>Privater Gerätekanal</span>
-      </div>
-    </SpotlightSurface>
+    <SystemStatusPanel
+      :active="showSystemPanel"
+      :assistant-phase="liveStatus.phase"
+      :project-name="activeProject?.name"
+      @close="showSystemPanel = false"
+      @open-mini="miniChat.open()"
+    />
   </div>
 </template>
 

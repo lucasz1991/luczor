@@ -26,6 +26,13 @@ export function updateReadAlong(owner: number, phase: ReadAlongState['phase'], p
   if (active.phase !== phase || active.position !== next) state.value = { ...active, phase, position: next }
 }
 
+/** Streaming text can grow or move into a retained comment while its audio continues. */
+export function updateReadAlongSource(owner: number, text: string, key: string): void {
+  const active = state.value
+  if (active?.owner !== owner || (active.text === text && active.key === key)) return
+  state.value = { ...active, text, key, position: Math.min(active.position, text.length) }
+}
+
 export function endReadAlong(owner: number): void {
   if (state.value?.owner === owner) state.value = null
 }

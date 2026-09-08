@@ -1,5 +1,5 @@
 import { createCorrelationId, LuczorApiError, type LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
-import { apiTransportInput } from '@/services/api/transportTarget'
+import { apiTransportFetch } from '@/services/api/transportTarget'
 import { validSpeechVoiceId } from './voiceCatalog'
 
 export const MAX_TTS_TEXT_CHARS = 4000
@@ -80,7 +80,7 @@ export async function serverTts(
 
   try {
     const operation = (async () => {
-      const response = await fetch(apiTransportInput(url), {
+      const response = await apiTransportFetch(url, {
         method: 'POST',
         headers: {
           Accept: 'audio/wav',

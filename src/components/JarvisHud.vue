@@ -1,922 +1,786 @@
 <script setup lang="ts">
-import { computed, onMounted, onBeforeUnmount, ref } from 'vue'
-import { hud, setKillSwitch } from '@/state/hud'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { hud, type ConnState } from '@/state/hud'
+import type { OrbPhase } from '@/services/miniChat/presentation'
 import { lastScreenshot } from '@/services/tools/registry'
 import { syncNow } from '@/services/status'
 import { appearance } from '@/services/appearance'
-import { readSystemMetrics, type SystemMetrics } from '@/services/systemMetrics'
+import { createSystemStatusMonitor, percent } from '@/services/systemStatusMonitor'
+import AiIcon from './ai/AiIcon.vue'
+import SystemStopButton from './SystemStopButton.vue'
 
-const props = withDefaults(defineProps<{ embedded?: boolean }>(), {
+const props = withDefaults(defineProps<{ embedded?: boolean; active?: boolean; assistantPhase?: OrbPhase }>(), {
   embedded: false,
+  active: true,
 })
-
-/* -------------------------------------------------
- * Animation clock + smoothed telemetry
- * ------------------------------------------------- */
-const frame = ref(0)
-let raf = 0
-let metricsTimer: number | undefined
-
-// Smoothed scalars (ease toward live values so nothing jitters).
-const sEnergy = ref(0)
-const sMic = ref(0)
-const sNet = ref(0)
-const sFile = ref(0)
-const sOs = ref(0)
-const sysMetrics = ref<SystemMetrics | null>(null)
-const sysMetricsError = ref(false)
-
-// Circular spectrum + linear waveform smoothing buffers.
-const SPECTRUM = 64
-const BARS = 40
-const spec = ref<number[]>(Array(SPECTRUM).fill(0))
-const bars = ref<number[]>(Array(BARS).fill(0))
-
-const lerp = (a: number, b: number, k: number) => a + (b - a) * k
-
-function loop() {
-  const f = (frame.value + 1) % 1_000_000
-  frame.value = f
-
-  const a = hud.activity
-  const thinking = hud.status === 'thinking' || hud.status === 'executing'
-  const base = thinking ? 0.32 : hud.status === 'listening' ? 0.14 : 0.05
-  const liveEnergy = Math.min(1, Math.max(hud.micLevel, a.audio, a.network, a.file, a.os, base))
-
-  sEnergy.value = lerp(sEnergy.value, liveEnergy, 0.14)
-  sMic.value = lerp(sMic.value, hud.micLevel, 0.25)
-  sNet.value = lerp(sNet.value, a.network, 0.2)
-  sFile.value = lerp(sFile.value, a.file, 0.2)
-  sOs.value = lerp(sOs.value, a.os, 0.2)
-
-  const level = Math.max(sMic.value, a.audio, hud.status !== 'idle' ? 0.1 : 0.02)
-
-  // Circular spectrum: symmetric, gently animated envelope.
-  const sp = spec.value
-  for (let i = 0; i < SPECTRUM; i++) {
-    const phase = f * 0.05
-    const wobble = 0.5 + 0.5 * Math.sin(phase + i * 0.5) * Math.cos(phase * 0.6 + i * 0.27)
-    const target = level * (0.35 + 0.65 * wobble)
-    sp[i] = lerp(sp[i]!, target, 0.22)
-  }
-
-  // Linear waveform: tapered at edges, mirrored in template.
-  const br = bars.value
-  for (let i = 0; i < BARS; i++) {
-    const env = Math.sin((i / (BARS - 1)) * Math.PI) // taper
-    const wob = 0.5 + 0.5 * Math.sin(f * 0.12 + i * 0.55)
-    const target = level * (0.3 + 0.7 * wob) * (0.35 + 0.65 * env)
-    br[i] = lerp(br[i]!, target, 0.3)
-  }
-
-  raf = requestAnimationFrame(loop)
-}
-onMounted(() => {
-  raf = requestAnimationFrame(loop)
-  void refreshSystemMetrics()
-  metricsTimer = window.setInterval(() => void refreshSystemMetrics(), 3500)
-})
-onBeforeUnmount(() => {
-  cancelAnimationFrame(raf)
-  if (metricsTimer) window.clearInterval(metricsTimer)
-})
-
 const collapsed = ref(false)
-
-/* -------------------------------------------------
- * Status -> palette (CSS transitions smooth the change)
- * ------------------------------------------------- */
-const palette = computed(() => {
-  switch (hud.status) {
+const monitor = createSystemStatusMonitor()
+const metrics = monitor.state
+watch(
+  () => props.active && !collapsed.value,
+  active => monitor.setActive(active),
+  { immediate: true }
+)
+onBeforeUnmount(() => monitor.dispose())
+const phase = computed(() => {
+  if (hud.killSwitch) return { label: 'Tools gesperrt', detail: 'Not-Aus ist aktiv.', tone: 'danger', moving: false }
+  switch (props.assistantPhase ?? hud.status) {
+    case 'waiting':
+      return {
+        label: 'Deine Entscheidung',
+        detail: 'Eine Freigabe oder Auswahl wartet im Chat.',
+        tone: 'warning',
+        moving: false,
+      }
+    case 'stopped':
+      return { label: 'Angehalten', detail: 'Die aktuelle Arbeit wurde gestoppt.', tone: 'neutral', moving: false }
+    case 'done':
+      return { label: 'Antwort bereit', detail: 'Eine neue Antwort steht im Chat.', tone: 'success', moving: false }
     case 'listening':
-      return { main: '#22d3ee', accent: '#67e8f9', glow: 'rgba(34,211,238,.65)', label: 'Höre zu' }
+      return { label: 'Hört zu', detail: 'Spracheingabe ist aktiv.', tone: 'accent', moving: true }
     case 'thinking':
-      return { main: '#38bdf8', accent: '#7dd3fc', glow: 'rgba(56,189,248,.6)', label: 'Denke nach' }
+      return { label: 'Verarbeitet', detail: 'Luczor bereitet die Antwort vor.', tone: 'accent', moving: true }
     case 'executing':
-      return { main: '#f59e0b', accent: '#fcd34d', glow: 'rgba(245,158,11,.72)', label: 'Führe aus' }
+      return { label: 'Arbeitet', detail: 'Eine Aktion wird ausgeführt.', tone: 'accent', moving: true }
     case 'speaking':
-      return { main: '#34d399', accent: '#6ee7b7', glow: 'rgba(52,211,153,.62)', label: 'Spreche' }
+      return { label: 'Spricht', detail: 'Die Antwort wird vorgelesen.', tone: 'success', moving: true }
     case 'error':
-      return { main: '#f43f5e', accent: '#fda4af', glow: 'rgba(244,63,94,.72)', label: 'Fehler' }
+      return {
+        label: 'Fehler gemeldet',
+        detail: 'Weitere Informationen stehen im Chat.',
+        tone: 'danger',
+        moving: false,
+      }
     default:
-      return { main: '#38bdf8', accent: '#7dd3fc', glow: 'rgba(56,189,248,.4)', label: 'Bereit' }
+      return { label: 'Bereit', detail: 'Im Moment keine aktive Unterhaltung.', tone: 'neutral', moving: false }
   }
 })
-
-/* Rotations */
-const rotOuter = computed(() => (frame.value * 0.28) % 360)
-const rotMid = computed(() => (-frame.value * 0.5) % 360)
-const rotArcs = computed(() => (frame.value * 0.9) % 360)
-const rotSweep = computed(() => (frame.value * 1.4) % 360)
-
-const coreScale = computed(() => 1 + sEnergy.value * 0.16)
-const pingR = computed(() => 22 + sEnergy.value * 26)
-const pingOpacity = computed(() => 0.05 + sEnergy.value * 0.32)
-
-/* Circular spectrum -> line segments radiating from r=40 */
-const spectrumLines = computed(() => {
-  void frame.value
-  const cx = 100,
-    cy = 100,
-    r0 = 41
-  const arr = spec.value
-  return arr.map((v, i) => {
-    const ang = (i / SPECTRUM) * Math.PI * 2 - Math.PI / 2
-    const len = 4 + v * 26
-    const cos = Math.cos(ang),
-      sin = Math.sin(ang)
-    return {
-      x1: cx + r0 * cos,
-      y1: cy + r0 * sin,
-      x2: cx + (r0 + len) * cos,
-      y2: cy + (r0 + len) * sin,
-      o: 0.35 + v * 0.6,
-    }
-  })
+const stamp = computed(() =>
+  metrics.lastUpdatedAt
+    ? new Date(metrics.lastUpdatedAt).toLocaleTimeString('de-DE', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+      })
+    : ''
+)
+const freshness = computed(() => {
+  switch (metrics.availability) {
+    case 'live':
+      return `Stand ${stamp.value}`
+    case 'stale':
+      return `Veraltet · letzter Stand ${stamp.value}`
+    case 'unavailable':
+      return 'Gerätemessung nicht verfügbar'
+    default:
+      return 'Messwerte werden gelesen …'
+  }
 })
-
-/* Outer tick marks */
-const ticks = computed(() => {
-  void frame.value
-  return Array.from({ length: 60 }, (_, i) => {
-    const ang = (i * 6 * Math.PI) / 180
-    const long = i % 5 === 0
-    const rOut = 90,
-      rIn = long ? 80 : 85
-    return {
-      x1: 100 + rOut * Math.cos(ang),
-      y1: 100 + rOut * Math.sin(ang),
-      x2: 100 + rIn * Math.cos(ang),
-      y2: 100 + rIn * Math.sin(ang),
-      o: long ? 0.8 : 0.4,
+type ResourceKey = 'cpu' | 'ram' | 'gpu'
+type Scope = 'system' | 'app' | 'model'
+const scopes = [
+  { key: 'system' as const, label: 'Rechner', detail: 'Gesamter Rechner' },
+  { key: 'app' as const, label: 'App', detail: 'Luczor-App ohne lokalen Modellprozess' },
+  { key: 'model' as const, label: 'Modell', detail: 'Verwaltetes lokales Modell' },
+]
+const modelStatus = computed(() =>
+  metrics.sample?.model_running === true
+    ? 'Lokales Modell aktiv'
+    : metrics.sample?.model_running === false
+      ? 'Kein lokales Modell aktiv'
+      : 'Modellprozess nicht bestätigt'
+)
+const gpuProcessUnavailable = computed(
+  () =>
+    metrics.sample &&
+    (percent(metrics.sample.app_gpu_percent) === null ||
+      (metrics.sample.model_running === true && percent(metrics.sample.model_gpu_percent) === null))
+)
+function chart(key: ResourceKey, scope: Scope) {
+  let path = ''
+  let connected = false
+  let last: { x: number; y: number } | null = null
+  metrics.history.forEach((point, index) => {
+    const values = scope === 'system' ? point : scope === 'app' ? point.app : point.model
+    const value = key === 'cpu' ? values.cpu : key === 'ram' ? values.ram : values.gpu
+    if (value === null) {
+      connected = false
+      last = null
+      return
     }
+    const x = 4 + (index / Math.max(1, metrics.history.length - 1)) * 172
+    const y = 68 - value * 0.6
+    path += `${connected ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)} `
+    connected = true
+    last = { x, y }
   })
-})
-
-/* Segmented energy ring (r=70): number of lit segments follows energy */
-const SEGMENTS = 44
-const segments = computed(() => {
-  const lit = Math.round(sEnergy.value * SEGMENTS)
-  return Array.from({ length: SEGMENTS }, (_, i) => {
-    const ang = (i / SEGMENTS) * Math.PI * 2 - Math.PI / 2
-    const on = i < lit
-    return {
-      x1: 100 + 66 * Math.cos(ang),
-      y1: 100 + 66 * Math.sin(ang),
-      x2: 100 + 72 * Math.cos(ang),
-      y2: 100 + 72 * Math.sin(ang),
-      on,
-    }
-  })
-})
-
-function arc(v: number) {
-  return { opacity: 0.2 + v * 0.8, width: 2 + v * 5 }
+  return { path, last }
 }
-
-async function refreshSystemMetrics() {
-  try {
-    sysMetrics.value = await readSystemMetrics()
-    sysMetricsError.value = false
-  } catch (e) {
-    sysMetricsError.value = true
-    console.warn('[hud] system metrics failed:', e)
+function resource(key: ResourceKey, label: string, detail: string, values: unknown[]) {
+  return {
+    key,
+    label,
+    detail,
+    series: scopes.map((scope, index) => ({
+      ...scope,
+      value: scope.key === 'model' && metrics.sample?.model_running === false ? null : percent(values.at(index)),
+      chart: chart(key, scope.key),
+    })),
   }
 }
-
-function pct(v: number | null | undefined) {
-  return typeof v === 'number' && Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : null
-}
-
-function temp(v: number | null | undefined) {
-  return typeof v === 'number' && Number.isFinite(v) ? v : null
-}
-
-function loadColor(load: number | null, tempC?: number | null) {
-  const hot = tempC != null && tempC >= 85
-  const warm = tempC != null && tempC >= 75
-  if (hot || (load != null && load >= 90)) return '#fb7185'
-  if (warm || (load != null && load >= 72)) return '#f59e0b'
-  if (load != null && load >= 45) return '#22d3ee'
-  return '#34d399'
-}
-
-function fmtPct(v: number | null) {
-  return v == null ? 'n/a' : `${Math.round(v)}%`
-}
-
-function fmtTemp(v: number | null) {
-  return v == null ? 'n/a' : `${Math.round(v)}C`
-}
-
-const hardwareMeters = computed(() => {
-  const m = sysMetrics.value
-  const cpu = pct(m?.cpu_percent)
-  const ram = pct(m?.ram_percent)
-  const gpu = pct(m?.gpu_percent)
-  const cpuTemp = temp(m?.cpu_temp_c)
-  const gpuTemp = temp(m?.gpu_temp_c)
-
+const hardware = computed(() => {
+  const s = metrics.sample
   return [
-    { tag: 'CPU', value: cpu, temp: cpuTemp, color: loadColor(cpu, cpuTemp), detail: fmtTemp(cpuTemp) },
-    {
-      tag: 'RAM',
-      value: ram,
-      temp: null,
-      color: loadColor(ram, null),
-      detail: m ? `${Math.round(m.ram_used_mb / 1024)}/${Math.round(m.ram_total_mb / 1024)}G` : 'n/a',
-    },
-    { tag: 'GPU', value: gpu, temp: gpuTemp, color: loadColor(gpu, gpuTemp), detail: fmtTemp(gpuTemp) },
+    resource('cpu', 'CPU', 'Anteil der gesamten CPU-Kapazität', [
+      s?.cpu_percent,
+      s?.app_cpu_percent,
+      s?.model_cpu_percent,
+    ]),
+    resource('ram', 'RAM', 'Anteil am gesamten Arbeitsspeicher', [
+      s?.ram_percent,
+      s?.app_ram_percent,
+      s?.model_ram_percent,
+    ]),
+    resource('gpu', 'GPU', s?.gpu_source === 'nvml' ? 'Geräteauslastung · NVIDIA' : 'Höchste GPU-Engine-Auslastung', [
+      s?.gpu_percent,
+      s?.app_gpu_percent,
+      s?.model_gpu_percent,
+    ]),
   ]
 })
-
-function toggleKill() {
-  setKillSwitch(!hud.killSwitch)
+const formatPercent = (value: number) => value.toLocaleString('de-DE', { maximumFractionDigits: 1 })
+const connectionLabels: Record<ConnState, string> = {
+  online: 'Verbunden',
+  offline: 'Nicht erreichbar',
+  configured: 'Eingerichtet',
+  disabled: 'Deaktiviert',
+  unknown: 'Unbekannt',
 }
-
+const connections = computed(() => [
+  { label: 'Server', state: hud.sync.server },
+  { label: 'Gedächtnis', state: hud.sync.cognee },
+])
 const syncing = ref(false)
+const syncMessage = ref('')
 async function doSync() {
-  if (syncing.value) return
+  if (syncing.value || hud.sync.server !== 'online') return
   syncing.value = true
+  syncMessage.value = ''
   try {
     await syncNow()
-  } catch (e) {
-    console.warn('[hud] sync failed:', e)
+    syncMessage.value = 'Synchronisierung abgeschlossen.'
+  } catch {
+    syncMessage.value = 'Synchronisierung fehlgeschlagen. Bitte erneut versuchen.'
   } finally {
     syncing.value = false
   }
 }
-
-function connColor(state: string): string {
-  switch (state) {
-    case 'online':
-      return '#34d399'
-    case 'configured':
-      return '#22d3ee'
-    case 'offline':
-      return '#f43f5e'
-    default:
-      return '#4f7488'
-  }
-}
-
-/* HUD anchor from personalization (br/bl/tr/tl) */
-const posStyle = computed(() => {
-  if (props.embedded) return {}
-  const p = appearance.hudPosition
-  const bottom = p[0] === 'b'
-  const right = p[1] === 'r'
-  return {
-    top: bottom ? 'auto' : '16px',
-    bottom: bottom ? '16px' : 'auto',
-    left: right ? 'auto' : '16px',
-    right: right ? '16px' : 'auto',
-  }
-})
+const position = computed(() =>
+  props.embedded
+    ? {}
+    : {
+        top: appearance.hudPosition.startsWith('t') ? '16px' : 'auto',
+        bottom: appearance.hudPosition.startsWith('b') ? '16px' : 'auto',
+        left: appearance.hudPosition.endsWith('l') ? '16px' : 'auto',
+        right: appearance.hudPosition.endsWith('r') ? '16px' : 'auto',
+      }
+)
 </script>
 
 <template>
-  <div class="jarvis" :class="{ collapsed, embedded: props.embedded }" :style="posStyle">
+  <section
+    class="status-dashboard"
+    :class="{ embedded, 'reduce-motion': appearance.reduceMotion }"
+    :style="position"
+    aria-label="Gerät und Verbindungen"
+  >
     <button
-      v-if="!props.embedded"
-      class="jarvis-toggle"
-      :title="collapsed ? 'HUD zeigen' : 'HUD einklappen'"
+      v-if="!embedded"
+      type="button"
+      class="status-toggle"
+      :aria-expanded="!collapsed"
       @click="collapsed = !collapsed"
     >
-      <span class="dot" :style="{ background: palette.main, boxShadow: `0 0 12px ${palette.glow}` }" />
+      <AiIcon name="spark" /> Systemstatus <AiIcon :name="collapsed ? 'plus' : 'close'" />
     </button>
-
-    <transition name="hud-fade">
-      <div v-if="!collapsed" class="jarvis-body">
-        <div class="scanline" />
-
-        <div v-if="hud.killSwitch" class="kill-banner">NOT-AUS AKTIV — Tools gesperrt</div>
-
-        <!-- Arc reactor -->
-        <div class="reactor" :style="{ filter: `drop-shadow(0 0 20px ${palette.glow})` }">
-          <svg viewBox="0 0 200 200" width="190" height="190">
-            <defs>
-              <radialGradient id="coreGrad" cx="50%" cy="50%" r="50%">
-                <stop offset="0%" :stop-color="palette.accent" stop-opacity="1" />
-                <stop offset="45%" :stop-color="palette.main" stop-opacity="0.55" />
-                <stop offset="100%" :stop-color="palette.main" stop-opacity="0" />
-              </radialGradient>
-              <radialGradient id="sweepGrad" cx="50%" cy="50%" r="50%">
-                <stop offset="0%" :stop-color="palette.main" stop-opacity="0.5" />
-                <stop offset="100%" :stop-color="palette.main" stop-opacity="0" />
-              </radialGradient>
-              <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%">
-                <feGaussianBlur stdDeviation="2.2" result="b" />
-                <feMerge>
-                  <feMergeNode in="b" />
-                  <feMergeNode in="SourceGraphic" />
-                </feMerge>
-              </filter>
-            </defs>
-
-            <!-- faint base rings -->
-            <circle cx="100" cy="100" r="92" fill="none" stroke="rgba(255,255,255,.06)" stroke-width="1" />
-            <circle cx="100" cy="100" r="55" fill="none" stroke="rgba(255,255,255,.05)" stroke-width="1" />
-
-            <!-- radar sweep -->
-            <g :transform="`rotate(${rotSweep} 100 100)`">
-              <path d="M100 100 L100 12 A88 88 0 0 1 156 34 Z" fill="url(#sweepGrad)" opacity="0.55" />
-            </g>
-
-            <!-- outer ticks -->
-            <g :transform="`rotate(${rotOuter} 100 100)`" :stroke="palette.main" stroke-width="1.5" class="tint">
-              <line
-                v-for="(tk, i) in ticks"
-                :key="'t' + i"
-                :x1="tk.x1"
-                :y1="tk.y1"
-                :x2="tk.x2"
-                :y2="tk.y2"
-                :opacity="tk.o"
-              />
-            </g>
-
-            <!-- mid dashed counter-rotating ring -->
-            <circle
-              :transform="`rotate(${rotMid} 100 100)`"
-              cx="100"
-              cy="100"
-              r="60"
-              fill="none"
-              :stroke="palette.main"
-              stroke-width="2.5"
-              stroke-dasharray="5 13"
-              opacity="0.75"
-              class="tint"
-            />
-
-            <!-- segmented energy ring -->
-            <g stroke-linecap="round" filter="url(#softGlow)">
-              <line
-                v-for="(s, i) in segments"
-                :key="'s' + i"
-                :x1="s.x1"
-                :y1="s.y1"
-                :x2="s.x2"
-                :y2="s.y2"
-                :stroke="s.on ? palette.accent : 'rgba(255,255,255,.10)'"
-                :stroke-width="s.on ? 3 : 2"
-                :opacity="s.on ? 0.95 : 1"
-                class="tint seg"
-              />
-            </g>
-
-            <!-- activity arcs (net / file / os) -->
-            <g filter="url(#softGlow)">
-              <circle
-                :transform="`rotate(${rotArcs} 100 100)`"
-                cx="100"
-                cy="100"
-                r="50"
-                fill="none"
-                stroke="#22d3ee"
-                :stroke-width="arc(sNet).width"
-                :opacity="arc(sNet).opacity"
-                stroke-dasharray="46 210"
-                stroke-linecap="round"
-              />
-              <circle
-                :transform="`rotate(${rotArcs + 120} 100 100)`"
-                cx="100"
-                cy="100"
-                r="50"
-                fill="none"
-                stroke="#a78bfa"
-                :stroke-width="arc(sFile).width"
-                :opacity="arc(sFile).opacity"
-                stroke-dasharray="46 210"
-                stroke-linecap="round"
-              />
-              <circle
-                :transform="`rotate(${rotArcs + 240} 100 100)`"
-                cx="100"
-                cy="100"
-                r="50"
-                fill="none"
-                stroke="#f59e0b"
-                :stroke-width="arc(sOs).width"
-                :opacity="arc(sOs).opacity"
-                stroke-dasharray="46 210"
-                stroke-linecap="round"
-              />
-            </g>
-
-            <!-- circular audio spectrum -->
-            <g :stroke="palette.main" stroke-width="1.6" stroke-linecap="round" filter="url(#softGlow)" class="tint">
-              <line
-                v-for="(l, i) in spectrumLines"
-                :key="'sp' + i"
-                :x1="l.x1"
-                :y1="l.y1"
-                :x2="l.x2"
-                :y2="l.y2"
-                :opacity="l.o"
-              />
-            </g>
-
-            <!-- expanding ping -->
-            <circle
-              cx="100"
-              cy="100"
-              :r="pingR"
-              fill="none"
-              :stroke="palette.accent"
-              stroke-width="1.5"
-              :opacity="pingOpacity"
-              class="tint"
-            />
-
-            <!-- pulsing core -->
-            <g :transform="`translate(100 100) scale(${coreScale})`">
-              <circle r="36" fill="url(#coreGrad)" />
-              <circle r="21" fill="none" :stroke="palette.main" stroke-width="2" opacity="0.9" class="tint" />
-              <circle r="14" fill="none" :stroke="palette.accent" stroke-width="1" opacity="0.7" class="tint" />
-              <circle r="8" :fill="palette.accent" opacity="0.95" class="tint" filter="url(#softGlow)" />
+    <div v-if="!collapsed" class="status-dashboard__body">
+      <div class="status-overview" :data-tone="phase.tone">
+        <div class="status-overview__text">
+          <span class="status-caption">Luczor</span>
+          <h3 role="status"><i class="phase-dot" />{{ phase.label }}</h3>
+          <p>{{ phase.detail }}</p>
+          <div
+            v-if="hud.status === 'listening' && !hud.killSwitch"
+            class="microphone-level"
+            aria-label="Mikrofonpegel"
+            role="meter"
+            :aria-valuenow="Math.round(hud.micLevel * 100)"
+            aria-valuemin="0"
+            aria-valuemax="100"
+          >
+            <AiIcon name="mic" :size="13" /><span><i :style="{ width: `${hud.micLevel * 100}%` }" /></span>
+          </div>
+        </div>
+        <svg
+          class="status-map"
+          :class="{ 'is-working': active && phase.moving }"
+          viewBox="0 0 180 130"
+          fill="none"
+          aria-hidden="true"
+        >
+          <path class="map-guide" d="M14 65h32m88 0h32M90 12v23m0 60v23" />
+          <path class="map-layer map-layer--back" d="m90 42 45 25-45 25-45-25Z" />
+          <path class="map-layer map-layer--middle" d="m90 29 45 25-45 25-45-25Z" />
+          <path class="map-layer map-layer--front" d="m90 16 45 25-45 25-45-25Z" />
+          <path class="map-spark" d="m90 28 4 9 11 4-11 4-4 9-4-9-11-4 11-4Z" />
+          <circle class="map-node" :data-state="hud.sync.server" cx="14" cy="65" r="3" />
+          <circle class="map-node" :data-state="hud.sync.cognee" cx="166" cy="65" r="3" />
+          <circle class="map-node" :data-state="hud.killSwitch ? 'offline' : 'unknown'" cx="90" cy="118" r="3" />
+        </svg>
+      </div>
+      <div class="resource-heading">
+        <h4>Geräteressourcen</h4>
+        <span :data-stale="metrics.availability === 'stale'">{{ freshness }}</span>
+      </div>
+      <div class="resource-grid" :class="{ 'is-stale': metrics.availability === 'stale' }">
+        <article v-for="meter in hardware" :key="meter.key" class="resource">
+          <h5>{{ meter.label }}</h5>
+          <dl class="resource-values">
+            <div v-for="series in meter.series" :key="series.key" :data-scope="series.key" :title="series.detail">
+              <dt><i />{{ series.label }}</dt>
+              <dd
+                :aria-label="
+                  series.value === null
+                    ? series.key === 'model' && metrics.sample?.model_running === false
+                      ? 'Nicht aktiv'
+                      : 'Nicht verfügbar'
+                    : undefined
+                "
+              >
+                {{ series.value === null ? '—' : formatPercent(series.value)
+                }}<small v-if="series.value !== null">%</small>
+              </dd>
+            </div>
+          </dl>
+          <svg class="resource__chart" viewBox="0 0 180 74" preserveAspectRatio="none" aria-hidden="true">
+            <path class="chart-baseline" d="M4 8H176M4 68H176" />
+            <g v-for="series in meter.series" :key="series.key" :data-scope="series.key">
+              <path class="chart-line" :d="series.chart.path" />
+              <circle v-if="series.chart.last" :cx="series.chart.last.x" :cy="series.chart.last.y" r="2.3" />
             </g>
           </svg>
-          <div class="status-label" :style="{ color: palette.main, textShadow: `0 0 12px ${palette.glow}` }">
-            {{ palette.label }}
-          </div>
-        </div>
-
-        <!-- mirrored waveform -->
-        <div class="wave">
-          <span
-            v-for="(h, i) in bars"
-            :key="i"
-            class="bar"
-            :style="{
-              height: 6 + h * 54 + 'px',
-              background: `linear-gradient(${palette.accent}, ${palette.main})`,
-              boxShadow: `0 0 7px ${palette.glow}`,
-            }"
-          />
-        </div>
-
-        <!-- channel meters -->
-        <div class="meters">
-          <div class="meter">
-            <span class="tag">NET</span>
-            <span class="track"
-              ><i :style="{ width: sNet * 100 + '%', background: 'linear-gradient(90deg,#0891b2,#22d3ee)' }"
-            /></span>
-          </div>
-          <div class="meter">
-            <span class="tag">FILE</span>
-            <span class="track"
-              ><i :style="{ width: sFile * 100 + '%', background: 'linear-gradient(90deg,#7c3aed,#a78bfa)' }"
-            /></span>
-          </div>
-          <div class="meter">
-            <span class="tag">OS</span>
-            <span class="track"
-              ><i :style="{ width: sOs * 100 + '%', background: 'linear-gradient(90deg,#d97706,#f59e0b)' }"
-            /></span>
-          </div>
-          <div class="meter">
-            <span class="tag">MIC</span>
-            <span class="track"
-              ><i :style="{ width: sMic * 100 + '%', background: 'linear-gradient(90deg,#059669,#34d399)' }"
-            /></span>
-          </div>
-        </div>
-
-        <div class="hardware" :class="{ 'is-stale': sysMetricsError }">
-          <div v-for="m in hardwareMeters" :key="m.tag" class="hw">
-            <div class="hw__head">
-              <span class="tag">{{ m.tag }}</span>
-              <span class="hw__value">{{ fmtPct(m.value) }}</span>
-              <span class="hw__temp">{{ m.detail }}</span>
-            </div>
-            <span class="track">
-              <i
-                :style="{
-                  width: (m.value ?? 0) + '%',
-                  background: `linear-gradient(90deg, ${m.color}88, ${m.color})`,
-                  boxShadow: `0 0 9px ${m.color}77`,
-                }"
-              />
-            </span>
-          </div>
-        </div>
-
-        <!-- sync / memory status -->
-        <div class="syncrow">
-          <button
-            type="button"
-            class="syncrow__item syncrow__btn"
-            :class="{ 'is-busy': syncing }"
-            :disabled="syncing || hud.sync.server !== 'online'"
-            :title="hud.sync.server === 'online' ? 'Jetzt synchronisieren' : 'Server nicht verbunden'"
-            @click="doSync"
-          >
-            <span class="syncrow__ico">⇅</span>{{ hud.sync.pending }}
-          </button>
-          <span class="syncrow__item" :title="`Server: ${hud.sync.server}`">
-            <span class="syncrow__dot" :style="{ background: connColor(hud.sync.server) }" />SRV
-          </span>
-          <span class="syncrow__item" :title="`Cognee: ${hud.sync.cognee}`">
-            <span class="syncrow__dot" :style="{ background: connColor(hud.sync.cognee) }" />MEM
-          </span>
-        </div>
-
-        <div class="footer">
-          <div class="ticker" :title="hud.lastTool"><span class="muted">tool</span> {{ hud.lastTool || '—' }}</div>
-          <button class="kill" :class="{ on: hud.killSwitch }" @click="toggleKill">
-            {{ hud.killSwitch ? 'Not-Aus AN' : 'Not-Aus' }}
-          </button>
-        </div>
-
-        <transition name="shot-fade">
-          <div v-if="lastScreenshot" class="shot"><img :src="lastScreenshot" alt="screen" /></div>
-        </transition>
+          <span class="resource__detail">{{ meter.detail }}</span>
+        </article>
       </div>
-    </transition>
-  </div>
+      <p class="resource-note">
+        {{
+          metrics.history.length > 1
+            ? 'Letzte Messungen · ca. 3,5 s Abstand · Skala 0–100 %'
+            : 'Der Verlauf entsteht aus den Messungen während dieser Ansicht.'
+        }}
+      </p>
+      <div class="resource-context">
+        <span>{{ modelStatus }}</span
+        ><span v-if="gpuProcessUnavailable">GPU-Prozessmessung teilweise nicht verfügbar.</span>
+      </div>
+      <details class="resource-explanation">
+        <summary>Zuordnung der Werte</summary>
+        <p>
+          Rechner umfasst alle Anwendungen. App zeigt Luczor und seine Unterprozesse ohne den verwalteten Modellprozess.
+          Modell zeigt den zugehörigen lokalen Prozess und seine Unterprozesse. RAM-Werte enthalten gemeinsam genutzte
+          Speicherseiten und sind nicht addierbar.
+        </p>
+        <p>
+          GPU zeigt pro Bereich die höchste Windows-GPU-Engine-Auslastung. Fehlt diese Messung, kann für den
+          Rechner die höchste Geräteauslastung einer NVIDIA-Karte angezeigt werden. Die Kurven werden nicht
+          addiert. Ein Strich bedeutet nicht verfügbar oder nicht aktiv.
+        </p>
+      </details>
+      <div class="connection-grid">
+        <div v-for="connection in connections" :key="connection.label" class="connection">
+          <span>{{ connection.label }}</span
+          ><strong
+            ><i class="connection-dot" :data-state="connection.state" />{{ connectionLabels[connection.state] }}</strong
+          >
+        </div>
+      </div>
+      <div class="sync-line">
+        <span>{{ hud.sync.pending }} zur Synchronisierung ausstehend</span
+        ><button type="button" class="quiet-button" :disabled="syncing || hud.sync.server !== 'online'" @click="doSync">
+          {{ syncing ? 'Synchronisiert …' : 'Synchronisieren' }}
+        </button>
+      </div>
+      <p v-if="syncMessage" class="sync-result" role="status">{{ syncMessage }}</p>
+      <div class="status-controls">
+        <div class="last-tool">
+          <span class="status-caption">Letztes Tool</span
+          ><span :title="hud.lastTool || undefined">{{ hud.lastTool || 'Noch kein Tool ausgeführt' }}</span>
+        </div>
+        <SystemStopButton v-if="!embedded" />
+      </div>
+      <details v-if="lastScreenshot" class="last-capture">
+        <summary>Letzte Bildschirmaufnahme</summary>
+        <img :src="lastScreenshot" alt="Zuletzt vom Bildschirm-Tool aufgenommener Bildschirm" />
+      </details>
+    </div>
+  </section>
 </template>
 
 <style scoped>
-.jarvis {
+.status-dashboard {
+  --status-color: var(--ai-muted);
   position: fixed;
-  right: 16px;
-  bottom: 16px;
   z-index: 50;
-  width: 244px;
-  font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
-  color: #cbe8f5;
-  user-select: none;
+  width: min(680px, calc(100vw - 32px));
+  color: var(--ai-ink);
+  font: 12px/1.5 var(--ai-font);
 }
-.jarvis.collapsed {
-  width: auto;
-}
-.jarvis.embedded {
+.status-dashboard.embedded {
   position: relative;
-  inset: auto;
+  width: 100%;
   z-index: auto;
-  width: 100%;
-  margin: var(--s3) 0;
 }
-.jarvis.embedded.collapsed {
-  width: 100%;
+.status-dashboard__body {
+  padding: 20px;
+  border: 1px solid var(--ai-line);
+  border-radius: 14px;
+  background: var(--ai-surface);
 }
-.jarvis.embedded .jarvis-toggle {
-  top: 8px;
-  right: 8px;
-}
-.jarvis.embedded .jarvis-body {
-  border-radius: var(--r-lg);
-  padding: 12px 11px 10px;
-}
-.jarvis.embedded .reactor svg {
-  width: 156px;
-  height: 156px;
-}
-.jarvis.embedded .wave {
-  height: 44px;
-  margin: 5px 2px 9px;
-}
-
-/* Smooth colour morphing on every tinted SVG element + labels */
-.tint {
-  transition:
-    stroke 0.55s ease,
-    fill 0.55s ease;
-}
-.status-label,
-.dot {
-  transition:
-    color 0.55s ease,
-    background 0.55s ease,
-    box-shadow 0.55s ease,
-    text-shadow 0.55s ease;
-}
-
-.jarvis-toggle {
-  position: absolute;
-  top: -14px;
-  right: 0;
-  z-index: 2;
-  border: none;
+.embedded .status-dashboard__body {
+  padding: 0;
+  border: 0;
   background: transparent;
+}
+.status-dashboard :is(button, summary):focus-visible {
+  outline: 2px solid var(--ai-accent);
+  outline-offset: 3px;
+}
+.status-dashboard button {
+  font: inherit;
   cursor: pointer;
-  padding: 4px;
 }
-.jarvis-toggle .dot {
-  display: block;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  animation: breathe 2.6s ease-in-out infinite;
+.status-dashboard button:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
-
-.jarvis-body {
-  position: relative;
-  overflow: hidden;
-  background:
-    radial-gradient(120% 90% at 50% 0%, rgba(34, 211, 238, 0.08), transparent 60%),
-    linear-gradient(160deg, rgba(6, 18, 28, 0.9), rgba(2, 8, 14, 0.94));
-  border: 1px solid rgba(56, 189, 248, 0.28);
-  border-radius: 20px;
-  padding: 14px 13px 11px;
-  backdrop-filter: blur(14px);
-  box-shadow:
-    0 16px 48px rgba(0, 0, 0, 0.55),
-    inset 0 0 34px rgba(34, 211, 238, 0.06);
-}
-
-/* faint travelling scanline */
-.scanline {
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  height: 40%;
-  background: linear-gradient(180deg, rgba(56, 189, 248, 0.1), transparent);
-  pointer-events: none;
-  animation: scan 5.5s linear infinite;
-}
-
-.kill-banner {
-  position: relative;
-  text-align: center;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  color: #fecaca;
-  background: rgba(244, 63, 94, 0.16);
-  border: 1px solid rgba(244, 63, 94, 0.5);
-  border-radius: 9px;
-  padding: 3px 6px;
-  margin-bottom: 8px;
-  animation: blink 1.1s steps(2) infinite;
-}
-
-.reactor {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  margin-bottom: 4px;
-}
-.seg {
-  transition:
-    stroke 0.25s ease,
-    stroke-width 0.25s ease;
-}
-.status-label {
-  margin-top: -8px;
-  font-size: 12px;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  font-weight: 600;
-}
-
-.wave {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 2px;
-  height: 60px;
-  margin: 8px 2px 12px;
-}
-.wave .bar {
-  width: 3px;
-  border-radius: 3px;
-  transition: height 0.05s linear;
-  align-self: center;
-}
-
-.meters {
-  display: grid;
-  gap: 6px;
-  margin-bottom: 9px;
-}
-.meter {
+.status-toggle {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 10px;
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  color: var(--ai-ink);
+  background: var(--ai-surface);
+  border: 1px solid var(--ai-line);
+  border-radius: 8px;
 }
-.meter .tag {
-  width: 32px;
-  color: #86bfd6;
-  letter-spacing: 0.12em;
-}
-.meter .track {
-  flex: 1;
-  height: 6px;
-  border-radius: 5px;
-  background: rgba(255, 255, 255, 0.07);
-  overflow: hidden;
-  box-shadow: inset 0 0 4px rgba(0, 0, 0, 0.4);
-}
-.meter .track i {
-  display: block;
-  height: 100%;
-  border-radius: 5px;
-  transition: width 0.18s ease-out;
-  box-shadow: 0 0 8px rgba(255, 255, 255, 0.15);
-}
-
-.hardware {
-  display: grid;
-  gap: 7px;
-  margin: 0 0 10px;
-  padding: 8px;
-  border: 1px solid rgba(56, 189, 248, 0.12);
-  border-radius: 10px;
-  background: rgba(2, 8, 14, 0.38);
-}
-.hardware.is-stale {
-  opacity: 0.72;
-}
-.hw {
-  display: grid;
-  gap: 4px;
-}
-.hw__head {
-  display: grid;
-  grid-template-columns: 34px 1fr auto;
-  align-items: center;
-  gap: 6px;
-  font-size: 10px;
-}
-.hw__value {
-  color: #d8f7ff;
-  text-align: right;
-}
-.hw__temp {
-  color: #86bfd6;
-  min-width: 34px;
-  text-align: right;
-}
-.hw .track {
-  height: 6px;
-  border-radius: 5px;
-  background: rgba(255, 255, 255, 0.07);
-  overflow: hidden;
-  box-shadow: inset 0 0 4px rgba(0, 0, 0, 0.45);
-}
-.hw .track i {
-  display: block;
-  height: 100%;
-  border-radius: 5px;
-  transition:
-    width 0.25s ease-out,
-    background 0.25s ease-out;
-}
-
-.syncrow {
+.status-overview {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin: 2px 0 8px;
-  font-size: 10px;
-  color: #7fb7cd;
-  letter-spacing: 0.06em;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 140px;
+  padding-bottom: 16px;
 }
-.syncrow__item {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
+[data-tone='accent'] {
+  --status-color: var(--ai-accent);
 }
-.syncrow__btn {
-  border: 1px solid transparent;
-  background: transparent;
-  color: inherit;
-  border-radius: var(--r-sm);
-  padding: 2px 6px;
-  cursor: pointer;
-  font: inherit;
-  transition: all 0.2s ease;
+[data-tone='success'] {
+  --status-color: var(--ai-green);
 }
-.syncrow__btn:hover:not(:disabled) {
-  border-color: var(--border-soft);
-  background: var(--cy-08);
-  color: var(--cy-soft);
+[data-tone='danger'] {
+  --status-color: var(--ai-red);
 }
-.syncrow__btn:disabled {
-  cursor: default;
-  opacity: 0.8;
+[data-tone='warning'] {
+  --status-color: var(--ai-orange);
 }
-.syncrow__btn.is-busy {
-  animation: pulse-soft 1s infinite;
+.status-overview__text {
+  min-width: 0;
 }
-.syncrow__ico {
-  color: #67e8f9;
+.status-caption {
+  color: var(--ai-muted);
   font-size: 11px;
 }
-.syncrow__dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  box-shadow: 0 0 6px currentColor;
-}
-
-.footer {
+.status-overview h3 {
   display: flex;
   align-items: center;
+  gap: 10px;
+  margin: 7px 0;
+  font-size: 26px;
+  font-weight: 500;
+  letter-spacing: -0.04em;
+  line-height: 1.2;
+}
+.status-overview p {
+  margin: 0;
+  color: var(--ai-muted);
+}
+.phase-dot,
+.connection-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--status-color);
+}
+.microphone-level {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  color: var(--ai-muted);
+}
+.microphone-level > span {
+  width: 80px;
+  height: 3px;
+  background: var(--ai-line);
+}
+.microphone-level i {
+  display: block;
+  height: 100%;
+  background: var(--ai-accent);
+}
+.status-map {
+  width: 166px;
+  height: 120px;
+  flex-shrink: 0;
+  overflow: visible;
+}
+.map-guide {
+  stroke: var(--ai-line-strong);
+  stroke-dasharray: 2 4;
+}
+.map-layer {
+  stroke: var(--ai-line-strong);
+  fill: var(--ai-canvas);
+}
+.map-layer--back {
+  opacity: 0.45;
+}
+.map-layer--middle {
+  opacity: 0.75;
+}
+.map-layer--front {
+  stroke: var(--status-color);
+}
+.map-spark {
+  stroke: var(--status-color);
+  stroke-linejoin: round;
+}
+.map-node {
+  fill: var(--ai-faint);
+}
+.map-node[data-state='online'] {
+  fill: var(--ai-green);
+}
+.map-node[data-state='offline'] {
+  fill: var(--ai-red);
+}
+.map-node[data-state='configured'] {
+  fill: var(--ai-accent);
+}
+.is-working .map-layer--front,
+.is-working .map-spark {
+  animation: status-lift 3s ease-in-out infinite;
+}
+.resource-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 16px 0 14px;
+  border-top: 1px solid var(--ai-line);
+}
+.resource-heading h4 {
+  font-size: 12px;
+  font-weight: 500;
+  margin: 0;
+}
+.resource-heading > span,
+.resource-note {
+  color: var(--ai-muted);
+  font-size: 10px;
+}
+.resource-heading [data-stale='true'] {
+  color: var(--ai-orange);
+}
+.resource-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.resource {
+  min-width: 0;
+  padding: 0 16px;
+  border-left: 1px solid var(--ai-line);
+}
+.resource:first-child {
+  padding-left: 0;
+  border: 0;
+}
+.resource:last-child {
+  padding-right: 0;
+}
+.resource h5 {
+  margin: 0 0 13px;
+  font-size: 12px;
+  font-weight: 600;
+}
+[data-scope='system'] {
+  --scope-color: var(--ai-green);
+}
+[data-scope='app'] {
+  --scope-color: #b3a0f7;
+}
+[data-scope='model'] {
+  --scope-color: var(--ai-orange);
+}
+.resource-values {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+.resource-values > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
   gap: 8px;
 }
-.ticker {
-  flex: 1;
-  font-size: 10px;
+.resource-values dt {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ai-muted);
+  font-size: 11px;
+}
+.resource-values dt i {
+  width: 5px;
+  height: 5px;
+  background: var(--scope-color);
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.resource-values dd {
+  margin: 0;
+  color: var(--scope-color);
+  font-size: 19px;
+  font-weight: 500;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: #9fd3e6;
 }
-.ticker .muted {
-  color: #4f7d91;
-}
-.kill {
+.resource-values small {
   font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  padding: 5px 9px;
-  border-radius: 9px;
-  cursor: pointer;
-  color: #a7f3d0;
-  background: rgba(16, 185, 129, 0.12);
-  border: 1px solid rgba(16, 185, 129, 0.4);
-  transition: all 0.25s ease;
+  margin-left: 3px;
+  color: var(--ai-muted);
 }
-.kill:hover {
-  background: rgba(16, 185, 129, 0.2);
+.resource__detail {
+  margin-top: 10px;
+  overflow-wrap: anywhere;
+  display: block;
+  min-height: 30px;
+  color: var(--ai-muted);
+  font-size: 10px;
+  line-height: 1.4;
 }
-.kill.on {
-  color: #fff;
-  background: #e11d48;
-  border-color: #e11d48;
-  box-shadow: 0 0 16px rgba(225, 29, 72, 0.65);
-}
-
-.shot {
-  margin-top: 9px;
-  border-radius: 10px;
-  overflow: hidden;
-  border: 1px solid rgba(56, 189, 248, 0.28);
-}
-.shot img {
+.resource__chart {
   display: block;
   width: 100%;
+  height: 74px;
+  margin-top: 4px;
+  overflow: visible;
 }
-
-.hud-fade-enter-active,
-.hud-fade-leave-active {
-  transition:
-    opacity 0.3s ease,
-    transform 0.3s ease;
+.resource__chart g {
+  fill: var(--scope-color);
 }
-.hud-fade-enter-from,
-.hud-fade-leave-to {
-  opacity: 0;
-  transform: translateY(8px) scale(0.97);
+.chart-baseline {
+  stroke: var(--ai-line);
+  fill: none;
+  stroke-dasharray: 2 4;
 }
-.shot-fade-enter-active {
-  transition:
-    opacity 0.4s ease,
-    max-height 0.4s ease;
+.chart-line {
+  fill: none;
+  stroke: var(--scope-color);
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+  stroke-linejoin: round;
 }
-.shot-fade-enter-from {
-  opacity: 0;
+.is-stale .resource__chart {
+  opacity: 0.55;
 }
-
-@keyframes breathe {
-  0%,
-  100% {
-    transform: scale(1);
-    opacity: 0.85;
-  }
+.resource__chart [data-scope='app'] .chart-line {
+  stroke-dasharray: 3 2;
+}
+.resource__chart [data-scope='model'] .chart-line {
+  stroke-dasharray: 7 2;
+}
+.resource-note {
+  margin: 12px 0 8px;
+}
+.resource-context {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--ai-muted);
+  font-size: 10px;
+}
+.resource-explanation {
+  color: var(--ai-muted);
+  font-size: 10px;
+  margin: 8px 0 18px;
+}
+.resource-explanation summary {
+  cursor: pointer;
+}
+.resource-explanation p {
+  line-height: 1.6;
+  margin: 8px 0;
+}
+.connection-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  padding-top: 17px;
+  border-top: 1px solid var(--ai-line);
+}
+.connection {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.connection > span {
+  color: var(--ai-muted);
+}
+.connection strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 400;
+  font-size: 11px;
+}
+.connection-dot {
+  background: var(--ai-faint);
+}
+.connection-dot[data-state='online'] {
+  background: var(--ai-green);
+}
+.connection-dot[data-state='offline'] {
+  background: var(--ai-red);
+}
+.connection-dot[data-state='configured'] {
+  background: var(--ai-accent);
+}
+.sync-line {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 0;
+  color: var(--ai-muted);
+  font-size: 11px;
+}
+.quiet-button {
+  border: 1px solid var(--ai-line);
+  background: transparent;
+  color: var(--ai-ink);
+  padding: 6px 10px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.quiet-button:hover:not(:disabled) {
+  background: var(--ai-hover);
+}
+.sync-result {
+  margin: 0 0 12px;
+  font-size: 11px;
+}
+.status-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-top: 1px solid var(--ai-line);
+  padding: 16px 0 8px;
+}
+.last-tool {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  font-size: 11px;
+}
+.last-tool > span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.last-capture {
+  border-top: 1px solid var(--ai-line);
+  margin-top: 12px;
+  padding-top: 12px;
+  color: var(--ai-muted);
+}
+.last-capture summary {
+  cursor: pointer;
+}
+.last-capture img {
+  display: block;
+  width: 100%;
+  border-radius: 6px;
+  margin-top: 10px;
+}
+@keyframes status-lift {
   50% {
-    transform: scale(1.25);
-    opacity: 1;
+    transform: translateY(-4px);
   }
 }
-@keyframes blink {
-  50% {
-    opacity: 0.35;
-  }
+.reduce-motion *,
+:global([data-reduce-motion='1']) .status-map * {
+  animation: none !important;
 }
-@keyframes scan {
-  0% {
-    transform: translateY(-100%);
-  }
-  100% {
-    transform: translateY(320%);
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  .scanline,
-  .jarvis-toggle .dot,
-  .kill-banner {
-    animation: none;
+  .status-map * {
+    animation: none !important;
+  }
+}
+@media (max-width: 480px) {
+  .status-overview {
+    min-height: 115px;
+    gap: 4px;
+  }
+  .status-overview h3 {
+    font-size: 22px;
+  }
+  .status-overview p {
+    font-size: 11px;
+  }
+  .status-map {
+    width: 98px;
+    height: 96px;
+  }
+  .resource {
+    padding: 0 10px;
+  }
+  .resource-values > div {
+    display: grid;
+    gap: 3px;
+  }
+  .resource-values dd {
+    font-size: 18px;
+  }
+  .resource__detail {
+    min-height: 42px;
+  }
+  .resource-heading {
+    gap: 5px;
+  }
+  .connection-grid {
+    gap: 12px;
+  }
+  .sync-line {
+    align-items: flex-start;
   }
 }
 </style>

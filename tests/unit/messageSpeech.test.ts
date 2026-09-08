@@ -31,6 +31,11 @@ describe('server speech privacy', () => {
   it('allows completed ordinary answers including locally generated non-private text', () => {
     expect(
       serverSpeechText({ content: ' Guten Tag. ', meta: { inferenceTarget: 'local_llama_cpp', question: 'Weiter?' } })
-    ).toBe('Guten Tag. Weiter?')
+    ).toBe(' Guten Tag. \n\nWeiter?')
+  })
+
+  it('keeps a closing code fence separate from the spoken follow-up question', () => {
+    const content = '```ts\nconst ready = true\n```'
+    expect(serverSpeechText({ content, meta: { question: 'Weiter?' } })).toBe(`${content}\n\nWeiter?`)
   })
 })

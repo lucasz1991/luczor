@@ -332,3 +332,16 @@ Append-only communication log. Source and runtime evidence override stale entrie
 - UI scope complete: new LocalResourceSettings.vue; ExecutionSettingsSection, LocalResourceSummary, LocalModelStatus and status presenter; UI/status tests, three new real scheduler/controller integration cases, actual-component synthetic fixture.
 - 36 focused tests plus scoped ESLint/Prettier/diff passed. Full build typecheck pending output. Root accepted independent workflow findings and owns cleanup fixes/native implementation.
 - Own browser provider unavailable; Root now checking fixture with its CUA Tab9. Leave own Vite PID86184 on port1448 for Root cleanup. Report workspace .lmzdev/artifacts/reports/2026-09-08-device-resource-settings-ui.md. All source frozen and returned.
+
+## 2026-09-08T16:04:35Z | Codex/root -> all | status
+
+- Message: Started: progressive read-aloud, spoken symbols and stable rich text
+
+
+## 2026-09-08 | Codex/root | Progressive Sprachausgabe completed-local
+
+- Start nach zwei fertigen Absätzen und Wiedergabe während Textstream, fließende Audioclips mit einem vorgeholten Folgeclip, gesprochene deutsche Sonderzeichen, unveränderter Rich-Text und Wortmarkierung einschließlich Abschlussfrage umgesetzt.
+- 1461 Tests/124 Dateien, Typecheck, fokussierte Lint-/Format-/Diffprüfungen, Browser1280/320px und zwei echte HTTPS-WAV-Proben bestanden. Stimme alba: erster Abschnitt3,375s Vorbereitung/10,4s Audio, Folgeabschnitt6,281s/20,96s. Keine Last-/Hörgarantie.
+- Endgültiger Appbuild: app/src-tauri/target/release/tauri-app.exe, 15028736 Bytes, SHA256 A3B67B72355FE9CBB2404478D1831384BBC0E3328AB4D2F833BCAC78BDE64D0A. Native Rebuild4m14s, kein Bundle.
+- Backend unverändert, kein Serverdeploy erforderlich. Bestehende Debug-App erhalten; eigene Browser/Vite1452 bereinigt. Keine native Hörprobe oder neues Benutzerchat-Ende-zu-Ende behauptet. Keine eigene Commitoperation.
+- Bericht: artifacts/reports/2026-09-08-progressive-read-aloud.md; maschinenlesbarer Buildnachweis daneben. Alle Quellen zurückgegeben.

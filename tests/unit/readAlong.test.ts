@@ -36,7 +36,7 @@ describe('read-aloud presentation', () => {
     expect(readAlongState.value).toMatchObject({ owner: current, key: 'new', position: 0 })
   })
 
-  it('marks the speaking commentary only, escapes its text and restores normal content after stop', async () => {
+  it('shows status for the speaking commentary only and retains escaped rich content after stop', async () => {
     const entry = {
       id: 'round-2',
       round: 2,
@@ -47,7 +47,8 @@ describe('read-aloud presentation', () => {
     const owner = beginReadAlong('message:round-2', entry.content)
     updateReadAlong(owner, 'playing', 8)
     const html = await renderToString(createSSRApp(ChatCommentary, { entries: [entry], messageId: 'message' }))
-    expect(html).toMatch(/<mark[^>]*aria-current="true"[^>]*>&lt;script&gt;<\/mark>/u)
+    expect(html).toContain('<p class="rt-p">Dateien &lt;script&gt; prüfen.</p>')
+    expect(html).not.toContain('<mark')
     expect(html).not.toContain('<script>')
     expect(html).toContain('Wortposition ungefähr')
     const other = await renderToString(

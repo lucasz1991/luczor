@@ -6,6 +6,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { memoryImportance, memoryPriority, MEMORY_PRIORITIES, type MemoryPriority } from './memoryPriority'
 import { analyzeMemoryRecords, type MemoryAnalysis } from './memoryAnalysis'
+import { trackMemoryActivity } from './activity'
 import {
   DEFAULT_FETCH_TIMEOUT_MS,
   fetchBoundedResponseWithTimeout,
@@ -1288,6 +1289,10 @@ export class LuczorMemoryService {
   }
 
   async remember(input: RememberInput): Promise<MemoryRecord> {
+    return trackMemoryActivity('write', () => this.rememberOperation(input))
+  }
+
+  private async rememberOperation(input: RememberInput): Promise<MemoryRecord> {
     const content = input.content.trim()
     if (!content) throw new Error('Memory content must not be empty.')
     const scope = input.scope ?? 'project'
@@ -1407,6 +1412,14 @@ export class LuczorMemoryService {
     scope: 'user' | 'project',
     ids: { projectId?: string } = {}
   ): Promise<{ local: MemoryAnalysis; server: MemoryAnalysis | null; serverUnavailable?: boolean }> {
+    return trackMemoryActivity('read', markFailed => this.analyzeOperation(scope, ids, markFailed))
+  }
+
+  private async analyzeOperation(
+    scope: 'user' | 'project',
+    ids: { projectId?: string },
+    markFailed: () => void
+  ): Promise<{ local: MemoryAnalysis; server: MemoryAnalysis | null; serverUnavailable?: boolean }> {
     if (scope === 'project' && !ids.projectId?.trim()) throw new Error('A project is required for memory analysis.')
     const snapshot = await this.operationSnapshot()
     const context = this.context(scope, scope === 'project' ? ids : {}, snapshot.principalId)
@@ -1428,34 +1441,45 @@ export class LuczorMemoryService {
     const current = await getVerifiedAccountSnapshot()
     if ((current?.principalId ?? 'device-local') !== snapshot.principalId)
       throw new Error('The selected memory account changed during analysis.')
+    if (serverUnavailable) markFailed()
     return { local, server, ...(serverUnavailable ? { serverUnavailable: true } : {}) }
   }
 
   async recall(query: RecallQuery): Promise<MemoryRecord[]> {
+    return trackMemoryActivity('read', markFailed => this.recallOperation(query, markFailed))
+  }
+
+  private async recallOperation(query: RecallQuery, markFailed: () => void): Promise<MemoryRecord[]> {
     const scope = query.scope ?? 'project'
     const snapshot = await this.operationSnapshot()
     const principalId = snapshot.principalId
     const context = this.context(scope, query, principalId)
     const limit = Number.isFinite(query.limit) ? Math.max(1, Math.min(20, Math.floor(query.limit!))) : 6
     const localPromise = this.offline.recall(context, query.query, limit * 2).catch(error => {
+      markFailed()
       console.warn('[memory] encrypted local store unavailable:', error)
       return []
     })
     const serverPromise = this.server(snapshot)
       .then(server => (server ? server.recall(context, query.query, limit * 2) : []))
       .catch(error => {
+        markFailed()
         console.warn('[memory] server recall failed, keeping local evidence:', error)
         return []
       })
     const [local, server] = await Promise.all([localPromise, serverPromise])
     const reconciled = await this.offline.reconcileRecall(context, local, server).catch(error => {
+      markFailed()
       console.warn('[memory] local recall policy unavailable:', error)
       return { local: [], remote: [] }
     })
     // The verified request snapshot keeps reads partitioned, but its result
     // must not be delivered into an account selected while I/O was pending.
     const currentAccount = await getVerifiedAccountSnapshot()
-    if ((currentAccount?.principalId ?? 'device-local') !== principalId) return []
+    if ((currentAccount?.principalId ?? 'device-local') !== principalId) {
+      markFailed()
+      return []
+    }
     return fuseMemories(
       reconciled.local.filter(isProviderSafeMemoryRecord),
       reconciled.remote.filter(isProviderSafeMemoryRecord),
@@ -1466,16 +1490,27 @@ export class LuczorMemoryService {
 
   /** Device-only retrieval. No query, private record or result is sent to the context server. */
   async recallLocal(query: RecallQuery): Promise<MemoryRecord[]> {
+    return trackMemoryActivity('read', markFailed => this.recallLocalOperation(query, markFailed))
+  }
+
+  private async recallLocalOperation(query: RecallQuery, markFailed: () => void): Promise<MemoryRecord[]> {
     const snapshot = await this.operationSnapshot()
     const context = this.context(query.scope ?? 'project', query, snapshot.principalId)
     const limit = Number.isFinite(query.limit) ? Math.max(1, Math.min(20, Math.floor(query.limit!))) : 6
     const records = await this.offline.recall(context, query.query, limit, true)
     const current = await getVerifiedAccountSnapshot()
-    if ((current?.principalId ?? 'device-local') !== snapshot.principalId) return []
+    if ((current?.principalId ?? 'device-local') !== snapshot.principalId) {
+      markFailed()
+      return []
+    }
     return fuseMemories(records, [], query.query, limit)
   }
 
   async promote(recordId: string): Promise<MemoryRecord | null> {
+    return trackMemoryActivity('write', () => this.promoteOperation(recordId))
+  }
+
+  private async promoteOperation(recordId: string): Promise<MemoryRecord | null> {
     const snapshot = await this.operationSnapshot()
     const candidate = await this.offline.recordForOutbox(recordId, snapshot.principalId)
     if (candidate?.status === 'candidate' && candidate.featureKey && candidate.requiresServerVersionRefresh) {
@@ -1502,6 +1537,10 @@ export class LuczorMemoryService {
   }
 
   async listCandidates(projectId: string, limit = 8): Promise<MemoryRecord[]> {
+    return trackMemoryActivity('read', () => this.listCandidatesOperation(projectId, limit))
+  }
+
+  private async listCandidatesOperation(projectId: string, limit: number): Promise<MemoryRecord[]> {
     const snapshot = await this.operationSnapshot()
     const principalId = snapshot.principalId
     return this.offline.candidates(
@@ -1514,6 +1553,14 @@ export class LuczorMemoryService {
     scope: MemoryScope,
     id: string,
     ids: { userId?: string; projectId?: string; agentId?: string; sessionId?: string } = {}
+  ): Promise<void> {
+    return trackMemoryActivity('write', () => this.forgetOperation(scope, id, ids))
+  }
+
+  private async forgetOperation(
+    scope: MemoryScope,
+    id: string,
+    ids: { userId?: string; projectId?: string; agentId?: string; sessionId?: string }
   ): Promise<void> {
     const snapshot = await this.operationSnapshot()
     const principalId = snapshot.principalId

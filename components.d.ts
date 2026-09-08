@@ -57,6 +57,8 @@ declare module 'vue' {
     SpotlightSurface: typeof import('./src/components/vengeance/SpotlightSurface.vue')['default']
     StatusOrb: typeof import('./src/components/mini/StatusOrb.vue')['default']
     StreamingText: typeof import('./src/components/ai/StreamingText.vue')['default']
+    SystemStatusPanel: typeof import('./src/components/SystemStatusPanel.vue')['default']
+    SystemStopButton: typeof import('./src/components/SystemStopButton.vue')['default']
     TaskRows: typeof import('./src/components/ai/TaskRows.vue')['default']
     ThinkingState: typeof import('./src/components/ai/ThinkingState.vue')['default']
     TokenCounter: typeof import('./src/components/ai/TokenCounter.vue')['default']

@@ -33,6 +33,8 @@ const displaying = computed(() => props.streaming || revealing.value)
 const playback = computed(() =>
   props.speechKey && readAlongState.value?.key === props.speechKey ? readAlongState.value : null
 )
+// Match serverSpeechText's original-source offsets, including the final question.
+const speechSource = computed(() => [shown.value, props.question.trim()].filter(part => !!part.trim()).join('\n\n'))
 // Split fenced blocks without interpreting HTML. RichMessage owns escaped prose.
 const blocks = computed(() => {
   const result: { type: 'text' | 'code'; content: string; language?: string }[] = []
@@ -49,19 +51,20 @@ const blocks = computed(() => {
 </script>
 <template>
   <div class="ai-answer" :aria-busy="displaying || undefined">
-    <ReadAloudText v-if="playback" :playback="playback" />
-    <div v-else class="ai-answer__body">
-      <template v-for="(block, index) in blocks" :key="index"
-        ><CodeBlock
-          v-if="block.type === 'code'"
-          :code="block.content"
-          :language="block.language"
-          :diff="block.language === 'diff'" /><RichMessage v-else :content="block.content"
-      /></template>
-      <span v-if="displaying" class="ai-stream-caret" aria-hidden="true" />
-    </div>
+    <ReadAloudText :playback="playback" :content="speechSource">
+      <div class="ai-answer__body">
+        <template v-for="(block, index) in blocks" :key="index"
+          ><CodeBlock
+            v-if="block.type === 'code'"
+            :code="block.content"
+            :language="block.language"
+            :diff="block.language === 'diff'" /><RichMessage v-else :content="block.content"
+        /></template>
+        <span v-if="displaying" class="ai-stream-caret" aria-hidden="true" />
+      </div>
+      <p v-if="question" class="ai-answer__question">{{ question }}</p>
+    </ReadAloudText>
     <button v-if="revealing" type="button" class="ai-icon-button" @click="skip">Sofort anzeigen</button>
-    <p v-if="question && !playback" class="ai-answer__question">{{ question }}</p>
     <ul v-if="followUps.length && displaying" class="ai-answer__streamed-bullets">
       <li v-for="(item, index) in followUps" :key="index">{{ item }}</li>
     </ul>

@@ -1,6 +1,6 @@
 // src/services/openrouter.service.ts
 import { createCorrelationId, getApiConfig, readBoundedResponseText } from '@/services/api/luczorApi'
-import { apiTransportInput } from '@/services/api/transportTarget'
+import { apiTransportFetch } from '@/services/api/transportTarget'
 import { readReportedTokenUsage } from '@/services/tokenUsage'
 import type {
   ApprovedProxyConfig,
@@ -139,7 +139,7 @@ export class OpenRouterService {
     const serializedBody = await approvedProxyBody(args, endpoint.clientId, false)
     assertApprovalNotExpired(args)
 
-    const res = await fetch(apiTransportInput(endpoint.url), {
+    const res = await apiTransportFetch(endpoint.url, {
       method: 'POST',
       headers: endpoint.headers,
       body: serializedBody,
@@ -204,7 +204,7 @@ export class OpenRouterService {
     const serializedBody = await approvedProxyBody(args, endpoint.clientId, true)
     assertApprovalNotExpired(args)
 
-    const res = await fetch(apiTransportInput(endpoint.url), {
+    const res = await apiTransportFetch(endpoint.url, {
       method: 'POST',
       headers: endpoint.headers,
       body: serializedBody,

@@ -1,7 +1,15 @@
 import { getApiConfigSnapshot, LuczorApiError } from '@/services/api/luczorApi'
 import { setStatus } from '@/state/hud'
-import { MAX_TTS_TEXT_CHARS, serverTts, speechAbortError } from './serverTts'
-import { beginReadAlong, endReadAlong, sentenceSpeechPosition, updateReadAlong } from './readAlong'
+import { serverTts, speechAbortError } from './serverTts'
+import {
+  beginReadAlong,
+  endReadAlong,
+  sentenceSpeechPosition,
+  updateReadAlong,
+  updateReadAlongSource,
+} from './readAlong'
+import { createSpeechSource, speechChunkEnd, type SpeechSource } from './speechSource'
+import { prepareSpokenText } from './spokenText'
 
 type SpeechSession = { controller: AbortController; stopAudio?: () => void; readAlongOwner: number }
 let active: SpeechSession | null = null
@@ -11,21 +19,15 @@ function current(session: SpeechSession): boolean {
   return active === session && !session.controller.signal.aborted
 }
 
-/** Prepare the full utterance in one request; split only when the server limit requires it. */
+/** Group sentences/paragraphs into fluent clips with a bounded preparation time. */
 export function splitSentences(text: string): string[] {
-  const normalized = text.replace(/\s+/gu, ' ').trim()
   const result: string[] = []
-  let rest = normalized
-  while (rest.length > MAX_TTS_TEXT_CHARS) {
-    const space = rest.lastIndexOf(' ', MAX_TTS_TEXT_CHARS)
-    let end = space > 0 ? space : MAX_TTS_TEXT_CHARS
-    // Avoid cutting a Unicode surrogate pair in long text without spaces.
-    const previous = rest.charCodeAt(end - 1)
-    if (previous >= 0xd800 && previous <= 0xdbff) end--
-    result.push(rest.slice(0, end))
+  let rest = text.trim()
+  while (rest) {
+    const end = speechChunkEnd(rest)
+    result.push(rest.slice(0, end).trim())
     rest = rest.slice(end).trimStart()
   }
-  if (rest) result.push(rest)
   return result
 }
 
@@ -33,8 +35,7 @@ function play(
   clip: Blob,
   volume: number,
   session: SpeechSession,
-  start: number,
-  length: number,
+  sourcePositions: number[],
   playbackRate = 1
 ): Promise<void> {
   if (!current(session)) return Promise.resolve()
@@ -58,7 +59,7 @@ function play(
         updateReadAlong(
           session.readAlongOwner,
           'playing',
-          sentenceSpeechPosition(start, length, audio.currentTime, audio.duration)
+          sourcePositions[sentenceSpeechPosition(0, sourcePositions.length - 1, audio.currentTime, audio.duration)]
         )
     }
     const tick = () => {
@@ -129,21 +130,30 @@ function cancelSession(session: SpeechSession | null): void {
   if (session) endReadAlong(session.readAlongOwner)
 }
 
-export type SpeakOptions = { rate?: number; volume?: number; signal?: AbortSignal; key?: string; voiceId?: string }
+export type SpeakOptions = {
+  rate?: number
+  volume?: number
+  signal?: AbortSignal
+  key?: string
+  voiceId?: string
+  source?: SpeechSource
+  /** Revalidate settings, scope and local-content consent before each request/playback. */
+  beforeChunk?: () => boolean | Promise<boolean>
+}
 export type SpeakResult = 'completed' | 'cancelled'
 
-/** Server TTS with one full-text clip (or limit-sized chunks) and one cancellable playback owner. */
+/** One cancellable playback owner, continuous paragraph clips, at most one clip prefetched. */
 export async function streamSpeak(text: string, opts: SpeakOptions = {}): Promise<SpeakResult> {
   if (suspensionDepth > 0) {
     throw new LuczorApiError(0, 'Die Server-Einstellungen werden gespeichert. Bitte danach erneut sprechen lassen.')
   }
-  const sentences = splitSentences(text ?? '')
   if (opts.signal?.aborted) return 'cancelled'
-  if (!sentences.length) return 'completed'
+  if (!opts.source && !text?.trim()) return 'completed'
+  const source = opts.source ?? createSpeechSource(text, { complete: true, key: opts.key })
   cancelSession(active)
   const session: SpeechSession = {
     controller: new AbortController(),
-    readAlongOwner: beginReadAlong(opts.key ?? '', sentences.join(' ')),
+    readAlongOwner: beginReadAlong(source.snapshot().key, source.snapshot().text),
   }
   active = session
   setStatus('thinking')
@@ -161,36 +171,86 @@ export async function streamSpeak(text: string, opts: SpeakOptions = {}): Promis
     if (active === session) stopSpeak()
   }
   opts.signal?.addEventListener('abort', callerAbort, { once: true })
+  const refreshSource = () => {
+    if (source.cancelled) cancelSession(session)
+    else updateReadAlongSource(session.readAlongOwner, source.snapshot().text, source.snapshot().key)
+  }
+  const unsubscribe = source.subscribe(refreshSource)
   // Keep cancellation observed even if the final abort only cleans up a prefetch.
   void cancellation.catch(() => undefined)
   try {
     const config = Object.freeze({ ...(await Promise.race([getApiConfigSnapshot(), cancellation])) })
     if (!current(session)) return 'cancelled'
-    const synth = (sentence: string) =>
-      serverTts(sentence, config, {
+    type Prepared = ReturnType<typeof prepareSpokenText>
+    const pieces: Prepared[] = []
+    let mappedSource = ''
+    let mappedText: Prepared = { text: '', sourcePositions: [0] }
+    const permitted = async () => {
+      if (opts.beforeChunk && !(await Promise.race([opts.beforeChunk(), cancellation]))) {
+        cancelSession(session)
+        return false
+      }
+      return current(session)
+    }
+    const prepareNext = async () => {
+      while (!pieces.length && current(session)) {
+        const part = await source.next(session.controller.signal)
+        if (!part) return null
+        // Keep the surrounding Markdown context even when a long code block or
+        // formatted sentence crosses a clip boundary. Only this part is sent.
+        const sourceText = source.snapshot().text
+        if (mappedSource !== sourceText) {
+          mappedSource = sourceText
+          mappedText = prepareSpokenText(sourceText)
+        }
+        const start = mappedText.sourcePositions.findIndex(position => position >= part.start)
+        const end = mappedText.sourcePositions.findIndex(position => position >= part.start + part.text.length)
+        const prepared: Prepared = {
+          text: mappedText.text.slice(start, end),
+          sourcePositions: mappedText.sourcePositions.slice(start, end + 1),
+        }
+        // Symbol expansion also respects the small clip limit, with its own source mapping.
+        let offset = 0
+        while (offset < prepared.text.length) {
+          const length = speechChunkEnd(prepared.text.slice(offset))
+          const raw = prepared.text.slice(offset, offset + length)
+          const left = raw.length - raw.trimStart().length
+          const right = raw.trimEnd().length
+          if (right > left)
+            pieces.push({
+              text: raw.slice(left, right),
+              sourcePositions: prepared.sourcePositions.slice(offset + left, offset + right + 1),
+            })
+          offset += length
+        }
+      }
+      const part = pieces.shift()
+      if (!part || !(await permitted())) return null
+      const clip = await serverTts(part.text, config, {
         speed: v2 ? 1 : rate,
         signal: session.controller.signal,
         ...(voiceId ? { voiceId } : {}),
-      }).then(
-        clip => ({ clip, error: null }),
-        (error: unknown) => ({ clip: null, error })
+      })
+      return { clip, sourcePositions: part.sourcePositions }
+    }
+    // Both outcomes are observed immediately, including a failed or cancelled prefetch.
+    const next = () =>
+      prepareNext().then(
+        value => ({ value, error: null }),
+        (error: unknown) => ({ value: null, error })
       )
-    const iterator = sentences[Symbol.iterator]()
-    let nextSentence = iterator.next()
-    let pending = synth(nextSentence.value!)
-    let sentenceStart = 0
-    while (!nextSentence.done && current(session)) {
+    let pending = next()
+    while (current(session)) {
       setStatus('thinking')
-      updateReadAlong(session.readAlongOwner, 'preparing', sentenceStart)
+      updateReadAlong(session.readAlongOwner, 'preparing')
       const result = await Promise.race([pending, cancellation])
       if (!current(session)) return 'cancelled'
-      if (!result.clip) throw result.error
-      const sentenceLength = nextSentence.value.length
-      nextSentence = iterator.next()
-      // Attach both handlers immediately: a failed prefetch can never escape as an unhandled rejection.
-      if (!nextSentence.done) pending = synth(nextSentence.value)
-      await play(result.clip, volume, session, sentenceStart, sentenceLength, v2 ? rate : 1)
-      sentenceStart += sentenceLength + 1
+      if (result.error) throw result.error
+      if (!result.value) break
+      if (!(await permitted())) return 'cancelled'
+      updateReadAlong(session.readAlongOwner, 'preparing', result.value.sourcePositions[0])
+      pending = next()
+      await play(result.value.clip, volume, session, result.value.sourcePositions, v2 ? rate : 1)
     }
     return current(session) ? 'completed' : 'cancelled'
   } catch (error) {
@@ -208,7 +268,8 @@ export async function streamSpeak(text: string, opts: SpeakOptions = {}): Promis
     }
     throw safeError
   } finally {
-    const wasCurrent = current(session)
+    const wasCurrent = active === session
+    unsubscribe()
     session.controller.signal.removeEventListener('abort', abort)
     opts.signal?.removeEventListener('abort', callerAbort)
     cancelSession(session)

@@ -1,5 +1,6 @@
 import type { Message } from '@/state/types'
 import { serverSpeechText } from './messageSpeech'
+import type { SpeechSource } from './speechSource'
 
 type SpeechMessage = Pick<Message, 'content' | 'meta'>
 
@@ -15,10 +16,14 @@ export type CommentarySpeechResult = 'completed' | 'cancelled' | 'skipped' | 'fa
 type SpeechEntry = CommentarySpeechContext & {
   readText: (allowLocalContent: boolean) => string
   resolve: (result: CommentarySpeechResult) => void
+  source?: SpeechSource
 }
 
 type CommentarySpeechOptions = {
-  speak: (text: string, options: { signal: AbortSignal; key: string }) => Promise<'completed' | 'cancelled'>
+  speak: (
+    text: string,
+    options: { signal: AbortSignal; key: string; source?: SpeechSource; beforeChunk: () => Promise<boolean> }
+  ) => Promise<'completed' | 'cancelled'>
   /** Re-read automatic speech settings before each entry, rather than caching them per turn. */
   canSpeak: (context: CommentarySpeechContext) => boolean | Promise<boolean>
   isCurrent: (scope: string) => boolean
@@ -53,7 +58,8 @@ async function enabledUnlessCancelled(read: () => boolean | Promise<boolean>, si
 /**
  * One FIFO for public activity labels, classified comments and the final answer.
  * Generated text is read again immediately before playback and uses the same
- * server-egress guard as manual speech. Raw stream chunks never enter this queue.
+ * server-egress guard as manual speech. Only visible public answer text can feed
+ * a progressive source; its conservative classification still requires consent.
  */
 export function createCommentarySpeechQueue(options: CommentarySpeechOptions) {
   const pending: SpeechEntry[] = []
@@ -80,16 +86,35 @@ export function createCommentarySpeechQueue(options: CommentarySpeechOptions) {
           ? await enabledUnlessCancelled(options.allowLocalContent, controller.signal)
           : false
       if (!current()) return 'cancelled'
-      const text = entry.readText(allowLocalContent).replace(/\s+/gu, ' ').trim()
+      const text = entry.readText(allowLocalContent)
       if (!text && entry.kind === 'message' && entry.readText(true)) options.onBlocked?.(context)
-      if (!text || text.startsWith('[Fehler]')) return 'skipped'
-      const textKey = JSON.stringify([entry.scope, text])
+      if (!text.trim() || text.trimStart().startsWith('[Fehler]')) return 'skipped'
+      const textKey = JSON.stringify([entry.scope, text.replace(/\s+/gu, ' ').trim()])
       if (spokenText.has(textKey)) return 'skipped'
       remember(spokenText, textKey)
 
       // Await the actual speaker even after abort so a new entry cannot overlap
       // with an audio implementation that takes time to release its owner.
-      const result = await options.speak(text, { signal: controller.signal, key: entry.key })
+      const beforeChunk = async () => {
+        if (!current() || !(await enabledUnlessCancelled(() => options.canSpeak(context), controller.signal)))
+          return false
+        const allowed =
+          entry.kind === 'message' && options.allowLocalContent
+            ? await enabledUnlessCancelled(options.allowLocalContent, controller.signal)
+            : false
+        if (!current()) return false
+        const permitted = !!entry.readText(allowed).trim()
+        if (!permitted && entry.readText(true)) options.onBlocked?.(context)
+        return permitted
+      }
+      const result = await options.speak(text, {
+        signal: controller.signal,
+        key: entry.key,
+        source: entry.source,
+        beforeChunk,
+      })
+      if (current() && result === 'completed' && entry.source)
+        remember(spokenText, JSON.stringify([entry.scope, entry.source.snapshot().text.replace(/\s+/gu, ' ').trim()]))
       return current() ? result : 'cancelled'
     } catch (error) {
       if (!current()) return 'cancelled'
@@ -119,13 +144,14 @@ export function createCommentarySpeechQueue(options: CommentarySpeechOptions) {
 
   function enqueue(
     context: CommentarySpeechContext,
-    readText: SpeechEntry['readText']
+    readText: SpeechEntry['readText'],
+    source?: SpeechSource
   ): Promise<CommentarySpeechResult> {
     const key = JSON.stringify([context.scope, context.key])
     if (keys.has(key)) return Promise.resolve('skipped')
     remember(keys, key)
     const result = new Promise<CommentarySpeechResult>(resolve => {
-      pending.push({ ...context, readText, resolve })
+      pending.push({ ...context, readText, resolve, source })
     })
     start()
     return result
@@ -136,9 +162,17 @@ export function createCommentarySpeechQueue(options: CommentarySpeechOptions) {
     enqueueStatus(entry: { scope: string; key: string; text: string }) {
       return enqueue({ scope: entry.scope, key: entry.key, kind: 'status' }, () => entry.text)
     },
-    enqueueMessage(entry: { scope: string; key: string; readMessage: () => SpeechMessage | null | undefined }) {
-      return enqueue({ scope: entry.scope, key: entry.key, kind: 'message' }, allowLocalContent =>
-        serverSpeechText(entry.readMessage(), { allowLocalContent })
+    enqueueMessage(entry: {
+      scope: string
+      key: string
+      readMessage: () => SpeechMessage | null | undefined
+      source?: SpeechSource
+    }) {
+      return enqueue(
+        { scope: entry.scope, key: entry.key, kind: 'message' },
+        allowLocalContent =>
+          serverSpeechText(entry.readMessage(), { allowLocalContent, allowStreaming: !!entry.source }),
+        entry.source
       )
     },
     cancel(): void {

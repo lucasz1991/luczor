@@ -13,14 +13,21 @@ use enigo::Coordinate;
 use enigo::{Axis, Button, Direction, Enigo, Key, Keyboard, Mouse, Settings};
 use nvml_wrapper::{enum_wrappers::device::TemperatureSensor, Nvml};
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use sysinfo::{Components, System, MINIMUM_CPU_UPDATE_INTERVAL};
+use sysinfo::{
+    Components, ProcessRefreshKind, ProcessesToUpdate, System, MINIMUM_CPU_UPDATE_INTERVAL,
+};
 use tauri::WebviewWindow;
 
 use super::desktop_target::{DesktopActionGuard, DesktopObservation, InputPayload, ObservePayload};
 use super::ensure_main_webview;
 use super::execution::{admit, Guarded};
+
+#[cfg(windows)]
+#[path = "system_gpu.rs"]
+mod system_gpu;
 
 #[tauri::command]
 pub async fn system_diagnostics(
@@ -246,6 +253,16 @@ pub struct SystemMetrics {
     pub gpu_percent: Option<f32>,
     pub cpu_temp_c: Option<f32>,
     pub gpu_temp_c: Option<f32>,
+    pub app_cpu_percent: Option<f32>,
+    pub app_ram_percent: Option<f32>,
+    pub app_ram_used_mb: Option<u64>,
+    pub app_gpu_percent: Option<f32>,
+    pub model_cpu_percent: Option<f32>,
+    pub model_ram_percent: Option<f32>,
+    pub model_ram_used_mb: Option<u64>,
+    pub model_gpu_percent: Option<f32>,
+    pub model_running: Option<bool>,
+    pub gpu_source: &'static str,
 }
 
 static METRICS_CACHE: OnceLock<Mutex<Option<(Instant, SystemMetrics)>>> = OnceLock::new();
@@ -253,12 +270,19 @@ static METRICS_CACHE: OnceLock<Mutex<Option<(Instant, SystemMetrics)>>> = OnceLo
 #[tauri::command]
 pub async fn system_metrics(window: WebviewWindow) -> Result<SystemMetrics, String> {
     ensure_main_webview(&window)?;
+    tauri::async_runtime::spawn_blocking(collect_system_metrics)
+        .await
+        .map_err(|_| "System metric worker could not finish.".to_string())?
+}
+
+fn collect_system_metrics() -> Result<SystemMetrics, String> {
     let cache = METRICS_CACHE.get_or_init(|| Mutex::new(None));
-    if let Some((updated_at, metrics)) = cache
+    // A status view and a read-only tool can request the same sample together.
+    // Serialize the short native observation instead of collecting overlapping windows.
+    let mut cached = cache
         .lock()
-        .map_err(|_| "System metrics cache unavailable")?
-        .as_ref()
-    {
+        .map_err(|_| "System metrics cache unavailable")?;
+    if let Some((updated_at, metrics)) = cached.as_ref() {
         if updated_at.elapsed() < Duration::from_secs(2) {
             return Ok(metrics.clone());
         }
@@ -266,9 +290,19 @@ pub async fn system_metrics(window: WebviewWindow) -> Result<SystemMetrics, Stri
 
     let mut system = System::new();
     system.refresh_memory();
-    system.refresh_cpu_usage();
+    system.refresh_cpu_all();
+    let process_refresh = ProcessRefreshKind::new().with_memory().with_cpu();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh);
+    let before = process_samples(&system);
+    let model_before = super::local_model::managed_runtime_process_id();
+    #[cfg(windows)]
+    let gpu_sampler = system_gpu::WindowsGpuSampler::start();
     std::thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
     system.refresh_cpu_usage();
+    system.refresh_memory();
+    system.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh);
+    let after = process_samples(&system);
+    let model_after = super::local_model::managed_runtime_process_id();
 
     let total_memory = system.total_memory();
     let used_memory = system.used_memory();
@@ -280,20 +314,223 @@ pub async fn system_metrics(window: WebviewWindow) -> Result<SystemMetrics, Stri
 
     let (cpu_temp_c, sensor_gpu_temp_c) = component_temperatures();
     let (gpu_percent, nvml_gpu_temp_c) = gpu_telemetry();
+    let model_identity = if model_before == model_after {
+        model_after
+    } else {
+        Err(())
+    };
+    let scopes = select_process_scopes(&after, std::process::id(), model_identity);
+    let app = scoped_process_metrics(
+        scopes.app.as_ref(),
+        &before,
+        &after,
+        system.cpus().len(),
+        total_memory,
+    );
+    let model = scoped_process_metrics(
+        scopes.model.as_ref(),
+        &before,
+        &after,
+        system.cpus().len(),
+        total_memory,
+    );
+    #[cfg(windows)]
+    let (engine_gpu_percent, app_gpu_percent, model_gpu_percent) =
+        if let Some(sampler) = gpu_sampler {
+            let empty = HashSet::new();
+            let measured = sampler.finish(
+                scopes.app.as_ref().unwrap_or(&empty),
+                scopes.model.as_ref().unwrap_or(&empty),
+            );
+            (
+                measured.total_percent,
+                scopes.app.as_ref().and(measured.app_percent),
+                scopes.model.as_ref().and(measured.model_percent),
+            )
+        } else {
+            (None, None, None)
+        };
+    #[cfg(not(windows))]
+    let (engine_gpu_percent, app_gpu_percent, model_gpu_percent) = (None, None, None);
+    let gpu_source = if engine_gpu_percent.is_some() {
+        "windows_engine"
+    } else if gpu_percent.is_some() {
+        "nvml"
+    } else {
+        "unavailable"
+    };
 
     let metrics = SystemMetrics {
         cpu_percent: clamp_percent(system.global_cpu_usage()),
         ram_percent: clamp_percent(ram_percent),
         ram_used_mb: used_memory / 1024 / 1024,
         ram_total_mb: total_memory / 1024 / 1024,
-        gpu_percent: gpu_percent.map(clamp_percent),
+        gpu_percent: engine_gpu_percent.or(gpu_percent).map(clamp_percent),
         cpu_temp_c,
         gpu_temp_c: nvml_gpu_temp_c.or(sensor_gpu_temp_c),
+        app_cpu_percent: app.cpu,
+        app_ram_percent: app.ram,
+        app_ram_used_mb: app.ram_bytes.map(|bytes| bytes / 1024 / 1024),
+        app_gpu_percent,
+        model_cpu_percent: model.cpu,
+        model_ram_percent: model.ram,
+        model_ram_used_mb: model.ram_bytes.map(|bytes| bytes / 1024 / 1024),
+        model_gpu_percent,
+        model_running: scopes.model_running,
+        gpu_source,
     };
-    *cache
-        .lock()
-        .map_err(|_| "System metrics cache unavailable")? = Some((Instant::now(), metrics.clone()));
+    *cached = Some((Instant::now(), metrics.clone()));
     Ok(metrics)
+}
+
+#[derive(Debug, Clone)]
+struct ProcessSample {
+    parent: Option<u32>,
+    started_at: u64,
+    cpu: f32,
+    ram_bytes: u64,
+}
+
+fn process_samples(system: &System) -> HashMap<u32, ProcessSample> {
+    system
+        .processes()
+        .iter()
+        .map(|(pid, process)| {
+            (
+                pid.as_u32(),
+                ProcessSample {
+                    parent: process.parent().map(|parent| parent.as_u32()),
+                    started_at: process.start_time(),
+                    cpu: process.cpu_usage(),
+                    ram_bytes: process.memory(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// Parent links are the only association: process names, command lines, and
+/// unrelated llama servers are neither inspected nor returned to the webview.
+fn process_tree(processes: &HashMap<u32, ProcessSample>, root: u32) -> Option<HashSet<u32>> {
+    processes.get(&root)?;
+    let mut selected = HashSet::from([root]);
+    loop {
+        let children: Vec<_> = processes
+            .iter()
+            .filter_map(|(pid, process)| {
+                if selected.contains(pid) {
+                    return None;
+                }
+                let parent = process.parent?;
+                let parent_process = processes.get(&parent)?;
+                (selected.contains(&parent)
+                    && (parent_process.started_at == 0
+                        || process.started_at >= parent_process.started_at))
+                    .then_some(*pid)
+            })
+            .collect();
+        if children.is_empty() {
+            break;
+        }
+        selected.extend(children);
+    }
+    Some(selected)
+}
+
+struct ProcessScopes {
+    app: Option<HashSet<u32>>,
+    model: Option<HashSet<u32>>,
+    model_running: Option<bool>,
+}
+
+fn select_process_scopes(
+    processes: &HashMap<u32, ProcessSample>,
+    app_pid: u32,
+    model_pid: Result<Option<u32>, ()>,
+) -> ProcessScopes {
+    let Ok(model_pid) = model_pid else {
+        // Without a trustworthy model identity, subtracting a guessed process
+        // would either attribute model work to the app or hide unrelated work.
+        return ProcessScopes {
+            app: None,
+            model: None,
+            model_running: None,
+        };
+    };
+    let mut app = process_tree(processes, app_pid);
+    let model = model_pid.and_then(|pid| process_tree(processes, pid));
+    if model_pid.is_some() && model.is_none() {
+        app = None;
+    }
+    if let (Some(app), Some(model)) = (&mut app, &model) {
+        app.retain(|pid| !model.contains(pid));
+    }
+    ProcessScopes {
+        app,
+        model,
+        model_running: Some(model_pid.is_some()),
+    }
+}
+
+#[derive(Default)]
+struct ScopedProcessMetrics {
+    cpu: Option<f32>,
+    ram: Option<f32>,
+    ram_bytes: Option<u64>,
+}
+
+fn scoped_process_metrics(
+    selected: Option<&HashSet<u32>>,
+    before: &HashMap<u32, ProcessSample>,
+    after: &HashMap<u32, ProcessSample>,
+    logical_cpus: usize,
+    total_memory: u64,
+) -> ScopedProcessMetrics {
+    let Some(selected) = selected.filter(|ids| !ids.is_empty()) else {
+        return ScopedProcessMetrics::default();
+    };
+    let current: Option<Vec<_>> = selected.iter().map(|pid| after.get(pid)).collect();
+    let Some(current) = current else {
+        return ScopedProcessMetrics::default();
+    };
+    let cpu = if logical_cpus > 0
+        && selected.iter().all(|pid| {
+            before
+                .get(pid)
+                .zip(after.get(pid))
+                .is_some_and(|(old, new)| old.started_at == new.started_at)
+        })
+        && current
+            .iter()
+            .all(|process| process.cpu.is_finite() && process.cpu >= 0.0)
+    {
+        Some(clamp_percent(
+            current
+                .iter()
+                .map(|process| process.cpu as f64)
+                .sum::<f64>() as f32
+                / logical_cpus as f32,
+        ))
+    } else {
+        None
+    };
+    // sysinfo's Windows memory is Working Set, which may include shared pages.
+    // A zero resident size cannot demonstrate a readable live process sample.
+    let ram_bytes = current.iter().try_fold(0u64, |sum, process| {
+        if process.ram_bytes == 0 {
+            None
+        } else {
+            sum.checked_add(process.ram_bytes)
+        }
+    });
+    let ram = ram_bytes
+        .filter(|_| total_memory > 0)
+        .map(|bytes| clamp_percent((bytes as f64 / total_memory as f64 * 100.0) as f32));
+    ScopedProcessMetrics {
+        cpu,
+        ram,
+        ram_bytes,
+    }
 }
 
 fn clamp_percent(v: f32) -> f32 {
@@ -814,6 +1051,166 @@ mod tests {
         MonitorInfo, MouseClickPayload, WindowInfo, MAX_SCROLL_AMOUNT,
     };
     use enigo::{Axis, Button, Key};
+    use std::collections::{HashMap, HashSet};
+
+    fn process_fixture(
+        parent: Option<u32>,
+        started_at: u64,
+        cpu: f32,
+        ram_bytes: u64,
+    ) -> super::ProcessSample {
+        super::ProcessSample {
+            parent,
+            started_at,
+            cpu,
+            ram_bytes,
+        }
+    }
+
+    #[test]
+    fn telemetry_splits_the_real_process_trees_and_excludes_unrelated_processes() {
+        let processes = HashMap::from([
+            (10, process_fixture(None, 100, 100.0, 100)),
+            (11, process_fixture(Some(10), 101, 50.0, 200)),
+            (12, process_fixture(Some(11), 102, 25.0, 100)),
+            (20, process_fixture(Some(10), 110, 300.0, 400)),
+            (21, process_fixture(Some(20), 111, 100.0, 200)),
+            // An unrelated runtime is never selected by its executable name.
+            (30, process_fixture(None, 100, 800.0, 900)),
+            (31, process_fixture(Some(30), 101, 100.0, 100)),
+        ]);
+        let scopes = super::select_process_scopes(&processes, 10, Ok(Some(20)));
+        assert_eq!(scopes.app, Some(HashSet::from([10, 11, 12])));
+        assert_eq!(scopes.model, Some(HashSet::from([20, 21])));
+        assert_eq!(scopes.model_running, Some(true));
+        let app =
+            super::scoped_process_metrics(scopes.app.as_ref(), &processes, &processes, 8, 2000);
+        let model =
+            super::scoped_process_metrics(scopes.model.as_ref(), &processes, &processes, 8, 2000);
+        assert_eq!(app.cpu, Some(21.875));
+        assert_eq!(app.ram, Some(20.0));
+        assert_eq!(app.ram_bytes, Some(400));
+        assert_eq!(model.cpu, Some(50.0));
+        assert_eq!(model.ram, Some(30.0));
+    }
+
+    #[test]
+    fn telemetry_preserves_stopped_versus_unknown_model_identity() {
+        let processes = HashMap::from([(10, process_fixture(None, 100, 0.0, 100))]);
+        let stopped = super::select_process_scopes(&processes, 10, Ok(None));
+        assert_eq!(stopped.app, Some(HashSet::from([10])));
+        assert_eq!(stopped.model_running, Some(false));
+        assert!(stopped.model.is_none());
+        let unknown = super::select_process_scopes(&processes, 10, Err(()));
+        assert!(unknown.app.is_none());
+        assert!(unknown.model.is_none());
+        assert_eq!(unknown.model_running, None);
+        let unreadable_model = super::select_process_scopes(&processes, 10, Ok(Some(20)));
+        assert!(unreadable_model.app.is_none());
+        assert!(unreadable_model.model.is_none());
+        assert_eq!(unreadable_model.model_running, Some(true));
+    }
+
+    #[test]
+    fn telemetry_ignores_recycled_parent_ids_and_terminates_cycles() {
+        let processes = HashMap::from([
+            (10, process_fixture(None, 100, 0.0, 100)),
+            (11, process_fixture(Some(10), 90, 0.0, 100)),
+            (12, process_fixture(Some(11), 91, 0.0, 100)),
+            (13, process_fixture(Some(10), 101, 0.0, 100)),
+            (14, process_fixture(Some(15), 102, 0.0, 100)),
+            (15, process_fixture(Some(14), 102, 0.0, 100)),
+        ]);
+        assert_eq!(
+            super::process_tree(&processes, 10),
+            Some(HashSet::from([10, 13]))
+        );
+        assert_eq!(
+            super::process_tree(&processes, 14),
+            Some(HashSet::from([14, 15]))
+        );
+        assert!(super::process_tree(&processes, 99).is_none());
+    }
+
+    #[test]
+    fn telemetry_requires_a_cpu_baseline_for_every_current_process() {
+        let before = HashMap::from([(10, process_fixture(None, 100, 0.0, 100))]);
+        let mut after = before.clone();
+        after.insert(11, process_fixture(Some(10), 101, 300.0, 100));
+        let selected = HashSet::from([10, 11]);
+        let result = super::scoped_process_metrics(Some(&selected), &before, &after, 8, 1000);
+        assert!(result.cpu.is_none());
+        assert_eq!(result.ram, Some(20.0));
+        // Reused PIDs must not inherit a previous process's CPU denominator.
+        after.get_mut(&10).unwrap().started_at = 200;
+        let result =
+            super::scoped_process_metrics(Some(&HashSet::from([10])), &before, &after, 8, 1000);
+        assert!(result.cpu.is_none());
+    }
+
+    #[test]
+    fn telemetry_handles_zero_and_invalid_scope_measurements_without_fake_values() {
+        let selected = HashSet::from([10]);
+        let mut processes = HashMap::from([(10, process_fixture(None, 100, 0.0, 100))]);
+        let result =
+            super::scoped_process_metrics(Some(&selected), &processes, &processes, 8, 1000);
+        assert_eq!(result.cpu, Some(0.0));
+        assert_eq!(result.ram, Some(10.0));
+        for invalid in [f32::NAN, f32::INFINITY, -1.0] {
+            processes.get_mut(&10).unwrap().cpu = invalid;
+            assert!(super::scoped_process_metrics(
+                Some(&selected),
+                &processes,
+                &processes,
+                8,
+                1000
+            )
+            .cpu
+            .is_none());
+        }
+        processes.get_mut(&10).unwrap().cpu = 900.0;
+        assert_eq!(
+            super::scoped_process_metrics(Some(&selected), &processes, &processes, 8, 1000).cpu,
+            Some(100.0)
+        );
+        let invalid_denominators =
+            super::scoped_process_metrics(Some(&selected), &processes, &processes, 0, 0);
+        assert!(invalid_denominators.cpu.is_none());
+        assert!(invalid_denominators.ram.is_none());
+        processes.get_mut(&10).unwrap().ram_bytes = 0;
+        assert!(
+            super::scoped_process_metrics(Some(&selected), &processes, &processes, 8, 1000)
+                .ram_bytes
+                .is_none()
+        );
+        assert!(
+            super::scoped_process_metrics(None, &processes, &processes, 8, 1000)
+                .cpu
+                .is_none()
+        );
+    }
+
+    #[test]
+    #[ignore = "read-only hardware smoke; run explicitly, starts no model"]
+    fn native_system_scope_metrics_smoke() {
+        let metrics =
+            super::collect_system_metrics().expect("collect bounded device/process telemetry");
+        assert!(metrics.cpu_percent.is_finite());
+        assert!(metrics.app_cpu_percent.is_some());
+        assert!(metrics.app_ram_used_mb.is_some_and(|mb| mb > 0));
+        assert_eq!(metrics.model_running, Some(false));
+        assert!(metrics.model_cpu_percent.is_none());
+        println!(
+            "cpu={}, app_cpu={:?}, ram={}, app_ram={:?}, gpu={:?}, app_gpu={:?}, gpu_source={}",
+            metrics.cpu_percent,
+            metrics.app_cpu_percent,
+            metrics.ram_percent,
+            metrics.app_ram_percent,
+            metrics.gpu_percent,
+            metrics.app_gpu_percent,
+            metrics.gpu_source
+        );
+    }
 
     fn monitor_fixture(id: u32, primary: bool, x: i32) -> MonitorInfo {
         MonitorInfo {

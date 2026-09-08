@@ -921,6 +921,32 @@ fn managed_child_is_running(child: Option<&mut Child>) -> bool {
     child.is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_none()))
 }
 
+/// Read only the child held by the verified runtime manager. A startup or
+/// replacement can temporarily own that child outside the manager mutex, so
+/// absence during an operation is unknown rather than proof of a stopped model.
+/// This does not initialize configuration, start a runtime, or expose its key/path.
+pub(crate) fn managed_runtime_process_id() -> Result<Option<u32>, ()> {
+    let Some(manager) = STATE.get() else {
+        return Ok(None);
+    };
+    let mut guard = manager.try_lock().map_err(|_| ())?;
+    if let Some(runtime) = guard.runtime.as_mut() {
+        let Some(child) = runtime.child.as_mut() else {
+            return Err(());
+        };
+        return match child.try_wait() {
+            Ok(None) => Ok(Some(child.id())),
+            Ok(Some(_)) => Ok(None),
+            Err(_) => Err(()),
+        };
+    }
+    if guard.active_request_id.is_some() || guard.pending_catalog_generation.is_some() {
+        Err(())
+    } else {
+        Ok(None)
+    }
+}
+
 #[tauri::command]
 pub async fn local_model_hardware_snapshot(
     window: WebviewWindow,

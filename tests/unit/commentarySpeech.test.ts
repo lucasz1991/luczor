@@ -174,7 +174,7 @@ describe('automatic commentary speech queue', () => {
     entry = message('Aktuelles Ergebnis.', { question: 'Fortfahren?' })
     clip.resolve('completed')
     expect(await final).toBe('completed')
-    expect(test.speak.mock.calls[1]?.[0]).toBe('Aktuelles Ergebnis. Fortfahren?')
+    expect(test.speak.mock.calls[1]?.[0]).toBe('Aktuelles Ergebnis.\n\nFortfahren?')
   })
 
   it('cancels a stalled settings read and queued speech without blocking the next turn', async () => {

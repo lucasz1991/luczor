@@ -4,6 +4,9 @@ import { getApiConfigSnapshot, LuczorApiError } from '@/services/api/luczorApi'
 import { serverTts, MAX_TTS_TEXT_CHARS } from '@/services/voice/serverTts'
 import { splitSentences, stopSpeak, streamSpeak, suspendSpeech } from '@/services/voice/speak'
 import { readAlongState } from '@/services/voice/readAlong'
+import { createSpeechSource, SPEECH_CHUNK_LIMIT, SPEECH_CHUNK_TARGET } from '@/services/voice/speechSource'
+import { prepareSpokenText } from '@/services/voice/spokenText'
+import { serverSpeechText } from '@/services/voice/messageSpeech'
 
 vi.mock('@/services/api/luczorApi', async importOriginal => ({
   ...(await importOriginal<typeof import('@/services/api/luczorApi')>()),
@@ -51,7 +54,7 @@ function deferred<Value>() {
 }
 
 async function flush() {
-  for (let index = 0; index < 12; index++) await Promise.resolve()
+  for (let index = 0; index < 30; index++) await Promise.resolve()
 }
 
 describe('server speech sessions', () => {
@@ -177,7 +180,7 @@ describe('server speech sessions', () => {
     expect(hud.status).toBe('idle')
   })
 
-  it('prefetches only one limit-sized chunk while playing and freezes the API identity for the full utterance', async () => {
+  it('prefetches only one fluent chunk while playing and freezes the API identity for the full utterance', async () => {
     const mutableConfig = { ...config }
     snapshot.mockResolvedValue(mutableConfig)
     const text = 'Abschnitt '.repeat(1300).trim()
@@ -252,12 +255,12 @@ describe('server speech sessions', () => {
     await Promise.all([first, second])
   })
 
-  it('splits long punctuation-free output at the server limit without losing Unicode characters', () => {
-    const text = 'a'.repeat(MAX_TTS_TEXT_CHARS - 1) + '😀' + 'b'.repeat(MAX_TTS_TEXT_CHARS + 5)
+  it('bounds preparation without losing Unicode characters at a clip boundary', () => {
+    const text = 'a'.repeat(SPEECH_CHUNK_TARGET - 1) + '😀' + 'b'.repeat(MAX_TTS_TEXT_CHARS + 5)
     const parts = splitSentences(text)
-    expect(parts.every(part => part.length <= MAX_TTS_TEXT_CHARS)).toBe(true)
+    expect(parts.every(part => part.length <= SPEECH_CHUNK_LIMIT)).toBe(true)
     expect(parts.join('')).toBe(text)
-    expect(parts[0]).toHaveLength(MAX_TTS_TEXT_CHARS - 1)
+    expect(parts[0]).toHaveLength(SPEECH_CHUNK_TARGET - 1)
     expect(splitSentences('   ')).toEqual([])
   })
 
@@ -271,6 +274,113 @@ describe('server speech sessions', () => {
     const parts = splitSentences('Wort '.repeat(2100))
     expect(parts.every(part => part.length > 0 && part.length <= MAX_TTS_TEXT_CHARS)).toBe(true)
     expect(parts.join(' ')).toBe('Wort '.repeat(2100).trim())
+  })
+
+  it('plays two complete streamed paragraphs while the answer continues, prefetches and never repeats its prefix', async () => {
+    const first = 'Der erste Absatz bleibt als zusammenhängender Satz erhalten.\n\n'
+    const second = 'Der zweite Absatz ist ebenfalls vollständig und wird flüssig vorgelesen.\n\n'
+    const source = createSpeechSource(first, { key: 'answer' })
+    const speech = streamSpeak('', { source, voiceId: 'benni' })
+    await flush()
+    expect(synth).not.toHaveBeenCalled()
+    source.update(first + second + 'Noch unvollständig')
+    await flush()
+    expect(AudioMock.instances).toHaveLength(1)
+    expect(synth).toHaveBeenCalledOnce()
+    expect(synth.mock.calls[0]?.[0]).toBe((first + second).trim())
+    const audio = AudioMock.instances[0]!
+    audio.onplaying?.()
+    const third = 'Jetzt folgt der spätere Rest. 25 % & 10 € sind lesbar.'
+    source.update(first + second + third, true, 'retained:round-1')
+    await flush()
+    expect(synth).toHaveBeenCalledTimes(2)
+    expect(synth.mock.calls[1]?.[0]).toBe('Jetzt folgt der spätere Rest. 25 Prozent und 10 Euro sind lesbar.')
+    expect(AudioMock.instances).toHaveLength(1)
+    expect(readAlongState.value).toMatchObject({
+      text: first + second + third,
+      key: 'retained:round-1',
+      phase: 'playing',
+    })
+    audio.onended?.()
+    await flush()
+    const rest = AudioMock.instances[1]!
+    rest.onplaying?.()
+    expect(readAlongState.value?.position).toBe(first.length + second.length)
+    rest.onended?.()
+    await expect(speech).resolves.toBe('completed')
+  })
+
+  it('maps spoken symbols to the unchanged Markdown instead of mutating displayed text', async () => {
+    const text = '**Preis:** 25 € & 50 %.'
+    const speech = streamSpeak(text, { key: 'mapped' })
+    await flush()
+    const audio = AudioMock.instances[0]!
+    expect(synth.mock.calls[0]?.[0]).toBe('Preis: 25 Euro und 50 Prozent.')
+    audio.onplaying?.()
+    audio.currentTime = 4
+    audio.ontimeupdate?.()
+    expect(readAlongState.value?.text).toBe(text)
+    expect(readAlongState.value?.position).toBe(text.indexOf('€'))
+    stopSpeak()
+    await speech
+  })
+
+  it('reads a follow-up question after a fenced code block as normal speech', async () => {
+    const text = serverSpeechText({
+      content: '```ts\nconst price = 25\n```',
+      meta: { question: 'Möchtest du 50 % prüfen?' },
+    })
+    const speech = streamSpeak(text)
+    await flush()
+    expect(synth.mock.calls[0]?.[0]).toBe('const price gleich 25\n\nMöchtest du 50 Prozent prüfen?')
+    expect(readAlongState.value?.text).toBe(text)
+    AudioMock.instances[0]!.onended?.()
+    await speech
+  })
+
+  it('cancels a stream waiting for the next paragraph and never sends late text', async () => {
+    const source = createSpeechSource('Erster Absatz.\n\nZweiter Absatz.\n\n')
+    const speech = streamSpeak('', { source })
+    await flush()
+    expect(synth).toHaveBeenCalledOnce()
+    stopSpeak()
+    source.update('Erster Absatz.\n\nZweiter Absatz.\n\nSpäterer Text.', true)
+    await expect(speech).resolves.toBe('cancelled')
+    await flush()
+    expect(synth).toHaveBeenCalledOnce()
+    expect(AudioMock.instances).toHaveLength(1)
+  })
+
+  it('does not play prefetched local content after consent is revoked', async () => {
+    let allowed = true
+    const speech = streamSpeak('Langer Abschnitt. '.repeat(130), { beforeChunk: () => allowed })
+    await flush()
+    expect(synth).toHaveBeenCalledTimes(2)
+    allowed = false
+    AudioMock.instances[0]!.onended?.()
+    await expect(speech).resolves.toBe('cancelled')
+    expect(AudioMock.instances).toHaveLength(1)
+    expect(hud.status).toBe('idle')
+    expect(readAlongState.value).toBeNull()
+  })
+
+  it('preserves Markdown parser context across audio clips in a long code block', async () => {
+    const text =
+      'Hier ist der Code:\n\n```sh\n' +
+      '# Kommentar & Inhalt\necho "25 %"\n'.repeat(75) +
+      '```\n\nDanach folgt **normaler Text**.'
+    let complete = false
+    const speech = streamSpeak(text).then(() => {
+      complete = true
+    })
+    for (let index = 0; index < 30 && !complete; index++) {
+      await flush()
+      AudioMock.instances.at(-1)?.onended?.()
+    }
+    await speech
+    const spoken = synth.mock.calls.map(([value]) => value).join(' ')
+    expect(spoken.replace(/\s/gu, '')).toBe(prepareSpokenText(text).text.replace(/\s/gu, ''))
+    expect(synth.mock.calls.every(([value]) => value.length <= SPEECH_CHUNK_LIMIT)).toBe(true)
   })
 
   it('blocks new snapshots until all identity writes finish and resumes idempotently', async () => {

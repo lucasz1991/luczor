@@ -19,7 +19,7 @@
 import { Store } from '@tauri-apps/plugin-store'
 import { loadDeviceKey, saveDeviceKey } from '@/services/secureDeviceKey'
 import { DEFAULT_API_BASE_URL } from './endpoint'
-import { apiTransportInput } from './transportTarget'
+import { apiTransportFetch } from './transportTarget'
 import type { AssistantProfile } from '@/services/assistantProfileTypes'
 
 const SETTINGS_FILE = 'luczor.settings.json'
@@ -299,7 +299,7 @@ export async function fetchWithTimeout(
 
   try {
     return await Promise.race([
-      fetch(apiTransportInput(input), { ...init, signal: deadline.signal }),
+      apiTransportFetch(input, { ...init, signal: deadline.signal }),
       deadline.cancellation,
     ])
   } finally {
@@ -388,7 +388,7 @@ export async function fetchBoundedResponseWithTimeout(
   const deadline = abortDeadline(init.signal, timeoutMs)
   try {
     const operation = (async () => {
-      const response = await fetch(apiTransportInput(input), { ...init, signal: deadline.signal })
+      const response = await apiTransportFetch(input, { ...init, signal: deadline.signal })
       const text = await readBoundedResponseText(response, maxBytes, deadline.signal)
       return { response, text }
     })()
