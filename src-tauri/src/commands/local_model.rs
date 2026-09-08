@@ -45,6 +45,8 @@ use context_budget::ContextUsage;
 mod gpu_runtime;
 #[path = "local_model_messages.rs"]
 mod local_messages;
+#[path = "local_model_install.rs"]
+mod install;
 #[path = "local_model_acceptance.rs"]
 mod resource_acceptance;
 #[path = "local_model_resource_config.rs"]
@@ -2089,7 +2091,15 @@ fn verify_configured_artifacts(
         .runtime
         .as_ref()
         .ok_or("Runtime metadata is unavailable.")?;
-    let (runtime_path, model_path) = configured_paths(app, model, catalog_binding)?;
+    let paths_configured = std::env::var_os("LUCZOR_LLAMA_CPP_BIN").is_some()
+        || std::env::var_os("LUCZOR_LOCAL_MODEL_DIR").is_some()
+        || app.path().app_data_dir().map_err(|_| "Local-model data directory unavailable.")?
+            .join("local-model/runtime-paths.json").exists();
+    let (runtime_path, model_path) = if cfg!(target_os = "linux") && !paths_configured {
+        install::ensure(app, model, cancel)?
+    } else {
+        configured_paths(app, model, catalog_binding)?
+    };
     let mut model_guard = open_artifact_guard(&model_path)?;
     let mut runtime_guard = open_artifact_guard(&runtime_path)?;
     if model_guard
