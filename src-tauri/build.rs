@@ -118,7 +118,7 @@ fn main() {
         .ok()
         .filter(|value| !value.trim().is_empty())
         .or_else(|| read_env_value("../.env.local-model", "LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID"));
-    if let (Some(public_key), Some(key_id)) = (local_public_key, local_key_id) {
+    if let (Some(public_key), Some(key_id)) = (&local_public_key, &local_key_id) {
         println!(
             "cargo:rustc-env=LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64={}",
             public_key.trim()
@@ -127,8 +127,10 @@ fn main() {
             "cargo:rustc-env=LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID={}",
             key_id.trim()
         );
+    } else if local_public_key.is_some() || local_key_id.is_some() {
+        panic!("Configure both local-model public key and key id, or omit both for automatic HTTPS discovery.");
     } else {
-        println!("cargo:warning=Local-model manifest trust anchor is incomplete; local inference will stay fail-closed.");
+        println!("cargo:warning=Local-model verification will use the Luczor HTTPS signing-key endpoint.");
     }
     tauri_build::try_build(
         tauri_build::Attributes::new()

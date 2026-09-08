@@ -31,6 +31,8 @@ mod context_budget;
 use context_budget::ContextUsage;
 #[path = "local_model_messages.rs"]
 mod local_messages;
+#[path = "local_model_trust.rs"]
+mod trust;
 
 const PUBLIC_KEY_B64: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64");
 const EXPECTED_KEY_ID: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID");
@@ -649,7 +651,8 @@ pub async fn local_model_verify_manifest(
     ensure_main_webview(&window)?;
     let wire: SignedEnvelope = serde_json::from_value(envelope)
         .map_err(|_| "Local-model manifest schema is invalid.".to_string())?;
-    let result = verify_envelope(&wire)?;
+    let (key_id, public_key) = trust::resolve(EXPECTED_KEY_ID, PUBLIC_KEY_B64).await?;
+    let result = verify_envelope_with_trust(&wire, &key_id, &public_key, now_ms()?)?;
     let payload = parse_manifest_payload(&wire.payload)?;
     validate_discovery_binding(
         &wire,
@@ -922,13 +925,6 @@ pub fn shutdown_all() {
     if let Some(runtime) = runtime.as_mut() {
         runtime.stop();
     }
-}
-
-fn verify_envelope(envelope: &SignedEnvelope) -> Result<ManifestVerificationResult, String> {
-    let expected_key =
-        EXPECTED_KEY_ID.ok_or("This app build has no local-model manifest key id.")?;
-    let key_b64 = PUBLIC_KEY_B64.ok_or("This app build has no local-model manifest public key.")?;
-    verify_envelope_with_trust(envelope, expected_key, key_b64, now_ms()?)
 }
 
 fn verify_envelope_with_trust(
