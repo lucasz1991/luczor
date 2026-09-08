@@ -27,8 +27,16 @@ export async function runAgentCli(agent: AgentName, prompt: string, projectDir?:
   return { ...result, timed_out: false, stdout_truncated: false, stderr_truncated: false }
 }
 
-export const writeBridgeFile = (projectDir: string, content: string, execution?: ExecutionTicket) =>
-  invokeGuarded<string>('agent_write_bridge', { project_dir: projectDir, content }, execution)
+export const writeBridgeFile = (
+  workspace: {
+    principalId: string
+    projectId: string
+    expectedRootPath: string
+    expectedWorkspaceUpdatedAt: number
+  },
+  content: string,
+  execution?: ExecutionTicket
+) => invokeGuarded<string>('agent_write_bridge', { ...workspace, content }, execution)
 
 /** Build the LUCZOR.md bridge markdown from the current project state. */
 export function buildBridgeMarkdown(project: {

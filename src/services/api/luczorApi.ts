@@ -701,6 +701,7 @@ export function assistantProfileWithApiConfig(
 export const LuczorApi = {
   agentTeamPolicy: (signal?: AbortSignal) => request<unknown>('/agent-team-policy', { signal }),
   getConfig: getApiConfig,
+  getConfigSnapshot: getApiConfigSnapshot,
   saveConfig: saveApiConfig,
   isConfigured,
 
@@ -797,26 +798,132 @@ export const LuczorApi = {
     request<{ applied: string[]; skipped: string[] }>('/preferences', { method: 'PUT', body: { preferences } }),
 
   // Projects / conversations / tasks (agent-tool backing, server is SoR).
-  createProject: (externalId: string, name: string) =>
-    request<{ data: unknown }>('/projects', { method: 'POST', body: { external_id: externalId, name } }),
+  createProject: (externalId: string, name: string, signal?: AbortSignal, config?: LuczorApiConfigSnapshot) => {
+    const options = { method: 'POST', body: { external_id: externalId, name }, signal }
+    return config
+      ? requestWithConfig<{ data: unknown }>('/projects', options, config)
+      : request<{ data: unknown }>('/projects', options)
+  },
   listProjects: () => request<{ data: unknown[] }>('/projects'),
-  createConversation: (body: { title?: string; project_id?: string; client_id?: string }) =>
-    request<{ data: { external_id: string; title: string | null } }>('/conversations', { method: 'POST', body }),
-  listConversations: (projectId?: string) =>
-    request<{ data: unknown[] }>('/conversations', { query: { project_id: projectId } }),
-  createTask: (body: {
-    title: string
-    description?: string
-    priority?: string
-    project_id?: string
-    conversation_id?: string
-    due_at?: string
-    client_id?: string
-  }) => request<{ data: { external_id: string } }>('/tasks', { method: 'POST', body }),
-  listTasks: (query?: { status?: string; project_id?: string; conversation_id?: string }) =>
-    request<{ data: unknown[] }>('/tasks', { query }),
-  updateTask: (externalId: string, body: Record<string, unknown>) =>
-    request<{ data: unknown }>(`/tasks/${encodeURIComponent(externalId)}`, { method: 'PATCH', body }),
+  createConversation: (
+    body: { external_id?: string; title?: string; project_id?: string; client_id?: string },
+    signal?: AbortSignal,
+    config?: LuczorApiConfigSnapshot
+  ) => {
+    const options = { method: 'POST', body, signal }
+    return config
+      ? requestWithConfig<{ data: { external_id: string }; meta?: { replayed?: boolean } }>(
+          '/conversations',
+          options,
+          config
+        )
+      : request<{ data: { external_id: string }; meta?: { replayed?: boolean } }>('/conversations', options)
+  },
+  listConversations: (
+    query?: { project_id?: string; external_id?: string },
+    signal?: AbortSignal,
+    config?: LuczorApiConfigSnapshot
+  ) => {
+    const options = { query, signal }
+    return config
+      ? requestWithConfig<{
+          data: unknown[]
+          meta?: { conversation_create_idempotency?: string; filters?: { external_id?: string | null } }
+        }>('/conversations', options, config)
+      : request<{
+          data: unknown[]
+          meta?: { conversation_create_idempotency?: string; filters?: { external_id?: string | null } }
+        }>('/conversations', options)
+  },
+  verifyConversationCreate: (
+    externalId: string,
+    projectId?: string,
+    signal?: AbortSignal,
+    config?: LuczorApiConfigSnapshot
+  ) => {
+    const options = {
+      method: 'POST',
+      body: { external_id: externalId, project_id: projectId },
+      signal,
+    }
+    return config
+      ? requestWithConfig<{
+          data: { external_id: string; exists: boolean }
+          meta: { conversation_create_idempotency: string; filters: { external_id: string } }
+        }>('/conversations/verify-create', options, config)
+      : request<{
+          data: { external_id: string; exists: boolean }
+          meta: { conversation_create_idempotency: string; filters: { external_id: string } }
+        }>('/conversations/verify-create', options)
+  },
+  createTask: (
+    body: {
+      external_id?: string
+      title: string
+      description?: string
+      priority?: string
+      project_id?: string
+      conversation_id?: string
+      due_at?: string
+      client_id?: string
+    },
+    signal?: AbortSignal,
+    config?: LuczorApiConfigSnapshot
+  ) => {
+    const options = { method: 'POST', body, signal }
+    return config
+      ? requestWithConfig<{ data: { external_id: string } }>('/tasks', options, config)
+      : request<{ data: { external_id: string } }>('/tasks', options)
+  },
+  listTasks: (
+    query?: { status?: string; project_id?: string; conversation_id?: string; external_id?: string },
+    signal?: AbortSignal,
+    config?: LuczorApiConfigSnapshot
+  ) => {
+    const options = { query, signal }
+    return config
+      ? requestWithConfig<{
+          data: unknown[]
+          meta?: { task_create_idempotency?: string; filters?: { external_id?: string | null } }
+        }>('/tasks', options, config)
+      : request<{
+          data: unknown[]
+          meta?: { task_create_idempotency?: string; filters?: { external_id?: string | null } }
+        }>('/tasks', options)
+  },
+  verifyTaskCreate: (
+    externalId: string,
+    projectId?: string,
+    signal?: AbortSignal,
+    config?: LuczorApiConfigSnapshot
+  ) => {
+    const options = {
+      method: 'POST',
+      body: { external_id: externalId, project_id: projectId },
+      signal,
+    }
+    return config
+      ? requestWithConfig<{
+          data: { external_id: string; exists: boolean }
+          meta: { task_create_idempotency: string; filters: { external_id: string } }
+        }>('/tasks/verify-create', options, config)
+      : request<{
+          data: { external_id: string; exists: boolean }
+          meta: { task_create_idempotency: string; filters: { external_id: string } }
+        }>('/tasks/verify-create', options)
+  },
+  updateTask: (
+    externalId: string,
+    body: Record<string, unknown>,
+    signal?: AbortSignal,
+    config?: LuczorApiConfigSnapshot
+  ) => {
+    const path = `/tasks/${encodeURIComponent(externalId)}`
+    const options = { method: 'PATCH', body, signal }
+    return config
+      ? requestWithConfig<{ data: unknown }>(path, options, config)
+      : request<{ data: unknown }>(path, options)
+  },
 
   agentEvent: (evt: AgentEventInput, clientId: string) =>
     request<{ ok: boolean; id: number }>('/agent-events', {

@@ -122,3 +122,10 @@
 
 ## 2026-09-07T00:25:39Z | Resident local runtime scope
 - Local runtime identity now remains stable across chat/coding/planning and conversation changes within one authenticated project/repository/desktop session. 100 coordinator tests and scoped quality gates passed; root owns native cache flag and integration.
+
+## 2026-09-07T18:57:00Z | Flüssiges Vorlesen abgeschlossen
+
+- Satzweise TTS-Anfragen durch eine Ganztextanfrage ersetzt; nur über 4.000 Zeichen bleiben große Wortgrenzen-Abschnitte. Echte mehrsätzige Benni-WAV: eine Anfrage, 426.284 Bytes, 8,880 Sekunden.
+- Antwort und Zwischenkommentare teilen eine Auswahlleiste mit „Auswahl vorlesen“. Browser bestätigte genau eine Auswahl-Anfrage, laufzeitbasierte Wortmarkierung und anschließendes Entfernen der Auswahl.
+- Fallback-Control in den kompakten Promptkopf verschoben. Beide Hinweise unter dem Composer entfernt; 1096px und 320px ohne horizontalen Überlauf.
+- 113 Testdateien / 1.246 Tests, Typecheck, ESLint, Prettier, Diffcheck und Releasebuild ohne Bundle bestanden. EXE 14.625.280 Bytes, SHA256 34359240E360022639C852C23A8EA38190BB9A99C819A750B134B6EF3827FD72. Laufende Debug-App PID114596 blieb geöffnet und reagiert.

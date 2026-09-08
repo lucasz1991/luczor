@@ -35,3 +35,5 @@
 
 
 | Stable resident runtime scope and isolation regression tests | Codex/model_research | completed-local; ownership returned | 2026-09-07T00:25:39Z |
+
+| Flüssige Ganztext-Sprachausgabe, Auswahl vorlesen und Fallback-Control im Promptkopf | Codex/root | completed-local | 2026-09-07 |

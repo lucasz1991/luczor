@@ -6,6 +6,7 @@ import ApprovalCard from '@/components/ai/ApprovalCard.vue'
 import ThinkingState from '@/components/ai/ThinkingState.vue'
 import RecordsTable from '@/components/ai/RecordsTable.vue'
 import AgentScreen from '@/components/ai/AgentScreen.vue'
+import PromptBar from '@/components/ai/PromptBar.vue'
 
 describe('AI component rendering contracts', () => {
   it('renders structured code without allowing model HTML to execute', async () => {
@@ -94,5 +95,18 @@ describe('AI component rendering contracts', () => {
     expect(screen).toContain('Keine Bildschirmansicht vorhanden.')
     expect(screen).toContain('disabled')
     expect(screen).not.toContain('<img')
+  })
+
+  it('places the explicit external fallback control in the prompt heading', async () => {
+    const html = await renderToString(
+      createSSRApp({
+        render: () => h(PromptBar, { modelValue: '', externalFallback: true, modelLabel: 'Lokales Modell' }),
+      })
+    )
+    expect(html).toContain('aria-label="Externen Fallback nach Freigabe erlauben"')
+    expect(html).toContain('aria-pressed="true"')
+    expect(html).toContain('ai-prompt__heading')
+    expect(html).not.toContain('Enter senden')
+    expect(html).not.toContain('Luczor kann Fehler machen')
   })
 })

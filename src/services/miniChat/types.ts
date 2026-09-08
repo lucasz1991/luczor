@@ -18,7 +18,7 @@ export type MiniMessage = {
 }
 export type MiniView = 'chat' | 'workspace'
 export type MiniPanel = 'agents' | 'project_folder' | 'desktop' | 'planning'
-export type MiniProject = { id: string; name: string; messageCount: number; updatedAt: number }
+export type MiniProject = { id: string; name: string; messageCount: number; updatedAt: number; busy?: boolean }
 export type MiniTool = { id: string; name: string; detail: string; status: ToolCallStatus }
 export type MiniDecision = {
   id: string
@@ -36,6 +36,12 @@ export type MiniSnapshot = {
   project: { id: string; name: string } | null
   mode: LuczorMode
   busy: boolean
+  agentMode: boolean
+  voice: {
+    wakeWord: boolean
+    recording: boolean
+    busy: boolean
+  }
   mainBusy: boolean
   messages: MiniMessage[]
   tools: MiniTool[]
@@ -50,6 +56,9 @@ export type MiniAction =
   | { type: 'select_project'; sessionId: string; projectId: string }
   | { type: 'workspace_open'; sessionId: string; panel: MiniPanel }
   | { type: 'send'; sessionId: string; text: string }
+  | { type: 'voice_push_to_talk'; sessionId: string }
+  | { type: 'voice_wake_word'; sessionId: string }
+  | { type: 'agent_mode'; sessionId: string; enabled: boolean }
   | { type: 'stop'; sessionId: string }
   | { type: 'reset'; sessionId: string }
   | { type: 'decide'; sessionId: string; id: string; approved: boolean }
@@ -67,6 +76,8 @@ export const emptyMiniSnapshot = (): MiniSnapshot => ({
   project: null,
   mode: 'observe',
   busy: false,
+  agentMode: false,
+  voice: { wakeWord: false, recording: false, busy: false },
   mainBusy: false,
   messages: [],
   tools: [],

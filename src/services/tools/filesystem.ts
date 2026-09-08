@@ -1,9 +1,8 @@
-import { invoke } from '@tauri-apps/api/core'
 import { getProjectWorkspace, resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
 import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
 import { asString } from './shared'
 import type { ToolContext, ToolDef } from './types'
-import { executionGate } from '@/services/executionGate'
+import { executionGate, invokeGuarded } from '@/services/executionGate'
 
 type EphemeralToolDef = ToolDef & { dataHandling?: 'ephemeral' }
 
@@ -41,18 +40,30 @@ function mutableTargetPath(value: unknown, label = 'path'): string {
   return path
 }
 
-async function workspacePayload(projectId: string): Promise<{ principalId: string; projectId: string }> {
-  return { principalId: await resolveWorkspacePrincipalId(), projectId }
+async function workspacePayload(projectId: string) {
+  const principalId = await resolveWorkspacePrincipalId()
+  const workspace = await getProjectWorkspace(projectId, principalId)
+  if (!workspace || workspace.status !== 'ready' || !Number.isSafeInteger(workspace.updatedAt))
+    throw new Error('Die lokale Projektzuordnung ist nicht mehr ausführbar.')
+  return {
+    principalId,
+    projectId,
+    expectedRootPath: workspace.rootPath,
+    expectedWorkspaceUpdatedAt: workspace.updatedAt,
+  }
 }
 
-async function invokeProjectFs<T>(command: string, ctx: ToolContext, payload: Record<string, unknown>): Promise<T> {
+async function invokeProjectFs<T>(
+  command: string,
+  ctx: ToolContext,
+  payload: Record<string, unknown>,
+  mutating = false
+): Promise<T> {
   const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
-  executionGate.assert(ticket)
+  executionGate.assert(ticket, mutating)
   const scope = await workspacePayload(ctx.projectId)
-  executionGate.assert(ticket)
-  const result = await invoke<T>(command, { payload: { ...scope, ...payload } })
-  executionGate.assert(ticket)
-  return result
+  executionGate.assert(ticket, mutating)
+  return invokeGuarded<T>(command, { ...scope, ...payload }, ticket, mutating)
 }
 
 async function enforceRepositoryReadEgress(projectId: string, target?: ToolContext['inferenceTarget']): Promise<void> {
@@ -269,11 +280,16 @@ export const filesystemTools: EphemeralToolDef[] = [
       if (expectedSha256 && !/^[a-f0-9]{64}$/iu.test(expectedSha256)) {
         throw new Error('expected_sha256 must be a 64 character hexadecimal SHA-256')
       }
-      return invokeProjectFs('project_fs_write', ctx, {
-        path: mutableTargetPath(args.path),
-        content,
-        expectedSha256: expectedSha256 || null,
-      })
+      return invokeProjectFs(
+        'project_fs_write',
+        ctx,
+        {
+          path: mutableTargetPath(args.path),
+          content,
+          expectedSha256: expectedSha256 || null,
+        },
+        true
+      )
     },
   },
   {
@@ -296,10 +312,15 @@ export const filesystemTools: EphemeralToolDef[] = [
       required: ['path'],
     },
     async execute(args, ctx) {
-      return invokeProjectFs('project_fs_create_dir', ctx, {
-        path: mutableTargetPath(args.path),
-        recursive: args.recursive !== false,
-      })
+      return invokeProjectFs(
+        'project_fs_create_dir',
+        ctx,
+        {
+          path: mutableTargetPath(args.path),
+          recursive: args.recursive !== false,
+        },
+        true
+      )
     },
   },
   {
@@ -322,10 +343,15 @@ export const filesystemTools: EphemeralToolDef[] = [
       required: ['from_path', 'to_path'],
     },
     async execute(args, ctx) {
-      return invokeProjectFs('project_fs_move', ctx, {
-        fromPath: mutableTargetPath(args.from_path, 'from_path'),
-        toPath: mutableTargetPath(args.to_path, 'to_path'),
-      })
+      return invokeProjectFs(
+        'project_fs_move',
+        ctx,
+        {
+          fromPath: mutableTargetPath(args.from_path, 'from_path'),
+          toPath: mutableTargetPath(args.to_path, 'to_path'),
+        },
+        true
+      )
     },
   },
   {
@@ -348,9 +374,14 @@ export const filesystemTools: EphemeralToolDef[] = [
       required: ['path'],
     },
     async execute(args, ctx) {
-      return invokeProjectFs('project_fs_delete', ctx, {
-        path: mutableTargetPath(args.path),
-      })
+      return invokeProjectFs(
+        'project_fs_delete',
+        ctx,
+        {
+          path: mutableTargetPath(args.path),
+        },
+        true
+      )
     },
   },
 ]

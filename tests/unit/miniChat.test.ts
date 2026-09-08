@@ -12,7 +12,12 @@ function setup(
     .fn<(options: RunAgentOptions) => Promise<{ finalText: string }>>()
     .mockResolvedValue({ finalText: 'Eine kurze Antwort.' })
 ) {
-  const context = { project: { id: 'project-a', name: 'Projekt A' }, mode: 'act' as 'act' | 'observe', mainBusy: false }
+  const context = {
+    project: { id: 'project-a', name: 'Projekt A' },
+    mode: 'act' as 'act' | 'observe',
+    mainBusy: false,
+    workspaceBindingId: 'binding-a',
+  }
   const controller = createMiniChatController({
     context: () => context,
     run,
@@ -232,6 +237,80 @@ describe('temporary mini chat session', () => {
     expect(signal?.aborted).toBe(true)
     expect(controller.state.messages[1]).toMatchObject({ status: 'canceled', content: 'Abgebrochen.' })
     expect(controller.state.busy).toBe(false)
+  })
+  it('keeps a mutation checkpoint across a mode-style gate invalidation and resumes it', async () => {
+    const checkpoint = {
+      projectId: 'project-a',
+      principalScopeId: 'server/account',
+      workspaceBindingId: 'binding-a',
+      sessionId: 'agent-session',
+      generation: 1,
+      objective: 'Aufgabe fertigstellen',
+      messages: [{ role: 'user' as const, content: 'Aufgabe starten' }],
+      completedMutations: [
+        ['write-key', { ok: true }],
+      ] as import('@/services/agents/chatCheckpoint').AgentCheckpoint['completedMutations'],
+      ephemeralDataUsed: false,
+    }
+    let attempt = 0
+    const { controller, send, run } = setup(
+      vi.fn(async options => {
+        attempt++
+        if (attempt === 1) {
+          await options.onCheckpoint?.(checkpoint)
+          executionGate.invalidate()
+          throw new Error('Steuerungsmodus geändert')
+        }
+        return { finalText: 'Fortgesetzt.' }
+      })
+    )
+
+    await send('Starte')
+    expect(controller.state.messages.at(-1)?.status).toBe('canceled')
+    await send('Weiter')
+
+    expect(run.mock.calls[1]![0].continuation).toMatchObject({
+      objective: 'Aufgabe fertigstellen',
+      completedMutations: checkpoint.completedMutations,
+    })
+    expect(controller.state.messages.at(-1)).toMatchObject({ status: 'done', content: 'Fortgesetzt.' })
+  })
+  it('discards an existing continuation when the user explicitly stops its resumed turn', async () => {
+    const checkpoint = {
+      projectId: 'project-a',
+      workspaceBindingId: 'binding-a',
+      sessionId: 'agent-session',
+      generation: 1,
+      objective: 'Alten Auftrag fortsetzen',
+      messages: [{ role: 'user' as const, content: 'Alter Auftrag' }],
+      completedMutations: [
+        ['write-key', { ok: true }],
+      ] as import('@/services/agents/chatCheckpoint').AgentCheckpoint['completedMutations'],
+      ephemeralDataUsed: false,
+    }
+    const run = vi
+      .fn()
+      .mockResolvedValueOnce({ finalText: 'Zwischenstand.', continuation: checkpoint })
+      .mockImplementationOnce(
+        (options: RunAgentOptions) =>
+          new Promise((_resolve, reject) => {
+            options.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), {
+              once: true,
+            })
+          })
+      )
+      .mockResolvedValueOnce({ finalText: 'Neuer Auftrag.' })
+    const { controller, send } = setup(run)
+
+    await send('Starte alt')
+    const resumed = send('Weiter')
+    controller.stop()
+    await resumed
+    await send('Beginne etwas Neues')
+
+    expect(run.mock.calls[1]![0].continuation).toMatchObject({ objective: 'Alten Auftrag fortsetzen' })
+    expect(run.mock.calls[2]![0].continuation).toBeUndefined()
+    expect(controller.state.messages.at(-1)).toMatchObject({ status: 'done', content: 'Neuer Auftrag.' })
   })
   it('clear hides old text immediately but keeps inference locked until the old run settles', async () => {
     let release!: (value: { finalText: string }) => void

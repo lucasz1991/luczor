@@ -4,9 +4,12 @@ const mocks = vi.hoisted(() => ({
   detectAgents: vi.fn(),
   runAgentCli: vi.fn(),
   prepareAgentJob: vi.fn(),
+  agentProjectSnapshot: vi.fn(),
+  cancelAgentJob: vi.fn(),
   writeBridgeFile: vi.fn(),
   buildBridgeMarkdown: vi.fn(),
   requireProjectWorkspace: vi.fn(),
+  resolveWorkspacePrincipalId: vi.fn(),
   getRepositoryExternalPolicy: vi.fn(),
   state: {
     projects: [
@@ -26,14 +29,25 @@ vi.mock('@/services/agents', () => ({
   writeBridgeFile: mocks.writeBridgeFile,
   buildBridgeMarkdown: mocks.buildBridgeMarkdown,
 }))
-vi.mock('@/services/agents/hub', () => ({ prepareAgentJob: mocks.prepareAgentJob }))
+vi.mock('@/services/agents/hub', () => ({
+  prepareAgentJob: mocks.prepareAgentJob,
+  agentProjectSnapshot: mocks.agentProjectSnapshot,
+  agentHub: { cancel: mocks.cancelAgentJob },
+}))
 vi.mock('@/services/projectWorkspace', () => ({
   requireProjectWorkspace: mocks.requireProjectWorkspace,
+  resolveWorkspacePrincipalId: mocks.resolveWorkspacePrincipalId,
 }))
 vi.mock('@/services/repositoryGraph', () => ({
   getRepositoryExternalPolicy: mocks.getRepositoryExternalPolicy,
 }))
 vi.mock('@/state/store', () => ({ state: mocks.state }))
+vi.mock('@/services/executionGate', () => ({
+  executionGate: {
+    capture: () => ({ sessionId: 'agent-tools-session', generation: 1 }),
+    assert: vi.fn(),
+  },
+}))
 
 import { agentTools } from '@/services/tools/agents'
 
@@ -53,6 +67,15 @@ describe('workspace-bound coding-agent tools', () => {
       displayName: 'luczor',
       isGitRepository: true,
       status: 'ready',
+      updatedAt: 7,
+    })
+    mocks.resolveWorkspacePrincipalId.mockResolvedValue('principal-1')
+    mocks.agentProjectSnapshot.mockResolvedValue({
+      principalId: 'principal-1',
+      projectId: 'project-1',
+      projectName: 'Luczor',
+      rootPath: 'E:\\private\\luczor',
+      workspaceUpdatedAt: 7,
     })
     mocks.runAgentCli.mockResolvedValue({ ok: true, code: 0, stdout: 'done', stderr: '' })
     mocks.prepareAgentJob.mockResolvedValue({ id: 'managed-job', status: 'awaiting_approval' })
@@ -73,21 +96,25 @@ describe('workspace-bound coding-agent tools', () => {
         scope: 'project',
       })
     }
-    expect(tool('agent_dispatch').effects).toEqual(['execute'])
+    expect(tool('agent_dispatch').effects).toEqual(['write'])
     expect(tool('agent_bridge_write').effects).toEqual(['write'])
   })
 
   it('stages the coding agent in the active project without running an unmanaged CLI', async () => {
     const result = await tool('agent_dispatch').execute({ agent: 'codex', prompt: '  Prüfen  ' }, CONTEXT)
 
-    expect(mocks.requireProjectWorkspace).toHaveBeenCalledWith('project-1')
-    expect(mocks.prepareAgentJob).toHaveBeenCalledWith({
-      projectId: 'project-1',
-      adapterId: 'codex',
-      prompt: 'Prüfen',
-      role: 'assistant',
-      permission: 'read-only',
-    })
+    expect(mocks.agentProjectSnapshot).toHaveBeenCalledWith('project-1')
+    expect(mocks.prepareAgentJob).toHaveBeenCalledWith(
+      expect.objectContaining({
+        projectId: 'project-1',
+        adapterId: 'codex',
+        prompt: 'Prüfen',
+        role: 'assistant',
+        permission: 'read-only',
+        expectedProject: expect.objectContaining({ projectId: 'project-1', workspaceUpdatedAt: 7 }),
+        assertExecution: expect.any(Function),
+      })
+    )
     expect(mocks.runAgentCli).not.toHaveBeenCalled()
     expect(result).toMatchObject({ ok: true, job_id: 'managed-job', status: 'awaiting_approval' })
   })
@@ -95,7 +122,16 @@ describe('workspace-bound coding-agent tools', () => {
   it('writes the bridge into the binding and returns only a relative path', async () => {
     const result = await tool('agent_bridge_write').execute({ content: '# Explicit' }, CONTEXT)
 
-    expect(mocks.writeBridgeFile).toHaveBeenCalledWith('E:\\private\\luczor', '# Explicit', undefined)
+    expect(mocks.writeBridgeFile).toHaveBeenCalledWith(
+      {
+        principalId: 'principal-1',
+        projectId: 'project-1',
+        expectedRootPath: 'E:\\private\\luczor',
+        expectedWorkspaceUpdatedAt: 7,
+      },
+      '# Explicit',
+      expect.objectContaining({ sessionId: 'agent-tools-session', generation: 1 })
+    )
     expect(result).toEqual({ ok: true, path: 'LUCZOR.md', workspace: 'luczor' })
     expect(JSON.stringify(result)).not.toContain('E:\\private\\luczor')
   })
@@ -117,6 +153,15 @@ describe('workspace-bound coding-agent tools', () => {
       summary: 'Lokaler Agent',
       goals: [{ title: 'Sicher binden', description: '', status: 'in_progress' }],
     })
-    expect(mocks.writeBridgeFile).toHaveBeenCalledWith('E:\\private\\luczor', '# generated bridge', undefined)
+    expect(mocks.writeBridgeFile).toHaveBeenCalledWith(
+      {
+        principalId: 'principal-1',
+        projectId: 'project-1',
+        expectedRootPath: 'E:\\private\\luczor',
+        expectedWorkspaceUpdatedAt: 7,
+      },
+      '# generated bridge',
+      expect.objectContaining({ sessionId: 'agent-tools-session', generation: 1 })
+    )
   })
 })

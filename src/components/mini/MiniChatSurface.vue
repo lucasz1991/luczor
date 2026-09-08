@@ -86,6 +86,9 @@ const disabled = computed(
     !!awaitingSend.value
 )
 const error = computed(() => props.connectionError || windowError.value || props.snapshot.notice)
+const compactWorking = computed(() =>
+  ['thinking', 'executing', 'listening', 'speaking'].includes(status.value.phase) || props.snapshot.busy || props.snapshot.mainBusy
+)
 
 async function windowAction(action: string) {
   if (!props.native) {
@@ -156,6 +159,27 @@ function send(text = draft.value) {
   }, 6000)
   emit('action', { type: 'send', sessionId: props.snapshot.sessionId, text })
   resetConfirm.value = false
+}
+function appendDraft(text: string) {
+  draft.value = `${draft.value}${draft.value.trim() ? '\n\n' : ''}${text}`.slice(0, 12_000)
+  void nextTick(() => field.value?.focus())
+}
+async function attachFile(event: Event) {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (file.size > 1_000_000) {
+    windowError.value = 'Die Datei ist zu groß für den Mini-Chat. Bitte nutze maximal 1 MB oder öffne sie im Projektordner.'
+    return
+  }
+  try {
+    const text = await file.text()
+    appendDraft(`[Datei: ${file.name}]\n${text.slice(0, 10_000)}`)
+    windowError.value = ''
+  } catch {
+    windowError.value = 'Datei konnte nicht gelesen werden.'
+  }
 }
 function inputKey(event: KeyboardEvent) {
   if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
@@ -418,6 +442,35 @@ onBeforeUnmount(() => {
           <AiIcon name="chevron" :size="10" />
         </button>
       </div>
+      <div class="mini-quick-controls" role="group" aria-label="Mini-Chat Funktionen">
+        <button
+          type="button"
+          :aria-pressed="snapshot.voice.wakeWord"
+          :disabled="snapshot.voice.busy"
+          @click="emit('action', { type: 'voice_wake_word', sessionId: snapshot.sessionId })"
+        >
+          <AiIcon name="sound" :size="13" /> {{ snapshot.voice.wakeWord ? 'Wake Word aktiv' : 'Wake Word' }}
+        </button>
+        <button
+          type="button"
+          :aria-pressed="snapshot.voice.recording"
+          :disabled="snapshot.voice.busy"
+          @click="emit('action', { type: 'voice_push_to_talk', sessionId: snapshot.sessionId })"
+        >
+          <AiIcon name="mic" :size="13" /> {{ snapshot.voice.recording ? 'Diktat läuft' : 'Sprache' }}
+        </button>
+        <label class="mini-upload">
+          <AiIcon name="upload" :size="13" /> Datei
+          <input type="file" accept=".txt,.md,.json,.csv,.log,.xml,.html,.css,.js,.ts,.vue,.php" @change="attachFile" />
+        </label>
+        <button
+          type="button"
+          :aria-pressed="snapshot.agentMode"
+          @click="emit('action', { type: 'agent_mode', sessionId: snapshot.sessionId, enabled: !snapshot.agentMode })"
+        >
+          <AiIcon name="spark" :size="13" /> {{ snapshot.agentMode ? 'Agenten an' : 'Agenten' }}
+        </button>
+      </div>
       <div v-if="!isChat" class="mini-workspace-actions">
         <button
           type="button"
@@ -626,15 +679,7 @@ onBeforeUnmount(() => {
       </aside>
       <div class="mini-orb-dock">
         <div class="mini-orb-tools">
-          <button
-            type="button"
-            aria-label="Mini-Chat verschieben"
-            title="Ziehen oder Pfeiltasten"
-            @pointerdown="beginDrag($event, true)"
-            @keydown="moveKey"
-          >
-            <AiIcon name="grid" :size="12" /></button
-          ><button type="button" aria-label="Mini-Chat ausblenden" @click="windowAction('hide')">
+          <button type="button" aria-label="Mini-Chat ausblenden" @click="windowAction('hide')">
             <AiIcon name="close" :size="12" />
           </button>
         </div>
@@ -652,7 +697,9 @@ onBeforeUnmount(() => {
             >{{ decision ? '!' : '1' }}</span
           >
         </button>
-        <button type="button" class="mini-status-label" @click="expand">{{ status.label }}</button>
+        <button type="button" class="mini-status-label" :class="{ 'is-working': compactWorking }" @click="expand">
+          {{ compactWorking ? `Arbeitet · ${status.label}` : status.label }}
+        </button>
         <span v-if="connectionError" class="mini-disconnected" role="alert">Verbindung fehlt</span>
       </div>
     </template>

@@ -19,6 +19,7 @@ use tauri::{AppHandle, Manager, WebviewWindow};
 use uuid::Uuid;
 
 use super::ensure_main_webview;
+use super::execution::{admit, ExecutionLease, Guarded};
 
 const DEFAULT_LIST_ENTRIES: usize = 200;
 const MAX_LIST_ENTRIES: usize = 1_000;
@@ -113,6 +114,8 @@ pub struct WorkspaceUnbindResult {
 pub struct FsListPayload {
     principal_id: String,
     project_id: String,
+    expected_root_path: String,
+    expected_workspace_updated_at: i64,
     path: Option<String>,
     max_depth: Option<usize>,
     #[serde(alias = "maxEntries")]
@@ -124,6 +127,8 @@ pub struct FsListPayload {
 pub struct FsStatPayload {
     principal_id: String,
     project_id: String,
+    expected_root_path: String,
+    expected_workspace_updated_at: i64,
     path: String,
 }
 
@@ -132,6 +137,8 @@ pub struct FsStatPayload {
 pub struct FsReadPayload {
     principal_id: String,
     project_id: String,
+    expected_root_path: String,
+    expected_workspace_updated_at: i64,
     path: String,
     start_line: Option<usize>,
     end_line: Option<usize>,
@@ -143,6 +150,8 @@ pub struct FsReadPayload {
 pub struct FsSearchPayload {
     principal_id: String,
     project_id: String,
+    expected_root_path: String,
+    expected_workspace_updated_at: i64,
     query: String,
     path: Option<String>,
     glob: Option<String>,
@@ -157,6 +166,8 @@ pub struct FsSearchPayload {
 pub struct FsWritePayload {
     principal_id: String,
     project_id: String,
+    expected_root_path: String,
+    expected_workspace_updated_at: i64,
     path: String,
     content: String,
     expected_sha256: Option<String>,
@@ -167,6 +178,8 @@ pub struct FsWritePayload {
 pub struct FsCreateDirPayload {
     principal_id: String,
     project_id: String,
+    expected_root_path: String,
+    expected_workspace_updated_at: i64,
     path: String,
     recursive: Option<bool>,
 }
@@ -176,6 +189,8 @@ pub struct FsCreateDirPayload {
 pub struct FsMovePayload {
     principal_id: String,
     project_id: String,
+    expected_root_path: String,
+    expected_workspace_updated_at: i64,
     from_path: String,
     to_path: String,
     overwrite: Option<bool>,
@@ -186,6 +201,8 @@ pub struct FsMovePayload {
 pub struct FsDeletePayload {
     principal_id: String,
     project_id: String,
+    expected_root_path: String,
+    expected_workspace_updated_at: i64,
     path: String,
     recursive: Option<bool>,
 }
@@ -293,6 +310,7 @@ pub async fn project_workspace_bind(
 ) -> Result<WorkspaceBinding, String> {
     ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _workspace = mutation_guard()?;
         let mut connection = open_database(&app)?;
         bind_workspace(
             &mut connection,
@@ -314,6 +332,7 @@ pub async fn project_workspace_get(
 ) -> Result<Option<WorkspaceBinding>, String> {
     ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _workspace = mutation_guard()?;
         let connection = open_database(&app)?;
         Ok(
             get_workspace(&connection, &payload.principal_id, &payload.project_id)?
@@ -332,6 +351,7 @@ pub async fn project_workspace_unbind(
 ) -> Result<WorkspaceUnbindResult, String> {
     ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _workspace = mutation_guard()?;
         let connection = open_database(&app)?;
         validate_identity(&payload.principal_id, &payload.project_id)?;
         let removed = connection
@@ -351,24 +371,34 @@ pub async fn project_workspace_unbind(
 pub async fn project_fs_list(
     window: WebviewWindow,
     app: AppHandle,
-    payload: FsListPayload,
+    payload: Guarded<FsListPayload>,
 ) -> Result<FsListResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, false)?;
+    let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace(&app, &payload.principal_id, &payload.project_id, |root| {
-            list_directory(
-                root,
-                payload.path.as_deref().unwrap_or(""),
-                payload
-                    .limit
-                    .unwrap_or(DEFAULT_LIST_ENTRIES)
-                    .clamp(1, MAX_LIST_ENTRIES),
-                payload
-                    .max_depth
-                    .unwrap_or(DEFAULT_LIST_DEPTH)
-                    .clamp(1, MAX_LIST_DEPTH),
-            )
-        })
+        with_workspace(
+            &app,
+            &payload.principal_id,
+            &payload.project_id,
+            &payload.expected_root_path,
+            payload.expected_workspace_updated_at,
+            |root| {
+                gate.check()?;
+                list_directory(
+                    root,
+                    payload.path.as_deref().unwrap_or(""),
+                    payload
+                        .limit
+                        .unwrap_or(DEFAULT_LIST_ENTRIES)
+                        .clamp(1, MAX_LIST_ENTRIES),
+                    payload
+                        .max_depth
+                        .unwrap_or(DEFAULT_LIST_DEPTH)
+                        .clamp(1, MAX_LIST_DEPTH),
+                )
+            },
+        )
     })
     .await
     .map_err(|error| format!("Project file list task failed: {error}"))?
@@ -378,13 +408,23 @@ pub async fn project_fs_list(
 pub async fn project_fs_stat(
     window: WebviewWindow,
     app: AppHandle,
-    payload: FsStatPayload,
+    payload: Guarded<FsStatPayload>,
 ) -> Result<FsStatResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, false)?;
+    let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace(&app, &payload.principal_id, &payload.project_id, |root| {
-            stat_path(root, &payload.path)
-        })
+        with_workspace(
+            &app,
+            &payload.principal_id,
+            &payload.project_id,
+            &payload.expected_root_path,
+            payload.expected_workspace_updated_at,
+            |root| {
+                gate.check()?;
+                stat_path(root, &payload.path)
+            },
+        )
     })
     .await
     .map_err(|error| format!("Project file stat task failed: {error}"))?
@@ -394,19 +434,29 @@ pub async fn project_fs_stat(
 pub async fn project_fs_read(
     window: WebviewWindow,
     app: AppHandle,
-    payload: FsReadPayload,
+    payload: Guarded<FsReadPayload>,
 ) -> Result<FsReadResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, false)?;
+    let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace(&app, &payload.principal_id, &payload.project_id, |root| {
-            read_text(
-                root,
-                &payload.path,
-                payload.start_line,
-                payload.end_line,
-                payload.max_bytes,
-            )
-        })
+        with_workspace(
+            &app,
+            &payload.principal_id,
+            &payload.project_id,
+            &payload.expected_root_path,
+            payload.expected_workspace_updated_at,
+            |root| {
+                gate.check()?;
+                read_text(
+                    root,
+                    &payload.path,
+                    payload.start_line,
+                    payload.end_line,
+                    payload.max_bytes,
+                )
+            },
+        )
     })
     .await
     .map_err(|error| format!("Project file read task failed: {error}"))?
@@ -416,27 +466,37 @@ pub async fn project_fs_read(
 pub async fn project_fs_search(
     window: WebviewWindow,
     app: AppHandle,
-    payload: FsSearchPayload,
+    payload: Guarded<FsSearchPayload>,
 ) -> Result<FsSearchResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, false)?;
+    let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace(&app, &payload.principal_id, &payload.project_id, |root| {
-            search_text(
-                root,
-                payload.path.as_deref().unwrap_or(""),
-                &payload.query,
-                payload.glob.as_deref(),
-                payload.case_sensitive.unwrap_or(false),
-                payload
-                    .limit
-                    .unwrap_or(DEFAULT_SEARCH_RESULTS)
-                    .clamp(1, MAX_SEARCH_RESULTS),
-                payload
-                    .max_files
-                    .unwrap_or(DEFAULT_SEARCH_FILES)
-                    .clamp(1, MAX_SEARCH_FILES),
-            )
-        })
+        with_workspace(
+            &app,
+            &payload.principal_id,
+            &payload.project_id,
+            &payload.expected_root_path,
+            payload.expected_workspace_updated_at,
+            |root| {
+                gate.check()?;
+                search_text(
+                    root,
+                    payload.path.as_deref().unwrap_or(""),
+                    &payload.query,
+                    payload.glob.as_deref(),
+                    payload.case_sensitive.unwrap_or(false),
+                    payload
+                        .limit
+                        .unwrap_or(DEFAULT_SEARCH_RESULTS)
+                        .clamp(1, MAX_SEARCH_RESULTS),
+                    payload
+                        .max_files
+                        .unwrap_or(DEFAULT_SEARCH_FILES)
+                        .clamp(1, MAX_SEARCH_FILES),
+                )
+            },
+        )
     })
     .await
     .map_err(|error| format!("Project file search task failed: {error}"))?
@@ -446,18 +506,29 @@ pub async fn project_fs_search(
 pub async fn project_fs_write(
     window: WebviewWindow,
     app: AppHandle,
-    payload: FsWritePayload,
+    payload: Guarded<FsWritePayload>,
 ) -> Result<FsWriteResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, true)?;
+    let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace(&app, &payload.principal_id, &payload.project_id, |root| {
-            write_text(
-                root,
-                &payload.path,
-                &payload.content,
-                payload.expected_sha256.as_deref(),
-            )
-        })
+        with_workspace_mutation(
+            &app,
+            &payload.principal_id,
+            &payload.project_id,
+            &payload.expected_root_path,
+            payload.expected_workspace_updated_at,
+            &gate,
+            |root, gate| {
+                write_text_locked(
+                    root,
+                    &payload.path,
+                    &payload.content,
+                    payload.expected_sha256.as_deref(),
+                    Some(gate),
+                )
+            },
+        )
     })
     .await
     .map_err(|error| format!("Project file write task failed: {error}"))?
@@ -467,13 +538,28 @@ pub async fn project_fs_write(
 pub async fn project_fs_create_dir(
     window: WebviewWindow,
     app: AppHandle,
-    payload: FsCreateDirPayload,
+    payload: Guarded<FsCreateDirPayload>,
 ) -> Result<FsCreateDirResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, true)?;
+    let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace(&app, &payload.principal_id, &payload.project_id, |root| {
-            create_directory(root, &payload.path, payload.recursive.unwrap_or(false))
-        })
+        with_workspace_mutation(
+            &app,
+            &payload.principal_id,
+            &payload.project_id,
+            &payload.expected_root_path,
+            payload.expected_workspace_updated_at,
+            &gate,
+            |root, gate| {
+                create_directory_locked(
+                    root,
+                    &payload.path,
+                    payload.recursive.unwrap_or(false),
+                    Some(gate),
+                )
+            },
+        )
     })
     .await
     .map_err(|error| format!("Project directory creation task failed: {error}"))?
@@ -483,18 +569,29 @@ pub async fn project_fs_create_dir(
 pub async fn project_fs_move(
     window: WebviewWindow,
     app: AppHandle,
-    payload: FsMovePayload,
+    payload: Guarded<FsMovePayload>,
 ) -> Result<FsMoveResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, true)?;
+    let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace(&app, &payload.principal_id, &payload.project_id, |root| {
-            move_path(
-                root,
-                &payload.from_path,
-                &payload.to_path,
-                payload.overwrite.unwrap_or(false),
-            )
-        })
+        with_workspace_mutation(
+            &app,
+            &payload.principal_id,
+            &payload.project_id,
+            &payload.expected_root_path,
+            payload.expected_workspace_updated_at,
+            &gate,
+            |root, gate| {
+                move_path_locked(
+                    root,
+                    &payload.from_path,
+                    &payload.to_path,
+                    payload.overwrite.unwrap_or(false),
+                    Some(gate),
+                )
+            },
+        )
     })
     .await
     .map_err(|error| format!("Project file move task failed: {error}"))?
@@ -504,13 +601,28 @@ pub async fn project_fs_move(
 pub async fn project_fs_delete(
     window: WebviewWindow,
     app: AppHandle,
-    payload: FsDeletePayload,
+    payload: Guarded<FsDeletePayload>,
 ) -> Result<FsDeleteResult, String> {
     ensure_main_webview(&window)?;
+    let gate = admit(&payload.execution, true)?;
+    let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace(&app, &payload.principal_id, &payload.project_id, |root| {
-            delete_path(root, &payload.path, payload.recursive.unwrap_or(false))
-        })
+        with_workspace_mutation(
+            &app,
+            &payload.principal_id,
+            &payload.project_id,
+            &payload.expected_root_path,
+            payload.expected_workspace_updated_at,
+            &gate,
+            |root, gate| {
+                delete_path_locked(
+                    root,
+                    &payload.path,
+                    payload.recursive.unwrap_or(false),
+                    Some(gate),
+                )
+            },
+        )
     })
     .await
     .map_err(|error| format!("Project file delete task failed: {error}"))?
@@ -533,13 +645,52 @@ fn with_workspace<T>(
     app: &AppHandle,
     principal_id: &str,
     project_id: &str,
+    expected_root_path: &str,
+    expected_workspace_updated_at: i64,
     operation: impl FnOnce(&Path) -> Result<T, String>,
 ) -> Result<T, String> {
     let connection = open_database(app)?;
     let bound = get_workspace(&connection, principal_id, project_id)?
         .ok_or_else(|| "No local workspace is bound to this project.".to_string())?;
+    validate_expected_workspace(&bound, expected_root_path, expected_workspace_updated_at)?;
     let root = validate_bound_root(&bound.root_path)?;
     operation(&root)
+}
+
+fn validate_expected_workspace(
+    bound: &BoundWorkspace,
+    expected_root_path: &str,
+    expected_workspace_updated_at: i64,
+) -> Result<(), String> {
+    if bound.root_path != Path::new(expected_root_path)
+        || bound.updated_at != expected_workspace_updated_at
+    {
+        return Err("The project workspace binding changed before execution.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn with_workspace_mutation<T>(
+    app: &AppHandle,
+    principal_id: &str,
+    project_id: &str,
+    expected_root_path: &str,
+    expected_workspace_updated_at: i64,
+    gate: &ExecutionLease,
+    operation: impl FnOnce(&Path, &ExecutionLease) -> Result<T, String>,
+) -> Result<T, String> {
+    let _workspace = mutation_guard()?;
+    with_workspace(
+        app,
+        principal_id,
+        project_id,
+        expected_root_path,
+        expected_workspace_updated_at,
+        |root| {
+            gate.check()?;
+            operation(root, gate)
+        },
+    )
 }
 
 fn open_database(app: &AppHandle) -> Result<Connection, String> {
@@ -1354,6 +1505,7 @@ fn safe_search_entry(root: &Path, entry: &DirEntry) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(test)]
 fn write_text(
     root: &Path,
     raw: &str,
@@ -1361,6 +1513,16 @@ fn write_text(
     expected_sha256: Option<&str>,
 ) -> Result<FsWriteResult, String> {
     let _mutation = mutation_guard()?;
+    write_text_locked(root, raw, content, expected_sha256, None)
+}
+
+fn write_text_locked(
+    root: &Path,
+    raw: &str,
+    content: &str,
+    expected_sha256: Option<&str>,
+    gate: Option<&ExecutionLease>,
+) -> Result<FsWriteResult, String> {
     if content.len() as u64 > MAX_TEXT_FILE_BYTES {
         return Err("Project text write exceeds the 5 MB safety limit.".into());
     }
@@ -1405,7 +1567,7 @@ fn write_text(
         }
     }
 
-    atomic_write(&target, content.as_bytes(), expected_sha256)?;
+    atomic_write(&target, content.as_bytes(), expected_sha256, gate)?;
     let digest = sha256(content.as_bytes());
     Ok(FsWriteResult {
         path: relative_string(&relative),
@@ -1415,8 +1577,18 @@ fn write_text(
     })
 }
 
+#[cfg(test)]
 fn create_directory(root: &Path, raw: &str, recursive: bool) -> Result<FsCreateDirResult, String> {
     let _mutation = mutation_guard()?;
+    create_directory_locked(root, raw, recursive, None)
+}
+
+fn create_directory_locked(
+    root: &Path,
+    raw: &str,
+    recursive: bool,
+    gate: Option<&ExecutionLease>,
+) -> Result<FsCreateDirResult, String> {
     let (relative, target) = resolve_new_target(root, raw)?;
     if recursive {
         let mut current = root.to_path_buf();
@@ -1434,6 +1606,9 @@ fn create_directory(root: &Path, raw: &str, recursive: bool) -> Result<FsCreateD
                     )
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if let Some(gate) = gate {
+                        gate.check()?;
+                    }
                     fs::create_dir(&current)
                         .map_err(|_| "Project directory could not be created.".to_string())?;
                     let metadata = fs::symlink_metadata(&current).map_err(|_| {
@@ -1464,6 +1639,9 @@ fn create_directory(root: &Path, raw: &str, recursive: bool) -> Result<FsCreateD
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err("Project directory target cannot be inspected.".into()),
     }
+    if let Some(gate) = gate {
+        gate.check()?;
+    }
     fs::create_dir(&target).map_err(|_| "Project directory could not be created.".to_string())?;
     Ok(FsCreateDirResult {
         path: relative_string(&relative),
@@ -1471,6 +1649,7 @@ fn create_directory(root: &Path, raw: &str, recursive: bool) -> Result<FsCreateD
     })
 }
 
+#[cfg(test)]
 fn move_path(
     root: &Path,
     from_raw: &str,
@@ -1478,6 +1657,16 @@ fn move_path(
     overwrite: bool,
 ) -> Result<FsMoveResult, String> {
     let _mutation = mutation_guard()?;
+    move_path_locked(root, from_raw, to_raw, overwrite, None)
+}
+
+fn move_path_locked(
+    root: &Path,
+    from_raw: &str,
+    to_raw: &str,
+    overwrite: bool,
+    gate: Option<&ExecutionLease>,
+) -> Result<FsMoveResult, String> {
     if overwrite {
         return Err("Project move never overwrites an existing destination.".into());
     }
@@ -1503,6 +1692,9 @@ fn move_path(
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err("Project move destination cannot be inspected.".into()),
     }
+    if let Some(gate) = gate {
+        gate.check()?;
+    }
     atomic_move_noreplace(&source, &target)
         .map_err(|_| "Project item could not be moved without overwriting.".to_string())?;
     Ok(FsMoveResult {
@@ -1512,8 +1704,18 @@ fn move_path(
     })
 }
 
+#[cfg(test)]
 fn delete_path(root: &Path, raw: &str, recursive: bool) -> Result<FsDeleteResult, String> {
     let _mutation = mutation_guard()?;
+    delete_path_locked(root, raw, recursive, None)
+}
+
+fn delete_path_locked(
+    root: &Path,
+    raw: &str,
+    recursive: bool,
+    gate: Option<&ExecutionLease>,
+) -> Result<FsDeleteResult, String> {
     if recursive {
         return Err("Recursive deletion is not available to project tools.".into());
     }
@@ -1524,6 +1726,9 @@ fn delete_path(root: &Path, raw: &str, recursive: bool) -> Result<FsDeleteResult
         return Err("Symbolic links and junctions cannot be deleted by project tools.".into());
     }
     let kind = file_kind(&metadata).to_string();
+    if let Some(gate) = gate {
+        gate.check()?;
+    }
     if metadata.is_file() {
         fs::remove_file(&target).map_err(|_| "Project file could not be deleted.".to_string())?;
     } else if metadata.is_dir() {
@@ -1638,13 +1843,21 @@ fn mutation_guard() -> Result<MutexGuard<'static, ()>, String> {
         .map_err(|_| "Project filesystem mutation lock is unavailable.".to_string())
 }
 
-fn atomic_write(target: &Path, bytes: &[u8], expected_sha256: Option<&str>) -> Result<(), String> {
+fn atomic_write(
+    target: &Path,
+    bytes: &[u8],
+    expected_sha256: Option<&str>,
+    gate: Option<&ExecutionLease>,
+) -> Result<(), String> {
     let file_name = target
         .file_name()
         .and_then(|value| value.to_str())
         .ok_or_else(|| "Project write target has an invalid filename.".to_string())?;
     let temporary = target.with_file_name(format!(".{file_name}.{}.tmp", Uuid::new_v4()));
     let result = (|| -> Result<(), String> {
+        if let Some(gate) = gate {
+            gate.check()?;
+        }
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -1653,9 +1866,15 @@ fn atomic_write(target: &Path, bytes: &[u8], expected_sha256: Option<&str>) -> R
         file.write_all(bytes)
             .and_then(|_| file.sync_all())
             .map_err(|_| "Temporary project file could not be written.".to_string())?;
+        if let Some(gate) = gate {
+            gate.check()?;
+        }
         match expected_sha256 {
             None => match fs::symlink_metadata(target) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    if let Some(gate) = gate {
+                        gate.check()?;
+                    }
                     atomic_create(&temporary, target).map_err(|_| {
                         "CAS conflict: project file appeared before creation committed.".to_string()
                     })
@@ -1675,6 +1894,9 @@ fn atomic_write(target: &Path, bytes: &[u8], expected_sha256: Option<&str>) -> R
                     return Err(
                         "CAS conflict: project file changed before replacement committed.".into(),
                     );
+                }
+                if let Some(gate) = gate {
+                    gate.check()?;
                 }
                 atomic_replace(&temporary, target)
                     .map_err(|_| "Project file could not be replaced atomically.".to_string())
@@ -1892,6 +2114,24 @@ mod tests {
         assert_eq!(serialized["status"], "ready");
         assert!(serialized.get("workspaceId").is_none());
         assert!(serialized.get("gitRootPath").is_none());
+        assert!(validate_expected_workspace(
+            &bound_a,
+            root_a.to_string_lossy().as_ref(),
+            bound_a.updated_at
+        )
+        .is_ok());
+        assert!(validate_expected_workspace(
+            &bound_a,
+            root_b.to_string_lossy().as_ref(),
+            bound_a.updated_at
+        )
+        .is_err());
+        assert!(validate_expected_workspace(
+            &bound_a,
+            root_a.to_string_lossy().as_ref(),
+            bound_a.updated_at + 1
+        )
+        .is_err());
 
         fs::remove_dir_all(&root_a).expect("cleanup a");
         assert_eq!(workspace_status(&root_a), "missing");

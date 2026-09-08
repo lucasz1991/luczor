@@ -63,7 +63,7 @@ describe('server speech sessions', () => {
     AudioMock.instances[0]?.onended?.()
     await expect(speech).resolves.toBe('completed')
   })
-  it('tracks actual audio time per sentence, freezes during waiting and clears on cancellation', async () => {
+  it('tracks actual audio time across the complete utterance, freezes during waiting and clears on cancellation', async () => {
     const speech = streamSpeak('Hallo Welt. Nächster Satz.', { key: 'answer-1' })
     await flush()
     const first = AudioMock.instances[0]!
@@ -71,26 +71,19 @@ describe('server speech sessions', () => {
     first.onplaying?.()
     first.currentTime = 5
     first.ontimeupdate?.()
-    expect(readAlongState.value).toMatchObject({ phase: 'playing', position: 5 })
+    expect(readAlongState.value).toMatchObject({ phase: 'playing', position: 13 })
     first.onwaiting?.()
     first.currentTime = 8
     first.ontimeupdate?.()
-    expect(readAlongState.value).toMatchObject({ phase: 'waiting', position: 5 })
+    expect(readAlongState.value).toMatchObject({ phase: 'waiting', position: 13 })
     first.onplaying?.()
-    expect(readAlongState.value).toMatchObject({ phase: 'playing', position: 8 })
-    first.onended?.()
-    await flush()
-    const second = AudioMock.instances[1]!
-    expect(readAlongState.value).toMatchObject({ phase: 'preparing', position: 12 })
-    second.onplaying?.()
-    second.currentTime = 5
-    second.ontimeupdate?.()
-    expect(readAlongState.value).toMatchObject({ phase: 'playing', position: 19 })
-    const late = second.ontimeupdate!
+    expect(readAlongState.value).toMatchObject({ phase: 'playing', position: 20 })
+    expect(synth).toHaveBeenCalledOnce()
+    const late = first.ontimeupdate!
     stopSpeak()
     late()
     expect(readAlongState.value).toBeNull()
-    expect(second.ontimeupdate).toBeNull()
+    expect(first.ontimeupdate).toBeNull()
     await expect(speech).resolves.toBe('cancelled')
   })
   beforeEach(() => {
@@ -184,10 +177,13 @@ describe('server speech sessions', () => {
     expect(hud.status).toBe('idle')
   })
 
-  it('prefetches only one sentence while playing and freezes the API identity for the full utterance', async () => {
+  it('prefetches only one limit-sized chunk while playing and freezes the API identity for the full utterance', async () => {
     const mutableConfig = { ...config }
     snapshot.mockResolvedValue(mutableConfig)
-    const speech = streamSpeak('Erster Satz. Zweiter Satz. Dritter Satz.')
+    const text = 'Abschnitt '.repeat(1300).trim()
+    const chunks = splitSentences(text)
+    expect(chunks.length).toBeGreaterThanOrEqual(3)
+    const speech = streamSpeak(text)
     await flush()
     expect(synth).toHaveBeenCalledTimes(2)
     expect(snapshot).toHaveBeenCalledOnce()
@@ -200,13 +196,16 @@ describe('server speech sessions', () => {
     expect(synth.mock.calls[2]![1]).toEqual(config)
     AudioMock.instances[1]!.onended?.()
     await flush()
-    AudioMock.instances[2]!.onended?.()
+    for (let index = 2; index < chunks.length; index++) {
+      await flush()
+      AudioMock.instances.at(index)!.onended?.()
+    }
     await speech
   })
 
   it('observes a rejected prefetch immediately and surfaces it only after the current clip', async () => {
     synth.mockResolvedValueOnce(clip).mockRejectedValueOnce(new LuczorApiError(503, 'Sprachdienst nicht verfügbar.'))
-    const outcome = streamSpeak('Erster Satz. Zweiter Satz.').catch((error: unknown) => error)
+    const outcome = streamSpeak('Abschnitt '.repeat(500)).catch((error: unknown) => error)
     await flush()
     expect(AudioMock.instances).toHaveLength(1)
     AudioMock.instances[0]!.onended?.()
@@ -218,7 +217,7 @@ describe('server speech sessions', () => {
   it('cancels prefetch and audio together on explicit stop', async () => {
     const pendingClip = deferred<Blob>()
     synth.mockResolvedValueOnce(clip).mockReturnValueOnce(pendingClip.promise)
-    const speech = streamSpeak('Erster Satz. Zweiter Satz.')
+    const speech = streamSpeak('Abschnitt '.repeat(500))
     await flush()
     const signal = synth.mock.calls[1]![2]!.signal!
     const audio = AudioMock.instances[0]!
@@ -232,7 +231,7 @@ describe('server speech sessions', () => {
   })
 
   it('cleans up playback failures and cancels any prefetched audio', async () => {
-    const outcome = streamSpeak('Erster Satz. Zweiter Satz.').catch((error: unknown) => error)
+    const outcome = streamSpeak('Abschnitt '.repeat(500)).catch((error: unknown) => error)
     await flush()
     AudioMock.instances[0]!.onerror?.()
     await expect(outcome).resolves.toMatchObject({ message: 'Audio-Wiedergabe fehlgeschlagen.' })
@@ -260,6 +259,12 @@ describe('server speech sessions', () => {
     expect(parts.join('')).toBe(text)
     expect(parts[0]).toHaveLength(MAX_TTS_TEXT_CHARS - 1)
     expect(splitSentences('   ')).toEqual([])
+  })
+
+  it('keeps a normal multi-sentence answer in one fluent synthesis request', () => {
+    expect(splitSentences('Erster Satz. Zweiter Satz! Dritter Satz?')).toEqual([
+      'Erster Satz. Zweiter Satz! Dritter Satz?',
+    ])
   })
 
   it('bounds long multiword sentences and does not send empty requests', () => {

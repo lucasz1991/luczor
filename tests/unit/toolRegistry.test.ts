@@ -9,14 +9,24 @@ const mocks = vi.hoisted(() => ({
   setProjectSummary: vi.fn(),
   upsertGoal: vi.fn(),
   addProject: vi.fn(),
+  rollbackProjectCreation: vi.fn(),
+  saveAppStateStrict: vi.fn(),
+  enqueueProjectSync: vi.fn(),
+  commitProjectSync: vi.fn(),
+  flushProjectSyncQueue: vi.fn(),
   createProject: vi.fn(),
+  getConfigSnapshot: vi.fn(),
   createConversation: vi.fn(),
+  listConversations: vi.fn(),
+  verifyConversationCreate: vi.fn(),
   createTask: vi.fn(),
   listTasks: vi.fn(),
+  verifyTaskCreate: vi.fn(),
   updateTask: vi.fn(),
   detectAgents: vi.fn(),
   runAgentCli: vi.fn(),
   prepareAgentJob: vi.fn(),
+  agentProjectSnapshot: vi.fn(),
   writeBridgeFile: vi.fn(),
   buildBridgeMarkdown: vi.fn(),
   setPlan: vi.fn(),
@@ -29,6 +39,7 @@ const mocks = vi.hoisted(() => ({
   resolveWorkspacePrincipalId: vi.fn(),
   getRepositoryExternalPolicy: vi.fn(),
   state: { projects: [] as unknown[] },
+  apiConfig: { baseUrl: 'https://luczor.test', deviceKey: 'test-key', clientId: 'test-client' },
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
@@ -38,16 +49,27 @@ vi.mock('@/state/store', () => ({
     upsertGoal: mocks.upsertGoal,
     setProjectSummary: mocks.setProjectSummary,
     addProject: mocks.addProject,
+    rollbackProjectCreation: mocks.rollbackProjectCreation,
   },
 }))
+vi.mock('@/services/persistence', () => ({ saveAppStateStrict: mocks.saveAppStateStrict }))
 vi.mock('@/services/api/luczorApi', () => ({
   LuczorApi: {
+    getConfigSnapshot: mocks.getConfigSnapshot,
     createProject: mocks.createProject,
     createConversation: mocks.createConversation,
+    listConversations: mocks.listConversations,
+    verifyConversationCreate: mocks.verifyConversationCreate,
     createTask: mocks.createTask,
     listTasks: mocks.listTasks,
+    verifyTaskCreate: mocks.verifyTaskCreate,
     updateTask: mocks.updateTask,
   },
+}))
+vi.mock('@/services/api/projectSyncQueue', () => ({
+  enqueueProjectSync: mocks.enqueueProjectSync,
+  commitProjectSync: mocks.commitProjectSync,
+  flushProjectSyncQueue: mocks.flushProjectSyncQueue,
 }))
 vi.mock('@/services/agents', () => ({
   detectAgents: mocks.detectAgents,
@@ -57,6 +79,7 @@ vi.mock('@/services/agents', () => ({
 }))
 vi.mock('@/services/agents/hub', () => ({
   prepareAgentJob: mocks.prepareAgentJob,
+  agentProjectSnapshot: mocks.agentProjectSnapshot,
   validateAgentScope: vi.fn(),
 }))
 vi.mock('@/services/projectWorkspace', () => ({
@@ -105,6 +128,7 @@ const TOOL_CONTRACT = [
   { name: 'os_observe_desktop', category: 'os', mutating: false, requiresApproval: true },
   { name: 'project_create', category: 'project', mutating: true, requiresApproval: true },
   { name: 'chat_create', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'chat_list', category: 'app', mutating: false, requiresApproval: false },
   { name: 'task_create', category: 'app', mutating: true, requiresApproval: true },
   { name: 'task_list', category: 'app', mutating: false, requiresApproval: false },
   { name: 'task_update', category: 'app', mutating: true, requiresApproval: true },
@@ -129,18 +153,34 @@ const TOOL_CONTRACT = [
   { name: 'workspace_agent_cancel', category: 'app', mutating: true, requiresApproval: false },
 ] as const
 
-const TOOL_SCHEMA_SHA256 = '51928fc898b0bf1a61a7c7919baef2eb0c7d48eef42e396bd42124fed4e58e3a'
-const CORE_TOOL_SCHEMA_SHA256 = '326c047eaf100b6b30b6860048dcf56f7142b28f338518dc2a9ffda71423d77f'
+const TOOL_SCHEMA_SHA256 = 'c05b45a2902b7588455914bcb83a48c2d39863aad954d21ed01f713e434b1e52'
+const CORE_TOOL_SCHEMA_SHA256 = '2a7c25e43257b4e61ecde77ea87725bdd62c73ac60d8145c3224905614c3b39a'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
+    updateExecutionControls({ mode: 'act', killSwitch: false, scope: 'project-1' })
+    await executionPayload(executionGate.capture(), false)
     vi.clearAllMocks()
     lastScreenshot.value = null
     mocks.createProject.mockResolvedValue({ data: {} })
+    mocks.enqueueProjectSync.mockResolvedValue({ scopeId: 'scope', operationId: 'operation', externalId: 'project' })
+    mocks.commitProjectSync.mockImplementation(async (_staged, commit: () => void) => commit())
+    mocks.flushProjectSyncQueue.mockResolvedValue({ attempted: 1, synced: 1, pending: 0 })
+    mocks.saveAppStateStrict.mockResolvedValue(undefined)
+    mocks.getConfigSnapshot.mockResolvedValue(mocks.apiConfig)
     mocks.createConversation.mockResolvedValue({ data: { external_id: 'chat-1' } })
+    mocks.listConversations.mockResolvedValue({ data: [{ external_id: 'chat-1' }] })
+    mocks.verifyConversationCreate.mockResolvedValue({
+      data: { external_id: 'chat-1', exists: true },
+      meta: { conversation_create_idempotency: 'external_id_v1', filters: { external_id: 'chat-1' } },
+    })
     mocks.createTask.mockResolvedValue({ data: { external_id: 'task-1' } })
     mocks.listTasks.mockResolvedValue({ data: [{ external_id: 'task-1' }] })
+    mocks.verifyTaskCreate.mockResolvedValue({
+      data: { external_id: 'task-1', exists: true },
+      meta: { task_create_idempotency: 'external_id_v1', filters: { external_id: 'task-1' } },
+    })
     mocks.updateTask.mockResolvedValue({ data: {} })
     mocks.detectAgents.mockResolvedValue([{ name: 'codex', installed: true }])
     mocks.runAgentCli.mockResolvedValue({ ok: true, code: 0, stdout: 'done', stderr: '' })
@@ -153,6 +193,7 @@ describe('tool registry contract', () => {
       displayName: 'project',
       isGitRepository: true,
       status: 'ready',
+      updatedAt: 10,
     })
     mocks.requireProjectWorkspace.mockResolvedValue({
       projectId: 'project-1',
@@ -160,6 +201,14 @@ describe('tool registry contract', () => {
       displayName: 'project',
       isGitRepository: true,
       status: 'ready',
+      updatedAt: 10,
+    })
+    mocks.agentProjectSnapshot.mockResolvedValue({
+      principalId: 'device:v1:test',
+      projectId: 'project-1',
+      projectName: 'Projekt 1',
+      rootPath: 'E:\\project',
+      workspaceUpdatedAt: 10,
     })
     mocks.resolveWorkspacePrincipalId.mockResolvedValue('device:v1:test')
     mocks.getRepositoryExternalPolicy.mockResolvedValue('allow_selected')
@@ -278,20 +327,132 @@ describe('tool registry contract', () => {
     await getTool('chat_create')!.execute({}, PROJECT_CONTEXT)
     await getTool('task_create')!.execute({ title: 'Tests schreiben' }, PROJECT_CONTEXT)
 
-    expect(mocks.createProject).toHaveBeenCalledWith(expect.any(String), 'Neues Projekt')
-    expect(mocks.addProject).toHaveBeenCalledWith({ id: expect.any(String), name: 'Neues Projekt' })
-    expect(mocks.createProject).toHaveBeenCalledWith('project-1', 'Projekt 1')
+    const projectId = mocks.addProject.mock.calls[0]![0].id as string
+    expect(mocks.enqueueProjectSync).toHaveBeenCalledWith(projectId, 'Neues Projekt', mocks.apiConfig)
+    expect(mocks.commitProjectSync).toHaveBeenCalledWith(
+      expect.objectContaining({ operationId: 'operation' }),
+      expect.any(Function)
+    )
+    expect(mocks.addProject).toHaveBeenCalledWith({ id: projectId, name: 'Neues Projekt' }, false)
+    expect(mocks.saveAppStateStrict).toHaveBeenCalledWith(mocks.state)
+    expect(mocks.flushProjectSyncQueue).toHaveBeenCalledWith({ config: mocks.apiConfig, signal: undefined })
+    expect(mocks.createProject).toHaveBeenCalledWith('project-1', 'Projekt 1', undefined, mocks.apiConfig)
     expect(mocks.createConversation).toHaveBeenCalledWith(
       expect.objectContaining({
+        external_id: expect.stringMatching(/^[0-9a-f-]{36}$/u),
         project_id: 'project-1',
-      })
+      }),
+      undefined,
+      mocks.apiConfig
     )
     expect(mocks.createTask).toHaveBeenCalledWith(
       expect.objectContaining({
         title: 'Tests schreiben',
         project_id: 'project-1',
-      })
+      }),
+      undefined,
+      mocks.apiConfig
     )
+  })
+
+  it('returns an actionable uncertain chat result and supports exact write-only verification', async () => {
+    mocks.createConversation.mockRejectedValueOnce(Object.assign(new Error('Verbindung unterbrochen.'), { status: 0 }))
+
+    const uncertain = (await getTool('chat_create')!.execute({ title: 'Projektanalyse' }, PROJECT_CONTEXT)) as {
+      match_conversation_id: string
+    }
+    const externalId = uncertain.match_conversation_id
+
+    expect(uncertain).toMatchObject({
+      ok: false,
+      code: 'conversation_create_outcome_unknown',
+      retry: 'verify_before_retry',
+      next_tool: 'chat_list',
+      next_arguments: { project_id: 'project-1', external_id: externalId },
+    })
+    expect(externalId).toMatch(/^[0-9a-f-]{36}$/u)
+
+    mocks.listConversations.mockRejectedValueOnce(Object.assign(new Error('Forbidden'), { status: 403 }))
+    mocks.verifyConversationCreate.mockResolvedValueOnce({
+      data: { external_id: externalId, exists: false },
+      meta: { conversation_create_idempotency: 'external_id_v1', filters: { external_id: externalId } },
+    })
+    await expect(
+      getTool('chat_list')!.execute({ project_id: 'project-1', external_id: externalId }, PROJECT_CONTEXT)
+    ).resolves.toEqual({
+      ok: true,
+      conversations: [],
+      conversation_create_idempotency: 'external_id_v1',
+      filtered_external_id: externalId,
+    })
+    expect(mocks.verifyConversationCreate).toHaveBeenCalledWith(externalId, 'project-1', undefined, mocks.apiConfig)
+  })
+
+  it('finishes local project creation without waiting for server synchronization', async () => {
+    mocks.flushProjectSyncQueue.mockImplementationOnce(() => new Promise(() => {}))
+
+    await expect(
+      getTool('project_create')!.execute({ name: 'Offline Projekt' }, PROJECT_CONTEXT)
+    ).resolves.toMatchObject({
+      ok: true,
+      name: 'Offline Projekt',
+      synced: false,
+      sync_queued: true,
+    })
+    expect(mocks.addProject).toHaveBeenCalledWith({ id: expect.any(String), name: 'Offline Projekt' }, false)
+  })
+
+  it('persists the project retry before exposing the local project', async () => {
+    let release!: () => void
+    mocks.enqueueProjectSync.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          release = resolve
+        })
+    )
+
+    const creation = getTool('project_create')!.execute({ name: 'Durables Projekt' }, PROJECT_CONTEXT)
+    await Promise.resolve()
+
+    expect(mocks.addProject).not.toHaveBeenCalled()
+    release()
+    await expect(creation).resolves.toMatchObject({ ok: true, sync_queued: true })
+    expect(mocks.enqueueProjectSync).toHaveBeenCalledOnce()
+    expect(mocks.addProject).toHaveBeenCalledOnce()
+  })
+
+  it('does not report or synchronize project creation when strict local persistence fails', async () => {
+    mocks.saveAppStateStrict.mockRejectedValueOnce(new Error('disk full'))
+
+    await expect(getTool('project_create')!.execute({ name: 'Nicht durabel' }, PROJECT_CONTEXT)).rejects.toThrow(
+      'disk full'
+    )
+
+    expect(mocks.addProject).toHaveBeenCalledOnce()
+    expect(mocks.rollbackProjectCreation).toHaveBeenCalledOnce()
+    expect(mocks.flushProjectSyncQueue).not.toHaveBeenCalled()
+  })
+
+  it('does not publish or synchronize a project when execution changes during queue persistence', async () => {
+    let release!: () => void
+    mocks.enqueueProjectSync.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          release = () => resolve({ scopeId: 'scope', operationId: 'revoked', externalId: 'project' })
+        })
+    )
+    const ticket = executionGate.capture()
+    const creation = getTool('project_create')!.execute(
+      { name: 'Widerrufenes Projekt' },
+      { ...PROJECT_CONTEXT, execution: ticket }
+    )
+    await vi.waitFor(() => expect(mocks.enqueueProjectSync).toHaveBeenCalledOnce())
+    updateExecutionControls({ mode: 'act', killSwitch: true, scope: 'project-1' })
+    release()
+
+    await expect(creation).rejects.toThrow('Ausführung verworfen')
+    expect(mocks.addProject).not.toHaveBeenCalled()
+    expect(mocks.flushProjectSyncQueue).not.toHaveBeenCalled()
   })
 
   it('keeps explicit current-project alignment for task and chat creation', async () => {
@@ -299,8 +460,117 @@ describe('tool registry contract', () => {
     await getTool('chat_create')!.execute({ project_id: 'project-1' }, PROJECT_CONTEXT)
 
     expect(mocks.createProject).toHaveBeenCalledTimes(2)
-    expect(mocks.createProject).toHaveBeenNthCalledWith(1, 'project-1', 'Projekt 1')
-    expect(mocks.createProject).toHaveBeenNthCalledWith(2, 'project-1', 'Projekt 1')
+    expect(mocks.createProject).toHaveBeenNthCalledWith(1, 'project-1', 'Projekt 1', undefined, mocks.apiConfig)
+    expect(mocks.createProject).toHaveBeenNthCalledWith(2, 'project-1', 'Projekt 1', undefined, mocks.apiConfig)
+  })
+
+  it('returns an actionable task-create rejection and permits a corrected retry', async () => {
+    mocks.createTask.mockRejectedValueOnce(Object.assign(new Error('Titel ist zu lang.'), { status: 422 }))
+
+    const rejected = await getTool('task_create')!.execute({ title: 'Ungültiger Titel' }, PROJECT_CONTEXT)
+    const retried = await getTool('task_create')!.execute({ title: 'Korrigierter Titel' }, PROJECT_CONTEXT)
+
+    expect(rejected).toEqual({
+      ok: false,
+      code: 'task_create_rejected',
+      error: 'task_create wurde vom Server abgelehnt (HTTP 422): Titel ist zu lang.',
+      retry: 'fix_arguments',
+    })
+    expect(retried).toEqual({ ok: true, task_id: 'task-1' })
+    expect(mocks.createTask).toHaveBeenCalledTimes(2)
+  })
+
+  it('requires verification before retrying a task whose POST outcome is uncertain', async () => {
+    mocks.createTask.mockRejectedValueOnce(Object.assign(new Error('Verbindung unterbrochen.'), { status: 0 }))
+
+    const result = await getTool('task_create')!.execute({ title: 'Graph vervollständigen' }, PROJECT_CONTEXT)
+    const matchTaskId = (result as { match_task_id: string }).match_task_id
+
+    expect(result).toEqual({
+      ok: false,
+      code: 'task_create_outcome_unknown',
+      error: expect.stringContaining('Wiederhole task_create nicht sofort'),
+      retry: 'verify_before_retry',
+      next_tool: 'task_list',
+      next_arguments: { project_id: 'project-1', external_id: matchTaskId },
+      match_title: 'Graph vervollständigen',
+      match_task_id: matchTaskId,
+    })
+    expect(matchTaskId).toMatch(/^[0-9a-f-]{36}$/u)
+    expect(mocks.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ external_id: matchTaskId }),
+      undefined,
+      mocks.apiConfig
+    )
+  })
+
+  it('treats HTTP 408 after a task POST as an uncertain outcome', async () => {
+    mocks.createTask.mockRejectedValueOnce(Object.assign(new Error('Gateway timeout.'), { status: 408 }))
+
+    const result = await getTool('task_create')!.execute({ title: 'Timeout prüfen' }, PROJECT_CONTEXT)
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: 'task_create_outcome_unknown',
+      retry: 'verify_before_retry',
+      next_tool: 'task_list',
+      next_arguments: { project_id: 'project-1', external_id: expect.any(String) },
+    })
+  })
+
+  it('reuses a guarded task operation id supplied by the agent runtime', async () => {
+    const externalId = '29ee4734-99c0-4f4c-8f06-33df65bce0d5'
+
+    const result = await getTool('task_create')!.execute(
+      { title: 'Release prüfen', external_id: externalId },
+      PROJECT_CONTEXT
+    )
+
+    expect(result).toEqual({ ok: true, task_id: 'task-1' })
+    expect(mocks.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ external_id: externalId }),
+      undefined,
+      mocks.apiConfig
+    )
+  })
+
+  it('does not post a task with a corrupt internal operation id', async () => {
+    const result = await getTool('task_create')!.execute(
+      { title: 'Release prüfen', external_id: 'invalid-id' },
+      PROJECT_CONTEXT
+    )
+
+    expect(result).toEqual({
+      ok: false,
+      code: 'task_create_rejected',
+      error: 'Die interne task_create-Operations-ID ist ungültig; der Task-POST wurde nicht gesendet.',
+      retry: 'stop',
+    })
+    expect(mocks.createTask).not.toHaveBeenCalled()
+  })
+
+  it('states that no task POST ran when current-project preparation fails', async () => {
+    mocks.createProject.mockRejectedValueOnce(new Error('Projektserver nicht erreichbar.'))
+
+    const result = await getTool('task_create')!.execute({ title: 'Später erneut versuchen' }, PROJECT_CONTEXT)
+
+    expect(result).toEqual({
+      ok: false,
+      code: 'task_create_project_prepare_failed',
+      error: expect.stringContaining('Es wurde noch kein Task-POST gesendet.'),
+      retry: 'retry_same_call',
+    })
+    expect(mocks.createTask).not.toHaveBeenCalled()
+  })
+
+  it('rejects a task create outside the active project before any POST', async () => {
+    const result = await getTool('task_create')!.execute(
+      { title: 'Falsches Projekt', project_id: 'project-2' },
+      PROJECT_CONTEXT
+    )
+
+    expect(result).toMatchObject({ ok: false, code: 'task_create_project_scope_rejected' })
+    expect(mocks.createTask).not.toHaveBeenCalled()
   })
 
   it('routes task listing, updates and completion without changing payloads', async () => {
@@ -322,20 +592,69 @@ describe('tool registry contract', () => {
     )
     await getTool('task_complete')!.execute({ task_id: 'task-1' }, PROJECT_CONTEXT)
 
-    expect(mocks.listTasks).toHaveBeenCalledWith({
-      status: 'open',
-      project_id: 'project-1',
-      conversation_id: 'chat-1',
+    expect(mocks.listTasks).toHaveBeenCalledWith(
+      {
+        status: 'open',
+        project_id: 'project-1',
+        conversation_id: 'chat-1',
+        external_id: undefined,
+      },
+      undefined,
+      mocks.apiConfig
+    )
+    expect(mocks.updateTask).toHaveBeenNthCalledWith(
+      1,
+      'task-1',
+      {
+        status: 'in_progress',
+        priority: 'high',
+        title: 'Titel',
+        description: 'Details',
+        project_id: 'project-2',
+        conversation_id: 'chat-2',
+      },
+      undefined,
+      mocks.apiConfig
+    )
+    expect(mocks.updateTask).toHaveBeenNthCalledWith(2, 'task-1', { status: 'done' }, undefined, mocks.apiConfig)
+  })
+
+  it('uses the write-scoped exact recovery endpoint when task listing is forbidden', async () => {
+    const forbidden = Object.assign(new Error('Forbidden'), { status: 403 })
+    mocks.listTasks.mockRejectedValueOnce(forbidden)
+    mocks.verifyTaskCreate.mockResolvedValueOnce({
+      data: { external_id: 'task-recovery', exists: false },
+      meta: {
+        task_create_idempotency: 'external_id_v1',
+        filters: { external_id: 'task-recovery' },
+      },
     })
-    expect(mocks.updateTask).toHaveBeenNthCalledWith(1, 'task-1', {
-      status: 'in_progress',
-      priority: 'high',
-      title: 'Titel',
-      description: 'Details',
-      project_id: 'project-2',
-      conversation_id: 'chat-2',
+
+    const result = await getTool('task_list')!.execute({ external_id: 'task-recovery' }, PROJECT_CONTEXT)
+
+    expect(mocks.verifyTaskCreate).toHaveBeenCalledWith('task-recovery', 'project-1', undefined, mocks.apiConfig)
+    expect(result).toEqual({
+      ok: true,
+      tasks: [],
+      task_create_idempotency: 'external_id_v1',
+      filtered_external_id: 'task-recovery',
     })
-    expect(mocks.updateTask).toHaveBeenNthCalledWith(2, 'task-1', { status: 'done' })
+  })
+
+  it('does not cross to task-create recovery after the captured execution is aborted', async () => {
+    const controller = new AbortController()
+    mocks.listTasks.mockImplementationOnce(async () => {
+      controller.abort()
+      throw Object.assign(new Error('Forbidden'), { status: 403 })
+    })
+
+    await expect(
+      getTool('task_list')!.execute(
+        { project_id: 'project-1', external_id: 'task-recovery' },
+        { ...PROJECT_CONTEXT, signal: controller.signal }
+      )
+    ).rejects.toMatchObject({ name: 'AbortError' })
+    expect(mocks.verifyTaskCreate).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -419,12 +738,21 @@ describe('tool registry contract', () => {
     await getTool('agent_bridge_write')!.execute({ content: '# Explicit' }, PROJECT_CONTEXT)
 
     expect(mocks.detectAgents).toHaveBeenCalledOnce()
-    expect(mocks.requireProjectWorkspace).toHaveBeenCalledWith('project-1')
     expect(mocks.prepareAgentJob).toHaveBeenCalledWith(
       expect.objectContaining({ projectId: 'project-1', prompt: 'Prüfen', permission: 'read-only' })
     )
     expect(mocks.runAgentCli).not.toHaveBeenCalled()
-    expect(mocks.writeBridgeFile).toHaveBeenCalledWith('E:\\project', '# Explicit', undefined)
+    expect(mocks.requireProjectWorkspace).toHaveBeenCalledWith('project-1', 'device:v1:test')
+    expect(mocks.writeBridgeFile).toHaveBeenCalledWith(
+      {
+        principalId: 'device:v1:test',
+        projectId: 'project-1',
+        expectedRootPath: 'E:\\project',
+        expectedWorkspaceUpdatedAt: 10,
+      },
+      '# Explicit',
+      expect.objectContaining({ sessionId: expect.any(String), generation: expect.any(Number) })
+    )
   })
 
   it('routes plan updates and reads through the visible-plan service', async () => {

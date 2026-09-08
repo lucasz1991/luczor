@@ -83,3 +83,9 @@ Record durable decisions with date, context, decision, and consequences.
 
 ## 2026-09-07T00:25:39Z | Process ownership versus request context
 - Native process scope binds verified principal, device, server instance, project, repository and native manifest acceptance session. Per-turn context IDs and task types stay request metadata, never process ownership keys. Real inference must disable prompt caching and send the complete request context; account/project/repository/session changes retain process isolation.
+
+## 2026-09-07 | Flüssige Sprachausgabe und manuelle Textauswahl
+
+- Normale Ausgaben werden als ein vollständiger TTS-Clip vorbereitet. Eine Aufteilung erfolgt ausschließlich oberhalb des 4.000-Zeichen-Serverlimits an Wortgrenzen; Satzzeichen sind keine Clipgrenze.
+- Die aktive Wortmarkierung bleibt eine aus der echten Clip-Laufzeit berechnete Näherung. Eine markierte Passage kann über die bestehende Auswahlleiste genau einmal vorgelesen werden und benötigt weiterhin die zielgebundene Freigabe für lokale Inhalte.
+- Die externe Fallback-Freigabe sitzt im oberen Promptkopf. Sie ändert keine Freigabe- oder Egressregeln. Allgemeine Composer-Hinweise entfallen auf ausdrücklichen Nutzerwunsch; Controls sind kompakter und zugänglich beschriftet.

@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Luczor · Flüssiges Vorlesen und Textauswahl</title>
+    <style>
+      body {
+        margin: 0;
+        background: #07090d;
+      }
+      .speech-selection-fixture {
+        box-sizing: border-box;
+        max-width: 820px;
+        min-height: 100vh;
+        margin: auto;
+        padding: 48px 24px;
+      }
+      .fixture-head {
+        margin-bottom: 24px;
+      }
+      .fixture-head h1 {
+        margin: 8px 0;
+        font-size: clamp(28px, 5vw, 48px);
+        letter-spacing: -0.04em;
+      }
+      .fixture-head p {
+        color: var(--ai-muted);
+      }
+      .fixture-answer {
+        padding: 24px;
+        border: 1px solid var(--ai-line);
+        border-radius: 14px;
+        background: var(--ai-panel);
+      }
+      .fixture-answer p {
+        margin: 0;
+        font-size: 18px;
+        line-height: 1.75;
+      }
+      .fixture-speak-all {
+        margin-top: 14px;
+      }
+      .fixture-output {
+        display: block;
+        min-height: 22px;
+        margin: 12px 0 28px;
+        color: var(--ai-accent);
+        font-size: 12px;
+      }
+      @media (max-width: 420px) {
+        .speech-selection-fixture {
+          padding: 28px 14px;
+        }
+        .fixture-answer {
+          padding: 18px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./speechSelectionPreview.ts"></script>
+  </body>
+</html>

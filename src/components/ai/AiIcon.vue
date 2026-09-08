@@ -21,6 +21,7 @@ const paths: Record<string, string> = {
   clock: 'M12 7v5l3 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
   shield: 'm12 2 8 3v6c0 5-8 11-8 11S4 16 4 11V5Zm-4 9 3 3 5-5',
   grid: 'M3 3h7v7H3Zm11 0h7v7h-7ZM3 14h7v7H3Zm11 0h7v7h-7Z',
+  upload: 'M12 16V4m-5 5 5-5 5 5M4 20h16',
 }
 </script>
 <template>

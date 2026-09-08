@@ -9,6 +9,7 @@ const KEY = 'app_state_v1'
 
 let store: Store | null = null
 let timer: number | null = null
+let saves: Promise<void> = Promise.resolve()
 
 async function getStore() {
   if (!store) store = await Store.load(STORE_FILE)
@@ -89,12 +90,26 @@ export function scheduleSave(state: AppState, debounceMs = 300) {
   timer = window.setTimeout(() => void saveAppState(state), debounceMs)
 }
 
+/** Persist a mutation whose caller must not report success before disk commit. */
+export async function saveAppStateStrict(state: AppState): Promise<void> {
+  const plain = stateForPersistence(state)
+  const operation = saves
+    .catch(() => undefined)
+    .then(async () => {
+      const s = await getStore()
+      await s.set(KEY, plain)
+      await s.save()
+    })
+  saves = operation.then(
+    () => undefined,
+    () => undefined
+  )
+  return operation
+}
+
 export async function saveAppState(state: AppState): Promise<void> {
   try {
-    const s = await getStore()
-    const plain = stateForPersistence(state)
-    await s.set(KEY, plain)
-    await s.save()
+    await saveAppStateStrict(state)
   } catch {
     // ignore (optional: toast/log)
   }

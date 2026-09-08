@@ -25,7 +25,7 @@ export function boundMiniMessages(messages: MiniMessage[]): MiniMessage[] {
   return bounded
 }
 
-export function miniProjectList(projects: Project[], messages: Message[]): MiniProject[] {
+export function miniProjectList(projects: Project[], messages: Message[], activity: Record<string, boolean> = {}): MiniProject[] {
   return projects
     .filter(project => !project.archivedAt)
     .slice(0, 200)
@@ -33,6 +33,7 @@ export function miniProjectList(projects: Project[], messages: Message[]): MiniP
       id: project.id,
       name: project.name.slice(0, 160),
       updatedAt: project.updatedAt,
+      busy: !!activity[project.id],
       messageCount: messages.filter(
         message => message.projectId === project.id && message.visibility !== 'hidden' && message.role === 'user'
       ).length,

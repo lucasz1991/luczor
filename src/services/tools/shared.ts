@@ -1,4 +1,4 @@
-import { LuczorApi } from '@/services/api/luczorApi'
+import { LuczorApi, type LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
 import { state } from '@/state/store'
 import type { GoalStatus } from '@/state/types'
 
@@ -23,7 +23,13 @@ export function getProject(projectId: string) {
  * conversations use the server tables. Keep the current external id aligned
  * before attaching a server-side child record; createProject is idempotent.
  */
-export async function ensureCurrentProjectOnServer(projectId: string): Promise<void> {
+export async function ensureCurrentProjectOnServer(
+  projectId: string,
+  signal?: AbortSignal,
+  config?: LuczorApiConfigSnapshot
+): Promise<void> {
   const project = getProject(projectId)
-  await LuczorApi.createProject(projectId, project?.name ?? projectId)
+  signal?.throwIfAborted()
+  await LuczorApi.createProject(projectId, project?.name ?? projectId, signal, config)
+  signal?.throwIfAborted()
 }

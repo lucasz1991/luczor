@@ -2,6 +2,7 @@ import { asString } from './shared'
 import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
 import { redactAbsoluteFilesystemPaths, redactProviderSecrets } from '@/services/prompt/promptContextAssembler'
 import { agentHub, agentProjectSnapshot, prepareAgentJob } from '@/services/agents/hub'
+import { executionGate } from '@/services/executionGate'
 import type { ToolDef } from './types'
 
 /** Managed jobs use the same hub already initialized by the desktop entry point. */
@@ -31,6 +32,8 @@ export const agentJobTools: ToolDef[] = [
       required: ['agent', 'prompt'],
     },
     async execute(args, ctx) {
+      const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
+      executionGate.assert(ticket, true)
       if (!['codex', 'local', 'policy'].includes(asString(args.agent))) throw new Error('Unbekannter Agent.')
       if (args.role !== undefined && !['planner', 'implementer', 'reviewer', 'assistant'].includes(asString(args.role)))
         throw new Error('Ungültige Rolle.')
@@ -40,6 +43,8 @@ export const agentJobTools: ToolDef[] = [
         const value = Object.getOwnPropertyDescriptor(args, key)?.value
         if (value !== undefined && typeof value !== 'boolean') throw new Error('Ungültige Agentenoption.')
       }
+      const project = await agentProjectSnapshot(ctx.projectId)
+      executionGate.assert(ticket, true)
       const job = await prepareAgentJob({
         projectId: ctx.projectId,
         adapterId: args.agent as 'codex' | 'local' | 'policy',
@@ -48,7 +53,15 @@ export const agentJobTools: ToolDef[] = [
         permission: args.permission === 'workspace-write' ? 'workspace-write' : 'read-only',
         includeMemory: args.include_memory === true,
         resume: args.resume === true,
+        expectedProject: project,
+        assertExecution: () => executionGate.assert(ticket, true),
       })
+      try {
+        executionGate.assert(ticket, true)
+      } catch (error) {
+        agentHub.cancel(job.id)
+        throw error
+      }
       return {
         ok: true,
         job_id: job.id,

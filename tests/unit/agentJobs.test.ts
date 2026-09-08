@@ -7,6 +7,13 @@ const harness = vi.hoisted(() => ({
   getOutput: vi.fn(),
   cancel: vi.fn(),
   externalPolicy: vi.fn(),
+  executionAssert: vi.fn(),
+}))
+vi.mock('@/services/executionGate', () => ({
+  executionGate: {
+    capture: () => ({ sessionId: 'session', generation: 1, signal: new AbortController().signal }),
+    assert: harness.executionAssert,
+  },
 }))
 vi.mock('@/services/repositoryGraph', () => ({ getRepositoryExternalPolicy: harness.externalPolicy }))
 vi.mock('@/services/agents/hub', () => ({
@@ -40,6 +47,7 @@ describe('managed agent tools', () => {
     harness.prepare.mockResolvedValue({ id: 'job-new', status: 'awaiting_approval' })
     harness.cancel.mockReturnValue(true)
     harness.externalPolicy.mockResolvedValue('ask')
+    harness.executionAssert.mockImplementation(() => undefined)
   })
 
   it('only prepares a staged task with strict defaults and no execution permission', async () => {
@@ -52,8 +60,38 @@ describe('managed agent tools', () => {
         permission: 'read-only',
         includeMemory: false,
         resume: false,
+        expectedProject: project,
+        assertExecution: expect.any(Function),
       })
     )
+  })
+
+  it('does not enqueue a prepared job after its execution generation changed during the snapshot', async () => {
+    harness.executionAssert
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => {
+        throw new Error('Ausführung verworfen')
+      })
+
+    await expect(
+      tool('agent_job_prepare').execute({ agent: 'local', prompt: 'Review this plan' }, context)
+    ).rejects.toThrow('Ausführung verworfen')
+    expect(harness.prepare).not.toHaveBeenCalled()
+  })
+
+  it('cancels the newly staged job when the execution generation changes before it is returned', async () => {
+    harness.executionAssert
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => {
+        throw new Error('Ausführung verworfen')
+      })
+
+    await expect(
+      tool('agent_job_prepare').execute({ agent: 'local', prompt: 'Review this plan' }, context)
+    ).rejects.toThrow('Ausführung verworfen')
+    expect(harness.prepare).toHaveBeenCalledOnce()
+    expect(harness.cancel).toHaveBeenCalledExactlyOnceWith('job-new')
   })
 
   it.each([

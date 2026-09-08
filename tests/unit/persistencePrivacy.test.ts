@@ -5,7 +5,7 @@ const storage = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), save: vi.fn() })
 vi.mock('@tauri-apps/plugin-store', () => ({ Store: { load: vi.fn(async () => storage) } }))
 
 import { DEFAULT_STATE } from '@/state/defaults'
-import { loadAppState, saveAppState, stateForPersistence } from '@/services/persistence'
+import { loadAppState, saveAppState, saveAppStateStrict, stateForPersistence } from '@/services/persistence'
 import { getTool } from '@/services/tools/registry'
 
 function pending(name: string, status: PendingToolCall['status'] = 'proposed'): PendingToolCall {
@@ -98,6 +98,43 @@ describe('ephemeral tool argument persistence', () => {
       expect(call).toMatchObject({ args: { text: 'LOCAL_OBSERVATION_SECRET' }, status: 'proposed' })
     }
     expect(storage.save).toHaveBeenCalledOnce()
+  })
+
+  it('propagates a strict app-state commit failure to transactional callers', async () => {
+    storage.save.mockRejectedValueOnce(new Error('disk full'))
+
+    await expect(saveAppStateStrict(appState())).rejects.toThrow('disk full')
+  })
+
+  it('serializes strict snapshots so an older delayed save cannot overwrite a newer project commit', async () => {
+    let releaseFirst!: () => void
+    const firstSave = new Promise<void>(resolve => {
+      releaseFirst = resolve
+    })
+    storage.save.mockImplementationOnce(() => firstSave).mockResolvedValueOnce(undefined)
+    const beforeProject = appState()
+    const withProject = appState()
+    withProject.projects.push({
+      ...structuredClone(withProject.projects[0]!),
+      id: 'project-new',
+      name: 'Neues Projekt',
+      createdAt: 2,
+      updatedAt: 2,
+    })
+
+    const older = saveAppStateStrict(beforeProject)
+    await vi.waitFor(() => expect(storage.save).toHaveBeenCalledOnce())
+    const durableProject = saveAppStateStrict(withProject)
+    await Promise.resolve()
+
+    expect(storage.set).toHaveBeenCalledOnce()
+    releaseFirst()
+    await Promise.all([older, durableProject])
+
+    expect(storage.set).toHaveBeenCalledTimes(2)
+    expect((storage.set.mock.calls[1]![1] as AppState).projects).toContainEqual(
+      expect.objectContaining({ id: 'project-new' })
+    )
   })
 
   it('scrubs legacy arguments and result errors on reload and updates the stored snapshot', async () => {

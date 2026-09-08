@@ -10,14 +10,23 @@ import { localAssistantProfilePrompt, refreshAssistantProfile } from '@/services
 import { createMiniChatBridge, type MiniWorkspaceBinding } from '@/services/miniChat/bridge'
 import { resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
 import { executionGate } from '@/services/executionGate'
+import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
+import { loadPendingTaskCreates, replacePendingTaskCreates } from '@/services/agents/taskCreateRecoveryLedger'
 
 type Dependencies = MiniWorkspaceBinding & {
-  context: () => { project: { id: string; name: string } | null; mode: LuczorMode; mainBusy: boolean }
+  context: () => {
+    project: { id: string; name: string } | null
+    mode: LuczorMode
+    mainBusy: boolean
+    workspaceBindingId?: string
+  }
   setMode: (mode: 'observe' | 'act') => void
   telemetry: () => MiniSnapshot['hud']
   mainDecision: () => MiniDecision | null
   decideMain: (id: string, approved: boolean) => void
   killSwitch: (enabled: boolean) => void
+  agentMode: () => boolean
+  voice: () => MiniSnapshot['voice']
   appearance: () => NonNullable<MiniSnapshot['appearance']>
 }
 export function useMiniChatHost(deps: Dependencies) {
@@ -32,18 +41,45 @@ export function useMiniChatHost(deps: Dependencies) {
       const projectIds = deps.projects().map(project => project.id)
       try {
         const principalId = await resolveWorkspacePrincipalId()
+        const account = await getVerifiedAccountSnapshot()
         executionGate.assert(ticket)
         const profile = await refreshAssistantProfile()
         executionGate.assert(ticket)
         if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
         const prompt = localAssistantProfilePrompt(profile)
+        const principalScopeId = JSON.stringify([
+          account?.serverInstance ?? 'device-local',
+          account?.principalId ?? principalId,
+        ])
+        let taskCreateRecoveryReady = true
+        const pendingTaskCreateVerifications = await loadPendingTaskCreates(principalScopeId, options.projectId).catch(
+          () => {
+            taskCreateRecoveryReady = false
+            return []
+          }
+        )
+        executionGate.assert(ticket)
         return await runAgent({
           ...options,
           workspaceScope: Object.freeze({ principalId, projectIds: Object.freeze(projectIds) }),
+          principalScopeId,
+          workspaceBindingId: deps.context().workspaceBindingId ?? '',
+          pendingTaskCreateVerifications,
+          taskCreateRecoveryReady,
           contextEgress: 'local_only',
           routingSettings: { preference: 'local_only' },
           externalBaseMessages: undefined,
           requestExternalApproval: undefined,
+          onCheckpoint: async checkpoint => {
+            if (ticket.signal.aborted || checkpoint.principalScopeId !== principalScopeId) return
+            await options.onCheckpoint?.(checkpoint)
+            if (ticket.signal.aborted) return
+            await replacePendingTaskCreates(
+              principalScopeId,
+              options.projectId,
+              checkpoint.pendingTaskCreateVerifications ?? []
+            )
+          },
           baseMessages: options.baseMessages.map(message =>
             message.role === 'system' && prompt ? { ...message, content: `${message.content}\n\n${prompt}` } : message
           ),
@@ -63,6 +99,8 @@ export function useMiniChatHost(deps: Dependencies) {
     ...bridge.snapshot.value,
     hud: deps.telemetry(),
     mainDecision: deps.mainDecision(),
+    agentMode: deps.agentMode(),
+    voice: deps.voice(),
     appearance: deps.appearance(),
   }))
   function dispatch(action: MiniAction) {
@@ -101,6 +139,7 @@ export function useMiniChatHost(deps: Dependencies) {
   )
   onMounted(async () => {
     window.addEventListener('luczor:voice-stop', bridge.reset)
+    window.addEventListener('luczor:api-identity-changing', bridge.reset)
     if (!isTauri()) return
     try {
       const off = await listen<MiniAction>(MINI_ACTION_EVENT, event => {
@@ -124,6 +163,7 @@ export function useMiniChatHost(deps: Dependencies) {
     disposed = true
     unlisten?.()
     window.removeEventListener('luczor:voice-stop', bridge.reset)
+    window.removeEventListener('luczor:api-identity-changing', bridge.reset)
     clearTimeout(timer)
   })
   async function open() {

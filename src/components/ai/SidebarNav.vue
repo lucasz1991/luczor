@@ -8,6 +8,7 @@ const props = withDefaults(
 )
 const emit = defineEmits<{
   select: [id: string]
+  rename: [id: string, name: string]
   newChat: []
   addProject: []
   settings: []
@@ -17,9 +18,27 @@ const emit = defineEmits<{
   'update:collapsed': [value: boolean]
 }>()
 const query = ref('')
+const editingId = ref('')
+const editingLabel = ref('')
 const filtered = computed(() =>
   props.items.filter(item => item.label.toLocaleLowerCase('de').includes(query.value.toLocaleLowerCase('de')))
 )
+function beginRename(item: SearchItem) {
+  if (props.collapsed) return
+  editingId.value = item.id
+  editingLabel.value = item.label
+}
+function commitRename(item: SearchItem) {
+  const next = editingLabel.value.trim()
+  if (editingId.value !== item.id) return
+  editingId.value = ''
+  editingLabel.value = ''
+  if (next && next !== item.label) emit('rename', item.id, next)
+}
+function cancelRename() {
+  editingId.value = ''
+  editingLabel.value = ''
+}
 </script>
 <template>
   <aside class="ai-sidebar" :class="{ 'is-collapsed': collapsed }" aria-label="Workspace-Navigation">
@@ -44,37 +63,53 @@ const filtered = computed(() =>
     <button class="ai-sidebar__action" type="button" title="Agenten und Erinnerungsübertragung" @click="emit('agents')">
       <AiIcon name="spark" /><span>Agenten & Erinnerungen</span>
     </button>
-    <button
-      class="ai-sidebar__action"
-      type="button"
-      title="Optionales Planungsfenster öffnen"
-      @click="emit('planning')"
-    >
+    <button class="ai-sidebar__action" type="button" title="Optionales Planungsfenster öffnen" @click="emit('planning')">
       <AiIcon name="check" /><span>Planungsfenster</span>
     </button>
-    <div class="ai-sidebar__section">
-      <span>Projekte</span><span>{{ items.length }}</span>
-    </div>
+    <div class="ai-sidebar__section"><span>Projekte</span><span>{{ items.length }}</span></div>
     <label v-if="!collapsed" class="ai-search__field"
-      ><AiIcon name="search" /><input
-        v-model="query"
-        type="search"
-        aria-label="Projekte suchen"
-        placeholder="Projekte suchen"
+      ><AiIcon name="search" /><input v-model="query" type="search" aria-label="Projekte suchen" placeholder="Projekte suchen"
     /></label>
     <nav class="ai-sidebar__items">
-      <button
+      <div
         v-for="item in filtered"
         :key="item.id"
-        type="button"
-        :title="item.label"
-        :aria-label="`Projekt ${item.label}`"
-        :aria-current="item.id === activeId ? 'page' : undefined"
-        :class="{ 'is-active': item.id === activeId }"
-        @click="emit('select', item.id)"
+        class="ai-sidebar__project"
+        :class="{ 'is-active': item.id === activeId, 'is-busy': item.busy }"
       >
-        <AiIcon name="folder" /><span>{{ item.label }}</span>
-      </button>
+        <button
+          type="button"
+          class="ai-sidebar__project-main"
+          :title="item.label"
+          :aria-label="`Projekt ${item.label}`"
+          :aria-current="item.id === activeId ? 'page' : undefined"
+          @click="emit('select', item.id)"
+        >
+          <AiIcon name="folder" />
+          <input
+            v-if="editingId === item.id"
+            v-model="editingLabel"
+            class="ai-sidebar__rename"
+            aria-label="Projektname bearbeiten"
+            maxlength="160"
+            @click.stop
+            @keydown.enter.prevent="commitRename(item)"
+            @keydown.esc.prevent="cancelRename"
+            @blur="commitRename(item)"
+          />
+          <span v-else>{{ item.label }}</span>
+          <span v-if="item.busy" class="ai-sidebar__activity" aria-label="AI läuft" title="In diesem Projekt läuft gerade eine AI" />
+        </button>
+        <button
+          v-if="!collapsed && editingId !== item.id"
+          type="button"
+          class="ai-sidebar__edit"
+          :aria-label="`${item.label} umbenennen`"
+          @click.stop="beginRename(item)"
+        >
+          <AiIcon name="settings" :size="12" />
+        </button>
+      </div>
       <p v-if="!filtered.length && !collapsed" class="ai-empty">Kein Projekt gefunden.</p>
     </nav>
     <footer>

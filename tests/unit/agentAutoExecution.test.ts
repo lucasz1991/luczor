@@ -184,7 +184,7 @@ describe('runAgent auto execution', () => {
     const result = await runAgent({ projectId: 'p1', baseMessages: [], mode: 'act' })
 
     expect(mocks.loadExecutionPolicy).toHaveBeenCalledTimes(2)
-    expect(mocks.awaitApproval).toHaveBeenCalledExactlyOnceWith('call-2')
+    expect(mocks.awaitApproval).toHaveBeenCalledExactlyOnceWith('call-2', expect.anything())
     expect(mocks.execute).toHaveBeenNthCalledWith(1, { value: 1 }, expect.objectContaining({ projectId: 'p1' }))
     expect(mocks.execute).toHaveBeenNthCalledWith(2, { value: 2 }, expect.objectContaining({ projectId: 'p1' }))
     expect(result.toolSuccesses).toBe(2)

@@ -4,6 +4,7 @@ import type { AgentProjectSnapshot } from '@/services/agents/types'
 import { agentProjectSnapshot } from '@/services/agents/hub'
 import { createStandardAgentTeamDefinition } from '@/services/agents/teams'
 import { agentTeams, prepareAgentTeam } from '@/services/agents/teamHub'
+import { executionGate } from '@/services/executionGate'
 
 const ADAPTERS = ['codex', 'local', 'policy'] as const
 
@@ -49,6 +50,8 @@ export const agentTeamTools: ToolDef[] = [
       required: ['objective', 'planner', 'implementer', 'reviewer', 'approval_mode'],
     },
     async execute(args, ctx) {
+      const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
+      executionGate.assert(ticket, true)
       const objective = asString(args.objective).trim()
       if (!objective || objective.length > 24_000)
         throw new Error('Das Teamziel muss zwischen 1 und 24000 Zeichen enthalten.')
@@ -68,12 +71,14 @@ export const agentTeamTools: ToolDef[] = [
         throw new Error('Nur der verwaltete Codex-Agent darf Workspace-Schreibzugriff erhalten.')
       }
       const project = await agentProjectSnapshot(ctx.projectId)
+      executionGate.assert(ticket, true)
       const definition = createStandardAgentTeamDefinition({
         planner,
         implementer,
         reviewer,
         implementerPermission: permission,
       })
+      executionGate.assert(ticket, true)
       const run = prepareAgentTeam(definition, {
         project,
         objective,

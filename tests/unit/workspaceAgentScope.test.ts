@@ -235,7 +235,7 @@ describe('agent workspace isolation', () => {
         inferenceGateway: gateway(),
       })
     ).rejects.toMatchObject({ name: 'AbortError' })
-    expect(mocks.approve).toHaveBeenCalledWith('workspace-call')
+    expect(mocks.approve).toHaveBeenCalledWith('workspace-call', expect.anything())
     expect(mocks.executeWorkspace).not.toHaveBeenCalled()
   })
 })

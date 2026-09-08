@@ -481,6 +481,47 @@ html.mini-window,
   justify-content: space-between;
   gap: 8px;
 }
+.mini-quick-controls {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  padding: 8px 12px 0;
+}
+.mini-quick-controls button,
+.mini-upload {
+  min-width: 0;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid var(--ai-line);
+  border-radius: 8px;
+  background: var(--ai-inset);
+  color: var(--ai-muted);
+  padding: 6px 5px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+.mini-quick-controls button:hover,
+.mini-upload:hover,
+.mini-quick-controls button[aria-pressed='true'] {
+  color: var(--ai-ink);
+  border-color: var(--ai-line-strong);
+  background: var(--ai-hover);
+}
+.mini-quick-controls button[aria-pressed='true'] {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ai-accent) 38%, transparent);
+}
+.mini-upload {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.mini-upload input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
 .mini-composer small {
   font-size: 9px;
   color: var(--ai-faint);
@@ -580,6 +621,21 @@ html.mini-window,
   white-space: nowrap;
   max-width: 146px;
 }
+.mini-status-label.is-working {
+  border-color: color-mix(in srgb, var(--ai-accent) 44%, var(--ai-line-strong)) !important;
+  color: var(--ai-accent) !important;
+}
+.mini-status-label.is-working::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 999px;
+  background: var(--ai-accent);
+  box-shadow: 0 0 10px color-mix(in srgb, var(--ai-accent) 70%, transparent);
+  animation: mini-pulse 1s ease-in-out infinite;
+}
 .mini-orb-tools {
   display: flex;
   align-self: flex-end;
@@ -588,6 +644,18 @@ html.mini-window,
   background: var(--ai-canvas);
   border-radius: 10px;
   border: 1px solid var(--ai-line);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition:
+    opacity 0.14s,
+    transform 0.14s;
+}
+.mini-orb-dock:hover .mini-orb-tools,
+.mini-orb-dock:focus-within .mini-orb-tools {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(0);
 }
 .mini-orb-tools button {
   padding: 3px;
@@ -605,6 +673,15 @@ html.mini-window,
   color: var(--ai-page);
   font-size: 11px;
   border: 2px solid var(--ai-page);
+}
+@keyframes mini-pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 .mini-peek {
   width: 100%;

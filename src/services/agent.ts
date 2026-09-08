@@ -39,7 +39,7 @@ import { executionGate } from '@/services/executionGate'
 import { validateToolArguments } from '@/services/tools/validateArguments'
 import { INVALID_TOOL_ARGUMENTS, prepareToolCallHistory } from '@/services/inference/toolCallHistory'
 import { loadToolLimits, validToolRounds } from '@/services/toolLimits'
-import { mutationKey, type AgentCheckpoint } from '@/services/agents/chatCheckpoint'
+import { mutationKey, type AgentCheckpoint, type PendingTaskCreateVerification } from '@/services/agents/chatCheckpoint'
 import { isPlanningDiscussion } from '@/services/planningEntry'
 import { createTokenUsageCounter, type TokenUsage } from '@/services/tokenUsage'
 import { looksLikeInternalReasoningLeak, publicAnswerText } from '@/services/publicAnswerStream'
@@ -56,7 +56,7 @@ export type AgentToolSession = {
     status: ToolCallStatus
   }) => void
   update: (id: string, status: ToolCallStatus) => void
-  approve: (id: string) => Promise<boolean>
+  approve: (id: string, signal?: AbortSignal) => Promise<boolean>
 }
 
 /** Truncate a value for the server event payload (avoid huge uploads). */
@@ -96,9 +96,23 @@ export type RunAgentOptions = {
     summary: import('./agents/externalSpecialists').TeamPacketApproval
   ) => boolean | Promise<boolean>
   continuation?: AgentCheckpoint
+  /** Principal-bound unresolved task writes carried into every project turn. */
+  pendingTaskCreateVerifications?: readonly PendingTaskCreateVerification[]
+  /** Stable account + server identity for checkpoints and pending write guards. */
+  principalScopeId?: string
+  /** Stable identifier for the active local workspace binding. */
+  workspaceBindingId?: string
+  /** False blocks task_create while the durable recovery ledger cannot be read. */
+  taskCreateRecoveryReady?: boolean
   /** Internal team nodes can only narrow tool access. */
   toolAccess?: 'read-only' | 'none'
+  /** Internal orchestration boundary: known tools omitted here remain non-executable even if a model names them. */
+  disabledTools?: readonly string[]
   signal?: AbortSignal
+  /** Scheduler-only cancellation. Unlike a user/scope abort it returns a resumable checkpoint. */
+  interruptionSignal?: AbortSignal
+  /** Receives mutation-safe progress before and after side effects. */
+  onCheckpoint?: (checkpoint: AgentCheckpoint) => void | Promise<void>
   /** Explicit test/integration gateway. Production callers resolve through the signed coordinator. */
   inferenceGateway?: InferenceGateway
   /** Local/external boundary for this turn. Local-only can never route to Laravel. */
@@ -141,6 +155,137 @@ export type RunAgentOptions = {
 
 type Outcome = { ok: boolean; output?: unknown; error?: string }
 type ToolOutcomeRecord = { name: string; outcome: Outcome }
+
+function stringArgument(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+function normalizedTaskTitle(value: unknown): string {
+  return stringArgument(value).normalize('NFKC').replace(/\s+/gu, ' ').toLocaleLowerCase('de-DE')
+}
+
+function sameTaskCreateSubject(
+  item: PendingTaskCreateVerification,
+  target: { projectId: string; title: string }
+): boolean {
+  return (
+    (item.kind ?? 'task') === 'task' &&
+    item.projectId === target.projectId &&
+    normalizedTaskTitle(item.title) === normalizedTaskTitle(target.title)
+  )
+}
+
+function sameConversationCreateSubject(
+  item: PendingTaskCreateVerification,
+  target: { projectId: string; title: string }
+): boolean {
+  return (
+    item.kind === 'conversation' &&
+    item.projectId === target.projectId &&
+    normalizedTaskTitle(item.title) === normalizedTaskTitle(target.title)
+  )
+}
+
+function completedMutationKey(name: string, args: Record<string, unknown>, currentProjectId: string): string {
+  if (name === 'chat_create')
+    return mutationKey(name, {
+      title: normalizedTaskTitle(args.title) || null,
+      project_id: stringArgument(args.project_id) || currentProjectId,
+    })
+  if (name !== 'task_create') return mutationKey(name, args)
+  return mutationKey(name, {
+    title: normalizedTaskTitle(args.title),
+    description: stringArgument(args.description) || null,
+    priority: stringArgument(args.priority) || 'normal',
+    project_id: stringArgument(args.project_id) || currentProjectId,
+    conversation_id: stringArgument(args.conversation_id) || null,
+    due_at: stringArgument(args.due_at) || null,
+  })
+}
+
+function conversationCreateTarget(
+  args: Record<string, unknown>,
+  fallbackProjectId: string
+): { key: string; projectId: string; title: string } {
+  const projectId = stringArgument(args.project_id) || fallbackProjectId
+  return {
+    key: completedMutationKey('chat_create', args, fallbackProjectId),
+    projectId,
+    title: stringArgument(args.title) || 'Neuer Chat',
+  }
+}
+
+function taskCreateTarget(
+  args: Record<string, unknown>,
+  fallbackProjectId: string
+): { key: string; projectId: string; title: string } | null {
+  const title = stringArgument(args.title)
+  if (!title) return null
+  const projectId = stringArgument(args.project_id) || fallbackProjectId
+  return {
+    key: completedMutationKey('task_create', args, fallbackProjectId),
+    projectId,
+    title,
+  }
+}
+
+function pendingTaskCreateKey(item: PendingTaskCreateVerification): string {
+  if (item.fingerprint) return item.fingerprint
+  if (item.fingerprintHash) return `sha256:${item.fingerprintHash}`
+  return completedMutationKey(
+    item.kind === 'conversation' ? 'chat_create' : 'task_create',
+    { title: item.title, project_id: item.projectId },
+    item.projectId
+  )
+}
+
+async function taskCreateFingerprintHash(fingerprint: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(fingerprint))
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function taskListRecords(output: unknown): Array<Record<string, unknown>> | null {
+  if (!output || typeof output !== 'object' || Array.isArray(output)) return null
+  const tasks = (output as Record<string, unknown>).tasks
+  if (!Array.isArray(tasks)) return null
+  if (!tasks.every(task => task && typeof task === 'object' && !Array.isArray(task))) return null
+  return tasks as Array<Record<string, unknown>>
+}
+
+export type AgentInterruption = {
+  code: string
+  message: string
+  round?: number
+}
+
+export type AgentRunEvaluation = {
+  requestId: string
+  role: 'planner' | 'worker' | 'reviewer'
+  toolFailures: number
+  toolSuccesses: number
+  continuation: boolean
+  interrupted?: AgentInterruption
+}
+
+export type RunAgentResult = {
+  finalText: string
+  requestId?: string
+  model?: string
+  provider?: string
+  useCase?: string
+  toolFailures: number
+  toolSuccesses: number
+  ephemeralDataUsed: boolean
+  inferenceTarget?: 'local_llama_cpp' | 'laravel_proxy'
+  routeDecisionId?: string
+  tokenUsage: TokenUsage
+  specialistOutcomes?: import('./agents/externalSpecialists').SpecialistOutcome[]
+  continuation?: AgentCheckpoint
+  /** A model round stopped after tool progress was already recorded. */
+  interrupted?: AgentInterruption
+  /** Per-node outcomes for an agent team. Never attribute team aggregates to one request ID. */
+  agentRunEvaluations?: AgentRunEvaluation[]
+}
 
 const RUNTIME_MODE_MARKER = '[LUCZOR-LAUFZEITMODUS]'
 const RUNTIME_TOOLS_MARKER = '[LUCZOR-LAUFZEITTOOLS]'
@@ -332,21 +477,7 @@ function recordPersistentOutcome(
   })
 }
 
-export async function runAgent(opts: RunAgentOptions): Promise<{
-  finalText: string
-  requestId?: string
-  model?: string
-  provider?: string
-  useCase?: string
-  toolFailures: number
-  toolSuccesses: number
-  ephemeralDataUsed: boolean
-  inferenceTarget?: 'local_llama_cpp' | 'laravel_proxy'
-  routeDecisionId?: string
-  tokenUsage: TokenUsage
-  specialistOutcomes?: import('./agents/externalSpecialists').SpecialistOutcome[]
-  continuation?: AgentCheckpoint
-}> {
+export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
   if (opts.continuation?.toolAccess) {
     opts = { ...opts, toolAccess: opts.toolAccess === 'none' ? 'none' : opts.continuation.toolAccess }
   }
@@ -354,10 +485,29 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   const maxRounds = opts.maxRounds ?? (await loadToolLimits()).chat
   if (!validToolRounds(maxRounds)) throw new Error('Tool-Runden müssen zwischen 1 und 64 liegen.')
   const execution = executionGate.capture(opts.signal)
-  const signal = execution.signal
+  const signal = opts.interruptionSignal
+    ? AbortSignal.any([execution.signal, opts.interruptionSignal])
+    : execution.signal
+  const internallyInterrupted = () => !!opts.interruptionSignal?.aborted && !execution.signal.aborted
+  if (
+    opts.continuation &&
+    opts.continuation.projectId === projectId &&
+    opts.continuation.sessionId === execution.sessionId &&
+    !!opts.principalScopeId &&
+    opts.continuation.principalScopeId === opts.principalScopeId &&
+    opts.continuation.workspaceBindingId === opts.workspaceBindingId &&
+    opts.continuation.generation !== execution.generation
+  ) {
+    opts = {
+      ...opts,
+      continuation: { ...opts.continuation, generation: execution.generation },
+    }
+  }
   if (
     opts.continuation &&
     (opts.continuation.projectId !== projectId ||
+      (!!opts.principalScopeId && opts.continuation.principalScopeId !== opts.principalScopeId) ||
+      (opts.workspaceBindingId !== undefined && opts.continuation.workspaceBindingId !== opts.workspaceBindingId) ||
       opts.continuation.sessionId !== execution.sessionId ||
       opts.continuation.generation !== execution.generation)
   ) {
@@ -377,8 +527,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     ''
   const planningDiscussion = isPlanningDiscussion(latestUserMessage)
   const requestedToolChoice = planningDiscussion && opts.toolChoice === 'required' ? 'auto' : opts.toolChoice
+  const disabledTools = new Set(opts.disabledTools ?? [])
   const allTools = toOpenAITools().filter(
     description =>
+      !disabledTools.has(description.function.name) &&
       (!getTool(description.function.name)?.workspaceOnly || !!opts.workspaceScope) &&
       opts.toolAccess !== 'none' &&
       (opts.toolAccess !== 'read-only' || getTool(description.function.name)?.mutating === false) &&
@@ -456,16 +608,88 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     ...(opts.continuation?.messages ?? resolvedRoute.replacementMessages ?? opts.baseMessages),
   ]
   const completedMutations = new Map(opts.continuation?.completedMutations ?? [])
+  const pendingSeedsByExternalId = new Map<string, PendingTaskCreateVerification>()
+  for (const item of opts.pendingTaskCreateVerifications ?? [])
+    if (item.projectId === projectId && (!opts.principalScopeId || item.principalScopeId === opts.principalScopeId))
+      pendingSeedsByExternalId.set(item.externalId, item)
+  // The live continuation carries the richer in-memory fingerprint and wins
+  // over the hash-only durable copy of the same operation.
+  for (const item of opts.continuation?.pendingTaskCreateVerifications ?? [])
+    if (item.projectId === projectId && (!opts.principalScopeId || item.principalScopeId === opts.principalScopeId))
+      pendingSeedsByExternalId.set(item.externalId, item)
+  const pendingSeeds = [...pendingSeedsByExternalId.values()]
+  const pendingTaskCreateVerifications = new Map<string, PendingTaskCreateVerification>(
+    pendingSeeds.map(item => [pendingTaskCreateKey(item), structuredClone(item)])
+  )
+  const deletePendingCreate = (externalId: string, kind: 'task' | 'conversation') => {
+    for (const [key, item] of pendingTaskCreateVerifications)
+      if (item.externalId === externalId && (item.kind ?? 'task') === kind) pendingTaskCreateVerifications.delete(key)
+  }
+  let pendingTaskCreateTouched = !!opts.continuation?.pendingTaskCreateVerifications?.some(
+    item => item.state === 'unknown' || item.state === 'verified_absent'
+  )
+  let ephemeralDataUsed = !!opts.continuation?.ephemeralDataUsed
   const checkpoint = (): AgentCheckpoint => ({
     projectId,
+    principalScopeId: opts.principalScopeId,
+    workspaceBindingId: opts.workspaceBindingId,
     sessionId: execution.sessionId,
     generation: execution.generation,
     objective: opts.continuation?.objective ?? latestUserMessage,
     messages: structuredClone(messages),
     completedMutations: structuredClone([...completedMutations]),
+    pendingTaskCreateVerifications: structuredClone([...pendingTaskCreateVerifications.values()]),
     ephemeralDataUsed: ephemeralDataUsed || !!opts.continuation?.ephemeralDataUsed,
     toolAccess: opts.toolAccess,
   })
+  const emitCheckpoint = async (value = checkpoint(), required = false): Promise<void> => {
+    // Project/account/mode invalidation must never repopulate UI state with a
+    // late checkpoint. A scheduler-only interruption leaves this ticket valid.
+    if (execution.signal.aborted) return
+    if (required && !opts.onCheckpoint)
+      throw new Error('Der Sicherheitsstatus vor dem Anlegen hat keinen dauerhaften Speicher-Handler.')
+    try {
+      await opts.onCheckpoint?.(value)
+    } catch (error) {
+      if (required) {
+        throw new Error(
+          `Der Sicherheitsstatus vor dem Anlegen konnte nicht dauerhaft gespeichert werden: ${error instanceof Error ? error.message : String(error)}`
+        )
+      }
+      // A noncritical UI progress observer cannot alter agent execution.
+    }
+  }
+  const safeProgressCheckpoint = (): AgentCheckpoint => {
+    const value = checkpoint()
+    const pending = value.pendingTaskCreateVerifications?.filter(
+      item => item.state === 'unknown' || item.state === 'verified_absent'
+    )
+    const pendingTaskCount = pending?.filter(item => (item.kind ?? 'task') === 'task').length ?? 0
+    const pendingConversationCount = pending?.filter(item => item.kind === 'conversation').length ?? 0
+    value.messages = [
+      ...messages.filter(message => message.role === 'system').map(message => structuredClone(message)),
+      {
+        role: 'user',
+        content: [
+          `Setze den begonnenen Auftrag fort: ${value.objective.slice(0, 6_000)}${value.objective.length > 6_000 ? '…' : ''}`,
+          'Der Zwischenstand wurde unmittelbar an einer Werkzeuggrenze gesichert. Lies den aktuellen Projekt- und Aufgabenstand neu ein, bevor du weitere Änderungen ausführst.',
+          value.completedMutations.length
+            ? `${value.completedMutations.length} bereits erfolgreiche Änderungen sind gegen identische Wiederholung geschützt.`
+            : '',
+          pendingTaskCount
+            ? `${pendingTaskCount} task_create-Vorgänge benötigen vor einer Wiederholung die im Werkzeugergebnis geforderte exakte external_id-Prüfung.`
+            : '',
+          pendingConversationCount
+            ? `${pendingConversationCount} chat_create-Vorgänge benötigen vor einer Wiederholung die exakte external_id-Prüfung mit chat_list.`
+            : '',
+        ]
+          .filter(Boolean)
+          .join('\n\n'),
+      },
+    ]
+    return value
+  }
+  if (opts.continuation || pendingTaskCreateVerifications.size) await emitCheckpoint(safeProgressCheckpoint())
   if (planningDiscussion && !resolvedRoute.externalOneShot) {
     messages.unshift({
       role: 'system',
@@ -479,7 +703,6 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   let lastUseCase: string | undefined
   let toolFailures = 0
   let toolSuccesses = 0
-  let ephemeralDataUsed = !!opts.continuation?.ephemeralDataUsed
   const toolOutcomes: ToolOutcomeRecord[] = []
   let reasoningRetryUsed = false
   let localContextAdjusted = false
@@ -501,6 +724,115 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   }
   const roundLimit = resolvedRoute.externalOneShot ? 1 : maxRounds
 
+  const partialResultAfterInferenceFailure = async (
+    error: unknown,
+    round: number,
+    interruptionOverride?: AgentInterruption
+  ): Promise<RunAgentResult> => {
+    const interruption: AgentInterruption =
+      interruptionOverride ??
+      (error instanceof LocalInferenceError
+        ? { code: error.code, message: error.message, round }
+        : {
+            code: 'inference_failed',
+            message: 'Die lokale Modellrunde konnte nicht abgeschlossen werden.',
+            round,
+          })
+    const continuation = checkpoint()
+    const resetHistory =
+      interruption.code === 'team_node_interrupted' ||
+      (error instanceof LocalInferenceError &&
+        ['runtime_context_exceeded', 'runtime_chat_history_rejected', 'runtime_tool_contract_rejected'].includes(
+          error.code
+        ))
+    const retainedMutationCount = completedMutations.size
+    if (resetHistory) {
+      const objective = continuation.objective.slice(0, 6_000)
+      const toolStatus = toolOutcomes
+        .slice(-20)
+        .map(item => `${item.name}: ${item.outcome.ok ? 'erfolgreich' : 'fehlgeschlagen'}`)
+        .join(', ')
+      const verificationStatus = [...pendingTaskCreateVerifications.values()]
+        .map(item => {
+          const conversation = item.kind === 'conversation'
+          const createTool = conversation ? 'chat_create' : 'task_create'
+          const listTool = conversation ? 'chat_list' : 'task_list'
+          if (item.state === 'unknown')
+            return `${createTool} „${item.title}“ in Projekt ${item.projectId}: exakte ${listTool}-Prüfung mit external_id ${item.externalId} erforderlich`
+          if (item.state === 'verified_absent')
+            return `${createTool} „${item.title}“ in Projekt ${item.projectId}: als nicht vorhanden verifiziert; ${createTool} mit derselben external_id ${item.externalId} erneut ausführen`
+          return `${createTool} „${item.title}“ in Projekt ${item.projectId}: als vorhanden verifiziert; nicht erneut anlegen`
+        })
+        .join(', ')
+      continuation.messages = [
+        ...messages.filter(message => message.role === 'system').map(message => structuredClone(message)),
+        {
+          role: 'user',
+          content: [
+            `Setze den begonnenen Auftrag fort: ${objective}${continuation.objective.length > objective.length ? '…' : ''}`,
+            'Die vorherige lokale Nachrichtenstruktur wurde nach einer Laufzeitstörung zurückgesetzt. Lies den aktuellen Projekt- und Aufgabenstand erneut ein, bevor du weitere Änderungen ausführst.',
+            `Bisherige Toolbilanz: ${toolSuccesses} erfolgreich, ${toolFailures} fehlgeschlagen.${toolStatus ? ` ${toolStatus}.` : ''}`,
+            verificationStatus ? `Offene Schreibverifikation: ${verificationStatus}.` : '',
+            'Bereits erfolgreich ausgeführte, wiederholbare Änderungen sind im Fortsetzungs-Checkpoint geschützt und dürfen nicht doppelt ausgeführt werden.',
+          ]
+            .filter(Boolean)
+            .join('\n\n'),
+        },
+      ]
+    }
+    const finalText = [
+      `Die lokale Modellrunde ${round} wurde vor dem Abschluss unterbrochen: ${interruption.message}`,
+      toolOutcomes.length
+        ? `Der bisherige Arbeitsfortschritt bleibt erhalten (${toolSuccesses} Tool-Aufrufe erfolgreich, ${toolFailures} fehlgeschlagen).`
+        : retainedMutationCount
+          ? `Der Fortsetzungsstand bleibt erhalten; ${retainedMutationCount} bereits erfolgreiche Änderungen bleiben vor identischer Wiederholung geschützt.`
+          : 'Der Auftrag wurde in einen bereinigten Fortsetzungsstand überführt.',
+      'Du kannst direkt weiterarbeiten; Luczor liest dabei den aktuellen Zustand erneut ein und wiederholt bereits erfolgreiche Änderungen nicht.',
+    ].join('\n\n')
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(
+        new CustomEvent('luczor:debug', {
+          detail: {
+            level: 'warn',
+            event: 'agent_inference_interrupted',
+            detail: {
+              code: interruption.code,
+              round,
+              tool_successes: toolSuccesses,
+              tool_failures: toolFailures,
+              history_reset: resetHistory,
+            },
+          },
+        })
+      )
+    }
+    publish(finalText)
+    opts.onRoundComplete?.({
+      round,
+      content: finalText,
+      kind: 'answer',
+      serverSpeechAllowed: !ephemeralDataUsed,
+    })
+    await emitCheckpoint(continuation)
+    return {
+      finalText,
+      // The failed inference did not return a request id. Reusing the previous
+      // successful round's id would assign this interruption to the wrong run.
+      requestId: undefined,
+      model: lastModel,
+      provider: lastProvider,
+      useCase: lastUseCase,
+      toolFailures,
+      toolSuccesses,
+      ephemeralDataUsed,
+      inferenceTarget: inferenceGateway.target,
+      routeDecisionId: resolvedRoute.decision?.id,
+      tokenUsage: tokenCounter.snapshot(),
+      continuation,
+      interrupted: interruption,
+    }
+  }
+
   if (opts.agentMode) {
     if (inferenceGateway.target !== 'local_llama_cpp')
       throw new Error('Der Chat-Agentenmodus benötigt das lokale Modell.')
@@ -514,7 +846,15 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
   }
 
   for (let round = 0; round < roundLimit; round++) {
-    if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+    if (signal.aborted) {
+      if (internallyInterrupted())
+        return partialResultAfterInferenceFailure(new Error('Agentenknoten intern beendet.'), round + 1, {
+          code: 'team_node_interrupted',
+          message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
+          round: round + 1,
+        })
+      throw new DOMException('Aborted', 'AbortError')
+    }
 
     // The user can change the mode while context/model/tool rounds are still
     // running. Refresh both the model instruction and the hard execution gate.
@@ -532,32 +872,61 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     // commentary just because the next inference request has started.
     visibleContent = ''
     updateUsage(round + 1, { messages, tools }, '')
-    const res = await inferenceGateway.streamChatWithTools({
-      messages,
-      tools,
-      toolChoice: nextToolChoice,
-      projectId,
-      taskType: opts.taskType,
-      contextId: opts.contextId,
-      repoId: opts.repoId,
-      branch: opts.branch,
-      commitSha: opts.commitSha,
-      inputSource: opts.inputSource,
-      signal,
-      // Public content is released as it arrives. Private channels are ignored
-      // in transports; the guard also withholds known work notes and think tags.
-      onToken: content => {
-        if (signal.aborted) return
-        opts.onProgress?.({ phase: 'receiving', round: round + 1, characters: content.length })
-        updateUsage(round + 1, { messages, tools }, content)
-        publish(publicAnswerText(content))
-      },
-    })
+    let res
+    try {
+      res = await inferenceGateway.streamChatWithTools({
+        messages,
+        tools,
+        toolChoice: nextToolChoice,
+        projectId,
+        taskType: opts.taskType,
+        contextId: opts.contextId,
+        repoId: opts.repoId,
+        branch: opts.branch,
+        commitSha: opts.commitSha,
+        inputSource: opts.inputSource,
+        signal,
+        // Public content is released as it arrives. Private channels are ignored
+        // in transports; the guard also withholds known work notes and think tags.
+        onToken: content => {
+          if (signal.aborted) return
+          opts.onProgress?.({ phase: 'receiving', round: round + 1, characters: content.length })
+          updateUsage(round + 1, { messages, tools }, content)
+          publish(publicAnswerText(content))
+        },
+      })
+    } catch (error) {
+      if (internallyInterrupted())
+        return partialResultAfterInferenceFailure(error, round + 1, {
+          code: 'team_node_interrupted',
+          message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
+          round: round + 1,
+        })
+      if (signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
+      executionGate.assert(execution)
+      const resettableLocalInputFailure =
+        error instanceof LocalInferenceError &&
+        ['runtime_context_exceeded', 'runtime_chat_history_rejected', 'runtime_tool_contract_rejected'].includes(
+          error.code
+        )
+      if (!resolvedRoute.externalOneShot && (toolOutcomes.length > 0 || resettableLocalInputFailure)) {
+        return partialResultAfterInferenceFailure(error, round + 1)
+      }
+      throw error
+    }
     localContextAdjusted ||=
       !!res.contextUsage && (res.contextUsage.omittedMessages > 0 || res.contextUsage.shortenedToolResults > 0)
     // A provider may finish after ignoring AbortSignal. Never publish that late
     // result or execute its tools in a replacement account/project generation.
-    if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    if (signal.aborted) {
+      if (internallyInterrupted())
+        return partialResultAfterInferenceFailure(new Error('Agentenknoten intern beendet.'), round + 1, {
+          code: 'team_node_interrupted',
+          message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
+          round: round + 1,
+        })
+      throw new DOMException('Aborted', 'AbortError')
+    }
     executionGate.assert(execution)
     updateUsage(round + 1, { messages, tools }, res.content, res)
     lastRequestId = res.requestId ?? lastRequestId
@@ -610,6 +979,15 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         finalText +=
           '\n\nHinweis: Für diese Antwort wurden ältere Gesprächsrunden oder umfangreiche Werkzeugausgaben im Modellkontext gekürzt. Der gespeicherte Chatverlauf bleibt vollständig erhalten.'
       }
+      const pendingVerification = [...pendingTaskCreateVerifications.values()].some(
+        item => item.state === 'unknown' || item.state === 'verified_absent'
+      )
+      if (pendingVerification && pendingTaskCreateTouched) {
+        const needsLookup = [...pendingTaskCreateVerifications.values()].some(item => item.state === 'unknown')
+        finalText += needsLookup
+          ? '\n\nMindestens ein task_create- oder chat_create-Aufruf hat einen unklaren Schreibausgang. Vor einem erneuten Anlegen muss die konkrete external_id mit task_list beziehungsweise chat_list geprüft werden. Der Verifikationsstand bleibt zum Weiterarbeiten erhalten.'
+          : '\n\nDie exakte Prüfung hat bestätigt, dass mindestens ein Eintrag noch nicht gespeichert ist. Der sichere Wiederholungsstand mit derselben external_id bleibt zum Weiterarbeiten erhalten.'
+      }
       publish(finalText)
       opts.onRoundComplete?.({
         round: round + 1,
@@ -629,6 +1007,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         inferenceTarget: inferenceGateway.target,
         routeDecisionId: resolvedRoute.decision?.id,
         tokenUsage: tokenCounter.snapshot(),
+        continuation: pendingVerification && pendingTaskCreateTouched ? checkpoint() : undefined,
       }
     }
 
@@ -654,7 +1033,15 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
     // Handle each tool call. Every call MUST get a matching tool message,
     // otherwise the next request is malformed.
     for (const call of res.toolCalls) {
-      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      if (signal.aborted) {
+        if (internallyInterrupted())
+          return partialResultAfterInferenceFailure(new Error('Agentenknoten intern beendet.'), round + 1, {
+            code: 'team_node_interrupted',
+            message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
+            round: round + 1,
+          })
+        throw new DOMException('Aborted', 'AbortError')
+      }
       const tool = getTool(call.name)
       const category = tool?.category ?? 'custom'
       const requiresApproval = !!tool?.requiresApproval
@@ -671,6 +1058,19 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       }
       if (opts.toolSession) opts.toolSession.queue(queuedCall)
       else mutations.queueToolCall(projectId, queuedCall)
+
+      if (disabledTools.has(call.name)) {
+        toolFailures++
+        const outcome: Outcome = {
+          ok: false,
+          error:
+            'Dieses Werkzeug ist innerhalb des laufenden Agententeams gesperrt, damit kein verschachteltes Team gestartet wird.',
+        }
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        continue
+      }
 
       // Unknown tool.
       if (!tool) {
@@ -708,6 +1108,249 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         continue
       }
 
+      let executionArguments = call.arguments
+      const guardedConversationCreate =
+        call.name === 'chat_create' ? conversationCreateTarget(call.arguments, projectId) : null
+      let conversationCreateOperation: PendingTaskCreateVerification | undefined
+      if (guardedConversationCreate) pendingTaskCreateTouched = true
+      if (guardedConversationCreate && guardedConversationCreate.projectId !== projectId) {
+        const outcome: Outcome = {
+          ok: false,
+          error: 'chat_create darf nur in das aktuell gebundene Luczor-Projekt schreiben.',
+          output: { code: 'conversation_create_project_scope_rejected', retry: 'fix_arguments' },
+        }
+        toolFailures++
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        continue
+      }
+      if (guardedConversationCreate && (opts.taskCreateRecoveryReady !== true || !opts.onCheckpoint)) {
+        const outcome: Outcome = {
+          ok: false,
+          error:
+            'chat_create wurde gesperrt, weil der lokale Sicherheitsstatus für unklare Schreibvorgänge nicht geladen werden konnte.',
+          output: { code: 'conversation_create_recovery_unavailable', retry: 'after_local_store_recovery' },
+        }
+        toolFailures++
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        continue
+      }
+      const guardedConversationCreateHash = guardedConversationCreate
+        ? await taskCreateFingerprintHash(guardedConversationCreate.key)
+        : undefined
+      const exactPendingConversationKey = guardedConversationCreate
+        ? pendingTaskCreateVerifications.has(guardedConversationCreate.key)
+          ? guardedConversationCreate.key
+          : guardedConversationCreateHash &&
+              pendingTaskCreateVerifications.has(`sha256:${guardedConversationCreateHash}`)
+            ? `sha256:${guardedConversationCreateHash}`
+            : undefined
+        : undefined
+      const exactPendingConversation = exactPendingConversationKey
+        ? pendingTaskCreateVerifications.get(exactPendingConversationKey)
+        : undefined
+      const siblingConversationEntry =
+        guardedConversationCreate && !exactPendingConversation
+          ? [...pendingTaskCreateVerifications.entries()].find(
+              ([, item]) =>
+                item.state !== 'verified_present' && sameConversationCreateSubject(item, guardedConversationCreate)
+            )
+          : undefined
+      const pendingConversation = exactPendingConversation ?? siblingConversationEntry?.[1]
+      const pendingConversationKeyToReplace = exactPendingConversationKey ?? siblingConversationEntry?.[0]
+      if (guardedConversationCreate && pendingConversation?.state === 'verified_absent') {
+        executionArguments = { ...call.arguments, external_id: pendingConversation.externalId }
+        conversationCreateOperation = {
+          ...pendingConversation,
+          kind: 'conversation',
+          title: guardedConversationCreate.title,
+          fingerprint: guardedConversationCreate.key,
+          fingerprintHash: guardedConversationCreateHash,
+          state: 'unknown',
+        }
+      } else if (guardedConversationCreate && pendingConversation) {
+        const alreadyPresent = exactPendingConversation?.state === 'verified_present'
+        const outcome: Outcome = alreadyPresent
+          ? {
+              ok: true,
+              output: {
+                alreadyCompleted: true,
+                verifiedAfterUncertainOutcome: true,
+                conversation_id: pendingConversation.resourceId ?? pendingConversation.externalId,
+                title: pendingConversation.title,
+                project_id: pendingConversation.projectId,
+              },
+            }
+          : {
+              ok: false,
+              error:
+                'Ein vorheriger chat_create-Aufruf für dieses Projekt und diesen Titel hat einen unklaren Schreibausgang. Prüfe zuerst chat_list mit der angegebenen external_id; ein erneuter Chat-POST wurde gesperrt.',
+              output: {
+                code: 'conversation_create_verification_required',
+                retry: 'verify_before_retry',
+                next_tool: 'chat_list',
+                next_arguments: {
+                  project_id: pendingConversation.projectId,
+                  external_id: pendingConversation.externalId,
+                },
+                match_title: pendingConversation.title,
+                match_conversation_id: pendingConversation.externalId,
+              },
+            }
+        if (alreadyPresent) toolSuccesses++
+        else toolFailures++
+        if (alreadyPresent) completedMutations.set(completedMutationKey(call.name, call.arguments, projectId), outcome)
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(
+          projectId,
+          call.id,
+          call.name,
+          alreadyPresent ? 'executed' : 'rejected',
+          outcome,
+          dataHandling,
+          res.requestId
+        )
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
+        continue
+      } else if (guardedConversationCreate) {
+        const externalId = crypto.randomUUID()
+        executionArguments = { ...call.arguments, external_id: externalId }
+        conversationCreateOperation = {
+          kind: 'conversation',
+          projectId: guardedConversationCreate.projectId,
+          ...(opts.principalScopeId ? { principalScopeId: opts.principalScopeId } : {}),
+          title: guardedConversationCreate.title,
+          externalId,
+          fingerprint: guardedConversationCreate.key,
+          fingerprintHash: guardedConversationCreateHash,
+          state: 'unknown',
+        }
+      }
+
+      const guardedTaskCreate = call.name === 'task_create' ? taskCreateTarget(call.arguments, projectId) : null
+      if (guardedTaskCreate) pendingTaskCreateTouched = true
+      if (guardedTaskCreate && guardedTaskCreate.projectId !== projectId) {
+        const outcome: Outcome = {
+          ok: false,
+          error: 'task_create darf nur in das aktuell gebundene Luczor-Projekt schreiben.',
+          output: { code: 'task_create_project_scope_rejected', retry: 'fix_arguments' },
+        }
+        toolFailures++
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        continue
+      }
+      if (guardedTaskCreate && (opts.taskCreateRecoveryReady !== true || !opts.onCheckpoint)) {
+        const outcome: Outcome = {
+          ok: false,
+          error:
+            'task_create wurde gesperrt, weil der lokale Sicherheitsstatus für unklare Schreibvorgänge nicht geladen werden konnte.',
+          output: { code: 'task_create_recovery_unavailable', retry: 'after_local_store_recovery' },
+        }
+        toolFailures++
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        continue
+      }
+      const guardedTaskCreateHash = guardedTaskCreate
+        ? await taskCreateFingerprintHash(guardedTaskCreate.key)
+        : undefined
+      const exactPendingTaskCreateKey = guardedTaskCreate
+        ? pendingTaskCreateVerifications.has(guardedTaskCreate.key)
+          ? guardedTaskCreate.key
+          : guardedTaskCreateHash && pendingTaskCreateVerifications.has(`sha256:${guardedTaskCreateHash}`)
+            ? `sha256:${guardedTaskCreateHash}`
+            : undefined
+        : undefined
+      const exactPendingTaskCreate = exactPendingTaskCreateKey
+        ? pendingTaskCreateVerifications.get(exactPendingTaskCreateKey)
+        : undefined
+      const unresolvedSiblingTaskCreateEntry =
+        guardedTaskCreate && !exactPendingTaskCreate
+          ? [...pendingTaskCreateVerifications.entries()].find(
+              ([, item]) => item.state !== 'verified_present' && sameTaskCreateSubject(item, guardedTaskCreate)
+            )
+          : undefined
+      const unresolvedSiblingTaskCreate = unresolvedSiblingTaskCreateEntry?.[1]
+      const pendingTaskCreate = exactPendingTaskCreate ?? unresolvedSiblingTaskCreate
+      const pendingTaskCreateKeyToReplace = exactPendingTaskCreateKey ?? unresolvedSiblingTaskCreateEntry?.[0]
+      let taskCreateOperation: PendingTaskCreateVerification | undefined
+      if (guardedTaskCreate && pendingTaskCreate?.state === 'verified_absent') {
+        executionArguments = { ...call.arguments, external_id: pendingTaskCreate.externalId }
+        taskCreateOperation = {
+          ...pendingTaskCreate,
+          title: guardedTaskCreate.title,
+          fingerprint: guardedTaskCreate.key,
+          fingerprintHash: guardedTaskCreateHash,
+          state: 'unknown',
+        }
+      } else if (guardedTaskCreate && pendingTaskCreate) {
+        const alreadyPresent = exactPendingTaskCreate?.state === 'verified_present'
+        const outcome: Outcome = alreadyPresent
+          ? {
+              ok: true,
+              output: {
+                alreadyCompleted: true,
+                verifiedAfterUncertainOutcome: true,
+                task_id: pendingTaskCreate.taskId,
+                title: pendingTaskCreate.title,
+                project_id: pendingTaskCreate.projectId,
+              },
+            }
+          : {
+              ok: false,
+              error:
+                'Ein vorheriger task_create-Aufruf für dieses Projekt und diesen Titel hat einen unklaren Schreibausgang. Führe zuerst task_list mit dem angegebenen project_id aus; ein erneuter Task-POST wurde gesperrt.',
+              output: {
+                code: 'task_create_verification_required',
+                retry: 'verify_before_retry',
+                next_tool: 'task_list',
+                next_arguments: {
+                  project_id: pendingTaskCreate.projectId,
+                  external_id: pendingTaskCreate.externalId,
+                },
+                match_title: pendingTaskCreate.title,
+                match_task_id: pendingTaskCreate.externalId,
+              },
+            }
+        if (alreadyPresent) toolSuccesses++
+        else toolFailures++
+        if (alreadyPresent) {
+          completedMutations.set(completedMutationKey(call.name, call.arguments, projectId), outcome)
+        }
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(
+          projectId,
+          call.id,
+          call.name,
+          alreadyPresent ? 'executed' : 'rejected',
+          outcome,
+          dataHandling,
+          res.requestId
+        )
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
+        continue
+      } else if (guardedTaskCreate) {
+        const externalId = crypto.randomUUID()
+        executionArguments = { ...call.arguments, external_id: externalId }
+        taskCreateOperation = {
+          projectId: guardedTaskCreate.projectId,
+          ...(opts.principalScopeId ? { principalScopeId: opts.principalScopeId } : {}),
+          title: guardedTaskCreate.title,
+          externalId,
+          fingerprint: guardedTaskCreate.key,
+          fingerprintHash: guardedTaskCreateHash,
+          state: 'unknown',
+        }
+      }
+
       // A saved policy change takes effect before the next tool, including
       // another tool returned by the same model round. Never keep a turn-wide
       // auto-approval snapshot after the user has revoked that setting.
@@ -717,6 +1360,12 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        if (internallyInterrupted())
+          return partialResultAfterInferenceFailure(new Error('Agentenknoten intern beendet.'), round + 1, {
+            code: 'team_node_interrupted',
+            message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
+            round: round + 1,
+          })
         throw new DOMException('Aborted', 'AbortError')
       }
 
@@ -763,10 +1412,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       // Input and process actions may legitimately repeat at a later desktop state.
       const reusableMutation =
         tool.mutating && !(tool.effects ?? []).some(effect => effect === 'input' || effect === 'execute')
-      const previousMutation =
-        opts.continuation && reusableMutation
-          ? completedMutations.get(mutationKey(call.name, call.arguments))
-          : undefined
+      const completionKey = completedMutationKey(call.name, call.arguments, projectId)
+      const previousMutation = reusableMutation
+        ? (completedMutations.get(completionKey) ?? completedMutations.get(mutationKey(call.name, call.arguments)))
+        : undefined
       if (previousMutation?.ok) {
         const outcome: Outcome = {
           ok: true,
@@ -792,13 +1441,21 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       })
       if (requiresApproval && approvalMode !== 'unrestricted' && !autoExecute) {
         updateToolStatus(call.id, 'proposed')
-        const approved = await (opts.toolSession ? opts.toolSession.approve(call.id) : awaitApproval(call.id))
+        const approved = await (opts.toolSession
+          ? opts.toolSession.approve(call.id, signal)
+          : awaitApproval(call.id, signal))
 
         if (signal?.aborted) {
           const outcome: Outcome = { ok: false, error: 'Abgebrochen.' }
           toolOutcomes.push({ name: call.name, outcome })
           recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
           messages.push(outcomeMessage(call.id, call.name, outcome))
+          if (internallyInterrupted())
+            return partialResultAfterInferenceFailure(new Error('Agentenknoten intern beendet.'), round + 1, {
+              code: 'team_node_interrupted',
+              message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
+              round: round + 1,
+            })
           throw new DOMException('Aborted', 'AbortError')
         }
 
@@ -841,16 +1498,56 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
       }
 
       // Execute.
-      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+      if (signal.aborted) {
+        if (internallyInterrupted())
+          return partialResultAfterInferenceFailure(new Error('Agentenknoten intern beendet.'), round + 1, {
+            code: 'team_node_interrupted',
+            message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
+            round: round + 1,
+          })
+        throw new DOMException('Aborted', 'AbortError')
+      }
       updateToolStatus(call.id, 'executing')
       setStatus('executing')
       setLastTool(call.name)
       pulseForCategory(tool.category)
       const toolStarted = performance.now()
       if (dataHandling === 'ephemeral') ephemeralDataUsed = true
+      if (guardedConversationCreate && conversationCreateOperation) {
+        deletePendingCreate(conversationCreateOperation.externalId, 'conversation')
+        if (pendingConversationKeyToReplace && pendingConversationKeyToReplace !== guardedConversationCreate.key)
+          pendingTaskCreateVerifications.delete(pendingConversationKeyToReplace)
+        pendingTaskCreateVerifications.set(guardedConversationCreate.key, conversationCreateOperation)
+        await emitCheckpoint(safeProgressCheckpoint(), true)
+        if (signal.aborted) {
+          if (internallyInterrupted())
+            return partialResultAfterInferenceFailure(new Error('Agentenknoten intern beendet.'), round + 1, {
+              code: 'team_node_interrupted',
+              message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
+              round: round + 1,
+            })
+          throw new DOMException('Aborted', 'AbortError')
+        }
+      }
+      if (guardedTaskCreate && taskCreateOperation) {
+        deletePendingCreate(taskCreateOperation.externalId, 'task')
+        if (pendingTaskCreateKeyToReplace && pendingTaskCreateKeyToReplace !== guardedTaskCreate.key)
+          pendingTaskCreateVerifications.delete(pendingTaskCreateKeyToReplace)
+        pendingTaskCreateVerifications.set(guardedTaskCreate.key, taskCreateOperation)
+        await emitCheckpoint(safeProgressCheckpoint(), true)
+        if (signal.aborted) {
+          if (internallyInterrupted())
+            return partialResultAfterInferenceFailure(new Error('Agentenknoten intern beendet.'), round + 1, {
+              code: 'team_node_interrupted',
+              message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
+              round: round + 1,
+            })
+          throw new DOMException('Aborted', 'AbortError')
+        }
+      }
       try {
         executionGate.assert(execution)
-        const output = await tool.execute(call.arguments, {
+        const output = await tool.execute(executionArguments, {
           projectId,
           signal,
           execution,
@@ -859,7 +1556,154 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         })
         executionGate.assert(execution)
         const outcome = normalizeToolOutcome(output)
-        if (outcome.ok && reusableMutation) completedMutations.set(mutationKey(call.name, call.arguments), outcome)
+        if (call.name === 'chat_create' && outcome.ok && guardedConversationCreate) {
+          if (conversationCreateOperation) deletePendingCreate(conversationCreateOperation.externalId, 'conversation')
+          else pendingTaskCreateVerifications.delete(guardedConversationCreate.key)
+        }
+        if (call.name === 'chat_create' && !outcome.ok) {
+          const detail =
+            outcome.output && typeof outcome.output === 'object' && !Array.isArray(outcome.output)
+              ? (outcome.output as Record<string, unknown>)
+              : null
+          if (detail?.code === 'conversation_create_outcome_unknown') {
+            const target = conversationCreateTarget(call.arguments, projectId)
+            const nextArguments =
+              detail.next_arguments &&
+              typeof detail.next_arguments === 'object' &&
+              !Array.isArray(detail.next_arguments)
+                ? (detail.next_arguments as Record<string, unknown>)
+                : null
+            const guardedProjectId = stringArgument(nextArguments?.project_id) || target.projectId
+            const guardedTitle = stringArgument(detail.match_title) || target.title
+            const guardedExternalId = stringArgument(detail.match_conversation_id)
+            if (guardedExternalId) {
+              pendingTaskCreateVerifications.set(target.key, {
+                kind: 'conversation',
+                projectId: guardedProjectId,
+                ...(opts.principalScopeId ? { principalScopeId: opts.principalScopeId } : {}),
+                title: guardedTitle,
+                externalId: guardedExternalId,
+                fingerprint: target.key,
+                fingerprintHash: guardedConversationCreateHash ?? (await taskCreateFingerprintHash(target.key)),
+                state: 'unknown',
+              })
+            }
+          } else if (guardedConversationCreate) {
+            if (conversationCreateOperation) deletePendingCreate(conversationCreateOperation.externalId, 'conversation')
+            else pendingTaskCreateVerifications.delete(guardedConversationCreate.key)
+          }
+        }
+        if (call.name === 'task_create' && outcome.ok && guardedTaskCreate) {
+          if (taskCreateOperation) deletePendingCreate(taskCreateOperation.externalId, 'task')
+          else pendingTaskCreateVerifications.delete(guardedTaskCreate.key)
+        }
+        if (call.name === 'task_create' && !outcome.ok) {
+          const detail =
+            outcome.output && typeof outcome.output === 'object' && !Array.isArray(outcome.output)
+              ? (outcome.output as Record<string, unknown>)
+              : null
+          if (detail?.code === 'task_create_outcome_unknown') {
+            const target = taskCreateTarget(call.arguments, projectId)
+            if (target) {
+              const nextArguments =
+                detail.next_arguments &&
+                typeof detail.next_arguments === 'object' &&
+                !Array.isArray(detail.next_arguments)
+                  ? (detail.next_arguments as Record<string, unknown>)
+                  : null
+              const guardedProjectId = stringArgument(nextArguments?.project_id) || target.projectId
+              const guardedTitle = stringArgument(detail.match_title) || target.title
+              const guardedExternalId = stringArgument(detail.match_task_id)
+              if (guardedExternalId) {
+                pendingTaskCreateVerifications.set(target.key, {
+                  projectId: guardedProjectId,
+                  ...(opts.principalScopeId ? { principalScopeId: opts.principalScopeId } : {}),
+                  title: guardedTitle,
+                  externalId: guardedExternalId,
+                  fingerprint: target.key,
+                  fingerprintHash: guardedTaskCreateHash ?? (await taskCreateFingerprintHash(target.key)),
+                  state: 'unknown',
+                })
+              }
+            }
+          } else if (guardedTaskCreate) {
+            // A definitive rejection means no duplicate can exist. Drop the
+            // operation guard so corrected arguments can start a new operation.
+            if (taskCreateOperation) deletePendingCreate(taskCreateOperation.externalId, 'task')
+            else pendingTaskCreateVerifications.delete(guardedTaskCreate.key)
+          }
+        }
+        if (call.name === 'task_list' && outcome.ok) {
+          const listedProjectId = stringArgument(call.arguments.project_id) || projectId
+          const exactExternalId = stringArgument(call.arguments.external_id)
+          const records = taskListRecords(outcome.output)
+          if (listedProjectId && records) {
+            const filteredListing =
+              stringArgument(call.arguments.status) || stringArgument(call.arguments.conversation_id)
+            for (const [key, pending] of pendingTaskCreateVerifications) {
+              if ((pending.kind ?? 'task') !== 'task') continue
+              if (pending.projectId !== listedProjectId) continue
+              if (exactExternalId && pending.externalId !== exactExternalId) continue
+              const existing = records.find(task => stringArgument(task.external_id) === pending.externalId)
+              if (existing) {
+                pendingTaskCreateTouched = true
+                pendingTaskCreateVerifications.set(key, {
+                  ...pending,
+                  state: 'verified_present',
+                  taskId: stringArgument(existing.external_id) || undefined,
+                })
+              } else if (
+                !filteredListing &&
+                exactExternalId === pending.externalId &&
+                (outcome.output as Record<string, unknown>).task_create_idempotency === 'external_id_v1' &&
+                stringArgument((outcome.output as Record<string, unknown>).filtered_external_id) === pending.externalId
+              ) {
+                pendingTaskCreateTouched = true
+                pendingTaskCreateVerifications.set(key, { ...pending, state: 'verified_absent' })
+              }
+            }
+          }
+        }
+        if (call.name === 'chat_list' && outcome.ok) {
+          const listedProjectId = stringArgument(call.arguments.project_id) || projectId
+          const exactExternalId = stringArgument(call.arguments.external_id)
+          const records =
+            outcome.output && typeof outcome.output === 'object' && !Array.isArray(outcome.output)
+              ? (outcome.output as Record<string, unknown>).conversations
+              : null
+          if (listedProjectId && exactExternalId && Array.isArray(records)) {
+            for (const [key, pending] of pendingTaskCreateVerifications) {
+              if (
+                pending.kind !== 'conversation' ||
+                pending.projectId !== listedProjectId ||
+                pending.externalId !== exactExternalId
+              )
+                continue
+              const existing = records.find(
+                item =>
+                  !!item &&
+                  typeof item === 'object' &&
+                  !Array.isArray(item) &&
+                  stringArgument((item as Record<string, unknown>).external_id) === pending.externalId
+              )
+              if (existing) {
+                pendingTaskCreateTouched = true
+                pendingTaskCreateVerifications.set(key, {
+                  ...pending,
+                  state: 'verified_present',
+                  resourceId: pending.externalId,
+                })
+              } else if (
+                (outcome.output as Record<string, unknown>).conversation_create_idempotency === 'external_id_v1' &&
+                stringArgument((outcome.output as Record<string, unknown>).filtered_external_id) === pending.externalId
+              ) {
+                pendingTaskCreateTouched = true
+                pendingTaskCreateVerifications.set(key, { ...pending, state: 'verified_absent' })
+              }
+            }
+          }
+        }
+        if (outcome.ok && reusableMutation) completedMutations.set(completionKey, outcome)
         if (outcome.ok) toolSuccesses++
         else toolFailures++
         toolOutcomes.push({ name: call.name, outcome })
@@ -875,6 +1719,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
         )
         messages.push(outcomeMessage(call.id, call.name, outcome))
       } catch (e: any) {
+        if (execution.signal.aborted) throw new DOMException('Aborted', 'AbortError')
         const outcome: Outcome = { ok: false, error: e?.message ?? String(e) }
         toolFailures++
         toolOutcomes.push({ name: call.name, outcome })
@@ -889,6 +1734,16 @@ export async function runAgent(opts: RunAgentOptions): Promise<{
           performance.now() - toolStarted
         )
         messages.push(outcomeMessage(call.id, call.name, outcome))
+      }
+      await emitCheckpoint(safeProgressCheckpoint())
+      if (signal.aborted) {
+        if (internallyInterrupted())
+          return partialResultAfterInferenceFailure(new Error('Agentenknoten intern beendet.'), round + 1, {
+            code: 'team_node_interrupted',
+            message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
+            round: round + 1,
+          })
+        throw new DOMException('Aborted', 'AbortError')
       }
     }
   }

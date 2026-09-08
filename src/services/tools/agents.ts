@@ -1,7 +1,8 @@
 import { buildBridgeMarkdown, detectAgents, writeBridgeFile } from '@/services/agents'
-import { prepareAgentJob } from '@/services/agents/hub'
-import { requireProjectWorkspace } from '@/services/projectWorkspace'
+import { agentHub, agentProjectSnapshot, prepareAgentJob } from '@/services/agents/hub'
+import { requireProjectWorkspace, resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
 import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
+import { executionGate } from '@/services/executionGate'
 import { asString, getProject } from './shared'
 import type { ToolDef } from './types'
 
@@ -38,7 +39,7 @@ export const agentTools: ToolDef[] = [
     dataHandling: 'ephemeral',
     risk: 'critical',
     scope: 'project',
-    effects: ['execute'],
+    effects: ['write'],
     parameters: {
       type: 'object',
       additionalProperties: false,
@@ -49,21 +50,33 @@ export const agentTools: ToolDef[] = [
       required: ['agent', 'prompt'],
     },
     async execute(args, ctx) {
+      const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
+      executionGate.assert(ticket, true)
       if (args.agent !== 'codex')
         throw new Error('Verwaltete Agentenaufträge verwenden codex, local oder policy über agent_job_prepare.')
       const prompt = asString(args.prompt).trim()
       if (!prompt) throw new Error('prompt is empty')
-      const workspace = await requireProjectWorkspace(ctx.projectId)
-      if (workspace.isGitRepository && (await getRepositoryExternalPolicy()) === 'deny') {
+      const project = await agentProjectSnapshot(ctx.projectId)
+      executionGate.assert(ticket, true)
+      if (project.rootPath && (await getRepositoryExternalPolicy()) === 'deny') {
         throw new Error('Die Repository-Richtlinie verbietet die Übergabe an einen externen Coding-Agenten.')
       }
+      executionGate.assert(ticket, true)
       const job = await prepareAgentJob({
         projectId: ctx.projectId,
         adapterId: 'codex',
         prompt,
         role: 'assistant',
         permission: 'read-only',
+        expectedProject: project,
+        assertExecution: () => executionGate.assert(ticket, true),
       })
+      try {
+        executionGate.assert(ticket, true)
+      } catch (error) {
+        agentHub.cancel(job.id)
+        throw error
+      }
       return {
         ok: true,
         job_id: job.id,
@@ -95,7 +108,14 @@ export const agentTools: ToolDef[] = [
       required: [],
     },
     async execute(args, ctx) {
-      const workspace = await requireProjectWorkspace(ctx.projectId)
+      const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
+      executionGate.assert(ticket, true)
+      const principalId = await resolveWorkspacePrincipalId()
+      executionGate.assert(ticket, true)
+      const workspace = await requireProjectWorkspace(ctx.projectId, principalId)
+      executionGate.assert(ticket, true)
+      if (!Number.isSafeInteger(workspace.updatedAt))
+        throw new Error('Die Projektzuordnung besitzt keine sichere Version.')
       let content = asString(args.content)
       if (!content) {
         const project = getProject(ctx.projectId)
@@ -109,7 +129,17 @@ export const agentTools: ToolDef[] = [
           })),
         })
       }
-      await writeBridgeFile(workspace.rootPath, content, ctx.execution)
+      await writeBridgeFile(
+        {
+          principalId,
+          projectId: ctx.projectId,
+          expectedRootPath: workspace.rootPath,
+          expectedWorkspaceUpdatedAt: workspace.updatedAt!,
+        },
+        content,
+        ticket
+      )
+      executionGate.assert(ticket, true)
       return { ok: true, path: 'LUCZOR.md', workspace: workspace.displayName }
     },
   },

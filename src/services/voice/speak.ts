@@ -11,26 +11,21 @@ function current(session: SpeechSession): boolean {
   return active === session && !session.controller.signal.aborted
 }
 
-/** Split long unpunctuated output too; every request stays within the server contract. */
+/** Prepare the full utterance in one request; split only when the server limit requires it. */
 export function splitSentences(text: string): string[] {
-  const sentences = text
-    .replace(/\s+/gu, ' ')
-    .trim()
-    .split(/(?<=[.!?:])\s+/u)
+  const normalized = text.replace(/\s+/gu, ' ').trim()
   const result: string[] = []
-  for (const sentence of sentences) {
-    let rest = sentence
-    while (rest.length > MAX_TTS_TEXT_CHARS) {
-      const space = rest.lastIndexOf(' ', MAX_TTS_TEXT_CHARS)
-      let end = space > 0 ? space : MAX_TTS_TEXT_CHARS
-      // Avoid cutting a Unicode surrogate pair in long text without spaces.
-      const previous = rest.charCodeAt(end - 1)
-      if (previous >= 0xd800 && previous <= 0xdbff) end--
-      result.push(rest.slice(0, end))
-      rest = rest.slice(end).trimStart()
-    }
-    if (rest) result.push(rest)
+  let rest = normalized
+  while (rest.length > MAX_TTS_TEXT_CHARS) {
+    const space = rest.lastIndexOf(' ', MAX_TTS_TEXT_CHARS)
+    let end = space > 0 ? space : MAX_TTS_TEXT_CHARS
+    // Avoid cutting a Unicode surrogate pair in long text without spaces.
+    const previous = rest.charCodeAt(end - 1)
+    if (previous >= 0xd800 && previous <= 0xdbff) end--
+    result.push(rest.slice(0, end))
+    rest = rest.slice(end).trimStart()
   }
+  if (rest) result.push(rest)
   return result
 }
 
@@ -137,7 +132,7 @@ function cancelSession(session: SpeechSession | null): void {
 export type SpeakOptions = { rate?: number; volume?: number; signal?: AbortSignal; key?: string; voiceId?: string }
 export type SpeakResult = 'completed' | 'cancelled'
 
-/** Server TTS with one prefetched sentence and a single cancellable playback owner. */
+/** Server TTS with one full-text clip (or limit-sized chunks) and one cancellable playback owner. */
 export async function streamSpeak(text: string, opts: SpeakOptions = {}): Promise<SpeakResult> {
   if (suspensionDepth > 0) {
     throw new LuczorApiError(0, 'Die Server-Einstellungen werden gespeichert. Bitte danach erneut sprechen lassen.')

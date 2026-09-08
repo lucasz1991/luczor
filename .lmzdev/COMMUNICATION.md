@@ -248,3 +248,22 @@ Append-only communication log. Source and runtime evidence override stale entrie
 ## 2026-09-07T00:46:16Z | Codex/routing_review -> all | handoff
 
 - Message: Final follow-up freeze: live auto-warmup confirmed app106820 -> llama127068, health200 and same process/start across122.9s; no chat inference triggered. Initial no-process report was an early snapshot during first preparation. Hardened transient-bootstrap retry with10sgrace/60-300sbackoff and savedFlash preference; no capacity relaxation, App/Coordinator unchanged. 156focusedtests/8files, ESLint and canonicaltypecheck passed. Root repeats final integrated gate/build. Safe policyStatus returned by hook. Docs/background-preparation.md updated. No remaining source ownership.
+
+## 2026-09-07T01:00:00Z | Codex/root -> all | status
+
+- Task: Flüssige Ganztext-Sprachausgabe, einmaliges Vorlesen markierter Ausgabetexte und Fallback-Freigabe in den oberen Prompt-Controls.
+- Status: in-progress; Ownership: `src/services/voice/speak.ts`, `src/components/ai/SelectionActions.vue`, `src/components/ai/PromptBar.vue` und gezielte Integration in `src/App.vue`.
+- Boundary: Bestehende parallele Modell-/Agenten-/Projektänderungen bleiben erhalten; kein Backend- oder Serverdeploy für diesen Auftrag vorgesehen.
+
+## 2026-09-07T18:36:45Z | Codex/root -> all | status
+
+- Message: Started: flüssige Ganztext-Sprachausgabe, Auswahl vorlesen und Fallback-Control
+
+## 2026-09-07T18:57:00Z | Codex/root -> all | handoff
+
+- Task: Flüssige Ganztext-Sprachausgabe, einmaliges Vorlesen markierter Ausgabe und kompakte Prompt-Controls nach direktem Browserfeedback.
+- Status: completed-local.
+- Changed: `src/services/voice/speak.ts`, `src/components/ai/SelectionActions.vue`, `src/components/ai/PromptBar.vue`, gezielte Integration in `src/App.vue`, `src/styles/beautiful-ui.css`, Tests, Browser-Fixture und Dokumentation.
+- Verified: 113 Testdateien / 1.246 Tests; Typecheck, ESLint, Prettier, Diffcheck; echte Server-WAVs für mehrsätzigen Text und Auswahl; Browser 1096/320px; nativer Releasebuild ohne Bundle.
+- Artifact: `src-tauri/target/release/tauri-app.exe`, 14.625.280 Bytes, SHA256 34359240E360022639C852C23A8EA38190BB9A99C819A750B134B6EF3827FD72. Bericht: `.lmzdev/artifacts/reports/2026-09-07-commentary-read-aloud.md`.
+- Boundary: Keine Backendänderung, kein Serverdeploy, kein App-Neustart. Laufende Debug-App PID114596 erhalten. Eigener Browserprüftab und Vite1446 geschlossen.

@@ -58,6 +58,14 @@ Seit 7. September 2026 gibt es unter **Einstellungen → Chat → Auch lokale In
 
 Während des Vorlesens zeigt der jeweilige Kommentar oder die Antwort den gesprochenen Text mit einer Markierung des aktuellen Wortes. Bereits gelesene Wörter sind dezenter dargestellt. Vorbereitung und Audiopausen haben eigene Statusanzeigen; nach Stoppen oder Abschluss erscheint wieder die normale Nachrichtendarstellung. Die Markierung folgt der tatsächlichen Audioposition jedes Satzes. Wie beim RailTime-Chatbot ist die Wortzuordnung näherungsweise, da der verwendete WAV-Vertrag keine Wortzeitstempel liefert; dies wird in der Oberfläche angezeigt.
 
+Seit der Optimierung vom 7. September 2026 wird eine normale mehrsätzige Ausgabe vollständig in einer Serveranfrage vorbereitet und als zusammenhängende Audiodatei abgespielt. Satzzeichen erzeugen keine einzelnen Clips und damit keine künstlichen Pausen mehr. Nur wenn der Text die Servergrenze von 4.000 Zeichen überschreitet, teilt Luczor ihn an einer Wortgrenze in möglichst große Abschnitte. Die Wortmarkierung wird proportional zur echten Laufzeit der jeweiligen zusammenhängenden Audiodatei geführt.
+
+Wird mit Maus oder Tastatur ein Teil einer Antwort einschließlich Zwischenkommentaren markiert, erscheint in der vorhandenen Auswahlleiste **Auswahl vorlesen**. Diese Aktion liest genau die markierte Passage einmal vor, entfernt danach die Markierung und nutzt dieselbe widerrufbare Freigabe für lokale Inhalte. Die übrigen Auswahlaktionen bleiben erhalten.
+
+Die Freigabe **Fallback** sitzt als kompakter Schalter in der oberen Leiste des Eingabefelds neben **Agenten**. Sie erlaubt weiterhin nur einen externen Wechsel nach der bestehenden ausdrücklichen Paketfreigabe. Die beiden allgemeinen Hinweiszeilen unter dem Eingabefeld wurden auf Nutzerwunsch entfernt; zugängliche Beschriftungen und Tooltips bleiben vorhanden.
+
+Der zugehörige Windows-Release liegt unter `src-tauri/target/release/tauri-app.exe` (14.625.280 Bytes, SHA256 `34359240E360022639C852C23A8EA38190BB9A99C819A750B134B6EF3827FD72`). Die während der Entwicklung laufende Debug-App wurde nicht beendet; für den sicheren Wechsel die laufende App schließen und anschließend diesen Release starten.
+
 Strukturierte private Reasoning-Felder, Denk-Tags und bekannte interne Arbeitsnotizpräfixe werden nicht angezeigt. Beliebige falsch einsortierte Modelltexte lassen sich damit nicht semantisch vollständig erkennen.
 
 Der Tokenzähler zeigt Eingabe, Ausgabe und Summe über sämtliche Modellrunden einer Antwort. Live-Schätzungen sind gekennzeichnet; gemeldete Runtime-/Providerwerte ersetzen sie am Abschluss. Fehlende Teilwerte bleiben als gemischt/geschätzt erkennbar. Das Kontextfenster ist die Kapazität und wird nicht zum Verbrauch addiert. Gemeldete Ausgabetokens können modellinterne Generierung einschließen.

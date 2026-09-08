@@ -17,6 +17,9 @@ export type MiniWorkspaceBinding = {
   stopChat: () => void | Promise<void>
   selectProject: (id: string) => void | Promise<void>
   openPanel: (panel: MiniPanel) => void | Promise<void>
+  togglePushToTalk?: () => void | Promise<void>
+  toggleWakeWord?: () => void | Promise<void>
+  setAgentMode?: (enabled: boolean) => void | Promise<void>
 }
 
 /** One display, two explicit contexts. Actions always carry the current view epoch. */
@@ -69,6 +72,18 @@ export function createMiniChatBridge(
     }
     if (action.type === 'decide') {
       return controller.dispatch({ ...action, sessionId: controller.state.sessionId })
+    }
+    if (action.type === 'voice_push_to_talk') {
+      await deps.togglePushToTalk?.()
+      return
+    }
+    if (action.type === 'voice_wake_word') {
+      await deps.toggleWakeWord?.()
+      return
+    }
+    if (action.type === 'agent_mode') {
+      await deps.setAgentMode?.(action.enabled)
+      return
     }
     if (action.type === 'select_project' || action.type === 'workspace_open') {
       if (busy.value || controller.state.mainBusy) {

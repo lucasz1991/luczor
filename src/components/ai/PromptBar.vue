@@ -7,6 +7,7 @@ const props = withDefaults(
   defineProps<{
     modelValue: string
     agentMode?: boolean
+    externalFallback?: boolean
     busy?: boolean
     recording?: boolean
     listening?: boolean
@@ -20,6 +21,7 @@ const props = withDefaults(
 )
 const emit = defineEmits<{
   'update:agentMode': [value: boolean]
+  'update:externalFallback': [value: boolean]
   'update:modelValue': [value: string]
   input: []
   send: []
@@ -98,18 +100,32 @@ defineExpose({ focus: () => field.value?.focus() })
         <button v-if="contextLabel" type="button" class="ai-prompt__context" @click="emit('context')">
           <AiIcon name="folder" :size="13" />{{ contextLabel }}
         </button>
-        <button
-          type="button"
-          class="ai-agent-mode"
-          :class="{ 'is-active': agentMode }"
-          :aria-pressed="!!agentMode"
-          :disabled="busy"
-          aria-label="Agentenmodus"
-          title="Aktiv: Neue Aufträge direkt mit einem Agententeam bearbeiten"
-          @click="emit('update:agentMode', !agentMode)"
-        >
-          <AiIcon name="grid" :size="13" />Agenten
-        </button>
+        <div class="ai-prompt__controls">
+          <button
+            type="button"
+            class="ai-agent-mode"
+            :class="{ 'is-active': externalFallback }"
+            :aria-pressed="!!externalFallback"
+            :disabled="busy"
+            aria-label="Externen Fallback nach Freigabe erlauben"
+            title="Erlaubt nach einer ausdrücklichen Freigabe den Wechsel vom lokalen Modell zu einem externen Modell"
+            @click="emit('update:externalFallback', !externalFallback)"
+          >
+            <AiIcon name="shield" :size="13" />Fallback
+          </button>
+          <button
+            type="button"
+            class="ai-agent-mode"
+            :class="{ 'is-active': agentMode }"
+            :aria-pressed="!!agentMode"
+            :disabled="busy"
+            aria-label="Agentenmodus"
+            title="Aktiv: Neue Aufträge direkt mit einem Agententeam bearbeiten"
+            @click="emit('update:agentMode', !agentMode)"
+          >
+            <AiIcon name="grid" :size="13" />Agenten
+          </button>
+        </div>
       </div>
       <textarea
         ref="field"
@@ -177,10 +193,6 @@ defineExpose({ focus: () => field.value?.focus() })
           </button>
         </div>
       </div>
-    </div>
-    <div class="ai-prompt__hint">
-      <span>Enter senden <span aria-hidden="true">·</span> Shift + Enter neue Zeile</span
-      ><span>{{ busy ? 'Du kannst jederzeit stoppen' : 'Luczor kann Fehler machen' }}</span>
     </div>
   </div>
 </template>

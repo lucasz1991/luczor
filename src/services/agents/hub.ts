@@ -121,14 +121,18 @@ export async function prepareAgentJob(input: {
   teamRunId?: string
   teamNodeId?: string
   expectedProject?: AgentProjectSnapshot
+  /** Caller-owned generation check, repeated around every asynchronous preparation step. */
+  assertExecution?: () => void
   /** exact-reviewed preserves a reviewed workflow or plan, including structured predecessor results. */
   promptAssembly?: 'project' | 'exact-reviewed'
 }) {
+  input.assertExecution?.()
   if (!input.prompt.trim() || input.prompt.length > 24_000)
     throw new Error('Bitte einen Arbeitsauftrag mit 1 bis 24000 Zeichen eingeben.')
   const project = state.projects.find(item => item.id === input.projectId)
   if (!project) throw new Error('Projekt nicht gefunden.')
   const snapshot = await agentProjectSnapshot(project.id)
+  input.assertExecution?.()
   if (
     input.expectedProject &&
     (snapshot.principalId !== input.expectedProject.principalId ||
@@ -139,27 +143,33 @@ export async function prepareAgentJob(input: {
     throw new Error('Das aktive Projekt entspricht nicht mehr dem freigegebenen Teamlauf.')
   }
   await validateAgentScope(snapshot, input.permission)
+  input.assertExecution?.()
   if (input.adapterId === 'codex') {
     if (!snapshot.rootPath) throw new Error('Bitte zuerst einen Projektordner zuordnen.')
     if ((await getRepositoryExternalPolicy()) === 'deny')
       throw new Error('Die Repository-Richtlinie verbietet externe Coding-Agenten.')
+    input.assertExecution?.()
   }
   let assembledPrompt = input.prompt
   const role = input.role ?? 'assistant'
   if (input.promptAssembly !== 'exact-reviewed') {
     const workspace = await getProjectWorkspace(project.id, snapshot.principalId)
+    input.assertExecution?.()
     const context = await buildProjectStartContext({ project, workspace, includeMemory: input.includeMemory === true })
+    input.assertExecution?.()
     assembledPrompt = `${context.providerText}\n\nRollenauftrag (${role}):\n${ROLE_INSTRUCTIONS.get(role)}\n\nArbeitsauftrag:\n${input.prompt}`
   }
   let externalThreadId: string | undefined
   if (input.resume && input.adapterId === 'codex') {
     const sessions = await listCodexSessions(snapshot)
+    input.assertExecution?.()
     externalThreadId = input.externalThreadId
       ? sessions.find(session => session.threadId === input.externalThreadId)?.threadId
       : sessions[0]?.threadId
     if (!externalThreadId) throw new Error('Für diesen Projektordner besteht keine passende native Codex-Sitzung.')
   }
   await validateAgentScope(snapshot, input.permission)
+  input.assertExecution?.()
   const job = agentHub.enqueue({
     project: snapshot,
     adapterId: input.adapterId,

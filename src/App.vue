@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
+import { loadPendingTaskCreates, replacePendingTaskCreates } from '@/services/agents/taskCreateRecoveryLedger'
 import Settings from './components/Settings.vue'
 import JarvisHud from './components/JarvisHud.vue'
 import LocalModelStatus from './components/LocalModelStatus.vue'
@@ -24,7 +25,6 @@ import {
 import { configureAgentHub } from '@/services/agents/hub'
 import {
   executionGate,
-  onExecutionInvalidated,
   invalidateExecution,
   updateExecutionControls,
   type ExecutionTicket,
@@ -63,7 +63,7 @@ import { presentLocalToolResult } from '@/services/toolProgressPresentation'
 import type { Message } from '@/state/types'
 import SpotlightSurface from './components/vengeance/SpotlightSurface.vue'
 import { type LuczorMode, type WireMessage } from './services/openrouter.service'
-import { runAgent, buildSystemPreamble, shouldRequireToolCall } from '@/services/agent'
+import { runAgent, buildSystemPreamble, shouldRequireToolCall, type AgentRunEvaluation } from '@/services/agent'
 import { presentEnvelopeStream } from '@/services/envelope'
 import { resolveApproval, rejectAllApprovals, hasPendingApproval } from '@/services/approvals'
 import { Store } from '@tauri-apps/plugin-store'
@@ -80,6 +80,13 @@ import { createVoiceInputSession, idleVoiceInput } from '@/services/voice/voiceI
 import { luczorMemory, getMemoryPrefs, type MemoryRecord } from '@/services/memory/luczorMemory'
 import { buildLocalPromptContextDetails, inferTaskType, type PromptContextDetails } from '@/services/contextController'
 import { LuczorApi } from '@/services/api/luczorApi'
+import {
+  cancelProjectSync,
+  commitProjectSync,
+  enqueueProjectSync,
+  flushProjectSyncQueue,
+  type StagedProjectSync,
+} from '@/services/api/projectSyncQueue'
 import { refreshStatus } from '@/services/status'
 import { appearance, appearanceAccentColor } from '@/services/appearance'
 import { miniProjectList, projectChatBinding } from '@/services/miniChat/projectChat'
@@ -111,7 +118,7 @@ import { FLASH_EXPERIMENT_SETTING_KEY } from '@/services/inference/hybridRouter'
 
 import { hud, setStatus, setKillSwitch } from '@/state/hud'
 import { state, mutations } from '@/state/store'
-import { scheduleSave } from '@/services/persistence'
+import { saveAppStateStrict, scheduleSave } from '@/services/persistence'
 import { playSfx, stopSfx } from '@/services/sfx'
 import { useAutoScroll } from '@/composables/useAutoScroll'
 import { useChatComposer, type ComposerInputSource } from '@/composables/useChatComposer'
@@ -164,13 +171,11 @@ const allowChatExternalFallback = ref(false)
 const agentMode = ref(false)
 const agentTeamPreset = ref<import('@/services/agents/teamPolicy').TeamPresetChoice>('server')
 const continuations = shallowRef<Record<string, AgentCheckpoint>>({})
-onBeforeUnmount(
-  onExecutionInvalidated(() => {
-    continuations.value = {}
-  })
-)
 const resetChatRouting = () => {
   continuations.value = {}
+  allowChatExternalFallback.value = false
+}
+const resetProjectRouting = () => {
   allowChatExternalFallback.value = false
 }
 window.addEventListener('luczor:api-identity-changing', resetChatRouting)
@@ -411,6 +416,25 @@ async function speakMessage(m: any) {
   }
 }
 
+async function speakSelectedText(text: string) {
+  const selected = text.replace(/\s+/gu, ' ').trim()
+  if (!selected) return
+  try {
+    const generation = speechGeneration
+    if (!(await getLocalSpeechConsent())) {
+      speechError.value =
+        'Die Textauswahl wurde nicht vorgelesen. Einstellungen → Chat → Auch lokale Inhalte zum Vorlesen freigeben.'
+      return
+    }
+    if (generation !== speechGeneration) return
+    await speakWithVoiceMuted(selected, undefined, false, 'context')
+  } catch (error) {
+    void recordDebugEvent('error', 'selection_tts_failed', {
+      message: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
 async function rateAssistantMessage(m: any, rating: 1 | -1) {
   const requestId = String(m?.meta?.llmRequestId ?? '')
   if (!requestId) return
@@ -429,6 +453,26 @@ async function rateAssistantMessage(m: any, rating: 1 | -1) {
   } catch (e) {
     console.warn('[evaluation] feedback sync failed:', e)
   }
+}
+
+function evaluateAgentRun(run: AgentRunEvaluation) {
+  void LuczorApi.evaluateLlmRun(run.requestId, {
+    evaluator_id: 'luczor.client.outcome.v1',
+    status: run.interrupted || run.continuation || run.toolFailures > 0 ? 'needs_review' : 'unverified',
+    success_score:
+      run.interrupted || run.toolFailures > 0 ? 0.25 : run.continuation ? 0.4 : run.toolSuccesses > 0 ? 0.75 : 0.5,
+    payload: {
+      agent_role: run.role,
+      tool_failures: run.toolFailures,
+      tool_successes: run.toolSuccesses,
+      finish: run.interrupted
+        ? 'inference_interrupted'
+        : run.continuation
+          ? 'continuation_required'
+          : 'assistant_response',
+      interruption_code: run.interrupted?.code,
+    },
+  }).catch(e => console.warn('[evaluation] deferred:', e))
 }
 
 function autoSpeakAssistantIfEnabled(pid: string, assistantId: string) {
@@ -484,7 +528,7 @@ const activeProjectId = computed<string>({
 })
 
 const activeProject = computed(() => projects.value.find(p => p.id === activeProjectId.value))
-watch(activeProjectId, resetChatRouting, { flush: 'sync' })
+watch(activeProjectId, resetProjectRouting, { flush: 'sync' })
 const activePlanningSession = computed(() => {
   void planningRevision.value
   return planningHub.get(activeProjectId.value)
@@ -517,6 +561,21 @@ onBeforeUnmount(() => {
   invalidateExecution()
 })
 const messages = computed(() => mutations.getProjectMessages(activeProjectId.value))
+const projectActivity = computed<Record<string, boolean>>(() => {
+  const active: Record<string, boolean> = {}
+  for (const message of state.messages) {
+    if (!message.projectId || message.visibility === 'hidden') continue
+    if (message.meta?.isLoading || message.meta?.activity?.status === 'running') active[message.projectId] = true
+  }
+  for (const [projectId, calls] of Object.entries(state.pending?.toolCallsByProject ?? {})) {
+    if (calls?.some(call => ['approved', 'executing'].includes(call.status))) active[projectId] = true
+  }
+  if (planningBusy.value) active[activeProjectId.value] = true
+  return active
+})
+const projectItems = computed(() =>
+  projects.value.map(project => ({ id: project.id, label: project.name, busy: !!projectActivity.value[project.id] }))
+)
 const isWelcomeMessage = (message: Message) =>
   message.role === 'assistant' &&
   ['Willkommen. Was ist das Ziel dieses Projekts?', 'Neuer Chat. Was ist das Ziel?'].includes(message.content)
@@ -613,6 +672,11 @@ function openProject(id: string) {
   activeProjectId.value = id
 }
 
+function renameProject(id: string, name: string) {
+  mutations.renameProject(id, name)
+  scheduleSave(state)
+}
+
 function newChat() {
   void voiceInputSession.stop()
   void stopGenerating()
@@ -625,18 +689,58 @@ async function addProject() {
   const rootPath = await selectProjectWorkspaceDirectory('Projektordner als neues Luczor-Projekt öffnen')
   if (!rootPath) return
 
-  const id = `p_${Math.random().toString(16).slice(2)}`
+  const id = globalThis.crypto?.randomUUID?.() ?? `p_${Math.random().toString(16).slice(2)}`
+  const execution = executionGate.capture()
+  let workspace: ProjectWorkspaceBinding | null = null
+  let staged: StagedProjectSync | null = null
+  let workspacePrincipalId = ''
+  let bindingStarted = false
+  let localCommitted = false
   try {
-    const workspace = await bindProjectWorkspace(id, rootPath)
-    mutations.addProject({ id, name: workspace.displayName || `Projekt ${projects.value.length + 1}` })
+    executionGate.assert(execution)
+    const apiConfig = await LuczorApi.getConfigSnapshot()
+    executionGate.assert(execution)
+    workspacePrincipalId = await resolveWorkspacePrincipalId()
+    executionGate.assert(execution)
+    const trimmedRoot = rootPath.replace(/[\\/]+$/u, '')
+    const name = trimmedRoot.split(/[\\/]/u).pop()?.trim() || `Projekt ${projects.value.length + 1}`
+    staged = await enqueueProjectSync(id, name, apiConfig, { workspacePrincipalId })
+    bindingStarted = true
+    workspace = await bindProjectWorkspace(id, rootPath, workspacePrincipalId)
+    executionGate.assert(execution)
+    await commitProjectSync(staged, async () => {
+      executionGate.assert(execution)
+      mutations.addProject({ id, name: workspace?.displayName || name }, false)
+      try {
+        await saveAppStateStrict(state)
+        localCommitted = true
+      } catch (error) {
+        mutations.rollbackProjectCreation(id)
+        throw error
+      }
+    })
     activeProjectId.value = id
     activeWorkspace.value = workspace
 
-    // Server mirroring is best-effort; the desktop project remains usable
-    // offline and its absolute directory never enters the sync payload.
-    void LuczorApi.createProject(id, workspace.displayName).catch(() => undefined)
+    // The queue is API-identity-bound and survives an offline/aborted POST.
+    // Capture the new project generation so a later scope change stops only
+    // the immediate attempt; the durable heartbeat retry remains available.
+    const syncExecution = executionGate.capture()
+    void flushProjectSyncQueue({ config: apiConfig, signal: syncExecution.signal }).catch(() => undefined)
     if (workspace.isGitRepository) await bindAndIndexWorkspace(workspace)
   } catch (error) {
+    if (!localCommitted) {
+      let workspaceRecovered = true
+      if (bindingStarted && workspacePrincipalId) {
+        workspaceRecovered = await unbindProjectWorkspace(id, workspacePrincipalId).then(
+          () => true,
+          () => false
+        )
+      }
+      // If native cleanup failed, keep the durable marker so startup/status
+      // recovery can retry the exact principal/project unbind later.
+      if (staged && workspaceRecovered) await cancelProjectSync(staged).catch(() => undefined)
+    }
     window.alert(error instanceof Error ? error.message : String(error))
   }
 }
@@ -839,7 +943,12 @@ const showContext = ref(false)
 const activeWorkspace = ref<ProjectWorkspaceBinding | null>(null)
 watch(
   () => [activeWorkspace.value?.rootPath, activeWorkspace.value?.updatedAt],
-  () => invalidateExecution(),
+  () => {
+    // Chat continuations may contain workspace-scoped mutation history. The
+    // principal/project task ledger is separate and remains available.
+    continuations.value = {}
+    invalidateExecution()
+  },
   { flush: 'sync' }
 )
 const workspaceBusy = ref(false)
@@ -1172,11 +1281,6 @@ async function send(
     userMsg.meta = { ...(userMsg.meta ?? {}), inputSource }
     mutations.addMessage(userMsg)
     if (!resume && !miniInput) input.value = ''
-    if (resume) {
-      const next = { ...continuations.value }
-      delete next[resume.messageId]
-      continuations.value = next
-    }
     void nextTick(() => autoGrow())
     sending.value = true
 
@@ -1297,10 +1401,18 @@ async function send(
         principalId: accountScope?.principalId ?? (await resolveWorkspacePrincipalId()),
         serverInstance: accountScope?.serverInstance ?? 'device-local',
         projectId: pid,
-        workspaceBindingId: String(workspace?.updatedAt ?? ''),
+        workspaceBindingId: JSON.stringify([workspace?.rootPath ?? '', workspace?.updatedAt ?? '']),
         sessionId: assistant.id,
         taskType,
       }
+      const principalScopeId = JSON.stringify([scopeKey.serverInstance, scopeKey.principalId])
+      let taskCreateRecoveryReady = true
+      const pendingTaskCreateVerifications = await loadPendingTaskCreates(principalScopeId, pid).catch(error => {
+        taskCreateRecoveryReady = false
+        console.warn('[task-create] recovery ledger unavailable:', error)
+        return []
+      })
+      executionGate.assert(turnExecution)
       if (workspace?.rootPath)
         contextFragments.push({
           id: 'local-workspace-path',
@@ -1348,7 +1460,6 @@ async function send(
       ]
 
       let streamStarted = false
-
       executionGate.assert(turnExecution)
       if (abort.signal.aborted) throw new DOMException('Aborted', 'AbortError')
       void playSfx('loading')
@@ -1365,7 +1476,9 @@ async function send(
         ephemeralDataUsed,
         tokenUsage,
         specialistOutcomes,
+        agentRunEvaluations,
         continuation,
+        interrupted,
       } = await runAgent({
         agentMode: useAgents,
         agentTeamPreset: agentTeamPreset.value,
@@ -1388,6 +1501,10 @@ async function send(
             turnExecution.signal
           ),
         continuation: resume?.checkpoint,
+        pendingTaskCreateVerifications,
+        principalScopeId,
+        workspaceBindingId: scopeKey.workspaceBindingId,
+        taskCreateRecoveryReady,
         projectId: pid,
         baseMessages,
         // This list is assembled exclusively through the existing provider-safe
@@ -1418,6 +1535,12 @@ async function send(
         commitSha: promptContext.commitSha,
         inputSource,
         signal: turnExecution.signal,
+        onCheckpoint: async checkpoint => {
+          if (turnExecution.signal.aborted || checkpoint.principalScopeId !== principalScopeId) return
+          const targetMessageId = resume?.messageId ?? assistant.id
+          continuations.value = { ...continuations.value, [targetMessageId]: checkpoint }
+          await replacePendingTaskCreates(principalScopeId, pid, checkpoint.pendingTaskCreateVerifications ?? [])
+        },
 
         onProgress: event => {
           if (turnExecution.signal.aborted) return
@@ -1483,7 +1606,13 @@ async function send(
 
       if (turnExecution.signal.aborted) throw new DOMException('Aborted', 'AbortError')
       executionGate.assert(turnExecution)
-      if (continuation) continuations.value = { ...continuations.value, [assistant.id]: continuation }
+      {
+        const next = { ...continuations.value }
+        if (resume) delete next[resume.messageId]
+        if (continuation) next[assistant.id] = continuation
+        else delete next[assistant.id]
+        continuations.value = next
+      }
       applyStreamedContent(pid, assistant.id, finalText, true)
       finishChatActivity(chatActivities.value[assistant.id]!, 'done')
       // Attach the server-reported routing metadata to the assistant message.
@@ -1509,20 +1638,28 @@ async function send(
         mutations.patchMessage(pid, assistant.id, {
           meta: { ...(current?.meta ?? {}), llmRequestId: requestId, userFeedback: null } as any,
         })
-        void LuczorApi.evaluateLlmRun(requestId, {
-          evaluator_id: 'luczor.client.outcome.v1',
-          status: toolFailures > 0 ? 'needs_review' : 'unverified',
-          success_score: toolFailures > 0 ? 0.25 : toolSuccesses > 0 ? 0.75 : 0.5,
-          payload: { tool_failures: toolFailures, tool_successes: toolSuccesses, finish: 'assistant_response' },
-        }).catch(e => console.warn('[evaluation] deferred:', e))
       }
+      const evaluations: AgentRunEvaluation[] = agentRunEvaluations?.length
+        ? agentRunEvaluations
+        : requestId
+          ? [
+              {
+                requestId,
+                role: 'worker',
+                toolFailures,
+                toolSuccesses,
+                continuation: Boolean(continuation),
+                interrupted,
+              },
+            ]
+          : []
+      for (const evaluation of evaluations) evaluateAgentRun(evaluation)
 
       setStatus('idle')
       if (turnSpeechGeneration === speechGeneration) void autoSpeakAssistantIfEnabled(pid, assistant.id)
-      if (!ephemeralDataUsed) void rememberExchange(pid, text, assistant.id, scopeKey.principalId, turnExecution)
+      if (!ephemeralDataUsed && !continuation && !interrupted)
+        void rememberExchange(pid, text, assistant.id, scopeKey.principalId, turnExecution)
     } catch (e: any) {
-      if (resume && !turnExecution.signal.aborted)
-        continuations.value = { ...continuations.value, [resume.messageId]: resume.checkpoint }
       try {
         stopSfx('loading')
       } catch {}
@@ -1573,7 +1710,7 @@ watch(
   { deep: true }
 )
 const miniChat = useMiniChatHost({
-  projects: () => miniProjectList(state.projects, state.messages),
+  projects: () => miniProjectList(state.projects, state.messages, projectActivity.value),
   chat: () =>
     projectChatBinding(
       activeProject.value,
@@ -1596,11 +1733,17 @@ const miniChat = useMiniChatHost({
     else if (panel === 'desktop') openSettings('execution')
     else await addProject()
   },
+  togglePushToTalk,
+  toggleWakeWord: toggleListening,
+  setAgentMode: enabled => {
+    agentMode.value = enabled
+  },
   appearance: () => ({ accent: appearanceAccentColor(), assistantName: appearance.assistantName }),
   context: () => ({
     project: activeProject.value ? { id: activeProject.value.id, name: activeProject.value.name } : null,
     mode: mode.value,
     mainBusy: sending.value || sendAdmission.value || showPlanning.value || planningBusy.value,
+    workspaceBindingId: JSON.stringify([activeWorkspace.value?.rootPath ?? '', activeWorkspace.value?.updatedAt ?? '']),
   }),
   setMode: next => {
     mode.value = next
@@ -1633,6 +1776,12 @@ const miniChat = useMiniChatHost({
     setKillSwitch(enabled)
     if (enabled) void stopGenerating()
   },
+  agentMode: () => agentMode.value,
+  voice: () => ({
+    wakeWord: listening.value,
+    recording: isRecording.value,
+    busy: voiceInputView.value.starting || voiceInputView.value.finishing,
+  }),
 })
 // Voice and both composers must share admission and mute state, including hotkeys.
 const conversationBusy = computed(
@@ -1689,9 +1838,10 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
     <SidebarNav
       v-model:collapsed="sidebarCollapsed"
       :title="appearance.assistantName"
-      :items="projects.map(p => ({ id: p.id, label: p.name }))"
+      :items="projectItems"
       :active-id="activeProjectId"
       @select="openProject"
+      @rename="renameProject"
       @new-chat="newChat"
       @add-project="addProject"
       @settings="openSettings()"
@@ -2069,8 +2219,8 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
                 ><ToolChips :tools="messageTools(m)"
               /></ThinkingState>
               <ToolChips v-else :tools="messageTools(m)" />
-              <ChatCommentary :entries="m.meta.commentary ?? []" :message-id="m.id" />
-              <SelectionActions :disabled="sending" @action="editSelection">
+              <SelectionActions :disabled="sending" @action="editSelection" @speak="speakSelectedText">
+                <ChatCommentary :entries="m.meta.commentary ?? []" :message-id="m.id" />
                 <StreamingText
                   :content="m.content"
                   :streaming="!!m.meta.isLoading"
@@ -2206,14 +2356,11 @@ const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
             <option value="local">Alle Agenten lokal</option>
           </select>
         </label>
-        <label class="chat-routing-choice">
-          <input v-model="allowChatExternalFallback" type="checkbox" :disabled="conversationBusy" />
-          Externen Fallback nach Freigabe erlauben
-        </label>
         <PromptBar
           ref="promptBar"
           v-model="input"
           v-model:agent-mode="agentMode"
+          v-model:external-fallback="allowChatExternalFallback"
           :busy="conversationBusy"
           :recording="isRecording"
           :listening="listening"

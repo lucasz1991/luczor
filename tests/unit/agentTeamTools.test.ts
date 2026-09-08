@@ -13,6 +13,14 @@ const mocks = vi.hoisted(() => ({
   prepare: vi.fn(),
   getRun: vi.fn(),
   cancelRun: vi.fn(),
+  executionAssert: vi.fn(),
+}))
+
+vi.mock('@/services/executionGate', () => ({
+  executionGate: {
+    capture: () => ({ sessionId: 'session', generation: 1, signal: new AbortController().signal }),
+    assert: mocks.executionAssert,
+  },
 }))
 
 vi.mock('@/services/agents/hub', () => ({ agentProjectSnapshot: mocks.snapshot }))
@@ -69,6 +77,7 @@ beforeEach(() => {
   }))
   mocks.getRun.mockReturnValue(run())
   mocks.cancelRun.mockReturnValue(true)
+  mocks.executionAssert.mockImplementation(() => undefined)
 })
 
 describe('agent team tools', () => {
@@ -134,5 +143,27 @@ describe('agent team tools', () => {
       run_id: 'team-run',
     })
     expect(mocks.cancelRun).toHaveBeenCalledWith('team-run')
+  })
+
+  it('does not stage a team after its execution generation changed during the project snapshot', async () => {
+    mocks.executionAssert
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => {
+        throw new Error('Ausführung verworfen')
+      })
+
+    await expect(
+      tool('agent_team_prepare').execute(
+        {
+          objective: 'Task',
+          planner: 'local',
+          implementer: 'codex',
+          reviewer: 'local',
+          approval_mode: 'team',
+        },
+        context
+      )
+    ).rejects.toThrow('Ausführung verworfen')
+    expect(mocks.prepare).not.toHaveBeenCalled()
   })
 })

@@ -2,7 +2,7 @@
 export type ActivityStatus = 'pending' | 'running' | 'done' | 'failed' | 'waiting' | 'canceled'
 export type ActivityStep = { id: string; label: string; detail?: string; status: ActivityStatus }
 export type ContextItem = { id: string; title: string; content: string; source: string; kind?: string }
-export type SearchItem = { id: string; label: string; description?: string; icon?: string }
+export type SearchItem = { id: string; label: string; description?: string; icon?: string; busy?: boolean }
 export type TableColumn = { key: string; label: string }
 export type TableRecord = { id: string; [key: string]: string | number }
 export type DiffRecord = { id: string; label: string; before: string; after: string }

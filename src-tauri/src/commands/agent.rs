@@ -13,10 +13,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tauri::WebviewWindow;
+use tauri::{AppHandle, WebviewWindow};
 
 use super::ensure_main_webview;
 use super::execution::{admit, ExecutionLease, Guarded};
+use super::project_workspace::with_workspace_mutation;
 
 const MAX_BRIDGE_BYTES: usize = 1_000_000;
 
@@ -61,6 +62,7 @@ fn detect_one(agent: &str) -> AgentInfo {
 /// Resolve a user-supplied project directory and reject filesystem roots.
 /// A bridge file or coding agent launched at `C:\`, `/`, etc. would escape
 /// every meaningful project boundary.
+#[cfg(test)]
 fn validate_project_dir(raw: &str) -> Result<PathBuf, String> {
     let dir = Path::new(raw);
     if !dir.is_dir() {
@@ -123,8 +125,12 @@ pub async fn agent_cli_run(
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BridgePayload {
-    pub project_dir: String,
+    pub principal_id: String,
+    pub project_id: String,
+    pub expected_root_path: String,
+    pub expected_workspace_updated_at: i64,
     pub content: String,
 }
 
@@ -132,16 +138,26 @@ pub struct BridgePayload {
 #[tauri::command]
 pub async fn agent_write_bridge(
     window: WebviewWindow,
+    app: AppHandle,
     payload: Guarded<BridgePayload>,
 ) -> Result<String, String> {
     ensure_main_webview(&window)?;
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     validate_bridge_content(&payload.content)?;
-    let dir = validate_project_dir(&payload.project_dir)?;
-    let file = dir.join("LUCZOR.md");
-    atomic_write_guarded(&file, payload.content.as_bytes(), Some(&gate))?;
-    Ok(file.to_string_lossy().into_owned())
+    with_workspace_mutation(
+        &app,
+        &payload.principal_id,
+        &payload.project_id,
+        &payload.expected_root_path,
+        payload.expected_workspace_updated_at,
+        &gate,
+        |root, gate| {
+            let file = root.join("LUCZOR.md");
+            atomic_write_guarded(&file, payload.content.as_bytes(), Some(gate))?;
+            Ok("LUCZOR.md".to_string())
+        },
+    )
 }
 
 fn validate_bridge_content(content: &str) -> Result<(), String> {
@@ -218,7 +234,42 @@ pub(crate) fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()
 
 #[cfg(test)]
 mod tests {
-    use super::{atomic_write, validate_bridge_content, validate_project_dir, MAX_BRIDGE_BYTES};
+    use super::{
+        atomic_write, validate_bridge_content, validate_project_dir, BridgePayload,
+        MAX_BRIDGE_BYTES,
+    };
+    use crate::commands::execution::Guarded;
+
+    #[test]
+    fn bridge_payload_accepts_the_guarded_camel_case_command_contract_only() {
+        let payload: Guarded<BridgePayload> = serde_json::from_value(serde_json::json!({
+            "execution": { "sessionId": "session-a", "generation": 7 },
+            "principalId": "principal-a",
+            "projectId": "project-a",
+            "expectedRootPath": "E:\\project",
+            "expectedWorkspaceUpdatedAt": 42,
+            "content": "# Bridge"
+        }))
+        .expect("camelCase renderer payload");
+
+        assert_eq!(payload.request.principal_id, "principal-a");
+        assert_eq!(payload.request.project_id, "project-a");
+        assert_eq!(payload.request.expected_root_path, "E:\\project");
+        assert_eq!(payload.request.expected_workspace_updated_at, 42);
+        assert_eq!(payload.request.content, "# Bridge");
+        assert!(
+            serde_json::from_value::<Guarded<BridgePayload>>(serde_json::json!({
+                "execution": { "sessionId": "session-a", "generation": 7 },
+                "principalId": "principal-a",
+                "projectId": "project-a",
+                "expectedRootPath": "E:\\project",
+                "expectedWorkspaceUpdatedAt": 42,
+                "content": "# Bridge",
+                "unexpected": true
+            }))
+            .is_err()
+        );
+    }
 
     #[test]
     fn project_directory_validation_rejects_the_filesystem_root() {

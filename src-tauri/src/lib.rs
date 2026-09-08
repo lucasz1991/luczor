@@ -4,7 +4,20 @@ use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let app = tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    #[cfg(desktop)]
+    {
+        // Register first: the recovery ledger has one process-wide writer.
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show();
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+
+    let app = builder
         .manage(commands::mini_chat::MiniChatState::default())
         .manage(commands::codex::CodexJobs::default())
         .plugin(tauri_plugin_dialog::init())

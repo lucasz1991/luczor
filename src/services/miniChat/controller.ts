@@ -1,21 +1,30 @@
 import { reactive } from 'vue'
-import type { AgentToolSession, RunAgentOptions } from '@/services/agent'
+import type { AgentToolSession, RunAgentOptions, RunAgentResult } from '@/services/agent'
+import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import type { LuczorMode, WireMessage } from '@/services/inference/types'
 import { createChatActivity, finishChatActivity, updateChatActivity } from '@/services/chatActivity'
 import { presentEnvelopeStream } from '@/services/envelope'
 import { completedCommentary } from '@/services/chatCommentary'
-import type { TokenUsage } from '@/services/tokenUsage'
 import { compactHistory, normalizeConversationHistory, previewToolArguments } from '@/services/chatPresentation'
 import { executionGate } from '@/services/executionGate'
 import { emptyMiniSnapshot, type MiniAction, type MiniDecision, type MiniMessage } from './types'
 
-type Context = { project: { id: string; name: string } | null; mode: LuczorMode; mainBusy: boolean }
+type Context = {
+  project: { id: string; name: string } | null
+  mode: LuczorMode
+  mainBusy: boolean
+  workspaceBindingId?: string
+}
 type Dependencies = {
   followProject?: boolean
   context: () => Context
   setMode: (mode: 'observe' | 'act') => void
   preamble: (mode: LuczorMode, name: string) => string
-  run: (options: RunAgentOptions) => Promise<{ finalText: string; tokenUsage?: TokenUsage }>
+  run: (
+    options: RunAgentOptions
+  ) => Promise<
+    Pick<RunAgentResult, 'finalText'> & Partial<Pick<RunAgentResult, 'tokenUsage' | 'continuation' | 'interrupted'>>
+  >
 }
 
 /** Conversation and tool journal are never passed to persistence, sync or memory. */
@@ -24,6 +33,7 @@ export function createMiniChatController(deps: Dependencies) {
   state.sessionId = crypto.randomUUID()
   let abort: AbortController | null = null
   let decisionResolve: ((approved: boolean) => void) | null = null
+  let continuation: AgentCheckpoint | undefined
 
   function touch() {
     state.revision++
@@ -32,8 +42,16 @@ export function createMiniChatController(deps: Dependencies) {
     const context = deps.context()
     state.mode = context.mode
     state.mainBusy = context.mainBusy
-    if (!state.busy && (deps.followProject || !state.messages.length))
+    if (!state.busy && (deps.followProject || !state.messages.length)) {
+      if (
+        continuation &&
+        (continuation.projectId !== context.project?.id ||
+          (continuation.workspaceBindingId !== undefined &&
+            continuation.workspaceBindingId !== (context.workspaceBindingId ?? '')))
+      )
+        continuation = undefined
       state.project = context.project ? { ...context.project } : null
+    }
     touch()
   }
   function decide(id: string, approved: boolean) {
@@ -45,6 +63,7 @@ export function createMiniChatController(deps: Dependencies) {
     resolve(approved)
   }
   function stop() {
+    continuation = undefined
     abort?.abort()
     if (state.decision) decide(state.decision.id, false)
     touch()
@@ -52,6 +71,7 @@ export function createMiniChatController(deps: Dependencies) {
   function reset() {
     stop()
     state.sessionId = crypto.randomUUID()
+    continuation = undefined
     state.messages = []
     state.tools = []
     state.busy = !!abort
@@ -161,7 +181,7 @@ export function createMiniChatController(deps: Dependencies) {
         if (tool) tool.status = status
         touch()
       },
-      approve(id) {
+      approve(id, approvalSignal) {
         const tool = state.tools.find(item => item.id === id)
         if (!valid() || !tool) return Promise.resolve(false)
         return ask(
@@ -172,10 +192,11 @@ export function createMiniChatController(deps: Dependencies) {
             description: `Einmalige Freigabe für ${project.name}.`,
             detail: tool.detail,
           },
-          turnExecution.signal
+          approvalSignal ?? turnExecution.signal
         )
       },
     }
+    let latestCheckpoint = continuation
     try {
       const transcript: WireMessage[] = state.messages
         .filter(message => message.id !== assistant.id && message.status === 'done')
@@ -200,6 +221,21 @@ export function createMiniChatController(deps: Dependencies) {
         ...compactHistory(normalizeConversationHistory(transcript), 2400),
       ]
       executionGate.assert(turnExecution)
+      const continuationForTurn = continuation
+        ? {
+            ...structuredClone(continuation),
+            objective: [
+              continuation.objective,
+              /^\s*(weiter|fortsetzen|mach(?:e)? weiter)[.!?\s]*$/iu.test(text)
+                ? ''
+                : `Aktuelle Nutzeranweisung: ${text}`,
+            ]
+              .filter(Boolean)
+              .join('\n\n')
+              .slice(0, 12_000),
+            messages: [...structuredClone(continuation.messages), { role: 'user' as const, content: text }],
+          }
+        : undefined
       const result = await deps.run({
         projectId: project.id,
         mode: state.mode,
@@ -208,7 +244,12 @@ export function createMiniChatController(deps: Dependencies) {
         contextEgress: 'local_only',
         routingSettings: { preference: 'local_only' },
         signal: turnExecution.signal,
+        continuation: continuationForTurn,
         toolSession,
+        onCheckpoint(checkpoint) {
+          if (!valid()) return
+          latestCheckpoint = checkpoint
+        },
         onProgress(event) {
           if (valid() && assistant.activity) {
             updateChatActivity(assistant.activity, event)
@@ -247,6 +288,10 @@ export function createMiniChatController(deps: Dependencies) {
       })
       executionGate.assert(turnExecution)
       if (!valid()) return
+      continuation = result.continuation ?? (result.interrupted ? latestCheckpoint : undefined)
+      state.notice = continuation
+        ? 'Der Arbeitsstand ist gesichert. Die nächste Nachricht setzt ihn fort; mit Zurücksetzen verwirfst du ihn.'
+        : ''
       assistant.tokenUsage = result.tokenUsage ?? assistant.tokenUsage
       const presented = presentEnvelopeStream(result.finalText, true)
       assistant.content = presented.content.slice(0, 16_000)
@@ -257,6 +302,10 @@ export function createMiniChatController(deps: Dependencies) {
       if (assistant.activity) finishChatActivity(assistant.activity, 'done')
     } catch (error) {
       if (state.sessionId !== sessionId || abort !== current) return
+      // Explicit Stop/Reset discards the transient continuation. A mode or
+      // kill-switch invalidation keeps already checkpointed mutation keys;
+      // identity reset and workspace rebinding clear it through reset/refresh.
+      if (!current.signal.aborted && latestCheckpoint) continuation = latestCheckpoint
       assistant.status = turnExecution.signal.aborted ? 'canceled' : 'failed'
       assistant.content = turnExecution.signal.aborted
         ? assistant.content || 'Abgebrochen.'

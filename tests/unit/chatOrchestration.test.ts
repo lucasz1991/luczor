@@ -20,7 +20,7 @@ vi.mock('@/services/agents/teamHub', async () => {
       executor: Executor
     ) => {
       execute = executor
-      return agentTeams.prepare(definition, input)
+      return agentTeams.prepare({ ...definition, deadlineMs: definition.deadlineMs ?? 5_000 }, input)
     },
   }
 })
@@ -62,6 +62,12 @@ it('runs a sequential planner-worker-reviewer graph with configured worker limit
   expect(calls.map(call => call.maxRounds)).toEqual([1, 17, 3])
   expect(calls.map(call => call.toolAccess)).toEqual(['none', undefined, 'read-only'])
   expect(
+    calls.every(
+      call =>
+        call.disabledTools?.includes('agent_team_prepare') && call.disabledTools.includes('workspace_agent_prepare')
+    )
+  ).toBe(true)
+  expect(
     calls.every(call => !call.agentMode && call.inferenceGateway === gateway && call.contextEgress === 'local_only')
   ).toBe(true)
   expect(response.continuation).toEqual(checkpoint)
@@ -84,6 +90,375 @@ it('stops scheduling dependent agents after cancellation', async () => {
     )
   ).rejects.toMatchObject({ name: 'AbortError' })
   expect(execute).toHaveBeenCalledTimes(1)
+})
+
+it('returns the saved checkpoint when the worker model fails before producing a result', async () => {
+  const savedWorkerCheckpoint = {
+    ...checkpoint,
+    objective: 'Gesicherter Worker-Stand',
+    completedMutations: [['mutation', { ok: true }]] as AgentCheckpoint['completedMutations'],
+  }
+  const execute = vi.fn(async (options: RunAgentOptions) => {
+    if (execute.mock.calls.length === 1)
+      return { ...result, requestId: 'planner-request', model: 'planner-model', provider: 'local' }
+    options.onUsage?.(result.tokenUsage)
+    await options.onCheckpoint?.(savedWorkerCheckpoint)
+    throw new Error('Local model request failed')
+  })
+
+  const response = await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'act', agentMode: true },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+
+  expect(execute).toHaveBeenCalledTimes(2)
+  expect(response.continuation).toEqual(savedWorkerCheckpoint)
+  expect(response.interrupted?.code).toBe('execution_failed')
+  expect(response.requestId).toBeUndefined()
+  expect(response.model).toBeUndefined()
+  expect(response.finalText).toContain('Arbeitsagent wurde vor dem Abschluss unterbrochen')
+  expect(response.finalText).toContain('Projekt- und Aufgabenstand')
+})
+
+it('returns the original checkpoint when the planning agent fails before producing a result', async () => {
+  const execute = vi.fn(async () => {
+    throw new Error('Local model request failed')
+  })
+
+  const response = await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'act', agentMode: true },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+
+  expect(execute).toHaveBeenCalledOnce()
+  expect(response.continuation).toEqual(checkpoint)
+  expect(response.interrupted?.code).toBe('execution_failed')
+  expect(response.finalText).toContain('Planungsagent wurde vor dem ersten Ergebnis unterbrochen')
+})
+
+it('starts the reviewer from the latest checkpoint emitted by the worker', async () => {
+  const workerCheckpoint = {
+    ...checkpoint,
+    objective: 'Aktueller Worker-Stand',
+    completedMutations: [['saved', { ok: true }]] as AgentCheckpoint['completedMutations'],
+  }
+  const execute = vi.fn(async (options: RunAgentOptions) => {
+    if (execute.mock.calls.length === 1) return { ...result, finalText: 'Plan' }
+    if (execute.mock.calls.length === 2) {
+      await options.onCheckpoint?.(workerCheckpoint)
+      return { ...result, finalText: 'Arbeitsstand' }
+    }
+    expect(options.continuation).toMatchObject({
+      objective: 'Aktueller Worker-Stand',
+      completedMutations: workerCheckpoint.completedMutations,
+    })
+    return { ...result, finalText: 'Geprüfter Arbeitsstand' }
+  })
+
+  const response = await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'act', agentMode: true },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+
+  expect(execute).toHaveBeenCalledTimes(3)
+  expect(response.finalText).toBe('Geprüfter Arbeitsstand')
+})
+
+it('does not attribute a worker continuation to a successful reviewer request', async () => {
+  const execute = vi.fn(async () => {
+    if (execute.mock.calls.length === 1)
+      return { ...result, finalText: 'Plan', requestId: 'planner-request', toolSuccesses: 0 }
+    if (execute.mock.calls.length === 2)
+      return {
+        ...result,
+        finalText: 'Arbeitsstand',
+        requestId: 'worker-request',
+        continuation: checkpoint,
+        toolSuccesses: 2,
+      }
+    return { ...result, finalText: 'Geprüfter Zwischenstand', requestId: 'reviewer-request', toolSuccesses: 0 }
+  })
+
+  const response = await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'act', agentMode: true },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+
+  expect(response.requestId).toBeUndefined()
+  expect(response.continuation).toEqual(checkpoint)
+  expect(response.agentRunEvaluations).toEqual([
+    {
+      requestId: 'planner-request',
+      role: 'planner',
+      toolFailures: 0,
+      toolSuccesses: 0,
+      continuation: false,
+      interrupted: undefined,
+    },
+    {
+      requestId: 'worker-request',
+      role: 'worker',
+      toolFailures: 0,
+      toolSuccesses: 2,
+      continuation: true,
+      interrupted: undefined,
+    },
+    {
+      requestId: 'reviewer-request',
+      role: 'reviewer',
+      toolFailures: 0,
+      toolSuccesses: 0,
+      continuation: false,
+      interrupted: undefined,
+    },
+  ])
+})
+
+it('keeps each local agent tool outcome attached to its own request', async () => {
+  const execute = vi.fn(async () => {
+    if (execute.mock.calls.length === 1)
+      return { ...result, finalText: 'Plan', requestId: 'planner-request', toolSuccesses: 0 }
+    if (execute.mock.calls.length === 2)
+      return {
+        ...result,
+        finalText: 'Arbeitsstand',
+        requestId: 'worker-request',
+        toolFailures: 1,
+        toolSuccesses: 2,
+      }
+    return {
+      ...result,
+      finalText: 'Geprüfter Arbeitsstand',
+      requestId: 'reviewer-request',
+      toolFailures: 0,
+      toolSuccesses: 0,
+    }
+  })
+
+  const response = await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'act', agentMode: true },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+
+  expect(response.requestId).toBe('reviewer-request')
+  expect(response.toolFailures).toBe(1)
+  expect(response.toolSuccesses).toBe(2)
+  expect(response.agentRunEvaluations?.find(item => item.role === 'worker')).toMatchObject({
+    requestId: 'worker-request',
+    toolFailures: 1,
+    toolSuccesses: 2,
+  })
+  expect(response.agentRunEvaluations?.find(item => item.role === 'reviewer')).toMatchObject({
+    requestId: 'reviewer-request',
+    toolFailures: 0,
+    toolSuccesses: 0,
+  })
+})
+
+it('labels a worker inference interruption as a model issue rather than a round limit', async () => {
+  const execute = vi.fn(async () => {
+    if (execute.mock.calls.length === 1) return result
+    if (execute.mock.calls.length === 2)
+      return {
+        ...result,
+        continuation: checkpoint,
+        interrupted: {
+          code: 'runtime_tool_contract_rejected',
+          message: 'Das lokale Modell konnte die Werkzeugdaten nicht verarbeiten.',
+          round: 5,
+        },
+      }
+    return result
+  })
+
+  const response = await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'act', agentMode: true },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+
+  expect(response.interrupted?.code).toBe('runtime_tool_contract_rejected')
+  expect(response.finalText).toContain('lokalen Modellstörung')
+  expect(response.finalText).not.toContain('Rundenlimit')
+})
+
+it('labels a reviewer inference interruption as a model issue rather than a round limit', async () => {
+  const execute = vi.fn(async () => {
+    if (execute.mock.calls.length === 1) return { ...result, finalText: 'Plan' }
+    if (execute.mock.calls.length === 2) return { ...result, finalText: 'Belegter Arbeitsstand' }
+    return {
+      ...result,
+      finalText: 'Die Prüfrunde wurde unterbrochen.',
+      continuation: checkpoint,
+      interrupted: {
+        code: 'runtime_context_exceeded',
+        message: 'Der Kontext wurde abgelehnt.',
+        round: 2,
+      },
+    }
+  })
+
+  const response = await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'act', agentMode: true },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+
+  expect(response.interrupted?.code).toBe('runtime_context_exceeded')
+  expect(response.continuation).toEqual({ ...checkpoint, toolAccess: 'read-only' })
+  expect(response.finalText).toContain('Belegter Arbeitsstand')
+  expect(response.finalText).not.toContain('Die Prüfrunde wurde unterbrochen.')
+  expect(response.finalText).toContain('Teamprüfung wurde nicht abgeschlossen')
+  expect(response.finalText).toContain('lokalen Modellstörung')
+  expect(response.finalText).not.toContain('Rundenlimit')
+})
+
+it('returns the worker result as unreviewed when the reviewer throws before producing a result', async () => {
+  const savedWorkerCheckpoint = {
+    ...checkpoint,
+    completedMutations: [['worker-write', { ok: true }]] as AgentCheckpoint['completedMutations'],
+  }
+  const execute = vi.fn(async (options: RunAgentOptions) => {
+    if (execute.mock.calls.length === 1) return { ...result, finalText: 'Plan', requestId: 'planner-request' }
+    if (execute.mock.calls.length === 2) {
+      await options.onCheckpoint?.(savedWorkerCheckpoint)
+      return { ...result, finalText: 'Arbeitsstand', requestId: 'worker-request' }
+    }
+    throw new Error('Reviewer runtime failed')
+  })
+
+  const response = await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'act', agentMode: true },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+
+  expect(execute).toHaveBeenCalledTimes(3)
+  expect(response.finalText).toContain('Arbeitsstand')
+  expect(response.finalText).toContain('Teamprüfung wurde nicht abgeschlossen')
+  expect(response.interrupted).toMatchObject({
+    code: 'execution_failed',
+    message: 'Der Prüfagent wurde vor dem Abschluss unterbrochen.',
+  })
+  expect(response.requestId).toBeUndefined()
+  expect(response.continuation).toMatchObject({
+    toolAccess: 'read-only',
+    completedMutations: savedWorkerCheckpoint.completedMutations,
+  })
+})
+
+it('ignores an invalid reviewer result and preserves the valid worker result as needing review', async () => {
+  const execute = vi.fn(async () => {
+    if (execute.mock.calls.length === 1) return { ...result, finalText: 'Plan' }
+    if (execute.mock.calls.length === 2) return { ...result, finalText: 'Arbeitsstand', requestId: 'worker-request' }
+    return { ...result, finalText: '', requestId: 'invalid-reviewer-request' }
+  })
+
+  const response = await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'act', agentMode: true },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+
+  expect(response.finalText).toContain('Arbeitsstand')
+  expect(response.finalText).toContain('Teamprüfung wurde nicht abgeschlossen')
+  expect(response.interrupted?.code).toBe('invalid_result')
+  expect(response.requestId).toBeUndefined()
+  expect(response.continuation?.toolAccess).toBe('read-only')
+})
+
+it('preserves the original checkpoint when the global team deadline interrupts the planner', async () => {
+  vi.useFakeTimers()
+  try {
+    const execute = vi.fn(
+      (options: RunAgentOptions) =>
+        new Promise<never>((_resolve, reject) => {
+          options.interruptionSignal?.addEventListener(
+            'abort',
+            () => reject(new DOMException('Deadline', 'AbortError')),
+            { once: true }
+          )
+        })
+    )
+    const pending = runChatAgentTeam(
+      { projectId: 'p', baseMessages: checkpoint.messages, mode: 'act', agentMode: true },
+      gateway,
+      { ...checkpoint },
+      execute
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(execute).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(5_000)
+    const response = await pending
+
+    expect(response.continuation).toEqual(checkpoint)
+    expect(response.interrupted?.code).toBe('run_timeout')
+    expect(response.requestId).toBeUndefined()
+    expect(response.finalText).toContain('Planungsagent wurde vor dem ersten Ergebnis unterbrochen')
+  } finally {
+    vi.useRealTimers()
+  }
+})
+
+it('marks a global reviewer deadline as unreviewed and keeps the worker result', async () => {
+  vi.useFakeTimers()
+  try {
+    const reviewerContinuation = { ...checkpoint, objective: 'Reviewer fortsetzen' }
+    const execute = vi.fn((options: RunAgentOptions) => {
+      if (execute.mock.calls.length === 1) return Promise.resolve({ ...result, finalText: 'Plan' })
+      if (execute.mock.calls.length === 2)
+        return Promise.resolve({ ...result, finalText: 'Arbeitsstand', requestId: 'worker-request' })
+      return new Promise<
+        typeof result & { continuation: AgentCheckpoint; interrupted: { code: string; message: string } }
+      >(resolve => {
+        options.interruptionSignal?.addEventListener(
+          'abort',
+          () =>
+            resolve({
+              ...result,
+              finalText: 'Prüfung unterbrochen',
+              continuation: reviewerContinuation,
+              interrupted: { code: 'team_node_interrupted', message: 'Deadline' },
+            }),
+          {
+            once: true,
+          }
+        )
+      })
+    })
+    const pending = runChatAgentTeam(
+      { projectId: 'p', baseMessages: checkpoint.messages, mode: 'act', agentMode: true },
+      gateway,
+      { ...checkpoint },
+      execute
+    )
+    await vi.advanceTimersByTimeAsync(0)
+    expect(execute).toHaveBeenCalledTimes(3)
+    await vi.advanceTimersByTimeAsync(5_000)
+    const response = await pending
+
+    expect(response.finalText).toContain('Arbeitsstand')
+    expect(response.finalText).toContain('Teamprüfung wurde nicht abgeschlossen')
+    expect(response.interrupted?.code).toBe('run_timeout')
+    expect(response.requestId).toBeUndefined()
+    expect(response.continuation).toEqual({ ...reviewerContinuation, toolAccess: 'read-only' })
+  } finally {
+    vi.useRealTimers()
+  }
 })
 
 it('uses parallel distinct external roles and passes their proposals only to the local tool worker', async () => {

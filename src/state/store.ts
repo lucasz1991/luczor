@@ -2,7 +2,13 @@
 import { reactive } from 'vue'
 import { DEFAULT_STATE } from '@/state/defaults'
 import type * as T from '@/state/types'
-import { createSafeRecord, getSafeRecordValue, isSafeRecordKey, setSafeRecordValue } from '@/services/safeRecord'
+import {
+  createSafeRecord,
+  deleteSafeRecordValue,
+  getSafeRecordValue,
+  isSafeRecordKey,
+  setSafeRecordValue,
+} from '@/services/safeRecord'
 
 /* =========================================================
  * Utils
@@ -168,7 +174,7 @@ export const mutations = {
     this.touchProject(projectId)
   },
 
-  addProject(p: { id: T.Id; name: string }) {
+  addProject(p: { id: T.Id; name: string }, activate = true) {
     if (!state.projects.some(x => x.id === p.id)) {
       state.projects.unshift({
         id: p.id,
@@ -185,13 +191,36 @@ export const mutations = {
     }
 
     ensurePendingBucket(p.id)
-    this.setActiveProject(p.id)
+    if (activate) this.setActiveProject(p.id)
 
     const hasAnyVisible = state.messages.some(m => m.projectId === p.id && m.visibility !== 'hidden')
 
     if (!hasAnyVisible) {
       state.messages.push(makeMsg('assistant', 'Willkommen. Was ist das Ziel dieses Projekts?', p.id))
     }
+  },
+
+  renameProject(projectId: T.Id, name: string) {
+    if (!isSafeRecordKey(projectId)) throw new Error('Unsafe project id rejected.')
+    const trimmed = name.trim().slice(0, 160)
+    if (!trimmed) return
+    const prj = state.projects.find(p => p.id === projectId)
+    if (!prj || prj.name === trimmed) return
+    prj.name = trimmed
+    prj.updatedAt = now()
+  },
+
+  /** Roll back a newly added, not-yet-activated project after strict persistence failed. */
+  rollbackProjectCreation(projectId: T.Id) {
+    if (state.global.ui?.lastProjectId === projectId)
+      throw new Error('Das aktive Projekt kann nicht als unbestätigt verworfen werden.')
+    state.projects = state.projects.filter(project => project.id !== projectId)
+    state.messages = state.messages.filter(message => message.projectId !== projectId)
+    state.todos = state.todos.filter(item => item?.projectId !== projectId)
+    state.todoSteps = state.todoSteps.filter(item => item?.projectId !== projectId)
+    state.projectMemories = state.projectMemories.filter(item => item?.projectId !== projectId)
+    state.summaries = state.summaries.filter(summary => summary.projectId !== projectId)
+    deleteSafeRecordValue(state.pending.toolCallsByProject, projectId)
   },
 
   touchProject(projectId: T.Id) {

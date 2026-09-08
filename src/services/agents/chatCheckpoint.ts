@@ -1,13 +1,35 @@
 import type { WireMessage } from '@/services/inference/types'
 
 export type ToolOutcome = { ok: boolean; output?: unknown; error?: string }
+export type PendingTaskCreateVerification = {
+  /** Missing on legacy entries and therefore interpreted as task. */
+  kind?: 'task' | 'conversation'
+  projectId: string
+  /** Account + server binding; prevents a delayed checkpoint crossing an identity boundary. */
+  principalScopeId?: string
+  title: string
+  externalId: string
+  /** Canonical task_create payload identity. Older in-memory checkpoints may not contain it. */
+  fingerprint?: string
+  /** SHA-256 of the canonical payload; safe for durable exact-match recovery. */
+  fingerprintHash?: string
+  state: 'unknown' | 'verified_absent' | 'verified_present'
+  taskId?: string
+  resourceId?: string
+}
 export type AgentCheckpoint = {
   projectId: string
+  /** Account + server binding used for safe generation rebasing. */
+  principalScopeId?: string
+  /** Workspace binding active when this checkpoint was produced. */
+  workspaceBindingId?: string
   sessionId: string
   generation: number
   objective: string
   messages: WireMessage[]
   completedMutations: [string, ToolOutcome][]
+  /** Ambiguous task/conversation POSTs must be checked before the same logical create can run again. */
+  pendingTaskCreateVerifications?: PendingTaskCreateVerification[]
   ephemeralDataUsed: boolean
   toolAccess?: 'read-only' | 'none'
 }

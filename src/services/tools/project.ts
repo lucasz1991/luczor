@@ -1,6 +1,9 @@
 import { LuczorApi } from '@/services/api/luczorApi'
+import { commitProjectSync, enqueueProjectSync, flushProjectSyncQueue } from '@/services/api/projectSyncQueue'
+import { executionGate } from '@/services/executionGate'
 import { getProjectWorkspace } from '@/services/projectWorkspace'
-import { mutations } from '@/state/store'
+import { saveAppStateStrict } from '@/services/persistence'
+import { mutations, state } from '@/state/store'
 import type { ProjectGoal } from '@/state/types'
 import { asGoalStatus, asString, getProject, uid } from './shared'
 import type { ToolDef } from './types'
@@ -143,22 +146,35 @@ export const projectCreationTools: ToolDef[] = [
       properties: { name: { type: 'string', description: 'Project name (German).' } },
       required: ['name'],
     },
-    async execute(args) {
+    async execute(args, ctx) {
       const name = asString(args.name).trim()
       if (!name) throw new Error('name is empty')
+      const execution = ctx.execution ?? executionGate.capture(ctx.signal)
+      executionGate.assert(execution, true)
+      const apiConfig = await LuczorApi.getConfigSnapshot()
+      executionGate.assert(execution, true)
       const externalId = uid()
-      mutations.addProject({ id: externalId, name })
+      // Persist the idempotent server mutation before reporting local success.
+      // A failed or aborted POST remains retryable across app restarts.
+      const staged = await enqueueProjectSync(externalId, name, apiConfig)
+      await commitProjectSync(staged, async () => {
+        executionGate.assert(execution, true)
+        // Keep the current chat selected until this tool turn has checkpointed
+        // its mutation. Switching here would revoke the tool's own execution.
+        mutations.addProject({ id: externalId, name }, false)
+        try {
+          await saveAppStateStrict(state)
+        } catch (error) {
+          mutations.rollbackProjectCreation(externalId)
+          throw error
+        }
+      })
 
-      let synced = false
-      try {
-        await LuczorApi.createProject(externalId, name)
-        synced = true
-      } catch {
-        // Desktop projects are offline-first. The normal state sync will
-        // mirror the allowlisted project metadata once the server is back.
-      }
+      // Do not keep the tool mutation open across a network await. The durable
+      // queue retries on the status heartbeat and on manual synchronization.
+      void flushProjectSyncQueue({ config: apiConfig, signal: ctx.signal }).catch(() => undefined)
 
-      return { ok: true, project_id: externalId, name, synced }
+      return { ok: true, project_id: externalId, name, synced: false, sync_queued: true }
     },
   },
 ]

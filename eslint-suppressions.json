@@ -93,7 +93,7 @@
   },
   "src/services/approvals.ts": {
     "id-length": {
-      "count": 2
+      "count": 1
     }
   },
   "src/services/chat.service.ts": {

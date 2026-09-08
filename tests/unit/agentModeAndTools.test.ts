@@ -71,6 +71,11 @@ const toolCallResult = {
   ],
 }
 
+const durableTaskCreate = {
+  taskCreateRecoveryReady: true,
+  onCheckpoint: async () => undefined,
+} as const
+
 describe('agent mode and tool reliability', () => {
   it('dispatches active agent mode immediately without an ordinary chat round', async () => {
     const gateway = { id: 'local', target: 'local_llama_cpp' as const, streamChatWithTools: mocks.streamChatWithTools }
@@ -130,6 +135,7 @@ describe('agent mode and tool reliability', () => {
     })
     mocks.streamChatWithTools.mockResolvedValue(toolCallResult)
     const first = await runAgent({
+      ...durableTaskCreate,
       projectId: 'project-2',
       baseMessages: [{ role: 'user', content: 'Speichere das Projekt' }],
       mode: 'act',
@@ -144,6 +150,726 @@ describe('agent mode and tool reliability', () => {
       maxRounds: 1,
     })
     expect(mocks.execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('requires task-list verification before retrying an uncertain task create across continuation', async () => {
+    const externalId = 'b8f4f761-f868-49f2-91de-7e6813f46855'
+    const taskCreateExecute = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        code: 'task_create_outcome_unknown',
+        error: 'Der Ausgang von task_create ist unklar.',
+        retry: 'verify_before_retry',
+        next_tool: 'task_list',
+        next_arguments: { project_id: 'project-2', external_id: externalId },
+        match_title: 'Graph vervollständigen',
+        match_task_id: externalId,
+      })
+      .mockResolvedValue({ ok: true, task_id: 'new-task' })
+    const taskListExecute = vi.fn().mockResolvedValue({
+      ok: true,
+      tasks: [
+        {
+          title: 'Graph vervollständigen',
+          external_id: '11111111-1111-4111-8111-111111111111',
+        },
+        {
+          title: 'Graph vervollständigen',
+          external_id: externalId,
+        },
+      ],
+    })
+    const taskCreate = {
+      name: 'task_create',
+      category: 'app',
+      mutating: true,
+      requiresApproval: false,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          title: { type: 'string' },
+          description: { type: 'string' },
+          project_id: { type: 'string' },
+        },
+        required: ['title'],
+      },
+      execute: taskCreateExecute,
+    }
+    const taskList = {
+      name: 'task_list',
+      category: 'app',
+      mutating: false,
+      requiresApproval: false,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { project_id: { type: 'string' }, external_id: { type: 'string' } },
+      },
+      execute: taskListExecute,
+    }
+    const call = (id: string, name: string, args: Record<string, unknown>) => ({
+      content: '',
+      toolCalls: [{ id, name, arguments: args }],
+      rawToolCalls: [{ id, type: 'function' as const, function: { name, arguments: JSON.stringify(args) } }],
+    })
+    mocks.getTool.mockImplementation(name => (name === 'task_create' ? taskCreate : taskList))
+    mocks.toOpenAITools.mockReturnValue(
+      [taskCreate, taskList].map(tool => ({
+        type: 'function',
+        function: { name: tool.name, parameters: tool.parameters },
+      }))
+    )
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(call('create-unknown', 'task_create', { title: 'Graph vervollständigen' }))
+      .mockResolvedValueOnce({ content: 'Schreibausgang unklar.', toolCalls: [], rawToolCalls: [] })
+
+    const first = await runAgent({
+      ...durableTaskCreate,
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Lege die Aufgabe an.' }],
+      mode: 'act',
+      maxRounds: 2,
+    })
+
+    expect(first.continuation?.pendingTaskCreateVerifications).toEqual([
+      {
+        projectId: 'project-2',
+        title: 'Graph vervollständigen',
+        externalId,
+        fingerprint: expect.any(String),
+        fingerprintHash: expect.stringMatching(/^[0-9a-f]{64}$/u),
+        state: 'unknown',
+      },
+    ])
+    expect(first.finalText).toContain('Verifikationsstand bleibt zum Weiterarbeiten erhalten')
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(call('blind-retry', 'task_create', { title: 'Graph vervollständigen' }))
+      .mockResolvedValueOnce(
+        call('changed-blind-retry', 'task_create', {
+          title: '  GRAPH  vervollsta\u0308ndigen ',
+          description: 'Noch ungeprüfte Variante',
+        })
+      )
+      .mockResolvedValueOnce(call('verify', 'task_list', { project_id: 'project-2', external_id: externalId }))
+      .mockResolvedValueOnce(
+        call('verified-retry', 'task_create', {
+          title: 'Graph vervollständigen',
+          project_id: 'project-2',
+        })
+      )
+      .mockResolvedValueOnce(call('equivalent-retry', 'task_create', { title: 'Graph vervollsta\u0308ndigen' }))
+      .mockResolvedValueOnce(
+        call('different-task', 'task_create', {
+          title: 'Graph vervollständigen',
+          description: 'Eigenständige zweite Aufgabe',
+        })
+      )
+      .mockResolvedValueOnce({ content: 'Aufgaben geprüft.', toolCalls: [], rawToolCalls: [] })
+
+    const resumed = await runAgent({
+      ...durableTaskCreate,
+      projectId: 'project-2',
+      baseMessages: [],
+      mode: 'act',
+      continuation: first.continuation,
+      maxRounds: 7,
+    })
+
+    expect(resumed.finalText).toBe('Aufgaben geprüft.')
+    expect(taskCreateExecute).toHaveBeenCalledTimes(2)
+    expect(taskCreateExecute.mock.calls[1]![0]).toMatchObject({
+      title: 'Graph vervollständigen',
+      description: 'Eigenständige zweite Aufgabe',
+    })
+    expect(taskListExecute).toHaveBeenCalledWith(
+      { project_id: 'project-2', external_id: externalId },
+      expect.anything()
+    )
+    expect(resumed.toolFailures).toBe(2)
+    expect(resumed.toolSuccesses).toBe(4)
+  })
+
+  it('retains an exact empty task lookup and retries the same operation id', async () => {
+    const externalId = '29ee4734-99c0-4f4c-8f06-33df65bce0d5'
+    const taskCreateExecute = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        code: 'task_create_outcome_unknown',
+        error: 'Der Ausgang von task_create ist unklar.',
+        retry: 'verify_before_retry',
+        next_tool: 'task_list',
+        next_arguments: { project_id: 'project-2', external_id: externalId },
+        match_title: 'Release prüfen',
+        match_task_id: externalId,
+      })
+      .mockResolvedValueOnce({ ok: true, task_id: externalId })
+    const taskListExecute = vi.fn().mockResolvedValue({
+      ok: true,
+      tasks: [],
+      task_create_idempotency: 'external_id_v1',
+      filtered_external_id: externalId,
+    })
+    const taskCreate = {
+      name: 'task_create',
+      category: 'app',
+      mutating: true,
+      requiresApproval: false,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { title: { type: 'string' }, description: { type: 'string' } },
+        required: ['title'],
+      },
+      execute: taskCreateExecute,
+    }
+    const taskList = {
+      name: 'task_list',
+      category: 'app',
+      mutating: false,
+      requiresApproval: false,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { project_id: { type: 'string' }, external_id: { type: 'string' } },
+      },
+      execute: taskListExecute,
+    }
+    const call = (id: string, name: string, args: Record<string, unknown>) => ({
+      content: '',
+      toolCalls: [{ id, name, arguments: args }],
+      rawToolCalls: [{ id, type: 'function' as const, function: { name, arguments: JSON.stringify(args) } }],
+    })
+    mocks.getTool.mockImplementation(name => (name === 'task_create' ? taskCreate : taskList))
+    mocks.toOpenAITools.mockReturnValue(
+      [taskCreate, taskList].map(tool => ({
+        type: 'function',
+        function: { name: tool.name, parameters: tool.parameters },
+      }))
+    )
+    mocks.streamChatWithTools.mockResolvedValueOnce(
+      call('create', 'task_create', { title: 'Release prüfen', description: 'Ursprüngliche Details' })
+    )
+
+    const uncertain = await runAgent({
+      ...durableTaskCreate,
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Lege die Aufgabe an.' }],
+      mode: 'act',
+      maxRounds: 1,
+    })
+
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(call('verify', 'task_list', { external_id: externalId }))
+      .mockResolvedValueOnce({ content: 'Noch nicht gespeichert.', toolCalls: [], rawToolCalls: [] })
+    const verifiedAbsent = await runAgent({
+      ...durableTaskCreate,
+      projectId: 'project-2',
+      baseMessages: [],
+      mode: 'act',
+      continuation: uncertain.continuation,
+      maxRounds: 2,
+    })
+
+    expect(verifiedAbsent.continuation?.pendingTaskCreateVerifications).toEqual([
+      expect.objectContaining({ externalId, state: 'verified_absent' }),
+    ])
+    expect(verifiedAbsent.finalText).toContain('derselben external_id')
+
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(call('retry', 'task_create', { title: 'Release prüfen' }))
+      .mockResolvedValueOnce({ content: 'Aufgabe gespeichert.', toolCalls: [], rawToolCalls: [] })
+    const completed = await runAgent({
+      ...durableTaskCreate,
+      projectId: 'project-2',
+      baseMessages: [],
+      mode: 'act',
+      continuation: verifiedAbsent.continuation,
+      pendingTaskCreateVerifications: verifiedAbsent.continuation?.pendingTaskCreateVerifications?.map(item => ({
+        ...item,
+        fingerprint: undefined,
+      })),
+      maxRounds: 2,
+    })
+
+    expect(taskCreateExecute).toHaveBeenCalledTimes(2)
+    expect(taskCreateExecute.mock.calls[1]![0]).toEqual({ title: 'Release prüfen', external_id: externalId })
+    expect(completed.continuation).toBeUndefined()
+    expect(completed.finalText).toBe('Aufgabe gespeichert.')
+  })
+
+  it('retains and verifies an uncertain chat create with the same operation id after a history reset', async () => {
+    let externalId = ''
+    const chatCreateExecute = vi
+      .fn()
+      .mockImplementationOnce(async (args: Record<string, unknown>) => {
+        externalId = String(args.external_id)
+        return {
+          ok: false,
+          code: 'conversation_create_outcome_unknown',
+          error: 'Die POST-Antwort ging verloren.',
+          retry: 'verify_before_retry',
+          next_tool: 'chat_list',
+          next_arguments: { project_id: 'project-2', external_id: externalId },
+          match_title: 'Projektanalyse',
+          match_conversation_id: externalId,
+        }
+      })
+      .mockResolvedValueOnce({ ok: true, conversation_id: 'replayed-chat' })
+    const chatListExecute = vi.fn(async () => ({
+      ok: true,
+      conversations: [],
+      conversation_create_idempotency: 'external_id_v1',
+      filtered_external_id: externalId,
+    }))
+    const chatCreate = {
+      name: 'chat_create',
+      category: 'app',
+      mutating: true,
+      requiresApproval: false,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { title: { type: 'string' }, project_id: { type: 'string' } },
+      },
+      execute: chatCreateExecute,
+    }
+    const chatList = {
+      name: 'chat_list',
+      category: 'app',
+      mutating: false,
+      requiresApproval: false,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { project_id: { type: 'string' }, external_id: { type: 'string' } },
+      },
+      execute: chatListExecute,
+    }
+    const call = (id: string, name: string, args: Record<string, unknown>) => ({
+      content: '',
+      toolCalls: [{ id, name, arguments: args }],
+      rawToolCalls: [{ id, type: 'function' as const, function: { name, arguments: JSON.stringify(args) } }],
+    })
+    mocks.getTool.mockImplementation(name => (name === 'chat_create' ? chatCreate : chatList))
+    mocks.toOpenAITools.mockReturnValue(
+      [chatCreate, chatList].map(tool => ({
+        type: 'function',
+        function: { name: tool.name, parameters: tool.parameters },
+      }))
+    )
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(call('create-chat', 'chat_create', { title: 'Projektanalyse' }))
+      .mockRejectedValueOnce(
+        new LocalInferenceError('Ungültiger lokaler Tool-Verlauf.', 'runtime_tool_contract_rejected', false, false)
+      )
+
+    const interrupted = await runAgent({
+      ...durableTaskCreate,
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Lege einen Projektchat an.' }],
+      mode: 'act',
+      maxRounds: 2,
+    })
+
+    expect(externalId).toMatch(/^[0-9a-f-]{36}$/u)
+    expect(interrupted.continuation?.pendingTaskCreateVerifications).toEqual([
+      expect.objectContaining({ kind: 'conversation', externalId, state: 'unknown' }),
+    ])
+    expect(interrupted.continuation?.messages.at(-1)?.content).toContain('chat_list-Prüfung')
+    expect(interrupted.continuation?.messages.at(-1)?.content).not.toContain('exakte task_list-Prüfung')
+
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(call('verify-chat', 'chat_list', { external_id: externalId }))
+      .mockResolvedValueOnce(call('retry-chat', 'chat_create', { title: 'Projektanalyse' }))
+      .mockResolvedValueOnce({ content: 'Chat gespeichert.', toolCalls: [], rawToolCalls: [] })
+    const completed = await runAgent({
+      ...durableTaskCreate,
+      projectId: 'project-2',
+      baseMessages: [],
+      continuation: interrupted.continuation,
+      mode: 'act',
+      maxRounds: 3,
+    })
+
+    expect(chatListExecute).toHaveBeenCalledWith({ external_id: externalId }, expect.anything())
+    expect(chatCreateExecute).toHaveBeenNthCalledWith(
+      2,
+      { title: 'Projektanalyse', external_id: externalId },
+      expect.anything()
+    )
+    expect(completed.continuation).toBeUndefined()
+    expect(completed.finalText).toBe('Chat gespeichert.')
+  })
+
+  it('checkpoints a task operation id before a team interruption can hide the POST outcome', async () => {
+    const interruption = new AbortController()
+    const checkpoints: import('@/services/agents/chatCheckpoint').AgentCheckpoint[] = []
+    const taskCreateExecute = vi.fn(async (args: Record<string, unknown>) => {
+      const externalId = String(args.external_id)
+      expect(externalId).toMatch(/^[0-9a-f-]{36}$/u)
+      expect(checkpoints.at(-1)?.pendingTaskCreateVerifications).toEqual([
+        expect.objectContaining({ externalId, state: 'unknown' }),
+      ])
+      interruption.abort()
+      return {
+        ok: false,
+        code: 'task_create_outcome_unknown',
+        error: 'Die Antwort ging nach dem POST verloren.',
+        retry: 'verify_before_retry',
+        next_tool: 'task_list',
+        next_arguments: { project_id: 'project-2', external_id: externalId },
+        match_title: 'Timeout-Aufgabe',
+        match_task_id: externalId,
+      }
+    })
+    const taskCreate = {
+      name: 'task_create',
+      category: 'app',
+      mutating: true,
+      requiresApproval: false,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { title: { type: 'string' } },
+        required: ['title'],
+      },
+      execute: taskCreateExecute,
+    }
+    mocks.getTool.mockReturnValue(taskCreate)
+    mocks.toOpenAITools.mockReturnValue([
+      { type: 'function', function: { name: taskCreate.name, parameters: taskCreate.parameters } },
+    ])
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: '',
+      toolCalls: [{ id: 'create-timeout', name: 'task_create', arguments: { title: 'Timeout-Aufgabe' } }],
+      rawToolCalls: [
+        {
+          id: 'create-timeout',
+          type: 'function' as const,
+          function: { name: 'task_create', arguments: JSON.stringify({ title: 'Timeout-Aufgabe' }) },
+        },
+      ],
+    })
+
+    const response = await runAgent({
+      taskCreateRecoveryReady: true,
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Lege die Timeout-Aufgabe an.' }],
+      mode: 'act',
+      interruptionSignal: interruption.signal,
+      onCheckpoint: checkpoint => {
+        checkpoints.push(checkpoint)
+      },
+      maxRounds: 2,
+    })
+
+    const externalId = String(taskCreateExecute.mock.calls[0]![0].external_id)
+    expect(response.interrupted?.code).toBe('team_node_interrupted')
+    expect(response.continuation?.pendingTaskCreateVerifications).toEqual([
+      expect.objectContaining({ externalId, state: 'unknown' }),
+    ])
+    expect(response.continuation?.messages.some(message => message.role === 'tool')).toBe(false)
+  })
+
+  it('keeps other uncertain creates untouched during an exact task lookup', async () => {
+    const ids = {
+      first: '4af86574-4593-459f-a78c-cfe7e8266908',
+      second: 'edb3faee-a142-470a-a213-57479a62276a',
+    }
+    const taskCreateExecute = vi.fn(async (args: Record<string, unknown>) => {
+      const externalId = args.description === 'A' ? ids.first : ids.second
+      return {
+        ok: false,
+        code: 'task_create_outcome_unknown',
+        error: 'Der Ausgang ist unklar.',
+        retry: 'verify_before_retry',
+        next_tool: 'task_list',
+        next_arguments: { project_id: 'project-2', external_id: externalId },
+        match_title: args.title,
+        match_task_id: externalId,
+      }
+    })
+    const taskListExecute = vi.fn().mockResolvedValue({
+      ok: true,
+      tasks: [],
+      task_create_idempotency: 'external_id_v1',
+      filtered_external_id: ids.first,
+    })
+    const taskCreate = {
+      name: 'task_create',
+      category: 'app',
+      mutating: true,
+      requiresApproval: false,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { title: { type: 'string' }, description: { type: 'string' } },
+        required: ['title'],
+      },
+      execute: taskCreateExecute,
+    }
+    const taskList = {
+      name: 'task_list',
+      category: 'app',
+      mutating: false,
+      requiresApproval: false,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { project_id: { type: 'string' }, external_id: { type: 'string' } },
+      },
+      execute: taskListExecute,
+    }
+    const calls = [
+      { id: 'create-a', name: 'task_create', arguments: { title: 'Erste Aufgabe', description: 'A' } },
+      { id: 'create-b', name: 'task_create', arguments: { title: 'Zweite Aufgabe', description: 'B' } },
+    ]
+    mocks.getTool.mockImplementation(name => (name === 'task_create' ? taskCreate : taskList))
+    mocks.toOpenAITools.mockReturnValue(
+      [taskCreate, taskList].map(tool => ({
+        type: 'function',
+        function: { name: tool.name, parameters: tool.parameters },
+      }))
+    )
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: '',
+      toolCalls: calls,
+      rawToolCalls: calls.map(call => ({
+        id: call.id,
+        type: 'function' as const,
+        function: { name: call.name, arguments: JSON.stringify(call.arguments) },
+      })),
+    })
+    const uncertain = await runAgent({
+      ...durableTaskCreate,
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Lege beide Aufgaben an.' }],
+      mode: 'act',
+      maxRounds: 1,
+    })
+
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: '',
+      toolCalls: [
+        {
+          id: 'verify-a',
+          name: 'task_list',
+          arguments: { project_id: 'project-2', external_id: ids.first },
+        },
+      ],
+      rawToolCalls: [
+        {
+          id: 'verify-a',
+          type: 'function' as const,
+          function: {
+            name: 'task_list',
+            arguments: JSON.stringify({ project_id: 'project-2', external_id: ids.first }),
+          },
+        },
+      ],
+    })
+    const verified = await runAgent({
+      ...durableTaskCreate,
+      projectId: 'project-2',
+      baseMessages: [],
+      mode: 'act',
+      continuation: uncertain.continuation,
+      maxRounds: 1,
+    })
+
+    expect(verified.continuation?.pendingTaskCreateVerifications).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ externalId: ids.first, state: 'verified_absent' }),
+        expect.objectContaining({ externalId: ids.second, state: 'unknown' }),
+      ])
+    )
+  })
+
+  it('keeps a mutation-safe checkpoint when a later local model round fails', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'project',
+      mutating: true,
+      requiresApproval: false,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(toolCallResult)
+      .mockRejectedValueOnce(
+        new LocalInferenceError(
+          'Das lokale Modell konnte die Werkzeugdaten nicht verarbeiten. Das Modell bleibt geladen.',
+          'runtime_tool_contract_rejected',
+          false,
+          false
+        )
+      )
+
+    const interrupted = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Speichere das Projekt' }],
+      mode: 'act',
+      maxRounds: 3,
+    })
+
+    expect(interrupted.interrupted).toMatchObject({ code: 'runtime_tool_contract_rejected', round: 2 })
+    expect(interrupted.continuation?.completedMutations).toHaveLength(1)
+    expect(interrupted.continuation?.messages.some(message => message.role === 'tool')).toBe(false)
+    expect(interrupted.finalText).toContain('Arbeitsfortschritt bleibt erhalten')
+
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(toolCallResult)
+      .mockResolvedValueOnce({ content: 'Fortsetzung abgeschlossen.', toolCalls: [], rawToolCalls: [] })
+    const resumed = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [],
+      mode: 'act',
+      continuation: interrupted.continuation,
+      maxRounds: 2,
+    })
+
+    expect(resumed.finalText).toBe('Fortsetzung abgeschlossen.')
+    expect(mocks.execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not dispatch an agent twice after rebuilding a rejected local tool history', async () => {
+    const dispatchResult = {
+      content: 'Agent wird gestartet.',
+      requestId: 'dispatch-request-1',
+      toolCalls: [
+        {
+          id: 'dispatch-call-1',
+          name: 'agent_dispatch',
+          arguments: { agent: 'codex', prompt: 'Prüfe das Projekt.' },
+        },
+      ],
+      rawToolCalls: [
+        {
+          id: 'dispatch-call-1',
+          type: 'function' as const,
+          function: {
+            name: 'agent_dispatch',
+            arguments: JSON.stringify({ agent: 'codex', prompt: 'Prüfe das Projekt.' }),
+          },
+        },
+      ],
+    }
+    mocks.getTool.mockReturnValue({
+      name: 'agent_dispatch',
+      category: 'app',
+      mutating: true,
+      requiresApproval: false,
+      effects: ['write'],
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(dispatchResult)
+      .mockRejectedValueOnce(
+        new LocalInferenceError(
+          'Das lokale Modell konnte die Werkzeugdaten nicht verarbeiten. Das Modell bleibt geladen.',
+          'runtime_tool_contract_rejected',
+          false,
+          false
+        )
+      )
+
+    const interrupted = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Delegiere die Prüfung.' }],
+      mode: 'act',
+      maxRounds: 3,
+    })
+
+    expect(interrupted.continuation?.completedMutations).toHaveLength(1)
+
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(dispatchResult)
+      .mockResolvedValueOnce({ content: 'Agentenprüfung abgeschlossen.', toolCalls: [], rawToolCalls: [] })
+    const resumed = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [],
+      mode: 'act',
+      continuation: interrupted.continuation,
+      maxRounds: 2,
+    })
+
+    expect(resumed.finalText).toBe('Agentenprüfung abgeschlossen.')
+    expect(mocks.execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('rebuilds a continuation whose first inference rejects the previous tool history', async () => {
+    mocks.streamChatWithTools.mockResolvedValueOnce(toolCallResult)
+    const first = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Lies zuerst den Stand.' }],
+      mode: 'observe',
+      maxRounds: 1,
+    })
+    mocks.streamChatWithTools.mockRejectedValueOnce(
+      new LocalInferenceError(
+        'Das lokale Modell konnte die Nachrichtenstruktur nicht verarbeiten. Das Modell bleibt geladen.',
+        'runtime_chat_history_rejected',
+        false,
+        false
+      )
+    )
+
+    const result = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [],
+      mode: 'act',
+      continuation: first.continuation,
+      maxRounds: 2,
+    })
+
+    expect(result.interrupted?.code).toBe('runtime_chat_history_rejected')
+    expect(result.continuation?.messages.some(message => message.role === 'tool')).toBe(false)
+  })
+
+  it('does not advertise or execute an internally disabled team-start tool', async () => {
+    const nestedToolCall = {
+      content: '',
+      toolCalls: [{ id: 'nested', name: 'agent_team_prepare', arguments: { objective: 'Nested' } }],
+      rawToolCalls: [
+        {
+          id: 'nested',
+          type: 'function' as const,
+          function: { name: 'agent_team_prepare', arguments: '{"objective":"Nested"}' },
+        },
+      ],
+    }
+    const nestedTool = {
+      name: 'agent_team_prepare',
+      category: 'app',
+      mutating: true,
+      requiresApproval: false,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    }
+    mocks.toOpenAITools.mockReturnValue([
+      { type: 'function', function: { name: 'agent_team_prepare', parameters: nestedTool.parameters } },
+    ])
+    mocks.getTool.mockReturnValue(nestedTool)
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(nestedToolCall)
+      .mockResolvedValueOnce({ content: 'Ohne verschachteltes Team fortgesetzt.', toolCalls: [], rawToolCalls: [] })
+
+    const result = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Bearbeite das Projekt' }],
+      mode: 'act',
+      disabledTools: ['agent_team_prepare'],
+      maxRounds: 2,
+    })
+
+    expect(mocks.streamChatWithTools.mock.calls[0]![0].tools).toEqual([])
+    expect(mocks.execute).not.toHaveBeenCalled()
+    expect(result.toolFailures).toBe(1)
+    expect(result.finalText).toBe('Ohne verschachteltes Team fortgesetzt.')
   })
 
   it('allows repeated desktop input after continuation because the target state can change', async () => {
@@ -304,7 +1030,7 @@ describe('agent mode and tool reliability', () => {
       baseMessages: [{ role: 'user', content: 'Bitte speichern' }],
       toolSession: { queue, update, approve },
     })
-    expect(approve).toHaveBeenCalledWith('call-1')
+    expect(approve).toHaveBeenCalledWith('call-1', expect.anything())
     expect(mocks.execute).toHaveBeenCalledTimes(1)
     expect(update).toHaveBeenCalledWith('call-1', 'executed')
     expect(mocks.queueToolCall).not.toHaveBeenCalled()
@@ -320,6 +1046,7 @@ describe('agent mode and tool reliability', () => {
     })
     await expect(
       runAgent({
+        taskCreateRecoveryReady: true,
         projectId: 'p1',
         mode: 'act',
         baseMessages: [{ role: 'user', content: 'Bitte lesen' }],
@@ -327,6 +1054,171 @@ describe('agent mode and tool reliability', () => {
       })
     ).rejects.toMatchObject({ name: 'AbortError' })
     expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
+  it('releases an approval wait when the team scheduler interrupts the node', async () => {
+    const interruption = new AbortController()
+    mocks.getTool.mockReturnValue({
+      name: 'project_upsert_goal',
+      category: 'project',
+      mutating: true,
+      requiresApproval: true,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      ...toolCallResult,
+      toolCalls: [{ id: 'call-approval', name: 'project_upsert_goal', arguments: { title: 'Ziel' } }],
+      rawToolCalls: [],
+    })
+    mocks.awaitApproval.mockImplementation(
+      async (_id: string, signal: AbortSignal) =>
+        new Promise<boolean>(resolve => {
+          signal.addEventListener('abort', () => resolve(false), { once: true })
+          queueMicrotask(() => interruption.abort())
+        })
+    )
+
+    const result = await runAgent({
+      ...durableTaskCreate,
+      projectId: 'p1',
+      mode: 'act',
+      baseMessages: [{ role: 'user', content: 'Bitte speichern' }],
+      interruptionSignal: interruption.signal,
+      inferenceGateway: {
+        id: 'local',
+        target: 'local_llama_cpp',
+        streamChatWithTools: mocks.streamChatWithTools,
+      },
+    })
+
+    expect(result.interrupted?.code).toBe('team_node_interrupted')
+    expect(result.continuation).toBeDefined()
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
+  it('blocks task creation when durable recovery state is unavailable', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'task_create',
+      category: 'project',
+      mutating: true,
+      requiresApproval: false,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: '',
+      requestId: 'request-task',
+      toolCalls: [{ id: 'call-task', name: 'task_create', arguments: { title: 'Analyse' } }],
+      rawToolCalls: [],
+    })
+
+    const result = await runAgent({
+      projectId: 'p1',
+      mode: 'unrestricted',
+      baseMessages: [{ role: 'user', content: 'Aufgabe anlegen' }],
+      taskCreateRecoveryReady: false,
+      maxRounds: 1,
+    })
+
+    expect(result.toolFailures).toBe(1)
+    expect(JSON.stringify(mocks.addHiddenToolMessage.mock.calls)).toContain('task_create_recovery_unavailable')
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
+  it('does not post a new task unless its pre-write checkpoint was persisted', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'task_create',
+      category: 'project',
+      mutating: true,
+      requiresApproval: false,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: '',
+      requestId: 'request-task',
+      toolCalls: [{ id: 'call-task', name: 'task_create', arguments: { title: 'Analyse' } }],
+      rawToolCalls: [],
+    })
+
+    await expect(
+      runAgent({
+        taskCreateRecoveryReady: true,
+        projectId: 'p1',
+        mode: 'unrestricted',
+        baseMessages: [{ role: 'user', content: 'Aufgabe anlegen' }],
+        onCheckpoint: async () => {
+          throw new Error('disk full')
+        },
+        maxRounds: 1,
+      })
+    ).rejects.toThrow('Sicherheitsstatus vor dem Anlegen')
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
+  it('carries an unresolved task write into a normal typed turn without a continuation', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'task_create',
+      category: 'project',
+      mutating: true,
+      requiresApproval: false,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: '',
+      requestId: 'request-task',
+      toolCalls: [{ id: 'call-task', name: 'task_create', arguments: { title: 'Analyse' } }],
+      rawToolCalls: [],
+    })
+
+    const result = await runAgent({
+      ...durableTaskCreate,
+      projectId: 'p1',
+      mode: 'unrestricted',
+      baseMessages: [{ role: 'user', content: 'Lege Analyse an' }],
+      pendingTaskCreateVerifications: [
+        {
+          projectId: 'p1',
+          title: 'Analyse',
+          externalId: '11111111-1111-4111-8111-111111111111',
+          state: 'unknown',
+        },
+      ],
+      maxRounds: 1,
+    })
+
+    expect(result.toolFailures).toBe(1)
+    expect(result.continuation?.pendingTaskCreateVerifications?.[0]?.externalId).toBe(
+      '11111111-1111-4111-8111-111111111111'
+    )
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
+  it('does not turn an unrelated answer into a continuation because the project has a pending task write', async () => {
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: 'Die Projektzusammenfassung ist aktuell.',
+      toolCalls: [],
+      rawToolCalls: [],
+    })
+
+    const result = await runAgent({
+      projectId: 'p1',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'Wie lautet die Zusammenfassung?' }],
+      pendingTaskCreateVerifications: [
+        {
+          projectId: 'p1',
+          title: 'Andere Aufgabe',
+          externalId: '11111111-1111-4111-8111-111111111111',
+          state: 'unknown',
+        },
+      ],
+    })
+
+    expect(result.finalText).toBe('Die Projektzusammenfassung ist aktuell.')
+    expect(result.continuation).toBeUndefined()
   })
 
   it('recognizes explicit execution requests but not ordinary questions', () => {
@@ -455,7 +1347,7 @@ describe('agent mode and tool reliability', () => {
           { role: 'user', content: text },
         ],
       })
-      expect(mocks.awaitApproval).toHaveBeenCalledWith('call-1')
+      expect(mocks.awaitApproval).toHaveBeenCalledWith('call-1', expect.anything())
       expect(mocks.execute).toHaveBeenCalledTimes(1)
     }
   )

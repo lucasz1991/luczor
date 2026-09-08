@@ -1,7 +1,7 @@
 // src/services/status.ts
 //
 // Refreshes the HUD sync/memory telemetry:
-//  - pending: syncable local memories not yet pushed to the server
+//  - pending: syncable local memories plus durable project-create retries
 //  - server:  Laravel Admin API reachability (only pinged when configured)
 //  - cognee:  whether a Cognee endpoint is configured
 
@@ -10,6 +10,8 @@ import { setSyncStatus, type ConnState } from '@/state/hud'
 import { luczorMemory } from '@/services/memory/luczorMemory'
 import { LuczorApi } from '@/services/api/luczorApi'
 import { pushAllToServer } from '@/services/api/sync'
+import { flushProjectSyncQueue, pendingProjectSyncCount } from '@/services/api/projectSyncQueue'
+import { executionGate } from '@/services/executionGate'
 
 const SETTINGS_FILE = 'luczor.settings.json'
 
@@ -20,12 +22,13 @@ export async function refreshStatus(): Promise<void> {
   if (inFlight) return
   inFlight = true
   try {
-    let pending = 0
+    let memoryPending = 0
     try {
-      pending = await luczorMemory.pendingSyncCount()
+      memoryPending = await luczorMemory.pendingSyncCount()
     } catch {
       /* ignore */
     }
+    let projectPending = await pendingProjectSyncCount().catch(() => 0)
 
     let server: ConnState = 'disabled'
     try {
@@ -42,6 +45,11 @@ export async function refreshStatus(): Promise<void> {
       /* ignore */
     }
 
+    if (server === 'online' && projectPending > 0) {
+      await flushProjectSyncQueue({ signal: executionGate.capture().signal }).catch(() => undefined)
+      projectPending = await pendingProjectSyncCount().catch(() => projectPending)
+    }
+
     let cognee: ConnState = 'disabled'
     try {
       const ch = await luczorMemory.memoryHealth()
@@ -50,20 +58,20 @@ export async function refreshStatus(): Promise<void> {
       /* ignore */
     }
 
-    setSyncStatus({ pending, server, cognee })
+    setSyncStatus({ pending: memoryPending + projectPending, server, cognee })
 
     // Auto-sync: when enabled, the server is reachable and enough records piled
     // up, push in the background (once at a time).
-    if (server === 'online' && pending > 0 && !autoSyncing) {
+    if (server === 'online' && memoryPending > 0 && !autoSyncing) {
       const s = await Store.load(SETTINGS_FILE)
       const auto = (await s.get<boolean>('sync_auto')) ?? false
       const threshold = (await s.get<number>('sync_auto_threshold')) ?? 20
-      if (auto && pending >= threshold) {
+      if (auto && memoryPending >= threshold) {
         autoSyncing = true
         try {
           await pushAllToServer()
-          const now = await luczorMemory.pendingSyncCount().catch(() => pending)
-          setSyncStatus({ pending: now, server, cognee })
+          const now = await luczorMemory.pendingSyncCount().catch(() => memoryPending)
+          setSyncStatus({ pending: now + projectPending, server, cognee })
         } catch {
           /* best-effort */
         } finally {
@@ -78,6 +86,7 @@ export async function refreshStatus(): Promise<void> {
 
 /** Manual sync trigger (e.g. clicking the HUD ⇅). Returns pushed count. */
 export async function syncNow(): Promise<number> {
+  await flushProjectSyncQueue({ force: true, signal: executionGate.capture().signal })
   const r = await pushAllToServer()
   const total = Object.values(r.counts).reduce((a, b) => a + b, 0)
   await refreshStatus()
