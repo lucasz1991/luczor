@@ -24,6 +24,8 @@ pub enum MiniAction {
         session_id: String,
         #[serde(rename = "requestId")]
         request_id: String,
+        #[serde(rename = "controlId")]
+        control_id: String,
         action: MiniThinkingControl,
         sequence: u64,
     },
@@ -194,9 +196,18 @@ fn validate_action(action: &MiniAction) -> Result<(), String> {
     if let MiniAction::SelectProject { project_id, .. } = action {
         validate_identifier(project_id)?;
     }
-    if let MiniAction::ThinkingControl { request_id, sequence, .. } = action {
+    if let MiniAction::ThinkingControl {
+        request_id,
+        control_id,
+        sequence,
+        ..
+    } = action
+    {
         validate_identifier(request_id)?;
-        if *sequence > 9_007_199_254_740_991 { return Err("Invalid budget sequence.".into()); }
+        validate_identifier(control_id)?;
+        if *sequence > 9_007_199_254_740_991 {
+            return Err("Invalid budget sequence.".into());
+        }
     }
     if let MiniAction::WorkflowOpen {
         message_id,
@@ -503,6 +514,23 @@ mod tests {
             serde_json::json!({"type": "workflow_action", "sessionId": "session", "messageId": "message", "workflowId": 7, "action": "stop", "runId": "foreign"}),
         ] {
             assert!(serde_json::from_value::<MiniAction>(payload).is_err());
+        }
+    }
+    #[test]
+    fn thinking_control_requires_bounded_ack_identity_and_roundtrips_exactly() {
+        let payload = serde_json::json!({"type":"thinking_control","sessionId":"session",
+            "requestId":"generation","controlId":"control-1","action":"answer","sequence":7});
+        let action: MiniAction = serde_json::from_value(payload.clone()).unwrap();
+        assert!(validate_action(&action).is_ok());
+        assert_eq!(serde_json::to_value(action).unwrap(), payload);
+        let mut missing = payload.clone();
+        missing.as_object_mut().unwrap().remove("controlId");
+        assert!(serde_json::from_value::<MiniAction>(missing).is_err());
+        for id in [String::new(), "x".repeat(201)] {
+            let mut changed = payload.clone();
+            changed["controlId"] = serde_json::json!(id);
+            let action: MiniAction = serde_json::from_value(changed).unwrap();
+            assert!(validate_action(&action).is_err());
         }
     }
     #[test]

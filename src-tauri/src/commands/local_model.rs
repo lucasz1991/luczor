@@ -446,6 +446,10 @@ struct LocalInferenceFailure {
 }
 
 impl LocalInferenceFailure {
+    fn preserves_resident_runtime(&self) -> bool {
+        self.is_input_rejection() || self.code == "runtime_reasoning_control_unavailable"
+    }
+
     fn is_input_rejection(&self) -> bool {
         matches!(
             self.code,
@@ -456,9 +460,17 @@ impl LocalInferenceFailure {
     }
 
     fn stream(message: impl Into<String>) -> Self {
+        let message = message.into();
+        if message == reasoning_budget::CONTROL_UNAVAILABLE {
+            return Self {
+                code: "runtime_reasoning_control_unavailable",
+                public_message: message,
+                retryable: false,
+            };
+        }
         Self {
             code: "runtime_stream_failed",
-            public_message: message.into(),
+            public_message: message,
             retryable: true,
         }
     }
@@ -2787,7 +2799,7 @@ fn infer_blocking(
     } else if result
         .as_ref()
         .err()
-        .is_some_and(LocalInferenceFailure::is_input_rejection)
+        .is_some_and(LocalInferenceFailure::preserves_resident_runtime)
     {
         RequestOutcome::Rejected
     } else {
@@ -3650,6 +3662,11 @@ fn stream_completion(
         usage.output_tokens as u32,
         resource_revision,
     )));
+    let reasoning_interruption = session
+        .lock()
+        .map_err(|_| "Local thinking state is unavailable.")?
+        .interruption
+        .clone();
     {
         let mut guard = state()
             .lock()
@@ -3674,6 +3691,7 @@ fn stream_completion(
         &api_key,
         serde_json::to_vec(&body).map_err(|_| "Local generation encoding failed.")?,
         cancel.clone(),
+        reasoning_interruption,
         generation_stream::Deadlines {
             first: signed_read_timeout(thresholds.max_first_token_ms)?,
             idle: Duration::from_secs(60),
@@ -3714,6 +3732,7 @@ fn stream_completion(
             on_event
                 .send(LocalInferenceEvent::Budget { progress })
                 .map_err(|_| "Local inference event channel closed.")?;
+            return Err(reasoning_budget::CONTROL_UNAVAILABLE.into());
         }
         Ok(())
     })?;
@@ -3991,6 +4010,7 @@ fn read_bounded_line<R: BufRead>(
                         "Local generation stopped making progress before its idle deadline."
                     }
                     "Local inference was cancelled." => "Local inference was cancelled.",
+                    reasoning_budget::CONTROL_UNAVAILABLE => reasoning_budget::CONTROL_UNAVAILABLE,
                     _ => "Local llama.cpp stream failed.",
                 }
                 .to_string()

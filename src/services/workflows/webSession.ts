@@ -11,7 +11,7 @@ export type WorkflowEditorState = {
   runs: WorkflowRun[]
   triggers: WorkflowTrigger[]
   capabilities: { deviceBound: boolean; canRunRealTests: boolean; canConfigureRepairPolicy: boolean }
-  urls: { save: string; testCases: string; tests: string; repairs: string; operation: string }
+  urls: { save: string; testCases: string; tests: string; repairs: string; operation: string; runControls?: string }
 }
 function sameOriginPath(path: string) {
   const url = new URL(path, window.location.origin)
@@ -74,6 +74,7 @@ export function createWorkflowWebSession(stateUrl: string) {
     if (!state) throw new Error('Workflow zuerst laden.')
     const current = state
     const path = Reflect.get(current.urls, kind) as string
+    if (typeof path !== 'string') throw new Error('Diese Workflow-Funktion benötigt eine aktualisierte Serverversion.')
     return operations.run<T>({
       scope: [window.location.origin, current.workflow.id],
       args: { kind, body },

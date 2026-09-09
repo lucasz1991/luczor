@@ -59,6 +59,28 @@ describe('managed workflow agent bridge', () => {
     expect(mocks.prepare).not.toHaveBeenCalled()
   })
 
+  it('preserves confirmed worker observations and an explicit read-only role through the real job lifecycle', async () => {
+    const effortSelection = {
+      tier: 'fast',
+      requestedEffort: 'high',
+      appliedEffort: 'high',
+      status: 'confirmed',
+      reason: 'role_requires_deeper_review',
+    }
+    const runtimeEvidence = { model: 'actual-runtime-model', modelSource: 'runtime', toolGateChecks: 3 }
+    mocks.execute.mockResolvedValue({ output: 'Reviewed', effortSelection, runtimeEvidence })
+    expect(
+      await runWorkflowAgent('claude', 'Review exact', undefined, undefined, 'active', {
+        role: 'reviewer',
+        permission: 'read-only',
+        thinkingTier: 'fast',
+      })
+    ).toMatchObject({ effortSelection, runtimeEvidence, stdout: 'Reviewed' })
+    expect(mocks.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({ permission: 'read-only', role: 'reviewer', prompt: 'Review exact' })
+    )
+  })
+
   it('forwards cancellation and waits on the managed job promise', async () => {
     const controller = new AbortController()
     mocks.execute.mockImplementation(async (_id, signal: AbortSignal) => {

@@ -766,6 +766,16 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
             round,
           })
     const continuation = checkpoint()
+    const publicControlPartial =
+      interruption.code === 'runtime_reasoning_control_unavailable' ? publicAnswerText(visibleContent, true).trim() : ''
+    if (publicControlPartial) {
+      continuation.messages.push({ role: 'assistant', content: publicControlPartial })
+      continuation.messages.push({
+        role: 'user',
+        content:
+          'Die vorherige Antwort wurde an der Denkbudgetgrenze unterbrochen. Setze den bestehenden Auftrag anhand dieses öffentlichen Teilstands fort; bereits erfolgreiche Aktionen nicht wiederholen.',
+      })
+    }
     const resetHistory =
       interruption.code === 'team_node_interrupted' ||
       (error instanceof LocalInferenceError &&
@@ -809,6 +819,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
     }
     const diagnostic = interruption.diagnostic
     const finalText = [
+      publicControlPartial,
       `Die lokale Modellrunde ${round} wurde vor dem Abschluss unterbrochen: ${interruption.message}`,
       diagnostic
         ? `Diagnose: ${interruption.code}; Abschluss: ${diagnostic.finishReason}; Dauer: ${(diagnostic.durationMs / 1000).toFixed(1)} s; öffentliche Zeichen: ${diagnostic.receivedCharacters}${diagnostic.outputTokens !== undefined ? `; gemeldete Ausgabetokens: ${diagnostic.outputTokens}` : ''}.`
@@ -953,9 +964,12 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
       executionGate.assert(execution)
       const resettableLocalInputFailure =
         error instanceof LocalInferenceError &&
-        ['runtime_context_exceeded', 'runtime_chat_history_rejected', 'runtime_tool_contract_rejected'].includes(
-          error.code
-        )
+        [
+          'runtime_context_exceeded',
+          'runtime_chat_history_rejected',
+          'runtime_tool_contract_rejected',
+          'runtime_reasoning_control_unavailable',
+        ].includes(error.code)
       if (!resolvedRoute.externalOneShot && (toolOutcomes.length > 0 || resettableLocalInputFailure)) {
         return partialResultAfterInferenceFailure(error, round + 1)
       }

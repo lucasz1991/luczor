@@ -5,6 +5,7 @@ import {
   fetchBoundedResponseWithTimeout,
   fetchWithTimeout,
   readBoundedResponseText,
+  requestWithConfig,
 } from '@/services/api/luczorApi'
 
 describe('Luczor API transport boundaries', () => {
@@ -104,6 +105,76 @@ describe('Luczor API transport boundaries', () => {
     await vi.advanceTimersByTimeAsync(10_000)
     await expect(outcome).resolves.toMatchObject({ name: 'LuczorApiError', status: 0 })
   })
+
+  it('allows a proved operation past ten seconds and enforces its entire response deadline', async () => {
+    vi.useFakeTimers()
+    const config = { baseUrl: 'https://bound.example.test', deviceKey: 'synthetic-test-key', clientId: 'device' }
+    let cancelled = false
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{'))
+      },
+      cancel() {
+        cancelled = true
+      },
+    })
+    const fetch = vi.fn(async () => new Response(body))
+    vi.stubGlobal('fetch', fetch)
+    let settled = false
+    const response = requestWithConfig('/proxy/vision', { method: 'POST', timeoutMs: 75000, body: {} }, config).catch(
+      error => {
+        settled = true
+        return error
+      }
+    )
+    await vi.advanceTimersByTimeAsync(10001)
+    expect(settled).toBe(false)
+    expect(cancelled).toBe(false)
+    await vi.advanceTimersByTimeAsync(64999)
+    await expect(response).resolves.toMatchObject({ name: 'LuczorApiError', status: 0 })
+    expect(cancelled).toBe(true)
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('accepts a long operation response after the ordinary ten-second deadline', async () => {
+    vi.useFakeTimers()
+    const fetch = vi.fn(
+      () => new Promise<Response>(resolve => setTimeout(() => resolve(new Response('{"data":{"ok":true}}')), 12000))
+    )
+    vi.stubGlobal('fetch', fetch)
+    const result = requestWithConfig(
+      '/proxy/vision',
+      { method: 'POST', timeoutMs: 75000, body: {} },
+      {
+        baseUrl: 'https://bound.example.test',
+        deviceKey: 'synthetic-test-key',
+        clientId: 'device',
+      }
+    )
+    await vi.advanceTimersByTimeAsync(12000)
+    await expect(result).resolves.toEqual({ data: { ok: true } })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it.each([0, -1, 999, 615001, Infinity, NaN, 1000.5])(
+    'rejects an invalid operation deadline %s before transport',
+    async timeoutMs => {
+      const fetch = vi.fn()
+      vi.stubGlobal('fetch', fetch)
+      await expect(
+        requestWithConfig(
+          '/proxy/vision',
+          { timeoutMs },
+          {
+            baseUrl: 'https://bound.example.test',
+            deviceKey: 'synthetic-test-key',
+            clientId: 'device',
+          }
+        )
+      ).rejects.toThrow('API request timeout')
+      expect(fetch).not.toHaveBeenCalled()
+    }
+  )
 
   it('times out and cancels a response body that stalls after successful headers', async () => {
     vi.useFakeTimers()

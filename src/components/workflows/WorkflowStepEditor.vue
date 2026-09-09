@@ -4,12 +4,15 @@ import type { WorkflowStepDefinition, WorkflowTask } from '@/services/workflows/
 import { boundedWorkflowJson } from '@/services/workflows/operations'
 import { THINKING_TIERS, THINKING_DEFAULTS } from '@/services/inference/thinking'
 import { WORKFLOW_SCRIPT_TEMPLATES } from '@/services/workflows/scriptTemplates'
+import { workflowBindingSource } from '@/services/workflows/bindings'
+import { connectWorkflowData } from '@/services/workflows/graph'
 const props = defineProps<{
   step: WorkflowStepDefinition
   steps: WorkflowStepDefinition[]
   catalog: WorkflowTask[]
   disabled: boolean
   workspaceRoot?: string
+  inputSchema?: Record<string, unknown>
 }>()
 const emit = defineEmits<{ 'update:step': [step: WorkflowStepDefinition] }>()
 const task = computed(() => props.catalog.find(item => item.key === props.step.type))
@@ -144,9 +147,25 @@ function setRoute(outcome: string, target: string) {
 }
 function addBinding() {
   if (!bindingField.value.trim() || !bindingSource.value.trim()) return
-  payload('input_bindings', { ...bindings.value, [bindingField.value.trim()]: bindingSource.value.trim() })
-  bindingField.value = ''
-  bindingSource.value = ''
+  try {
+    const definition = { steps: props.steps, input_schema: props.inputSchema }
+    const source = workflowBindingSource(definition, bindingSource.value.trim())
+    if (!source) throw new Error('Die Datenquelle ist ungültig oder fehlt im Workflow.')
+    const next = connectWorkflowData(
+      definition,
+      props.catalog,
+      source.id,
+      source.path,
+      props.step.key,
+      bindingField.value.trim()
+    )
+    update(next.steps.find(step => step.key === props.step.key)!)
+    bindingField.value = ''
+    bindingSource.value = ''
+    payloadError.value = ''
+  } catch (error) {
+    payloadError.value = error instanceof Error ? error.message : 'Datenverbindung prüfen.'
+  }
 }
 function removeBinding(key: string) {
   const next = { ...bindings.value }
@@ -227,9 +246,10 @@ function applyPayload() {
           @change="structuredParameter(key, ($event.target as HTMLTextAreaElement).value, param.type)"
         />
         <textarea
-          v-else-if="param.type === 'textarea'"
+          v-else-if="param.type === 'textarea' || key === 'code' || key === 'instruction'"
           :value="stringValue(step.payload[key])"
-          rows="4"
+          :rows="key === 'code' ? 10 : 4"
+          :spellcheck="key === 'code' ? false : undefined"
           @input="payload(key, ($event.target as HTMLTextAreaElement).value)"
         />
         <input

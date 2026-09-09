@@ -7,7 +7,7 @@ import { workflowHash } from './executionLedger'
 type NativeProbe = {
   runtimes: Array<{ runtime: string; available: boolean }>
   browser: { available: boolean }
-  image: { capture: boolean; compare: boolean; ocr: boolean }
+  image: { capture: boolean; compare: boolean; ocr: boolean; prepareVision?: boolean }
   build: { appVersion: string; platform: string; arch: string; contractFingerprint: string }
   runtimeFingerprint: string
 }
@@ -16,7 +16,7 @@ const SHA256 = /^[a-f0-9]{64}$/u
 const pending = new Map<string, Promise<unknown>>()
 const recent = new Map<string, number>()
 
-async function probe() {
+async function probe(config?: LuczorApiConfigSnapshot, signal?: AbortSignal) {
   const [native, local] = await Promise.all([
     invoke<NativeProbe>('wf_runtime_capabilities'),
     invoke<NativeLocalModelStatus>('local_model_status').catch(() => null),
@@ -25,6 +25,10 @@ async function probe() {
   if (!native?.build || !SHA256.test(native.runtimeFingerprint) || !SHA256.test(native.build.contractFingerprint))
     throw new Error('workflow_capability_native_contract_missing')
   const released = typeof frontend === 'string' && SHA256.test(frontend)
+  const vision =
+    native.image.prepareVision && config
+      ? await import('./vision').then(module => module.getWorkflowVisionCapabilities(config, signal)).catch(() => null)
+      : null
   const environmentHash = await workflowHash({
     frontend: released ? frontend : 'development-unverified',
     native: native.runtimeFingerprint,
@@ -34,12 +38,22 @@ async function probe() {
     catalog: local?.catalogVersion ?? null,
     policy: local?.policyVersion ?? null,
     resources: local?.resourceConfig?.appliedRevision ?? null,
+    vision: vision?.revision ?? null,
   })
-  return { native, local, released, environmentHash }
+  return { native, local, released, environmentHash, vision }
 }
 export async function currentWorkflowEnvironmentHash(): Promise<string | null> {
-  const value = await probe()
-  return value.released ? value.environmentHash : null
+  const identity = await getVerifiedAccountSnapshot()
+  const value = await probe(identity?.config)
+  const current = await getVerifiedAccountSnapshot()
+  return value.released &&
+    identity &&
+    current?.principalId === identity.principalId &&
+    current.config.baseUrl === identity.config.baseUrl &&
+    current.config.clientId === identity.config.clientId &&
+    current.config.deviceKey === identity.config.deviceKey
+    ? value.environmentHash
+    : null
 }
 
 /** Probe installed runtimes without preparing, downloading or starting a model. */
@@ -56,7 +70,7 @@ export async function refreshWorkflowCapabilities(
     identity.config.deviceKey !== config.deviceKey
   )
     throw new Error('workflow_capability_identity_changed')
-  const { native, local, released, environmentHash } = await probe()
+  const { native, local, released, environmentHash, vision } = await probe(config, signal)
   const tasks: Capability[] = []
   const add = (types: string[], adapter: string, available: boolean, reason = 'runtime_not_available') => {
     for (const type of types)
@@ -109,7 +123,12 @@ export async function refreshWorkflowCapabilities(
   add(['image.capture'], 'desktop.image', native.image.capture)
   add(['image.ocr'], 'desktop.image', native.image.ocr, 'ocr_language_unavailable')
   add(['image.compare'], 'desktop.image', native.image.compare)
-  add(['image.vision'], 'desktop.image', false, 'multimodal_runtime_unavailable')
+  add(
+    ['image.vision'],
+    'desktop.image',
+    native.image.prepareVision === true && vision?.ready === true,
+    vision?.reason_code ?? 'multimodal_runtime_unavailable'
+  )
   signal?.throwIfAborted()
   const current = await getVerifiedAccountSnapshot()
   if (

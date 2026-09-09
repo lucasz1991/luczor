@@ -389,6 +389,7 @@ export function createMiniChatController(deps: Dependencies) {
                 state.notice = 'Budgetstand aktualisiert. Bitte die gewünschte Aktion erneut wählen.'
               touch()
             }
+            return progress
           })
         }
         break

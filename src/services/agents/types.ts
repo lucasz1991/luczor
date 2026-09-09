@@ -20,6 +20,14 @@ export type AgentExecutionOptions = Readonly<{
   maxBudgetUsd?: number
 }>
 
+/** Allowlisted observations returned by the actual worker, never inferred from requested options. */
+export type AgentRuntimeEvidence = Readonly<{
+  model?: string
+  modelSource?: 'runtime'
+  /** Gate checks can include denials or duplicate hooks; this is not a successful-tool count. */
+  toolGateChecks?: number
+}>
+
 /** These records are local to the trusted desktop renderer. */
 export type AgentPermission = 'read-only' | 'workspace-write'
 export type AgentRole = 'planner' | 'implementer' | 'reviewer' | 'join' | 'assistant'
@@ -68,6 +76,7 @@ export type AgentJobMetadata = Readonly<
     teamRunId?: string
     teamNodeId?: string
     errorCode?: 'scope_changed' | 'execution_failed' | 'invalid_result' | 'approval_expired'
+    runtimeEvidence?: AgentRuntimeEvidence
   }
 >
 
@@ -96,6 +105,7 @@ export type AgentRunRequest = Readonly<
 export type AgentRunResult = Readonly<{
   output: string
   effortSelection?: AgentEffortSelection
+  runtimeEvidence?: AgentRuntimeEvidence
   /** Only a real ID returned by the external runtime, never inferred from text. */
   externalThreadId?: string
 }>

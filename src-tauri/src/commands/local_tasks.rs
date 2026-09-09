@@ -331,27 +331,7 @@ pub struct WorkflowRuntimeCapability {
 }
 
 fn native_contract_fingerprint() -> String {
-    let mut hash = Sha256::new();
-    for part in [
-        env!("CARGO_PKG_VERSION"),
-        std::env::consts::OS,
-        std::env::consts::ARCH,
-        include_str!("local_tasks.rs"),
-        include_str!("process.rs"),
-        include_str!("execution.rs"),
-        include_str!("workflow_browser.rs"),
-        include_str!("workflow_browser_script.js"),
-        include_str!("workflow_image.rs"),
-        include_str!("workflow_artifacts.rs"),
-        include_str!("agent.rs"),
-        include_str!("codex.rs"),
-        include_str!("claude.rs"),
-        include_str!("agent_effort.rs"),
-    ] {
-        hash.update((part.len() as u64).to_le_bytes());
-        hash.update(part.as_bytes());
-    }
-    format!("{:x}", hash.finalize())
+    env!("LUCZOR_NATIVE_WORKFLOW_CODE_HASH").into()
 }
 
 fn runtime_version(exe: &Path, runtime: &str) -> Option<String> {
@@ -399,7 +379,7 @@ pub async fn wf_runtime_capabilities(window: WebviewWindow) -> Result<Value, Str
         let browser = super::workflow_browser::capabilities();
         let ocr = super::workflow_image::ocr_capabilities().unwrap_or_else(|_| serde_json::json!({"ocrAvailable":false,"ocrLanguages":[],"ocrReason":"windows_ocr_unavailable"}));
         let capture = xcap::Monitor::all().is_ok_and(|monitors| !monitors.is_empty());
-        let image = serde_json::json!({"capture":capture,"compare":true,"ocr":ocr["ocrAvailable"],"ocrLanguages":ocr["ocrLanguages"],"vision":false,"visionReason":"multimodal_runtime_unavailable"});
+        let image = serde_json::json!({"capture":capture,"compare":true,"ocr":ocr["ocrAvailable"],"ocrLanguages":ocr["ocrLanguages"],"prepareVision":true,"vision":false,"visionReason":"local_multimodal_runtime_unavailable"});
         let build = serde_json::json!({"appVersion":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,"contractFingerprint":native_contract_fingerprint()});
         let mut report = serde_json::json!({"runtimes":runtimes,"browser":browser,"image":image,"build":build});
         let fingerprint = format!("{:x}", Sha256::digest(report.to_string().as_bytes()));

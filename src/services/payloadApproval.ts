@@ -7,6 +7,8 @@ export type PayloadApproval = Readonly<{
   destination: string
   hash: string
   content: string
+  /** Ephemeral exact PNG preview; never a remote image URL or persisted artifact. */
+  imagePreview?: string
   expiresAt: number
 }>
 export const pendingPayloadApproval = shallowRef<PayloadApproval | null>(null)
@@ -23,6 +25,13 @@ export function requestPayloadApproval(
 ): Promise<boolean> {
   finish?.(false)
   if (signal?.aborted) return Promise.resolve(false)
+  if (
+    request.imagePreview !== undefined &&
+    (!/^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/u.test(request.imagePreview) ||
+      request.imagePreview.length > 2_800_000 ||
+      !request.content.includes(request.imagePreview.slice('data:image/png;base64,'.length)))
+  )
+    return Promise.resolve(false)
   const preview = Object.freeze({ ...request, id: crypto.randomUUID(), expiresAt: Date.now() + 120_000 })
   return new Promise(resolve => {
     const abort = () => complete(false)

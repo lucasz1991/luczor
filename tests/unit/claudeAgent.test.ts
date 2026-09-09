@@ -85,6 +85,7 @@ describe('managed Claude adapter', () => {
       requestedEffort: 'high',
       appliedEffort: 'high',
     })
+    expect(result.runtimeEvidence).toEqual({ model: 'claude-opus-4-7', modelSource: 'runtime', toolGateChecks: 0 })
   })
   it('does not claim default-model effort or runtime readiness from installation', async () => {
     const fixture = harness()
@@ -92,6 +93,8 @@ describe('managed Claude adapter', () => {
     const result = await createClaudeAgentAdapter(fixture.dependencies).run(request())
     expect(result.effortSelection).toMatchObject({ status: 'unknown', reason: 'default_model_unresolved' })
     expect(result.effortSelection?.appliedEffort).toBeUndefined()
+    expect(result.runtimeEvidence?.model).toBeUndefined()
+    expect(result.runtimeEvidence?.modelSource).toBeUndefined()
   })
   it('waits for actual stop after cancellation during start and suppresses late output', async () => {
     const fixture = harness()

@@ -430,14 +430,17 @@ export class LocalModelManager {
       // retains the resident process, so the next valid request stays admissible.
       if (
         error instanceof LocalInferenceError &&
-        ['runtime_context_exceeded', 'runtime_chat_history_rejected', 'runtime_tool_contract_rejected'].includes(
-          error.code
-        )
+        [
+          'runtime_context_exceeded',
+          'runtime_chat_history_rejected',
+          'runtime_tool_contract_rejected',
+          'runtime_reasoning_control_unavailable',
+        ].includes(error.code)
       ) {
         if (operationEpoch === this.boundaryEpoch) {
           this.health.set(release.id, { ...previous, state: 'ready', updatedAt: nowIso(this.now) })
         }
-        throw error
+        throw new LocalInferenceError(error.message, error.code, error.retryable, partialOutput || error.partialOutput)
       }
       const failures = previous.consecutiveFailures + 1
       const entersCooldown = failures >= release.healthPolicy.maxConsecutiveFailures

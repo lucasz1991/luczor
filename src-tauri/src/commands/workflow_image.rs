@@ -13,6 +13,7 @@ pub enum ImageOperation {
     Ocr,
     Compare,
     Vision,
+    PrepareVision,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -100,6 +101,9 @@ pub async fn wf_image_action(
         if artifact.mime != "image/png" {
             return Err("workflow_image_png_required".into());
         }
+        if input.action == ImageOperation::PrepareVision {
+            return prepare_vision(&artifact, &bytes, &check);
+        }
         if input.action == ImageOperation::Compare {
             let other_id = input
                 .other_artifact_id
@@ -125,6 +129,42 @@ pub async fn wf_image_action(
     })
     .await
     .map_err(|_| "workflow_image_task_failed")?
+}
+
+/// Exports only one already-owned artifact for a separately approved inference request.
+/// This is transport preparation, not evidence that the resident model supports images.
+fn prepare_vision(
+    artifact: &workflow_artifacts::WorkflowArtifact,
+    bytes: &[u8],
+    check: &dyn Fn() -> Result<(), String>,
+) -> Result<Value, String> {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+    check()?;
+    if artifact.mime != "image/png" || bytes.is_empty() || bytes.len() > 2 * 1024 * 1024 {
+        return Err("workflow_vision_image_budget_invalid".into());
+    }
+    if artifact.bytes != bytes.len() as u64
+        || artifact.sha256 != format!("{:x}", Sha256::digest(bytes))
+    {
+        return Err("workflow_vision_artifact_integrity_invalid".into());
+    }
+    // Decode the bounded PNG to reject truncated images and mismatching metadata.
+    let image = decode(bytes)?;
+    if artifact.width != Some(image.width()) || artifact.height != Some(image.height()) {
+        return Err("workflow_vision_image_dimensions_invalid".into());
+    }
+    check()?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+    check()?;
+    Ok(json!({
+        "artifact": {
+            "artifactId": artifact.artifact_id,
+            "mime": "image/png", "bytes": artifact.bytes, "sha256": artifact.sha256,
+            "width": image.width(), "height": image.height()
+        },
+        "base64": encoded
+    }))
 }
 
 fn decode(bytes: &[u8]) -> Result<image::RgbaImage, String> {
@@ -349,5 +389,31 @@ mod tests {
         );
         assert!(compare(&left, &right, &|| Err("revoked".into())).is_err());
         assert!(decode(b"invalid").is_err());
+    }
+    #[test]
+    fn vision_export_binds_owned_bytes_and_dimensions_without_claiming_inference() {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        let bytes = png([1, 2, 3, 255]);
+        let mut artifact = workflow_artifacts::WorkflowArtifact {
+            artifact_id: uuid::Uuid::new_v4().to_string(),
+            mime: "image/png".into(), bytes: bytes.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(&bytes)),
+            name: "private-name.png".into(), width: Some(1), height: Some(1),
+        };
+        let result = prepare_vision(&artifact, &bytes, &|| Ok(())).unwrap();
+        assert_eq!(result["artifact"]["sha256"], artifact.sha256);
+        assert_eq!(base64::engine::general_purpose::STANDARD.decode(result["base64"].as_str().unwrap()).unwrap(), bytes);
+        assert!(result["artifact"].get("name").is_none());
+        assert!(prepare_vision(&artifact, &bytes, &|| Err("revoked".into())).is_err());
+        artifact.width = Some(2);
+        assert!(prepare_vision(&artifact, &bytes, &|| Ok(())).is_err());
+        artifact.width = Some(1);
+        artifact.bytes += 1;
+        assert!(prepare_vision(&artifact, &bytes, &|| Ok(())).is_err());
+        artifact.bytes -= 1;
+        artifact.sha256 = "0".repeat(64);
+        assert!(prepare_vision(&artifact, &bytes, &|| Ok(())).is_err());
+        assert!(prepare_vision(&artifact, &vec![0; 2 * 1024 * 1024 + 1], &|| Ok(())).is_err());
     }
 }

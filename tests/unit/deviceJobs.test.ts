@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   approveDeviceJob: vi.fn(),
   startDeviceJob: vi.fn(),
   completeDeviceJob: vi.fn(),
+  requestWithConfig: vi.fn(),
 }))
 
 const notifications = vi.hoisted(() => ({
@@ -50,6 +51,7 @@ const pusherHarness = vi.hoisted(() => {
 vi.mock('pusher-js', () => ({ default: pusherHarness.FakePusher }))
 vi.mock('@/services/api/luczorApi', () => ({
   getApiConfig: api.getApiConfig,
+  requestWithConfig: api.requestWithConfig,
   LuczorApi: {
     registerDevice: api.registerDevice,
     realtimeConfig: api.realtimeConfig,

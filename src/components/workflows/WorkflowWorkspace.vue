@@ -552,8 +552,10 @@ onBeforeUnmount(() => {
             <WorkflowGraphEditor
               v-model="draft"
               :catalog="view.catalog"
+              :triggers="view.triggers"
               :disabled="writeBlocked || locked"
               @select="stepIndex = draft.steps.findIndex(step => step.key === $event)"
+              @select-source="tab = $event === 'input' ? 'inputs' : 'automation'"
             />
             <div class="wf-editor">
               <div class="wf-step-list">
@@ -604,6 +606,7 @@ onBeforeUnmount(() => {
                 v-if="activeStep"
                 :step="activeStep"
                 :steps="draft.steps"
+                :input-schema="draft.input_schema"
                 :catalog="view.catalog"
                 :workspace-root="view.rootPath"
                 :disabled="writeBlocked || locked"

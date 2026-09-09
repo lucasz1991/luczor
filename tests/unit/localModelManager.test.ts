@@ -195,27 +195,29 @@ describe('LocalModelManager runtime safety', () => {
     }
   )
 
-  it.each(['runtime_context_exceeded', 'runtime_chat_history_rejected', 'runtime_tool_contract_rejected'])(
-    'keeps the model admissible after %s instead of cooling down or stopping it',
-    async code => {
-      const model = await release()
-      const stream = vi.fn().mockRejectedValue(new LocalInferenceError('Input rejected', code, false, false))
-      const transport: LocalRuntimeTransport = { stream, cancel: vi.fn(), stop: vi.fn() }
-      const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
-      const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
-      for (let attempt = 0; attempt < 3; attempt++) {
-        await expect(
-          gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'long input' }] })
-        ).rejects.toMatchObject({ code })
-      }
-      expect(manager.getHealth(model)).toMatchObject({ state: 'ready', consecutiveFailures: 0 })
-      expect(transport.stop).not.toHaveBeenCalled()
-      stream.mockResolvedValueOnce(successfulResult)
+  it.each([
+    'runtime_context_exceeded',
+    'runtime_chat_history_rejected',
+    'runtime_tool_contract_rejected',
+    'runtime_reasoning_control_unavailable',
+  ])('keeps the model admissible after %s instead of cooling down or stopping it', async code => {
+    const model = await release()
+    const stream = vi.fn().mockRejectedValue(new LocalInferenceError('Input rejected', code, false, false))
+    const transport: LocalRuntimeTransport = { stream, cancel: vi.fn(), stop: vi.fn() }
+    const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
+    const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+    for (let attempt = 0; attempt < 3; attempt++) {
       await expect(
-        gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'short input' }] })
-      ).resolves.toMatchObject({ content: 'OK', provider: 'local' })
+        gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'long input' }] })
+      ).rejects.toMatchObject({ code })
     }
-  )
+    expect(manager.getHealth(model)).toMatchObject({ state: 'ready', consecutiveFailures: 0 })
+    expect(transport.stop).not.toHaveBeenCalled()
+    stream.mockResolvedValueOnce(successfulResult)
+    await expect(
+      gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'short input' }] })
+    ).resolves.toMatchObject({ content: 'OK', provider: 'local' })
+  })
 
   it('propagates a parent abort to native cancel without counting a model failure', async () => {
     const model = await release()

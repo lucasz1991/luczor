@@ -171,6 +171,10 @@ export async function runWorkflowTask(
         language: str(params.language) || undefined,
         monitorId: typeof params.monitor_id === 'number' ? params.monitor_id : undefined,
         maxChars: typeof params.max_chars === 'number' ? params.max_chars : undefined,
+        instruction: typeof params.instruction === 'string' ? params.instruction : undefined,
+        inference: params.inference === 'external' ? 'external' : params.inference === 'local' ? 'local' : undefined,
+        outputFormat: params.output_format === 'json' ? 'json' : params.output_format === 'text' ? 'text' : undefined,
+        maxOutputChars: typeof params.max_output_chars === 'number' ? params.max_output_chars : undefined,
       })
     }
     case 'browser.open':

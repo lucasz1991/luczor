@@ -3,22 +3,62 @@ import { computed, ref, useId } from 'vue'
 import { VueFlow, Handle, Position, useVueFlow, type Connection, type NodeDragEvent } from '@vue-flow/core'
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
-import type { WorkflowDefinition, WorkflowTask } from '@/services/workflows/types'
-import { connectWorkflowSteps, moveWorkflowNode, workflowGraph } from '@/services/workflows/graph'
+import type { WorkflowDefinition, WorkflowTask, WorkflowTrigger } from '@/services/workflows/types'
+import { connectWorkflowData, connectWorkflowSteps, moveWorkflowNode, workflowGraph } from '@/services/workflows/graph'
 const props = withDefaults(
-  defineProps<{ modelValue: WorkflowDefinition; catalog?: WorkflowTask[]; disabled?: boolean }>(),
-  { catalog: () => [] }
+  defineProps<{
+    modelValue: WorkflowDefinition
+    catalog?: WorkflowTask[]
+    triggers?: WorkflowTrigger[]
+    disabled?: boolean
+  }>(),
+  { catalog: () => [], triggers: () => [] }
 )
-const emit = defineEmits<{ 'update:modelValue': [value: WorkflowDefinition]; select: [key: string] }>()
+const emit = defineEmits<{
+  'update:modelValue': [value: WorkflowDefinition]
+  select: [key: string]
+  'select-source': [kind: 'input' | 'event' | 'trigger']
+}>()
 const id = useId()
 const flow = useVueFlow({ id })
-const graph = computed(() => workflowGraph(props.modelValue, props.catalog))
+const graph = computed(() => workflowGraph(props.modelValue, props.catalog, props.triggers))
 const notice = ref('')
+const sourceField = ref('')
+const targetField = ref('')
+const sourceOptions = computed(() =>
+  graph.value.nodes.flatMap(node =>
+    node.data.outputs.map(field => ({
+      value: `${node.id}|${field.path}`,
+      label: `${node.data.title} · ${field.path} (${field.type})`,
+    }))
+  )
+)
+const targetOptions = computed(() =>
+  graph.value.nodes
+    .filter(node => !node.data.sourceKind)
+    .flatMap(node =>
+      node.data.inputs.map(field => ({
+        value: `${node.id}|${field.path}`,
+        label: `${node.data.title} · ${field.path} (${field.type})`,
+      }))
+    )
+)
+function selectNode(key: string) {
+  const node = graph.value.nodes.find(item => item.id === key)
+  if (node?.data.sourceKind) emit('select-source', node.data.sourceKind)
+  else emit('select', key)
+}
+function bindFields() {
+  const [source, sourcePath] = sourceField.value.split('|')
+  const [target, targetPath] = targetField.value.split('|')
+  if (!source || !sourcePath || !target || !targetPath) return
+  connect({ source, target, sourceHandle: `data:${sourcePath}`, targetHandle: `data:${targetPath}` })
+}
 function move(event: NodeDragEvent) {
   if (props.disabled) return
   try {
     let next = props.modelValue
-    for (const node of event.nodes) next = moveWorkflowNode(next, node.id, node.position)
+    for (const node of event.nodes) if (!node.id.startsWith('@')) next = moveWorkflowNode(next, node.id, node.position)
     emit('update:modelValue', next)
   } catch (error) {
     notice.value = error instanceof Error ? error.message : 'Position konnte nicht übernommen werden.'
@@ -27,8 +67,27 @@ function move(event: NodeDragEvent) {
 function connect(connection: Connection) {
   if (props.disabled) return
   try {
-    emit('update:modelValue', connectWorkflowSteps(props.modelValue, connection.source, connection.target))
-    notice.value = 'Ablaufverbindung im Entwurf ergänzt.'
+    const sourceData = connection.sourceHandle?.startsWith('data:')
+    const targetData = connection.targetHandle?.startsWith('data:')
+    if (sourceData !== targetData) throw new Error('Verbinde Datenfelder miteinander oder beide Ablaufanschlüsse.')
+    if (sourceData) {
+      emit(
+        'update:modelValue',
+        connectWorkflowData(
+          props.modelValue,
+          props.catalog,
+          connection.source,
+          connection.sourceHandle!.slice(5),
+          connection.target,
+          connection.targetHandle!.slice(5)
+        )
+      )
+      notice.value =
+        'Datenverbindung ergänzt. Bei Schrittergebnissen wird auch der Quellschritt abgewartet. Die Werte werden beim Ausführen erneut geprüft.'
+    } else {
+      emit('update:modelValue', connectWorkflowSteps(props.modelValue, connection.source, connection.target))
+      notice.value = 'Ablaufverbindung im Entwurf ergänzt.'
+    }
   } catch (error) {
     notice.value = error instanceof Error ? error.message : 'Verbindung konnte nicht übernommen werden.'
   }
@@ -37,13 +96,33 @@ function connect(connection: Connection) {
 <template>
   <section class="workflow-graph" aria-label="Workflow als Knotenansicht">
     <div class="workflow-graph__toolbar">
-      <span>Knoten verschieben: nur Layout · Verbinden: Ablauf ändern</span>
+      <span>Verschieben: nur Layout · Ablauf und Daten getrennt verbinden</span>
       <div>
         <button type="button" aria-label="Workflow vergrößern" @click="flow.zoomIn()">+</button
         ><button type="button" aria-label="Workflow verkleinern" @click="flow.zoomOut()">−</button
         ><button type="button" @click="flow.fitView()">Einpassen</button>
       </div>
     </div>
+    <details class="workflow-graph__bindings">
+      <summary>Datenfelder verbinden</summary>
+      <div>
+        <label
+          >Quelle<select v-model="sourceField" :disabled="disabled">
+            <option value="">Feld wählen</option>
+            <option v-for="field in sourceOptions" :key="field.value" :value="field.value">{{ field.label }}</option>
+          </select></label
+        >
+        <label
+          >Ziel<select v-model="targetField" :disabled="disabled">
+            <option value="">Feld wählen</option>
+            <option v-for="field in targetOptions" :key="field.value" :value="field.value">{{ field.label }}</option>
+          </select></label
+        >
+        <button type="button" :disabled="disabled || !sourceField || !targetField" @click="bindFields">
+          Daten verbinden
+        </button>
+      </div>
+    </details>
     <div class="workflow-graph__canvas">
       <VueFlow
         :id="id"
@@ -58,11 +137,25 @@ function connect(connection: Connection) {
         fit-view-on-init
         @node-drag-stop="move"
         @connect="connect"
-        @node-click="emit('select', $event.node.id)"
+        @node-click="selectNode($event.node.id)"
       >
         <template #node-workflow="{ data }">
-          <Handle id="in" type="target" :position="Position.Left" :connectable="!disabled" />
-          <div class="workflow-node">
+          <Handle
+            v-if="!data.sourceKind"
+            id="in"
+            type="target"
+            :position="Position.Left"
+            :connectable="!disabled"
+            :style="{ top: '18px' }"
+          />
+          <Handle
+            v-else-if="data.sourceKind !== 'trigger'"
+            id="trigger"
+            type="target"
+            :position="Position.Left"
+            :connectable="false"
+          />
+          <div class="workflow-node" :class="{ 'workflow-node--source': data.sourceKind }">
             <span class="workflow-node__location">{{ data.location }}</span>
             <strong>{{ data.title }}</strong
             ><span>{{ data.task }}</span>
@@ -74,15 +167,44 @@ function connect(connection: Connection) {
               <dt>Bei Fehler</dt>
               <dd>{{ data.failure }}</dd>
             </dl>
+            <div v-if="data.inputs.length || data.outputs.length" class="workflow-node__ports">
+              <div v-for="field in data.inputs" :key="`in:${field.path}`" class="workflow-node__port">
+                <Handle :id="`data:${field.path}`" type="target" :position="Position.Left" :connectable="!disabled" />
+                <span>→ {{ field.path }}</span
+                ><small>{{ field.type }}</small>
+              </div>
+              <div
+                v-for="field in data.outputs"
+                :key="`out:${field.path}`"
+                class="workflow-node__port workflow-node__port--out"
+              >
+                <span>{{ field.path }} →</span><small>{{ field.type }}</small>
+                <Handle :id="`data:${field.path}`" type="source" :position="Position.Right" :connectable="!disabled" />
+              </div>
+            </div>
           </div>
-          <Handle id="out" type="source" :position="Position.Right" :connectable="!disabled" />
+          <Handle
+            v-if="!data.sourceKind"
+            id="out"
+            type="source"
+            :position="Position.Right"
+            :connectable="!disabled"
+            :style="{ top: '18px' }"
+          />
+          <Handle
+            v-else-if="data.sourceKind === 'trigger'"
+            id="trigger"
+            type="source"
+            :position="Position.Right"
+            :connectable="false"
+          />
         </template>
       </VueFlow>
     </div>
     <p v-if="notice" role="status">{{ notice }}</p>
     <p class="workflow-graph__legend">
-      Durchgehend: Ablauf · Gestrichelt: Datenübergabe. Datenfelder und Fehlerpfade werden im ausgewählten Schritt
-      bearbeitet.
+      Durchgehend: Ablauf · Gestrichelt: Datenübergabe · Gepunktet: Auslöser. Typen werden vorab abgeglichen; unbekannte
+      Typen benötigen die Laufzeitprüfung. Auslöser und Eingaben öffnen ihre vorhandene Verwaltung.
     </p>
   </section>
 </template>
@@ -108,6 +230,54 @@ function connect(connection: Connection) {
 .workflow-graph__toolbar div {
   display: flex;
   gap: 6px;
+}
+.workflow-graph__bindings {
+  padding: 10px 12px;
+  font-size: 12px;
+}
+.workflow-graph__bindings > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+  margin-top: 10px;
+}
+.workflow-graph__bindings label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  flex: 1 1 220px;
+}
+.workflow-graph__bindings select {
+  width: 100%;
+  min-width: 0;
+  padding: 6px;
+  background: var(--ai-bg, #181b21);
+  color: inherit;
+  border: 1px solid var(--ai-border, #3d404b);
+  border-radius: 6px;
+}
+.workflow-node__ports {
+  margin: 10px -12px -4px;
+  border-top: 1px solid var(--ai-border, #3d404b);
+  padding-top: 4px;
+}
+.workflow-node__port {
+  position: relative;
+  padding: 3px 12px;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  overflow-wrap: anywhere;
+}
+.workflow-node__port small {
+  color: var(--ai-text-muted, #b5b9c7);
+}
+.workflow-node__port--out {
+  text-align: right;
+}
+.workflow-node--source {
+  border-style: dashed;
 }
 button {
   min-height: 32px;

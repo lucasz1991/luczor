@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm vite:dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "node scripts/build-agent-runtime.mjs && pnpm build",
+    "beforeBuildCommand": "pnpm build",
     "frontendDist": "../dist"
   },
   "app": {

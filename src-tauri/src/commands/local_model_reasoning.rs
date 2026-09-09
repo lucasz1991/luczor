@@ -2,9 +2,13 @@
 //! output tokens, never fabricated private-reasoning token counts.
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub(super) const MAX_OUTPUT_TOKENS: u32 = 131_072;
+pub(super) const CONTROL_UNAVAILABLE: &str =
+    "Local thinking control was not confirmed; generation interrupted.";
 const MAX_THINKING: u32 = 65_536;
 const END_RESERVE: u32 = 64;
 const MIN_ANSWER: u32 = 256;
@@ -200,6 +204,7 @@ pub(super) struct Session {
     last_emit: Instant,
     live: bool,
     pub finished: bool,
+    pub interruption: Arc<AtomicBool>,
     control_pending: bool,
 }
 impl Session {
@@ -239,6 +244,7 @@ impl Session {
             last_emit: now,
             live: plan.live && limit > 0,
             finished: false,
+            interruption: Arc::new(AtomicBool::new(false)),
             control_pending: false,
         };
         s.refresh_controls();
@@ -276,6 +282,9 @@ impl Session {
     /// Returns whether a native reasoning_end request should be sent. Only
     /// phase flags and reported numeric counters are retained from private SSE.
     pub fn observe(&mut self, value: &Value) -> Result<(bool, bool), String> {
+        if self.interruption.load(Ordering::SeqCst) {
+            return Err(CONTROL_UNAVAILABLE.into());
+        }
         if self.finished {
             return Ok((false, false));
         }
@@ -423,6 +432,12 @@ impl Session {
     }
     pub fn control_failed(&mut self) {
         self.live = false;
+        // A missing acknowledgement is not evidence that the sampler stopped.
+        // Interrupt only this unfinished socket; never spend speculative headroom
+        // or cancel a later request/model on behalf of an old control response.
+        if !self.finished {
+            self.interruption.store(true, Ordering::SeqCst);
+        }
         self.refresh_controls();
     }
 }
@@ -564,6 +579,37 @@ mod tests {
         assert_eq!(s.progress.phase, Phase::Thinking);
         assert!(!s.observe(&thinking(4097)).unwrap().0);
         assert!(!s.progress.can_answer);
+    }
+    #[test]
+    fn unconfirmed_automatic_control_interrupts_before_spending_speculative_headroom() {
+        let mut s = session(ThinkingTier::Fast, 30000, true);
+        assert!(s.observe(&thinking(4096)).unwrap().0);
+        assert!(s.progress.output_limit_tokens > s.progress.thinking_limit_tokens + 4096);
+        s.control_failed();
+        assert!(s.interruption.load(Ordering::SeqCst));
+        assert_eq!(s.observe(&thinking(4097)).unwrap_err(), CONTROL_UNAVAILABLE);
+        assert_eq!(s.progress.generated_tokens, Some(4096));
+        assert!(!s.progress.can_answer && !s.progress.can_extend);
+        let failure = super::super::LocalInferenceFailure::from(CONTROL_UNAVAILABLE);
+        assert_eq!(failure.code, "runtime_reasoning_control_unavailable");
+        assert!(!failure.retryable);
+        assert!(failure.preserves_resident_runtime());
+    }
+    #[test]
+    fn manual_control_failure_interrupts_only_its_unfinished_generation() {
+        let mut s = session(ThinkingTier::Fast, 30000, true);
+        s.observe(&thinking(200)).unwrap();
+        assert!(s.control("answer", 0).unwrap().1);
+        s.control_failed();
+        assert!(s.interruption.load(Ordering::SeqCst));
+        let other = session(ThinkingTier::Fast, 30000, true);
+        assert!(!other.interruption.load(Ordering::SeqCst));
+        let mut ended = session(ThinkingTier::Fast, 30000, true);
+        ended
+            .observe(&json!({"choices":[{"finish_reason":"stop"}]}))
+            .unwrap();
+        ended.control_failed();
+        assert!(!ended.interruption.load(Ordering::SeqCst));
     }
     #[test]
     fn stale_control_changes_nothing_and_current_more_only_moves_one_tier() {

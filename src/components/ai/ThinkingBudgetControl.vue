@@ -16,6 +16,13 @@ const props = defineProps<{
 const emit = defineEmits<{ stop: [] }>()
 const pending = ref(false)
 const message = ref('')
+const controlFailure = computed(() =>
+  props.progress.controlOutcome === 'unavailable'
+    ? props.progress.answerRequested
+      ? 'Der Denkabschluss wurde nicht bestätigt. Die Generation wird mit gesichertem Arbeitsstand unterbrochen.'
+      : 'Für diese Generation ist keine Live-Steuerung verfügbar.'
+    : ''
+)
 watch(
   () => props.progress.requestId,
   () => {
@@ -24,15 +31,17 @@ watch(
   }
 )
 const phase = computed(() =>
-  props.progress.phase === 'answering'
-    ? 'Antwort wird geschrieben'
-    : props.progress.answerRequested
-      ? 'Antwort angefordert'
-      : props.progress.phase === 'thinking'
-        ? 'Denkt'
-        : props.progress.phase === 'preparing'
-          ? 'Wird vorbereitet'
-          : 'Phase nicht bestätigt'
+  controlFailure.value && props.progress.answerRequested
+    ? 'Denksteuerung unterbrochen'
+    : props.progress.phase === 'answering'
+      ? 'Antwort wird geschrieben'
+      : props.progress.answerRequested
+        ? 'Antwort angefordert'
+        : props.progress.phase === 'thinking'
+          ? 'Denkt'
+          : props.progress.phase === 'preparing'
+            ? 'Wird vorbereitet'
+            : 'Phase nicht bestätigt'
 )
 const fmt = (value: number) => value.toLocaleString('de-DE')
 async function act(action: ThinkingControlAction) {
@@ -99,7 +108,7 @@ async function act(action: ThinkingControlAction) {
       </button>
       <button type="button" @click="emit('stop')">Stoppen</button>
     </div>
-    <p v-if="message" role="status">{{ message }}</p>
+    <p v-if="controlFailure || message" role="status">{{ controlFailure || message }}</p>
   </section>
 </template>
 <style scoped>

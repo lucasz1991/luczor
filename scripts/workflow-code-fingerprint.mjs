@@ -13,8 +13,17 @@ export function workflowCodeFingerprint(root) {
     }
   }
   visit(resolve(root, 'src'))
-  files.push(resolve(root, 'package.json'), resolve(root, 'pnpm-lock.yaml'))
+  for (const name of [
+    'package.json',
+    'pnpm-lock.yaml',
+    'vite.config.ts',
+    'scripts/claude-worker.ts',
+    'scripts/build-agent-runtime.mjs',
+    'scripts/workflow-code-fingerprint.mjs',
+  ])
+    files.push(resolve(root, name))
   const hash = createHash('sha256')
-  for (const file of files.sort()) hash.update(relative(root, file).replaceAll('\\', '/')).update('\0').update(readFileSync(file)).update('\0')
+  for (const file of files.sort())
+    hash.update(relative(root, file).replaceAll('\\', '/')).update('\0').update(readFileSync(file)).update('\0')
   return hash.digest('hex')
 }

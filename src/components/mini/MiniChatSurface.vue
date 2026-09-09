@@ -17,7 +17,7 @@ import TokenCounter from '../ai/TokenCounter.vue'
 import ThinkingState from '../ai/ThinkingState.vue'
 import ThinkingSelector from '../ai/ThinkingSelector.vue'
 import ThinkingBudgetControl from '../ai/ThinkingBudgetControl.vue'
-import type { ThinkingControlAction } from '@/services/inference/thinking'
+import { createMiniThinkingControl } from '@/services/miniChat/thinkingControl'
 import ApprovalCard from '../ai/ApprovalCard.vue'
 import ToolChips from '../ai/ToolChips.vue'
 import WorkflowChatCards from '../workflows/WorkflowChatCards.vue'
@@ -31,11 +31,13 @@ const props = withDefaults(defineProps<{ snapshot: MiniSnapshot; native?: boolea
 })
 const emit = defineEmits<{ action: [action: MiniAction]; hide: []; showMain: [] }>()
 const expanded = ref(false)
-async function controlThinking(requestId: string, action: ThinkingControlAction, sequence: number) {
-  if (props.connectionError || props.snapshot.thinkingBudget?.requestId !== requestId)
-    throw new Error('Die Verbindung zum aktiven Auftrag ist nicht verfügbar.')
-  emit('action', { type: 'thinking_control', sessionId: props.snapshot.sessionId, requestId, action, sequence })
-}
+const thinkingControl = createMiniThinkingControl(
+  () => props.snapshot,
+  action => emit('action', action),
+  () => props.connectionError
+)
+const controlThinking = thinkingControl.control
+onBeforeUnmount(thinkingControl.dispose)
 const pinned = ref(true)
 const draft = ref('')
 const drafts = new Map<string, string>()
@@ -648,6 +650,8 @@ onBeforeUnmount(() => {
               :workflows="message.workflows"
               :project-id="snapshot.project?.id ?? ''"
               :host-only="true"
+              :host-runs="snapshot.workflowRuns"
+              :host-runs-verified="snapshot.workflowRunsVerified"
               :disabled="disabled"
               :read-only="snapshot.mode === 'observe' || snapshot.hud.killSwitch"
               @open="reference => openWorkflow(message.id, reference.id)"

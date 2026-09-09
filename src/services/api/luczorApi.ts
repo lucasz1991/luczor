@@ -407,6 +407,8 @@ export type RequestOptions = {
   auth?: boolean
   query?: Record<string, string | undefined>
   signal?: AbortSignal
+  /** Explicit bounded long-running operation deadline; ordinary API requests retain ten seconds. */
+  timeoutMs?: number
   headers?: Record<string, string>
 }
 
@@ -577,9 +579,17 @@ async function request<T>(path: string, opts: RequestOptions = {}, config?: Lucz
   return requestWithConfig<T>(path, opts, config ?? (await getApiConfigSnapshot()))
 }
 
-export async function requestWithConfig<T>(path: string, opts: RequestOptions, cfg: LuczorApiConfigSnapshot): Promise<T> {
+export async function requestWithConfig<T>(
+  path: string,
+  opts: RequestOptions,
+  cfg: LuczorApiConfigSnapshot
+): Promise<T> {
   // An identity change may have invalidated the caller while configuration was loading.
   if (opts.signal?.aborted) throw abortError(opts.signal)
+  const timeoutMs = opts.timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 615000) {
+    throw new Error('API request timeout must be an integer between 1000 and 615000 milliseconds.')
+  }
   const requestCorrelationId = createCorrelationId()
   if (!cfg.baseUrl) {
     emitDebug('error', 'api_config_missing', { path })
@@ -621,7 +631,7 @@ export async function requestWithConfig<T>(path: string, opts: RequestOptions, c
         redirect: 'error',
         credentials: 'omit',
       },
-      DEFAULT_FETCH_TIMEOUT_MS,
+      timeoutMs,
       MAX_API_RESPONSE_BYTES
     )
     res = result.response

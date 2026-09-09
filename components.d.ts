@@ -75,6 +75,7 @@ declare module 'vue' {
     WorkflowChatCards: typeof import('./src/components/workflows/WorkflowChatCards.vue')['default']
     WorkflowEditorIsland: typeof import('./src/components/workflows/WorkflowEditorIsland.vue')['default']
     WorkflowGraphEditor: typeof import('./src/components/workflows/WorkflowGraphEditor.vue')['default']
+    WorkflowRunBudget: typeof import('./src/components/workflows/WorkflowRunBudget.vue')['default']
     WorkflowStepEditor: typeof import('./src/components/workflows/WorkflowStepEditor.vue')['default']
     WorkflowTestsPanel: typeof import('./src/components/workflows/WorkflowTestsPanel.vue')['default']
     WorkflowTriggerEditor: typeof import('./src/components/workflows/WorkflowTriggerEditor.vue')['default']

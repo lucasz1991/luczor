@@ -3,12 +3,16 @@ import { reactive, watch } from 'vue'
 import type { Message, PendingToolCall, Project } from '@/state/types'
 import type { RunAgentOptions } from '@/services/agent'
 import type { MiniAction, MiniView } from '@/services/miniChat/types'
+import type { ThinkingBudgetProgress } from '@/services/inference/thinking'
 import { DEFAULT_STATE } from '@/state/defaults'
 import { createChatActivity } from '@/services/chatActivity'
 import { createMiniChatController } from '@/services/miniChat/controller'
 import { createMiniChatBridge } from '@/services/miniChat/bridge'
 import { miniProjectList, projectChatBinding } from '@/services/miniChat/projectChat'
 import { updateExecutionControls } from '@/services/executionGate'
+const workflowMock = vi.hoisted(() => ({ access: vi.fn(), stop: vi.fn(), read: vi.fn() }))
+vi.mock('@/services/workflows/access', () => ({ captureWorkflowAccess: workflowMock.access }))
+vi.mock('@/services/workflows/api', () => ({ stopWorkflowAfterStep: workflowMock.stop }))
 
 const cleanups = new Set<() => void>()
 let generation = 0
@@ -61,6 +65,7 @@ function setup(
     tools: [pendingTool('shared-tool')],
     chatBusy: false,
     planningBusy: false,
+    budget: null as ThinkingBudgetProgress | null,
   })
   const currentProject = () => source.projects.find(item => item.id === source.activeProjectId)
   const context = () => ({
@@ -88,6 +93,7 @@ function setup(
   const openPanel = vi.fn(async () => {})
   const openWorkflow = vi.fn(async () => {})
   const runWorkflow = vi.fn(async () => {})
+  const controlThinking = vi.fn<() => Promise<ThinkingBudgetProgress>>()
   const bridge = createMiniChatBridge(controller, {
     projects: () => miniProjectList(source.projects, source.messages),
     chat: () => projectChatBinding(currentProject(), source.messages, source.tools, source.chatBusy),
@@ -97,6 +103,8 @@ function setup(
     openPanel,
     openWorkflow,
     runWorkflow,
+    thinkingBudget: () => source.budget,
+    controlThinking,
   })
   cleanups.add(() => {
     controller.reset()
@@ -119,10 +127,14 @@ function setup(
     openPanel,
     openWorkflow,
     runWorkflow,
+    controlThinking,
   }
 }
 
 beforeEach(() => {
+  workflowMock.access.mockReset().mockRejectedValue(new Error('No workflow fixture'))
+  workflowMock.read.mockReset()
+  workflowMock.stop.mockReset()
   updateExecutionControls({ mode: 'act', killSwitch: false, scope: `mini-bridge-tests-${++generation}` })
 })
 afterEach(() => {
@@ -131,6 +143,56 @@ afterEach(() => {
 })
 
 describe('mini chat and workspace bridge', () => {
+  it('publishes only the correlated completed control and drops acknowledgement after a view switch', async () => {
+    const { source, bridge, view, controlThinking } = setup()
+    const progress: ThinkingBudgetProgress = {
+      requestId: 'request-1',
+      tier: 'fast',
+      phase: 'thinking',
+      generatedTokens: 410,
+      softTargetTokens: 512,
+      thinkingLimitTokens: 4096,
+      requestedThinkingLimitTokens: 4096,
+      outputLimitTokens: 30000,
+      responseReserveTokens: 4096,
+      warning: true,
+      canExtend: true,
+      canAnswer: true,
+      answerRequested: false,
+      elapsedMs: 1000,
+      sequence: 10,
+    }
+    source.budget = progress
+    source.chatBusy = true
+    await view('chat')
+    const response = deferred<ThinkingBudgetProgress>()
+    controlThinking.mockReturnValueOnce(response.promise)
+    const action = {
+      type: 'thinking_control',
+      sessionId: bridge.snapshot.value.sessionId,
+      requestId: 'request-1',
+      controlId: 'control-1',
+      action: 'answer',
+      sequence: 10,
+    } as const
+    const waiting = bridge.dispatch(action)
+    expect(bridge.snapshot.value.thinkingControlAck).toBeNull()
+    response.resolve({ ...progress, answerRequested: true, sequence: 11, controlOutcome: 'applied' })
+    await waiting
+    expect(bridge.snapshot.value.thinkingControlAck).toMatchObject({
+      controlId: 'control-1',
+      requestId: 'request-1',
+      progress: { phase: 'thinking', answerRequested: true },
+    })
+    const late = deferred<ThinkingBudgetProgress>()
+    controlThinking.mockReturnValueOnce(late.promise)
+    const next = bridge.dispatch({ ...action, controlId: 'control-2' })
+    await view('workspace')
+    late.resolve({ ...progress, sequence: 12, controlOutcome: 'stale' })
+    await next
+    expect(bridge.snapshot.value.thinkingControlAck).toBeNull()
+    expect(bridge.snapshot.value.notice).toBe('')
+  })
   it('opens only a trusted workflow card from the current project and dispatches improvement through the shared chat owner', async () => {
     const { source, bridge, view, openWorkflow, sendChat } = setup()
     source.tools.push(
@@ -249,6 +311,51 @@ describe('mini chat and workspace bridge', () => {
       action: 'start',
     })
     expect(runWorkflow).toHaveBeenCalledTimes(3)
+  })
+
+  it('publishes only measured host budgets and handles a bound boundary stop without starting another run', async () => {
+    const { source, bridge, view, runWorkflow } = setup()
+    const runId = '11111111-1111-4111-8111-111111111111'
+    let run = { id: 15, public_id: runId, workflow_definition_id: 7, project_external_id: 'project-a', status: 'running', sandbox: false,
+      budgets: { max_executions: 200 }, budget_state: { executions: 170 } as Record<string, unknown>, output: { private: 'SECRET' }, context: { token: 'SECRET' } }
+    workflowMock.read.mockImplementation(async () => ({ data: run }))
+    workflowMock.access.mockResolvedValue({ api: { run: workflowMock.read }, check: async () => {} })
+    source.tools.push(pendingTool('budget-card', { name: 'workflow_run_start', status: 'executed', result: {
+      toolCallId: 'budget-card', name: 'workflow_run_start', ok: true, ts: 1,
+      output: { workflow_ref: { id: 7, name: 'Budget', runId, status: 'running' } },
+    } }))
+    await view('chat')
+    for (let index = 0; index < 20; index++) await Promise.resolve()
+    expect(bridge.snapshot.value.workflowRunsVerified).toBe(true)
+    expect(bridge.snapshot.value.workflowRuns?.[0]).toMatchObject({ budget_state: { executions: 170 } })
+    expect(JSON.stringify(bridge.snapshot.value.workflowRuns)).not.toContain('SECRET')
+    workflowMock.stop.mockImplementation(async () => {
+      run = { ...run, budget_state: { executions: 170, boundary_stop: { status: 'pending' } } }
+      return run
+    })
+    await bridge.dispatch({ type: 'workflow_action', sessionId: bridge.snapshot.value.sessionId, messageId: 'shared-answer', workflowId: 7, action: 'stop_after_step' })
+    expect(workflowMock.stop).toHaveBeenCalledWith('project-a', 7, runId, expect.any(AbortSignal))
+    expect(bridge.snapshot.value.workflowRuns?.[0]).toMatchObject({ status: 'running', budget_state: { boundary_stop: { status: 'pending' } } })
+    expect(runWorkflow).not.toHaveBeenCalled()
+    await view('workspace')
+    expect(bridge.snapshot.value.workflowRuns).toEqual([])
+  })
+
+  it('discards a budget reply after switching the chat project', async () => {
+    const { source, bridge, view } = setup()
+    const pending = deferred<{ data: Record<string, unknown> }>()
+    workflowMock.access.mockResolvedValue({ api: { run: () => pending.promise }, check: async () => {} })
+    source.tools.push(pendingTool('budget-card', { name: 'workflow_run_start', status: 'executed', result: {
+      toolCallId: 'budget-card', name: 'workflow_run_start', ok: true, ts: 1,
+      output: { workflow_ref: { id: 7, name: 'Budget', runId: '11111111-1111-4111-8111-111111111111' } },
+    } }))
+    await view('chat')
+    for (let index = 0; index < 10; index++) await Promise.resolve()
+    source.activeProjectId = 'project-b'
+    pending.resolve({ data: { id: 15, public_id: '11111111-1111-4111-8111-111111111111', workflow_definition_id: 7, project_external_id: 'project-a', status: 'running', sandbox: false, budgets: { max_executions: 200 }, budget_state: { executions: 199 } } })
+    for (let index = 0; index < 20; index++) await Promise.resolve()
+    expect(bridge.snapshot.value.workflowRuns).toEqual([])
+    expect(bridge.snapshot.value.workflowRunsVerified).toBe(false)
   })
 
   it('rejects stop without a trusted run and execution under observe or Not-Aus', async () => {

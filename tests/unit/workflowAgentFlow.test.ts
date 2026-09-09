@@ -5,6 +5,9 @@ vi.mock('@/services/agents/workflowAgent', () => ({ runWorkflowAgent: vi.fn() })
 vi.mock('@/services/agent', () => ({ runAgent: vi.fn() }))
 import { runWorkflowAgentFlow } from '@/services/workflows/agentFlow'
 import type { RunAgentOptions, RunAgentResult } from '@/services/agent'
+import type { WorkflowAgentResult } from '@/services/agents/workflowAgent'
+import type { WorkflowAgentAvailability } from '@/services/workflows/agentSelection'
+import type { requestPayloadApproval } from '@/services/payloadApproval'
 
 function fixture(overrides: Partial<RunAgentResult> = {}) {
   const controller = new AbortController()
@@ -36,11 +39,21 @@ function fixture(overrides: Partial<RunAgentResult> = {}) {
     account: vi.fn(async () => account),
     project: vi.fn(async () => project),
     run: vi.fn<(options: RunAgentOptions) => Promise<RunAgentResult>>(async () => answer),
-    managed: vi.fn(async () => ({ ok: true, code: 0, stdout: 'CLI result', stderr: '' })),
+    managed: vi.fn<
+      (
+        ...args: Parameters<typeof import('@/services/agents/workflowAgent').runWorkflowAgent>
+      ) => Promise<WorkflowAgentResult>
+    >(async () => ({ ok: true, code: 0, stdout: 'CLI result', stderr: '' })),
     assert: vi.fn((ticket: { signal: AbortSignal }) => ticket.signal.throwIfAborted()),
     mode: () => 'act' as const,
     confirm: vi.fn(async () => ({ approved: true })),
-    approve: vi.fn(async () => true),
+    approve: vi.fn<typeof requestPayloadApproval>(async () => true),
+    availability: vi.fn<(signal: AbortSignal) => Promise<WorkflowAgentAvailability>>(async () => ({
+      externalPolicy: 'ask',
+      local: { manifestAvailable: true, state: 'ready', activeModelId: 'signed-model' },
+      codex: { available: false, catalog: { revision: 'unavailable', models: [] } },
+      claude: { available: false, catalog: { revision: 'unavailable', models: [] } },
+    })),
   }
   return {
     deps,
@@ -150,6 +163,120 @@ describe('workflow agent adapter', () => {
       thinking_application: 'adapter_not_confirmed',
     })
     expect(deps.run).not.toHaveBeenCalled()
+    expect(deps.availability).not.toHaveBeenCalled()
+  })
+
+  it('selects and approves the exact automatic managed route, preserving actual model/effort metadata', async () => {
+    const { deps, context } = fixture()
+    const available = await deps.availability(context.ticket.signal)
+    deps.availability.mockResolvedValue({
+      ...available,
+      codex: {
+        available: true,
+        catalog: {
+          source: 'codex-cache',
+          revision: 'revision',
+          validForSeconds: 300,
+          models: [{ model: 'real-model', supportedEfforts: ['low', 'medium', 'high'] }],
+        },
+      },
+    })
+    deps.managed.mockResolvedValue({
+      ok: true,
+      code: 0,
+      stdout: 'Done',
+      stderr: '',
+      runtimeEvidence: { model: 'actual-model', modelSource: 'runtime', toolGateChecks: 2 },
+      effortSelection: {
+        tier: 'thorough',
+        model: 'actual-model',
+        requestedEffort: 'high',
+        appliedEffort: 'high',
+        status: 'confirmed',
+        reason: 'node_override',
+        capabilityRevision: 'revision',
+        capabilitySource: 'runtime',
+      },
+    })
+    const result = await runWorkflowAgentFlow(false, { instruction: 'Implementiere Code' }, context, deps)
+    expect(result).toMatchObject({
+      agent: 'codex',
+      requested_model: 'real-model',
+      model: 'actual-model',
+      model_confirmation: 'runtime',
+      requested_effort: 'high',
+      applied_effort: 'high',
+      thinking_application: 'confirmed',
+      tool_gate_checks: 2,
+      selection_availability: 'runtime_present_auth_unknown',
+      selection_cost: 'unknown',
+    })
+    const packet = deps.approve.mock.calls[0]?.[0]
+    expect(packet).toMatchObject({ kind: 'inference' })
+    expect(JSON.parse(packet!.content)).toMatchObject({
+      adapter: 'codex',
+      model: 'real-model',
+      effort: 'high',
+      permission: 'workspace-write',
+      prompt: expect.stringContaining('Implementiere Code'),
+    })
+    expect(deps.managed).toHaveBeenCalledExactlyOnceWith(
+      'codex',
+      expect.any(String),
+      'C:/fixture',
+      expect.any(AbortSignal),
+      'project',
+      expect.objectContaining({ model: 'real-model', effort: 'high', permission: 'workspace-write' })
+    )
+    expect(deps.approve).toHaveBeenCalledTimes(2) // Exact dispatch packet, then exact public-result export.
+  })
+
+  it.each(['denied', 'revoked', 'changed'])(
+    'does not dispatch an automatic route after approval is %s',
+    async failure => {
+      const { deps, context, controller } = fixture()
+      const base = await deps.availability(context.ticket.signal)
+      const available: WorkflowAgentAvailability = {
+        ...base,
+        codex: {
+          available: true,
+          catalog: {
+            source: 'codex-cache',
+            revision: 'revision',
+            validForSeconds: 300,
+            models: [{ model: 'model', supportedEfforts: ['high'] }],
+          },
+        },
+      }
+      deps.availability.mockResolvedValue(available)
+      deps.approve.mockImplementationOnce(async () => {
+        if (failure === 'revoked') controller.abort()
+        if (failure === 'changed') deps.availability.mockResolvedValue({ ...available, externalPolicy: 'deny' })
+        return failure !== 'denied'
+      })
+      const result = runWorkflowAgentFlow(false, { instruction: 'Implementiere Code' }, context, deps)
+      const outcome = await result.catch(() => ({ ok: false, code: 'revoked_or_changed' }))
+      expect(outcome).toEqual({
+        ok: false,
+        code: failure === 'denied' ? 'workflow_agent_dispatch_denied' : 'revoked_or_changed',
+      })
+      expect(deps.managed).not.toHaveBeenCalled()
+      expect(deps.run).not.toHaveBeenCalled()
+    }
+  )
+
+  it('does not silently replay a failed managed route through another adapter', async () => {
+    const { deps, context } = fixture()
+    deps.managed.mockResolvedValue({ ok: false, code: 1, stdout: '', stderr: 'Unavailable' })
+    const result = await runWorkflowAgentFlow(
+      false,
+      { instruction: 'Code', agent_selection: 'override', agent: 'claude' },
+      context,
+      deps
+    )
+    expect(result).toMatchObject({ ok: false, outcome: 'failed', model: null, applied_effort: null })
+    expect(deps.managed).toHaveBeenCalledOnce()
+    expect(deps.run).not.toHaveBeenCalled()
   })
 
   it.each([
@@ -196,7 +323,7 @@ describe('workflow agent adapter', () => {
       context,
       deps
     )
-    expect(deps.managed).toHaveBeenCalledWith(
+    expect(deps.managed).toHaveBeenCalledExactlyOnceWith(
       'claude',
       expect.any(String),
       'C:/fixture',
@@ -212,7 +339,6 @@ describe('workflow agent adapter', () => {
         deps
       )
     ).rejects.toThrow('workflow_codex_budget_controls_unavailable')
-    expect(deps.managed).toHaveBeenCalledOnce()
   })
 
   it('rejects a changed workspace after execution and never exports that late result', async () => {

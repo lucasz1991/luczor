@@ -8,6 +8,7 @@ import {
   type WorkflowTestState,
 } from '@/services/workflows/workflowTests'
 import { boundedWorkflowJson } from '@/services/workflows/operations'
+import { readLocalWorkflowRepairStatus, type LocalWorkflowRepairStatus } from '@/services/workflows/repairAutomation'
 import type { Workflow, WorkflowDefinition, WorkflowRun } from '@/services/workflows/types'
 
 const props = defineProps<{
@@ -22,6 +23,17 @@ const state = ref<WorkflowTestState>()
 const busy = ref(false)
 const error = ref('')
 const notice = ref('')
+const localRepair = ref<LocalWorkflowRepairStatus | null>(null)
+async function refreshLocalRepair() {
+  const ticket = generation
+  try {
+    const result = await readLocalWorkflowRepairStatus(props.workflow.id, props.projectId)
+    current(ticket)
+    localRepair.value = result
+  } catch {
+    if (ticket === generation) localRepair.value = null
+  }
+}
 const caseName = ref('')
 const specification = ref('{\n  "input": {},\n  "fixtures": {},\n  "assertions": []\n}')
 const authorizeReal = ref(false)
@@ -67,6 +79,8 @@ async function refresh(api: ReturnType<typeof createWorkflowTests>, ticket: numb
     current(ticket)
   }
   state.value = next
+  await refreshLocalRepair()
+  current(ticket)
   if (!next.cases.some(item => item.id === selectedCase.value)) selectedCase.value = next.cases[0]?.id
   if (!next.repairs.some(item => item.id === selectedRepair.value && item.status === 'proposed'))
     selectedRepair.value = undefined
@@ -171,6 +185,7 @@ function reset() {
   error.value = ''
   notice.value = ''
   caseName.value = ''
+  localRepair.value = null
   specification.value = '{\n  "input": {},\n  "fixtures": {},\n  "assertions": []\n}'
   authorizeReal.value = false
   selectedCase.value = undefined
@@ -188,11 +203,17 @@ watch(
     allowScriptRepair.value = policy?.allow_script_repair === true
     maxRepairs.value = typeof policy?.max_repairs === 'number' ? policy.max_repairs : 2
     void reload()
+    void refreshLocalRepair()
   },
   { immediate: true }
 )
 const identityChanged = () => reset()
 if (typeof window !== 'undefined') window.addEventListener('luczor:api-identity-changing', identityChanged)
+const repairChanged = (event: Event) => {
+  const detail = (event as CustomEvent<{ workflowId: number }>).detail
+  if (detail?.workflowId === props.workflow.id) void refreshLocalRepair()
+}
+if (typeof window !== 'undefined') window.addEventListener('luczor:workflow-repair-progress', repairChanged)
 const poll = setInterval(() => {
   if (!busy.value && state.value?.tests.some(test => test.status === 'running')) void reload()
 }, 5000)
@@ -201,10 +222,19 @@ onBeforeUnmount(() => {
   generation++
   if (poll) clearInterval(poll)
   window.removeEventListener('luczor:api-identity-changing', identityChanged)
+  window.removeEventListener('luczor:workflow-repair-progress', repairChanged)
 })
 </script>
 <template>
   <div class="wf-tests">
+    <div v-if="localRepair" class="wf-test-card" role="status" aria-live="polite">
+      <strong>{{ localRepair.label }}</strong>
+      <p>Ausgangslauf {{ localRepair.sourceRunId }} · {{ localRepair.attempts }} von höchstens 2 Versuchen</p>
+      <p v-if="localRepair.reason">{{ localRepair.reason }}</p>
+      <p v-if="localRepair.status === 'exhausted'">
+        Der bisherige Stand bleibt erhalten. Prüfregeln und Freigaben wurden nicht erweitert.
+      </p>
+    </div>
     <div class="wf-section-heading">
       <h4>Tests und Nachweise</h4>
       <button type="button" :disabled="busy" @click="reload">Aktualisieren</button>

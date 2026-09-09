@@ -414,7 +414,11 @@ export class AgentOrchestrator {
       if (
         !result ||
         typeof result.output !== 'string' ||
-        (result.externalThreadId !== undefined && !safeIdentifier(result.externalThreadId))
+        (result.externalThreadId !== undefined && !safeIdentifier(result.externalThreadId)) ||
+        (result.runtimeEvidence?.model !== undefined &&
+          (!safeIdentifier(result.runtimeEvidence.model) || result.runtimeEvidence.modelSource !== 'runtime')) ||
+        (result.runtimeEvidence?.toolGateChecks !== undefined &&
+          (!Number.isSafeInteger(result.runtimeEvidence.toolGateChecks) || result.runtimeEvidence.toolGateChecks < 0))
       ) {
         throw new Error('Ungültiges Agentenergebnis.')
       }
@@ -424,6 +428,13 @@ export class AgentOrchestrator {
         finishedAt: this.now(),
         externalThreadId: result.externalThreadId,
         effortSelection: result.effortSelection ?? job.metadata.effortSelection,
+        runtimeEvidence:
+          result.runtimeEvidence &&
+          Object.freeze({
+            model: result.runtimeEvidence.model,
+            modelSource: result.runtimeEvidence.modelSource,
+            toolGateChecks: result.runtimeEvidence.toolGateChecks,
+          }),
       })
     } catch {
       if (!job.controller.signal.aborted && !this.disposed) {

@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-const mock = vi.hoisted(() => ({ invoke: vi.fn(), account: vi.fn(), request: vi.fn() }))
+const mock = vi.hoisted(() => ({ invoke: vi.fn(), account: vi.fn(), request: vi.fn(), vision: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mock.invoke }))
 vi.mock('@/services/accountPrincipal', () => ({ getVerifiedAccountSnapshot: mock.account }))
 vi.mock('@/services/api/luczorApi', () => ({ requestWithConfig: mock.request }))
+vi.mock('@/services/workflows/vision', () => ({ getWorkflowVisionCapabilities: mock.vision }))
 import { refreshWorkflowCapabilities, currentWorkflowEnvironmentHash } from '@/services/workflows/capabilities'
 const config = { baseUrl: 'https://server.test', clientId: 'device', deviceKey: 'private-key' }
 beforeEach(() => {
@@ -10,6 +11,7 @@ beforeEach(() => {
   vi.stubEnv('VITE_WORKFLOW_CODE_HASH', 'a'.repeat(64))
   mock.account.mockResolvedValue({ principalId: 'user:1', config })
   mock.request.mockResolvedValue({ data: {} })
+  mock.vision.mockResolvedValue({ ready: true, reason_code: null, revision: 'd'.repeat(64) })
   mock.invoke.mockImplementation(async (command: string) => {
     if (command === 'wf_runtime_capabilities')
       return {
@@ -62,4 +64,24 @@ it('drops a report after account identity changes during the probe', async () =>
     .mockResolvedValueOnce({ principalId: 'user:2', config })
   await expect(refreshWorkflowCapabilities(config)).rejects.toThrow('identity_changed')
   expect(mock.request).not.toHaveBeenCalled()
+})
+
+it('requires both the native PNG adapter and a ready vision policy and binds policy changes to evidence', async () => {
+  const original = mock.invoke.getMockImplementation()!
+  mock.invoke.mockImplementation(async command => {
+    const value = await original(command)
+    if (command === 'wf_runtime_capabilities') return { ...value, image: { ...value.image, prepareVision: true } }
+    return value
+  })
+  await refreshWorkflowCapabilities(config)
+  const first = mock.request.mock.calls.at(-1)![1].body.capabilities
+  expect(first.tasks).toContainEqual(expect.objectContaining({ type: 'image.vision', available: true }))
+  mock.vision.mockResolvedValue({ ready: false, reason_code: 'vision_policy_missing', revision: 'e'.repeat(64) })
+  await refreshWorkflowCapabilities(config)
+  const second = mock.request.mock.calls.at(-1)![1].body.capabilities
+  expect(second.tasks).toContainEqual(
+    expect.objectContaining({ type: 'image.vision', available: false, reason: 'vision_policy_missing' })
+  )
+  expect(first.environment_hash).not.toBe(second.environment_hash)
+  expect(mock.invoke.mock.calls.map(call => call[0])).not.toContain('wf_image_action')
 })

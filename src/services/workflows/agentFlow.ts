@@ -15,6 +15,12 @@ import {
 } from '@/services/inference/thinking'
 import { validateToolArguments } from '@/services/tools/validateArguments'
 import type { TeamPacketApproval } from '@/services/agents/externalSpecialists'
+import {
+  readWorkflowAgentAvailability,
+  selectWorkflowAgent,
+  assertWorkflowAgentSelectionCurrent,
+  type WorkflowAgentSelection,
+} from './agentSelection'
 
 type AgentFlowContext = {
   projectId: string
@@ -31,6 +37,7 @@ type AgentFlowDependencies = {
   mode: () => RunAgentOptions['mode']
   confirm: typeof requestConfirmation
   approve: typeof requestPayloadApproval
+  availability: typeof readWorkflowAgentAvailability
 }
 const dependencies: AgentFlowDependencies = {
   account: getVerifiedAccountSnapshot,
@@ -41,6 +48,7 @@ const dependencies: AgentFlowDependencies = {
   mode: () => executionGate.snapshot().mode,
   confirm: requestConfirmation,
   approve: requestPayloadApproval,
+  availability: readWorkflowAgentAvailability,
 }
 
 function integer(value: unknown, fallback: number, minimum: number, maximum: number): number {
@@ -64,11 +72,13 @@ export async function runWorkflowAgentFlow(
   deps: AgentFlowDependencies = dependencies
 ): Promise<Record<string, unknown>> {
   deps.assert(context.ticket)
+  // Keep the reviewed node immutable across asynchronous metadata/approval requests.
+  params = structuredClone(params)
   if (typeof params.instruction !== 'string' || !params.instruction.trim() || params.instruction.length > 12_000)
     throw new Error('workflow_agent_instruction_invalid')
   const selection = params.agent_selection ?? 'auto'
   if (selection !== 'auto' && selection !== 'override') throw new Error('workflow_agent_selection_invalid')
-  const adapter = selection === 'auto' ? 'local' : params.agent
+  let adapter = selection === 'auto' ? 'local' : params.agent
   if (!['local', 'codex', 'claude'].includes(String(adapter))) throw new Error('workflow_agent_override_invalid')
   if (selection === 'auto' && (params.agent !== undefined || params.model !== undefined))
     throw new Error('workflow_agent_override_requires_selection')
@@ -110,12 +120,12 @@ export async function runWorkflowAgentFlow(
   const maxBudgetUsd = params.max_budget_usd
   if (
     maxBudgetUsd !== undefined &&
-    (typeof maxBudgetUsd !== 'number' || !Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0 || maxBudgetUsd > 1000)
+    (typeof maxBudgetUsd !== 'number' || !Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0 || maxBudgetUsd > 100)
   )
     throw new Error('workflow_agent_cost_limit_invalid')
   if (adapter === 'codex' && (maxTurns !== undefined || maxBudgetUsd !== undefined))
     throw new Error('workflow_codex_budget_controls_unavailable')
-  if (adapter === 'local' && maxBudgetUsd !== undefined)
+  if (selection === 'override' && adapter === 'local' && maxBudgetUsd !== undefined)
     throw new Error('workflow_agent_team_uses_approved_admin_cost_limits')
   const timeout = integer(params.timeout_seconds, 600, 5, 2700)
   const controller = new AbortController()
@@ -168,12 +178,69 @@ export async function runWorkflowAgentFlow(
       await current()
       return approved
     }
+    let decision: WorkflowAgentSelection | undefined
+    if (selection === 'auto') {
+      const availability = await deps.availability(ticket.signal)
+      await current()
+      decision = selectWorkflowAgent({
+        team,
+        instruction: params.instruction as string,
+        mode: deps.mode(),
+        projectBound: !!project.rootPath && Number.isFinite(project.workspaceUpdatedAt),
+        tier: thinkingTier,
+        maxTurns,
+        maxBudgetUsd: maxBudgetUsd as number | undefined,
+        availability,
+      })
+      adapter = decision.adapter
+      if (adapter === 'local' && maxBudgetUsd !== undefined)
+        throw new Error('workflow_agent_no_adapter_for_requested_cost_limit')
+      if (adapter === 'codex' || adapter === 'claude') {
+        const content = JSON.stringify({
+          adapter,
+          model: decision.model,
+          thinkingTier,
+          effort: decision.effortSelection?.requestedEffort,
+          capabilityRevision: decision.effortSelection?.capabilityRevision,
+          availability: decision.availability,
+          cost: decision.cost,
+          maxBudgetUsd: maxBudgetUsd ?? null,
+          maxTurns: maxTurns ?? null,
+          role: decision.role,
+          permission: decision.permission,
+          executionProfile: adapter === 'claude' ? 'host-user' : 'workspace',
+          projectId: project.projectId,
+          workspaceUpdatedAt: project.workspaceUpdatedAt,
+          prompt,
+        })
+        const hash = await digest(content)
+        await current()
+        const approved = await deps.approve(
+          {
+            title: 'Workflow: ausgewählten Agentenauftrag einmal freigeben',
+            kind: 'inference',
+            destination: `${adapter === 'claude' ? 'Claude' : 'Codex'} · ${decision.model}`,
+            hash,
+            content,
+          },
+          ticket.signal
+        )
+        await current()
+        if (!approved) return { ok: false, code: 'workflow_agent_dispatch_denied' }
+        const fresh = await deps.availability(ticket.signal)
+        await current()
+        assertWorkflowAgentSelectionCurrent(decision, fresh)
+      }
+    }
     let result: Record<string, unknown>
     let exportRequired = false
     if (adapter === 'codex' || adapter === 'claude') {
       const managed = await deps.managed(adapter, prompt, project.rootPath, ticket.signal, context.projectId, {
         thinkingTier,
-        model: params.model as string | undefined,
+        model: decision?.model ?? (params.model as string | undefined),
+        ...(decision
+          ? { role: decision.role, permission: decision.permission, effort: decision.effortSelection?.requestedEffort }
+          : {}),
         ...(maxTurns !== undefined ? { maxTurns } : {}),
         ...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
       })
@@ -186,11 +253,23 @@ export async function runWorkflowAgentFlow(
         text: text.slice(0, maxOutput),
         code: complete ? undefined : 'workflow_agent_managed_failed_or_incomplete',
         agent: adapter,
-        requested_model: params.model ?? null,
-        model: null,
+        requested_model: decision?.model ?? params.model ?? null,
+        model: managed.runtimeEvidence?.model ?? null,
+        model_confirmation: managed.runtimeEvidence?.modelSource ?? 'unconfirmed',
         thinking_tier: thinkingTier,
-        thinking_application: 'adapter_not_confirmed',
-        selection_reason: 'manual_node_override',
+        thinking_application: managed.effortSelection?.status ?? 'adapter_not_confirmed',
+        requested_effort: managed.effortSelection?.requestedEffort ?? null,
+        applied_effort: managed.effortSelection?.appliedEffort ?? null,
+        effort_reason: managed.effortSelection?.reason ?? null,
+        selection_effort_reason: decision?.effortSelection?.reason ?? null,
+        capability_source: managed.effortSelection?.capabilitySource ?? null,
+        capability_revision: managed.effortSelection?.capabilityRevision ?? null,
+        tool_gate_checks: managed.runtimeEvidence?.toolGateChecks ?? null,
+        selection_reason: decision?.reason ?? 'manual_node_override',
+        selection_availability: decision?.availability ?? 'explicit_user_override',
+        selection_cost: decision?.cost ?? 'explicit_user_override',
+        selection_quality_evidence: decision?.qualityEvidence ?? 'unavailable',
+        selection_excluded: decision?.excluded ?? [],
         duration_ms: Date.now() - started,
       }
       exportRequired = true
@@ -277,11 +356,9 @@ export async function runWorkflowAgentFlow(
         thinking_tier: thinkingTier,
         thinking_application: agent.inferenceTarget === 'local_llama_cpp' ? 'native_context_bounded' : 'unconfirmed',
         selection_reason:
-          selection === 'override'
-            ? 'manual_local_policy_override'
-            : team
-              ? 'local_orchestrator_with_approved_admin_specialists'
-              : 'signed_local_policy',
+          selection === 'override' ? 'manual_local_policy_override' : (decision?.reason ?? 'signed_local_policy'),
+        selection_quality_evidence: 'unavailable',
+        selection_excluded: decision?.excluded ?? [],
         request_id: agent.requestId ?? null,
         tokens: agent.tokenUsage,
         tool_successes: agent.toolSuccesses,

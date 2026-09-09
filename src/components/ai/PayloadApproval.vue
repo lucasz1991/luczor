@@ -19,7 +19,17 @@ import { pendingPayloadApproval, resolvePayloadApproval } from '@/services/paylo
         <p v-if="pendingPayloadApproval.kind !== 'result'">
           Der API-Server kann konfigurierte Systemanweisungen ergänzen. Diese sind in dieser Vorschau nicht enthalten.
         </p>
-        <pre tabindex="0">{{ pendingPayloadApproval.content }}</pre>
+        <template v-if="pendingPayloadApproval.imagePreview">
+          <img
+            :src="pendingPayloadApproval.imagePreview"
+            alt="Dieses Bild wird mit dem freizugebenden Paket übertragen"
+          />
+          <details>
+            <summary>Vollständiges Paket einschließlich Bilddaten ansehen</summary>
+            <pre tabindex="0">{{ pendingPayloadApproval.content }}</pre>
+          </details>
+        </template>
+        <pre v-else tabindex="0">{{ pendingPayloadApproval.content }}</pre>
         <small>SHA-256: {{ pendingPayloadApproval.hash }}</small>
         <footer>
           <button type="button" autofocus @click="resolvePayloadApproval(pendingPayloadApproval.id, false)">
@@ -72,6 +82,17 @@ pre {
 }
 small {
   overflow-wrap: anywhere;
+}
+img {
+  display: block;
+  max-width: 100%;
+  max-height: 42dvh;
+  object-fit: contain;
+  margin: 12px 0;
+}
+summary {
+  cursor: pointer;
+  margin: 10px 0;
 }
 footer {
   display: flex;

@@ -175,6 +175,11 @@ export async function startDeviceJobChannel(): Promise<() => void> {
   const pollNow = () => {
     if (!active || session !== sessionCounter) return
     void reportWorkflowCapabilitiesIfDue(channelSession.config, channelSession.signal)
+    if ('__TAURI_INTERNALS__' in window) {
+      void import('@/services/workflows/repairAutomation')
+        .then(module => module.pollWorkflowRepairs(channelSession.config, channelSession.signal))
+        .catch(() => {})
+    }
     if (
       !shouldPollDeviceJobs(Date.now(), channelState.lastPollAt, document.visibilityState, navigator.onLine !== false)
     )

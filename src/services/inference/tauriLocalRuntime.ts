@@ -246,6 +246,7 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
     let contextRejected = false
     let historyRejected = false
     let toolContractRejected = false
+    let thinkingControlUnavailable = false
     const budget: ActiveBudget = { request, latest: null }
     activeBudgets.set(request.requestId, budget)
     channel.onmessage = event => {
@@ -255,6 +256,8 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
       if (event.type === 'error' && event.code === 'runtime_context_exceeded') contextRejected = true
       if (event.type === 'error' && event.code === 'runtime_chat_history_rejected') historyRejected = true
       if (event.type === 'error' && event.code === 'runtime_tool_contract_rejected') toolContractRejected = true
+      if (event.type === 'error' && event.code === 'runtime_reasoning_control_unavailable')
+        thinkingControlUnavailable = true
       if (event.type === 'delta') {
         if (request.signal?.aborted) return
         accumulated += event.content
@@ -284,6 +287,17 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
     })
       .catch(error => {
         observation.fail(request.signal?.aborted === true)
+        if (
+          thinkingControlUnavailable ||
+          String(error) === 'Local thinking control was not confirmed; generation interrupted.'
+        ) {
+          throw new LocalInferenceError(
+            'Die Runtime hat den Abschluss der Denkphase nicht bestätigt. Die Generation wurde an der Budgetgrenze unterbrochen. Der öffentliche Fortschritt bleibt erhalten; das Modell bleibt geladen.',
+            'runtime_reasoning_control_unavailable',
+            false,
+            false
+          )
+        }
         if (
           toolContractRejected ||
           /^Local llama\.cpp rejected the tool contract \(HTTP (400|500)\)\.$/.test(String(error))

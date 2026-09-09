@@ -6,6 +6,25 @@ afterEach(() => {
   vi.useRealTimers()
 })
 describe('payload approval', () => {
+  it('only previews PNG bytes that belong to the exact payload and clears them after approval', async () => {
+    const imagePreview = 'data:image/png;base64,aGVsbG8='
+    const approved = requestPayloadApproval({
+      ...request,
+      content: JSON.stringify({ image: imagePreview }),
+      imagePreview,
+    })
+    expect(pendingPayloadApproval.value?.imagePreview).toBe(imagePreview)
+    resolvePayloadApproval(pendingPayloadApproval.value!.id, true)
+    expect(await approved).toBe(true)
+    expect(pendingPayloadApproval.value).toBeNull()
+  })
+  it.each(['https://example.test/image.png', 'data:image/svg+xml;base64,aGVsbG8=', 'data:image/png;base64,b3RoZXI='])(
+    'rejects a remote, executable or different image preview: %s',
+    async imagePreview => {
+      expect(await requestPayloadApproval({ ...request, content: '{"image":"aGVsbG8="}', imagePreview })).toBe(false)
+      expect(pendingPayloadApproval.value).toBeNull()
+    }
+  )
   it('times out without retaining an execution slot', async () => {
     vi.useFakeTimers()
     const result = requestPayloadApproval(request)

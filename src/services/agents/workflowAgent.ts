@@ -1,9 +1,17 @@
 import { state } from '@/state/store'
 import { agentProjectSnapshot, prepareAgentJob } from './hub'
 import { executePreparedAgentJob } from './managedJob'
-import type { AgentExecutionOptions, AgentRole } from './types'
+import type { AgentExecutionOptions, AgentPermission, AgentRole, AgentRunResult } from './types'
 
-export type WorkflowAgentResult = Readonly<{ ok: boolean; code: number; stdout: string; stderr: string }>
+export type WorkflowAgentResult = Readonly<{
+  ok: boolean
+  code: number
+  stdout: string
+  stderr: string
+  effortSelection?: AgentRunResult['effortSelection']
+  runtimeEvidence?: AgentRunResult['runtimeEvidence']
+  externalThreadId?: string
+}>
 
 function canonicalPath(path: string): string {
   const normalized = path.replace(/\\/gu, '/').replace(/\/+$/u, '')
@@ -17,7 +25,7 @@ export async function runWorkflowAgent(
   projectDir?: string,
   signal?: AbortSignal,
   explicitProjectId?: string,
-  options: AgentExecutionOptions & { model?: string; role?: AgentRole } = {}
+  options: AgentExecutionOptions & { model?: string; role?: AgentRole; permission?: AgentPermission } = {}
 ): Promise<WorkflowAgentResult> {
   const adapterId = agent.trim().toLowerCase()
   if (adapterId !== 'codex' && adapterId !== 'claude') {
@@ -39,14 +47,22 @@ export async function runWorkflowAgent(
     prompt,
     ...options,
     role: options.role ?? 'implementer',
-    permission: 'workspace-write',
+    permission: options.permission ?? 'workspace-write',
     includeMemory: false,
     expectedProject: snapshot,
     promptAssembly: 'exact-reviewed',
   })
   try {
     const result = await executePreparedAgentJob(job.id, signal)
-    return { ok: true, code: 0, stdout: result.output, stderr: '' }
+    return {
+      ok: true,
+      code: 0,
+      stdout: result.output,
+      stderr: '',
+      ...(result.effortSelection ? { effortSelection: result.effortSelection } : {}),
+      ...(result.runtimeEvidence ? { runtimeEvidence: result.runtimeEvidence } : {}),
+      ...(result.externalThreadId ? { externalThreadId: result.externalThreadId } : {}),
+    }
   } catch (error) {
     if (signal?.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
     return {

@@ -283,7 +283,13 @@ function workflowPrimitives(
         ? (bundle.workflow.grant as { config: { egress_hosts: string[] } }).config.egress_hosts
         : undefined,
     }),
-    runImage: input => runWorkflowImage(input, { scope: artifactScope, invokeTask }),
+    runImage: input =>
+      runWorkflowImage(input, {
+        scope: artifactScope,
+        invokeTask,
+        ticket,
+        workflowExecutionId: bundle.workflow.execution_id!,
+      }),
     fileRead: async path => {
       if (!workspaceFiles) return invokeTask('wf_file_read', { path }, false)
       const result = await invokeTask<{ content: string; bytes: number; truncated: boolean }>(

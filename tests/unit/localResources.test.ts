@@ -45,6 +45,112 @@ function setup() {
 afterEach(() => vi.useRealTimers())
 
 describe('device resource workflow barrier', () => {
+  it('drops maintenance when a resource switch appears between registration and native begin without applying or retrying it', async () => {
+    const { controller, deps } = setup()
+    const operation = vi.fn(async () => {})
+    const waiting = controller.runPreemptibleBackground(operation, new AbortController().signal)
+    deps.begin.mockRejectedValueOnce(new Error('resource_config_pending'))
+    await expect(waiting).rejects.toThrow('resource_background_unavailable')
+    expect(operation).not.toHaveBeenCalled()
+    expect(deps.begin).toHaveBeenCalledOnce()
+    expect(deps.apply).not.toHaveBeenCalled()
+    expect(controller.hasWork()).toBe(false)
+    const foreground = await controller.acquire()
+    await foreground.release()
+  })
+
+  it('preempts resident maintenance and drains it before user admission without replacing the idle hook', async () => {
+    const { controller, deps, nativeLeases } = setup()
+    const admission = vi.fn(async () => ({ release: vi.fn() }))
+    controller.setForegroundAdmission(admission)
+    let started!: () => void
+    const startedPromise = new Promise<void>(resolve => {
+      started = resolve
+    })
+    let drain!: () => void
+    const drainPromise = new Promise<void>(resolve => {
+      drain = resolve
+    })
+    let backgroundSignal!: AbortSignal
+    const background = controller.runPreemptibleBackground(async (_work, signal) => {
+      backgroundSignal = signal
+      started()
+      await drainPromise
+      signal.throwIfAborted()
+    }, new AbortController().signal)
+    const rejected = background.catch((error: unknown) => error)
+    await startedPromise
+    const foreground = controller.acquire()
+    expect(backgroundSignal.aborted).toBe(true)
+    await Promise.resolve()
+    expect(admission).not.toHaveBeenCalled()
+    expect(deps.begin).toHaveBeenCalledTimes(1)
+    expect(nativeLeases.size).toBe(1)
+    drain()
+    expect(String(await rejected)).toContain('resource_background_preempted')
+    const lease = await foreground
+    expect(admission).toHaveBeenCalledOnce()
+    expect(deps.end).toHaveBeenCalledOnce()
+    expect(nativeLeases.size).toBe(1)
+    expect(deps.end.mock.invocationCallOrder[0]).toBeLessThan(deps.begin.mock.invocationCallOrder[1]!)
+    await lease.release()
+    expect(controller.hasWork()).toBe(false)
+  })
+
+  it('refuses maintenance while foreground admission or an entire multi-round job is active', async () => {
+    const { controller } = setup()
+    let admit!: () => void
+    controller.setForegroundAdmission(
+      () =>
+        new Promise(resolve => {
+          admit = () => resolve({ release() {} })
+        })
+    )
+    const pending = controller.acquire()
+    const operation = vi.fn(async () => {})
+    await expect(controller.runPreemptibleBackground(operation, new AbortController().signal)).rejects.toThrow(
+      'background_unavailable'
+    )
+    admit()
+    const outer = await pending
+    const child = await controller.acquire(undefined, outer.work)
+    await outer.release()
+    await expect(controller.runPreemptibleBackground(operation, new AbortController().signal)).rejects.toThrow(
+      'background_unavailable'
+    )
+    expect(operation).not.toHaveBeenCalled()
+    await child.release()
+    await controller.runPreemptibleBackground(operation, new AbortController().signal)
+    expect(operation).toHaveBeenCalledOnce()
+  })
+
+  it('retains a single maintenance owner and releases it after parent cancellation or failure', async () => {
+    const { controller, nativeLeases } = setup()
+    const aborted = new AbortController()
+    aborted.abort(new Error('parent cancelled'))
+    const unused = vi.fn(async () => {})
+    await expect(controller.runPreemptibleBackground(unused, aborted.signal)).rejects.toThrow('parent cancelled')
+    expect(unused).not.toHaveBeenCalled()
+    let finish!: () => void
+    const background = controller.runPreemptibleBackground(async () => {
+      await new Promise<void>(resolve => {
+        finish = resolve
+      })
+      throw new Error('bounded proposal failed')
+    }, new AbortController().signal)
+    const failed = background.catch((error: unknown) => error)
+    await vi.waitFor(() => expect(nativeLeases.size).toBe(1))
+    await expect(controller.runPreemptibleBackground(unused, new AbortController().signal)).rejects.toThrow(
+      'background_unavailable'
+    )
+    finish()
+    expect(String(await failed)).toContain('bounded proposal failed')
+    expect(controller.hasWork()).toBe(false)
+    const foreground = await controller.acquire()
+    await foreground.release()
+    expect(nativeLeases.size).toBe(0)
+  })
+
   it('waits for idle work to drain before native user admission and pauses through nested rounds', async () => {
     const { controller, deps } = setup()
     let drain = () => {}

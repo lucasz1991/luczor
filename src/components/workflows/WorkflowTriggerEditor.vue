@@ -2,6 +2,7 @@
 import { computed, reactive, watch } from 'vue'
 import { WORKFLOW_TRIGGER_KINDS, type WorkflowTrigger, type WorkflowTriggerKind } from '@/services/workflows/types'
 import { workflowTimeToUtc, workflowZonedTime } from '@/services/workflows/timezone'
+import { preserveWorkflowTriggerScope } from '@/services/workflows/triggerEditing'
 const props = defineProps<{
   trigger?: WorkflowTrigger
   disabled: boolean
@@ -61,8 +62,12 @@ watch(
   },
   { immediate: true }
 )
+const existingFileBinding = computed(() =>
+  props.trigger?.kind === 'workspace.file_changed' && form.kind === props.trigger.kind ? props.trigger.config : null
+)
+const fileRoot = computed(() => existingFileBinding.value?.root_path ?? props.rootPath)
 const canSave = computed(
-  () => !props.disabled && form.name.trim() && (form.kind !== 'workspace.file_changed' || !!props.rootPath)
+  () => !props.disabled && form.name.trim() && (form.kind !== 'workspace.file_changed' || !!fileRoot.value)
 )
 function save() {
   try {
@@ -93,12 +98,16 @@ function save() {
     } else if (form.kind === 'workflow.completed')
       config = {
         ...(form.sourceWorkflowId ? { workflow_definition_id: form.sourceWorkflowId } : {}),
-        statuses: ['completed', 'failed'],
+        ...(props.trigger?.kind === 'workflow.completed'
+          ? Object.hasOwn(props.trigger.config, 'statuses')
+            ? { statuses: props.trigger.config.statuses }
+            : {}
+          : { statuses: ['completed', 'failed'] }),
       }
     else if (form.kind === 'workspace.file_changed')
       config = {
-        device_id: props.deviceId,
-        root_path: props.rootPath,
+        device_id: existingFileBinding.value?.device_id ?? props.deviceId,
+        root_path: fileRoot.value,
         paths: form.paths
           .split('\n')
           .map(item => item.trim())
@@ -107,7 +116,7 @@ function save() {
           .split('\n')
           .map(item => item.trim())
           .filter(Boolean),
-        debounce_seconds: 2,
+        debounce_seconds: existingFileBinding.value?.debounce_seconds ?? 2,
       }
     else if (!props.trigger || props.trigger.kind !== form.kind) config = {}
     emit('save', {
@@ -115,7 +124,7 @@ function save() {
       name: form.name.trim(),
       kind: form.kind,
       enabled: form.enabled,
-      config,
+      config: preserveWorkflowTriggerScope(props.trigger, form.kind, config),
       input,
     })
   } catch (error) {
@@ -174,7 +183,10 @@ function save() {
         Nach dem Speichern erscheinen die Adresse und der einmalig sichtbare Zugangsschlüssel.
       </p>
       <template v-if="form.kind === 'workspace.file_changed'">
-        <p class="wf-muted">{{ rootPath || 'Zuerst einen Projektordner binden.' }} · Dieses Gerät</p>
+        <p class="wf-muted">
+          {{ fileRoot || 'Zuerst einen Projektordner binden.' }} ·
+          {{ existingFileBinding ? 'Gespeicherte Gerätebindung' : 'Dieses Gerät' }}
+        </p>
         <label>Dateimuster (eines pro Zeile)<textarea v-model="form.paths" rows="3" placeholder="**/*.md" /></label>
         <label>Ausschließen<textarea v-model="form.excludes" rows="3" /></label>
         <p class="wf-muted">

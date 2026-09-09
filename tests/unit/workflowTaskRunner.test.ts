@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { createWorkflowBrowser } from '@/services/workflows/browser'
 import {
   isWorkflowTaskBundle,
   runWorkflowTask,
@@ -26,6 +27,142 @@ function primitives(overrides: Partial<WorkflowTaskPrimitives> = {}): WorkflowTa
     ...overrides,
   }
 }
+
+describe('versioned workflow adapters', () => {
+  it('rejects unknown versions before running a primitive', async () => {
+    const runtime = primitives()
+    await expect(runWorkflowTask({ ...bundle('node.run', { code: '42' }), task_version: 2 }, runtime)).rejects.toThrow(
+      'workflow_task_version_unsupported'
+    )
+    expect(runtime.runScript).not.toHaveBeenCalled()
+  })
+  it('continues the bound browser session without opening an unrelated browser', async () => {
+    const native = vi
+      .fn()
+      .mockResolvedValue({ ok: true, sessionId: 'session-a', tabId: 'tab-a', url: 'https://example.test/form' })
+    const runtime = primitives({
+      browserSession: createWorkflowBrowser({
+        scope: {
+          principalId: 'user',
+          projectId: 'project',
+          runId: 'root',
+          expectedRootPath: 'E:/project',
+          expectedWorkspaceUpdatedAt: 2,
+        },
+        invokeTask: native,
+      }),
+    })
+    await runWorkflowTask(
+      bundle('browser.fill', {
+        selector: '#email',
+        value: 'fixture@example.test',
+        browser_session_id: 'session-a',
+        tab_id: 'tab-a',
+        expected_url: 'https://example.test/form',
+      }),
+      runtime
+    )
+    expect(runtime.browserOpen).not.toHaveBeenCalled()
+    expect(runtime.openUrl).not.toHaveBeenCalled()
+    expect(native).toHaveBeenCalledWith(
+      'wf_browser_action',
+      expect.objectContaining({
+        action: 'fill',
+        sessionId: 'session-a',
+        expectedTabId: 'tab-a',
+        expectedUrl: 'https://example.test/form',
+        selector: '#email',
+        value: 'fixture@example.test',
+      }),
+      true
+    )
+  })
+  it('keeps JSON input separate from code and checks actual script output', async () => {
+    const code = 'process.stdout.write(JSON.stringify({result:42}))'
+    const runtime = primitives({
+      runScript: vi.fn().mockResolvedValue({
+        ok: true,
+        code: 0,
+        stdout: '{"result":42}',
+        stderr: '',
+        timed_out: false,
+        input_mode: 'json-stdin',
+        code_sha256: 'a'.repeat(64),
+        internal_secret: 'not public',
+      }),
+    })
+    const output = await runWorkflowTask(
+      bundle('node.run', {
+        code,
+        input: { instruction: 'literal data' },
+        output_schema: {
+          type: 'object',
+          required: ['result'],
+          properties: { result: { type: 'number' } },
+          additionalProperties: false,
+        },
+      }),
+      runtime
+    )
+    expect(runtime.runScript).toHaveBeenCalledWith('node', code, undefined, { instruction: 'literal data' })
+    expect(output).toMatchObject({ data: { result: 42 }, input_mode: 'json-stdin', code_sha256: 'a'.repeat(64) })
+    expect(output).not.toHaveProperty('internal_secret')
+  })
+  it.each([
+    { stdout: '{"result":' },
+    { stdout: '{"result":42}', stdout_truncated: true },
+    { stdout: '{"result":42}', timed_out: true },
+  ])('never accepts incomplete JSON script output as test evidence', async overrides => {
+    const runtime = primitives({
+      runScript: vi.fn().mockResolvedValue({ ok: true, code: 0, stderr: '', timed_out: false, ...overrides }),
+    })
+    await expect(runWorkflowTask(bundle('python.run', { code: 'print(42)', input: {} }), runtime)).rejects.toThrow(
+      'workflow_script_json_output_'
+    )
+  })
+  it('enforces the classifier labels and excludes execution controls from input data', async () => {
+    const runtime = primitives({ runLlm: vi.fn().mockResolvedValue({ ok: true, data: { label: 'invented' } }) })
+    await expect(
+      runWorkflowTask(
+        bundle('llm.classify', {
+          instruction: 'Classify',
+          labels: ['urgent', 'normal'],
+          text: 'Please read',
+          thinking_tier: 'ultra',
+          device_id: 'private-device',
+        }),
+        runtime
+      )
+    ).rejects.toThrow()
+    const input = vi.mocked(runtime.runLlm!).mock.calls[0]![0]
+    expect(input.input_bindings).toEqual({ text: 'Please read', classification_labels: ['urgent', 'normal'] })
+    expect(input.thinking_tier).toBe('ultra')
+  })
+  it('rejects a self-reported passing evaluation with duplicate checks', async () => {
+    const runtime = primitives({
+      runLlm: vi.fn().mockResolvedValue({
+        ok: true,
+        data: {
+          passed: true,
+          checks: [
+            { criterion: 'accurate', passed: true },
+            { criterion: 'accurate', passed: true },
+          ],
+        },
+      }),
+    })
+    await expect(
+      runWorkflowTask(bundle('llm.evaluate', { instruction: 'Evaluate', criteria: ['accurate', 'complete'] }), runtime)
+    ).rejects.toThrow('workflow_llm_evaluation_inconsistent')
+  })
+  it('requires an extraction schema before any inference', async () => {
+    const runtime = primitives({ runLlm: vi.fn() })
+    await expect(runWorkflowTask(bundle('llm.extract', { instruction: 'Extract' }), runtime)).rejects.toThrow(
+      'extraction_schema_required'
+    )
+    expect(runtime.runLlm).not.toHaveBeenCalled()
+  })
+})
 
 describe('workflow.task bundle guard', () => {
   it('accepts a well-formed bundle and rejects junk', () => {

@@ -2,11 +2,14 @@ import { computed, ref, watch } from 'vue'
 import { executionGate } from '@/services/executionGate'
 import {
   isThinkingTier,
+  readThinkingProgress,
   type ThinkingTier,
   type ThinkingBudgetProgress,
   type ThinkingControlAction,
 } from '@/services/inference/thinking'
 import { boundMiniMessages } from './projectChat'
+import { miniWorkflowBudgetSnapshot } from './workflowBudgetSnapshot'
+import type { WorkflowRun } from '@/services/workflows/types'
 import type { createMiniChatController } from './controller'
 import type {
   MiniAction,
@@ -58,13 +61,63 @@ export function createMiniChatBridge(
   const sessionId = ref(crypto.randomUUID())
   const revision = ref(0)
   const notice = ref('')
+  const workflowRuns = ref<WorkflowRun[]>([])
+  const workflowRunsVerified = ref(false)
+  let workflowAbort = new AbortController()
+  let workflowTimer: ReturnType<typeof setInterval> | undefined
+  let workflowLoading = false
+  async function refreshWorkflowRuns() {
+    if (workflowLoading || view.value !== 'chat') return
+    const chat = deps.chat()
+    const projectId = chat.project?.id
+    const references = chat.messages.flatMap(message => message.workflows ?? [])
+      .filter(item => item.projectId === projectId && item.runId).slice(-8)
+    if (!projectId || !references.length) return
+    const signal = workflowAbort.signal
+    workflowLoading = true
+    try {
+      const { captureWorkflowAccess } = await import('@/services/workflows/access')
+      const access = await captureWorkflowAccess({ projectId, signal }, undefined, false)
+      const next: WorkflowRun[] = []
+      for (const reference of references) {
+        const run = (await access.api.run(reference.runId!)).data
+        await access.check()
+        if (run.workflow_definition_id !== reference.id || run.public_id !== reference.runId || run.project_external_id !== projectId)
+          throw new Error('Workflow-Laufzuordnung geändert.')
+        next.push(miniWorkflowBudgetSnapshot(run))
+      }
+      if (!signal.aborted) { workflowRuns.value = next; workflowRunsVerified.value = true }
+    } catch {
+      if (!signal.aborted) workflowRunsVerified.value = false
+    } finally {
+      workflowLoading = false
+      if (signal.aborted && !workflowAbort.signal.aborted) void refreshWorkflowRuns()
+    }
+  }
+  const thinkingControlAck = ref<MiniSnapshot['thinkingControlAck']>(null)
+  let pendingThinkingControl: string | null = null
   const selecting = ref(false)
   const busy = computed(() => controller.state.busy || deps.chat().busy || selecting.value)
   const rotate = () => {
     sessionId.value = crypto.randomUUID()
     notice.value = ''
+    thinkingControlAck.value = null
+    pendingThinkingControl = null
+    workflowAbort.abort()
+    workflowAbort = new AbortController()
+    workflowRuns.value = []
+    workflowRunsVerified.value = false
   }
   const stopContextWatch = watch(() => `${view.value}:${deps.chat().key}`, rotate, { flush: 'sync' })
+  const stopWorkflowWatch = watch(() => `${view.value}:${deps.chat().key}:${deps.chat().messages.flatMap(message => message.workflows ?? []).map(item => item.id + '/' + item.runId).join(',')}`, () => {
+    workflowAbort.abort()
+    workflowAbort = new AbortController()
+    workflowRuns.value = []
+    workflowRunsVerified.value = false
+    if (workflowTimer) clearInterval(workflowTimer)
+    void refreshWorkflowRuns()
+    if (view.value === 'chat') workflowTimer = setInterval(() => void refreshWorkflowRuns(), 10000)
+  }, { immediate: true })
   const content = computed(() => {
     const chat = deps.chat()
     return {
@@ -72,6 +125,9 @@ export function createMiniChatBridge(
       view: view.value,
       thinkingTier: view.value === 'chat' ? (deps.thinkingTier?.() ?? 'balanced') : controller.state.thinkingTier,
       thinkingBudget: view.value === 'chat' ? (deps.thinkingBudget?.() ?? null) : controller.state.thinkingBudget,
+      thinkingControlAck: thinkingControlAck.value,
+      workflowRuns: view.value === 'chat' ? workflowRuns.value : [],
+      workflowRunsVerified: view.value === 'chat' && workflowRunsVerified.value,
       sessionId: sessionId.value,
       projects: deps.projects().slice(0, 200),
       project: chat.project,
@@ -101,18 +157,37 @@ export function createMiniChatBridge(
       return
     }
     if (action.type === 'thinking_control') {
-      if (snapshot.value.thinkingBudget?.requestId !== action.requestId || !busy.value) return
+      if (typeof action.controlId !== 'string' || !/^[a-zA-Z0-9_-]{1,160}$/.test(action.controlId)) return
       const epoch = sessionId.value
+      if (snapshot.value.thinkingBudget?.requestId !== action.requestId || !busy.value || pendingThinkingControl) {
+        thinkingControlAck.value = {
+          controlId: action.controlId,
+          requestId: action.requestId,
+          error: 'Der Auftrag wurde beendet oder eine Steuerung wartet noch auf Bestätigung.',
+        }
+        return
+      }
+      pendingThinkingControl = action.controlId
       try {
-        if (view.value === 'workspace') await controller.dispatch({ ...action, sessionId: controller.state.sessionId })
-        else {
-          const progress = await deps.controlThinking?.(action.requestId, action.action, action.sequence)
-          if (epoch === sessionId.value && progress?.controlOutcome === 'stale')
+        const result =
+          view.value === 'workspace'
+            ? await controller.dispatch({ ...action, sessionId: controller.state.sessionId })
+            : await deps.controlThinking?.(action.requestId, action.action, action.sequence)
+        const progress = readThinkingProgress(result)
+        if (!progress || progress.requestId !== action.requestId)
+          throw new Error('Die Runtime hat keinen gültigen Steuerungsstand bestätigt.')
+        if (epoch === sessionId.value) {
+          thinkingControlAck.value = { controlId: action.controlId, requestId: action.requestId, progress }
+          if (progress.controlOutcome === 'stale')
             notice.value = 'Budgetstand aktualisiert. Bitte die gewünschte Aktion erneut wählen.'
         }
       } catch (error) {
-        if (epoch === sessionId.value)
+        if (epoch === sessionId.value) {
           notice.value = error instanceof Error ? error.message : 'Budgetsteuerung fehlgeschlagen.'
+          thinkingControlAck.value = { controlId: action.controlId, requestId: action.requestId, error: notice.value }
+        }
+      } finally {
+        if (epoch === sessionId.value && pendingThinkingControl === action.controlId) pendingThinkingControl = null
       }
       return
     }
@@ -146,8 +221,8 @@ export function createMiniChatBridge(
       if (
         action.type === 'workflow_action' &&
         (controller.state.mode === 'observe' ||
-          !['test', 'start', 'stop'].includes(action.action) ||
-          (action.action === 'stop' &&
+          !['test', 'start', 'stop', 'stop_after_step'].includes(action.action) ||
+          (['stop', 'stop_after_step'].includes(action.action) &&
             (typeof reference.runId !== 'string' || !/^[a-f0-9-]{36}$/iu.test(reference.runId))))
       )
         return
@@ -158,7 +233,11 @@ export function createMiniChatBridge(
         if (action.type === 'workflow_open') await deps.openWorkflow?.({ ...reference })
         else if (action.type === 'workflow_action') {
           executionGate.assert(executionGate.capture(), true)
-          await deps.runWorkflow?.({ ...reference }, action.action)
+          if (action.action === 'stop_after_step') {
+            const { stopWorkflowAfterStep } = await import('@/services/workflows/api')
+            await stopWorkflowAfterStep(projectId, reference.id, reference.runId!, workflowAbort.signal)
+            if (sessionId.value === epoch) await refreshWorkflowRuns()
+          } else await deps.runWorkflow?.({ ...reference }, action.action)
         } else {
           const run =
             typeof reference.runId === 'string' && /^[a-f0-9-]{36}$/iu.test(reference.runId)
@@ -236,6 +315,9 @@ export function createMiniChatBridge(
       rotate()
     },
     dispose() {
+      workflowAbort.abort()
+      if (workflowTimer) clearInterval(workflowTimer)
+      stopWorkflowWatch()
       stopContextWatch()
       stopRevisionWatch()
     },

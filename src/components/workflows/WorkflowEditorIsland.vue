@@ -2,8 +2,10 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { createWorkflowWebSession, type WorkflowEditorState } from '@/services/workflows/webSession'
 import { boundedWorkflowJson } from '@/services/workflows/operations'
-import type { WorkflowDefinition, WorkflowStepDefinition } from '@/services/workflows/types'
-import { workflowStatusLabel } from '@/services/workflows/types'
+import type { WorkflowDefinition, WorkflowStepDefinition, WorkflowRun } from '@/services/workflows/types'
+import { isTerminalWorkflow, workflowStatusLabel } from '@/services/workflows/types'
+import { readWorkflowRunBudget } from '@/services/workflows/runBudget'
+import WorkflowRunBudget from './WorkflowRunBudget.vue'
 import WorkflowGraphEditor from './WorkflowGraphEditor.vue'
 import WorkflowBudgetSettings from './WorkflowBudgetSettings.vue'
 import WorkflowStepEditor from './WorkflowStepEditor.vue'
@@ -17,6 +19,10 @@ const baseline = ref('')
 const busy = ref(false)
 const error = ref('')
 const notice = ref('')
+const runsStale = ref(false)
+let monitorTimer: ReturnType<typeof setInterval> | undefined
+let monitoring = false
+let refreshEpoch = 0
 const tab = ref('flow')
 const tabs = [
   { key: 'flow', label: 'Ablauf' },
@@ -45,8 +51,11 @@ function object(text: string): Record<string, unknown> {
   return value
 }
 async function refresh(replace = true) {
+  const epoch = ++refreshEpoch
   const next = await session.refresh()
+  if (epoch !== refreshEpoch) return
   state.value = next
+  runsStale.value = false
   if (replace) {
     draft.value = structuredClone(next.workflow.definition)
     name.value = next.workflow.name
@@ -105,6 +114,19 @@ function addStep() {
   selected.value = `schritt_${number}`
   draft.value.steps.push({ key: selected.value, type: item.key, version: item.version ?? 1, payload })
 }
+function removeStep(key: string) {
+  if (blocked.value) return
+  draft.value.steps = draft.value.steps.filter(step => step.key !== key)
+  for (const step of draft.value.steps) {
+    step.depends_on = step.depends_on?.filter(dependency => dependency !== key)
+    for (const [outcome, route] of Object.entries(step.routes ?? {})) {
+      if (route.step_key === key) Reflect.deleteProperty(step.routes!, outcome)
+    }
+  }
+  if (draft.value.meta?.node_positions) Reflect.deleteProperty(draft.value.meta.node_positions, key)
+  if (selected.value === key) selected.value = draft.value.steps[0]?.key ?? ''
+  notice.value = 'Schritt aus dem Entwurf entfernt. Verbleibende Datenbindungen vor dem Speichern prüfen.'
+}
 async function save() {
   if (blocked.value || !state.value) return
   await action(async () => {
@@ -147,8 +169,27 @@ async function proposeRepair() {
     notice.value = 'Reparaturversion angelegt. Tests und Aktivierungsnachweis stehen separat im Verlauf.'
   })
 }
-onMounted(() => action(() => refresh()))
-onBeforeUnmount(() => session.dispose())
+async function controlRun(run: WorkflowRun, control: 'stop_after_step' | 'cancel') {
+  await action(async () => {
+    await session.mutate('runControls', { run_id: run.public_id, action: control })
+    await refresh(false)
+  })
+}
+function stopPending(run: WorkflowRun) {
+  return readWorkflowRunBudget(run, state.value?.runs ?? []).boundaryStop === 'pending'
+}
+onMounted(() => {
+  void action(() => refresh())
+  monitorTimer = setInterval(async () => {
+    if (monitoring || busy.value || !state.value?.runs.some(run => !isTerminalWorkflow(run.status))) return
+    monitoring = true
+    try { await refresh(false) } catch { runsStale.value = true } finally { monitoring = false }
+  }, 10000)
+})
+onBeforeUnmount(() => {
+  if (monitorTimer) clearInterval(monitorTimer)
+  session.dispose()
+})
 </script>
 <template>
   <section class="workflow-editor-island" aria-label="Gemeinsamer Workflow-Editor" :aria-busy="busy">
@@ -182,7 +223,14 @@ onBeforeUnmount(() => session.dispose())
             @update:model-value="draft.thinking_tier = $event"
           />
         </fieldset>
-        <WorkflowGraphEditor v-model="draft" :catalog="state.catalog" :disabled="blocked" @select="selected = $event" />
+        <WorkflowGraphEditor
+          v-model="draft"
+          :catalog="state.catalog"
+          :triggers="state.triggers"
+          :disabled="blocked"
+          @select="selected = $event"
+          @select-source="tab = $event === 'input' ? 'inputs' : 'automation'"
+        />
         <div class="workflow-editor-split">
           <div>
             <h3>Schritte</h3>
@@ -194,6 +242,14 @@ onBeforeUnmount(() => session.dispose())
                   @click="selected = step.key"
                 >
                   {{ step.payload.title || step.key }}
+                </button>
+                <button
+                  type="button"
+                  :disabled="blocked"
+                  :aria-label="`${step.key} entfernen`"
+                  @click="removeStep(step.key)"
+                >
+                  Entfernen
                 </button>
               </li>
             </ol>
@@ -212,6 +268,7 @@ onBeforeUnmount(() => session.dispose())
             </button>
           </div>
           <WorkflowStepEditor
+            :input-schema="draft.input_schema"
             v-if="activeStep"
             :step="activeStep"
             :steps="draft.steps"
@@ -296,6 +353,11 @@ onBeforeUnmount(() => session.dispose())
           <li v-for="run in state.runs" :key="run.id">
             <strong>{{ workflowStatusLabel(run.status) }}</strong> · {{ run.sandbox ? 'Simulation' : 'Ausführung' }} ·
             {{ run.public_id }}
+            <WorkflowRunBudget :run="run" :known-runs="state.runs" :stale="runsStale" />
+            <template v-if="state.urls.runControls && !isTerminalWorkflow(run.status)">
+              <button type="button" :disabled="busy || stopPending(run) || run.status !== 'running'" @click="controlRun(run, 'stop_after_step')">{{ stopPending(run) ? 'Halt angefordert' : 'Nach diesem Schritt stoppen' }}</button>
+              <button type="button" :disabled="busy || run.status === 'cancelling'" @click="controlRun(run, 'cancel')">Sofortigen Stopp anfordern</button>
+            </template>
             <details v-if="run.steps?.length">
               <summary>Schritte</summary>
               <ul>
@@ -345,6 +407,7 @@ onBeforeUnmount(() => session.dispose())
 </template>
 <style scoped>
 .workflow-editor-island {
+  container-type: inline-size;
   --ai-surface: var(--ui-surface, #20232b);
   --ai-border: var(--ui-border, #3d404b);
   --ai-text: var(--ui-text, #e7e9f0);
@@ -452,6 +515,11 @@ footer {
 @media (max-width: 700px) {
   .workflow-editor-split {
     grid-template-columns: 1fr;
+  }
+}
+@container (max-width: 700px) {
+  .workflow-editor-split {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 </style>

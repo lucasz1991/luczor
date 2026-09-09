@@ -66,6 +66,33 @@ function harness(options: Partial<AgentOrchestratorOptions> = {}) {
 afterEach(() => vi.useRealTimers())
 
 describe('project agent orchestrator', () => {
+  it('retains only allowlisted actual worker metadata across the job lifecycle', async () => {
+    const { orchestrator, enqueue, runs } = harness()
+    const job = enqueue({ model: 'requested-model' })
+    orchestrator.approve(job.id)
+    await flush()
+    runs[0]!.result.resolve({
+      output: 'Done',
+      runtimeEvidence: { model: 'actual-model', modelSource: 'runtime', toolGateChecks: 2 },
+    })
+    await flush()
+    expect(orchestrator.getJob(job.id)).toMatchObject({
+      model: 'requested-model',
+      runtimeEvidence: { model: 'actual-model', modelSource: 'runtime', toolGateChecks: 2 },
+    })
+  })
+
+  it('rejects runtime claims with missing provenance or invalid gate counts', async () => {
+    const { orchestrator, enqueue, runs } = harness()
+    const job = enqueue()
+    orchestrator.approve(job.id)
+    await flush()
+    runs[0]!.result.resolve({ output: 'Done', runtimeEvidence: { model: 'unconfirmed', toolGateChecks: -1 } })
+    await flush()
+    expect(orchestrator.getJob(job.id)).toMatchObject({ status: 'failed', errorCode: 'invalid_result' })
+    expect(orchestrator.getJob(job.id)?.runtimeEvidence).toBeUndefined()
+  })
+
   it('requires approval for every backend and preserves the immutable account and workspace snapshot', async () => {
     const { orchestrator, enqueue, runs, run, validateScope } = harness()
     const project = { ...PROJECT }

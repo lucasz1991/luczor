@@ -45,6 +45,7 @@ export function executePreparedAgentJob(
             output: lastOutput,
             externalThreadId: last?.externalThreadId,
             effortSelection: last?.effortSelection,
+            runtimeEvidence: last?.runtimeEvidence,
           })
         )
       } else if (signal?.aborted || last?.status === 'cancelled') {

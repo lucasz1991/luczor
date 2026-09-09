@@ -1,62 +1,88 @@
 <script setup lang="ts">
-import { onBeforeUnmount, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { workflowChanged, type WorkflowChatReference } from '@/services/workflows/presentation'
-import { isTerminalWorkflow, workflowStatusLabel } from '@/services/workflows/types'
+import { isTerminalWorkflow, workflowStatusLabel, type WorkflowRun } from '@/services/workflows/types'
+import { readWorkflowRunBudget } from '@/services/workflows/runBudget'
+import WorkflowRunBudget from './WorkflowRunBudget.vue'
 const props = defineProps<{
   workflows: WorkflowChatReference[]
   projectId: string
   disabled?: boolean
   readOnly?: boolean
   hostOnly?: boolean
+  hostRuns?: WorkflowRun[]
+  hostRunsVerified?: boolean
 }>()
 const emit = defineEmits<{
   open: [reference: WorkflowChatReference]
   discuss: [reference: WorkflowChatReference]
-  action: [reference: WorkflowChatReference, action: 'test' | 'start' | 'stop']
+  action: [reference: WorkflowChatReference, action: 'test' | 'start' | 'stop' | 'stop_after_step']
 }>()
 const statuses = ref<Record<number, string>>({})
+const runs = ref<WorkflowRun[]>([])
+const displayedRuns = computed(() => props.hostOnly ? (props.hostRuns ?? []) : runs.value)
+const currentVerified = computed(() => props.hostOnly ? props.hostRunsVerified === true : verified.value)
+function runFor(workflow: WorkflowChatReference) {
+  return displayedRuns.value.find(run => run.workflow_definition_id === workflow.id && run.public_id === workflow.runId && run.project_external_id === props.projectId)
+}
+function statusFor(workflow: WorkflowChatReference) {
+  return runFor(workflow)?.status ?? statuses.value[workflow.id] ?? workflow.status ?? ''
+}
+function boundaryPending(workflow: WorkflowChatReference) {
+  return readWorkflowRunBudget(runFor(workflow) ?? null, displayedRuns.value).boundaryStop === 'pending'
+}
 const verified = ref(false)
 const error = ref('')
 const acting = ref(false)
 let abort = new AbortController()
 let timer: ReturnType<typeof setInterval> | undefined
 let refreshing = false
-async function refresh() {
+let refreshAgain = false
+let readEpoch = 0
+async function refresh(force = false) {
+  if (refreshing) { if (force) refreshAgain = true; return }
   if (
     props.hostOnly ||
     refreshing ||
-    !props.workflows.some(
+    (!force && !props.workflows.some(
       item =>
         item.runId &&
         (!verified.value || !isTerminalWorkflow(Reflect.get(statuses.value, item.id) ?? item.status ?? ''))
-    )
+    ))
   )
     return
   refreshing = true
   const signal = abort.signal
+  const epoch = ++readEpoch
   try {
     const { captureWorkflowAccess } = await import('@/services/workflows/access')
     const access = await captureWorkflowAccess({ projectId: props.projectId, signal }, undefined, false)
     const next: Record<number, string> = {}
+    const nextRuns: WorkflowRun[] = []
     for (const workflow of props.workflows)
       if (workflow.runId) {
         const run = (await access.api.run(workflow.runId)).data
         await access.check()
-        if (run.workflow_definition_id !== workflow.id || run.project_external_id !== props.projectId)
+        if (run.workflow_definition_id !== workflow.id || run.public_id !== workflow.runId || run.project_external_id !== props.projectId)
           throw new Error('Laufzuordnung wurde geändert.')
         next[workflow.id] = run.status
+        nextRuns.push(run)
       }
-    if (!signal.aborted) {
+    if (!signal.aborted && epoch === readEpoch) {
       statuses.value = next
+      runs.value = nextRuns
       verified.value = true
     }
   } catch {
-    if (!signal.aborted) verified.value = false
+    if (!signal.aborted && epoch === readEpoch) verified.value = false
   } finally {
     refreshing = false
+    const again = refreshAgain
+    refreshAgain = false
+    if (again || (signal.aborted && !abort.signal.aborted)) void refresh(again)
   }
 }
-async function act(workflow: WorkflowChatReference, action: 'test' | 'start' | 'stop') {
+async function act(workflow: WorkflowChatReference, action: 'test' | 'start' | 'stop' | 'stop_after_step') {
   if (props.disabled || props.readOnly || acting.value) return
   if (props.hostOnly) {
     emit('action', workflow, action)
@@ -66,6 +92,21 @@ async function act(workflow: WorkflowChatReference, action: 'test' | 'start' | '
   error.value = ''
   const signal = abort.signal
   try {
+    if (action === 'stop_after_step') {
+      if (!workflow.runId || boundaryPending(workflow) || isTerminalWorkflow(statusFor(workflow))) return
+      const { stopWorkflowAfterStep } = await import('@/services/workflows/api')
+      const result = await stopWorkflowAfterStep(props.projectId, workflow.id, workflow.runId, signal)
+      if (!signal.aborted) {
+        readEpoch++
+        const current = runFor(workflow)
+        if (current) {
+          runs.value = runs.value.map(run => run.id !== current.id ? run : result.id === current.id ? result : Object.assign({}, current, { root_budget: result }))
+          verified.value = true
+        }
+        await refresh(true)
+      }
+      return
+    }
     const { workflowTools } = await import('@/services/tools/workflows')
     const tool = workflowTools.find(
       item => item.name === (action === 'stop' ? 'workflow_run_cancel' : 'workflow_run_start')
@@ -80,14 +121,14 @@ async function act(workflow: WorkflowChatReference, action: 'test' | 'start' | '
     if (signal.aborted) return
     if (!result.ok) throw new Error(result.error ?? 'Workflow-Aktion fehlgeschlagen.')
     if (result.workflow_ref) emit('open', result.workflow_ref)
-    await refresh()
+    await refresh(true)
   } catch (failure) {
     if (!signal.aborted)
       error.value =
         String(failure instanceof Error ? failure.message : 'Aktion fehlgeschlagen.') +
         ' Öffne den Workflow für Eingaben und Details.'
   } finally {
-    acting.value = false
+    if (!signal.aborted) acting.value = false
   }
 }
 watch(
@@ -97,6 +138,8 @@ watch(
     abort = new AbortController()
     verified.value = false
     statuses.value = {}
+    runs.value = []
+    acting.value = false
     error.value = ''
     if (timer) clearInterval(timer)
     void refresh()
@@ -124,10 +167,11 @@ onBeforeUnmount(() => {
         >
         <strong>{{ workflow.name }}</strong>
         <p v-if="workflow.summary">{{ workflow.summary }}</p>
-        <span v-if="workflow.status"
-          >{{ workflowStatusLabel(statuses[workflow.id] ?? workflow.status)
-          }}{{ verified ? '' : ' · letzter bekannter Stand' }}</span
+        <span v-if="statusFor(workflow)"
+          >{{ workflowStatusLabel(statusFor(workflow))
+          }}{{ currentVerified ? '' : ' · letzter bekannter Stand' }}</span
         >
+        <WorkflowRunBudget v-if="runFor(workflow)" :run="runFor(workflow)!" :known-runs="displayedRuns" :stale="!currentVerified" />
       </div>
       <footer>
         <button type="button" @click="emit('open', workflow)">Öffnen</button>
@@ -136,12 +180,20 @@ onBeforeUnmount(() => {
           Starten
         </button>
         <button
-          v-if="workflow.runId && !isTerminalWorkflow(statuses[workflow.id] ?? workflow.status ?? '')"
+          v-if="workflow.runId && !isTerminalWorkflow(statusFor(workflow))"
           type="button"
-          :disabled="disabled || readOnly || acting || (statuses[workflow.id] ?? workflow.status) === 'cancelling'"
+          :disabled="disabled || readOnly || acting || boundaryPending(workflow) || statusFor(workflow) === 'cancelling'"
+          @click="act(workflow, 'stop_after_step')"
+        >
+          {{ boundaryPending(workflow) ? 'Halt angefordert' : 'Nach diesem Schritt stoppen' }}
+        </button>
+        <button
+          v-if="workflow.runId && !isTerminalWorkflow(statusFor(workflow))"
+          type="button"
+          :disabled="disabled || readOnly || acting || statusFor(workflow) === 'cancelling'"
           @click="act(workflow, 'stop')"
         >
-          Stoppen
+          Sofortigen Stopp anfordern
         </button>
         <button type="button" :disabled="disabled" @click="emit('discuss', workflow)">Im Chat verbessern</button>
       </footer>

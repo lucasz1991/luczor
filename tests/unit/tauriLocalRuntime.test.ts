@@ -213,6 +213,32 @@ describe('Tauri local runtime catalog boundary', () => {
     })
   })
 
+  it.each([true, false])(
+    'classifies thinking-control failure without leaking native details (event: %s)',
+    async withEvent => {
+      tauri.invoke.mockImplementationOnce(async (_command, args) => {
+        if (withEvent) {
+          args.onEvent.onmessage({ type: 'error', code: 'runtime_reasoning_control_unavailable', retryable: false })
+          throw 'private control response body'
+        }
+        throw 'Local thinking control was not confirmed; generation interrupted.'
+      })
+      await expect(
+        new TauriLocalRuntimeTransport().stream({} as LocalModelReleaseManifest, {
+          requestId: 'request-1',
+          modelReleaseId: 'model-1',
+          scopeDigest: 'd'.repeat(64),
+          catalogBinding,
+          messages: [{ role: 'user', content: 'test' }],
+        })
+      ).rejects.toMatchObject({
+        code: 'runtime_reasoning_control_unavailable',
+        retryable: false,
+        message: expect.stringContaining('Modell bleibt geladen'),
+      })
+    }
+  )
+
   it.each([true, false])('classifies role rejection without exposing native text (event: %s)', async withEvent => {
     tauri.invoke.mockImplementationOnce(async (_command, args) => {
       if (withEvent) {

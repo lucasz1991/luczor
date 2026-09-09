@@ -1,4 +1,49 @@
-use std::{env, fs, path::Path};
+use sha2::{Digest, Sha256};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
+
+/// Bind workflow test evidence to all native contracts without embedding source text in the executable.
+fn workflow_source_fingerprint() -> String {
+    fn collect(directory: &Path, files: &mut Vec<PathBuf>) {
+        for entry in fs::read_dir(directory)
+            .expect("native source directory")
+            .flatten()
+        {
+            let kind = entry.file_type().expect("native source metadata");
+            let path = entry.path();
+            if kind.is_dir() {
+                collect(&path, files);
+            } else if kind.is_file()
+                && matches!(
+                    path.extension().and_then(|value| value.to_str()),
+                    Some("rs" | "js" | "json" | "toml")
+                )
+            {
+                files.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    for directory in ["src", "permissions", "capabilities"] {
+        println!("cargo:rerun-if-changed={directory}");
+        if Path::new(directory).is_dir() {
+            collect(Path::new(directory), &mut files);
+        }
+    }
+    files.extend(["Cargo.toml", "Cargo.lock", "build.rs", "tauri.conf.json"].map(PathBuf::from));
+    files.sort();
+    let mut hash = Sha256::new();
+    for path in files {
+        println!("cargo:rerun-if-changed={}", path.display());
+        hash.update(path.to_string_lossy().replace('\\', "/").as_bytes());
+        hash.update([0]);
+        hash.update(fs::read(&path).expect("native source fingerprint input"));
+        hash.update([0]);
+    }
+    format!("{:x}", hash.finalize())
+}
 
 const APP_COMMANDS: &[&str] = &[
     "open_user_link",
@@ -157,7 +202,11 @@ fn main() {
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(APP_COMMANDS)),
     )
-    .expect("failed to build the Tauri application manifest")
+    .expect("failed to build the Tauri application manifest");
+    println!(
+        "cargo:rustc-env=LUCZOR_NATIVE_WORKFLOW_CODE_HASH={}",
+        workflow_source_fingerprint()
+    );
 }
 
 fn read_voice_env() -> Option<String> {

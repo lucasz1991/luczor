@@ -3,10 +3,11 @@ import type { ChatCommentary, ToolCallStatus } from '@/state/types'
 import type { LuczorMode } from '@/services/inference/types'
 import type { TokenUsage } from '@/services/tokenUsage'
 import type { WorkflowChatReference } from '@/services/workflows/presentation'
+import type { WorkflowRun } from '@/services/workflows/types'
 import type { ThinkingTier, ThinkingBudgetProgress, ThinkingControlAction } from '@/services/inference/thinking'
 
 export type MiniWorkflowReference = WorkflowChatReference & { projectId: string }
-export type MiniWorkflowAction = 'test' | 'start' | 'stop'
+export type MiniWorkflowAction = 'test' | 'start' | 'stop' | 'stop_after_step'
 
 export type MiniMessage = {
   id: string
@@ -34,8 +35,16 @@ export type MiniDecision = {
   detail: string
 }
 export type MiniSnapshot = {
+  workflowRuns?: WorkflowRun[]
+  workflowRunsVerified?: boolean
   thinkingTier?: ThinkingTier
   thinkingBudget?: ThinkingBudgetProgress | null
+  thinkingControlAck?: {
+    controlId: string
+    requestId: string
+    progress?: ThinkingBudgetProgress
+    error?: string
+  } | null
   view: MiniView
   projects: MiniProject[]
   appearance?: { accent: string; assistantName: string }
@@ -76,7 +85,14 @@ export type MiniAction =
   | { type: 'voice_wake_word'; sessionId: string }
   | { type: 'agent_mode'; sessionId: string; enabled: boolean }
   | { type: 'thinking_tier'; sessionId: string; tier: ThinkingTier }
-  | { type: 'thinking_control'; sessionId: string; requestId: string; action: ThinkingControlAction; sequence: number }
+  | {
+      type: 'thinking_control'
+      sessionId: string
+      requestId: string
+      controlId: string
+      action: ThinkingControlAction
+      sequence: number
+    }
   | { type: 'stop'; sessionId: string }
   | { type: 'reset'; sessionId: string }
   | { type: 'decide'; sessionId: string; id: string; approved: boolean }

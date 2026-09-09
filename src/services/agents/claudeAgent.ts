@@ -153,6 +153,10 @@ export function createClaudeAgentAdapter(api: ClaudeAgentDependencies = dependen
           throw new Error(snapshot.error ?? 'Claude-Auftrag lieferte kein verwertbares Ergebnis.')
         return {
           output: snapshot.output,
+          runtimeEvidence: Object.freeze({
+            ...(snapshot.model ? { model: snapshot.model, modelSource: 'runtime' as const } : {}),
+            toolGateChecks: snapshot.toolCalls,
+          }),
           effortSelection: Object.freeze({
             ...selection,
             model: snapshot.model ?? selection.model,

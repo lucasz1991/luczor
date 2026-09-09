@@ -82,6 +82,8 @@ export class LocalResourceController {
   private retry?: ReturnType<typeof setTimeout>
   private last?: LocalResourceConfigState
   private foregroundAdmission?: ForegroundAdmission
+  private foregroundPending = 0
+  private preemptibleBackground?: { controller: AbortController; drained: Promise<void> }
 
   constructor(private readonly dependencies: ResourceDependencies) {}
 
@@ -94,7 +96,7 @@ export class LocalResourceController {
   }
 
   hasWork(): boolean {
-    return this.leases.size > 0
+    return this.leases.size > 0 || this.preemptibleBackground !== undefined || this.foregroundPending > 0
   }
 
   private publish(state: LocalResourceConfigState): LocalResourceConfigState {
@@ -271,8 +273,18 @@ export class LocalResourceController {
       lease = inherited
       lease.references += 1
     } else {
-      const foreground = priority === 'foreground' ? await this.foregroundAdmission?.(signal) : undefined
+      const isForeground = priority === 'foreground'
+      if (isForeground) this.foregroundPending += 1
+      let foreground: { release(): void } | undefined
       try {
+        if (isForeground) {
+          const background = this.preemptibleBackground
+          background?.controller.abort(new Error('resource_background_preempted'))
+          // Wait for inference AND its native lease cleanup before admitting the user.
+          if (background) await background.drained
+          signal?.throwIfAborted()
+          foreground = await this.foregroundAdmission?.(signal)
+        }
         let work: LocalResourceWork
         const leaseId = crypto.randomUUID()
         const native = this.dependencies.enabled()
@@ -285,6 +297,8 @@ export class LocalResourceController {
               break
             } catch (error) {
               if (!pendingError(error)) throw error
+              // Background maintenance must never prepare/apply a runtime or wait behind a resource change.
+              if (priority === 'background') throw new Error('resource_background_unavailable')
               await this.flush()
               await waitForChange(signal)
             }
@@ -295,6 +309,8 @@ export class LocalResourceController {
       } catch (error) {
         foreground?.release()
         throw error
+      } finally {
+        if (isForeground) this.foregroundPending -= 1
       }
     }
     let released = false
@@ -347,6 +363,30 @@ export class LocalResourceController {
       return await operation(lease.work)
     } finally {
       await lease.release()
+    }
+  }
+
+  /** Bounded resident-only maintenance. Foreground acquisition aborts and drains this owner first. */
+  async runPreemptibleBackground<T>(
+    operation: (work: LocalResourceWork, signal: AbortSignal) => Promise<T>,
+    signal: AbortSignal
+  ): Promise<T> {
+    signal.throwIfAborted()
+    if (this.hasWork()) throw new Error('resource_background_unavailable')
+    const controller = new AbortController()
+    const background = { controller, drained: Promise.resolve() }
+    this.preemptibleBackground = background
+    const combined = AbortSignal.any([signal, controller.signal])
+    // Registration is synchronous, so a foreground request cannot slip past the drain barrier.
+    const result = Promise.resolve().then(() => this.runBackground(work => operation(work, combined), combined))
+    background.drained = result.then(
+      () => undefined,
+      () => undefined
+    )
+    try {
+      return await result
+    } finally {
+      if (this.preemptibleBackground === background) this.preemptibleBackground = undefined
     }
   }
 }

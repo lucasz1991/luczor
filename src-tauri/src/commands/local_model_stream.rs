@@ -63,6 +63,7 @@ pub(super) struct Stream {
     task: Option<tauri::async_runtime::JoinHandle<()>>,
     pub progress: Arc<Mutex<Progress>>,
     cancel: Arc<AtomicBool>,
+    reasoning_interruption: Arc<AtomicBool>,
     limits: Deadlines,
     buffer: std::io::Cursor<Vec<u8>>,
     ended: bool,
@@ -81,6 +82,7 @@ impl Stream {
         key: &str,
         body: Vec<u8>,
         cancel: Arc<AtomicBool>,
+        reasoning_interruption: Arc<AtomicBool>,
         limits: Deadlines,
         max_bytes: usize,
     ) -> Result<(u16, Self), String> {
@@ -136,6 +138,7 @@ impl Stream {
                 generated: 0,
             })),
             cancel,
+            reasoning_interruption,
             limits,
             buffer: std::io::Cursor::new(Vec::new()),
             ended: false,
@@ -148,6 +151,9 @@ impl Stream {
     fn check(&self) -> Result<(), String> {
         if self.cancel.load(Ordering::SeqCst) {
             return Err("Local inference was cancelled.".into());
+        }
+        if self.reasoning_interruption.load(Ordering::SeqCst) {
+            return Err(super::reasoning_budget::CONTROL_UNAVAILABLE.into());
         }
         if let Some(error) = self
             .progress
@@ -258,6 +264,7 @@ mod tests {
             "fixture-key",
             b"{}".to_vec(),
             Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
             limits(),
             4096,
         )
@@ -279,10 +286,56 @@ mod tests {
             signal.store(true, Ordering::SeqCst);
             closed(&mut socket);
         });
-        let error = Stream::open(port, "fixture-key", b"{}".to_vec(), cancel, limits(), 4096)
-            .err()
-            .unwrap();
+        let error = Stream::open(
+            port,
+            "fixture-key",
+            b"{}".to_vec(),
+            cancel,
+            Arc::new(AtomicBool::new(false)),
+            limits(),
+            4096,
+        )
+        .err()
+        .unwrap();
         assert!(error.contains("cancelled"));
+        server.join().unwrap();
+    }
+    #[test]
+    fn control_failure_closes_stalled_socket_without_cancelling_model_operation() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let interruption = Arc::new(AtomicBool::new(false));
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            request(&mut socket);
+            socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+            closed(&mut socket);
+        });
+        let (_, mut response) = Stream::open(
+            port,
+            "fixture-key",
+            b"{}".to_vec(),
+            cancel.clone(),
+            interruption.clone(),
+            limits(),
+            4096,
+        )
+        .unwrap();
+        interruption.store(true, Ordering::SeqCst);
+        let error = super::super::read_bounded_line(
+            &mut std::io::BufReader::new(&mut response),
+            &mut Vec::new(),
+            4096,
+        )
+        .unwrap_err();
+        assert_eq!(error, super::super::reasoning_budget::CONTROL_UNAVAILABLE);
+        assert!(!cancel.load(Ordering::SeqCst));
+        drop(response);
         server.join().unwrap();
     }
     #[test]
@@ -307,6 +360,7 @@ mod tests {
             port,
             "fixture-key",
             b"{}".to_vec(),
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             limits(),
             4096,
@@ -340,6 +394,7 @@ mod tests {
             port,
             "fixture-key",
             b"{}".to_vec(),
+            Arc::new(AtomicBool::new(false)),
             Arc::new(AtomicBool::new(false)),
             limits(),
             10,
