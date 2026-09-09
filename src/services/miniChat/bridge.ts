@@ -1,5 +1,11 @@
 import { computed, ref, watch } from 'vue'
 import { executionGate } from '@/services/executionGate'
+import {
+  isThinkingTier,
+  type ThinkingTier,
+  type ThinkingBudgetProgress,
+  type ThinkingControlAction,
+} from '@/services/inference/thinking'
 import { boundMiniMessages } from './projectChat'
 import type { createMiniChatController } from './controller'
 import type {
@@ -22,6 +28,14 @@ export type MiniChatBinding = {
   busy: boolean
 }
 export type MiniWorkspaceBinding = {
+  thinkingTier?: () => ThinkingTier
+  thinkingBudget?: () => ThinkingBudgetProgress | null
+  setThinkingTier?: (tier: ThinkingTier) => void
+  controlThinking?: (
+    requestId: string,
+    action: ThinkingControlAction,
+    sequence: number
+  ) => Promise<ThinkingBudgetProgress>
   projects: () => MiniProject[]
   chat: () => MiniChatBinding
   sendChat: (text: string, projectId: string) => Promise<void>
@@ -56,6 +70,8 @@ export function createMiniChatBridge(
     return {
       ...controller.state,
       view: view.value,
+      thinkingTier: view.value === 'chat' ? (deps.thinkingTier?.() ?? 'balanced') : controller.state.thinkingTier,
+      thinkingBudget: view.value === 'chat' ? (deps.thinkingBudget?.() ?? null) : controller.state.thinkingBudget,
       sessionId: sessionId.value,
       projects: deps.projects().slice(0, 200),
       project: chat.project,
@@ -76,6 +92,28 @@ export function createMiniChatBridge(
     if ('sessionId' in action && action.sessionId !== sessionId.value) return
     if (action.type === 'view') {
       view.value = action.view
+      return
+    }
+    if (action.type === 'thinking_tier') {
+      if (!isThinkingTier(action.tier)) return
+      if (view.value === 'chat') deps.setThinkingTier?.(action.tier)
+      else return controller.dispatch({ ...action, sessionId: controller.state.sessionId })
+      return
+    }
+    if (action.type === 'thinking_control') {
+      if (snapshot.value.thinkingBudget?.requestId !== action.requestId || !busy.value) return
+      const epoch = sessionId.value
+      try {
+        if (view.value === 'workspace') await controller.dispatch({ ...action, sessionId: controller.state.sessionId })
+        else {
+          const progress = await deps.controlThinking?.(action.requestId, action.action, action.sequence)
+          if (epoch === sessionId.value && progress?.controlOutcome === 'stale')
+            notice.value = 'Budgetstand aktualisiert. Bitte die gewünschte Aktion erneut wählen.'
+        }
+      } catch (error) {
+        if (epoch === sessionId.value)
+          notice.value = error instanceof Error ? error.message : 'Budgetsteuerung fehlgeschlagen.'
+      }
       return
     }
     if (action.type === 'stop') {

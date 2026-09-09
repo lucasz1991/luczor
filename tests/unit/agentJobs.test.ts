@@ -66,6 +66,47 @@ describe('managed agent tools', () => {
     )
   })
 
+  it('stages Claude and typed effort options for the existing job review', async () => {
+    await tool('agent_job_prepare').execute(
+      {
+        agent: 'claude',
+        prompt: 'Review',
+        model: 'claude-opus-4-7',
+        thinking_tier: 'ultra',
+        effort: 'high',
+        max_turns: 9,
+        max_budget_usd: 1,
+      },
+      context
+    )
+    expect(harness.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        adapterId: 'claude',
+        model: 'claude-opus-4-7',
+        thinkingTier: 'ultra',
+        effort: 'high',
+        maxTurns: 9,
+        maxBudgetUsd: 1,
+        permission: 'read-only',
+      })
+    )
+  })
+
+  it('rejects malformed model, effort and execution budgets before staging', async () => {
+    for (const options of [
+      { thinking_tier: 'turbo' },
+      { effort: 'unlimited' },
+      { model: '--flag bad' },
+      { max_turns: 201 },
+      { max_budget_usd: -1 },
+    ]) {
+      await expect(
+        tool('agent_job_prepare').execute({ agent: 'claude', prompt: 'Review', ...options }, context)
+      ).rejects.toThrow()
+    }
+    expect(harness.prepare).not.toHaveBeenCalled()
+  })
+
   it('does not enqueue a prepared job after its execution generation changed during the snapshot', async () => {
     harness.executionAssert
       .mockImplementationOnce(() => undefined)

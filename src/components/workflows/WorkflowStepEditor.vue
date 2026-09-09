@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import type { WorkflowStepDefinition, WorkflowTask } from '@/services/workflows/types'
 import { boundedWorkflowJson } from '@/services/workflows/operations'
+import { THINKING_TIERS, THINKING_DEFAULTS } from '@/services/inference/thinking'
 const props = defineProps<{
   step: WorkflowStepDefinition
   steps: WorkflowStepDefinition[]
@@ -39,7 +40,16 @@ const outcomeLabels: Record<string, string> = {
 const params = computed(() =>
   Object.entries(task.value?.params ?? {}).filter(
     ([key]) =>
-      !['input_bindings', 'routes', 'file_scope', 'workspace_root_id', 'inference', 'output_format'].includes(key)
+      ![
+        'input_bindings',
+        'routes',
+        'file_scope',
+        'workspace_root_id',
+        'inference',
+        'output_format',
+        'thinking_tier',
+        'thinking_config',
+      ].includes(key)
   )
 )
 function update(values: Partial<WorkflowStepDefinition>) {
@@ -145,6 +155,16 @@ function applyPayload() {
       {{ task?.runner === 'client' ? 'Auf dem zugeordneten Gerät' : 'Auf dem Server'
       }}<span v-if="task?.requires_approval"> · Freigabe erforderlich</span>
     </p>
+    <label v-if="step.type === 'llm' || step.type.startsWith('llm.') || step.type.startsWith('agent.')"
+      >Denktiefe
+      <select
+        :value="step.payload.thinking_tier ?? 'inherit'"
+        @change="payload('thinking_tier', ($event.target as HTMLSelectElement).value)"
+      >
+        <option value="inherit">Vom Workflow übernehmen</option>
+        <option v-for="tier in THINKING_TIERS" :key="tier" :value="tier">{{ THINKING_DEFAULTS[tier].label }}</option>
+      </select>
+    </label>
     <template v-for="[key, param] in params" :key="key">
       <label
         >{{ key }}

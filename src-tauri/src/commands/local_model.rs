@@ -26,6 +26,8 @@ use uuid::Uuid;
 
 use super::ensure_main_webview;
 
+#[path = "local_model_stream.rs"]
+mod generation_stream;
 #[path = "local_model_idle.rs"]
 mod idle_inference;
 #[path = "local_model_network.rs"]
@@ -64,7 +66,9 @@ const PUBLIC_KEY_B64: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_PU
 const EXPECTED_KEY_ID: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID");
 const FLASH_MODEL_ID: &str = "qwen3.8-flash-next";
 const FALLBACK_MODEL_ID: &str = "orcarouter-qwen3.8-27b-uncensored-q4-k-m";
-const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+// SSE framing/timings can exceed the text size many times. The HTTP queue is
+// independently bounded to four 32 KiB chunks; private text is not retained.
+const MAX_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_ERROR_RESPONSE_BYTES: usize = 16 * 1024;
 const MAX_CONTENT_CHARS: usize = 4 * 1024 * 1024;
 const MAX_TOOL_CALLS: usize = 128;
@@ -358,6 +362,7 @@ struct ManagerState {
     readiness: HashMap<String, ReadinessRecord>,
     active_request_id: Option<String>,
     active_idle_optimization: bool,
+    active_reasoning: Option<Arc<Mutex<reasoning_budget::Session>>>,
     cancel: Option<Arc<AtomicBool>>,
     failures: HashMap<String, u32>,
     cooldown_until_ms: HashMap<String, i128>,
@@ -633,7 +638,10 @@ pub struct LocalInferenceRequest {
     messages: Vec<Value>,
     tools: Vec<Value>,
     tool_choice: String,
-    max_output_tokens: u32,
+    max_output_tokens: Option<u32>,
+    #[serde(default)]
+    thinking_tier: reasoning_budget::ThinkingTier,
+    thinking_config: Option<reasoning_budget::ThinkingConfig>,
     context_limit: Option<u32>,
     reasoning_mode: String,
 }
@@ -734,6 +742,10 @@ fn reported_token_usage(value: &Value) -> Option<InferenceTokenUsage> {
     rename_all_fields = "camelCase"
 )]
 pub enum LocalInferenceEvent {
+    Budget {
+        #[serde(flatten)]
+        progress: reasoning_budget::BudgetProgress,
+    },
     Started {
         request_id: String,
     },
@@ -1082,6 +1094,153 @@ pub async fn local_model_cancel(
     Ok(())
 }
 
+#[tauri::command]
+pub async fn local_model_reasoning_control(
+    window: WebviewWindow,
+    request_id: String,
+    action: String,
+    expected_sequence: u64,
+    catalog_binding: CatalogBindingInput,
+) -> Result<reasoning_budget::BudgetProgress, String> {
+    ensure_main_webview(&window)?;
+    validate_catalog_binding_input(&catalog_binding)?;
+    if !safe_id(&request_id) || !matches!(action.as_str(), "more" | "answer") {
+        return Err("Local thinking control is invalid.".into());
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let (session, progress, send) = {
+            let guard = state()
+                .lock()
+                .map_err(|_| "Local model manager is unavailable.")?;
+            require_thinking_owner(&guard, &request_id, &catalog_binding)?;
+            let session = guard
+                .active_reasoning
+                .as_ref()
+                .ok_or("Local thinking request is unavailable.")?
+                .clone();
+            let (progress, send) = session
+                .lock()
+                .map_err(|_| "Local thinking state is unavailable.")?
+                .control(&action, expected_sequence)?;
+            (session, progress, send)
+        };
+        if send && send_reasoning_end(&request_id, &catalog_binding, &session).is_err() {
+            let mut current = session
+                .lock()
+                .map_err(|_| "Local thinking state is unavailable.")?;
+            current.control_failed();
+            let mut snapshot = current.snapshot();
+            snapshot.control_outcome = Some("unavailable");
+            return Ok(snapshot);
+        }
+        Ok(progress)
+    })
+    .await
+    .map_err(|_| "Local thinking control task failed.")?
+}
+
+fn require_thinking_owner(
+    guard: &ManagerState,
+    request_id: &str,
+    binding: &CatalogBindingInput,
+) -> Result<(), String> {
+    if !operation_owns_catalog_binding(guard, request_id, binding)
+        || guard
+            .cancel
+            .as_ref()
+            .is_none_or(|cancel| cancel.load(Ordering::SeqCst))
+    {
+        return Err("Local thinking request has ended or changed its binding.".into());
+    }
+    let session = guard
+        .active_reasoning
+        .as_ref()
+        .ok_or("Local thinking request is unavailable.")?
+        .lock()
+        .map_err(|_| "Local thinking state is unavailable.")?;
+    if session.finished
+        || session.progress.request_id != request_id
+        || session.resource_revision != guard.resource_settings.state.applied_revision
+        || guard
+            .runtime
+            .as_ref()
+            .is_none_or(|runtime| runtime.resource_revision != session.resource_revision)
+    {
+        return Err("Local thinking resource revision has changed.".into());
+    }
+    Ok(())
+}
+
+fn send_reasoning_end(
+    request_id: &str,
+    binding: &CatalogBindingInput,
+    session: &Arc<Mutex<reasoning_budget::Session>>,
+) -> Result<(), String> {
+    let (port, key, completion_id) = {
+        let mut guard = state()
+            .lock()
+            .map_err(|_| "Local model manager is unavailable.")?;
+        require_thinking_owner(&guard, request_id, binding)?;
+        if !guard
+            .active_reasoning
+            .as_ref()
+            .is_some_and(|active| Arc::ptr_eq(active, session))
+        {
+            return Err("Local thinking generation changed.".into());
+        }
+        let completion_id = session
+            .lock()
+            .map_err(|_| "Local thinking state is unavailable.")?
+            .completion_id
+            .clone()
+            .ok_or("Local generation identity is unavailable.")?;
+        let (port, key) = verified_runtime_endpoint(
+            guard
+                .runtime
+                .as_mut()
+                .ok_or("Local runtime is unavailable.")?,
+        )?;
+        (port, key, completion_id)
+    };
+    // This immutable server action changes the sampler for exactly one native
+    // completion id. It neither restarts a model nor increases max_tokens.
+    let response = local_network::send(
+        local_http_client(Duration::from_secs(3), Duration::from_secs(3))?
+            .post(format!(
+                "http://127.0.0.1:{port}/v1/chat/completions/control"
+            ))
+            .bearer_auth(key)
+            .header("Content-Type", "application/json")
+            .body(
+                serde_json::to_vec(&json!({"id":completion_id,"action":"reasoning_end"}))
+                    .map_err(|_| "Local reasoning control encoding failed.")?,
+            ),
+    )
+    .map_err(|_| "Local reasoning control is unavailable.")?;
+    if !response.status().is_success() {
+        return Err("Local reasoning control was not accepted.".into());
+    }
+    let bytes = read_bounded_error_body(response)
+        .ok_or("Local reasoning control exceeded its response limit.")?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|_| "Local reasoning control response is invalid.")?;
+    if value.get("success").and_then(Value::as_bool) != Some(true) {
+        return Err("Local reasoning control was not confirmed.".into());
+    }
+    let guard = state()
+        .lock()
+        .map_err(|_| "Local model manager is unavailable.")?;
+    require_thinking_owner(&guard, request_id, binding)
+}
+
+fn clear_thinking_session(guard: &mut ManagerState) {
+    if let Some(session) = guard.active_reasoning.take() {
+        if let Ok(mut current) = session.lock() {
+            current.finished = true;
+        }
+    }
+}
+
 fn cancel_active_operation(guard: &mut ManagerState, request_id: &str) -> Option<ManagedRuntime> {
     if guard.active_request_id.as_deref() != Some(request_id) {
         return None;
@@ -1302,6 +1461,7 @@ fn begin_manifest_acceptance(
     if let Some(cancel) = guard.cancel.take() {
         cancel.store(true, Ordering::SeqCst);
     }
+    clear_thinking_session(guard);
     guard.active_request_id = None;
     guard.active_idle_optimization = false;
     guard.catalog = None;
@@ -1342,6 +1502,7 @@ fn rotate_manifest_session(
     if let Some(cancel) = guard.cancel.take() {
         cancel.store(true, Ordering::SeqCst);
     }
+    clear_thinking_session(guard);
     guard.active_request_id = None;
     guard.active_idle_optimization = false;
     guard.catalog = None;
@@ -2532,8 +2693,9 @@ fn validate_inference_request(request: &LocalInferenceRequest) -> Result<(), Str
         || request.messages.is_empty()
         || request.messages.len() > 256
         || request.tools.len() > MAX_TOOL_CALLS
-        || request.max_output_tokens == 0
-        || request.max_output_tokens > 16_384
+        || request
+            .max_output_tokens
+            .is_some_and(|value| value == 0 || value > reasoning_budget::MAX_OUTPUT_TOKENS)
         || request
             .context_limit
             .is_some_and(|value| value == 0 || value > 1_048_576)
@@ -2552,11 +2714,18 @@ fn validate_inference_request(request: &LocalInferenceRequest) -> Result<(), Str
         && (!request.tools.is_empty()
             || request.tool_choice != "none"
             || request.reasoning_mode != "off"
-            || request.max_output_tokens > 768
+            || request.max_output_tokens.is_none_or(|value| value > 768)
             || encoded.len() > 64 * 1024)
     {
         return Err("Background local optimization exceeds its native read-only bounds.".into());
     }
+    reasoning_budget::Plan::new(
+        request.thinking_tier,
+        request.thinking_config.as_ref(),
+        &request.reasoning_mode,
+        request.max_output_tokens,
+        false,
+    )?;
     Ok(())
 }
 
@@ -3328,7 +3497,7 @@ fn stream_completion(
             LlamaHttpFailureKind::ToolContractRejected,
         ));
     }
-    let (port, api_key) = {
+    let (port, api_key, runtime_context, resource_revision) = {
         let mut guard = state()
             .lock()
             .map_err(|_| "Local model manager is unavailable.".to_string())?;
@@ -3339,13 +3508,53 @@ fn stream_completion(
             .runtime
             .as_mut()
             .ok_or("Local runtime is unavailable.")?;
-        verified_runtime_endpoint(runtime)?
+        let (port, key) = verified_runtime_endpoint(runtime)?;
+        let actual_context = serde_json::to_value(&runtime.resource_plan)
+            .ok()
+            .and_then(|value| value["contextTokens"].as_u64())
+            .filter(|n| *n > 0 && *n <= 1_048_576)
+            .ok_or("Resident model context limit is unavailable.")?
+            as u32;
+        (port, key, actual_context, runtime.resource_revision)
     };
     let thresholds = model
         .capacity_policy
         .benchmark_thresholds
         .as_ref()
         .ok_or("Capacity policy has no read-time threshold.")?;
+    let signed_context = model
+        .context_limit
+        .ok_or("Model context limit is unavailable.")?;
+    let mut props = Value::Null;
+    if request.use_case != IDLE_CONTEXT_USE_CASE {
+        let client = local_http_client(Duration::from_secs(3), Duration::from_secs(3))?;
+        if let Ok(response) = local_network::send(
+            client
+                .get(format!("http://127.0.0.1:{port}/props"))
+                .bearer_auth(&api_key),
+        ) {
+            if response.status().is_success() {
+                let mut bytes = Vec::new();
+                if response
+                    .take(256 * 1024 + 1)
+                    .read_to_end(&mut bytes)
+                    .is_ok()
+                    && bytes.len() <= 256 * 1024
+                {
+                    props = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                }
+            }
+        }
+    }
+    let (context_limit, live_control) =
+        reasoning_budget::runtime_limits(&props, signed_context.min(runtime_context));
+    let plan = reasoning_budget::Plan::new(
+        request.thinking_tier,
+        request.thinking_config.as_ref(),
+        &request.reasoning_mode,
+        request.max_output_tokens,
+        live_control,
+    )?;
     let mut body = json!({
         "model": request.model_release_id,
         "messages": local_messages::normalize_system_messages(&request.messages)
@@ -3354,23 +3563,20 @@ fn stream_completion(
         "tool_choice": request.tool_choice,
         "stream": true,
         "stream_options": { "include_usage": true },
-        "max_tokens": request.max_output_tokens,
+        "max_tokens": plan.output_ceiling,
         // Keep model weights resident while each request supplies its entire conversation.
         "cache_prompt": false,
         "chat_template_kwargs": {
             "parse_tool_calls": true
         }
     });
-    let context_limit = model
-        .context_limit
-        .ok_or("Model context limit is unavailable.")?;
     let tokenizer_client = local_http_client(Duration::from_secs(15), Duration::from_secs(15))?;
     let started = Instant::now();
-    let usage = context_budget::fit_context(
+    let usage = context_budget::fit_adaptive_context(
         &mut body,
         u64::from(context_limit),
         |candidate| {
-            reasoning_budget::apply(candidate, &request.reasoning_mode)?;
+            plan.apply(candidate)?;
             require_runtime_operation_checkpoint(
                 &request.request_id,
                 &request.catalog_binding,
@@ -3438,22 +3644,79 @@ fn stream_completion(
         result.context_usage = Some(usage);
         return Ok(result);
     }
-    let response = local_network::send(
-        local_http_client(
-            signed_read_timeout(thresholds.max_first_token_ms)?,
-            Duration::from_secs(MAX_INFERENCE_TOTAL_SECONDS),
-        )?
-        .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-        .bearer_auth(api_key)
-        .header("Content-Type", "application/json")
-        .body(serde_json::to_vec(&body).map_err(|error| error.to_string())?),
-    )
-    .map_err(|_| "Local llama.cpp request failed.".to_string())?;
-    if !response.status().is_success() {
-        let status = response.status().as_u16();
+    let session = Arc::new(Mutex::new(reasoning_budget::Session::new(
+        &request.request_id,
+        &plan,
+        usage.output_tokens as u32,
+        resource_revision,
+    )));
+    {
+        let mut guard = state()
+            .lock()
+            .map_err(|_| "Local model manager is unavailable.")?;
+        if !operation_owns_catalog_binding(&guard, &request.request_id, &request.catalog_binding)
+            || guard.resource_settings.state.applied_revision != resource_revision
+        {
+            return Err("Local thinking configuration changed during preparation.".into());
+        }
+        guard.active_reasoning = Some(session.clone());
+    }
+    on_event
+        .send(LocalInferenceEvent::Budget {
+            progress: session
+                .lock()
+                .map_err(|_| "Local thinking state is unavailable.")?
+                .snapshot(),
+        })
+        .map_err(|_| "Local inference event channel closed.")?;
+    let (status, response) = generation_stream::Stream::open(
+        port,
+        &api_key,
+        serde_json::to_vec(&body).map_err(|_| "Local generation encoding failed.")?,
+        cancel.clone(),
+        generation_stream::Deadlines {
+            first: signed_read_timeout(thresholds.max_first_token_ms)?,
+            idle: Duration::from_secs(60),
+            total: Duration::from_secs(MAX_INFERENCE_TOTAL_SECONDS),
+        },
+        MAX_RESPONSE_BYTES,
+    )?;
+    if !(200..300).contains(&status) {
         return Err(llama_http_failure(status, response));
     }
-    let mut result = parse_sse(response, request, cancel, on_event)?;
+    let clock = response.progress.clone();
+    let mut result = parse_sse_observed(response, request, cancel, on_event, |value| {
+        clock
+            .lock()
+            .map_err(|_| "Local progress is unavailable.")?
+            .observe(value);
+        let (force, snapshot) = {
+            let mut current = session
+                .lock()
+                .map_err(|_| "Local thinking state is unavailable.")?;
+            let (force, emit) = current.observe(value)?;
+            (force, emit.then(|| current.snapshot()))
+        };
+        if let Some(progress) = snapshot {
+            on_event
+                .send(LocalInferenceEvent::Budget { progress })
+                .map_err(|_| "Local inference event channel closed.")?;
+        }
+        if force
+            && send_reasoning_end(&request.request_id, &request.catalog_binding, &session).is_err()
+        {
+            let mut current = session
+                .lock()
+                .map_err(|_| "Local thinking state is unavailable.")?;
+            current.control_failed();
+            let mut progress = current.snapshot();
+            progress.control_outcome = Some("unavailable");
+            on_event
+                .send(LocalInferenceEvent::Budget { progress })
+                .map_err(|_| "Local inference event channel closed.")?;
+        }
+        Ok(())
+    })?;
     result.context_usage = Some(usage);
     Ok(result)
 }
@@ -3463,6 +3726,16 @@ fn parse_sse(
     request: &LocalInferenceRequest,
     cancel: Arc<AtomicBool>,
     on_event: &Channel<LocalInferenceEvent>,
+) -> Result<LocalInferenceResult, LocalInferenceFailure> {
+    parse_sse_observed(response, request, cancel, on_event, |_| Ok(()))
+}
+
+fn parse_sse_observed(
+    response: impl Read,
+    request: &LocalInferenceRequest,
+    cancel: Arc<AtomicBool>,
+    on_event: &Channel<LocalInferenceEvent>,
+    mut observe: impl FnMut(&Value) -> Result<(), LocalInferenceFailure>,
 ) -> Result<LocalInferenceResult, LocalInferenceFailure> {
     let mut reader = BufReader::new(response);
     let mut line = Vec::new();
@@ -3501,6 +3774,7 @@ fn parse_sse(
         let value: Value = serde_json::from_str(data)
             .map_err(|_| "Local llama.cpp emitted invalid SSE JSON.".to_string())?;
         diagnostics.observe(&value);
+        observe(&value)?;
         // The terminal usage frame may contain an empty choices array.
         if let Some(reported) = value.get("usage").and_then(reported_token_usage) {
             usage = Some(reported);
@@ -3604,6 +3878,7 @@ fn finish_request(
         if !operation_owns_catalog_binding(&guard, request_id, catalog_binding) {
             return;
         }
+        clear_thinking_session(&mut guard);
         guard.active_request_id = None;
         guard.active_idle_optimization = false;
         guard.cancel = None;
@@ -3656,6 +3931,7 @@ fn release_operation(
     if !operation_owns_catalog_binding(&guard, operation_id, catalog_binding) {
         return None;
     }
+    clear_thinking_session(&mut guard);
     guard.active_request_id = None;
     guard.active_idle_optimization = false;
     guard.cancel = None;
@@ -3703,9 +3979,22 @@ fn read_bounded_line<R: BufRead>(
     output.clear();
     loop {
         let (chunk, consumed, terminal) = {
-            let available = reader
-                .fill_buf()
-                .map_err(|_| "Local llama.cpp stream failed.".to_string())?;
+            let available = reader.fill_buf().map_err(|error| {
+                match error.to_string().as_str() {
+                    "Local generation exceeded its total deadline." => {
+                        "Local generation exceeded its total deadline."
+                    }
+                    "Local generation produced no first progress before its deadline." => {
+                        "Local generation produced no first progress before its deadline."
+                    }
+                    "Local generation stopped making progress before its idle deadline." => {
+                        "Local generation stopped making progress before its idle deadline."
+                    }
+                    "Local inference was cancelled." => "Local inference was cancelled.",
+                    _ => "Local llama.cpp stream failed.",
+                }
+                .to_string()
+            })?;
             if available.is_empty() {
                 return Ok(output.len());
             }
@@ -4530,7 +4819,7 @@ mod tests {
                 invalid.reasoning_mode = mode.as_str().unwrap().into();
             }
             if let Some(max) = changed.get("maxOutputTokens") {
-                invalid.max_output_tokens = max.as_u64().unwrap() as u32;
+                invalid.max_output_tokens = Some(max.as_u64().unwrap() as u32);
             }
             if let Some(messages) = changed.get("messages") {
                 invalid.messages = messages.as_array().unwrap().clone();

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wf-browser-cleanup"
+description = "Enables the wf_browser_cleanup command without any pre-configured scope."
+commands.allow = ["wf_browser_cleanup"]
+
+[[permission]]
+identifier = "deny-wf-browser-cleanup"
+description = "Denies the wf_browser_cleanup command without any pre-configured scope."
+commands.deny = ["wf_browser_cleanup"]

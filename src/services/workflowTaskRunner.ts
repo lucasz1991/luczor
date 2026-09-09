@@ -15,7 +15,13 @@
 // fails cleanly with an explanatory error, which the server records as a failed
 // step — never a silent success.
 
+import { workflowLlmInput, checkWorkflowLlmResult } from '@/services/workflows/taskInputs'
+import { validateToolArguments } from '@/services/tools/validateArguments'
+import type { ThinkingTier } from '@/services/inference/thinking'
+import { isThinkingTier } from '@/services/inference/thinking'
+
 export type WorkflowTaskBundle = {
+  task_version?: number
   task_key: string
   params: Record<string, unknown>
   workflow: {
@@ -36,6 +42,10 @@ export type WorkflowTaskBundle = {
     output_keys?: string[]
     automatic?: boolean
     grant?: unknown
+    thinking_tier?: ThinkingTier
+    test_mode?: 'real'
+    test_run?: string
+    test_binding?: Record<string, unknown>
   }
 }
 
@@ -53,9 +63,13 @@ export type WorkflowTaskPrimitives = {
   runAgent: (
     agent: string,
     prompt: string,
-    projectDir?: string
+    projectDir?: string,
+    options?: import('@/services/agents/types').AgentExecutionOptions & { model?: string }
   ) => Promise<{ ok: boolean; code: number; stdout: string; stderr: string }>
   runLlm?: (input: import('@/services/workflows/llm').WorkflowLlmInput) => Promise<Record<string, unknown>>
+  runAgentFlow?: (team: boolean, params: Record<string, unknown>) => Promise<Record<string, unknown>>
+  browserSession?: ReturnType<typeof import('@/services/workflows/browser').createWorkflowBrowser>
+  runImage?: (input: import('@/services/workflows/image').WorkflowImageInput) => Promise<Record<string, unknown>>
   /** Read/write a file inside the confined workflow files root (P15b). */
   fileRead: (path: string) => Promise<{ content: string; bytes: number; truncated: boolean }>
   fileWrite: (path: string, content: string) => Promise<{ path: string; bytes: number }>
@@ -63,8 +77,17 @@ export type WorkflowTaskPrimitives = {
   runScript: (
     runtime: 'python' | 'node',
     code: string,
-    timeoutSeconds?: number
-  ) => Promise<{ ok: boolean; code: number; stdout: string; stderr: string; timed_out: boolean }>
+    timeoutSeconds?: number,
+    input?: Record<string, unknown>
+  ) => Promise<{
+    ok: boolean
+    code: number
+    stdout: string
+    stderr: string
+    timed_out: boolean
+    stdout_truncated?: boolean
+    stderr_truncated?: boolean
+  }>
   /** Drive the in-app browser window (P24). */
   browserOpen: (url?: string) => Promise<unknown>
   browserClick: (selector: string, expectedUrl?: string) => Promise<unknown>
@@ -106,40 +129,40 @@ export async function runWorkflowTask(
   primitives: WorkflowTaskPrimitives
 ): Promise<Record<string, unknown>> {
   const params = bundle.params ?? {}
+  if (bundle.task_version !== undefined && bundle.task_version !== 1)
+    throw new Error('workflow_task_version_unsupported')
+  if (bundle.task_key.startsWith('browser.') && primitives.browserSession)
+    return runBrowserTask(bundle.task_key, params, primitives.browserSession)
 
   switch (bundle.task_key) {
-    case 'llm': {
+    case 'llm':
+    case 'llm.text':
+    case 'llm.json':
+    case 'llm.classify':
+    case 'llm.extract':
+    case 'llm.evaluate': {
       if (!primitives.runLlm) throw new Error('workflow_llm_executor_unavailable')
-      // Laravel resolves input_bindings into payload target fields; retain those values as data-only model inputs.
-      const controlKeys = new Set([
-        'instruction',
-        'input_bindings',
-        'output_format',
-        'output_schema',
-        'inference',
-        'timeout_seconds',
-        'max_output_chars',
-        'title',
-        'list',
-        'routes',
-        'device_id',
-        'project_id',
-        'file_scope',
-        'workspace_root_id',
-        'workspace_root_path',
-      ])
-      const inputs = Object.fromEntries(Object.entries(params).filter(([key]) => !controlKeys.has(key)))
-      return primitives.runLlm({
-        ...params,
-        input_bindings: {
-          ...(params.input_bindings &&
-          typeof params.input_bindings === 'object' &&
-          !Array.isArray(params.input_bindings)
-            ? params.input_bindings
-            : {}),
-          ...inputs,
-        },
-      } as import('@/services/workflows/llm').WorkflowLlmInput)
+      const input = workflowLlmInput(bundle.task_key, params)
+      return checkWorkflowLlmResult(bundle.task_key, input, await primitives.runLlm(input))
+    }
+    case 'agent.single':
+    case 'agent.team': {
+      if (!primitives.runAgentFlow) throw new Error('workflow_agent_executor_unavailable')
+      return primitives.runAgentFlow(bundle.task_key === 'agent.team', params)
+    }
+    case 'image.capture':
+    case 'image.ocr':
+    case 'image.vision':
+    case 'image.compare': {
+      if (!primitives.runImage) throw new Error('workflow_image_executor_unavailable')
+      return primitives.runImage({
+        action: bundle.task_key.slice(6) as import('@/services/workflows/image').WorkflowImageInput['action'],
+        artifactId: str(params.artifact_id) || undefined,
+        otherArtifactId: str(params.other_artifact_id) || undefined,
+        language: str(params.language) || undefined,
+        monitorId: typeof params.monitor_id === 'number' ? params.monitor_id : undefined,
+        maxChars: typeof params.max_chars === 'number' ? params.max_chars : undefined,
+      })
     }
     case 'browser.open':
     case 'browser.open_url': {
@@ -175,7 +198,16 @@ export async function runWorkflowTask(
       const prompt = str(params.prompt).trim()
       if (!prompt) throw new Error('agent.dispatch requires a prompt.')
       const projectDir = str(params.project_dir).trim() || undefined
-      const res = await primitives.runAgent(agent, prompt, projectDir)
+      const requested =
+        params.thinking_tier === 'inherit' || params.thinking_tier === undefined
+          ? bundle.workflow.thinking_tier
+          : params.thinking_tier
+      if (requested !== undefined && !isThinkingTier(requested)) throw new Error('workflow_thinking_tier_invalid')
+      const options = { thinkingTier: requested, model: typeof params.model === 'string' ? params.model : undefined }
+      const res =
+        requested !== undefined || options.model
+          ? await primitives.runAgent(agent, prompt, projectDir, options)
+          : await primitives.runAgent(agent, prompt, projectDir)
       return {
         ok: res.ok,
         code: res.code,
@@ -223,18 +255,84 @@ export async function runWorkflowTask(
       const code = str(params.code).trim()
       if (!code) throw new Error(`${bundle.task_key} requires code.`)
       const timeout = params.timeout_seconds != null ? Number(params.timeout_seconds) : undefined
-      const res = await primitives.runScript(runtime, code, timeout)
+      if (
+        params.input !== undefined &&
+        (!params.input || typeof params.input !== 'object' || Array.isArray(params.input))
+      )
+        throw new Error('workflow_script_input_invalid')
+      const res =
+        params.input !== undefined
+          ? await primitives.runScript(runtime, code, timeout, params.input as Record<string, unknown>)
+          : await primitives.runScript(runtime, code, timeout)
+      let data: unknown
+      if (params.input !== undefined || params.output_schema !== undefined) {
+        if (!res.ok || res.timed_out || res.stdout_truncated || res.stdout.length > MAX_RESPONSE_CHARS)
+          throw new Error('workflow_script_json_output_incomplete')
+        try {
+          data = JSON.parse(res.stdout)
+        } catch {
+          throw new Error('workflow_script_json_output_invalid')
+        }
+        if (params.output_schema) validateToolArguments(params.output_schema as Record<string, unknown>, data)
+      }
       return {
         ok: res.ok,
         code: res.code,
         timed_out: res.timed_out,
         stdout: res.stdout.slice(0, MAX_RESPONSE_CHARS),
         stderr: res.stderr.slice(0, MAX_RESPONSE_CHARS),
+        ...(data !== undefined ? { data, execution_environment: 'windows_user' } : {}),
       }
     }
 
     default:
       throw new Error(`Unsupported workflow client task: ${bundle.task_key}`)
+  }
+}
+
+async function runBrowserTask(
+  task: string,
+  params: Record<string, unknown>,
+  browser: NonNullable<WorkflowTaskPrimitives['browserSession']>
+): Promise<Record<string, unknown>> {
+  const options = {
+    sessionId: str(params.browser_session_id) || undefined,
+    expectedTabId: str(params.tab_id) || undefined,
+    expectedUrl: str(params.expected_url || params.url) || undefined,
+    timeoutMs: typeof params.timeout_ms === 'number' ? params.timeout_ms : undefined,
+  }
+  const selector = str(params.selector).trim()
+  const url = str(params.url).trim()
+  if (['browser.click', 'browser.fill', 'browser.select'].includes(task) && !selector)
+    throw new Error(`${task} requires a selector.`)
+  switch (task) {
+    case 'browser.open':
+      return browser.open(url ? assertHttpUrl(url) : undefined, { ...options, expectedUrl: undefined })
+    case 'browser.open_url':
+    case 'browser.navigate':
+      return browser.navigate(assertHttpUrl(url), { ...options, expectedUrl: str(params.expected_url) || undefined })
+    case 'browser.click':
+      return browser.click(selector, options)
+    case 'browser.fill':
+    case 'browser.select': {
+      if (typeof params.value !== 'string') throw new Error(`${task} requires a string value.`)
+      return task === 'browser.fill'
+        ? browser.fill(selector, params.value, options)
+        : browser.select(selector, params.value, options)
+    }
+    case 'browser.wait':
+      return browser.wait(selector || undefined, options)
+    case 'browser.read':
+      return browser.read(selector || undefined, options)
+    case 'browser.screenshot':
+      return browser.screenshot(str(params.name) || undefined, options)
+    case 'browser.download':
+      return browser.download(assertHttpUrl(url), str(params.name) || undefined, {
+        ...options,
+        expectedUrl: str(params.expected_url) || undefined,
+      })
+    default:
+      throw new Error(`Unsupported workflow browser task: ${task}`)
   }
 }
 

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wf-image-action"
+description = "Enables the wf_image_action command without any pre-configured scope."
+commands.allow = ["wf_image_action"]
+
+[[permission]]
+identifier = "deny-wf-image-action"
+description = "Denies the wf_image_action command without any pre-configured scope."
+commands.deny = ["wf_image_action"]

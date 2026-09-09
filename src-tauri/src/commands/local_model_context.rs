@@ -58,11 +58,33 @@ fn shorten_tool_result(messages: &mut [Value]) -> bool {
     true
 }
 
+#[cfg(test)]
 pub(super) fn fit_context<E>(
+    body: &mut Value,
+    context_tokens: u64,
+    count: impl FnMut(&mut Value) -> Result<u64, E>,
+    cannot_fit: impl Fn() -> E,
+) -> Result<ContextUsage, E> {
+    fit(body, context_tokens, count, cannot_fit, false)
+}
+
+/// Optional future thinking headroom must never evict usable history. First
+/// shrink output to the available context, keeping the existing answer minimum.
+pub(super) fn fit_adaptive_context<E>(
+    body: &mut Value,
+    context_tokens: u64,
+    count: impl FnMut(&mut Value) -> Result<u64, E>,
+    cannot_fit: impl Fn() -> E,
+) -> Result<ContextUsage, E> {
+    fit(body, context_tokens, count, cannot_fit, true)
+}
+
+fn fit<E>(
     body: &mut Value,
     context_tokens: u64,
     mut count: impl FnMut(&mut Value) -> Result<u64, E>,
     cannot_fit: impl Fn() -> E,
+    prefer_history: bool,
 ) -> Result<ContextUsage, E> {
     let mut requested_output = body["max_tokens"].as_u64().ok_or_else(&cannot_fit)?;
     let mut usage = ContextUsage {
@@ -79,6 +101,11 @@ pub(super) fn fit_context<E>(
             usage.input_tokens = input_tokens;
             usage.output_tokens = requested_output;
             return Ok(usage);
+        }
+        if prefer_history && available >= requested_output.min(256) {
+            requested_output = available;
+            body["max_tokens"] = json!(requested_output);
+            continue;
         }
         let messages = body["messages"].as_array_mut().ok_or_else(&cannot_fit)?;
         let removed = remove_oldest_round(messages);
@@ -107,6 +134,65 @@ pub(super) fn fit_context<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adaptive_headroom_preserves_existing_rounds_and_clamps_ultra_to_real_context() {
+        let mut body = json!({"max_tokens":81984,"messages":[{"role":"user","content":"old"},
+            {"role":"assistant","content":"existing answer"},{"role":"user","content":"current"}],"chat_template_kwargs":{}});
+        let history = body["messages"].clone();
+        let plan = super::super::reasoning_budget::Plan::new(
+            super::super::reasoning_budget::ThinkingTier::Ultra,
+            None,
+            "auto",
+            None,
+            true,
+        )
+        .unwrap();
+        let mut counts = 0;
+        let usage = fit_adaptive_context(
+            &mut body,
+            32768,
+            |candidate| {
+                plan.apply(candidate)?;
+                counts += 1;
+                Ok::<u64, String>(10000)
+            },
+            || "does not fit".to_string(),
+        )
+        .unwrap();
+        assert_eq!(usage.output_tokens, 22704);
+        assert_eq!(usage.omitted_messages, 0);
+        assert_eq!(body["messages"], history);
+        assert_eq!(body["reasoning_budget_tokens"], 22704 - 16384 - 64);
+        assert_eq!(counts, 2);
+        assert!(usage.input_tokens + usage.output_tokens + 64 <= usage.context_tokens);
+    }
+
+    #[test]
+    fn adaptive_fit_reduces_answer_only_when_thinking_no_longer_fits() {
+        let mut body = json!({"max_tokens":81984,"messages":[{"role":"user","content":"current"}],"chat_template_kwargs":{}});
+        let plan = super::super::reasoning_budget::Plan::new(
+            super::super::reasoning_budget::ThinkingTier::Ultra,
+            None,
+            "auto",
+            None,
+            true,
+        )
+        .unwrap();
+        let usage = fit_adaptive_context(
+            &mut body,
+            32768,
+            |candidate| {
+                plan.apply(candidate)?;
+                Ok::<u64, String>(32000)
+            },
+            || "does not fit".to_string(),
+        )
+        .unwrap();
+        assert_eq!(usage.output_tokens, 704);
+        assert_eq!(body["reasoning_effort"], "none");
+        assert_eq!(body["reasoning_budget_tokens"], 0);
+    }
 
     #[test]
     fn counts_template_and_tools_and_reserves_answer_space() {

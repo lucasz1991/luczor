@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-claude-job-cancel"
+description = "Enables the claude_job_cancel command without any pre-configured scope."
+commands.allow = ["claude_job_cancel"]
+
+[[permission]]
+identifier = "deny-claude-job-cancel"
+description = "Denies the claude_job_cancel command without any pre-configured scope."
+commands.deny = ["claude_job_cancel"]

@@ -40,7 +40,13 @@ export function executePreparedAgentJob(
       const vanishedAfterTerminal = !current && !!last && ['completed', 'failed', 'cancelled'].includes(last.status)
       if (!agentHub.isSettled(jobId) && !vanishedAfterTerminal) return
       if (last?.status === 'completed') {
-        finish(() => resolve({ output: lastOutput, externalThreadId: last?.externalThreadId }))
+        finish(() =>
+          resolve({
+            output: lastOutput,
+            externalThreadId: last?.externalThreadId,
+            effortSelection: last?.effortSelection,
+          })
+        )
       } else if (signal?.aborted || last?.status === 'cancelled') {
         finish(() => reject(abortError()))
       } else {

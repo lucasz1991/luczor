@@ -17,6 +17,7 @@ import {
   getNativeHardwareSnapshot,
   prepareNativeLocalModel,
   TauriLocalRuntimeTransport,
+  controlLocalReasoning,
 } from '@/services/inference/tauriLocalRuntime'
 
 const catalogBinding = {
@@ -26,6 +27,70 @@ const catalogBinding = {
 } as const
 
 describe('Tauri local runtime catalog boundary', () => {
+  it('binds live controls to active catalog and generation, drops late progress, and removes the old implicit 2048 cap', async () => {
+    let finish!: (value: unknown) => void
+    let channel!: { onmessage: (event: unknown) => void }
+    const event = {
+      type: 'budget',
+      requestId: 'budget-request',
+      tier: 'ultra',
+      phase: 'thinking',
+      generatedTokens: 7200,
+      softTargetTokens: 8192,
+      thinkingLimitTokens: 16384,
+      requestedThinkingLimitTokens: 65536,
+      outputLimitTokens: 32700,
+      responseReserveTokens: 16384,
+      warning: true,
+      canExtend: false,
+      canAnswer: true,
+      answerRequested: false,
+      elapsedMs: 4000,
+      sequence: 7,
+    }
+    const onBudget = vi.fn()
+    tauri.invoke.mockImplementation((command, args) => {
+      if (command === 'local_model_infer') {
+        channel = args.onEvent
+        channel.onmessage({ ...event, reasoningContent: 'PRIVATE' })
+        return new Promise(resolve => {
+          finish = resolve
+        })
+      }
+      if (command === 'local_model_reasoning_control')
+        return Promise.resolve({ ...event, sequence: 8, answerRequested: true, controlOutcome: 'applied' })
+      throw new Error('Unexpected command')
+    })
+    const running = new TauriLocalRuntimeTransport().stream({} as LocalModelReleaseManifest, {
+      requestId: 'budget-request',
+      modelReleaseId: 'model-1',
+      scopeDigest: 'd'.repeat(64),
+      catalogBinding,
+      messages: [{ role: 'user', content: 'Test' }],
+      thinkingTier: 'ultra',
+      onBudget,
+    })
+    expect(tauri.invoke.mock.calls[0]?.[1].request.maxOutputTokens).toBeUndefined()
+    expect(tauri.invoke.mock.calls[0]?.[1].request.thinkingTier).toBe('ultra')
+    expect(JSON.stringify(onBudget.mock.calls)).not.toContain('PRIVATE')
+    channel.onmessage({ ...event, sequence: 6 })
+    expect(onBudget).toHaveBeenCalledTimes(1)
+    await controlLocalReasoning('budget-request', 'answer', 7)
+    expect(tauri.invoke).toHaveBeenLastCalledWith('local_model_reasoning_control', {
+      requestId: 'budget-request',
+      action: 'answer',
+      expectedSequence: 7,
+      catalogBinding,
+    })
+    expect(onBudget).toHaveBeenLastCalledWith(expect.objectContaining({ phase: 'thinking', answerRequested: true }))
+    finish({ requestId: 'budget-request', content: 'Public', rawToolCalls: [], finishReason: 'stop' })
+    await running
+    expect(onBudget).toHaveBeenLastCalledWith(null)
+    const count = onBudget.mock.calls.length
+    channel.onmessage({ ...event, sequence: 100 })
+    expect(onBudget).toHaveBeenCalledTimes(count)
+    await expect(controlLocalReasoning('budget-request', 'more', 8)).rejects.toThrow('nicht mehr')
+  })
   it.each(['off', 'auto', undefined] as const)(
     'serializes local reasoning mode %s into native inference without changing output/context limits',
     async reasoningMode => {
@@ -252,7 +317,14 @@ describe('Tauri local runtime catalog boundary', () => {
 
     await prepareNativeLocalModel('model-1', binding)
     const transport = new TauriLocalRuntimeTransport()
-    await transport.stream({} as LocalModelReleaseManifest, {
+    let finish!: (value: unknown) => void
+    tauri.invoke.mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          finish = resolve
+        })
+    )
+    const streaming = transport.stream({} as LocalModelReleaseManifest, {
       requestId: 'request-1',
       modelReleaseId: 'model-1',
       scopeDigest: 'd'.repeat(64),
@@ -267,6 +339,8 @@ describe('Tauri local runtime catalog boundary', () => {
     channel?.onmessage?.({ type: 'delta', content: 'visible' })
     controller.abort()
     channel?.onmessage?.({ type: 'delta', content: '-secret-after-abort' })
+    finish({ requestId: 'request-1', content: 'visible', rawToolCalls: [], finishReason: 'stop' })
+    await streaming
     await transport.cancel('request-1', binding)
     await transport.stop('model-1', binding)
 

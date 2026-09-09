@@ -15,9 +15,11 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, WebviewWindow};
 
 use super::ensure_main_webview;
@@ -251,12 +253,17 @@ fn runtime_candidates(runtime: &str) -> Option<&'static [&'static str]> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunScriptPayload {
     pub runtime: String,
     pub code: String,
     pub timeout_seconds: Option<u64>,
     #[serde(rename = "fullAccessAcknowledged", default)]
     pub full_access_acknowledged: bool,
+    pub scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
+    pub input: Option<Value>,
+    #[serde(rename = "outputSchema")]
+    pub output_schema: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -268,27 +275,68 @@ pub struct RunScriptResult {
     pub timed_out: bool,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    pub duration_ms: u64,
+    pub runtime: String,
+    pub interpreter: String,
+    pub runtime_version: Option<String>,
+    pub execution_profile: &'static str,
+    pub input_mode: &'static str,
+    pub code_sha256: String,
+}
+
+fn validate_script(input: &RunScriptPayload) -> Result<(), String> {
+    if !input.full_access_acknowledged { return Err("Local scripts require the reviewed Windows host-user profile; the project is not a filesystem sandbox.".into()); }
+    if input.code.trim().is_empty() || input.code.len() > 200_000 || input.code.contains('\0') { return Err("workflow_script_code_invalid".into()); }
+    if runtime_candidates(&input.runtime).is_none() { return Err("workflow_script_runtime_unsupported".into()); }
+    if let Some(data) = &input.input {
+        if input.scope.is_none() || !data.is_object() || serde_json::to_vec(data).map_err(|_| "workflow_script_json_invalid")?.len() > MAX_OUTPUT_BYTES { return Err("workflow_script_json_input_invalid".into()); }
+        #[cfg(windows)]
+        if input.code.encode_utf16().count() > 28000 { return Err("workflow_script_exceeds_windows_argument_limit".into()); }
+    }
+    if input.output_schema.as_ref().is_some_and(|schema| !schema.is_object() || schema.to_string().len() > 50000) { return Err("workflow_script_output_schema_invalid".into()); }
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRuntimeCapability { runtime: &'static str, available: bool, version: Option<String>, execution_profile: &'static str, json_input: bool }
+
+fn runtime_version(exe: &Path, runtime: &str) -> Option<String> {
+    let mut command = Command::new(exe);
+    command.arg("--version").env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("PYTHONSTARTUP");
+    let result = super::process::run_bounded_command(command, None, Duration::from_secs(3), 256).ok()?;
+    if !result.success || result.stdout_truncated || result.stderr_truncated { return None; }
+    let version = if result.stdout.trim().is_empty() { result.stderr.trim() } else { result.stdout.trim() };
+    if version.len() > 80 || !version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ' ')) || !(if runtime == "node" { version.starts_with('v') } else { version.starts_with("Python ") }) { return None; }
+    Some(version.into())
+}
+
+/// Only --version probes, never user code, package installation, login or model preparation.
+#[tauri::command]
+pub async fn wf_runtime_capabilities(window: WebviewWindow) -> Result<Vec<WorkflowRuntimeCapability>, String> {
+    ensure_main_webview(&window)?;
+    tauri::async_runtime::spawn_blocking(|| {
+        ["node", "python"].into_iter().map(|runtime| {
+            let exe = runtime_candidates(runtime).and_then(find_executable);
+            let version = exe.as_deref().and_then(|exe| runtime_version(exe, runtime));
+            WorkflowRuntimeCapability { runtime, available: version.is_some(), version, execution_profile: "host-user", json_input: true }
+        }).collect()
+    }).await.map_err(|_| "workflow_runtime_probe_failed".into())
 }
 
 /// Run a Python/Node snippet headlessly with a timeout and bounded output.
 #[tauri::command]
 pub async fn wf_run_script(
+    app: AppHandle,
     window: WebviewWindow,
     payload: Guarded<RunScriptPayload>,
 ) -> Result<RunScriptResult, String> {
     ensure_main_webview(&window)?;
-    let gate = admit_full(&payload.execution, true, true)?;
+    validate_script(&payload.request)?;
+    if payload.scope.is_some() && payload.execution.workflow_execution_id.is_none() { return Err("workflow_execution_identity_required".into()); }
+    // Existing unscoped clients retain the old global mode requirement. A durable job already owns its scoped host grant.
+    let gate = admit_full(&payload.execution, true, payload.scope.is_none())?;
     let payload = payload.request;
-    if !payload.full_access_acknowledged {
-        return Err("Local scripts run with full OS user access. Explicit acknowledgement is required; this is not a sandbox.".into());
-    }
-    let code = payload.code.trim().to_string();
-    if code.is_empty() {
-        return Err("code is empty".into());
-    }
-    if code.len() > 200_000 {
-        return Err("code is too large".into());
-    }
     let names = runtime_candidates(&payload.runtime)
         .ok_or_else(|| format!("Unsupported runtime: {}", payload.runtime))?;
     let exe = find_executable(names)
@@ -303,30 +351,42 @@ pub async fn wf_run_script(
     // Run the potentially long subprocess off the async runtime.
     tauri::async_runtime::spawn_blocking(move || {
         gate.check()?;
-        run_script_blocking(exe, &payload.runtime, code, timeout, Some(gate))
+        let check = || {
+            gate.check()?;
+            if let Some(scope) = &payload.scope { scope.check(&app)?; }
+            Ok(())
+        };
+        check()?;
+        let root = payload.scope.as_ref().map(|scope| PathBuf::from(&scope.expected_root_path));
+        let _lease = root.as_deref().map(|root| super::codex::acquire_workspace_lease(root, true)).transpose()?;
+        let version = runtime_version(&exe, &payload.runtime);
+        if version.is_none() { return Err("workflow_runtime_probe_failed".into()); }
+        check()?;
+        run_script_blocking(&exe, &payload, root.as_deref(), timeout, Some(gate.clone()), version, &check)
     })
     .await
     .map_err(|e| format!("join failed: {e}"))?
 }
 
 fn run_script_blocking(
-    exe: PathBuf,
-    runtime: &str,
-    code: String,
+    exe: &Path,
+    payload: &RunScriptPayload,
+    root: Option<&Path>,
     timeout: Duration,
     execution: Option<super::execution::ExecutionLease>,
+    version: Option<String>,
+    check: &dyn Fn() -> Result<(), String>,
 ) -> Result<RunScriptResult, String> {
-    let mut command = Command::new(exe);
-    // Read the program from stdin: `python -` / `node -` avoids writing temp files.
-    command.arg("-");
-    let output = super::process::run_bounded_command_guarded(
+    let (command, stdin) = script_command(exe, payload, root)?;
+    let started = Instant::now();
+    let output = super::process::run_bounded_command_scoped(
         command,
-        Some(code.into_bytes()),
+        Some(stdin),
         timeout,
         MAX_OUTPUT_BYTES,
         execution,
+        Some(check),
     )?;
-    let _ = runtime;
 
     Ok(RunScriptResult {
         ok: output.success,
@@ -336,7 +396,25 @@ fn run_script_blocking(
         timed_out: output.timed_out,
         stdout_truncated: output.stdout_truncated,
         stderr_truncated: output.stderr_truncated,
+        duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        runtime: payload.runtime.clone(),
+        interpreter: exe.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| payload.runtime.clone()),
+        runtime_version: version,
+        execution_profile: "host-user",
+        input_mode: if payload.input.is_some() { "json-stdin" } else { "code-stdin" },
+        code_sha256: format!("{:x}", Sha256::digest(payload.code.as_bytes())),
     })
+}
+
+fn script_command(exe: &Path, payload: &RunScriptPayload, root: Option<&Path>) -> Result<(Command, Vec<u8>), String> {
+    let mut command = Command::new(exe);
+    command.env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("PYTHONSTARTUP");
+    if let Some(root) = root { command.current_dir(root); }
+    let stdin = if let Some(input) = &payload.input {
+        command.arg(if payload.runtime == "node" { "-e" } else { "-c" }).arg(&payload.code);
+        serde_json::to_vec(input).map_err(|_| "workflow_script_json_invalid")?
+    } else { command.arg("-"); payload.code.as_bytes().to_vec() };
+    Ok((command, stdin))
 }
 
 #[cfg(test)]

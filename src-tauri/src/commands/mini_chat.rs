@@ -14,6 +14,32 @@ pub struct MiniChatState(pub Mutex<Option<serde_json::Value>>);
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum MiniAction {
     Ready,
+    ThinkingTier {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        tier: MiniThinkingTier,
+    },
+    ThinkingControl {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "requestId")]
+        request_id: String,
+        action: MiniThinkingControl,
+        sequence: u64,
+    },
+    AgentMode {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        enabled: bool,
+    },
+    VoicePushToTalk {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    VoiceWakeWord {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
     Send {
         #[serde(rename = "sessionId")]
         session_id: String,
@@ -94,6 +120,14 @@ pub enum MiniMode {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
+pub enum MiniThinkingTier { Fast, Balanced, Thorough, Max, Ultra }
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MiniThinkingControl { More, Answer }
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum MiniWorkflowAction {
     Test,
     Start,
@@ -141,6 +175,11 @@ fn validate_action(action: &MiniAction) -> Result<(), String> {
     }
     match action {
         MiniAction::Send { session_id, .. }
+        | MiniAction::ThinkingTier { session_id, .. }
+        | MiniAction::ThinkingControl { session_id, .. }
+        | MiniAction::AgentMode { session_id, .. }
+        | MiniAction::VoicePushToTalk { session_id }
+        | MiniAction::VoiceWakeWord { session_id }
         | MiniAction::Stop { session_id }
         | MiniAction::Reset { session_id }
         | MiniAction::Decide { session_id, .. }
@@ -154,6 +193,10 @@ fn validate_action(action: &MiniAction) -> Result<(), String> {
     }
     if let MiniAction::SelectProject { project_id, .. } = action {
         validate_identifier(project_id)?;
+    }
+    if let MiniAction::ThinkingControl { request_id, sequence, .. } = action {
+        validate_identifier(request_id)?;
+        if *sequence > 9_007_199_254_740_991 { return Err("Invalid budget sequence.".into()); }
     }
     if let MiniAction::WorkflowOpen {
         message_id,

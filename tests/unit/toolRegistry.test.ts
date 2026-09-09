@@ -170,11 +170,31 @@ const TOOL_CONTRACT = [
   { name: 'workspace_agent_cancel', category: 'app', mutating: true, requiresApproval: false },
 ] as const
 
-const TOOL_SCHEMA_SHA256 = '201598dee8b59909a0081690e5fa10234c3f92b90aa8331f020da9bbe0fd043d'
-const CORE_TOOL_SCHEMA_SHA256 = 'fe694b20d5a15a37be6027618d76aca6bc92c7e858784aae272ae776edb1f6c8'
+// Reviewed addition: managed Claude, five thinking tiers and model-bound effort/budget options.
+const TOOL_SCHEMA_SHA256 = '587ad12aaa4680e1f6792d1e28feba03337e383cc888de3a2b741cc40fa03e3e'
+const CORE_TOOL_SCHEMA_SHA256 = '7b66786e79efcc6053122b428adf6b96d3fd66b2fca8f6376ba14c3bce1f67a1'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {
+  it('exposes reviewed Claude and effort options without granting execution through preparation', () => {
+    const tool = getTool('agent_job_prepare')!
+    expect(tool.requiresApproval).toBe(false)
+    const schema = toOpenAITools().find(item => item.function.name === 'agent_job_prepare')!.function.parameters
+    expect(schema).toMatchObject({
+      additionalProperties: false,
+      required: ['agent', 'prompt'],
+      properties: {
+        agent: { enum: ['codex', 'claude', 'local', 'policy'] },
+        thinking_tier: { enum: ['fast', 'balanced', 'thorough', 'max', 'ultra'] },
+        effort: { enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] },
+        model: { type: 'string', maxLength: 160 },
+        max_turns: { type: 'integer', minimum: 1, maximum: 200 },
+        max_budget_usd: { type: 'number', exclusiveMinimum: 0, maximum: 100 },
+      },
+    })
+    expect(tool.description).toContain('Does not execute it')
+    expect(tool.description).toContain('not a filesystem sandbox')
+  })
   beforeEach(async () => {
     updateExecutionControls({ mode: 'act', killSwitch: false, scope: 'project-1' })
     await executionPayload(executionGate.capture(), false)

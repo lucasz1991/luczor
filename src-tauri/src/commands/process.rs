@@ -31,15 +31,29 @@ pub(crate) fn run_bounded_command(
 }
 
 pub(crate) fn run_bounded_command_guarded(
-    mut command: Command,
+    command: Command,
     stdin: Option<Vec<u8>>,
     timeout: Duration,
     max_output_bytes: usize,
     execution: Option<super::execution::ExecutionLease>,
 ) -> Result<BoundedProcessOutput, String> {
-    if let Some(gate) = &execution {
-        gate.check()?;
-    }
+    run_bounded_command_scoped(command, stdin, timeout, max_output_bytes, execution, None)
+}
+
+pub(crate) fn run_bounded_command_scoped(
+    mut command: Command,
+    stdin: Option<Vec<u8>>,
+    timeout: Duration,
+    max_output_bytes: usize,
+    execution: Option<super::execution::ExecutionLease>,
+    scope_check: Option<&dyn Fn() -> Result<(), String>>,
+) -> Result<BoundedProcessOutput, String> {
+    let check = || {
+        if let Some(gate) = &execution { gate.check()?; }
+        if let Some(scope) = scope_check { scope()?; }
+        Ok::<(), String>(())
+    };
+    check()?;
     let deadline = Instant::now() + timeout;
     configure_child_process(&mut command);
     command
@@ -54,6 +68,8 @@ pub(crate) fn run_bounded_command_guarded(
     let mut child = command
         .spawn()
         .map_err(|error| format!("spawn failed: {error}"))?;
+    // On Windows the child is still suspended here. Reject a rebinding before resuming it.
+    if let Err(error) = check() { terminate_process_tree(&mut child); let _ = child.wait(); return Err(error); }
     #[cfg(windows)]
     let lifetime = match super::codex::LifetimeGuard::attach(&child) {
         Ok(guard) => guard,
@@ -63,8 +79,8 @@ pub(crate) fn run_bounded_command_guarded(
             return Err(error);
         }
     };
-    if let Some(gate) = &execution {
-        if let Err(error) = gate.check() {
+    {
+        if let Err(error) = check() {
             terminate_process_tree(&mut child);
             let _ = child.wait();
             return Err(error);
@@ -85,7 +101,7 @@ pub(crate) fn run_bounded_command_guarded(
     });
 
     let (status, timed_out) = loop {
-        if execution.as_ref().is_some_and(|gate| gate.check().is_err()) {
+        if check().is_err() {
             terminate_process_tree(&mut child);
             let _ = child.wait();
             return Err("Execution policy changed; local process stopped.".into());
@@ -120,6 +136,7 @@ pub(crate) fn run_bounded_command_guarded(
     }
     let stdout = finish_thread(stdout_thread, drain_deadline, "stdout")?;
     let stderr = finish_thread(stderr_thread, drain_deadline, "stderr")?;
+    check()?;
 
     Ok(BoundedProcessOutput {
         success: status.success() && !timed_out,

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wf-browser-action"
+description = "Enables the wf_browser_action command without any pre-configured scope."
+commands.allow = ["wf_browser_action"]
+
+[[permission]]
+identifier = "deny-wf-browser-action"
+description = "Denies the wf_browser_action command without any pre-configured scope."
+commands.deny = ["wf_browser_action"]

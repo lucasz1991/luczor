@@ -117,6 +117,7 @@ pub async fn browser_open(
     payload: Guarded<BrowserOpenPayload>,
 ) -> Result<BrowserOkResult, String> {
     ensure_main_webview(&window)?;
+    super::workflow_browser::ensure_unbound()?;
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     let target = match payload.url.as_deref() {
@@ -172,6 +173,7 @@ pub async fn browser_navigate(
     payload: Guarded<BrowserNavigatePayload>,
 ) -> Result<BrowserOkResult, String> {
     ensure_main_webview(&window)?;
+    super::workflow_browser::ensure_unbound()?;
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     let target = valid_http_url(&payload.url)?;
@@ -197,6 +199,7 @@ pub async fn browser_close(
     payload: ExecutionOnly,
 ) -> Result<BrowserOkResult, String> {
     ensure_main_webview(&window)?;
+    super::workflow_browser::ensure_unbound()?;
     let gate = admit(&payload.execution, true)?;
     if let Some(window) = app.get_webview_window(BROWSER_WEBVIEW_LABEL) {
         gate.check()?;
@@ -248,6 +251,7 @@ pub async fn browser_click(
     payload: Guarded<BrowserClickPayload>,
 ) -> Result<BrowserActionResult, String> {
     ensure_main_webview(&window)?;
+    super::workflow_browser::ensure_unbound()?;
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     let selector = payload.selector.trim();
@@ -326,6 +330,7 @@ pub async fn browser_read(
     payload: Guarded<BrowserReadPayload>,
 ) -> Result<BrowserReadResult, String> {
     ensure_main_webview(&window)?;
+    super::workflow_browser::ensure_unbound()?;
     let gate = admit(&payload.execution, false)?;
     let payload = payload.request;
     let window = app

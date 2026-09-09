@@ -1,3 +1,25 @@
+import type { ThinkingTier } from '@/services/inference/thinking'
+
+export type AgentEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
+export type AgentEffortSelection = Readonly<{
+  tier: ThinkingTier
+  model?: string
+  requestedEffort?: AgentEffort
+  appliedEffort?: AgentEffort
+  status: 'requested' | 'confirmed' | 'unknown'
+  reason: string
+  capabilityRevision?: string
+  capabilitySource?: 'codex-cache' | 'sdk-documentation' | 'runtime'
+}>
+export type AgentExecutionOptions = Readonly<{
+  thinkingTier?: ThinkingTier
+  effort?: AgentEffort
+  effortSelection?: AgentEffortSelection
+  executionProfile?: 'workspace' | 'host-user'
+  maxTurns?: number
+  maxBudgetUsd?: number
+}>
+
 /** These records are local to the trusted desktop renderer. */
 export type AgentPermission = 'read-only' | 'workspace-write'
 export type AgentRole = 'planner' | 'implementer' | 'reviewer' | 'join' | 'assistant'
@@ -13,60 +35,67 @@ export type AgentProjectSnapshot = Readonly<{
   workspaceUpdatedAt?: number
 }>
 
-export type AgentJobInput = Readonly<{
-  project: AgentProjectSnapshot
-  adapterId: string
-  prompt: string
-  permission: AgentPermission
-  role?: AgentRole
-  model?: string
-  externalThreadId?: string
-  teamRunId?: string
-  teamNodeId?: string
-}>
+export type AgentJobInput = Readonly<
+  AgentExecutionOptions & {
+    project: AgentProjectSnapshot
+    adapterId: string
+    prompt: string
+    permission: AgentPermission
+    role?: AgentRole
+    model?: string
+    externalThreadId?: string
+    teamRunId?: string
+    teamNodeId?: string
+  }
+>
 
 /** Suitable for local metadata history; never contains prompts, output or absolute paths. */
-export type AgentJobMetadata = Readonly<{
-  id: string
-  principalId: string
-  projectId: string
-  adapterId: string
-  model?: string
-  role: AgentRole
-  permission: AgentPermission
-  status: AgentJobStatus
-  createdAt: number
-  approvalExpiresAt?: number
-  startedAt?: number
-  finishedAt?: number
-  externalThreadId?: string
-  teamRunId?: string
-  teamNodeId?: string
-  errorCode?: 'scope_changed' | 'execution_failed' | 'invalid_result' | 'approval_expired'
-}>
+export type AgentJobMetadata = Readonly<
+  AgentExecutionOptions & {
+    id: string
+    principalId: string
+    projectId: string
+    adapterId: string
+    model?: string
+    role: AgentRole
+    permission: AgentPermission
+    status: AgentJobStatus
+    createdAt: number
+    approvalExpiresAt?: number
+    startedAt?: number
+    finishedAt?: number
+    externalThreadId?: string
+    teamRunId?: string
+    teamNodeId?: string
+    errorCode?: 'scope_changed' | 'execution_failed' | 'invalid_result' | 'approval_expired'
+  }
+>
 
 /** Live UI record; the prompt is intentionally absent, including while queued. */
 export type AgentJob = Readonly<AgentJobMetadata & { project: AgentProjectSnapshot }>
 
-export type AgentRunRequest = Readonly<{
-  jobId: string
-  project: AgentProjectSnapshot
-  prompt: string
-  permission: AgentPermission
-  role: AgentRole
-  model?: string
-  externalThreadId?: string
-  teamRunId?: string
-  teamNodeId?: string
-  signal: AbortSignal
-  /** Report a bounded lifecycle phase without exposing prompts or output. */
-  onPhase?: (phase: 'running' | 'awaiting_external_approval') => void
-  /** Replace the live text with this complete output snapshot; the orchestrator bounds it. */
-  onOutput: (output: string) => void
-}>
+export type AgentRunRequest = Readonly<
+  AgentExecutionOptions & {
+    jobId: string
+    project: AgentProjectSnapshot
+    prompt: string
+    permission: AgentPermission
+    role: AgentRole
+    model?: string
+    externalThreadId?: string
+    teamRunId?: string
+    teamNodeId?: string
+    signal: AbortSignal
+    /** Report a bounded lifecycle phase without exposing prompts or output. */
+    onPhase?: (phase: 'running' | 'awaiting_external_approval') => void
+    /** Replace the live text with this complete output snapshot; the orchestrator bounds it. */
+    onOutput: (output: string) => void
+  }
+>
 
 export type AgentRunResult = Readonly<{
   output: string
+  effortSelection?: AgentEffortSelection
   /** Only a real ID returned by the external runtime, never inferred from text. */
   externalThreadId?: string
 }>

@@ -16,11 +16,59 @@ import type {
 import type { InferenceResult, WireToolCall } from '@/services/inference/types'
 import { readReportedTokenUsage } from '@/services/tokenUsage'
 import { localResources, type LocalResourceConfigState } from './resources'
+import { readThinkingProgress, type ThinkingBudgetProgress, type ThinkingControlAction } from './thinking'
 
 type NativeInferenceEvent =
   | { type: 'started'; requestId: string }
   | { type: 'delta'; requestId: string; content: string }
   | { type: 'error'; requestId: string; code: string; retryable: boolean }
+  | (ThinkingBudgetProgress & { type: 'budget' })
+
+type ActiveBudget = { request: LocalRuntimeRequest; latest: ThinkingBudgetProgress | null }
+const activeBudgets = new Map<string, ActiveBudget>()
+function publishBudget(active: ActiveBudget, value: unknown) {
+  const progress = readThinkingProgress(value)
+  if (
+    !progress ||
+    progress.requestId !== active.request.requestId ||
+    active.request.signal?.aborted ||
+    activeBudgets.get(progress.requestId) !== active ||
+    (active.latest && progress.sequence < active.latest.sequence)
+  )
+    return
+  active.latest = progress
+  active.request.onBudget?.(progress)
+}
+/** Called only by the owning main renderer; the mini bridge verifies its view epoch first. */
+export async function controlLocalReasoning(
+  requestId: string,
+  action: ThinkingControlAction,
+  expectedSequence: number
+) {
+  const active = activeBudgets.get(requestId)
+  if (
+    !active ||
+    active.request.signal?.aborted ||
+    !active.latest ||
+    !Number.isSafeInteger(expectedSequence) ||
+    expectedSequence < 0 ||
+    !['more', 'answer'].includes(action)
+  )
+    throw new Error('Diese Modellgeneration kann nicht mehr gesteuert werden.')
+  const value = await invoke<ThinkingBudgetProgress>('local_model_reasoning_control', {
+    requestId,
+    action,
+    expectedSequence,
+    catalogBinding: active.request.catalogBinding,
+  })
+  if (activeBudgets.get(requestId) !== active || active.request.signal?.aborted)
+    throw new Error('Diese Modellgeneration wurde bereits beendet.')
+  const progress = readThinkingProgress(value)
+  if (!progress || progress.requestId !== requestId)
+    throw new Error('Die Runtime hat keinen gültigen Steuerungsstand bestätigt.')
+  publishBudget(active, progress)
+  return progress
+}
 
 type NativeInferenceResult = {
   content: string
@@ -198,8 +246,12 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
     let contextRejected = false
     let historyRejected = false
     let toolContractRejected = false
+    const budget: ActiveBudget = { request, latest: null }
+    activeBudgets.set(request.requestId, budget)
     channel.onmessage = event => {
+      if (activeBudgets.get(request.requestId) !== budget) return
       if (event.requestId && event.requestId !== request.requestId) return
+      if (event.type === 'budget') publishBudget(budget, event)
       if (event.type === 'error' && event.code === 'runtime_context_exceeded') contextRejected = true
       if (event.type === 'error' && event.code === 'runtime_chat_history_rejected') historyRejected = true
       if (event.type === 'error' && event.code === 'runtime_tool_contract_rejected') toolContractRejected = true
@@ -222,50 +274,59 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
         messages: request.messages,
         tools: request.tools ?? [],
         toolChoice: request.toolChoice ?? 'auto',
-        maxOutputTokens: request.maxOutputTokens ?? 2_048,
+        maxOutputTokens: request.maxOutputTokens,
         contextLimit: request.contextLimit,
         reasoningMode: request.reasoningMode ?? 'auto',
+        thinkingTier: request.thinkingTier ?? 'balanced',
+        thinkingConfig: request.thinkingConfig,
       },
       onEvent: channel,
-    }).catch(error => {
-      observation.fail(request.signal?.aborted === true)
-      if (
-        toolContractRejected ||
-        /^Local llama\.cpp rejected the tool contract \(HTTP (400|500)\)\.$/.test(String(error))
-      ) {
-        throw new LocalInferenceError(
-          'Das lokale Modell konnte die Werkzeugdaten nicht verarbeiten. Bereits ausgeführte Aktionen bleiben erhalten. Das Modell bleibt geladen.',
-          'runtime_tool_contract_rejected',
-          false,
-          false
-        )
-      }
-      if (
-        historyRejected ||
-        /^Local llama\.cpp rejected the conversation role order in its chat template \(HTTP (400|500)\)\.$/.test(
-          String(error)
-        )
-      ) {
-        throw new LocalInferenceError(
-          'Das lokale Modell konnte die Nachrichtenstruktur nicht verarbeiten. Bitte die Anfrage erneut senden. Das Modell bleibt geladen.',
-          'runtime_chat_history_rejected',
-          false,
-          false
-        )
-      }
-      if (
-        contextRejected ||
-        String(error) === 'Local llama.cpp rejected the request because the context window was exceeded (HTTP 400).'
-      ) {
-        throw new LocalInferenceError(
-          'Der aktuelle Auftrag passt auch nach der Kontextanpassung nicht vollständig in das lokale Modell. Bitte große Inhalte als Datei abschnittsweise bearbeiten lassen. Das Modell bleibt geladen.',
-          'runtime_context_exceeded',
-          false,
-          false
-        )
-      }
-      throw error
     })
+      .catch(error => {
+        observation.fail(request.signal?.aborted === true)
+        if (
+          toolContractRejected ||
+          /^Local llama\.cpp rejected the tool contract \(HTTP (400|500)\)\.$/.test(String(error))
+        ) {
+          throw new LocalInferenceError(
+            'Das lokale Modell konnte die Werkzeugdaten nicht verarbeiten. Bereits ausgeführte Aktionen bleiben erhalten. Das Modell bleibt geladen.',
+            'runtime_tool_contract_rejected',
+            false,
+            false
+          )
+        }
+        if (
+          historyRejected ||
+          /^Local llama\.cpp rejected the conversation role order in its chat template \(HTTP (400|500)\)\.$/.test(
+            String(error)
+          )
+        ) {
+          throw new LocalInferenceError(
+            'Das lokale Modell konnte die Nachrichtenstruktur nicht verarbeiten. Bitte die Anfrage erneut senden. Das Modell bleibt geladen.',
+            'runtime_chat_history_rejected',
+            false,
+            false
+          )
+        }
+        if (
+          contextRejected ||
+          String(error) === 'Local llama.cpp rejected the request because the context window was exceeded (HTTP 400).'
+        ) {
+          throw new LocalInferenceError(
+            'Der aktuelle Auftrag passt auch nach der Kontextanpassung nicht vollständig in das lokale Modell. Bitte große Inhalte als Datei abschnittsweise bearbeiten lassen. Das Modell bleibt geladen.',
+            'runtime_context_exceeded',
+            false,
+            false
+          )
+        }
+        throw error
+      })
+      .finally(() => {
+        if (activeBudgets.get(request.requestId) === budget) {
+          activeBudgets.delete(request.requestId)
+          request.onBudget?.(null)
+        }
+      })
     if (request.signal?.aborted) observation.fail(true)
     else observation.finish(result, result.diagnostics)
     return {

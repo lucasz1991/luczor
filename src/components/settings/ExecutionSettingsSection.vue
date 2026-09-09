@@ -2,6 +2,7 @@
 import { computed, ref } from 'vue'
 import LocalResourceSettings from '@/components/LocalResourceSettings.vue'
 import IdleOptimizationSettings from '@/components/IdleOptimizationSettings.vue'
+import ThinkingSettings from './ThinkingSettings.vue'
 import type { LuczorMode } from '@/services/inference/types'
 import {
   capabilityAccess,
@@ -102,6 +103,7 @@ function toggleAutoExecution(): void {
       </p>
     </div>
     <LocalResourceSettings />
+    <ThinkingSettings />
     <IdleOptimizationSettings />
     <div class="lz-card">
       <div class="lz-card__title">Im Hintergrund vorbereiten</div>

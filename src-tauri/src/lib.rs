@@ -26,6 +26,7 @@ pub fn run() {
         })
         .manage(commands::mini_chat::MiniChatState::default())
         .manage(commands::codex::CodexJobs::default())
+        .manage(commands::claude::ClaudeJobs::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_prevent_default::init())
         .plugin(tauri_plugin_notification::init())
@@ -95,6 +96,11 @@ pub fn run() {
             commands::codex::codex_runtime_status,
             commands::codex::codex_desktop_open,
             commands::codex::codex_job_start,
+            commands::agent_effort::codex_model_capabilities,
+            commands::claude::claude_runtime_status,
+            commands::claude::claude_job_start,
+            commands::claude::claude_job_status,
+            commands::claude::claude_job_cancel,
             commands::codex::codex_job_status,
             commands::codex::codex_job_cancel,
             commands::agent::agent_cli_run,
@@ -140,6 +146,10 @@ pub fn run() {
             commands::local_model::local_model_recover_memory,
             commands::local_model::local_model_prepare,
             commands::local_model::local_model_infer,
+            commands::local_model::local_model_reasoning_control,
+            commands::workflow_browser::wf_browser_action,
+            commands::workflow_browser::wf_browser_cleanup,
+            commands::workflow_image::wf_image_action,
             commands::local_model::local_model_cancel,
             commands::local_model::local_model_stop,
             commands::local_model::resource_config::local_model_get_resource_config,
@@ -166,6 +176,7 @@ pub fn run() {
         ) {
             commands::local_model::shutdown_all();
             _app.state::<commands::codex::CodexJobs>().cancel_all();
+            _app.state::<commands::claude::ClaudeJobs>().cancel_all();
         }
     });
 }

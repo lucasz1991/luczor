@@ -10,8 +10,17 @@ import type { InferenceGateway, InferenceRequest } from '@/services/inference/ty
 import { publicAnswerText } from '@/services/publicAnswerStream'
 import { requestPayloadApproval } from '@/services/payloadApproval'
 import { validateToolArguments } from '@/services/tools/validateArguments'
+import {
+  isThinkingTier,
+  resolveThinkingConfig,
+  type ThinkingTier,
+  type ThinkingConfig,
+  type ThinkingBudgetProgress,
+} from '@/services/inference/thinking'
 
 export type WorkflowLlmInput = {
+  thinking_tier?: ThinkingTier | 'inherit'
+  thinking_config?: ThinkingConfig
   instruction: string
   input_bindings?: Record<string, unknown>
   output_format?: 'text' | 'json'
@@ -20,7 +29,13 @@ export type WorkflowLlmInput = {
   timeout_seconds?: number
   max_output_chars?: number
 }
-type LlmContext = { projectId: string; ticket: ExecutionTicket; onToken?: (text: string) => void }
+type LlmContext = {
+  projectId: string
+  ticket: ExecutionTicket
+  onToken?: (text: string) => void
+  thinkingTier?: ThinkingTier
+  onBudget?: (progress: ThinkingBudgetProgress | null) => void
+}
 type LlmDependencies = {
   local: (projectId: string) => Promise<InferenceGateway>
   external: (request: InferenceRequest, ticket: ExecutionTicket) => Promise<InferenceGateway>
@@ -79,6 +94,13 @@ export async function runWorkflowLlm(
   deps: LlmDependencies = dependencies
 ): Promise<Record<string, unknown>> {
   deps.assert(context.ticket)
+  if (input.thinking_tier !== undefined && input.thinking_tier !== 'inherit' && !isThinkingTier(input.thinking_tier))
+    throw new Error('workflow_thinking_tier_invalid')
+  const thinkingTier =
+    input.thinking_tier && input.thinking_tier !== 'inherit'
+      ? input.thinking_tier
+      : (context.thinkingTier ?? 'balanced')
+  const thinkingConfig = resolveThinkingConfig(thinkingTier, input.thinking_config)
   if (typeof input.instruction !== 'string' || !input.instruction.trim() || input.instruction.length > 12_000)
     throw new Error('workflow_llm_instruction_invalid')
   if (input.inference && !['local', 'external'].includes(input.inference))
@@ -98,6 +120,11 @@ export async function runWorkflowLlm(
   const started = Date.now()
   try {
     const request: InferenceRequest = {
+      thinkingTier,
+      thinkingConfig,
+      onBudget: progress => {
+        if (!signal.aborted) context.onBudget?.(progress)
+      },
       projectId: context.projectId,
       taskType: 'workflow.llm',
       tools: [],
@@ -138,6 +165,8 @@ export async function runWorkflowLlm(
       ok: true,
       ...(input.output_format === 'json' ? { data } : { text }),
       inference_target: gateway.target,
+      thinking_tier: thinkingTier,
+      thinking_application: gateway.target === 'local_llama_cpp' ? 'native_context_bounded' : 'provider_not_confirmed',
       model: result.model ?? null,
       request_id: result.requestId ?? null,
       finish_reason: result.finishReason,

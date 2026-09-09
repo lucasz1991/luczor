@@ -61,6 +61,43 @@ function deferred<T>() {
 }
 
 describe('native Codex agent adapter', () => {
+  it('pins the reviewed model and requested effort with the metadata revision, without claiming it was applied', async () => {
+    const fixture = harness()
+    fixture.invoke
+      .mockResolvedValueOnce({
+        revision: 'current',
+        source: 'codex-cache',
+        models: [{ model: 'gpt-6-astra', supportedEfforts: ['low', 'medium', 'high', 'max', 'ultra'] }],
+      })
+      .mockResolvedValueOnce(snapshot('completed', 'Done'))
+    const result = await createCodexAgentAdapter(fixture.dependencies).run({
+      ...request(),
+      model: 'gpt-6-astra',
+      thinkingTier: 'ultra',
+    })
+    expect(fixture.invoke).toHaveBeenNthCalledWith(2, 'codex_job_start', {
+      payload: expect.objectContaining({ model: 'gpt-6-astra', effort: 'ultra', capabilityRevision: 'current' }),
+    })
+    expect(result.effortSelection).toMatchObject({
+      requestedEffort: 'ultra',
+      status: 'requested',
+      capabilitySource: 'codex-cache',
+    })
+    expect(result.effortSelection?.appliedEffort).toBeUndefined()
+  })
+
+  it('does not start when a node effort override is unsupported for its pinned model', async () => {
+    const fixture = harness()
+    fixture.invoke.mockResolvedValueOnce({
+      revision: 'current',
+      models: [{ model: 'older', supportedEfforts: ['low', 'high'] }],
+    })
+    await expect(
+      createCodexAgentAdapter(fixture.dependencies).run({ ...request(), model: 'older', effort: 'ultra' })
+    ).rejects.toThrow('unterstützt')
+    expect(fixture.invoke).toHaveBeenCalledTimes(1)
+  })
+
   it('polls starting/running states and binds workspace version and explicit resume ID', async () => {
     const fixture = harness()
     fixture.invoke

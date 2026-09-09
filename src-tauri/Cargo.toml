@@ -67,11 +67,18 @@ keyring = "4.1.6"
 tauri-plugin-single-instance = "2.4.3"
 
 [target.'cfg(windows)'.dependencies]
+webview2-com = "=0.38.2"
 # Reuse xcap's locked Windows bindings for native adapter inventory (no shell).
 windows = { version = "=0.62.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
+    "Win32_System_WinRT",
+    "Foundation",
+    "Globalization",
+    "Graphics_Imaging",
+    "Media_Ocr",
+    "Storage_Streams",
 ] }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",

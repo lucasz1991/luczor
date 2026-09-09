@@ -7,6 +7,9 @@ import { presentEnvelopeStream } from '@/services/envelope'
 import { completedCommentary } from '@/services/chatCommentary'
 import { compactHistory, normalizeConversationHistory, previewToolArguments } from '@/services/chatPresentation'
 import { executionGate } from '@/services/executionGate'
+import { isThinkingTier } from '@/services/inference/thinking'
+import { captureThinking, thinkingSettings } from '@/services/inference/thinkingSettings'
+import { controlLocalReasoning } from '@/services/inference/tauriLocalRuntime'
 import { emptyMiniSnapshot, type MiniAction, type MiniDecision, type MiniMessage } from './types'
 
 type Context = {
@@ -31,6 +34,7 @@ type Dependencies = {
 export function createMiniChatController(deps: Dependencies) {
   const state = reactive(emptyMiniSnapshot())
   state.sessionId = crypto.randomUUID()
+  state.thinkingTier = thinkingSettings.value.defaultTier
   let abort: AbortController | null = null
   let decisionResolve: ((approved: boolean) => void) | null = null
   let continuation: AgentCheckpoint | undefined
@@ -70,6 +74,8 @@ export function createMiniChatController(deps: Dependencies) {
   }
   function reset() {
     stop()
+    state.thinkingTier = thinkingSettings.value.defaultTier
+    state.thinkingBudget = null
     state.sessionId = crypto.randomUUID()
     continuation = undefined
     state.messages = []
@@ -124,6 +130,7 @@ export function createMiniChatController(deps: Dependencies) {
       return
     }
     const project = { ...state.project }
+    const turnThinking = captureThinking(state.thinkingTier ?? 'balanced')
     const sessionId = state.sessionId
     const current = new AbortController()
     const turnExecution = executionGate.capture(current.signal)
@@ -237,6 +244,13 @@ export function createMiniChatController(deps: Dependencies) {
           }
         : undefined
       const result = await deps.run({
+        ...turnThinking,
+        onBudget(progress) {
+          if (valid()) {
+            state.thinkingBudget = progress
+            touch()
+          }
+        },
         projectId: project.id,
         mode: state.mode,
         getMode: () => deps.context().mode,
@@ -330,6 +344,7 @@ export function createMiniChatController(deps: Dependencies) {
           })
         }
         state.busy = false
+        state.thinkingBudget = null
         state.decision = null
         if (state.sessionId !== sessionId) state.notice = ''
         abort = null
@@ -360,6 +375,23 @@ export function createMiniChatController(deps: Dependencies) {
       return
     if (action.sessionId !== state.sessionId) return
     switch (action.type) {
+      case 'thinking_tier':
+        if (isThinkingTier(action.tier)) {
+          state.thinkingTier = action.tier
+          touch()
+        }
+        break
+      case 'thinking_control':
+        if (state.busy && state.thinkingBudget?.requestId === action.requestId) {
+          return controlLocalReasoning(action.requestId, action.action, action.sequence).then(progress => {
+            if (state.thinkingBudget?.requestId === action.requestId) {
+              if (progress.controlOutcome === 'stale')
+                state.notice = 'Budgetstand aktualisiert. Bitte die gewünschte Aktion erneut wählen.'
+              touch()
+            }
+          })
+        }
+        break
       case 'send':
         return send(action.text)
       case 'stop':

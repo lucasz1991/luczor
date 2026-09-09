@@ -1,6 +1,7 @@
 /** Shared desktop contracts for the existing Laravel workflow API. */
 export type WorkflowRoute = { type: 'step' | 'end' | 'fail'; step_key?: string; max_iterations?: number }
 export type WorkflowStepDefinition = {
+  version?: number
   key: string
   type: string
   depends_on?: string[]
@@ -10,6 +11,15 @@ export type WorkflowStepDefinition = {
   max_attempts?: number
 }
 export type WorkflowDefinition = {
+  schema_version?: 1 | 2
+  thinking_tier?: import('@/services/inference/thinking').ThinkingTier
+  budgets?: {
+    active_seconds: number
+    max_executions: number
+    max_loop_iterations: number
+    max_parallel: number
+    max_repairs: number
+  }
   steps: WorkflowStepDefinition[]
   lists?: Array<{ key: string; name: string }>
   input_schema?: Record<string, unknown>
@@ -35,9 +45,15 @@ export type Workflow = {
   is_edit_locked?: boolean
   definition: WorkflowDefinition
   revisions?: WorkflowRevision[]
+  repair_policy?: Record<string, unknown> | null
   updated_at?: string
 }
 export type WorkflowTask = {
+  version?: number
+  input_schema?: Record<string, unknown>
+  output_schema?: Record<string, unknown>
+  required_capabilities?: string[]
+  adapters?: string[]
   key: string
   label: string
   kind: string

@@ -14,6 +14,9 @@ import {
 import { canonicalWorkflowPath, workflowAutomationAllows } from './automation'
 import { workflowAccountScope, workflowExecutionLedger } from './executionLedger'
 import { runWorkflowLlm } from './llm'
+import { createWorkflowBrowser } from './browser'
+import { runWorkflowImage } from './image'
+import { retainWorkflowResources, releaseWorkflowResources } from './runResources'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 
@@ -60,6 +63,13 @@ export async function runWorkflowDeviceJob(
   )
     throw new Error('workflow_execution_root_changed')
   const controller = new AbortController()
+  const artifactScope = {
+    principalId: account.principalId,
+    projectId: metadata.project_id,
+    expectedRootPath: workspace.rootPath,
+    expectedWorkspaceUpdatedAt: workspace.updatedAt,
+    runId: metadata.run,
+  }
   const ticket: ExecutionTicket = { ...parentTicket, signal: AbortSignal.any([parentTicket.signal, controller.signal]) }
   const assert = () => {
     assertSession()
@@ -159,6 +169,7 @@ export async function runWorkflowDeviceJob(
       await LuczorApi.startDeviceJob(job.id, config.clientId, config, ticket.signal)
       assert()
       try {
+        if (bundle.task_key.startsWith('browser.')) retainWorkflowResources(artifactScope, config)
         const result = await runWorkflowTask(
           bundle,
           workflowPrimitives(bundle, account.principalId, workspace, ticket, assert)
@@ -190,6 +201,7 @@ export async function runWorkflowDeviceJob(
     clearInterval(timer)
     ticket.signal.removeEventListener('abort', cancelNative)
     if (cancellation) await cancellation.catch(() => {})
+    if (ticket.signal.aborted) await releaseWorkflowResources(artifactScope).catch(() => {})
   }
 }
 
@@ -217,13 +229,25 @@ function workflowPrimitives(
     return result
   }
   const workspaceFiles = bundle.workflow.file_scope === 'workspace'
+  const artifactScope = {
+    ...workspaceIdentity,
+    expectedWorkspaceUpdatedAt: workspace.updatedAt!,
+    runId: bundle.workflow.run,
+  }
   return {
     openUrl: url => invokeTask('open_url', { url }),
     httpFetch: (method, url, headers, body) =>
       invokeTask('wf_http_request', { method, url, headers, body, timeout_seconds: 30 }),
-    runAgent: (agent, prompt, projectDir) =>
-      runWorkflowAgent(agent, prompt, projectDir ?? workspace.rootPath, ticket.signal, projectId),
-    runLlm: input => runWorkflowLlm(input, { projectId, ticket }),
+    runAgent: (agent, prompt, projectDir, options) =>
+      runWorkflowAgent(agent, prompt, projectDir ?? workspace.rootPath, ticket.signal, projectId, options),
+    runLlm: input => runWorkflowLlm(input, { projectId, ticket, thinkingTier: bundle.workflow.thinking_tier }),
+    runAgentFlow: async (team, params) => {
+      const { runWorkflowAgentFlow } = await import('./agentFlow')
+      assert()
+      return runWorkflowAgentFlow(team, params, { projectId, ticket, thinkingTier: bundle.workflow.thinking_tier })
+    },
+    browserSession: createWorkflowBrowser({ scope: artifactScope, invokeTask }),
+    runImage: input => runWorkflowImage(input, { scope: artifactScope, invokeTask }),
     fileRead: async path => {
       if (!workspaceFiles) return invokeTask('wf_file_read', { path }, false)
       const result = await invokeTask<{ content: string; bytes: number; truncated: boolean }>(
@@ -237,12 +261,14 @@ function workflowPrimitives(
       if (!workspaceFiles) return invokeTask('wf_file_write', { path, content })
       return invokeTask('project_fs_write', { ...workspaceIdentity, path, content, originRunId: bundle.workflow.run })
     },
-    runScript: (runtime, code, timeoutSeconds) =>
+    runScript: (runtime, code, timeoutSeconds, input) =>
       invokeTask('wf_run_script', {
         runtime,
         code,
         timeout_seconds: timeoutSeconds ?? null,
         fullAccessAcknowledged: true,
+        scope: artifactScope,
+        ...(input !== undefined ? { input } : {}),
       }),
     browserOpen: url => invokeTask('browser_open', { url: url ?? null }),
     browserClick: (selector, expectedUrl) => invokeTask('browser_click', { selector, expectedUrl }),

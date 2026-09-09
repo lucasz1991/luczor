@@ -2,6 +2,11 @@ import { invoke } from '@tauri-apps/api/core'
 import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
 import { executionGate, executionPayload } from '@/services/executionGate'
 import type { AgentAdapter, AgentPermission, AgentProjectSnapshot } from './types'
+import { selectAgentEffort, type AgentCapabilityCatalog } from './effort'
+
+export function getCodexModelCapabilities(): Promise<AgentCapabilityCatalog> {
+  return invoke('codex_model_capabilities')
+}
 
 export type CodexJobSnapshot = {
   id: string
@@ -98,6 +103,19 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
         throw new Error('Für Codex fehlt eine aktuelle Projektordner-Zuordnung.')
       }
       const scope = { principalId: request.project.principalId, projectId: request.project.projectId }
+      let effortSelection = request.effortSelection
+      if (!effortSelection && (request.thinkingTier || request.effort)) {
+        const catalog = await dependencies.invoke<AgentCapabilityCatalog>('codex_model_capabilities')
+        effortSelection = selectAgentEffort({
+          adapter: 'codex',
+          tier: request.thinkingTier,
+          role: request.role,
+          model: request.model,
+          override: request.effort,
+          catalog,
+        })
+      }
+      if (signal.aborted) throw new DOMException('Abgebrochen', 'AbortError')
       let snapshot: CodexJobSnapshot
       try {
         const execution = await guarded.authorize(request.permission)
@@ -109,6 +127,8 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
             prompt: request.prompt,
             permission: request.permission,
             model: request.model,
+            effort: effortSelection?.requestedEffort,
+            capabilityRevision: effortSelection?.capabilityRevision,
             externalThreadId: request.externalThreadId,
             timeoutSeconds: 900,
             execution,
@@ -162,6 +182,7 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
         return {
           output: snapshot.output + (snapshot.outputTruncated ? '\n\n[Ausgabe gekürzt]' : ''),
           externalThreadId: snapshot.externalThreadId ?? undefined,
+          effortSelection,
         }
       } finally {
         signal.removeEventListener('abort', cancel)

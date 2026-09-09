@@ -6,9 +6,11 @@ import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
 import { buildProjectStartContext } from '@/services/prompt/projectStartContext'
 import type { LuczorMode } from '@/services/inference/types'
 import { AgentOrchestrator } from './orchestrator'
-import { createCodexAgentAdapter, listCodexSessions } from './codexAgent'
+import { createCodexAgentAdapter, listCodexSessions, getCodexModelCapabilities } from './codexAgent'
+import { createClaudeAgentAdapter, CLAUDE_CAPABILITIES } from './claudeAgent'
+import { selectAgentEffort } from './effort'
 import { createModelAgentAdapter, type ModelAgentApprovalRequest } from './modelAgent'
-import type { AgentJobInput, AgentPermission, AgentProjectSnapshot } from './types'
+import type { AgentJobInput, AgentPermission, AgentProjectSnapshot, AgentExecutionOptions } from './types'
 
 export const agentHubRevision = shallowRef(0)
 export const agentExternalApprovals = shallowRef<readonly ModelAgentApprovalRequest[]>([])
@@ -81,6 +83,7 @@ export function resolveAgentExternalApproval(jobId: string, approved: boolean) {
 export const agentHub = new AgentOrchestrator({
   adapters: [
     createCodexAgentAdapter(),
+    createClaudeAgentAdapter(),
     createModelAgentAdapter({ id: 'local' }),
     createModelAgentAdapter({ id: 'policy', requestExternalApproval }),
   ],
@@ -108,24 +111,26 @@ export async function agentProjectSnapshot(projectId: string): Promise<AgentProj
   }
 }
 
-export async function prepareAgentJob(input: {
-  projectId: string
-  adapterId: 'codex' | 'local' | 'policy'
-  prompt: string
-  role: AgentJobInput['role']
-  permission: AgentPermission
-  model?: string
-  includeMemory?: boolean
-  resume?: boolean
-  externalThreadId?: string
-  teamRunId?: string
-  teamNodeId?: string
-  expectedProject?: AgentProjectSnapshot
-  /** Caller-owned generation check, repeated around every asynchronous preparation step. */
-  assertExecution?: () => void
-  /** exact-reviewed preserves a reviewed workflow or plan, including structured predecessor results. */
-  promptAssembly?: 'project' | 'exact-reviewed'
-}) {
+export async function prepareAgentJob(
+  input: AgentExecutionOptions & {
+    projectId: string
+    adapterId: 'codex' | 'claude' | 'local' | 'policy'
+    prompt: string
+    role: AgentJobInput['role']
+    permission: AgentPermission
+    model?: string
+    includeMemory?: boolean
+    resume?: boolean
+    externalThreadId?: string
+    teamRunId?: string
+    teamNodeId?: string
+    expectedProject?: AgentProjectSnapshot
+    /** Caller-owned generation check, repeated around every asynchronous preparation step. */
+    assertExecution?: () => void
+    /** exact-reviewed preserves a reviewed workflow or plan, including structured predecessor results. */
+    promptAssembly?: 'project' | 'exact-reviewed'
+  }
+) {
   input.assertExecution?.()
   if (!input.prompt.trim() || input.prompt.length > 24_000)
     throw new Error('Bitte einen Arbeitsauftrag mit 1 bis 24000 Zeichen eingeben.')
@@ -144,7 +149,7 @@ export async function prepareAgentJob(input: {
   }
   await validateAgentScope(snapshot, input.permission)
   input.assertExecution?.()
-  if (input.adapterId === 'codex') {
+  if (input.adapterId === 'codex' || input.adapterId === 'claude') {
     if (!snapshot.rootPath) throw new Error('Bitte zuerst einen Projektordner zuordnen.')
     if ((await getRepositoryExternalPolicy()) === 'deny')
       throw new Error('Die Repository-Richtlinie verbietet externe Coding-Agenten.')
@@ -170,6 +175,21 @@ export async function prepareAgentJob(input: {
   }
   await validateAgentScope(snapshot, input.permission)
   input.assertExecution?.()
+  if (input.resume && input.adapterId === 'claude')
+    throw new Error('Claude-Sitzungen können derzeit nicht wiederaufgenommen werden.')
+  const effortSelection =
+    (input.adapterId === 'codex' || input.adapterId === 'claude') && (input.thinkingTier || input.effort)
+      ? selectAgentEffort({
+          adapter: input.adapterId,
+          tier: input.thinkingTier,
+          role,
+          model: input.model,
+          override: input.effort,
+          catalog: input.adapterId === 'codex' ? await getCodexModelCapabilities() : CLAUDE_CAPABILITIES,
+        })
+      : undefined
+  input.assertExecution?.()
+  await validateAgentScope(snapshot, input.permission)
   const job = agentHub.enqueue({
     project: snapshot,
     adapterId: input.adapterId,
@@ -177,6 +197,12 @@ export async function prepareAgentJob(input: {
     role,
     permission: input.permission,
     model: input.model?.trim() || undefined,
+    thinkingTier: input.thinkingTier,
+    effort: input.effort,
+    effortSelection,
+    executionProfile: input.adapterId === 'claude' ? 'host-user' : 'workspace',
+    maxTurns: input.maxTurns,
+    maxBudgetUsd: input.maxBudgetUsd,
     externalThreadId,
     teamRunId: input.teamRunId,
     teamNodeId: input.teamNodeId,
@@ -226,7 +252,10 @@ export function configureAgentHub(modeReader: () => LuczorMode): () => void {
         if (!['awaiting_approval', 'queued', 'running', 'awaiting_external_approval'].includes(job.status)) continue
         try {
           await validateAgentScope(job.project, job.permission)
-          if (job.adapterId === 'codex' && (await getRepositoryExternalPolicy()) === 'deny')
+          if (
+            (job.adapterId === 'codex' || job.adapterId === 'claude') &&
+            (await getRepositoryExternalPolicy()) === 'deny'
+          )
             throw new Error('Externe Agenten gesperrt.')
         } catch {
           if (generation === configurationGeneration) agentHub.cancel(job.id)

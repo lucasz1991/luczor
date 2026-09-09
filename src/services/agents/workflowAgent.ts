@@ -1,6 +1,7 @@
 import { state } from '@/state/store'
 import { agentProjectSnapshot, prepareAgentJob } from './hub'
 import { executePreparedAgentJob } from './managedJob'
+import type { AgentExecutionOptions, AgentRole } from './types'
 
 export type WorkflowAgentResult = Readonly<{ ok: boolean; code: number; stdout: string; stderr: string }>
 
@@ -15,9 +16,11 @@ export async function runWorkflowAgent(
   prompt: string,
   projectDir?: string,
   signal?: AbortSignal,
-  explicitProjectId?: string
+  explicitProjectId?: string,
+  options: AgentExecutionOptions & { model?: string; role?: AgentRole } = {}
 ): Promise<WorkflowAgentResult> {
-  if (agent.trim().toLowerCase() !== 'codex') {
+  const adapterId = agent.trim().toLowerCase()
+  if (adapterId !== 'codex' && adapterId !== 'claude') {
     throw new Error('Dieser Workflow-Agent ist nicht als verwalteter Luczor-Agent verfügbar.')
   }
   if (!prompt.trim() || prompt.length > 24_000) throw new Error('Der Workflow-Agentenauftrag ist ungültig.')
@@ -32,9 +35,10 @@ export async function runWorkflowAgent(
   }
   const job = await prepareAgentJob({
     projectId: project.id,
-    adapterId: 'codex',
+    adapterId,
     prompt,
-    role: 'implementer',
+    ...options,
+    role: options.role ?? 'implementer',
     permission: 'workspace-write',
     includeMemory: false,
     expectedProject: snapshot,

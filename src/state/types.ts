@@ -11,6 +11,7 @@ export type ChatRole = 'user' | 'assistant' | 'tool'
 export type MessageVisibility = 'visible' | 'hidden'
 
 export type MessageMeta = {
+  thinkingTier?: import('@/services/inference/thinking').ThinkingTier
   kind?: 'question' | 'statement'
   isLoading?: boolean
 

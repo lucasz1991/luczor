@@ -14,7 +14,9 @@ import {
 import type { LuczorMode } from '@/services/inference/types'
 import { requestConfirmation } from '@/services/confirmation'
 import WorkflowStepEditor from './WorkflowStepEditor.vue'
+import WorkflowGraphEditor from './WorkflowGraphEditor.vue'
 import WorkflowTriggerEditor from './WorkflowTriggerEditor.vue'
+import WorkflowTestsPanel from './WorkflowTestsPanel.vue'
 const props = withDefaults(
   defineProps<{
     open: boolean
@@ -32,13 +34,14 @@ const emit = defineEmits<{ 'update:open': [open: boolean]; discuss: [text: strin
 const controller = props.controllerProp ?? new WorkflowController()
 const view = controller.view
 const dialog = ref<HTMLDialogElement | null>(null)
-const tab = ref('overview')
+const tab = ref('edit')
 const tabs = [
-  { id: 'overview', label: 'Übersicht' },
   { id: 'edit', label: 'Ablauf' },
-  { id: 'versions', label: 'Versionen' },
-  { id: 'triggers', label: 'Auslöser' },
+  { id: 'inputs', label: 'Eingaben' },
+  { id: 'tests', label: 'Tests' },
+  { id: 'automation', label: 'Automatisierung' },
   { id: 'runs', label: 'Läufe' },
+  { id: 'versions', label: 'Versionen' },
 ]
 const query = ref('')
 const name = ref('')
@@ -121,7 +124,7 @@ async function selectWorkflow(id: number) {
   }
   await controller.select(id)
   fillDraft()
-  tab.value = 'overview'
+  tab.value = 'edit'
   showTriggerEditor.value = false
 }
 function updateStep(index: number, next: WorkflowStepDefinition) {
@@ -290,6 +293,15 @@ async function completeManual(id: number) {
     localError.value = error instanceof Error ? error.message : 'Ergebnis prüfen.'
   }
 }
+async function refreshSelected() {
+  if (!view.selected || dirty.value) return
+  await controller.select(view.selected.id)
+  fillDraft()
+}
+async function showTestRun(id: string) {
+  await controller.refreshRun(id)
+  tab.value = 'runs'
+}
 function keyboardTab(event: KeyboardEvent, index: number) {
   let target = index
   if (event.key === 'ArrowRight') target = (index + 1) % tabs.length
@@ -426,6 +438,12 @@ onBeforeUnmount(() => {
           </div>
           <button type="button" :disabled="busy" @click="discuss">Im Chat verbessern</button>
         </div>
+        <div v-if="view.selected && !creating" class="wf-actions">
+          <button type="button" :disabled="writeBlocked || dirty" class="ai-button ai-button--primary" @click="start(false)">Workflow starten</button>
+          <button type="button" :disabled="writeBlocked || dirty" @click="start(true)">Ohne Effekte simulieren</button>
+          <button type="button" :disabled="writeBlocked || dirty" @click="newWorkflow(true)">Als Kopie bearbeiten</button>
+          <span class="wf-muted">{{ view.selected.definition.steps.length }} Schritte · {{ view.triggers.filter(item => item.enabled).length }} aktive Auslöser</span>
+        </div>
         <div class="wf-tabs" role="tablist" aria-label="Workflow-Bereiche">
           <button
             v-for="(item, index) in tabs"
@@ -442,67 +460,18 @@ onBeforeUnmount(() => {
             {{ item.label }}
           </button>
         </div>
-        <section v-if="tab === 'overview'" id="wf-panel-overview" role="tabpanel" aria-labelledby="wf-tab-overview">
-          <template v-if="view.selected"
-            ><div class="wf-stats">
-              <div>
-                <strong>{{ view.selected.definition.steps.length }}</strong
-                ><span>Schritte</span>
-              </div>
-              <div>
-                <strong>{{ view.triggers.filter(item => item.enabled).length }}</strong
-                ><span>Aktive Auslöser</span>
-              </div>
-              <div>
-                <strong>{{ view.runs.length }}</strong
-                ><span>Letzte Läufe</span>
-              </div>
-            </div>
-            <div class="wf-section-heading">
-              <h4>Ablauf</h4>
-              <button type="button" @click="tab = 'edit'">Bearbeiten</button>
-            </div>
-            <ol class="wf-outline">
-              <li v-for="step in view.selected.definition.steps" :key="step.key">
-                <strong>{{ step.payload.title || step.key }}</strong
-                ><span>{{ view.catalog.find(item => item.key === step.type)?.label || step.type }}</span
-                ><small>{{ step.depends_on?.length ? `Nach ${step.depends_on.join(', ')}` : 'Startschritt' }}</small>
-              </li>
-            </ol>
-            <details>
-              <summary>Eingaben für diesen Lauf</summary>
-              <label>Eingaben als JSON<textarea v-model="runInput" rows="5" spellcheck="false" /></label>
-            </details>
-            <div class="wf-actions">
-              <button type="button" :disabled="writeBlocked || dirty" @click="start(true)">Testlauf</button
-              ><button
-                type="button"
-                class="ai-button ai-button--primary"
-                :disabled="writeBlocked || dirty"
-                @click="start(false)"
-              >
-                Workflow starten</button
-              ><button type="button" :disabled="writeBlocked || dirty" @click="newWorkflow(true)">
-                Als Kopie bearbeiten
-              </button>
-            </div>
-            <p class="wf-muted">
-              Testläufe simulieren Effekte. Lokale Aufgaben warten auf das zugeordnete Gerät, Projekt und notwendige
-              Freigaben.
-            </p>
-          </template>
-          <div v-else class="wf-empty">
-            <h3>Ein Gespräch wird zum wiederverwendbaren Ablauf.</h3>
-            <p>Beschreibe dein Ziel im Chat oder lege die ersten Schritte hier an.</p>
-            <button type="button" @click="discuss">Workflow im Chat entwickeln</button>
-          </div>
-        </section>
         <section v-if="tab === 'edit'" id="wf-panel-edit" role="tabpanel" aria-labelledby="wf-tab-edit">
           <template v-if="view.selected || creating"
             ><p v-if="locked" class="wf-notice">
               Dieser Ablauf ist gesperrt oder eingebettet. Erstelle eine bearbeitbare Kopie.
             </p>
             <label>Name<input v-model="name" :disabled="writeBlocked || locked" maxlength="160" /></label>
+            <WorkflowGraphEditor
+              v-model="draft"
+              :catalog="view.catalog"
+              :disabled="writeBlocked || locked"
+              @select="stepIndex = draft.steps.findIndex(step => step.key === $event)"
+            />
             <div class="wf-editor">
               <div class="wf-step-list">
                 <div
@@ -559,17 +528,6 @@ onBeforeUnmount(() => {
               />
               <p v-else class="wf-muted">Wähle die erste Aufgabe aus der Bibliothek.</p>
             </div>
-            <details>
-              <summary>Eingabefelder definieren</summary>
-              <label
-                >Eingabeschema (JSON)<textarea
-                  v-model="inputSchemaText"
-                  :disabled="writeBlocked || locked"
-                  rows="7"
-                  spellcheck="false"
-                />
-              </label>
-            </details>
             <label
               >Was ändert sich?<textarea
                 v-model="changeSummary"
@@ -594,6 +552,34 @@ onBeforeUnmount(() => {
             </div>
           </template>
           <p v-else class="wf-muted">Wähle einen Workflow oder erstelle einen neuen.</p>
+        </section>
+        <section v-if="tab === 'inputs'" id="wf-panel-inputs" role="tabpanel" aria-labelledby="wf-tab-inputs">
+          <template v-if="view.selected || creating">
+            <h4>Eingaben für den Ablauf</h4>
+            <p class="wf-muted">Das Schema gehört zur gespeicherten Workflow-Version. Startwerte gelten nur für den nächsten manuellen Lauf.</p>
+            <label>Eingabeschema (JSON)<textarea v-model="inputSchemaText" :disabled="writeBlocked || locked" rows="9" spellcheck="false" /></label>
+            <div class="wf-actions">
+              <button type="button" :disabled="blocked" @click="save(true)">Definition prüfen</button>
+              <button type="button" :disabled="writeBlocked || locked || !name.trim() || !draft.steps.length" @click="save()">Workflow mit Eingabeschema speichern</button>
+            </div>
+            <label>Startwerte (JSON)<textarea v-model="runInput" :disabled="writeBlocked" rows="7" spellcheck="false" /></label>
+            <p class="wf-muted">Im Bereich Tests kannst du feste Beispieldaten mit überprüfbaren Ergebnisregeln speichern.</p>
+          </template>
+          <p v-else class="wf-muted">Wähle zuerst einen Workflow.</p>
+        </section>
+        <section v-if="tab === 'tests'" id="wf-panel-tests" role="tabpanel" aria-labelledby="wf-tab-tests">
+          <WorkflowTestsPanel
+            v-if="view.selected && !creating && open"
+            :key="`${projectId}:${view.selected.id}`"
+            :workflow="view.selected"
+            :project-id="projectId"
+            :disabled="writeBlocked"
+            :dirty="dirty"
+            :runs="view.runs"
+            @changed="refreshSelected"
+            @run="showTestRun"
+          />
+          <p v-else class="wf-muted">Speichere zuerst einen Workflow, um Tests und Nachweise zu verwalten.</p>
         </section>
         <section v-if="tab === 'versions'" id="wf-panel-versions" role="tabpanel" aria-labelledby="wf-tab-versions">
           <template v-if="view.selected"
@@ -625,7 +611,7 @@ onBeforeUnmount(() => {
             </p></template
           >
         </section>
-        <section v-if="tab === 'triggers'" id="wf-panel-triggers" role="tabpanel" aria-labelledby="wf-tab-triggers">
+        <section v-if="tab === 'automation'" id="wf-panel-automation" role="tabpanel" aria-labelledby="wf-tab-automation">
           <template v-if="view.selected"
             ><div class="wf-section-heading">
               <h4>Auslöser</h4>

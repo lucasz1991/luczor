@@ -18,6 +18,8 @@ export type PendingTaskCreateVerification = {
   resourceId?: string
 }
 export type AgentCheckpoint = {
+  thinkingTier?: import('@/services/inference/thinking').ThinkingTier
+  thinkingConfig?: import('@/services/inference/thinking').ThinkingConfig
   projectId: string
   /** Account + server binding used for safe generation rebasing. */
   principalScopeId?: string

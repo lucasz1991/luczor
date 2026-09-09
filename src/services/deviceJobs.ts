@@ -11,6 +11,7 @@ import {
 } from '@/services/notifications'
 import { isWorkflowTaskBundle, runWorkflowTask, type WorkflowTaskPrimitives } from '@/services/workflowTaskRunner'
 import { isDurableWorkflowJob, runWorkflowDeviceJob } from '@/services/workflows/execution'
+import { sweepWorkflowResources, releaseWorkflowAccountResources } from '@/services/workflows/runResources'
 
 let stop: (() => void) | null = null
 const inFlight = new Set<string>()
@@ -82,6 +83,7 @@ export async function startDeviceJobChannel(): Promise<() => void> {
     const wasCurrent = session === sessionCounter
     active = false
     controller.abort()
+    if (config) void releaseWorkflowAccountResources(config)
     if (wasCurrent) sessionCounter++
     cleanupStartedResources?.()
     if (pusher) {
@@ -97,7 +99,7 @@ export async function startDeviceJobChannel(): Promise<() => void> {
   const stopThis = () => deactivate(true)
   stop = stopThis
 
-  let config: Awaited<ReturnType<typeof getApiConfig>>
+  let config: Awaited<ReturnType<typeof getApiConfig>> | undefined
   try {
     config = Object.freeze({ ...(await getApiConfig()) })
   } catch (error) {
@@ -229,6 +231,8 @@ async function pullPendingBatch(clientId: string, session: ChannelSession): Prom
       if (!response.data) break
       if (!(await safeProcessJob(clientId, response.data, session))) break
     }
+    if (!session.isCurrent()) return
+    await sweepWorkflowResources(session.config, session.signal)
     if (!session.isCurrent()) return
     updateChannelState({ rest: 'polling', lastPollAt: Date.now() })
   } catch (error) {

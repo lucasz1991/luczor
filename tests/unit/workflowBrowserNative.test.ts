@@ -1,0 +1,238 @@
+import { readFileSync } from 'node:fs'
+import vm from 'node:vm'
+import { describe, expect, it, vi } from 'vitest'
+import { createWorkflowBrowser, type WorkflowNativeInvoke } from '@/services/workflows/browser'
+import { runWorkflowImage } from '@/services/workflows/image'
+
+const script = readFileSync(new URL('../../src-tauri/src/commands/workflow_browser_script.js', import.meta.url), 'utf8')
+type Params = {
+  action: string
+  expectedUrl: string
+  selector?: string
+  value?: string
+  timeoutMs?: number
+  maxChars?: number
+  url?: string
+  maxBytes?: number
+}
+function page() {
+  class Element {
+    disabled = false
+    readOnly = false
+    valueText = ''
+    clicked = false
+    innerText = ''
+    options = [{ value: 'one', disabled: false }]
+    get value() {
+      return this.valueText
+    }
+    set value(value: string) {
+      this.valueText = value
+    }
+    getBoundingClientRect() {
+      return { left: 0, top: 0, width: 20, height: 20 }
+    }
+    getAttribute() {
+      return null
+    }
+    contains() {
+      return false
+    }
+    dispatchEvent = vi.fn()
+    click() {
+      this.clicked = true
+    }
+  }
+  class Input extends Element {
+    type = 'text'
+    override get value() {
+      return this.valueText
+    }
+    override set value(value: string) {
+      this.valueText = value
+    }
+  }
+  class Select extends Element {
+    override get value() {
+      return this.valueText
+    }
+    override set value(value: string) {
+      this.valueText = value
+    }
+  }
+  class Textarea extends Element {
+    override get value() {
+      return this.valueText
+    }
+    override set value(value: string) {
+      this.valueText = value
+    }
+  }
+  const element = new Input()
+  const document = {
+    readyState: 'complete',
+    querySelectorAll: vi.fn(() => [element] as Element[]),
+    elementFromPoint: () => element,
+  }
+  const context = {
+    location: { href: 'https://example.test/form', origin: 'https://example.test' },
+    document,
+    innerWidth: 800,
+    innerHeight: 600,
+    getComputedStyle: () => ({ visibility: 'visible', display: 'block' }),
+    HTMLInputElement: Input,
+    HTMLSelectElement: Select,
+    HTMLTextAreaElement: Textarea,
+    Event: class {
+      constructor(readonly type: string) {}
+    },
+    URL,
+    AbortController,
+    setTimeout,
+    clearTimeout,
+    fetch: vi.fn(),
+    btoa: (value: string) => Buffer.from(value, 'binary').toString('base64'),
+  }
+  const execute = vm.runInNewContext(`${script}\nluczorWorkflowBrowser`, context) as (
+    params: Params
+  ) => Promise<Record<string, unknown>>
+  return { execute, context, document, element, Select }
+}
+const base = { expectedUrl: 'https://example.test/form', selector: '#field', maxChars: 20 }
+
+describe('fixed native browser DOM protocol', () => {
+  it('fills through the native setter and treats code-like content as literal data', async () => {
+    const fixture = page()
+    const value = '"; globalThis.attacked = true; //'
+    expect(await fixture.execute({ ...base, action: 'fill', value })).toEqual({ ok: true, applied: true })
+    expect(fixture.element.value).toBe(value)
+    expect(fixture.element.dispatchEvent).toHaveBeenCalledTimes(2)
+    expect(Reflect.get(fixture.context, 'attacked')).toBeUndefined()
+  })
+  it('refuses ambiguous, disabled, obscured and stale targets', async () => {
+    const fixture = page()
+    expect(await fixture.execute({ ...base, action: 'click', expectedUrl: 'https://other.test' })).toMatchObject({
+      ok: false,
+      code: 'browser_url_changed',
+    })
+    fixture.document.querySelectorAll.mockReturnValueOnce([fixture.element, fixture.element])
+    expect(await fixture.execute({ ...base, action: 'click' })).toMatchObject({ ok: false })
+    fixture.element.disabled = true
+    expect(await fixture.execute({ ...base, action: 'click' })).toMatchObject({ ok: false })
+    expect(fixture.element.clicked).toBe(false)
+  })
+  it('selects only an existing enabled option and returns bounded visible text', async () => {
+    const fixture = page()
+    const select = new fixture.Select()
+    fixture.document.querySelectorAll.mockReturnValue([select])
+    expect(await fixture.execute({ ...base, action: 'select', value: 'missing' })).toMatchObject({
+      ok: false,
+      code: 'browser_option_missing',
+    })
+    expect(await fixture.execute({ ...base, action: 'select', value: 'one' })).toEqual({ ok: true, applied: true })
+    select.innerText = 'x'.repeat(30)
+    expect(await fixture.execute({ ...base, action: 'read' })).toEqual({
+      ok: true,
+      text: 'x'.repeat(20),
+      truncated: true,
+    })
+  })
+  it('downloads within the same session origin and cancels oversized responses', async () => {
+    const fixture = page()
+    expect(
+      await fixture.execute({
+        ...base,
+        action: 'download',
+        url: 'https://foreign.test/file',
+        timeoutMs: 50,
+        maxBytes: 20,
+      })
+    ).toMatchObject({ ok: false, code: 'browser_download_same_origin_required' })
+    expect(fixture.context.fetch).not.toHaveBeenCalled()
+    const cancel = vi.fn(async () => undefined)
+    fixture.context.fetch.mockResolvedValue({
+      ok: true,
+      url: 'https://example.test/file',
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      body: { getReader: () => ({ read: async () => ({ done: false, value: new Uint8Array(30) }), cancel }) },
+    })
+    expect(
+      await fixture.execute({
+        ...base,
+        action: 'download',
+        url: 'https://example.test/file',
+        timeoutMs: 100,
+        maxBytes: 20,
+      })
+    ).toMatchObject({ ok: false, code: 'browser_download_size_exceeded' })
+    expect(cancel).toHaveBeenCalledOnce()
+  })
+})
+
+describe('workflow session and image IPC contracts', () => {
+  const scope = {
+    principalId: 'user',
+    projectId: 'project',
+    expectedRootPath: 'E:\\project',
+    expectedWorkspaceUpdatedAt: 4,
+    runId: 'run',
+  }
+  it('reuses a verified session and sends the immutable run identity for every operation', async () => {
+    const invokeTask = vi.fn(async () => ({
+      ok: true,
+      sessionId: 'session',
+      tabId: 'tab',
+      url: base.expectedUrl,
+      data: { text: 'Page', truncated: false },
+    }))
+    const browser = createWorkflowBrowser({ scope, invokeTask: invokeTask as WorkflowNativeInvoke })
+    await browser.open(base.expectedUrl)
+    await browser.fill('#field', 'hello')
+    await browser.read()
+    expect(invokeTask).toHaveBeenNthCalledWith(
+      2,
+      'wf_browser_action',
+      expect.objectContaining({ scope, sessionId: 'session', action: 'fill', value: 'hello' }),
+      true
+    )
+    expect(invokeTask).toHaveBeenNthCalledWith(
+      3,
+      'wf_browser_action',
+      expect.objectContaining({ scope, sessionId: 'session', action: 'read' }),
+      false
+    )
+  })
+  it('rejects a mismatched returned session instead of continuing in a different tab', async () => {
+    const invokeTask = vi.fn(async () => ({
+      ok: true,
+      sessionId: 'other',
+      tabId: 'tab',
+      url: base.expectedUrl,
+      data: {},
+    }))
+    await expect(
+      createWorkflowBrowser({ scope, invokeTask: invokeTask as WorkflowNativeInvoke }).click('#field', {
+        sessionId: 'reviewed',
+      })
+    ).rejects.toThrow('session_changed')
+  })
+  it('uses artifact IDs for OCR and never sends a screenshot to the text-only inference path', async () => {
+    const invokeTask = vi.fn(async () => ({ ok: true, text: 'Recognized' }))
+    await runWorkflowImage(
+      { action: 'ocr', artifactId: 'image', language: 'de-DE' },
+      { scope, invokeTask: invokeTask as WorkflowNativeInvoke }
+    )
+    expect(invokeTask).toHaveBeenCalledWith(
+      'wf_image_action',
+      { scope, action: 'ocr', artifactId: 'image', language: 'de-DE' },
+      false
+    )
+    await expect(
+      runWorkflowImage(
+        { action: 'vision', artifactId: 'image' },
+        { scope, invokeTask: invokeTask as WorkflowNativeInvoke }
+      )
+    ).rejects.toThrow('multimodal_runtime_unavailable')
+    expect(invokeTask).toHaveBeenCalledTimes(1)
+  })
+})

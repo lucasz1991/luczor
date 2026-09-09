@@ -9,6 +9,7 @@ import type {
   AgentProjectSnapshot,
   AgentRole,
 } from './types'
+import { validateAgentExecutionOptions } from './effort'
 
 type InternalJob = {
   metadata: AgentJobMetadata
@@ -110,6 +111,7 @@ export class AgentOrchestrator {
   }
 
   enqueue(input: AgentJobInput): AgentJob {
+    validateAgentExecutionOptions(input)
     if (this.disposed) throw new Error('Die Agentenzentrale ist geschlossen.')
     const adapter = this.adapters.get(input.adapterId)
     if (!adapter) throw new Error('Der gewählte Agent ist nicht verfügbar.')
@@ -154,6 +156,12 @@ export class AgentOrchestrator {
         projectId: project.projectId,
         adapterId: adapter.id,
         model: input.model,
+        thinkingTier: input.thinkingTier,
+        effort: input.effort,
+        effortSelection: input.effortSelection && Object.freeze({ ...input.effortSelection }),
+        executionProfile: input.executionProfile,
+        maxTurns: input.maxTurns,
+        maxBudgetUsd: input.maxBudgetUsd,
         role,
         permission: input.permission,
         teamRunId: input.teamRunId,
@@ -370,6 +378,12 @@ export class AgentOrchestrator {
           permission: job.metadata.permission,
           role: job.metadata.role,
           model: job.metadata.model,
+          thinkingTier: job.metadata.thinkingTier,
+          effort: job.metadata.effort,
+          effortSelection: job.metadata.effortSelection,
+          executionProfile: job.metadata.executionProfile,
+          maxTurns: job.metadata.maxTurns,
+          maxBudgetUsd: job.metadata.maxBudgetUsd,
           externalThreadId: job.resumeThreadId,
           teamRunId: job.metadata.teamRunId,
           teamNodeId: job.metadata.teamNodeId,
@@ -409,6 +423,7 @@ export class AgentOrchestrator {
         status: 'completed',
         finishedAt: this.now(),
         externalThreadId: result.externalThreadId,
+        effortSelection: result.effortSelection ?? job.metadata.effortSelection,
       })
     } catch {
       if (!job.controller.signal.aborted && !this.disposed) {

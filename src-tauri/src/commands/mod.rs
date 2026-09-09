@@ -1,4 +1,6 @@
 pub mod agent;
+pub mod agent_effort;
+pub mod claude;
 pub mod browser;
 pub mod codex;
 mod desktop_target;
@@ -16,6 +18,9 @@ mod system_diagnostics;
 pub mod voice;
 pub mod voice_input;
 pub mod workflow_http;
+pub mod workflow_browser;
+pub mod workflow_image;
+pub mod workflow_artifacts;
 pub mod workflow_watch;
 
 mod process;
@@ -94,6 +99,11 @@ mod tests {
             "codex_runtime_status",
             "codex_desktop_open",
             "codex_job_start",
+            "codex_model_capabilities",
+            "claude_runtime_status",
+            "claude_job_start",
+            "claude_job_status",
+            "claude_job_cancel",
             "codex_job_status",
             "codex_job_cancel",
             "memory_key_get_or_create",
@@ -123,6 +133,10 @@ mod tests {
             "local_model_hardware_snapshot",
             "local_model_prepare",
             "local_model_infer",
+            "local_model_reasoning_control",
+            "wf_browser_action",
+            "wf_browser_cleanup",
+            "wf_image_action",
             "local_model_cancel",
             "local_model_stop",
         ] {

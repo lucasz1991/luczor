@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
+use super::agent_effort::{validate_codex_effort, AgentEffort};
 use super::ensure_main_webview;
 use super::execution::{admit, ExecutionLease, Guarded};
 use super::process::run_bounded_command;
@@ -135,6 +136,8 @@ pub struct CodexStartPayload {
     expected_workspace_updated_at: i64,
     prompt: String,
     model: Option<String>,
+    effort: Option<AgentEffort>,
+    capability_revision: Option<String>,
     #[serde(default)]
     permission: CodexPermission,
     external_thread_id: Option<String>,
@@ -346,6 +349,11 @@ pub async fn codex_job_start(
     let execution = admit(&payload.execution, writing)?;
     let payload = payload.request;
     validate_start(&payload)?;
+    validate_codex_effort(
+        payload.model.as_deref(),
+        payload.effort,
+        payload.capability_revision.as_deref(),
+    )?;
     let (root, binding_version) =
         agent_workspace_snapshot(&app, &payload.principal_id, &payload.project_id)?;
     verify_expected_binding(
@@ -865,6 +873,12 @@ fn codex_args(payload: &CodexStartPayload) -> Vec<String> {
     ];
     if let Some(model) = &payload.model {
         args.extend(["--model".into(), model.clone()]);
+    }
+    if let Some(effort) = payload.effort {
+        args.extend([
+            "--config".into(),
+            format!("model_reasoning_effort=\"{}\"", effort.as_str()),
+        ]);
     }
     if let Some(id) = &payload.external_thread_id {
         args.extend(["resume".into(), id.clone()]);
@@ -1439,7 +1453,7 @@ impl Drop for LifetimeGuard {
 
 #[cfg(not(windows))]
 impl LifetimeGuard {
-    fn attach(_child: &Child) -> Result<Self, String> {
+    pub(crate) fn attach(_child: &Child) -> Result<Self, String> {
         Err(
             "Managed Codex jobs require Windows process lifetime protection on this version."
                 .into(),
@@ -1517,6 +1531,24 @@ mod tests {
             assert!(codex_args(&data)
                 .windows(2)
                 .any(|pair| pair == ["--config", config]));
+        }
+    }
+
+    #[test]
+    fn explicit_model_and_typed_effort_are_preserved_for_new_and_resumed_jobs() {
+        let mut data = payload();
+        data.model = Some("gpt-6-astra".into());
+        data.effort = Some(AgentEffort::Ultra);
+        for resume in [None, Some(uuid::Uuid::new_v4().to_string())] {
+            data.external_thread_id = resume;
+            let args = codex_args(&data);
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--model", "gpt-6-astra"]));
+            assert!(args
+                .windows(2)
+                .any(|pair| pair == ["--config", "model_reasoning_effort=\"ultra\""]));
+            assert!(!args.contains(&data.prompt));
         }
     }
 

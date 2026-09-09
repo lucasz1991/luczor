@@ -31,6 +31,33 @@ function setup(
 }
 
 describe('temporary mini chat session', () => {
+  it('captures the selected budget once, permits a next-turn choice, and resets a new workspace', async () => {
+    let options!: RunAgentOptions
+    let release!: (value: { finalText: string }) => void
+    const { controller, send } = setup(
+      vi.fn(value => {
+        options = value
+        return new Promise(resolve => {
+          release = resolve
+        })
+      })
+    )
+    controller.dispatch({ type: 'thinking_tier', sessionId: controller.state.sessionId, tier: 'ultra' })
+    const pending = send()
+    expect(options.thinkingTier).toBe('ultra')
+    expect(options.thinkingConfig?.maxThinkingTokens).toBe(65536)
+    controller.dispatch({ type: 'thinking_tier', sessionId: controller.state.sessionId, tier: 'fast' })
+    expect(options.thinkingTier).toBe('ultra')
+    release({ finalText: 'Antwort' })
+    await pending
+    const next = send('Weiter')
+    expect(options.thinkingTier).toBe('fast')
+    release({ finalText: 'Fertig' })
+    await next
+    controller.reset()
+    expect(controller.state.thinkingTier).toBe('balanced')
+    expect(controller.state.thinkingBudget).toBeNull()
+  })
   it('retains completed commentary during the next round, final answer and subsequent turn', async () => {
     let options!: RunAgentOptions
     let release!: (value: { finalText: string }) => void

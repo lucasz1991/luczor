@@ -15,6 +15,9 @@ import StreamingText from '../ai/StreamingText.vue'
 import ChatCommentary from '../ai/ChatCommentary.vue'
 import TokenCounter from '../ai/TokenCounter.vue'
 import ThinkingState from '../ai/ThinkingState.vue'
+import ThinkingSelector from '../ai/ThinkingSelector.vue'
+import ThinkingBudgetControl from '../ai/ThinkingBudgetControl.vue'
+import type { ThinkingControlAction } from '@/services/inference/thinking'
 import ApprovalCard from '../ai/ApprovalCard.vue'
 import ToolChips from '../ai/ToolChips.vue'
 import WorkflowChatCards from '../workflows/WorkflowChatCards.vue'
@@ -28,6 +31,11 @@ const props = withDefaults(defineProps<{ snapshot: MiniSnapshot; native?: boolea
 })
 const emit = defineEmits<{ action: [action: MiniAction]; hide: []; showMain: [] }>()
 const expanded = ref(false)
+async function controlThinking(requestId: string, action: ThinkingControlAction, sequence: number) {
+  if (props.connectionError || props.snapshot.thinkingBudget?.requestId !== requestId)
+    throw new Error('Die Verbindung zum aktiven Auftrag ist nicht verfügbar.')
+  emit('action', { type: 'thinking_control', sessionId: props.snapshot.sessionId, requestId, action, sequence })
+}
 const pinned = ref(true)
 const draft = ref('')
 const drafts = new Map<string, string>()
@@ -709,6 +717,20 @@ onBeforeUnmount(() => {
         {{ clipboardError || 'Antwort kopiert' }}
       </p>
       <form class="mini-composer" @submit.prevent="send()">
+        <ThinkingBudgetControl
+          v-if="snapshot.thinkingBudget"
+          :progress="snapshot.thinkingBudget"
+          :control="controlThinking"
+          @stop="emit('action', { type: 'stop', sessionId: snapshot.sessionId })"
+        />
+        <div class="mini-thinking-choice">
+          <small>Lokales Modell</small>
+          <ThinkingSelector
+            :model-value="snapshot.thinkingTier"
+            :next-prompt="snapshot.busy"
+            @update:model-value="emit('action', { type: 'thinking_tier', sessionId: snapshot.sessionId, tier: $event })"
+          />
+        </div>
         <VoiceInputSettings
           :busy="disabled || voiceView.starting || voiceView.finishing"
           :active="!!voiceView.mode"

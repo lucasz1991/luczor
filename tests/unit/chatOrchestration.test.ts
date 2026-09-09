@@ -68,7 +68,7 @@ it('runs a sequential planner-worker-reviewer graph with configured worker limit
   )
   expect(calls.map(call => call.maxRounds)).toEqual([1, 17, 3])
   expect(calls.map(call => call.toolAccess)).toEqual(['none', undefined, 'read-only'])
-  expect(calls.map(call => call.localReasoningMode)).toEqual(['off', undefined, undefined])
+  expect(calls.map(call => call.localReasoningMode)).toEqual([undefined, undefined, undefined])
   expect(
     calls.every(
       call =>
@@ -84,10 +84,20 @@ it('runs a sequential planner-worker-reviewer graph with configured worker limit
   expect(response.finalText).toContain('Rundenlimit')
 })
 
-it('keeps short planning public while retaining caller reasoning for worker and reviewer', async () => {
+it('inherits admitted thinking for planner, worker and reviewer while preserving role limits', async () => {
   const calls: RunAgentOptions[] = []
+  const thinkingConfig = { initialTokens: 8192, maxThinkingTokens: 65536, responseReserveTokens: 16384 }
+  const onBudget = vi.fn()
   await runChatAgentTeam(
-    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'observe', localReasoningMode: 'auto' },
+    {
+      projectId: 'p',
+      baseMessages: checkpoint.messages,
+      mode: 'observe',
+      localReasoningMode: 'auto',
+      thinkingTier: 'ultra',
+      thinkingConfig,
+      onBudget,
+    },
     gateway,
     { ...checkpoint },
     async options => {
@@ -95,7 +105,12 @@ it('keeps short planning public while retaining caller reasoning for worker and 
       return result
     }
   )
-  expect(calls.map(call => call.localReasoningMode)).toEqual(['off', 'auto', 'auto'])
+  expect(calls.map(call => call.localReasoningMode)).toEqual(['auto', 'auto', 'auto'])
+  expect(
+    calls.every(
+      call => call.thinkingTier === 'ultra' && call.thinkingConfig === thinkingConfig && call.onBudget === onBudget
+    )
+  ).toBe(true)
   expect(calls.map(call => call.maxRounds)).toEqual([1, 17, 3])
   expect(calls.map(call => call.toolAccess)).toEqual(['none', undefined, 'read-only'])
 })

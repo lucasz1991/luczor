@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-claude-job-status"
+description = "Enables the claude_job_status command without any pre-configured scope."
+commands.allow = ["claude_job_status"]
+
+[[permission]]
+identifier = "deny-claude-job-status"
+description = "Denies the claude_job_status command without any pre-configured scope."
+commands.deny = ["claude_job_status"]

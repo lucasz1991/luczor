@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-claude-runtime-status"
+description = "Enables the claude_runtime_status command without any pre-configured scope."
+commands.allow = ["claude_runtime_status"]
+
+[[permission]]
+identifier = "deny-claude-runtime-status"
+description = "Denies the claude_runtime_status command without any pre-configured scope."
+commands.deny = ["claude_runtime_status"]

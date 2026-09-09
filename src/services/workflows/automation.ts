@@ -34,6 +34,7 @@ export type WorkflowAutomationConfig = Required<Omit<WorkflowAutomationInput, 's
   root_path: string
   approved_revision: number
   script_hashes: Record<string, string>
+  test_binding?: Record<string, unknown>
 }
 export type WorkflowAutomationGrant = {
   id: number
@@ -42,12 +43,22 @@ export type WorkflowAutomationGrant = {
   status: string
   scope_hash: string
   config: WorkflowAutomationConfig
+  predecessor_grant_id?: number
+  repair_revision_id?: number
+  test_evidence_id?: number
 }
 type LocalGrant = {
   grant: WorkflowAutomationGrant
+  predecessors?: WorkflowAutomationGrant[]
   principalId: string
   workspaceUpdatedAt: number
   approvedAt: number
+}
+type LocalRepairPolicy = {
+  policy: Record<string, unknown>
+  policyHash: string
+  principalId: string
+  workspaceUpdatedAt: number
 }
 const TASKS = new Set([
   'context',
@@ -73,6 +84,33 @@ const TASKS = new Set([
   'approval',
   'manual',
   'device_job',
+  'browser.navigate',
+  'browser.fill',
+  'browser.select',
+  'browser.wait',
+  'browser.screenshot',
+  'browser.download',
+  'llm.text',
+  'llm.json',
+  'llm.classify',
+  'llm.extract',
+  'llm.evaluate',
+  'image.capture',
+  'image.ocr',
+  'image.vision',
+  'image.compare',
+  'agent.single',
+  'agent.team',
+  'data.map',
+  'data.filter',
+  'data.split',
+  'data.collect',
+  'data.merge',
+  'control.foreach',
+  'control.until',
+  'control.parallel',
+  'control.join',
+  'test.assert',
 ])
 const textList = (value: unknown, limit = 100): string[] => {
   if (
@@ -347,17 +385,15 @@ export async function workflowAutomationAllows(
   if (!metadata?.definition_id || !metadata.grant || typeof metadata.grant !== 'object') return false
   const grant = metadata.grant as WorkflowAutomationGrant
   const stored = await (await storeForGrant()).get<LocalGrant>(`${scope}:${metadata.definition_id}`)
-  if (
-    !stored ||
-    stored.principalId !== principalId ||
-    stored.grant.status !== 'active' ||
-    grant.status !== 'active' ||
-    stored.grant.id !== grant.id ||
-    stored.grant.scope_hash !== grant.scope_hash ||
-    (await workflowHash(stored.grant.config)) !== (await workflowHash(grant.config))
-  )
-    return false
-  const config = stored.grant.config
+  if (!stored || stored.principalId !== principalId || stored.grant.status !== 'active') return false
+  const locallyKnown = [stored.grant, ...(stored.predecessors ?? [])].find(item => item.id === grant.id && item.status === 'active')
+  const sameGrant =
+    grant.status === 'active' && !!locallyKnown &&
+    locallyKnown.scope_hash === grant.scope_hash &&
+    (await workflowHash(locallyKnown.config)) === (await workflowHash(grant.config))
+  const successor = !sameGrant && (await repairGrantAllows(bundle, stored, scope, principalId, apiConfig))
+  if (!sameGrant && !successor) return false
+  const config = grant.config
   if (
     !Array.isArray(metadata.input_sources) ||
     metadata.input_sources.some(source => !config.allowed_input_sources.includes(source as 'input' | 'event' | 'steps'))
@@ -377,8 +413,8 @@ export async function workflowAutomationAllows(
   )
   if (
     current.data.grant?.status !== 'active' ||
-    current.data.grant.id !== grant.id ||
-    current.data.grant.scope_hash !== grant.scope_hash
+    current.data.grant.id !== (sameGrant || grant.status === 'testing' ? stored.grant.id : grant.id) ||
+    current.data.grant.scope_hash !== (sameGrant || grant.status === 'testing' ? stored.grant.scope_hash : grant.scope_hash)
   )
     return false
   if (
@@ -415,15 +451,176 @@ export async function workflowAutomationAllows(
     )
       return false
   }
-  if (bundle.task_key === 'llm' && bundle.params.inference === 'external') return false
-  if (['api.call', 'browser.open_url', 'browser.open', 'browser.click', 'browser.read'].includes(bundle.task_key)) {
+  if ((bundle.task_key === 'llm' || bundle.task_key.startsWith('llm.')) && bundle.params.inference === 'external')
+    return false
+  if (bundle.task_key === 'api.call' || bundle.task_key.startsWith('browser.')) {
     try {
-      if (!config.egress_hosts.includes(new URL(String(bundle.params.url)).host)) return false
+      if (!config.egress_hosts.includes(new URL(String(bundle.params.expected_url || bundle.params.url)).host))
+        return false
     } catch {
       return false
     }
   }
+  if (successor && grant.status === 'active') {
+    const store = await storeForGrant()
+    // Re-check the stored predecessor after asynchronous evidence reads. A local revocation wins.
+    const latest = await store.get<LocalGrant>(`${scope}:${metadata.definition_id}`)
+    if (latest?.grant.id !== stored.grant.id || latest.grant.scope_hash !== stored.grant.scope_hash) return false
+    await store.set(`${scope}:${metadata.definition_id}`, { ...stored, grant, predecessors: [stored.grant, ...(stored.predecessors ?? [])].slice(0, 3) })
+    const localPolicy = await store.get<LocalRepairPolicy>(`repair:${scope}:${metadata.definition_id}`)
+    if (localPolicy)
+      await store.set(`repair:${scope}:${metadata.definition_id}`, {
+        ...localPolicy,
+        policy: successor.policy,
+        policyHash: await workflowHash(successor.policy),
+      })
+    await store.save()
+  }
   return true
+}
+
+/** Called only by the local UI after its confirmed policy operation completes. */
+export async function rememberLocalWorkflowRepairPolicy(
+  workflowId: number,
+  policy: Record<string, unknown>,
+  context: { projectId: string; execution?: ExecutionTicket }
+): Promise<void> {
+  const ticket = context.execution ?? executionGate.capture()
+  executionGate.assert(ticket, true)
+  const account = await getVerifiedAccountSnapshot()
+  if (!account) throw new Error('workflow_verified_account_required')
+  const scope = await workflowAccountScope(account.config)
+  const store = await storeForGrant()
+  const key = `repair:${scope}:${workflowId}`
+  if (policy.enabled === false) {
+    await store.delete(key)
+    await store.save()
+    return
+  }
+  const prior = await store.get<LocalGrant>(`${scope}:${workflowId}`)
+  const workspace = await getProjectWorkspace(context.projectId, account.principalId)
+  if (
+    !prior ||
+    prior.principalId !== account.principalId ||
+    prior.grant.status !== 'active' ||
+    prior.grant.id !== policy.grant_id ||
+    prior.grant.scope_hash !== policy.scope_hash ||
+    policy.device_id !== account.config.clientId ||
+    workspace?.status !== 'ready' ||
+    workspace.updatedAt !== prior.workspaceUpdatedAt
+  )
+    throw new Error('workflow_repair_local_predecessor_required')
+  executionGate.assert(ticket, true)
+  const current = await getVerifiedAccountSnapshot()
+  if (!current || current.principalId !== account.principalId || (await workflowAccountScope(current.config)) !== scope)
+    throw new Error('workflow_repair_identity_changed')
+  await store.set(key, {
+    policy: structuredClone(policy),
+    policyHash: await workflowHash(policy),
+    principalId: account.principalId,
+    workspaceUpdatedAt: prior.workspaceUpdatedAt,
+  } satisfies LocalRepairPolicy)
+  await store.save()
+}
+
+async function repairGrantAllows(
+  bundle: WorkflowTaskBundle,
+  stored: LocalGrant,
+  scope: string,
+  principalId: string,
+  apiConfig?: LuczorApiConfigSnapshot
+): Promise<false | { policy: Record<string, unknown> }> {
+  const grant = bundle.workflow.grant as WorkflowAutomationGrant
+  if (
+    !apiConfig ||
+    !['testing', 'active'].includes(grant.status) ||
+    grant.predecessor_grant_id !== stored.grant.id ||
+    !Number.isSafeInteger(grant.repair_revision_id) ||
+    !Number.isSafeInteger(grant.test_evidence_id) ||
+    grant.workflow_definition_id !== bundle.workflow.definition_id
+  )
+    return false
+  const local = await (await storeForGrant()).get<LocalRepairPolicy>(`repair:${scope}:${bundle.workflow.definition_id}`)
+  if (
+    !local ||
+    local.principalId !== principalId ||
+    local.workspaceUpdatedAt !== stored.workspaceUpdatedAt ||
+    local.policy.enabled !== true ||
+    local.policy.grant_id !== stored.grant.id ||
+    local.policy.scope_hash !== stored.grant.scope_hash ||
+    (await workflowHash(local.policy)) !== local.policyHash
+  )
+    return false
+  const unchangedConfig = (config: WorkflowAutomationConfig) => {
+    const { script_hashes: _scripts, test_binding: _binding, approved_revision: _revision, ...bounds } = config
+    return bounds
+  }
+  if (
+    (await workflowHash(unchangedConfig(grant.config))) !== (await workflowHash(unchangedConfig(stored.grant.config)))
+  )
+    return false
+  if (
+    local.policy.allow_script_repair !== true &&
+    (await workflowHash(grant.config.script_hashes)) !== (await workflowHash(stored.grant.config.script_hashes))
+  )
+    return false
+  const { data: evidence } = await requestWithConfig<{ data: Record<string, unknown> }>(
+    `/workflow-tests/${grant.test_evidence_id}`,
+    {},
+    apiConfig
+  )
+  if (
+    evidence.mode !== 'real' ||
+    evidence.workflow_definition_id !== grant.workflow_definition_id ||
+    evidence.repair_revision_id !== grant.repair_revision_id ||
+    evidence.device_id !== apiConfig.clientId ||
+    evidence.workflow_test_case_id !== local.policy.test_case_id ||
+    evidence.assertions_hash !== local.policy.assertions_hash ||
+    evidence.fixture_hash !== local.policy.fixture_hash
+  )
+    return false
+  const currentPolicy = evidence.repair_policy as Record<string, unknown> | undefined
+  if (!currentPolicy || (await workflowHash(currentPolicy)) !== evidence.repair_policy_hash) return false
+  const basePolicy = { ...currentPolicy, grant_id: local.policy.grant_id, scope_hash: local.policy.scope_hash }
+  if ((await workflowHash(basePolicy)) !== local.policyHash) return false
+  if (grant.status === 'testing') {
+    if (
+      !['queued', 'running'].includes(String(evidence.status)) ||
+      evidence.repair_status !== 'proposed' ||
+      bundle.workflow.test_mode !== 'real' ||
+      !bundle.workflow.test_run ||
+      bundle.workflow.test_run !== evidence.run_public_id ||
+      currentPolicy.grant_id !== stored.grant.id ||
+      currentPolicy.scope_hash !== stored.grant.scope_hash
+    )
+      return false
+    const binding = {
+      run: evidence.run_public_id,
+      test_evidence_id: evidence.id,
+      repair_revision_id: evidence.repair_revision_id,
+      definition_hash: evidence.definition_hash,
+      code_hash: evidence.code_hash,
+      environment_hash: evidence.environment_hash,
+      assertions_hash: evidence.assertions_hash,
+      fixture_hash: evidence.fixture_hash,
+    }
+    if (
+      (await workflowHash(binding)) !== (await workflowHash(bundle.workflow.test_binding)) ||
+      (await workflowHash(binding)) !== (await workflowHash(grant.config.test_binding))
+    )
+      return false
+  } else {
+    if (
+      evidence.status !== 'passed' ||
+      evidence.repair_status !== 'activated' ||
+      currentPolicy.grant_id !== grant.id ||
+      currentPolicy.scope_hash !== grant.scope_hash ||
+      grant.config.test_binding !== undefined ||
+      grant.approved_revision !== bundle.workflow.revision
+    )
+      return false
+  }
+  return { policy: currentPolicy }
 }
 
 export async function getLocalWorkflowAutomationGrant(scope: string, definitionId: number): Promise<LocalGrant | null> {

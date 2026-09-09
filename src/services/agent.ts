@@ -77,6 +77,9 @@ function pulseForCategory(category: ToolCategory) {
 }
 
 export type RunAgentOptions = {
+  thinkingTier?: import('./inference/thinking').ThinkingTier
+  thinkingConfig?: import('./inference/thinking').ThinkingConfig
+  onBudget?: (progress: import('./inference/thinking').ThinkingBudgetProgress | null) => void
   /** Trusted parent workflow only; never persisted or exposed to model tools. */
   resourceWork?: import('@/services/inference/resources').LocalResourceWork
   projectId: string
@@ -663,6 +666,8 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
     pendingTaskCreateVerifications: structuredClone([...pendingTaskCreateVerifications.values()]),
     ephemeralDataUsed: ephemeralDataUsed || !!opts.continuation?.ephemeralDataUsed,
     toolAccess: opts.toolAccess,
+    thinkingTier: opts.thinkingTier ?? opts.continuation?.thinkingTier ?? 'balanced',
+    thinkingConfig: opts.thinkingConfig ?? opts.continuation?.thinkingConfig,
   })
   const emitCheckpoint = async (value = checkpoint(), required = false): Promise<void> => {
     // Project/account/mode invalidation must never repopulate UI state with a
@@ -908,6 +913,15 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
         messages,
         tools,
         toolChoice: nextToolChoice,
+        ...(inferenceGateway.target === 'local_llama_cpp'
+          ? {
+              thinkingTier: opts.thinkingTier ?? opts.continuation?.thinkingTier ?? 'balanced',
+              thinkingConfig: opts.thinkingConfig ?? opts.continuation?.thinkingConfig,
+              onBudget: (progress: import('./inference/thinking').ThinkingBudgetProgress | null) => {
+                if (!signal.aborted) opts.onBudget?.(progress)
+              },
+            }
+          : {}),
         ...(inferenceGateway.target === 'local_llama_cpp' && opts.localReasoningMode
           ? { reasoningMode: opts.localReasoningMode }
           : {}),

@@ -3,6 +3,8 @@ import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
 import { redactAbsoluteFilesystemPaths, redactProviderSecrets } from '@/services/prompt/promptContextAssembler'
 import { agentHub, agentProjectSnapshot, prepareAgentJob } from '@/services/agents/hub'
 import { executionGate } from '@/services/executionGate'
+import { validateAgentExecutionOptions } from '@/services/agents/effort'
+import type { AgentExecutionOptions } from '@/services/agents/types'
 import type { ToolDef } from './types'
 
 /** Managed jobs use the same hub already initialized by the desktop entry point. */
@@ -11,7 +13,7 @@ export const agentJobTools: ToolDef[] = [
     name: 'agent_job_prepare',
     category: 'app',
     description:
-      'Prepare a project-scoped Codex or model-agent task for user review in Agenten & Erinnerungen. Does not execute it. The user starts it there after reviewing the full project context. Local/policy model agents provide analysis and proposals without tools.',
+      'Prepare a project-scoped Codex, Claude or model-agent task for user review in Agenten & Erinnerungen. Does not execute it. Claude uses Windows host user rights, not a filesystem sandbox. Local/policy model agents provide analysis and proposals without tools.',
     mutating: true,
     requiresApproval: false,
     dataHandling: 'ephemeral',
@@ -22,7 +24,12 @@ export const agentJobTools: ToolDef[] = [
       type: 'object',
       additionalProperties: false,
       properties: {
-        agent: { type: 'string', enum: ['codex', 'local', 'policy'] },
+        agent: { type: 'string', enum: ['codex', 'claude', 'local', 'policy'] },
+        model: { type: 'string', minLength: 1, maxLength: 160 },
+        thinking_tier: { type: 'string', enum: ['fast', 'balanced', 'thorough', 'max', 'ultra'] },
+        effort: { type: 'string', enum: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'] },
+        max_turns: { type: 'integer', minimum: 1, maximum: 200 },
+        max_budget_usd: { type: 'number', exclusiveMinimum: 0, maximum: 100 },
         prompt: { type: 'string', minLength: 1, maxLength: 24000 },
         role: { type: 'string', enum: ['planner', 'implementer', 'reviewer', 'assistant'] },
         permission: { type: 'string', enum: ['read-only', 'workspace-write'] },
@@ -34,7 +41,19 @@ export const agentJobTools: ToolDef[] = [
     async execute(args, ctx) {
       const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
       executionGate.assert(ticket, true)
-      if (!['codex', 'local', 'policy'].includes(asString(args.agent))) throw new Error('Unbekannter Agent.')
+      if (!['codex', 'claude', 'local', 'policy'].includes(asString(args.agent))) throw new Error('Unbekannter Agent.')
+      const executionOptions: AgentExecutionOptions = {
+        thinkingTier: args.thinking_tier as AgentExecutionOptions['thinkingTier'],
+        effort: args.effort as AgentExecutionOptions['effort'],
+        maxTurns: args.max_turns as number | undefined,
+        maxBudgetUsd: args.max_budget_usd as number | undefined,
+      }
+      validateAgentExecutionOptions(executionOptions)
+      if (
+        args.model !== undefined &&
+        (typeof args.model !== 'string' || !/^[a-zA-Z0-9_.:/-]{1,160}$/u.test(args.model))
+      )
+        throw new Error('Ungültiges Agentenmodell.')
       if (args.role !== undefined && !['planner', 'implementer', 'reviewer', 'assistant'].includes(asString(args.role)))
         throw new Error('Ungültige Rolle.')
       if (args.permission !== undefined && !['read-only', 'workspace-write'].includes(asString(args.permission)))
@@ -47,7 +66,9 @@ export const agentJobTools: ToolDef[] = [
       executionGate.assert(ticket, true)
       const job = await prepareAgentJob({
         projectId: ctx.projectId,
-        adapterId: args.agent as 'codex' | 'local' | 'policy',
+        adapterId: args.agent as 'codex' | 'claude' | 'local' | 'policy',
+        ...executionOptions,
+        model: args.model as string | undefined,
         prompt: asString(args.prompt),
         role: args.role as 'planner' | 'implementer' | 'reviewer' | 'assistant' | undefined,
         permission: args.permission === 'workspace-write' ? 'workspace-write' : 'read-only',

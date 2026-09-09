@@ -1,3 +1,4 @@
+import type { ThinkingTier, ThinkingConfig, ThinkingBudgetProgress } from './thinking'
 export type LuczorMode = 'observe' | 'act' | 'unrestricted'
 export type ToolChoice = 'auto' | 'required' | 'none'
 export type InferenceTarget = 'local_llama_cpp' | 'laravel_proxy'
@@ -68,6 +69,9 @@ export type InferenceRequest = {
   toolChoice?: ToolChoice
   /** Local generation only; never part of the approved external provider body. */
   reasoningMode?: 'auto' | 'off'
+  thinkingTier?: ThinkingTier
+  thinkingConfig?: ThinkingConfig
+  onBudget?: (progress: ThinkingBudgetProgress | null) => void
   projectId?: string
   taskType?: string
   /** Admin team policy displayed in the exact approved packet. */

@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import AiIcon from './AiIcon.vue'
+import ThinkingSelector from './ThinkingSelector.vue'
+import type { ThinkingTier } from '@/services/inference/thinking'
 import VoiceInputSettings from './VoiceInputSettings.vue'
 import SearchList from './SearchList.vue'
 import type { SearchItem } from './types'
 const props = withDefaults(
   defineProps<{
     modelValue: string
+    thinkingTier?: ThinkingTier
     agentMode?: boolean
     externalFallback?: boolean
     busy?: boolean
@@ -22,6 +25,7 @@ const props = withDefaults(
 )
 const emit = defineEmits<{
   'update:agentMode': [value: boolean]
+  'update:thinkingTier': [value: ThinkingTier]
   'update:externalFallback': [value: boolean]
   'update:modelValue': [value: string]
   input: []
@@ -161,6 +165,11 @@ defineExpose({ focus: () => field.value?.focus() })
             <AiIcon :size="13" /><span>{{ modelLabel }}</span
             ><AiIcon name="chevron" :size="11" />
           </button>
+          <ThinkingSelector
+            :model-value="thinkingTier"
+            :next-prompt="busy"
+            @update:model-value="emit('update:thinkingTier', $event)"
+          />
         </div>
         <div>
           <button

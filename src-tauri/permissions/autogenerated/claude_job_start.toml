@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-claude-job-start"
+description = "Enables the claude_job_start command without any pre-configured scope."
+commands.allow = ["claude_job_start"]
+
+[[permission]]
+identifier = "deny-claude-job-start"
+description = "Denies the claude_job_start command without any pre-configured scope."
+commands.deny = ["claude_job_start"]

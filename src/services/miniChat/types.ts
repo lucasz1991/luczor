@@ -3,6 +3,7 @@ import type { ChatCommentary, ToolCallStatus } from '@/state/types'
 import type { LuczorMode } from '@/services/inference/types'
 import type { TokenUsage } from '@/services/tokenUsage'
 import type { WorkflowChatReference } from '@/services/workflows/presentation'
+import type { ThinkingTier, ThinkingBudgetProgress, ThinkingControlAction } from '@/services/inference/thinking'
 
 export type MiniWorkflowReference = WorkflowChatReference & { projectId: string }
 export type MiniWorkflowAction = 'test' | 'start' | 'stop'
@@ -33,6 +34,8 @@ export type MiniDecision = {
   detail: string
 }
 export type MiniSnapshot = {
+  thinkingTier?: ThinkingTier
+  thinkingBudget?: ThinkingBudgetProgress | null
   view: MiniView
   projects: MiniProject[]
   appearance?: { accent: string; assistantName: string }
@@ -72,6 +75,8 @@ export type MiniAction =
   | { type: 'voice_push_to_talk'; sessionId: string }
   | { type: 'voice_wake_word'; sessionId: string }
   | { type: 'agent_mode'; sessionId: string; enabled: boolean }
+  | { type: 'thinking_tier'; sessionId: string; tier: ThinkingTier }
+  | { type: 'thinking_control'; sessionId: string; requestId: string; action: ThinkingControlAction; sequence: number }
   | { type: 'stop'; sessionId: string }
   | { type: 'reset'; sessionId: string }
   | { type: 'decide'; sessionId: string; id: string; approved: boolean }
@@ -82,6 +87,8 @@ export type MiniAction =
 export const MINI_ACTION_EVENT = 'luczor://mini-action'
 export const MINI_STATE_EVENT = 'luczor://mini-state'
 export const emptyMiniSnapshot = (): MiniSnapshot => ({
+  thinkingTier: 'balanced',
+  thinkingBudget: null,
   view: 'workspace',
   projects: [],
   sessionId: '',

@@ -122,6 +122,46 @@ pub(super) fn send(request: RequestBuilder) -> reqwest::Result<CountedResponse<'
     send_counted(request, &COUNTERS)
 }
 
+pub(super) struct AsyncResponse {
+    response: reqwest::Response,
+    count: RequestCount<'static>,
+}
+impl AsyncResponse {
+    pub fn status(&self) -> u16 {
+        self.response.status().as_u16()
+    }
+    pub async fn chunk(&mut self) -> Result<Option<Vec<u8>>, String> {
+        match self.response.chunk().await {
+            Ok(Some(bytes)) => {
+                add(&self.count.counters.received, bytes.len() as u64);
+                Ok(Some(bytes.to_vec()))
+            }
+            Ok(None) => Ok(None),
+            Err(_) => {
+                self.count.fail();
+                Err("Local HTTP stream failed.".into())
+            }
+        }
+    }
+}
+pub(super) async fn send_async(request: reqwest::RequestBuilder) -> Result<AsyncResponse, String> {
+    let (client, request) = request.build_split();
+    let request = request.map_err(|_| "Local HTTP encoding failed.")?;
+    let bytes = request
+        .body()
+        .and_then(|body| body.as_bytes())
+        .map_or(0, |bytes| bytes.len() as u64);
+    let mut count = RequestCount::begin(&COUNTERS, bytes);
+    let response = client.execute(request).await.map_err(|_| {
+        count.fail();
+        "Local HTTP connection failed."
+    })?;
+    if !response.status().is_success() {
+        count.fail();
+    }
+    Ok(AsyncResponse { response, count })
+}
+
 /// Background-only bounded async transport. Aborting its task drops both the
 /// HTTP response and counter guard, including while waiting for headers/body.
 pub(super) async fn send_async_bounded(

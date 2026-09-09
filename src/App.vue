@@ -52,6 +52,15 @@ import SelectionActions from './components/ai/SelectionActions.vue'
 import AiIcon from './components/ai/AiIcon.vue'
 import MiniChatSurface from './components/mini/MiniChatSurface.vue'
 import { useMiniChatHost } from '@/composables/useMiniChatHost'
+import ThinkingBudgetControl from '@/components/ai/ThinkingBudgetControl.vue'
+import {
+  isThinkingTier,
+  type ThinkingTier,
+  type ThinkingBudgetProgress,
+  type ThinkingControlAction,
+} from '@/services/inference/thinking'
+import { captureThinking, thinkingSettings } from '@/services/inference/thinkingSettings'
+import { controlLocalReasoning } from '@/services/inference/tauriLocalRuntime'
 import { useBackgroundPreparation } from '@/composables/useBackgroundPreparation'
 import { useIdleOptimization } from '@/composables/useIdleOptimization'
 import { miniStatus } from '@/services/miniChat/presentation'
@@ -178,9 +187,17 @@ const sendAdmission = ref(false)
 // Capture it at turn admission so later UI changes cannot change an in-flight route.
 const allowChatExternalFallback = ref(false)
 const agentMode = ref(false)
+const chatThinkingChoices = ref(new Map<string, ThinkingTier>())
+const activeThinkingBudget = shallowRef<{
+  projectId: string
+  messageId: string
+  progress: ThinkingBudgetProgress
+} | null>(null)
 const agentTeamPreset = ref<import('@/services/agents/teamPolicy').TeamPresetChoice>('server')
 const continuations = shallowRef<Record<string, AgentCheckpoint>>({})
 const resetChatRouting = () => {
+  chatThinkingChoices.value = new Map()
+  activeThinkingBudget.value = null
   continuations.value = {}
   allowChatExternalFallback.value = false
 }
@@ -586,6 +603,31 @@ onBeforeUnmount(() => {
   invalidateExecution()
 })
 const messages = computed(() => mutations.getProjectMessages(activeProjectId.value))
+const thinkingTier = computed<ThinkingTier>({
+  get: () => {
+    const choice = chatThinkingChoices.value.get(activeProjectId.value)
+    if (choice) return choice
+    const saved = [...messages.value]
+      .reverse()
+      .find(message => message.role === 'user' && isThinkingTier(message.meta.thinkingTier))?.meta.thinkingTier
+    return saved ?? thinkingSettings.value.defaultTier
+  },
+  set: value => {
+    if (isThinkingTier(value)) chatThinkingChoices.value.set(activeProjectId.value, value)
+  },
+})
+const visibleThinkingBudget = computed(() =>
+  activeThinkingBudget.value?.projectId === activeProjectId.value ? activeThinkingBudget.value.progress : null
+)
+async function controlChatThinking(requestId: string, action: ThinkingControlAction, sequence: number) {
+  if (
+    visibleThinkingBudget.value?.requestId !== requestId ||
+    !activeTurn.value ||
+    activeTurn.value.messageId !== activeThinkingBudget.value?.messageId
+  )
+    throw new Error('Der aktive Auftrag wurde gewechselt.')
+  return controlLocalReasoning(requestId, action, sequence)
+}
 const projectActivity = computed<Record<string, boolean>>(() => {
   const active = new Map<string, boolean>()
   for (const message of state.messages) {
@@ -719,6 +761,8 @@ watch(activeProjectId, () => {
 })
 
 function newChat() {
+  chatThinkingChoices.value.delete(activeProjectId.value)
+  activeThinkingBudget.value = null
   void voiceInputSession.stop()
   void stopGenerating()
   mutations.resetProjectChat(activeProjectId.value)
@@ -1344,6 +1388,9 @@ async function send(
 ) {
   const pid = activeProjectId.value
   const useAgents = resume?.asTeam ?? agentMode.value
+  const turnThinking = resume?.checkpoint.thinkingTier
+    ? { thinkingTier: resume.checkpoint.thinkingTier, thinkingConfig: resume.checkpoint.thinkingConfig }
+    : captureThinking(thinkingTier.value)
   const externalFallbackAllowed = !useAgents && !resume && allowChatExternalFallback.value
   const rawText = resume?.checkpoint.objective ?? (miniInput?.text ?? input.value).trim()
   if (!rawText || conversationBusy.value) return
@@ -1376,7 +1423,7 @@ async function send(
       resume ? (resume.asTeam ? 'Mit Agententeam fortsetzen' : 'Weiterarbeiten') : text,
       pid
     )
-    userMsg.meta = { ...(userMsg.meta ?? {}), inputSource }
+    userMsg.meta = { ...(userMsg.meta ?? {}), inputSource, thinkingTier: turnThinking.thinkingTier }
     mutations.addMessage(userMsg)
     if (!resume && !miniInput) input.value = ''
     void nextTick(() => autoGrow())
@@ -1603,6 +1650,11 @@ async function send(
         continuation,
         interrupted,
       } = await runAgent({
+        ...turnThinking,
+        onBudget: progress => {
+          if (turnExecution.signal.aborted || activeTurn.value?.messageId !== assistant.id) return
+          activeThinkingBudget.value = progress ? { projectId: pid, messageId: assistant.id, progress } : null
+        },
         agentMode: useAgents,
         agentTeamPreset: agentTeamPreset.value,
         requestAgentTeamApproval: approval =>
@@ -1815,6 +1867,7 @@ async function send(
         cancelCurrent = null
       }
       if (activeTurn.value?.messageId === assistant.id) activeTurn.value = null
+      if (activeThinkingBudget.value?.messageId === assistant.id) activeThinkingBudget.value = null
     }
   } finally {
     sendAdmission.value = false
@@ -1830,6 +1883,12 @@ watch(
   { deep: true }
 )
 const miniChat = useMiniChatHost({
+  thinkingTier: () => thinkingTier.value,
+  thinkingBudget: () => visibleThinkingBudget.value,
+  setThinkingTier: tier => {
+    thinkingTier.value = tier
+  },
+  controlThinking: controlChatThinking,
   projects: () => miniProjectList(state.projects, state.messages, projectActivity.value),
   chat: () =>
     projectChatBinding(
@@ -2548,6 +2607,12 @@ useWorkflowWatchers()
       </div>
 
       <div class="ai-main-composer">
+        <ThinkingBudgetControl
+          v-if="visibleThinkingBudget"
+          :progress="visibleThinkingBudget"
+          :control="controlChatThinking"
+          @stop="stopGenerating"
+        />
         <label v-if="agentMode" class="chat-routing-choice">
           Agententeam
           <select v-model="agentTeamPreset" :disabled="conversationBusy" aria-label="Agententeam auswählen">
@@ -2561,6 +2626,7 @@ useWorkflowWatchers()
           ref="promptBar"
           v-model="input"
           v-model:agent-mode="agentMode"
+          v-model:thinking-tier="thinkingTier"
           v-model:external-fallback="allowChatExternalFallback"
           :busy="conversationBusy"
           :recording="isRecording"
