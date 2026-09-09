@@ -80,7 +80,8 @@ export type WorkflowTaskPrimitives = {
     runtime: 'python' | 'node',
     code: string,
     timeoutSeconds?: number,
-    input?: Record<string, unknown>
+    input?: Record<string, unknown>,
+    environment?: import('@/services/workflows/scriptEnvironment').WorkflowScriptEnvironment
   ) => Promise<{
     ok: boolean
     code: number
@@ -96,6 +97,7 @@ export type WorkflowTaskPrimitives = {
     execution_profile?: 'host-user'
     input_mode?: 'json-stdin' | 'code-stdin'
     code_sha256?: string
+    environment?: { revision: string; lock_sha256: string | null; dependency_count: number; reused: boolean }
   }>
   /** Drive the in-app browser window (P24). */
   browserOpen: (url?: string) => Promise<unknown>
@@ -273,8 +275,11 @@ export async function runWorkflowTask(
         (!params.input || typeof params.input !== 'object' || Array.isArray(params.input))
       )
         throw new Error('workflow_script_input_invalid')
-      const res =
-        params.input !== undefined
+      const { validateWorkflowScriptEnvironment } = await import('@/services/workflows/scriptEnvironment')
+      const environment = validateWorkflowScriptEnvironment(runtime, params.environment)
+      const res = environment
+        ? await primitives.runScript(runtime, code, timeout, params.input as Record<string, unknown> | undefined, environment)
+        : params.input !== undefined
           ? await primitives.runScript(runtime, code, timeout, params.input as Record<string, unknown>)
           : await primitives.runScript(runtime, code, timeout)
       let data: unknown
@@ -304,6 +309,7 @@ export async function runWorkflowTask(
             'execution_profile',
             'input_mode',
             'code_sha256',
+            'environment',
           ].flatMap(key => (Reflect.get(res, key) === undefined ? [] : [[key, Reflect.get(res, key)]]))
         ),
       }

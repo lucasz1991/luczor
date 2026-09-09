@@ -9,6 +9,7 @@ pub mod device_key;
 pub mod execution;
 pub mod local_model;
 pub mod local_tasks;
+mod script_environment;
 pub mod mini_chat;
 pub mod notifications;
 pub mod project_workspace;

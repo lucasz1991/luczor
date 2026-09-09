@@ -183,7 +183,13 @@ onMounted(() => {
   monitorTimer = setInterval(async () => {
     if (monitoring || busy.value || !state.value?.runs.some(run => !isTerminalWorkflow(run.status))) return
     monitoring = true
-    try { await refresh(false) } catch { runsStale.value = true } finally { monitoring = false }
+    try {
+      await refresh(false)
+    } catch {
+      runsStale.value = true
+    } finally {
+      monitoring = false
+    }
   }, 10000)
 })
 onBeforeUnmount(() => {
@@ -268,8 +274,8 @@ onBeforeUnmount(() => {
             </button>
           </div>
           <WorkflowStepEditor
-            :input-schema="draft.input_schema"
             v-if="activeStep"
+            :input-schema="draft.input_schema"
             :step="activeStep"
             :steps="draft.steps"
             :catalog="state.catalog"
@@ -355,8 +361,16 @@ onBeforeUnmount(() => {
             {{ run.public_id }}
             <WorkflowRunBudget :run="run" :known-runs="state.runs" :stale="runsStale" />
             <template v-if="state.urls.runControls && !isTerminalWorkflow(run.status)">
-              <button type="button" :disabled="busy || stopPending(run) || run.status !== 'running'" @click="controlRun(run, 'stop_after_step')">{{ stopPending(run) ? 'Halt angefordert' : 'Nach diesem Schritt stoppen' }}</button>
-              <button type="button" :disabled="busy || run.status === 'cancelling'" @click="controlRun(run, 'cancel')">Sofortigen Stopp anfordern</button>
+              <button
+                type="button"
+                :disabled="busy || stopPending(run) || run.status !== 'running'"
+                @click="controlRun(run, 'stop_after_step')"
+              >
+                {{ stopPending(run) ? 'Halt angefordert' : 'Nach diesem Schritt stoppen' }}
+              </button>
+              <button type="button" :disabled="busy || run.status === 'cancelling'" @click="controlRun(run, 'cancel')">
+                Sofortigen Stopp anfordern
+              </button>
             </template>
             <details v-if="run.steps?.length">
               <summary>Schritte</summary>

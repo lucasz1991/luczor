@@ -316,14 +316,33 @@ describe('mini chat and workspace bridge', () => {
   it('publishes only measured host budgets and handles a bound boundary stop without starting another run', async () => {
     const { source, bridge, view, runWorkflow } = setup()
     const runId = '11111111-1111-4111-8111-111111111111'
-    let run = { id: 15, public_id: runId, workflow_definition_id: 7, project_external_id: 'project-a', status: 'running', sandbox: false,
-      budgets: { max_executions: 200 }, budget_state: { executions: 170 } as Record<string, unknown>, output: { private: 'SECRET' }, context: { token: 'SECRET' } }
+    let run = {
+      id: 15,
+      public_id: runId,
+      workflow_definition_id: 7,
+      project_external_id: 'project-a',
+      status: 'running',
+      sandbox: false,
+      budgets: { max_executions: 200 },
+      budget_state: { executions: 170 } as Record<string, unknown>,
+      output: { private: 'SECRET' },
+      context: { token: 'SECRET' },
+    }
     workflowMock.read.mockImplementation(async () => ({ data: run }))
     workflowMock.access.mockResolvedValue({ api: { run: workflowMock.read }, check: async () => {} })
-    source.tools.push(pendingTool('budget-card', { name: 'workflow_run_start', status: 'executed', result: {
-      toolCallId: 'budget-card', name: 'workflow_run_start', ok: true, ts: 1,
-      output: { workflow_ref: { id: 7, name: 'Budget', runId, status: 'running' } },
-    } }))
+    source.tools.push(
+      pendingTool('budget-card', {
+        name: 'workflow_run_start',
+        status: 'executed',
+        result: {
+          toolCallId: 'budget-card',
+          name: 'workflow_run_start',
+          ok: true,
+          ts: 1,
+          output: { workflow_ref: { id: 7, name: 'Budget', runId, status: 'running' } },
+        },
+      })
+    )
     await view('chat')
     for (let index = 0; index < 20; index++) await Promise.resolve()
     expect(bridge.snapshot.value.workflowRunsVerified).toBe(true)
@@ -333,9 +352,18 @@ describe('mini chat and workspace bridge', () => {
       run = { ...run, budget_state: { executions: 170, boundary_stop: { status: 'pending' } } }
       return run
     })
-    await bridge.dispatch({ type: 'workflow_action', sessionId: bridge.snapshot.value.sessionId, messageId: 'shared-answer', workflowId: 7, action: 'stop_after_step' })
+    await bridge.dispatch({
+      type: 'workflow_action',
+      sessionId: bridge.snapshot.value.sessionId,
+      messageId: 'shared-answer',
+      workflowId: 7,
+      action: 'stop_after_step',
+    })
     expect(workflowMock.stop).toHaveBeenCalledWith('project-a', 7, runId, expect.any(AbortSignal))
-    expect(bridge.snapshot.value.workflowRuns?.[0]).toMatchObject({ status: 'running', budget_state: { boundary_stop: { status: 'pending' } } })
+    expect(bridge.snapshot.value.workflowRuns?.[0]).toMatchObject({
+      status: 'running',
+      budget_state: { boundary_stop: { status: 'pending' } },
+    })
     expect(runWorkflow).not.toHaveBeenCalled()
     await view('workspace')
     expect(bridge.snapshot.value.workflowRuns).toEqual([])
@@ -345,14 +373,34 @@ describe('mini chat and workspace bridge', () => {
     const { source, bridge, view } = setup()
     const pending = deferred<{ data: Record<string, unknown> }>()
     workflowMock.access.mockResolvedValue({ api: { run: () => pending.promise }, check: async () => {} })
-    source.tools.push(pendingTool('budget-card', { name: 'workflow_run_start', status: 'executed', result: {
-      toolCallId: 'budget-card', name: 'workflow_run_start', ok: true, ts: 1,
-      output: { workflow_ref: { id: 7, name: 'Budget', runId: '11111111-1111-4111-8111-111111111111' } },
-    } }))
+    source.tools.push(
+      pendingTool('budget-card', {
+        name: 'workflow_run_start',
+        status: 'executed',
+        result: {
+          toolCallId: 'budget-card',
+          name: 'workflow_run_start',
+          ok: true,
+          ts: 1,
+          output: { workflow_ref: { id: 7, name: 'Budget', runId: '11111111-1111-4111-8111-111111111111' } },
+        },
+      })
+    )
     await view('chat')
     for (let index = 0; index < 10; index++) await Promise.resolve()
     source.activeProjectId = 'project-b'
-    pending.resolve({ data: { id: 15, public_id: '11111111-1111-4111-8111-111111111111', workflow_definition_id: 7, project_external_id: 'project-a', status: 'running', sandbox: false, budgets: { max_executions: 200 }, budget_state: { executions: 199 } } })
+    pending.resolve({
+      data: {
+        id: 15,
+        public_id: '11111111-1111-4111-8111-111111111111',
+        workflow_definition_id: 7,
+        project_external_id: 'project-a',
+        status: 'running',
+        sandbox: false,
+        budgets: { max_executions: 200 },
+        budget_state: { executions: 199 },
+      },
+    })
     for (let index = 0; index < 20; index++) await Promise.resolve()
     expect(bridge.snapshot.value.workflowRuns).toEqual([])
     expect(bridge.snapshot.value.workflowRunsVerified).toBe(false)

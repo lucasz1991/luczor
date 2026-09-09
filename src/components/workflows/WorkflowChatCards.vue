@@ -20,10 +20,15 @@ const emit = defineEmits<{
 }>()
 const statuses = ref<Record<number, string>>({})
 const runs = ref<WorkflowRun[]>([])
-const displayedRuns = computed(() => props.hostOnly ? (props.hostRuns ?? []) : runs.value)
-const currentVerified = computed(() => props.hostOnly ? props.hostRunsVerified === true : verified.value)
+const displayedRuns = computed(() => (props.hostOnly ? (props.hostRuns ?? []) : runs.value))
+const currentVerified = computed(() => (props.hostOnly ? props.hostRunsVerified === true : verified.value))
 function runFor(workflow: WorkflowChatReference) {
-  return displayedRuns.value.find(run => run.workflow_definition_id === workflow.id && run.public_id === workflow.runId && run.project_external_id === props.projectId)
+  return displayedRuns.value.find(
+    run =>
+      run.workflow_definition_id === workflow.id &&
+      run.public_id === workflow.runId &&
+      run.project_external_id === props.projectId
+  )
 }
 function statusFor(workflow: WorkflowChatReference) {
   return runFor(workflow)?.status ?? statuses.value[workflow.id] ?? workflow.status ?? ''
@@ -40,15 +45,19 @@ let refreshing = false
 let refreshAgain = false
 let readEpoch = 0
 async function refresh(force = false) {
-  if (refreshing) { if (force) refreshAgain = true; return }
+  if (refreshing) {
+    if (force) refreshAgain = true
+    return
+  }
   if (
     props.hostOnly ||
     refreshing ||
-    (!force && !props.workflows.some(
-      item =>
-        item.runId &&
-        (!verified.value || !isTerminalWorkflow(Reflect.get(statuses.value, item.id) ?? item.status ?? ''))
-    ))
+    (!force &&
+      !props.workflows.some(
+        item =>
+          item.runId &&
+          (!verified.value || !isTerminalWorkflow(Reflect.get(statuses.value, item.id) ?? item.status ?? ''))
+      ))
   )
     return
   refreshing = true
@@ -63,7 +72,11 @@ async function refresh(force = false) {
       if (workflow.runId) {
         const run = (await access.api.run(workflow.runId)).data
         await access.check()
-        if (run.workflow_definition_id !== workflow.id || run.public_id !== workflow.runId || run.project_external_id !== props.projectId)
+        if (
+          run.workflow_definition_id !== workflow.id ||
+          run.public_id !== workflow.runId ||
+          run.project_external_id !== props.projectId
+        )
           throw new Error('Laufzuordnung wurde geändert.')
         next[workflow.id] = run.status
         nextRuns.push(run)
@@ -100,7 +113,13 @@ async function act(workflow: WorkflowChatReference, action: 'test' | 'start' | '
         readEpoch++
         const current = runFor(workflow)
         if (current) {
-          runs.value = runs.value.map(run => run.id !== current.id ? run : result.id === current.id ? result : Object.assign({}, current, { root_budget: result }))
+          runs.value = runs.value.map(run =>
+            run.id !== current.id
+              ? run
+              : result.id === current.id
+                ? result
+                : Object.assign({}, current, { root_budget: result })
+          )
           verified.value = true
         }
         await refresh(true)
@@ -153,9 +172,20 @@ watch(
 watch(workflowChanged, change => {
   if (change.projectId === props.projectId) void refresh()
 })
+function clearAccount() {
+  abort.abort()
+  abort = new AbortController()
+  statuses.value = {}
+  runs.value = []
+  verified.value = false
+  acting.value = false
+  error.value = ''
+}
+if (typeof window !== 'undefined') window.addEventListener('luczor:api-identity-changing', clearAccount)
 onBeforeUnmount(() => {
   abort.abort()
   if (timer) clearInterval(timer)
+  if (typeof window !== 'undefined') window.removeEventListener('luczor:api-identity-changing', clearAccount)
 })
 </script>
 <template>
@@ -168,10 +198,14 @@ onBeforeUnmount(() => {
         <strong>{{ workflow.name }}</strong>
         <p v-if="workflow.summary">{{ workflow.summary }}</p>
         <span v-if="statusFor(workflow)"
-          >{{ workflowStatusLabel(statusFor(workflow))
-          }}{{ currentVerified ? '' : ' · letzter bekannter Stand' }}</span
+          >{{ workflowStatusLabel(statusFor(workflow)) }}{{ currentVerified ? '' : ' · letzter bekannter Stand' }}</span
         >
-        <WorkflowRunBudget v-if="runFor(workflow)" :run="runFor(workflow)!" :known-runs="displayedRuns" :stale="!currentVerified" />
+        <WorkflowRunBudget
+          v-if="runFor(workflow)"
+          :run="runFor(workflow)!"
+          :known-runs="displayedRuns"
+          :stale="!currentVerified"
+        />
       </div>
       <footer>
         <button type="button" @click="emit('open', workflow)">Öffnen</button>
@@ -182,7 +216,9 @@ onBeforeUnmount(() => {
         <button
           v-if="workflow.runId && !isTerminalWorkflow(statusFor(workflow))"
           type="button"
-          :disabled="disabled || readOnly || acting || boundaryPending(workflow) || statusFor(workflow) === 'cancelling'"
+          :disabled="
+            disabled || readOnly || acting || boundaryPending(workflow) || statusFor(workflow) === 'cancelling'
+          "
           @click="act(workflow, 'stop_after_step')"
         >
           {{ boundaryPending(workflow) ? 'Halt angefordert' : 'Nach diesem Schritt stoppen' }}

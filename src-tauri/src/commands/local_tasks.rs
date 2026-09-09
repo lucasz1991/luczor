@@ -52,7 +52,7 @@ fn files_root(app: &AppHandle, create: bool) -> Result<PathBuf, String> {
 
 /// Resolve a caller-supplied relative path against the confined root, rejecting
 /// anything that could escape it (absolute paths, `..`, root/prefix components).
-fn safe_path(root: &Path, raw: &str, create: bool) -> Result<PathBuf, String> {
+pub(super) fn safe_path(root: &Path, raw: &str, create: bool) -> Result<PathBuf, String> {
     let rel = Path::new(raw.trim());
     if raw.trim().is_empty() {
         return Err("path is empty".into());
@@ -111,7 +111,7 @@ fn safe_path(root: &Path, raw: &str, create: bool) -> Result<PathBuf, String> {
     }
     Ok(canonical_parent.join(joined.file_name().ok_or("path has no file name")?))
 }
-fn is_link_like(metadata: &std::fs::Metadata) -> bool {
+pub(super) fn is_link_like(metadata: &std::fs::Metadata) -> bool {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
@@ -265,6 +265,7 @@ pub struct RunScriptPayload {
     pub input: Option<Value>,
     #[serde(rename = "outputSchema")]
     pub output_schema: Option<Value>,
+    pub environment: Option<super::script_environment::ScriptEnvironment>,
 }
 
 #[derive(Serialize)]
@@ -283,6 +284,7 @@ pub struct RunScriptResult {
     pub execution_profile: &'static str,
     pub input_mode: &'static str,
     pub code_sha256: String,
+    pub environment: Option<super::script_environment::EnvironmentReport>,
 }
 
 fn validate_script(input: &RunScriptPayload) -> Result<(), String> {
@@ -294,6 +296,10 @@ fn validate_script(input: &RunScriptPayload) -> Result<(), String> {
     }
     if runtime_candidates(&input.runtime).is_none() {
         return Err("workflow_script_runtime_unsupported".into());
+    }
+    if let Some(environment) = &input.environment {
+        if input.scope.is_none() { return Err("workflow_script_environment_requires_project".into()); }
+        environment.validate(&input.runtime)?;
     }
     if let Some(data) = &input.input {
         if input.scope.is_none()
@@ -461,12 +467,23 @@ fn run_script_blocking(
     version: Option<String>,
     check: &dyn Fn() -> Result<(), String>,
 ) -> Result<RunScriptResult, String> {
-    let (command, stdin) = script_command(exe, payload, root)?;
     let started = Instant::now();
+    let prepared = payload.environment.as_ref().map(|environment| {
+        super::script_environment::prepare(environment, &payload.runtime, exe,
+            version.as_deref().ok_or("workflow_runtime_probe_failed")?,
+            root.ok_or("workflow_script_environment_requires_project")?,
+            started + timeout, execution.clone(), check)
+    }).transpose()?;
+    check()?;
+    let selected_exe = prepared.as_ref().map_or(exe, |env| env.interpreter.as_path());
+    let (mut command, stdin) = script_command(selected_exe, payload, root)?;
+    if let Some(env) = &prepared { env.apply(&mut command, &payload.runtime); }
+    let remaining = timeout.checked_sub(started.elapsed()).filter(|v| !v.is_zero())
+        .ok_or("workflow_script_environment_timeout")?;
     let output = super::process::run_bounded_command_scoped(
         command,
         Some(stdin),
-        timeout,
+        remaining,
         MAX_OUTPUT_BYTES,
         execution,
         Some(check),
@@ -494,6 +511,7 @@ fn run_script_blocking(
             "code-stdin"
         },
         code_sha256: format!("{:x}", Sha256::digest(payload.code.as_bytes())),
+        environment: prepared.map(|env| env.report),
     })
 }
 
@@ -584,6 +602,7 @@ mod tests {
             }),
             input: Some(serde_json::json!({"text":"'; touch injected; ${1+1}"})),
             output_schema: None,
+            environment: None,
         }
     }
 

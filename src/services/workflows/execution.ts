@@ -303,7 +303,7 @@ function workflowPrimitives(
       if (!workspaceFiles) return invokeTask('wf_file_write', { path, content })
       return invokeTask('project_fs_write', { ...workspaceIdentity, path, content, originRunId: bundle.workflow.run })
     },
-    runScript: (runtime, code, timeoutSeconds, input) =>
+    runScript: (runtime, code, timeoutSeconds, input, environment) =>
       invokeTask('wf_run_script', {
         runtime,
         code,
@@ -311,6 +311,7 @@ function workflowPrimitives(
         fullAccessAcknowledged: true,
         scope: artifactScope,
         ...(input !== undefined ? { input } : {}),
+        ...(environment !== undefined ? { environment } : {}),
       }),
     browserOpen: url => invokeTask('browser_open', { url: url ?? null }),
     browserClick: (selector, expectedUrl) => invokeTask('browser_click', { selector, expectedUrl }),

@@ -117,15 +117,17 @@ export async function runWorkflowAgentFlow(
   const maxOutput = integer(params.max_output_chars, 12_000, 256, 20_000)
   const maxRounds = params.max_rounds === undefined ? undefined : integer(params.max_rounds, 16, 1, 64)
   const maxTurns = params.max_turns === undefined ? undefined : integer(params.max_turns, 24, 1, 64)
+  const managedTurns =
+    maxRounds === undefined ? maxTurns : maxTurns === undefined ? maxRounds : Math.min(maxRounds, maxTurns)
   const maxBudgetUsd = params.max_budget_usd
   if (
     maxBudgetUsd !== undefined &&
     (typeof maxBudgetUsd !== 'number' || !Number.isFinite(maxBudgetUsd) || maxBudgetUsd <= 0 || maxBudgetUsd > 100)
   )
     throw new Error('workflow_agent_cost_limit_invalid')
-  if (adapter === 'codex' && (maxTurns !== undefined || maxBudgetUsd !== undefined))
+  if (adapter === 'codex' && (managedTurns !== undefined || maxBudgetUsd !== undefined))
     throw new Error('workflow_codex_budget_controls_unavailable')
-  if (selection === 'override' && adapter === 'local' && maxBudgetUsd !== undefined)
+  if ((selection === 'override' || team) && adapter === 'local' && maxBudgetUsd !== undefined)
     throw new Error('workflow_agent_team_uses_approved_admin_cost_limits')
   const timeout = integer(params.timeout_seconds, 600, 5, 2700)
   const controller = new AbortController()
@@ -179,7 +181,7 @@ export async function runWorkflowAgentFlow(
       return approved
     }
     let decision: WorkflowAgentSelection | undefined
-    if (selection === 'auto') {
+    if (selection === 'auto' && !team) {
       const availability = await deps.availability(ticket.signal)
       await current()
       decision = selectWorkflowAgent({
@@ -188,7 +190,7 @@ export async function runWorkflowAgentFlow(
         mode: deps.mode(),
         projectBound: !!project.rootPath && Number.isFinite(project.workspaceUpdatedAt),
         tier: thinkingTier,
-        maxTurns,
+        maxTurns: managedTurns,
         maxBudgetUsd: maxBudgetUsd as number | undefined,
         availability,
       })
@@ -205,7 +207,7 @@ export async function runWorkflowAgentFlow(
           availability: decision.availability,
           cost: decision.cost,
           maxBudgetUsd: maxBudgetUsd ?? null,
-          maxTurns: maxTurns ?? null,
+          maxTurns: managedTurns ?? null,
           role: decision.role,
           permission: decision.permission,
           executionProfile: adapter === 'claude' ? 'host-user' : 'workspace',
@@ -241,7 +243,7 @@ export async function runWorkflowAgentFlow(
         ...(decision
           ? { role: decision.role, permission: decision.permission, effort: decision.effortSelection?.requestedEffort }
           : {}),
-        ...(maxTurns !== undefined ? { maxTurns } : {}),
+        ...(managedTurns !== undefined ? { maxTurns: managedTurns } : {}),
         ...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
       })
       await current()
@@ -356,7 +358,11 @@ export async function runWorkflowAgentFlow(
         thinking_tier: thinkingTier,
         thinking_application: agent.inferenceTarget === 'local_llama_cpp' ? 'native_context_bounded' : 'unconfirmed',
         selection_reason:
-          selection === 'override' ? 'manual_local_policy_override' : (decision?.reason ?? 'signed_local_policy'),
+          selection === 'override'
+            ? 'manual_local_policy_override'
+            : team
+              ? 'local_orchestrator_with_approved_admin_specialists'
+              : (decision?.reason ?? 'signed_local_policy'),
         selection_quality_evidence: 'unavailable',
         selection_excluded: decision?.excluded ?? [],
         request_id: agent.requestId ?? null,

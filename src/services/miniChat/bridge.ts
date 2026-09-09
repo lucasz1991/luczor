@@ -66,14 +66,23 @@ export function createMiniChatBridge(
   let workflowAbort = new AbortController()
   let workflowTimer: ReturnType<typeof setInterval> | undefined
   let workflowLoading = false
-  async function refreshWorkflowRuns() {
-    if (workflowLoading || view.value !== 'chat') return
+  let workflowRefreshAgain = false
+  let workflowReadEpoch = 0
+  async function refreshWorkflowRuns(force = false) {
+    if (workflowLoading) {
+      if (force) workflowRefreshAgain = true
+      return
+    }
+    if (view.value !== 'chat') return
     const chat = deps.chat()
     const projectId = chat.project?.id
-    const references = chat.messages.flatMap(message => message.workflows ?? [])
-      .filter(item => item.projectId === projectId && item.runId).slice(-8)
+    const references = chat.messages
+      .flatMap(message => message.workflows ?? [])
+      .filter(item => item.projectId === projectId && item.runId)
+      .slice(-8)
     if (!projectId || !references.length) return
     const signal = workflowAbort.signal
+    const epoch = ++workflowReadEpoch
     workflowLoading = true
     try {
       const { captureWorkflowAccess } = await import('@/services/workflows/access')
@@ -82,16 +91,25 @@ export function createMiniChatBridge(
       for (const reference of references) {
         const run = (await access.api.run(reference.runId!)).data
         await access.check()
-        if (run.workflow_definition_id !== reference.id || run.public_id !== reference.runId || run.project_external_id !== projectId)
+        if (
+          run.workflow_definition_id !== reference.id ||
+          run.public_id !== reference.runId ||
+          run.project_external_id !== projectId
+        )
           throw new Error('Workflow-Laufzuordnung geändert.')
         next.push(miniWorkflowBudgetSnapshot(run))
       }
-      if (!signal.aborted) { workflowRuns.value = next; workflowRunsVerified.value = true }
+      if (!signal.aborted && epoch === workflowReadEpoch) {
+        workflowRuns.value = next
+        workflowRunsVerified.value = true
+      }
     } catch {
-      if (!signal.aborted) workflowRunsVerified.value = false
+      if (!signal.aborted && epoch === workflowReadEpoch) workflowRunsVerified.value = false
     } finally {
       workflowLoading = false
-      if (signal.aborted && !workflowAbort.signal.aborted) void refreshWorkflowRuns()
+      const again = workflowRefreshAgain
+      workflowRefreshAgain = false
+      if (again || (signal.aborted && !workflowAbort.signal.aborted)) void refreshWorkflowRuns(again)
     }
   }
   const thinkingControlAck = ref<MiniSnapshot['thinkingControlAck']>(null)
@@ -109,15 +127,25 @@ export function createMiniChatBridge(
     workflowRunsVerified.value = false
   }
   const stopContextWatch = watch(() => `${view.value}:${deps.chat().key}`, rotate, { flush: 'sync' })
-  const stopWorkflowWatch = watch(() => `${view.value}:${deps.chat().key}:${deps.chat().messages.flatMap(message => message.workflows ?? []).map(item => item.id + '/' + item.runId).join(',')}`, () => {
-    workflowAbort.abort()
-    workflowAbort = new AbortController()
-    workflowRuns.value = []
-    workflowRunsVerified.value = false
-    if (workflowTimer) clearInterval(workflowTimer)
-    void refreshWorkflowRuns()
-    if (view.value === 'chat') workflowTimer = setInterval(() => void refreshWorkflowRuns(), 10000)
-  }, { immediate: true })
+  if (typeof window !== 'undefined') window.addEventListener('luczor:api-identity-changing', rotate)
+  const stopWorkflowWatch = watch(
+    () =>
+      `${view.value}:${deps.chat().key}:${deps
+        .chat()
+        .messages.flatMap(message => message.workflows ?? [])
+        .map(item => item.id + '/' + item.runId)
+        .join(',')}`,
+    () => {
+      workflowAbort.abort()
+      workflowAbort = new AbortController()
+      workflowRuns.value = []
+      workflowRunsVerified.value = false
+      if (workflowTimer) clearInterval(workflowTimer)
+      void refreshWorkflowRuns()
+      if (view.value === 'chat') workflowTimer = setInterval(() => void refreshWorkflowRuns(), 10000)
+    },
+    { immediate: true }
+  )
   const content = computed(() => {
     const chat = deps.chat()
     return {
@@ -228,6 +256,7 @@ export function createMiniChatBridge(
         return
       const projectId = chat.project.id
       const epoch = sessionId.value
+      const workflowSignal = workflowAbort.signal
       selecting.value = true
       try {
         if (action.type === 'workflow_open') await deps.openWorkflow?.({ ...reference })
@@ -235,8 +264,19 @@ export function createMiniChatBridge(
           executionGate.assert(executionGate.capture(), true)
           if (action.action === 'stop_after_step') {
             const { stopWorkflowAfterStep } = await import('@/services/workflows/api')
-            await stopWorkflowAfterStep(projectId, reference.id, reference.runId!, workflowAbort.signal)
-            if (sessionId.value === epoch) await refreshWorkflowRuns()
+            if (sessionId.value !== epoch || workflowSignal.aborted) return
+            const result = await stopWorkflowAfterStep(projectId, reference.id, reference.runId!, workflowSignal)
+            if (sessionId.value === epoch) {
+              workflowReadEpoch++
+              workflowRuns.value = workflowRuns.value.map(run =>
+                run.public_id !== reference.runId
+                  ? run
+                  : miniWorkflowBudgetSnapshot(
+                      result.id === run.id ? result : Object.assign({}, run, { root_budget: result })
+                    )
+              )
+              await refreshWorkflowRuns(true)
+            }
           } else await deps.runWorkflow?.({ ...reference }, action.action)
         } else {
           const run =
@@ -315,6 +355,7 @@ export function createMiniChatBridge(
       rotate()
     },
     dispose() {
+      if (typeof window !== 'undefined') window.removeEventListener('luczor:api-identity-changing', rotate)
       workflowAbort.abort()
       if (workflowTimer) clearInterval(workflowTimer)
       stopWorkflowWatch()

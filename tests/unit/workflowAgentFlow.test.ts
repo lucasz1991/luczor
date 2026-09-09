@@ -131,6 +131,7 @@ describe('workflow agent adapter', () => {
     const result = await runWorkflowAgentFlow(true, { instruction: 'Bearbeiten', team_preset: 'budget' }, context, deps)
     expect(result.selection_reason).toBe('local_orchestrator_with_approved_admin_specialists')
     expect(deps.approve).toHaveBeenCalledOnce()
+    expect(deps.availability).not.toHaveBeenCalled()
   })
 
   it('routes a manual model and tier to the managed adapter without claiming confirmed application', async () => {
@@ -279,6 +280,67 @@ describe('workflow agent adapter', () => {
     expect(deps.run).not.toHaveBeenCalled()
   })
 
+  it('freezes the reviewed node and ignores mutated input while availability and approval are awaited', async () => {
+    const { deps, context } = fixture()
+    const base = await deps.availability(context.ticket.signal)
+    const available: WorkflowAgentAvailability = {
+      ...base,
+      codex: {
+        available: true,
+        catalog: {
+          revision: 'revision',
+          source: 'codex-cache',
+          validForSeconds: 300,
+          models: [{ model: 'pinned-model', supportedEfforts: ['high'] }],
+        },
+      },
+    }
+    const params = {
+      instruction: 'Implementiere Code',
+      thinking_tier: 'thorough',
+      input_bindings: { note: 'original' },
+    }
+    deps.availability.mockImplementation(async () => {
+      params.instruction = 'different instruction'
+      params.thinking_tier = 'ultra'
+      params.input_bindings.note = 'mutated'
+      return available
+    })
+    await runWorkflowAgentFlow(false, params, context, deps)
+    const sent = deps.managed.mock.calls[0]
+    expect(sent?.[1]).toContain('Implementiere Code')
+    expect(sent?.[1]).toContain('original')
+    expect(sent?.[1]).not.toContain('mutated')
+    expect(sent?.[5]).toMatchObject({ model: 'pinned-model', thinkingTier: 'thorough', effort: 'high' })
+    expect(JSON.parse(deps.approve.mock.calls[0]![0].content).prompt).toBe(sent?.[1])
+  })
+
+  it('rejects changed account credentials after automatic packet approval without dispatch or result export', async () => {
+    const { deps, context, account } = fixture()
+    const base = await deps.availability(context.ticket.signal)
+    deps.availability.mockResolvedValue({
+      ...base,
+      codex: {
+        available: true,
+        catalog: {
+          revision: 'revision',
+          source: 'codex-cache',
+          validForSeconds: 300,
+          models: [{ model: 'pinned-model', supportedEfforts: ['high'] }],
+        },
+      },
+    })
+    deps.approve.mockImplementationOnce(async () => {
+      deps.account.mockResolvedValue({ ...account, config: { ...account.config, clientId: 'another-device' } })
+      return true
+    })
+    await expect(runWorkflowAgentFlow(false, { instruction: 'Implementiere Code' }, context, deps)).rejects.toThrow(
+      'scope_changed'
+    )
+    expect(deps.managed).not.toHaveBeenCalled()
+    expect(deps.approve).toHaveBeenCalledOnce()
+  })
+
   it.each([
     [{ interrupted: { code: 'readiness_unavailable', message: 'Unavailable', round: 1 } }, 'partial'],
     [{ finalText: '' }, 'failed'],
@@ -339,6 +401,32 @@ describe('workflow agent adapter', () => {
         deps
       )
     ).rejects.toThrow('workflow_codex_budget_controls_unavailable')
+  })
+
+  it('preserves the lower round cap for managed Claude and refuses unsupported Codex rounds', async () => {
+    const { deps, context } = fixture()
+    await runWorkflowAgentFlow(
+      false,
+      { instruction: 'Review', agent_selection: 'override', agent: 'claude', max_turns: 8, max_rounds: 3 },
+      context,
+      deps
+    )
+    await expect(
+      runWorkflowAgentFlow(
+        false,
+        { instruction: 'Review', agent_selection: 'override', agent: 'codex', max_rounds: 3 },
+        context,
+        deps
+      )
+    ).rejects.toThrow('workflow_codex_budget_controls_unavailable')
+    expect(deps.managed).toHaveBeenCalledExactlyOnceWith(
+      'claude',
+      expect.any(String),
+      'C:/fixture',
+      expect.any(AbortSignal),
+      'project',
+      expect.objectContaining({ maxTurns: 3 })
+    )
   })
 
   it('rejects a changed workspace after execution and never exports that late result', async () => {
