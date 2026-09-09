@@ -71,6 +71,7 @@ declare module 'vue' {
     ToolChips: typeof import('./src/components/ai/ToolChips.vue')['default']
     VoiceInputSettings: typeof import('./src/components/ai/VoiceInputSettings.vue')['default']
     VoiceSettingsSection: typeof import('./src/components/settings/VoiceSettingsSection.vue')['default']
+    WorkflowBudgetSettings: typeof import('./src/components/workflows/WorkflowBudgetSettings.vue')['default']
     WorkflowChatCards: typeof import('./src/components/workflows/WorkflowChatCards.vue')['default']
     WorkflowEditorIsland: typeof import('./src/components/workflows/WorkflowEditorIsland.vue')['default']
     WorkflowGraphEditor: typeof import('./src/components/workflows/WorkflowGraphEditor.vue')['default']

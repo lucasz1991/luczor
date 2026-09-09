@@ -26,6 +26,8 @@ export type WorkflowTaskBundle = {
   params: Record<string, unknown>
   workflow: {
     run: string
+    /** Root run owns browser/image artifacts shared by frozen child runs. */
+    resource_run?: string
     step_id: number
     step_key: string
     execution_id?: string
@@ -87,6 +89,13 @@ export type WorkflowTaskPrimitives = {
     timed_out: boolean
     stdout_truncated?: boolean
     stderr_truncated?: boolean
+    duration_ms?: number
+    runtime?: string
+    interpreter?: string
+    runtime_version?: string
+    execution_profile?: 'host-user'
+    input_mode?: 'json-stdin' | 'code-stdin'
+    code_sha256?: string
   }>
   /** Drive the in-app browser window (P24). */
   browserOpen: (url?: string) => Promise<unknown>
@@ -282,6 +291,17 @@ export async function runWorkflowTask(
         stdout: res.stdout.slice(0, MAX_RESPONSE_CHARS),
         stderr: res.stderr.slice(0, MAX_RESPONSE_CHARS),
         ...(data !== undefined ? { data, execution_environment: 'windows_user' } : {}),
+        ...Object.fromEntries(
+          [
+            'duration_ms',
+            'runtime',
+            'interpreter',
+            'runtime_version',
+            'execution_profile',
+            'input_mode',
+            'code_sha256',
+          ].flatMap(key => (Reflect.get(res, key) === undefined ? [] : [[key, Reflect.get(res, key)]]))
+        ),
       }
     }
 

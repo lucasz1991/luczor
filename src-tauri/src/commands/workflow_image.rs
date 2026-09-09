@@ -56,6 +56,7 @@ pub async fn wf_image_action(
         return Err("workflow_vision_multimodal_runtime_unavailable".into());
     }
     if input.action == ImageOperation::Capture {
+        gate.check()?;
         let capture = super::system::capture_screen(
             window,
             Some(super::system::ScreenCapturePayload {
@@ -192,7 +193,7 @@ impl Drop for WinRt {
 }
 
 #[cfg(windows)]
-fn ocr_capabilities() -> Result<Value, String> {
+pub(crate) fn ocr_capabilities() -> Result<Value, String> {
     use windows::Media::Ocr::OcrEngine;
     let _runtime = WinRt::initialize()?;
     let languages = OcrEngine::AvailableRecognizerLanguages()
@@ -216,7 +217,7 @@ fn ocr_capabilities() -> Result<Value, String> {
     )
 }
 #[cfg(not(windows))]
-fn ocr_capabilities() -> Result<Value, String> {
+pub(crate) fn ocr_capabilities() -> Result<Value, String> {
     Ok(
         json!({"ok":true,"ocrAvailable":false,"ocrLanguages":[],"ocrReason":"windows_ocr_required","visionAvailable":false,"visionReason":"multimodal_runtime_unavailable"}),
     )

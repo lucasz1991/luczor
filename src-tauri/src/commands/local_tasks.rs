@@ -6,8 +6,9 @@
 // The server compiles a vetted `workflow.task` bundle, the device job pipeline
 // verifies its signature, and the frontend runner (workflowTaskRunner.ts) calls
 // these commands. Security posture (SOLL §0):
-//  - Filesystem access is confined to a single app-managed root; traversal,
-//    absolute paths and `..` are rejected.
+//  - File helper operations are confined to an app-managed root. Explicitly
+//    reviewed scripts run with Windows user rights; their checked project cwd
+//    is not a filesystem or network sandbox.
 //  - Interpreters are chosen from a fixed allowlist and resolved against PATH;
 //    the user never supplies a raw binary path.
 //  - Subprocesses run off the async runtime, with a wall-clock timeout and a
@@ -285,42 +286,125 @@ pub struct RunScriptResult {
 }
 
 fn validate_script(input: &RunScriptPayload) -> Result<(), String> {
-    if !input.full_access_acknowledged { return Err("Local scripts require the reviewed Windows host-user profile; the project is not a filesystem sandbox.".into()); }
-    if input.code.trim().is_empty() || input.code.len() > 200_000 || input.code.contains('\0') { return Err("workflow_script_code_invalid".into()); }
-    if runtime_candidates(&input.runtime).is_none() { return Err("workflow_script_runtime_unsupported".into()); }
-    if let Some(data) = &input.input {
-        if input.scope.is_none() || !data.is_object() || serde_json::to_vec(data).map_err(|_| "workflow_script_json_invalid")?.len() > MAX_OUTPUT_BYTES { return Err("workflow_script_json_input_invalid".into()); }
-        #[cfg(windows)]
-        if input.code.encode_utf16().count() > 28000 { return Err("workflow_script_exceeds_windows_argument_limit".into()); }
+    if !input.full_access_acknowledged {
+        return Err("Local scripts require the reviewed Windows host-user profile; the project is not a filesystem sandbox.".into());
     }
-    if input.output_schema.as_ref().is_some_and(|schema| !schema.is_object() || schema.to_string().len() > 50000) { return Err("workflow_script_output_schema_invalid".into()); }
+    if input.code.trim().is_empty() || input.code.len() > 200_000 || input.code.contains('\0') {
+        return Err("workflow_script_code_invalid".into());
+    }
+    if runtime_candidates(&input.runtime).is_none() {
+        return Err("workflow_script_runtime_unsupported".into());
+    }
+    if let Some(data) = &input.input {
+        if input.scope.is_none()
+            || !data.is_object()
+            || serde_json::to_vec(data)
+                .map_err(|_| "workflow_script_json_invalid")?
+                .len()
+                > MAX_OUTPUT_BYTES
+        {
+            return Err("workflow_script_json_input_invalid".into());
+        }
+        #[cfg(windows)]
+        if input.code.encode_utf16().count() > 28000 {
+            return Err("workflow_script_exceeds_windows_argument_limit".into());
+        }
+    }
+    if input
+        .output_schema
+        .as_ref()
+        .is_some_and(|schema| !schema.is_object() || schema.to_string().len() > 50000)
+    {
+        return Err("workflow_script_output_schema_invalid".into());
+    }
     Ok(())
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorkflowRuntimeCapability { runtime: &'static str, available: bool, version: Option<String>, execution_profile: &'static str, json_input: bool }
+pub struct WorkflowRuntimeCapability {
+    runtime: &'static str,
+    available: bool,
+    version: Option<String>,
+    execution_profile: &'static str,
+    json_input: bool,
+}
+
+fn native_contract_fingerprint() -> String {
+    let mut hash = Sha256::new();
+    for part in [
+        env!("CARGO_PKG_VERSION"),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        include_str!("local_tasks.rs"),
+        include_str!("process.rs"),
+        include_str!("execution.rs"),
+        include_str!("workflow_browser.rs"),
+        include_str!("workflow_browser_script.js"),
+        include_str!("workflow_image.rs"),
+        include_str!("workflow_artifacts.rs"),
+        include_str!("agent.rs"),
+        include_str!("codex.rs"),
+        include_str!("claude.rs"),
+        include_str!("agent_effort.rs"),
+    ] {
+        hash.update((part.len() as u64).to_le_bytes());
+        hash.update(part.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
 
 fn runtime_version(exe: &Path, runtime: &str) -> Option<String> {
     let mut command = Command::new(exe);
-    command.arg("--version").env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("PYTHONSTARTUP");
-    let result = super::process::run_bounded_command(command, None, Duration::from_secs(3), 256).ok()?;
-    if !result.success || result.stdout_truncated || result.stderr_truncated { return None; }
-    let version = if result.stdout.trim().is_empty() { result.stderr.trim() } else { result.stdout.trim() };
-    if version.len() > 80 || !version.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ' ')) || !(if runtime == "node" { version.starts_with('v') } else { version.starts_with("Python ") }) { return None; }
+    command
+        .arg("--version")
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_PATH")
+        .env_remove("PYTHONSTARTUP");
+    let result =
+        super::process::run_bounded_command(command, None, Duration::from_secs(3), 256).ok()?;
+    if !result.success || result.stdout_truncated || result.stderr_truncated {
+        return None;
+    }
+    let version = if result.stdout.trim().is_empty() {
+        result.stderr.trim()
+    } else {
+        result.stdout.trim()
+    };
+    if version.len() > 80
+        || !version
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ' '))
+        || !(if runtime == "node" {
+            version.starts_with('v')
+        } else {
+            version.starts_with("Python ")
+        })
+    {
+        return None;
+    }
     Some(version.into())
 }
 
 /// Only --version probes, never user code, package installation, login or model preparation.
 #[tauri::command]
-pub async fn wf_runtime_capabilities(window: WebviewWindow) -> Result<Vec<WorkflowRuntimeCapability>, String> {
+pub async fn wf_runtime_capabilities(window: WebviewWindow) -> Result<Value, String> {
     ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(|| {
-        ["node", "python"].into_iter().map(|runtime| {
+        let runtimes: Vec<_> = ["node", "python"].into_iter().map(|runtime| {
             let exe = runtime_candidates(runtime).and_then(find_executable);
             let version = exe.as_deref().and_then(|exe| runtime_version(exe, runtime));
             WorkflowRuntimeCapability { runtime, available: version.is_some(), version, execution_profile: "host-user", json_input: true }
-        }).collect()
+        }).collect();
+        let browser = super::workflow_browser::capabilities();
+        let ocr = super::workflow_image::ocr_capabilities().unwrap_or_else(|_| serde_json::json!({"ocrAvailable":false,"ocrLanguages":[],"ocrReason":"windows_ocr_unavailable"}));
+        let capture = xcap::Monitor::all().is_ok_and(|monitors| !monitors.is_empty());
+        let image = serde_json::json!({"capture":capture,"compare":true,"ocr":ocr["ocrAvailable"],"ocrLanguages":ocr["ocrLanguages"],"vision":false,"visionReason":"multimodal_runtime_unavailable"});
+        let build = serde_json::json!({"appVersion":env!("CARGO_PKG_VERSION"),"platform":std::env::consts::OS,"arch":std::env::consts::ARCH,"contractFingerprint":native_contract_fingerprint()});
+        let mut report = serde_json::json!({"runtimes":runtimes,"browser":browser,"image":image,"build":build});
+        let fingerprint = format!("{:x}", Sha256::digest(report.to_string().as_bytes()));
+        report["runtimeFingerprint"] = Value::String(fingerprint);
+        report
     }).await.map_err(|_| "workflow_runtime_probe_failed".into())
 }
 
@@ -333,7 +417,9 @@ pub async fn wf_run_script(
 ) -> Result<RunScriptResult, String> {
     ensure_main_webview(&window)?;
     validate_script(&payload.request)?;
-    if payload.scope.is_some() && payload.execution.workflow_execution_id.is_none() { return Err("workflow_execution_identity_required".into()); }
+    if payload.scope.is_some() && payload.execution.workflow_execution_id.is_none() {
+        return Err("workflow_execution_identity_required".into());
+    }
     // Existing unscoped clients retain the old global mode requirement. A durable job already owns its scoped host grant.
     let gate = admit_full(&payload.execution, true, payload.scope.is_none())?;
     let payload = payload.request;
@@ -353,16 +439,34 @@ pub async fn wf_run_script(
         gate.check()?;
         let check = || {
             gate.check()?;
-            if let Some(scope) = &payload.scope { scope.check(&app)?; }
+            if let Some(scope) = &payload.scope {
+                scope.check(&app)?;
+            }
             Ok(())
         };
         check()?;
-        let root = payload.scope.as_ref().map(|scope| PathBuf::from(&scope.expected_root_path));
-        let _lease = root.as_deref().map(|root| super::codex::acquire_workspace_lease(root, true)).transpose()?;
+        let root = payload
+            .scope
+            .as_ref()
+            .map(|scope| PathBuf::from(&scope.expected_root_path));
+        let _lease = root
+            .as_deref()
+            .map(|root| super::codex::acquire_workspace_lease(root, true))
+            .transpose()?;
         let version = runtime_version(&exe, &payload.runtime);
-        if version.is_none() { return Err("workflow_runtime_probe_failed".into()); }
+        if version.is_none() {
+            return Err("workflow_runtime_probe_failed".into());
+        }
         check()?;
-        run_script_blocking(&exe, &payload, root.as_deref(), timeout, Some(gate.clone()), version, &check)
+        run_script_blocking(
+            &exe,
+            &payload,
+            root.as_deref(),
+            timeout,
+            Some(gate.clone()),
+            version,
+            &check,
+        )
     })
     .await
     .map_err(|e| format!("join failed: {e}"))?
@@ -398,22 +502,47 @@ fn run_script_blocking(
         stderr_truncated: output.stderr_truncated,
         duration_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
         runtime: payload.runtime.clone(),
-        interpreter: exe.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_else(|| payload.runtime.clone()),
+        interpreter: exe
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| payload.runtime.clone()),
         runtime_version: version,
         execution_profile: "host-user",
-        input_mode: if payload.input.is_some() { "json-stdin" } else { "code-stdin" },
+        input_mode: if payload.input.is_some() {
+            "json-stdin"
+        } else {
+            "code-stdin"
+        },
         code_sha256: format!("{:x}", Sha256::digest(payload.code.as_bytes())),
     })
 }
 
-fn script_command(exe: &Path, payload: &RunScriptPayload, root: Option<&Path>) -> Result<(Command, Vec<u8>), String> {
+fn script_command(
+    exe: &Path,
+    payload: &RunScriptPayload,
+    root: Option<&Path>,
+) -> Result<(Command, Vec<u8>), String> {
     let mut command = Command::new(exe);
-    command.env_remove("NODE_OPTIONS").env_remove("NODE_PATH").env_remove("PYTHONSTARTUP");
-    if let Some(root) = root { command.current_dir(root); }
+    command
+        .env_remove("NODE_OPTIONS")
+        .env_remove("NODE_PATH")
+        .env_remove("PYTHONSTARTUP");
+    if let Some(root) = root {
+        command.current_dir(root);
+    }
     let stdin = if let Some(input) = &payload.input {
-        command.arg(if payload.runtime == "node" { "-e" } else { "-c" }).arg(&payload.code);
+        command
+            .arg(if payload.runtime == "node" {
+                "-e"
+            } else {
+                "-c"
+            })
+            .arg(&payload.code);
         serde_json::to_vec(input).map_err(|_| "workflow_script_json_invalid")?
-    } else { command.arg("-"); payload.code.as_bytes().to_vec() };
+    } else {
+        command.arg("-");
+        payload.code.as_bytes().to_vec()
+    };
     Ok((command, stdin))
 }
 
@@ -458,5 +587,119 @@ mod tests {
         assert!(runtime_candidates("node").is_some());
         assert!(runtime_candidates("ruby").is_none());
         assert!(runtime_candidates("sh").is_none());
+    }
+
+    fn fixture(runtime: &str) -> RunScriptPayload {
+        RunScriptPayload {
+            runtime: runtime.into(),
+            code: "print('code')\n".into(),
+            timeout_seconds: Some(10),
+            full_access_acknowledged: true,
+            scope: Some(super::super::workflow_artifacts::WorkflowArtifactScope {
+                principal_id: "user".into(),
+                project_id: "project".into(),
+                expected_root_path: "E:\\project".into(),
+                expected_workspace_updated_at: 7,
+                run_id: uuid::Uuid::new_v4().to_string(),
+            }),
+            input: Some(serde_json::json!({"text":"'; touch injected; ${1+1}"})),
+            output_schema: None,
+        }
+    }
+
+    #[test]
+    fn durable_scripts_pass_exact_code_as_argument_and_json_only_on_stdin() {
+        for (runtime, switch) in [("node", "-e"), ("python", "-c")] {
+            let input = fixture(runtime);
+            assert!(validate_script(&input).is_ok());
+            let (command, stdin) = script_command(
+                Path::new("interpreter"),
+                &input,
+                Some(Path::new("project-root")),
+            )
+            .unwrap();
+            let args: Vec<_> = command
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(args, vec![switch.to_string(), input.code.clone()]);
+            assert_eq!(command.get_current_dir(), Some(Path::new("project-root")));
+            assert_eq!(
+                serde_json::from_slice::<Value>(&stdin).unwrap(),
+                input.input.unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_stdin_code_stays_compatible_and_invalid_json_scope_is_rejected() {
+        let mut input = fixture("python");
+        input.scope = None;
+        assert!(validate_script(&input).is_err());
+        input.input = None;
+        assert!(validate_script(&input).is_ok());
+        let (command, stdin) = script_command(Path::new("python"), &input, None).unwrap();
+        assert_eq!(
+            command.get_args().collect::<Vec<_>>(),
+            vec![std::ffi::OsStr::new("-")]
+        );
+        assert_eq!(stdin, input.code.as_bytes());
+        input.full_access_acknowledged = false;
+        assert!(validate_script(&input).is_err());
+        input = fixture("node");
+        input.input = Some(serde_json::json!([1, 2]));
+        assert!(validate_script(&input).is_err());
+        input.input = Some(serde_json::json!({}));
+        input.output_schema = Some(Value::String("schema".into()));
+        assert!(validate_script(&input).is_err());
+    }
+
+    #[test]
+    fn fingerprint_is_a_stable_hash_of_the_compiled_source_contracts() {
+        let fingerprint = native_contract_fingerprint();
+        assert_eq!(fingerprint.len(), 64);
+        assert_eq!(fingerprint, native_contract_fingerprint());
+        assert_ne!(
+            fingerprint,
+            format!("{:x}", Sha256::digest(env!("CARGO_PKG_VERSION").as_bytes()))
+        );
+    }
+
+    #[test]
+    #[ignore = "Explicit installed-runtime smoke: starts only fixed JSON echo programs, never models or agents."]
+    fn installed_json_interpreters_preserve_untrusted_input() {
+        let directory = std::env::temp_dir().join(format!("luczor-json-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let directory = directory.canonicalize().unwrap();
+        let result = (|| -> Result<(), String> {
+            for runtime in ["node", "python"] {
+                let exe = find_executable(runtime_candidates(runtime).unwrap())
+                    .ok_or_else(|| format!("{runtime} runtime unavailable"))?;
+                let version = runtime_version(&exe, runtime)
+                    .ok_or_else(|| format!("{runtime} version unavailable"))?;
+                let mut input = fixture(runtime);
+                input.code = if runtime == "node" { "const fs=require('node:fs');process.stdout.write(JSON.stringify({received:JSON.parse(fs.readFileSync(0,'utf8'))}));" } else { "import sys,json\njson.dump({'received':json.load(sys.stdin)},sys.stdout)" }.into();
+                let output = run_script_blocking(
+                    &exe,
+                    &input,
+                    Some(&directory),
+                    Duration::from_secs(5),
+                    None,
+                    Some(version.clone()),
+                    &|| Ok(()),
+                )?;
+                assert!(output.ok && !output.stdout_truncated && !output.timed_out);
+                assert_eq!(
+                    serde_json::from_str::<Value>(&output.stdout).unwrap()["received"],
+                    input.input.unwrap()
+                );
+                assert_eq!(output.input_mode, "json-stdin");
+                assert_eq!(output.execution_profile, "host-user");
+                println!("Installed {runtime} {version}: exact JSON stdin roundtrip succeeded.");
+            }
+            Ok(())
+        })();
+        std::fs::remove_dir(directory).unwrap();
+        result.unwrap();
     }
 }

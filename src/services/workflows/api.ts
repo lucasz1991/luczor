@@ -39,6 +39,11 @@ export function createWorkflowApi(config: LuczorApiConfigSnapshot, signal?: Abor
       request<WorkflowEnvelope<WorkflowRun>>(`/workflows/${id}/runs`, { method: 'POST', body }),
     cancel: (id: string) =>
       request<WorkflowEnvelope<WorkflowRun>>(`/workflow-runs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+    stopAfterStep: (id: string, operationId: string) =>
+      request<WorkflowEnvelope<WorkflowRun>>(`/workflow-runs/${encodeURIComponent(id)}/stop-after-step`, {
+        method: 'POST',
+        body: { operation_id: operationId },
+      }),
     approve: (id: number) =>
       request<WorkflowEnvelope<WorkflowRun>>(`/workflow-steps/${id}/approve`, { method: 'POST' }),
     complete: (id: number, output: Record<string, unknown>) =>
@@ -71,3 +76,50 @@ export function createWorkflowApi(config: LuczorApiConfigSnapshot, signal?: Abor
   }
 }
 export type WorkflowApi = ReturnType<typeof createWorkflowApi>
+
+/** Explicit UI stop, bound to an owned run and recovered before repeating an uncertain POST. */
+export async function stopWorkflowAfterStep(
+  projectId: string,
+  workflowId: number,
+  runId: string,
+  signal?: AbortSignal
+) {
+  const { captureWorkflowAccess } = await import('./access')
+  const { workflowOperations, WorkflowOperationUncertain } = await import('./operations')
+  const access = await captureWorkflowAccess({ projectId, signal }, undefined, true)
+  await access.workflow(workflowId)
+  const requested = (await access.api.run(runId)).data
+  await access.check()
+  if (requested.workflow_definition_id !== workflowId)
+    throw new Error('Der angeforderte Lauf gehört zu einem anderen Workflow.')
+  const rootId: unknown = Reflect.get(requested, 'root_workflow_run_id')
+  const validate = (result: WorkflowRun) => {
+    if (!Number.isSafeInteger(result?.id) || result.id < 1 || (result.id !== requested.id && result.id !== rootId))
+      throw new Error('Die Stoppantwort gehört zu einem anderen Auftrag.')
+    return result
+  }
+  return workflowOperations.run<WorkflowRun>({
+    scope: {
+      principal: access.principalId,
+      config: access.config,
+      workflowId,
+      runId: requested.public_id,
+      action: 'stop_after_step',
+    },
+    args: { workflowId, runId: requested.public_id },
+    assertCurrent: access.check,
+    async verify(operationId) {
+      const response = await access.api.operation(operationId)
+      if (response.data.status === 'not_found') return null
+      if (response.data.status !== 'completed' || !response.data.response)
+        throw new WorkflowOperationUncertain(operationId)
+      return validate(response.data.response as WorkflowRun)
+    },
+    async execute(operationId) {
+      await access.check()
+      const response = await access.api.stopAfterStep(requested.public_id, operationId)
+      await access.check()
+      return validate(response.data)
+    },
+  })
+}

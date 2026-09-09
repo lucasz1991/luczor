@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const mock = vi.hoisted(() => ({
   invoke: vi.fn(),
   request: vi.fn(),
@@ -13,6 +13,9 @@ const mock = vi.hoisted(() => ({
   runTask: vi.fn(),
   account: vi.fn(),
   workspace: vi.fn(),
+  automationRevision: vi.fn(),
+  sweep: vi.fn(),
+  retain: vi.fn(),
 }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mock.invoke }))
 vi.mock('@/services/accountPrincipal', () => ({ getVerifiedAccountSnapshot: mock.account }))
@@ -29,9 +32,16 @@ vi.mock('@/services/executionGate', () => ({
 vi.mock('@/services/agents/workflowAgent', () => ({ runWorkflowAgent: vi.fn() }))
 vi.mock('@/services/workflowTaskRunner', () => ({ isWorkflowTaskBundle: () => true, runWorkflowTask: mock.runTask }))
 vi.mock('@/services/workflows/llm', () => ({ runWorkflowLlm: vi.fn() }))
+vi.mock('@/services/workflows/runResources', () => ({
+  sweepWorkflowResources: mock.sweep,
+  retainWorkflowResources: mock.retain,
+  releaseWorkflowResources: async () => {},
+}))
 vi.mock('@/services/workflows/automation', () => ({
   canonicalWorkflowPath: (path: string) => path.toLowerCase().replaceAll('\\', '/'),
   workflowAutomationAllows: mock.allows,
+  workflowAutomationRevision: mock.automationRevision,
+  WORKFLOW_AUTOMATION_INVALIDATED: 'workflow-invalidated',
 }))
 vi.mock('@/services/workflows/executionLedger', () => ({
   workflowAccountScope: async () => 'account-scope',
@@ -68,6 +78,8 @@ function fixture() {
 }
 beforeEach(() => {
   vi.resetAllMocks()
+  vi.stubGlobal('window', new EventTarget())
+  mock.automationRevision.mockReturnValue(0)
   mock.invoke.mockResolvedValue(undefined)
   mock.account.mockResolvedValue({ principalId: 'user:1', config })
   mock.workspace.mockResolvedValue({ rootPath: 'E:\\Project', updatedAt: 10, status: 'ready' })
@@ -79,7 +91,50 @@ beforeEach(() => {
   )
   mock.runTask.mockResolvedValue({ ok: true, result: 'saved' })
 })
+afterEach(() => vi.unstubAllGlobals())
 describe('signed workflow device lifecycle', () => {
+  it('releases completed sessions before a child uses the signed root browser scope', async () => {
+    const { job, ticket } = fixture()
+    const payload = job.payload as import('@/services/workflowTaskRunner').WorkflowTaskBundle
+    payload.task_key = 'browser.open'
+    payload.params = { url: 'https://example.test' }
+    payload.workflow.resource_run = 'root-resource-run'
+    mock.runTask.mockImplementationOnce(async (_bundle, primitives) => {
+      await primitives.browserSession.open('https://example.test')
+      return { ok: true }
+    })
+    await runWorkflowDeviceJob(job, config, ticket, () => {}, 'preview')
+    expect(mock.sweep).toHaveBeenCalledWith(config, expect.any(AbortSignal))
+    expect(mock.sweep.mock.invocationCallOrder[0]).toBeLessThan(mock.retain.mock.invocationCallOrder[0]!)
+    expect(mock.retain).toHaveBeenCalledWith(expect.objectContaining({ runId: 'root-resource-run' }), config, undefined)
+    expect(mock.invoke).toHaveBeenCalledWith(
+      'wf_browser_action',
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          scope: expect.objectContaining({ runId: 'root-resource-run' }),
+          execution: expect.objectContaining({ workflowExecutionId: executionId }),
+        }),
+      })
+    )
+  })
+  it('cancels a locally revoked automatic grant during device start before any effects', async () => {
+    const { job, ticket } = fixture()
+    mock.allows.mockResolvedValue(true)
+    mock.start.mockImplementation(async () => {
+      mock.automationRevision.mockReturnValue(1)
+      window.dispatchEvent(
+        new CustomEvent('workflow-invalidated', { detail: { scope: 'account-scope', definitionId: 1 } })
+      )
+    })
+    await expect(runWorkflowDeviceJob(job, config, ticket, () => {}, 'preview')).rejects.toThrow(
+      'workflow_automation_revoked'
+    )
+    expect(mock.runTask).not.toHaveBeenCalled()
+    expect(mock.invoke).toHaveBeenCalledWith(
+      'wf_execution_cancel',
+      expect.objectContaining({ payload: expect.objectContaining({ executionId }) })
+    )
+  })
   it('resends a durable result without repeating approval, start or effects', async () => {
     const { job, ticket } = fixture()
     mock.recover.mockResolvedValue({ ok: true, result: 'saved earlier' })

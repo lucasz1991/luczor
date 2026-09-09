@@ -35,8 +35,14 @@ export function cleanupWorkflowBrowser(scope: WorkflowArtifactScope): Promise<bo
   return invoke('wf_browser_cleanup', { payload: { ...scope } })
 }
 
-export function createWorkflowBrowser(context: { scope: WorkflowArtifactScope; invokeTask: WorkflowNativeInvoke }) {
+export function createWorkflowBrowser(context: {
+  scope: WorkflowArtifactScope
+  invokeTask: WorkflowNativeInvoke
+  allowedHosts?: readonly string[]
+  automated?: boolean
+}) {
   const scope = Object.freeze({ ...context.scope })
+  const allowedHosts = context.allowedHosts ? Object.freeze([...context.allowedHosts]) : undefined
   let sessionId: string | undefined
   const execute = async (action: string, options: Record<string, unknown> = {}, mutating = true) => {
     const requestedSession = typeof options.sessionId === 'string' ? options.sessionId : sessionId
@@ -45,6 +51,8 @@ export function createWorkflowBrowser(context: { scope: WorkflowArtifactScope; i
       {
         ...options,
         scope,
+        allowedHosts,
+        automated: context.automated === true,
         action,
         sessionId: requestedSession,
       },

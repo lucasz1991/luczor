@@ -12,6 +12,7 @@ import {
 import { isWorkflowTaskBundle, runWorkflowTask, type WorkflowTaskPrimitives } from '@/services/workflowTaskRunner'
 import { isDurableWorkflowJob, runWorkflowDeviceJob } from '@/services/workflows/execution'
 import { sweepWorkflowResources, releaseWorkflowAccountResources } from '@/services/workflows/runResources'
+import { reportWorkflowCapabilitiesIfDue } from '@/services/workflows/capabilities'
 
 let stop: (() => void) | null = null
 const inFlight = new Set<string>()
@@ -173,6 +174,7 @@ export async function startDeviceJobChannel(): Promise<() => void> {
   }
   const pollNow = () => {
     if (!active || session !== sessionCounter) return
+    void reportWorkflowCapabilitiesIfDue(channelSession.config, channelSession.signal)
     if (
       !shouldPollDeviceJobs(Date.now(), channelState.lastPollAt, document.visibilityState, navigator.onLine !== false)
     )

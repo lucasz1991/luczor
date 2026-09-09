@@ -11,12 +11,17 @@ import {
   type WorkflowTaskBundle,
   type WorkflowTaskPrimitives,
 } from '@/services/workflowTaskRunner'
-import { canonicalWorkflowPath, workflowAutomationAllows } from './automation'
+import {
+  canonicalWorkflowPath,
+  workflowAutomationAllows,
+  workflowAutomationRevision,
+  WORKFLOW_AUTOMATION_INVALIDATED,
+} from './automation'
 import { workflowAccountScope, workflowExecutionLedger } from './executionLedger'
 import { runWorkflowLlm } from './llm'
 import { createWorkflowBrowser } from './browser'
 import { runWorkflowImage } from './image'
-import { retainWorkflowResources, releaseWorkflowResources } from './runResources'
+import { retainWorkflowResources, releaseWorkflowResources, sweepWorkflowResources } from './runResources'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 
@@ -63,17 +68,27 @@ export async function runWorkflowDeviceJob(
   )
     throw new Error('workflow_execution_root_changed')
   const controller = new AbortController()
+  let automated = false
+  const automationRevision = workflowAutomationRevision(scope, metadata.definition_id ?? 0)
   const artifactScope = {
     principalId: account.principalId,
     projectId: metadata.project_id,
     expectedRootPath: workspace.rootPath,
     expectedWorkspaceUpdatedAt: workspace.updatedAt,
-    runId: metadata.run,
+    runId: metadata.resource_run ?? metadata.run,
   }
   const ticket: ExecutionTicket = { ...parentTicket, signal: AbortSignal.any([parentTicket.signal, controller.signal]) }
   const assert = () => {
     assertSession()
+    if (automated && workflowAutomationRevision(scope, metadata.definition_id ?? 0) !== automationRevision)
+      controller.abort(new Error('workflow_automation_revoked'))
     executionGate.assert(ticket, true)
+    ticket.signal.throwIfAborted()
+  }
+  const invalidate = (event: Event) => {
+    const detail = (event as CustomEvent<{ scope?: string; definitionId?: number }>).detail
+    if (automated && detail?.scope === scope && detail.definitionId === metadata.definition_id)
+      controller.abort(new Error('workflow_automation_revoked'))
   }
   const nativeExecution = await executionPayload(parentTicket, true)
   let cancellation: Promise<unknown> | undefined
@@ -118,6 +133,7 @@ export async function runWorkflowDeviceJob(
   const timer = setInterval(() => {
     void checkCancellation()
   }, 2000)
+  window.addEventListener(WORKFLOW_AUTOMATION_INVALIDATED, invalidate)
   try {
     await checkCancellation()
     assert()
@@ -136,7 +152,7 @@ export async function runWorkflowDeviceJob(
       await workflowExecutionLedger.acknowledge(scope, executionId)
       return
     }
-    const automated = await workflowAutomationAllows(bundle, scope, account.principalId, config)
+    automated = await workflowAutomationAllows(bundle, scope, account.principalId, config)
     assert()
     const approval = automated ? { approved: true } : await requestConfirmation(preview, 'Luczor – Workflow-Schritt')
     assert()
@@ -169,10 +185,21 @@ export async function runWorkflowDeviceJob(
       await LuczorApi.startDeviceJob(job.id, config.clientId, config, ticket.signal)
       assert()
       try {
-        if (bundle.task_key.startsWith('browser.')) retainWorkflowResources(artifactScope, config)
+        if (bundle.task_key.startsWith('browser.')) {
+          // Another root may have completed earlier in this same device-job batch.
+          await sweepWorkflowResources(config, ticket.signal)
+          assert()
+          retainWorkflowResources(
+            artifactScope,
+            config,
+            automated
+              ? { accountScope: scope, definitionId: metadata.definition_id!, revision: automationRevision }
+              : undefined
+          )
+        }
         const result = await runWorkflowTask(
           bundle,
-          workflowPrimitives(bundle, account.principalId, workspace, ticket, assert)
+          workflowPrimitives(bundle, account.principalId, workspace, ticket, assert, automated)
         )
         assert()
         const resultBytes = new TextEncoder().encode(JSON.stringify(result)).byteLength
@@ -198,6 +225,7 @@ export async function runWorkflowDeviceJob(
     )
     await workflowExecutionLedger.acknowledge(scope, executionId)
   } finally {
+    window.removeEventListener(WORKFLOW_AUTOMATION_INVALIDATED, invalidate)
     clearInterval(timer)
     ticket.signal.removeEventListener('abort', cancelNative)
     if (cancellation) await cancellation.catch(() => {})
@@ -210,7 +238,8 @@ function workflowPrimitives(
   principalId: string,
   workspace: ProjectWorkspaceBinding,
   ticket: ExecutionTicket,
-  assert: () => void
+  assert: () => void,
+  automated: boolean
 ): WorkflowTaskPrimitives {
   const projectId = bundle.workflow.project_id!
   const workspaceIdentity = {
@@ -232,7 +261,7 @@ function workflowPrimitives(
   const artifactScope = {
     ...workspaceIdentity,
     expectedWorkspaceUpdatedAt: workspace.updatedAt!,
-    runId: bundle.workflow.run,
+    runId: bundle.workflow.resource_run ?? bundle.workflow.run,
   }
   return {
     openUrl: url => invokeTask('open_url', { url }),
@@ -246,7 +275,14 @@ function workflowPrimitives(
       assert()
       return runWorkflowAgentFlow(team, params, { projectId, ticket, thinkingTier: bundle.workflow.thinking_tier })
     },
-    browserSession: createWorkflowBrowser({ scope: artifactScope, invokeTask }),
+    browserSession: createWorkflowBrowser({
+      scope: artifactScope,
+      invokeTask,
+      automated,
+      allowedHosts: automated
+        ? (bundle.workflow.grant as { config: { egress_hosts: string[] } }).config.egress_hosts
+        : undefined,
+    }),
     runImage: input => runWorkflowImage(input, { scope: artifactScope, invokeTask }),
     fileRead: async path => {
       if (!workspaceFiles) return invokeTask('wf_file_read', { path }, false)

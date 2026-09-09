@@ -7,12 +7,15 @@ import { defineConfig } from 'vite'
 import vueDevTools from 'vite-plugin-vue-devtools'
 import { version as pkgVersion } from './package.json'
 import { DEFAULT_API_BASE_URL, DEV_API_PREFIX } from './src/services/api/endpoint'
+// @ts-expect-error Build-only ESM helper is not part of the client TypeScript graph.
+import { workflowCodeFingerprint } from './scripts/workflow-code-fingerprint.mjs'
 
 const HOST = process.env.TAURI_DEV_HOST
 const PLATFORM = process.env.TAURI_ENV_PLATFORM
 process.env.VITE_APP_VERSION = pkgVersion
 if (process.env.NODE_ENV === 'production') {
   process.env.VITE_APP_BUILD_EPOCH = new Date().getTime().toString()
+  process.env.VITE_WORKFLOW_CODE_HASH = workflowCodeFingerprint(fileURLToPath(new URL('.', import.meta.url)))
 }
 
 // https://vitejs.dev/config/

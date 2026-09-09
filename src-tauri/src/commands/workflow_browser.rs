@@ -14,7 +14,55 @@ struct Session {
     id: String,
     scope: WorkflowArtifactScope,
     busy: AtomicBool,
-    created: Instant,
+    allowed_hosts: Option<Vec<String>>,
+    automated: bool,
+    gate: Mutex<Option<ExecutionLease>>,
+    policy_violation: AtomicBool,
+    navigation: Mutex<NavigationTracker>,
+}
+
+#[derive(Default)]
+struct NavigationTracker {
+    generation: u64,
+    requested: Option<RequestedNavigation>,
+}
+struct RequestedNavigation {
+    target: String,
+    id: Option<u64>,
+    complete: Option<bool>,
+}
+impl NavigationTracker {
+    fn begin(&mut self, target: &str) -> u64 {
+        self.generation = self.generation.saturating_add(1);
+        self.requested = Some(RequestedNavigation {
+            target: target.into(),
+            id: None,
+            complete: None,
+        });
+        self.generation
+    }
+    fn started(&mut self, id: u64, uri: &str) {
+        if let Some(request) = &mut self.requested {
+            if request.id.is_none() && uri == request.target {
+                request.id = Some(id);
+            } else if request.id.is_some_and(|expected| expected != id) {
+                request.complete = Some(false);
+            }
+        }
+    }
+    fn finished(&mut self, id: u64, success: bool) {
+        if let Some(request) = &mut self.requested {
+            if request.id == Some(id) && request.complete.is_none() {
+                request.complete = Some(success);
+            }
+        }
+    }
+    fn status(&self, generation: u64) -> Result<Option<bool>, String> {
+        if generation != self.generation {
+            return Err("workflow_browser_navigation_changed".into());
+        }
+        Ok(self.requested.as_ref().and_then(|request| request.complete))
+    }
 }
 fn sessions() -> &'static Mutex<Option<Arc<Session>>> {
     static SESSION: OnceLock<Mutex<Option<Arc<Session>>>> = OnceLock::new();
@@ -65,6 +113,9 @@ pub struct WorkflowBrowserAction {
     pub scope: WorkflowArtifactScope,
     pub session_id: Option<String>,
     pub expected_tab_id: Option<String>,
+    pub allowed_hosts: Option<Vec<String>>,
+    #[serde(default)]
+    pub automated: bool,
     pub action: BrowserOperation,
     pub url: Option<String>,
     pub expected_url: Option<String>,
@@ -84,6 +135,7 @@ pub struct WorkflowBrowserResult {
 }
 
 fn validate(input: &WorkflowBrowserAction) -> Result<(), String> {
+    validate_hosts(input.allowed_hosts.as_deref(), input.automated)?;
     if input
         .expected_tab_id
         .as_deref()
@@ -139,6 +191,52 @@ fn validate(input: &WorkflowBrowserAction) -> Result<(), String> {
     }
     Ok(())
 }
+fn validate_hosts(hosts: Option<&[String]>, automated: bool) -> Result<(), String> {
+    if automated && hosts.is_none_or(|values| values.is_empty()) {
+        return Err("workflow_browser_host_boundary_required".into());
+    }
+    if let Some(hosts) = hosts {
+        if hosts.is_empty()
+            || hosts.len() > 30
+            || hosts.iter().any(|host| {
+                host.len() > 260
+                    || host.is_empty()
+                    || host
+                        .chars()
+                        .any(|c| !c.is_ascii_alphanumeric() && !matches!(c, '.' | '-' | ':'))
+                    || tauri::Url::parse(&format!("https://{host}/"))
+                        .ok()
+                        .is_none_or(|parsed| host_key(&parsed) != host.to_ascii_lowercase())
+            })
+        {
+            return Err("workflow_browser_allowed_hosts_invalid".into());
+        }
+    }
+    Ok(())
+}
+fn host_key(url: &tauri::Url) -> String {
+    match url.port() {
+        Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
+        None => url.host_str().unwrap_or_default().to_string(),
+    }
+}
+fn host_allowed(url: &tauri::Url, hosts: Option<&[String]>) -> bool {
+    if url.as_str() == "about:blank" {
+        return true;
+    }
+    if !matches!(url.scheme(), "http" | "https")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return false;
+    }
+    hosts.is_none_or(|hosts| {
+        hosts
+            .iter()
+            .any(|host| host.eq_ignore_ascii_case(&host_key(url)))
+    })
+}
 fn url(value: &str) -> Result<tauri::Url, String> {
     let parsed = tauri::Url::parse(value).map_err(|_| "workflow_browser_url_invalid")?;
     if !matches!(parsed.scheme(), "http" | "https")
@@ -152,14 +250,26 @@ fn url(value: &str) -> Result<tauri::Url, String> {
 }
 fn check(app: &AppHandle, session: &Session, gate: &ExecutionLease) -> Result<(), String> {
     gate.check()?;
+    if session.policy_violation.load(Ordering::Acquire) {
+        return Err("workflow_browser_host_not_allowed".into());
+    }
     session.scope.check(app)?;
     let current = sessions()
         .lock()
         .map_err(|_| "workflow_browser_registry_unavailable")?;
-    if !current.as_ref().is_some_and(|value| value.id == session.id) {
+    if current.as_ref().is_none_or(|value| value.id != session.id) {
         return Err("workflow_browser_session_changed".into());
     }
     Ok(())
+}
+fn check_session(app: &AppHandle, session: &Session) -> Result<(), String> {
+    let gate = session
+        .gate
+        .lock()
+        .map_err(|_| "workflow_browser_gate_unavailable")?
+        .clone()
+        .ok_or("workflow_browser_gate_unavailable")?;
+    check(app, session, &gate)
 }
 fn retire(app: &AppHandle, session: &Session) {
     let mut close = false;
@@ -233,13 +343,14 @@ pub async fn wf_browser_action(
             .map_err(|_| "workflow_browser_registry_unavailable")?;
         if current.as_ref().is_some_and(|session| {
             !session.busy.load(Ordering::Acquire)
-                && (session.created.elapsed() > Duration::from_secs(7200)
-                    || app.get_webview_window(BROWSER_WEBVIEW_LABEL).is_none())
+                && app.get_webview_window(BROWSER_WEBVIEW_LABEL).is_none()
         }) {
             *current = None;
         }
         if let Some(session) = current.as_ref() {
             if session.scope != input.scope
+                || session.allowed_hosts != input.allowed_hosts
+                || session.automated != input.automated
                 || input
                     .session_id
                     .as_ref()
@@ -259,13 +370,21 @@ pub async fn wf_browser_action(
                 id: uuid::Uuid::new_v4().to_string(),
                 scope: input.scope.clone(),
                 busy: AtomicBool::new(false),
-                created: Instant::now(),
+                allowed_hosts: input.allowed_hosts.clone(),
+                automated: input.automated,
+                gate: Mutex::new(None),
+                policy_violation: AtomicBool::new(false),
+                navigation: Mutex::new(NavigationTracker::default()),
             });
             *current = Some(session.clone());
             session
         }
     };
     let _busy = lock_session(&session)?;
+    *session
+        .gate
+        .lock()
+        .map_err(|_| "workflow_browser_gate_unavailable")? = Some(gate.clone());
     let result = run(&app, &session, &gate, &input).await;
     if result.is_err()
         && (check(&app, &session, &gate).is_err() || input.action == BrowserOperation::Open)
@@ -282,6 +401,17 @@ async fn run(
     input: &WorkflowBrowserAction,
 ) -> Result<WorkflowBrowserResult, String> {
     check(app, session, gate)?;
+    // expectedUrl is the source-page precondition. Check it before navigation or any other mutation.
+    if let Some(expected) = &input.expected_url {
+        let source = app
+            .get_webview_window(BROWSER_WEBVIEW_LABEL)
+            .ok_or("workflow_browser_window_unavailable")?
+            .url()
+            .map_err(|_| "workflow_browser_url_unavailable")?;
+        if source.as_str() != expected {
+            return Err("workflow_browser_url_changed".into());
+        }
+    }
     if input.action == BrowserOperation::Close {
         retire(app, session);
         return Ok(WorkflowBrowserResult {
@@ -292,19 +422,40 @@ async fn run(
             data: json!({"closed":true}),
         });
     }
+    let mut navigation_generation = None;
     if input.action == BrowserOperation::Open
         && app.get_webview_window(BROWSER_WEBVIEW_LABEL).is_none()
     {
         let target = input.url.as_deref().map(url).transpose()?.unwrap_or(
             tauri::Url::parse("about:blank").map_err(|_| "workflow_browser_url_invalid")?,
         );
+        if !host_allowed(&target, session.allowed_hosts.as_deref()) {
+            return Err("workflow_browser_host_not_allowed".into());
+        }
         check(app, session, gate)?;
-        let browser =
-            WebviewWindowBuilder::new(app, BROWSER_WEBVIEW_LABEL, WebviewUrl::External(target))
-                .title("Luczor Workflow Browser")
-                .inner_size(1200., 800.)
-                .build()
-                .map_err(|_| "workflow_browser_window_failed")?;
+        let navigation_app = app.clone();
+        let navigation_session = session.clone();
+        let browser = WebviewWindowBuilder::new(
+            app,
+            BROWSER_WEBVIEW_LABEL,
+            WebviewUrl::External(
+                tauri::Url::parse("about:blank").map_err(|_| "workflow_browser_url_invalid")?,
+            ),
+        )
+        .title("Luczor Workflow Browser")
+        .inner_size(1200., 800.)
+        .on_navigation(move |url| {
+            if !host_allowed(url, navigation_session.allowed_hosts.as_deref()) {
+                navigation_session
+                    .policy_violation
+                    .store(true, Ordering::Release);
+                return false;
+            }
+            check_session(&navigation_app, &navigation_session).is_ok()
+        })
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
+        .build()
+        .map_err(|_| "workflow_browser_window_failed")?;
         let session_id = session.id.clone();
         browser.on_window_event(move |event| {
             if matches!(event, tauri::WindowEvent::Destroyed) {
@@ -318,15 +469,38 @@ async fn run(
                 }
             }
         });
+        install_request_boundary(&browser, app.clone(), session.clone()).await?;
+        check(app, session, gate)?;
+        navigation_generation = Some(
+            session
+                .navigation
+                .lock()
+                .map_err(|_| "workflow_browser_navigation_unavailable")?
+                .begin(target.as_str()),
+        );
+        browser
+            .navigate(target)
+            .map_err(|_| "workflow_browser_navigation_failed")?;
     } else if matches!(
         input.action,
         BrowserOperation::Open | BrowserOperation::Navigate
     ) {
         if let Some(target) = input.url.as_deref() {
             check(app, session, gate)?;
+            let target = url(target)?;
+            if !host_allowed(&target, session.allowed_hosts.as_deref()) {
+                return Err("workflow_browser_host_not_allowed".into());
+            }
+            navigation_generation = Some(
+                session
+                    .navigation
+                    .lock()
+                    .map_err(|_| "workflow_browser_navigation_unavailable")?
+                    .begin(target.as_str()),
+            );
             app.get_webview_window(BROWSER_WEBVIEW_LABEL)
                 .ok_or("workflow_browser_window_unavailable")?
-                .navigate(url(target)?)
+                .navigate(target)
                 .map_err(|_| "workflow_browser_navigation_failed")?;
         } else if input.action == BrowserOperation::Navigate {
             return Err("workflow_browser_url_required".into());
@@ -339,7 +513,10 @@ async fn run(
         .url()
         .map_err(|_| "workflow_browser_url_unavailable")?
         .to_string();
-    if input
+    if !matches!(
+        input.action,
+        BrowserOperation::Open | BrowserOperation::Navigate
+    ) && input
         .expected_url
         .as_ref()
         .is_some_and(|expected| expected != &current_url)
@@ -352,13 +529,28 @@ async fn run(
             let deadline = Instant::now() + timeout;
             loop {
                 check(app, session, gate)?;
+                let completed = if let Some(generation) = navigation_generation {
+                    match session
+                        .navigation
+                        .lock()
+                        .map_err(|_| "workflow_browser_navigation_unavailable")?
+                        .status(generation)?
+                    {
+                        Some(false) => return Err("workflow_browser_navigation_failed".into()),
+                        Some(true) => true,
+                        None => false,
+                    }
+                } else {
+                    true
+                };
                 let state = devtools(&browser, "Runtime.evaluate", json!({"expression":"({url:location.href,ready:document.readyState})","returnByValue":true}), app.clone(), session.clone(), gate.clone(), Duration::from_secs(2)).await;
                 if let Ok(state) = state {
                     let value = &state["result"]["value"];
                     let actual = browser
                         .url()
                         .map_err(|_| "workflow_browser_url_unavailable")?;
-                    if value["ready"] == "complete"
+                    if completed
+                        && value["ready"] == "complete"
                         && value["url"].as_str() == Some(actual.as_str())
                         && (input.url.is_none() || actual.as_str() != "about:blank")
                     {
@@ -490,6 +682,185 @@ async fn run(
     })
 }
 
+/// The request filter is installed on a blank page before any permitted target URL is loaded.
+/// Redirects and subresources are checked at WebView2's request boundary; no page script supplies this policy.
+#[cfg(windows)]
+async fn install_request_boundary(
+    window: &WebviewWindow,
+    app: AppHandle,
+    session: Arc<Session>,
+) -> Result<(), String> {
+    use webview2_com::Microsoft::Web::WebView2::Win32::*;
+    use windows_webview::core::{Interface, PWSTR};
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let callback_app = app.clone();
+    let callback_session = session.clone();
+    window
+        .with_webview(move |view| {
+            let result = (|| {
+                check_session(&callback_app, &callback_session)?;
+                let environment = view.environment();
+                let controller = view.controller();
+                unsafe {
+                    let webview = view
+                        .controller()
+                        .CoreWebView2()
+                        .map_err(|_| "workflow_browser_host_boundary_unavailable")?;
+                    let extended: ICoreWebView2_22 = webview
+                        .cast()
+                        .map_err(|_| "workflow_browser_host_boundary_unavailable")?;
+                    let wildcard = webview2_com::CoTaskMemPWSTR::from("*");
+                    extended
+                        .AddWebResourceRequestedFilterWithRequestSourceKinds(
+                            *wildcard.as_ref().as_pcwstr(),
+                            COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
+                            COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL,
+                        )
+                        .map_err(|_| "workflow_browser_host_boundary_unavailable")?;
+                    let starting_session = callback_session.clone();
+                    let starting = webview2_com::NavigationStartingEventHandler::create(Box::new(
+                        move |_, args| {
+                            if let Some(args) = args {
+                                let mut id = 0;
+                                let mut uri = PWSTR::null();
+                                args.NavigationId(&mut id)?;
+                                args.Uri(&mut uri)?;
+                                let target = webview2_com::take_pwstr(uri);
+                                if let Ok(mut tracker) = starting_session.navigation.lock() {
+                                    tracker.started(id, &target);
+                                }
+                            }
+                            Ok(())
+                        },
+                    ));
+                    let completed_session = callback_session.clone();
+                    let completed = webview2_com::NavigationCompletedEventHandler::create(
+                        Box::new(move |_, args| {
+                            if let Some(args) = args {
+                                let mut id = 0;
+                                let mut success = windows_webview::core::BOOL::default();
+                                args.NavigationId(&mut id)?;
+                                args.IsSuccess(&mut success)?;
+                                if let Ok(mut tracker) = completed_session.navigation.lock() {
+                                    tracker.finished(id, success.as_bool());
+                                }
+                            }
+                            Ok(())
+                        }),
+                    );
+                    let mut starting_token = 0;
+                    let mut completed_token = 0;
+                    webview
+                        .add_NavigationStarting(&starting, &mut starting_token)
+                        .map_err(|_| "workflow_browser_navigation_tracking_unavailable")?;
+                    webview
+                        .add_NavigationCompleted(&completed, &mut completed_token)
+                        .map_err(|_| "workflow_browser_navigation_tracking_unavailable")?;
+                    let handler = webview2_com::WebResourceRequestedEventHandler::create(Box::new(
+                        move |_, args| {
+                            let args = args.ok_or_else(|| {
+                                windows_webview::core::Error::from_hresult(
+                                    windows_webview::core::HRESULT(0x80004005u32 as i32),
+                                )
+                            })?;
+                            let mut raw = PWSTR::null();
+                            let target = args
+                                .Request()
+                                .and_then(|request| request.Uri(&mut raw))
+                                .ok()
+                                .map(|_| webview2_com::take_pwstr(raw));
+                            let host_matches = target
+                                .as_deref()
+                                .and_then(|value| tauri::Url::parse(value).ok())
+                                .is_some_and(|target| {
+                                    host_allowed(&target, callback_session.allowed_hosts.as_deref())
+                                });
+                            if !host_matches {
+                                callback_session
+                                    .policy_violation
+                                    .store(true, Ordering::Release);
+                            }
+                            let allowed = host_matches
+                                && check_session(&callback_app, &callback_session).is_ok();
+                            if !allowed {
+                                let reason = webview2_com::CoTaskMemPWSTR::from(
+                                    "Blocked by workflow host policy",
+                                );
+                                let headers = webview2_com::CoTaskMemPWSTR::from(
+                                    "Content-Type: text/plain\r\nCache-Control: no-store",
+                                );
+                                let denied = environment
+                                    .CreateWebResourceResponse(
+                                        None::<&windows_webview::Win32::System::Com::IStream>,
+                                        403,
+                                        *reason.as_ref().as_pcwstr(),
+                                        *headers.as_ref().as_pcwstr(),
+                                    )
+                                    .and_then(|response| args.SetResponse(&response));
+                                if let Err(error) = denied {
+                                    // If WebView2 cannot install the synthetic blocked response, close the controller synchronously.
+                                    let _ = controller.Close();
+                                    return Err(error);
+                                }
+                            }
+                            Ok(())
+                        },
+                    ));
+                    let mut token = 0;
+                    webview
+                        .add_WebResourceRequested(&handler, &mut token)
+                        .map_err(|_| "workflow_browser_host_boundary_unavailable")?;
+                }
+                Ok(())
+            })();
+            let _ = sender.try_send(result);
+        })
+        .map_err(|_| "workflow_browser_host_boundary_unavailable")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            check_session(&app, &session)?;
+            match receiver.recv_timeout(Duration::from_millis(40)) {
+                Ok(result) => return result,
+                Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
+                _ => return Err("workflow_browser_host_boundary_unavailable".into()),
+            }
+        }
+    })
+    .await
+    .map_err(|_| "workflow_browser_task_failed")?
+}
+#[cfg(not(windows))]
+async fn install_request_boundary(
+    _window: &WebviewWindow,
+    _app: AppHandle,
+    _session: Arc<Session>,
+) -> Result<(), String> {
+    Err("workflow_browser_host_boundary_unavailable".into())
+}
+
+pub(crate) fn capabilities() -> Value {
+    #[cfg(windows)]
+    {
+        use webview2_com::Microsoft::Web::WebView2::Win32::GetAvailableCoreWebView2BrowserVersionString;
+        let mut raw = windows_webview::core::PWSTR::null();
+        let version = unsafe {
+            GetAvailableCoreWebView2BrowserVersionString(
+                windows_webview::core::PCWSTR::null(),
+                &mut raw,
+            )
+        }
+        .ok()
+        .map(|_| webview2_com::take_pwstr(raw))
+        .filter(|value| !value.trim().is_empty() && value.len() < 200);
+        json!({"available":version.is_some(),"backend":"webview2","version":version,"hostBoundary":"verified-at-session-start"})
+    }
+    #[cfg(not(windows))]
+    {
+        json!({"available":false,"backend":"unavailable","reason":"windows_webview2_required"})
+    }
+}
+
 #[cfg(windows)]
 async fn devtools(
     window: &WebviewWindow,
@@ -595,11 +966,84 @@ mod tests {
                 run_id: uuid::Uuid::new_v4().to_string(),
             },
             busy: AtomicBool::new(false),
-            created: Instant::now(),
+            allowed_hosts: None,
+            automated: false,
+            gate: Mutex::new(None),
+            policy_violation: AtomicBool::new(false),
+            navigation: Mutex::new(NavigationTracker::default()),
         });
         let guard = lock_session(&session).unwrap();
         assert!(lock_session(&session).is_err());
         drop(guard);
         assert!(lock_session(&session).is_ok());
+    }
+    #[test]
+    fn automated_hosts_are_explicit_exact_and_do_not_allow_redirect_destinations() {
+        assert!(validate_hosts(None, true).is_err());
+        assert!(validate_hosts(Some(&[]), true).is_err());
+        for invalid in [
+            "*.example.com",
+            "example.com/path",
+            "user@example.com",
+            "example.com:bad",
+            "example.com:65536",
+        ] {
+            assert!(validate_hosts(Some(&[invalid.into()]), true).is_err());
+        }
+        let hosts = vec!["example.com".into(), "localhost:1442".into()];
+        assert!(validate_hosts(Some(&hosts), true).is_ok());
+        assert!(host_allowed(
+            &url("https://example.com/form").unwrap(),
+            Some(&hosts)
+        ));
+        assert!(host_allowed(
+            &url("http://localhost:1442/form").unwrap(),
+            Some(&hosts)
+        ));
+        for target in [
+            "https://foreign.com/redirect",
+            "https://example.com.evil.test/",
+            "https://sub.example.com/",
+            "http://localhost:8080/",
+        ] {
+            assert!(!host_allowed(&url(target).unwrap(), Some(&hosts)));
+        }
+        assert!(!host_allowed(
+            &tauri::Url::parse("file:///C:/secret.txt").unwrap(),
+            None
+        ));
+    }
+
+    #[test]
+    fn readiness_requires_the_requested_navigation_id_not_an_old_complete_document() {
+        let mut tracker = NavigationTracker::default();
+        let generation = tracker.begin("https://example.com/new");
+        tracker.started(40, "https://example.com/old");
+        tracker.finished(40, true);
+        assert_eq!(tracker.status(generation).unwrap(), None);
+        tracker.started(41, "https://example.com/new");
+        tracker.started(41, "https://example.com/redirected");
+        tracker.finished(40, true);
+        assert_eq!(tracker.status(generation).unwrap(), None);
+        tracker.finished(41, true);
+        assert_eq!(tracker.status(generation).unwrap(), Some(true));
+        let reloaded = tracker.begin("https://example.com/new");
+        tracker.finished(41, true);
+        assert_eq!(tracker.status(reloaded).unwrap(), None);
+        assert!(tracker.status(generation).is_err());
+        tracker.started(42, "https://example.com/new");
+        tracker.finished(42, false);
+        assert_eq!(tracker.status(reloaded).unwrap(), Some(false));
+    }
+
+    #[test]
+    fn a_superseding_navigation_cannot_confirm_the_requested_document() {
+        let mut tracker = NavigationTracker::default();
+        let generation = tracker.begin("https://example.com/new");
+        tracker.started(50, "https://example.com/new");
+        tracker.started(51, "https://example.com/unrequested");
+        tracker.finished(51, true);
+        tracker.finished(50, true);
+        assert_eq!(tracker.status(generation).unwrap(), Some(false));
     }
 }

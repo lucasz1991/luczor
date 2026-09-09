@@ -170,12 +170,36 @@ const TOOL_CONTRACT = [
   { name: 'workspace_agent_cancel', category: 'app', mutating: true, requiresApproval: false },
 ] as const
 
-// Reviewed addition: managed Claude, five thinking tiers and model-bound effort/budget options.
-const TOOL_SCHEMA_SHA256 = '587ad12aaa4680e1f6792d1e28feba03337e383cc888de3a2b741cc40fa03e3e'
+// Reviewed additions: managed effort and versioned workflows with bounded execution budgets.
+const TOOL_SCHEMA_SHA256 = '846ad1c036023c0aa3a4d9a6a5d4e9e1958712dd7681bc70cf60edcf5429a3dd'
 const CORE_TOOL_SCHEMA_SHA256 = '7b66786e79efcc6053122b428adf6b96d3fd66b2fca8f6376ba14c3bce1f67a1'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {
+  it('keeps chat workflow definitions compatible with the versioned editor and bounded budgets', () => {
+    const schema = toOpenAITools().find(item => item.function.name === 'workflow_create')!.function.parameters
+    expect(schema).toMatchObject({
+      properties: {
+        definition: {
+          properties: {
+            schema_version: { enum: [1, 2] },
+            thinking_tier: { enum: ['fast', 'balanced', 'thorough', 'max', 'ultra'] },
+            budgets: {
+              additionalProperties: false,
+              properties: {
+                active_seconds: { maximum: 2700 },
+                max_executions: { maximum: 200 },
+                max_loop_iterations: { maximum: 10 },
+                max_parallel: { maximum: 2 },
+                max_repairs: { minimum: 0, maximum: 2 },
+              },
+            },
+            steps: { items: { properties: { version: { enum: [1] } } } },
+          },
+        },
+      },
+    })
+  })
   it('exposes reviewed Claude and effort options without granting execution through preparation', () => {
     const tool = getTool('agent_job_prepare')!
     expect(tool.requiresApproval).toBe(false)

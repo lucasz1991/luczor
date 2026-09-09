@@ -73,7 +73,7 @@ export function createWorkflowWebSession(stateUrl: string) {
   async function mutate<T>(kind: keyof WorkflowEditorState['urls'], body: Record<string, unknown>) {
     if (!state) throw new Error('Workflow zuerst laden.')
     const current = state
-    const path = current.urls[kind]
+    const path = Reflect.get(current.urls, kind) as string
     return operations.run<T>({
       scope: [window.location.origin, current.workflow.id],
       args: { kind, body },
@@ -86,7 +86,8 @@ export function createWorkflowWebSession(stateUrl: string) {
           `${current.urls.operation}/${encodeURIComponent(operationId)}`
         )
         if (found.status === 'not_found') return null
-        if (found.status !== 'completed' || found.response === undefined) throw new WorkflowOperationUncertain(operationId)
+        if (found.status !== 'completed' || found.response === undefined)
+          throw new WorkflowOperationUncertain(operationId)
         return found.response
       },
       execute: operationId =>

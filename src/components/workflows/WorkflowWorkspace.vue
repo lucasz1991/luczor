@@ -2,6 +2,8 @@
 import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { WorkflowController } from '@/services/workflows/controller'
 import { boundedWorkflowJson } from '@/services/workflows/operations'
+import { readWorkflowRunBudget } from '@/services/workflows/runBudget'
+import { stopWorkflowAfterStep } from '@/services/workflows/api'
 import { workflowChanged, workflowWebhookSecrets } from '@/services/workflows/presentation'
 import {
   isTerminalWorkflow,
@@ -17,6 +19,7 @@ import WorkflowStepEditor from './WorkflowStepEditor.vue'
 import WorkflowGraphEditor from './WorkflowGraphEditor.vue'
 import WorkflowTriggerEditor from './WorkflowTriggerEditor.vue'
 import WorkflowTestsPanel from './WorkflowTestsPanel.vue'
+import WorkflowBudgetSettings from './WorkflowBudgetSettings.vue'
 const props = withDefaults(
   defineProps<{
     open: boolean
@@ -33,6 +36,7 @@ const props = withDefaults(
 const emit = defineEmits<{ 'update:open': [open: boolean]; discuss: [text: string] }>()
 const controller = props.controllerProp ?? new WorkflowController()
 const view = controller.view
+const runBudget = computed(() => readWorkflowRunBudget(view.run, view.runs))
 const dialog = ref<HTMLDialogElement | null>(null)
 const tab = ref('edit')
 const tabs = [
@@ -60,9 +64,11 @@ const showTriggerEditor = ref(false)
 const manualResults = ref<Record<number, string>>({})
 const exportResults = ref(false)
 const allowedOutputKeys = ref('')
+const boundaryBusy = ref(false)
+let boundaryAbort = new AbortController()
 let poll: ReturnType<typeof setInterval> | undefined
 let openGeneration = 0
-const blocked = computed(() => props.killSwitch || props.busy || view.busy)
+const blocked = computed(() => props.killSwitch || props.busy || view.busy || boundaryBusy.value)
 const writeBlocked = computed(() => blocked.value || props.mode === 'observe')
 const locked = computed(() => !creating.value && !!(view.selected?.is_edit_locked || view.selected?.is_locked))
 const filtered = computed(() =>
@@ -109,7 +115,21 @@ function fillDraft() {
 function newWorkflow(copy = false) {
   creating.value = true
   name.value = copy ? `${view.selected?.name ?? 'Workflow'} – Kopie` : ''
-  draft.value = copy && view.selected ? cloneDefinition(view.selected.definition) : { steps: [] }
+  draft.value =
+    copy && view.selected
+      ? cloneDefinition(view.selected.definition)
+      : {
+          schema_version: 2,
+          thinking_tier: 'balanced',
+          steps: [],
+          budgets: {
+            active_seconds: 2700,
+            max_executions: 200,
+            max_loop_iterations: 10,
+            max_parallel: 2,
+            max_repairs: 2,
+          },
+        }
   inputSchemaText.value = JSON.stringify(draft.value.input_schema ?? {}, null, 2)
   initialDraft.value = draftSnapshot()
   changeSummary.value = copy ? 'Bearbeitbare Kopie erstellt.' : 'Erste Version.'
@@ -302,6 +322,42 @@ async function showTestRun(id: string) {
   await controller.refreshRun(id)
   tab.value = 'runs'
 }
+async function stopAfterCurrentStep() {
+  if (writeBlocked.value || !view.selected || !view.run) return
+  const selectedId = view.selected.id
+  const runId = view.run.public_id
+  const generation = openGeneration
+  const abort = boundaryAbort
+  boundaryBusy.value = true
+  localError.value = ''
+  try {
+    const result = await stopWorkflowAfterStep(props.projectId, selectedId, runId, abort.signal)
+    if (
+      abort.signal.aborted ||
+      generation !== openGeneration ||
+      view.selected?.id !== selectedId ||
+      view.run?.public_id !== runId
+    )
+      return
+    view.notice =
+      readWorkflowRunBudget(result, [result]).boundaryStop === 'completed'
+        ? 'Der Auftrag wurde nach Abschluss der laufenden Schritte angehalten.'
+        : isTerminalWorkflow(result.status)
+          ? `Der Auftrag ist bereits ${workflowStatusLabel(result.status).toLocaleLowerCase('de-DE')}.`
+          : 'Halt angefordert – laufende Schritte abschließen.'
+    await controller.refreshRun(runId)
+  } catch (error) {
+    if (!abort.signal.aborted && generation === openGeneration)
+      localError.value = error instanceof Error ? error.message : 'Der Halt konnte nicht angefordert werden.'
+  } finally {
+    if (boundaryAbort === abort) boundaryBusy.value = false
+  }
+}
+function resetBoundaryRequest() {
+  boundaryAbort.abort()
+  boundaryAbort = new AbortController()
+  boundaryBusy.value = false
+}
 function keyboardTab(event: KeyboardEvent, index: number) {
   let target = index
   if (event.key === 'ArrowRight') target = (index + 1) % tabs.length
@@ -314,6 +370,7 @@ function keyboardTab(event: KeyboardEvent, index: number) {
   void nextTick(() => dialog.value?.querySelector<HTMLButtonElement>(`#wf-tab-${tab.value}`)?.focus())
 }
 function clearIdentity() {
+  resetBoundaryRequest()
   controller.reset()
   draft.value = { steps: [] }
   name.value = ''
@@ -333,6 +390,7 @@ watch(
     const generation = ++openGeneration
     await nextTick()
     if (!open) {
+      resetBoundaryRequest()
       dialog.value?.close()
       return
     }
@@ -367,16 +425,29 @@ watch(
   }
 )
 watch(
-  () => [props.open, view.run?.public_id, view.run?.status] as const,
-  ([open, runId, status]) => {
+  () =>
+    [
+      props.open,
+      view.run?.public_id,
+      view.run?.status,
+      runBudget.value.boundaryStop,
+      runBudget.value.rootStatus,
+    ] as const,
+  ([open, runId, status, boundary, rootStatus]) => {
     if (poll) clearInterval(poll)
-    if (open && runId && status && !isTerminalWorkflow(status))
+    if (
+      open &&
+      runId &&
+      status &&
+      (!isTerminalWorkflow(status) || (boundary === 'pending' && rootStatus && !isTerminalWorkflow(rootStatus)))
+    )
       poll = setInterval(() => {
         if (!view.busy) void controller.refreshRun(runId)
       }, 5000)
   }
 )
 onBeforeUnmount(() => {
+  boundaryAbort.abort()
   if (poll) clearInterval(poll)
   controller.reset()
   window.removeEventListener('luczor:api-identity-changing', clearIdentity)
@@ -412,7 +483,7 @@ onBeforeUnmount(() => {
           class="wf-list-item"
           :class="{ selected: !creating && view.selected?.id === workflow.id }"
           :aria-current="!creating && view.selected?.id === workflow.id ? 'true' : undefined"
-          :disabled="view.busy"
+          :disabled="view.busy || boundaryBusy"
           @click="selectWorkflow(workflow.id)"
         >
           <strong>{{ workflow.name }}</strong
@@ -439,10 +510,22 @@ onBeforeUnmount(() => {
           <button type="button" :disabled="busy" @click="discuss">Im Chat verbessern</button>
         </div>
         <div v-if="view.selected && !creating" class="wf-actions">
-          <button type="button" :disabled="writeBlocked || dirty" class="ai-button ai-button--primary" @click="start(false)">Workflow starten</button>
+          <button
+            type="button"
+            :disabled="writeBlocked || dirty"
+            class="ai-button ai-button--primary"
+            @click="start(false)"
+          >
+            Workflow starten
+          </button>
           <button type="button" :disabled="writeBlocked || dirty" @click="start(true)">Ohne Effekte simulieren</button>
-          <button type="button" :disabled="writeBlocked || dirty" @click="newWorkflow(true)">Als Kopie bearbeiten</button>
-          <span class="wf-muted">{{ view.selected.definition.steps.length }} Schritte · {{ view.triggers.filter(item => item.enabled).length }} aktive Auslöser</span>
+          <button type="button" :disabled="writeBlocked || dirty" @click="newWorkflow(true)">
+            Als Kopie bearbeiten
+          </button>
+          <span class="wf-muted"
+            >{{ view.selected.definition.steps.length }} Schritte ·
+            {{ view.triggers.filter(item => item.enabled).length }} aktive Auslöser</span
+          >
         </div>
         <div class="wf-tabs" role="tablist" aria-label="Workflow-Bereiche">
           <button
@@ -556,14 +639,35 @@ onBeforeUnmount(() => {
         <section v-if="tab === 'inputs'" id="wf-panel-inputs" role="tabpanel" aria-labelledby="wf-tab-inputs">
           <template v-if="view.selected || creating">
             <h4>Eingaben für den Ablauf</h4>
-            <p class="wf-muted">Das Schema gehört zur gespeicherten Workflow-Version. Startwerte gelten nur für den nächsten manuellen Lauf.</p>
-            <label>Eingabeschema (JSON)<textarea v-model="inputSchemaText" :disabled="writeBlocked || locked" rows="9" spellcheck="false" /></label>
+            <WorkflowBudgetSettings v-model="draft" :disabled="writeBlocked || locked" />
+            <p class="wf-muted">
+              Das Schema gehört zur gespeicherten Workflow-Version. Startwerte gelten nur für den nächsten manuellen
+              Lauf.
+            </p>
+            <label
+              >Eingabeschema (JSON)<textarea
+                v-model="inputSchemaText"
+                :disabled="writeBlocked || locked"
+                rows="9"
+                spellcheck="false"
+              />
+            </label>
             <div class="wf-actions">
               <button type="button" :disabled="blocked" @click="save(true)">Definition prüfen</button>
-              <button type="button" :disabled="writeBlocked || locked || !name.trim() || !draft.steps.length" @click="save()">Workflow mit Eingabeschema speichern</button>
+              <button
+                type="button"
+                :disabled="writeBlocked || locked || !name.trim() || !draft.steps.length"
+                @click="save()"
+              >
+                Workflow mit Eingabeschema speichern
+              </button>
             </div>
-            <label>Startwerte (JSON)<textarea v-model="runInput" :disabled="writeBlocked" rows="7" spellcheck="false" /></label>
-            <p class="wf-muted">Im Bereich Tests kannst du feste Beispieldaten mit überprüfbaren Ergebnisregeln speichern.</p>
+            <label
+              >Startwerte (JSON)<textarea v-model="runInput" :disabled="writeBlocked" rows="7" spellcheck="false" />
+            </label>
+            <p class="wf-muted">
+              Im Bereich Tests kannst du feste Beispieldaten mit überprüfbaren Ergebnisregeln speichern.
+            </p>
           </template>
           <p v-else class="wf-muted">Wähle zuerst einen Workflow.</p>
         </section>
@@ -611,7 +715,12 @@ onBeforeUnmount(() => {
             </p></template
           >
         </section>
-        <section v-if="tab === 'automation'" id="wf-panel-automation" role="tabpanel" aria-labelledby="wf-tab-automation">
+        <section
+          v-if="tab === 'automation'"
+          id="wf-panel-automation"
+          role="tabpanel"
+          aria-labelledby="wf-tab-automation"
+        >
           <template v-if="view.selected"
             ><div class="wf-section-heading">
               <h4>Auslöser</h4>
@@ -750,7 +859,25 @@ onBeforeUnmount(() => {
               <button
                 v-if="!isTerminalWorkflow(view.run.status)"
                 type="button"
-                :disabled="writeBlocked || view.run.status === 'cancelling'"
+                :disabled="
+                  writeBlocked ||
+                  runBudget.boundaryStop === 'pending' ||
+                  ['cancelling', 'cancel_requested'].includes(view.run.status)
+                "
+                @click="stopAfterCurrentStep"
+              >
+                {{
+                  boundaryBusy
+                    ? 'Halt wird angefordert…'
+                    : runBudget.boundaryStop === 'pending'
+                      ? 'Halt angefordert…'
+                      : 'Nach diesem Schritt stoppen'
+                }}
+              </button>
+              <button
+                v-if="!isTerminalWorkflow(view.run.status)"
+                type="button"
+                :disabled="writeBlocked || ['cancelling', 'cancel_requested'].includes(view.run.status)"
                 @click="
                   controller.action('workflow_run_cancel', {
                     workflow_id: view.selected!.id,
@@ -758,9 +885,62 @@ onBeforeUnmount(() => {
                   })
                 "
               >
-                {{ view.run.status === 'cancelling' ? 'Abbruch läuft…' : 'Lauf stoppen' }}
+                {{
+                  ['cancelling', 'cancel_requested'].includes(view.run.status)
+                    ? 'Stopp angefordert…'
+                    : 'Sofortigen Stopp anfordern'
+                }}
               </button>
             </div>
+            <p v-if="['cancelling', 'cancel_requested'].includes(view.run.status)" role="status" class="wf-notice">
+              Stopp ist angefordert. Laufende Effekte warten auf ihre tatsächliche Abschluss- oder Abbruchbestätigung.
+            </p>
+            <section
+              v-if="
+                runBudget.rows.length || runBudget.rootUnavailable || runBudget.boundaryStop || runBudget.stopReason
+              "
+              class="wf-run-budget"
+              aria-label="Laufbudget"
+            >
+              <p v-if="runBudget.boundaryStop === 'pending'" role="status" class="wf-notice">
+                Halt angefordert – laufende Schritte abschließen. Es starten keine weiteren Schritte.
+              </p>
+              <p v-else-if="runBudget.boundaryStop === 'completed'" role="status" class="wf-notice">
+                Nach Abschluss der laufenden Schritte angehalten.
+              </p>
+              <p v-if="runBudget.rootUnavailable" class="wf-muted">
+                Das Gesamtbudget gehört zum übergeordneten Lauf #{{ runBudget.rootId }}. Seine Messwerte sind hier noch
+                nicht geladen.
+              </p>
+              <p v-else-if="runBudget.inherited" class="wf-muted">
+                Gesamtverbrauch des übergeordneten Laufs #{{ runBudget.rootId }} einschließlich Unterläufen.
+              </p>
+              <div v-for="row in runBudget.rows" :key="row.key">
+                <label :for="`wf-budget-${row.key}`"
+                  >{{ row.label }}: {{ row.used.toLocaleString('de-DE', { maximumFractionDigits: 1 }) }} /
+                  {{ row.limit.toLocaleString('de-DE', { maximumFractionDigits: 1 }) }} {{ row.unit }}</label
+                >
+                <progress :id="`wf-budget-${row.key}`" :value="row.percent" max="100" />
+              </div>
+              <p v-if="runBudget.nearLimit && !isTerminalWorkflow(view.run.status)" role="status" class="wf-notice">
+                Mindestens 80 % eines Laufbudgets sind verbraucht. Du kannst einen Stopp anfordern; die gesetzten
+                Grenzen bleiben verbindlich.
+              </p>
+              <p v-if="runBudget.accountedAt" class="wf-muted">
+                Servermessung: {{ new Date(runBudget.accountedAt).toLocaleString('de-DE') }}. Wartezeiten zählen nicht
+                zur aktiven Laufzeit.
+              </p>
+              <p v-if="runBudget.stopReason" class="wf-muted">
+                Stoppgrund:
+                {{
+                  runBudget.stopReason === 'workflow_boundary_stop'
+                    ? 'Halt nach dem aktuellen Schritt'
+                    : runBudget.stopReason === 'workflow_budget_exhausted'
+                      ? 'Laufbudget erreicht'
+                      : runBudget.stopReason
+                }}
+              </p>
+            </section>
             <p class="wf-muted">
               {{
                 view.run.definition_version

@@ -49,8 +49,12 @@ pub(crate) fn run_bounded_command_scoped(
     scope_check: Option<&dyn Fn() -> Result<(), String>>,
 ) -> Result<BoundedProcessOutput, String> {
     let check = || {
-        if let Some(gate) = &execution { gate.check()?; }
-        if let Some(scope) = scope_check { scope()?; }
+        if let Some(gate) = &execution {
+            gate.check()?;
+        }
+        if let Some(scope) = scope_check {
+            scope()?;
+        }
         Ok::<(), String>(())
     };
     check()?;
@@ -69,7 +73,11 @@ pub(crate) fn run_bounded_command_scoped(
         .spawn()
         .map_err(|error| format!("spawn failed: {error}"))?;
     // On Windows the child is still suspended here. Reject a rebinding before resuming it.
-    if let Err(error) = check() { terminate_process_tree(&mut child); let _ = child.wait(); return Err(error); }
+    if let Err(error) = check() {
+        terminate_process_tree(&mut child);
+        let _ = child.wait();
+        return Err(error);
+    }
     #[cfg(windows)]
     let lifetime = match super::codex::LifetimeGuard::attach(&child) {
         Ok(guard) => guard,
@@ -275,6 +283,39 @@ mod tests {
         assert!(output.timed_out);
         assert!(!output.success);
         assert!(started.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn scoped_process_rejects_before_spawn_and_stops_on_scope_revocation() {
+        let denied = || Err("fixture scope revoked".to_string());
+        let impossible = Command::new("luczor-intentionally-missing-executable");
+        let result = super::run_bounded_command_scoped(
+            impossible,
+            None,
+            Duration::from_secs(5),
+            64,
+            None,
+            Some(&denied),
+        );
+        assert!(matches!(result, Err(error) if error == "fixture scope revoked"));
+        let started = Instant::now();
+        let expires = || {
+            if started.elapsed() > Duration::from_millis(150) {
+                Err("fixture scope revoked".to_string())
+            } else {
+                Ok(())
+            }
+        };
+        let result = super::run_bounded_command_scoped(
+            slow_command(),
+            None,
+            Duration::from_secs(5),
+            64,
+            None,
+            Some(&expires),
+        );
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
 
     #[cfg(windows)]

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createWorkflowBrowser, type WorkflowNativeInvoke } from '@/services/workflows/browser'
 import { runWorkflowImage } from '@/services/workflows/image'
 
+// eslint-disable-next-line security/detect-non-literal-fs-filename -- Fixed checked-in protocol source, never user input.
 const script = readFileSync(new URL('../../src-tauri/src/commands/workflow_browser_script.js', import.meta.url), 'utf8')
 type Params = {
   action: string
@@ -166,6 +167,10 @@ describe('fixed native browser DOM protocol', () => {
       })
     ).toMatchObject({ ok: false, code: 'browser_download_size_exceeded' })
     expect(cancel).toHaveBeenCalledOnce()
+    expect(fixture.context.fetch).toHaveBeenCalledWith(
+      'https://example.test/file',
+      expect.objectContaining({ redirect: 'error', credentials: 'same-origin' })
+    )
   })
 })
 
@@ -215,6 +220,32 @@ describe('workflow session and image IPC contracts', () => {
         sessionId: 'reviewed',
       })
     ).rejects.toThrow('session_changed')
+  })
+  it('copies reviewed host restrictions and cannot expand them through an operation payload', async () => {
+    const invokeTask = vi.fn(async () => ({
+      ok: true,
+      sessionId: 'session',
+      tabId: 'tab',
+      url: base.expectedUrl,
+      data: {},
+    }))
+    const hosts = ['example.test']
+    const browser = createWorkflowBrowser({
+      scope,
+      invokeTask: invokeTask as WorkflowNativeInvoke,
+      automated: true,
+      allowedHosts: hosts,
+    })
+    hosts.push('foreign.test')
+    await browser.open(base.expectedUrl, {
+      ...{ allowedHosts: ['foreign.test'], automated: false },
+      expectedTabId: 'reviewed-tab',
+    })
+    expect(invokeTask).toHaveBeenCalledWith(
+      'wf_browser_action',
+      expect.objectContaining({ allowedHosts: ['example.test'], automated: true, expectedTabId: 'reviewed-tab' }),
+      true
+    )
   })
   it('uses artifact IDs for OCR and never sends a screenshot to the text-only inference path', async () => {
     const invokeTask = vi.fn(async () => ({ ok: true, text: 'Recognized' }))

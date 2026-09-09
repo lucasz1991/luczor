@@ -30,6 +30,19 @@ const definitionSchema = {
   type: 'object',
   additionalProperties: false,
   properties: {
+    schema_version: { type: 'integer', enum: [1, 2] },
+    thinking_tier: { type: 'string', enum: ['fast', 'balanced', 'thorough', 'max', 'ultra'] },
+    budgets: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        active_seconds: { type: 'integer', minimum: 1, maximum: 2700 },
+        max_executions: { type: 'integer', minimum: 1, maximum: 200 },
+        max_loop_iterations: { type: 'integer', minimum: 1, maximum: 10 },
+        max_parallel: { type: 'integer', minimum: 1, maximum: 2 },
+        max_repairs: { type: 'integer', minimum: 0, maximum: 2 },
+      },
+    },
     steps: {
       type: 'array',
       minItems: 1,
@@ -38,6 +51,7 @@ const definitionSchema = {
         type: 'object',
         additionalProperties: false,
         properties: {
+          version: { type: 'integer', enum: [1] },
           key: text(120),
           type: text(120),
           depends_on: strings,

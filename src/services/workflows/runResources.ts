@@ -2,16 +2,64 @@ import { invoke } from '@tauri-apps/api/core'
 import { requestWithConfig, type LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
 import type { WorkflowArtifactScope } from './browser'
 import { isTerminalWorkflow } from './types'
+import { WORKFLOW_AUTOMATION_INVALIDATED, workflowAutomationRevision } from './automation'
 
-type Resource = { scope: WorkflowArtifactScope; config: LuczorApiConfigSnapshot }
+type Authorization = { accountScope: string; definitionId: number; revision: number }
+type Resource = { scope: WorkflowArtifactScope; config: LuczorApiConfigSnapshot; authorization?: Authorization }
 const resources = new Map<string, Resource>()
 const key = (scope: WorkflowArtifactScope) => `${scope.principalId}:${scope.projectId}:${scope.runId}`
-const sameAccount = (a: LuczorApiConfigSnapshot, b: LuczorApiConfigSnapshot) =>
-  a.baseUrl === b.baseUrl && a.clientId === b.clientId && a.deviceKey === b.deviceKey
+const sameAccount = (left: LuczorApiConfigSnapshot, right: LuczorApiConfigSnapshot) =>
+  left.baseUrl === right.baseUrl && left.clientId === right.clientId && left.deviceKey === right.deviceKey
+const sameScope = (left: WorkflowArtifactScope, right: WorkflowArtifactScope) =>
+  left.principalId === right.principalId &&
+  left.projectId === right.projectId &&
+  left.runId === right.runId &&
+  left.expectedRootPath === right.expectedRootPath &&
+  left.expectedWorkspaceUpdatedAt === right.expectedWorkspaceUpdatedAt
+let listenerWindow: Window | undefined
+function watchRevocation() {
+  if (listenerWindow === window) return
+  listenerWindow = window
+  window.addEventListener(WORKFLOW_AUTOMATION_INVALIDATED, event => {
+    const detail = (event as CustomEvent<{ scope?: string; definitionId?: number }>).detail
+    for (const item of resources.values())
+      if (
+        item.authorization &&
+        detail?.scope === item.authorization.accountScope &&
+        detail.definitionId === item.authorization.definitionId
+      )
+        void releaseWorkflowResources(item.scope).catch(() => {})
+  })
+}
 
 /** Retain browser state between steps, release it only after the complete run or its owner ends. */
-export function retainWorkflowResources(scope: WorkflowArtifactScope, config: LuczorApiConfigSnapshot) {
-  resources.set(key(scope), { scope: Object.freeze({ ...scope }), config: Object.freeze({ ...config }) })
+export function retainWorkflowResources(
+  scope: WorkflowArtifactScope,
+  config: LuczorApiConfigSnapshot,
+  authorization?: Authorization
+) {
+  const previous = resources.get(key(scope))
+  if (
+    previous &&
+    (!sameScope(previous.scope, scope) ||
+      !sameAccount(previous.config, config) ||
+      JSON.stringify(previous.authorization) !== JSON.stringify(authorization))
+  ) {
+    void releaseWorkflowResources(previous.scope).catch(() => {})
+    throw new Error('workflow_browser_scope_changed')
+  }
+  if (
+    authorization &&
+    workflowAutomationRevision(authorization.accountScope, authorization.definitionId) !== authorization.revision
+  )
+    throw new Error('workflow_automation_revoked')
+  watchRevocation()
+  if (!previous)
+    resources.set(key(scope), {
+      scope: Object.freeze({ ...scope }),
+      config: Object.freeze({ ...config }),
+      authorization: authorization ? Object.freeze({ ...authorization }) : undefined,
+    })
 }
 export async function releaseWorkflowResources(scope: WorkflowArtifactScope) {
   const owned = resources.get(key(scope))

@@ -3,6 +3,7 @@ import { computed, ref, watch } from 'vue'
 import type { WorkflowStepDefinition, WorkflowTask } from '@/services/workflows/types'
 import { boundedWorkflowJson } from '@/services/workflows/operations'
 import { THINKING_TIERS, THINKING_DEFAULTS } from '@/services/inference/thinking'
+import { WORKFLOW_SCRIPT_TEMPLATES } from '@/services/workflows/scriptTemplates'
 const props = defineProps<{
   step: WorkflowStepDefinition
   steps: WorkflowStepDefinition[]
@@ -38,7 +39,24 @@ const outcomeLabels: Record<string, string> = {
   default: 'Sonst',
 }
 const params = computed(() =>
-  Object.entries(task.value?.params ?? {}).filter(
+  Object.entries({
+    ...Object.fromEntries(
+      Object.entries((task.value?.input_schema?.properties ?? {}) as Record<string, Record<string, unknown>>).map(
+        ([key, field]) => [
+          key,
+          {
+            type: typeof field.type === 'string' ? field.type : 'json',
+            default: field.default,
+            required: (task.value?.input_schema?.required as string[] | undefined)?.includes(key),
+            enum: field.enum as string[] | undefined,
+            min: field.minimum as number | undefined,
+            max: field.maximum as number | undefined,
+          },
+        ]
+      )
+    ),
+    ...task.value?.params,
+  }).filter(
     ([key]) =>
       ![
         'input_bindings',
@@ -52,6 +70,25 @@ const params = computed(() =>
       ].includes(key)
   )
 )
+function applyScriptTemplate() {
+  const runtime = props.step.type === 'python.run' ? 'python' : 'node'
+  const template = runtime === 'python' ? WORKFLOW_SCRIPT_TEMPLATES.python : WORKFLOW_SCRIPT_TEMPLATES.node
+  update({
+    payload: {
+      ...props.step.payload,
+      code: template.code,
+      input: props.step.payload.input ?? { text: '' },
+      output_schema: {
+        type: 'object',
+        required: ['text'],
+        properties: { text: { type: 'string' } },
+        additionalProperties: false,
+      },
+      execution_environment: 'windows_user',
+      template: { id: template.id, version: template.version, dependencies: template.dependencies },
+    },
+  })
+}
 function update(values: Partial<WorkflowStepDefinition>) {
   emit('update:step', { ...props.step, ...values })
 }
@@ -155,6 +192,13 @@ function applyPayload() {
       {{ task?.runner === 'client' ? 'Auf dem zugeordneten Gerät' : 'Auf dem Server'
       }}<span v-if="task?.requires_approval"> · Freigabe erforderlich</span>
     </p>
+    <div v-if="['node.run', 'python.run'].includes(step.type)" class="wf-muted">
+      <p>Windows · Benutzerrechte · JSON-Eingabe über Standardeingabe, JSON-Ergebnis über Standardausgabe.</p>
+      <button type="button" @click="applyScriptTemplate">JSON-Vorlage v1 übernehmen</button>
+      <p v-if="step.payload.template">
+        Vorlage ohne zusätzliche Pakete. Eigener Code bleibt Bestandteil dieser Workflow-Version.
+      </p>
+    </div>
     <label v-if="step.type === 'llm' || step.type.startsWith('llm.') || step.type.startsWith('agent.')"
       >Denktiefe
       <select
@@ -195,6 +239,12 @@ function applyPayload() {
           :max="param.max"
           :value="Number(step.payload[key] ?? param.default ?? 0)"
           @input="payload(key, Number(($event.target as HTMLInputElement).value))"
+        />
+        <input
+          v-else-if="param.type === 'boolean'"
+          type="checkbox"
+          :checked="step.payload[key] === true"
+          @change="payload(key, ($event.target as HTMLInputElement).checked)"
         />
         <input
           v-else
@@ -244,7 +294,7 @@ function applyPayload() {
         </select></label
       >
     </template>
-    <label v-if="step.type === 'llm'"
+    <label v-if="step.type === 'llm' || step.type.startsWith('llm.')"
       >Modellverarbeitung<select
         :value="step.payload.inference ?? 'local'"
         @change="payload('inference', ($event.target as HTMLSelectElement).value)"

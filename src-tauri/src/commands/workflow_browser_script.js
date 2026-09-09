@@ -26,7 +26,7 @@ async function luczorWorkflowBrowser(p) {
     if (!['http:', 'https:'].includes(url.protocol) || url.origin !== location.origin || url.username || url.password) return fail('browser_download_same_origin_required')
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), p.timeoutMs)
     try {
-      const response = await fetch(url.href, { credentials: 'same-origin', signal: controller.signal })
+      const response = await fetch(url.href, { credentials: 'same-origin', redirect: 'error', signal: controller.signal })
       if (!response.ok || new URL(response.url).origin !== location.origin || !response.body) return fail('browser_download_response_invalid')
       if (Number(response.headers.get('content-length')) > p.maxBytes) return fail('browser_download_size_exceeded')
       const reader = response.body.getReader(), chunks = []; let length = 0

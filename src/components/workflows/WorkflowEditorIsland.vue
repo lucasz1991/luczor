@@ -5,6 +5,7 @@ import { boundedWorkflowJson } from '@/services/workflows/operations'
 import type { WorkflowDefinition, WorkflowStepDefinition } from '@/services/workflows/types'
 import { workflowStatusLabel } from '@/services/workflows/types'
 import WorkflowGraphEditor from './WorkflowGraphEditor.vue'
+import WorkflowBudgetSettings from './WorkflowBudgetSettings.vue'
 import WorkflowStepEditor from './WorkflowStepEditor.vue'
 import ThinkingSelector from '@/components/ai/ThinkingSelector.vue'
 const props = defineProps<{ stateUrl: string }>()
@@ -82,6 +83,11 @@ function updateStep(next: WorkflowStepDefinition) {
       for (const [key, source] of Object.entries(bindings ?? {}))
         if (typeof source === 'string' && source.startsWith(`steps.${previous}.`))
           Reflect.set(bindings!, key, `steps.${next.key}.${source.slice(previous.length + 7)}`)
+    }
+    const positions = draft.value.meta?.node_positions
+    if (positions && typeof positions === 'object' && Object.hasOwn(positions, previous)) {
+      Reflect.set(positions, next.key, Reflect.get(positions, previous))
+      Reflect.deleteProperty(positions, previous)
     }
     selected.value = next.key
   }
@@ -216,6 +222,7 @@ onBeforeUnmount(() => session.dispose())
         </div>
       </div>
       <div v-else-if="tab === 'inputs'">
+        <WorkflowBudgetSettings v-model="draft" :disabled="blocked" />
         <h3>Eingaben</h3>
         <p>Dieses Schema beschreibt die Eingaben desselben gespeicherten Workflows.</p>
         <label

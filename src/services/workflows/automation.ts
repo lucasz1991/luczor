@@ -7,6 +7,7 @@ import { getProjectWorkspace } from '@/services/projectWorkspace'
 import { workflowAccountScope, workflowHash, workflowTextHash } from './executionLedger'
 import { workflowOperations, WorkflowOperationUncertain } from './operations'
 import type { WorkflowTaskBundle } from '@/services/workflowTaskRunner'
+import { currentWorkflowEnvironmentHash } from './capabilities'
 
 export type WorkflowAutomationInput = {
   status?: 'active' | 'revoked'
@@ -59,6 +60,41 @@ type LocalRepairPolicy = {
   policyHash: string
   principalId: string
   workspaceUpdatedAt: number
+}
+export const WORKFLOW_AUTOMATION_INVALIDATED = 'luczor:workflow-automation-invalidated'
+const automationRevisions = new Map<string, number>()
+const automationWrites = new Map<string, Promise<unknown>>()
+async function writeAutomation<T>(
+  scope: string,
+  definitionId: number,
+  revision: number | null,
+  write: (store: Awaited<ReturnType<typeof storeForGrant>>) => Promise<T>
+): Promise<T> {
+  const key = `${scope}:${definitionId}`
+  const next = (automationWrites.get(key) ?? Promise.resolve())
+    .catch(() => {})
+    .then(async () => {
+      if (revision !== null && workflowAutomationRevision(scope, definitionId) !== revision)
+        throw new Error('workflow_automation_authorization_changed')
+      const result = await write(await storeForGrant())
+      if (revision !== null && workflowAutomationRevision(scope, definitionId) !== revision)
+        throw new Error('workflow_automation_authorization_changed')
+      return result
+    })
+  automationWrites.set(key, next)
+  try {
+    return await next
+  } finally {
+    if (automationWrites.get(key) === next) automationWrites.delete(key)
+  }
+}
+export function workflowAutomationRevision(scope: string, definitionId: number): number {
+  return automationRevisions.get(`${scope}:${definitionId}`) ?? 0
+}
+function invalidateAutomation(scope: string, definitionId: number) {
+  const key = `${scope}:${definitionId}`
+  automationRevisions.set(key, workflowAutomationRevision(scope, definitionId) + 1)
+  window.dispatchEvent(new CustomEvent(WORKFLOW_AUTOMATION_INVALIDATED, { detail: { scope, definitionId } }))
 }
 const TASKS = new Set([
   'context',
@@ -151,7 +187,7 @@ export async function configureWorkflowAutomation(
   if (!account) throw new Error('workflow_verified_account_required')
   const scope = await workflowAccountScope(account.config)
   const key = `${scope}:${workflow.id}`
-  const store = await storeForGrant()
+  const startingRevision = workflowAutomationRevision(scope, workflow.id)
   const assertIdentity = async () => {
     assert()
     const current = await getVerifiedAccountSnapshot()
@@ -229,9 +265,14 @@ export async function configureWorkflowAutomation(
     return validateGrant(grant)
   }
   if (input.status === 'revoked') {
-    const stored = await store.get<LocalGrant>(key)
-    await store.delete(key)
-    await store.save()
+    invalidateAutomation(scope, workflow.id)
+    const stored = await writeAutomation(scope, workflow.id, null, async store => {
+      const old = await store.get<LocalGrant>(key)
+      await store.delete(key)
+      await store.delete(`repair:${scope}:${workflow.id}`)
+      await store.save()
+      return old
+    })
     window.dispatchEvent(new Event('luczor:workflow-automation-changed'))
     assert()
     const prior =
@@ -268,9 +309,17 @@ export async function configureWorkflowAutomation(
     if (ancestors.includes(definition.id) || ancestors.length > 8) throw new Error('workflow_automation_nested_cycle')
     if (definition.project_external_id !== undefined && definition.project_external_id !== context.projectId)
       throw new Error('workflow_automation_nested_project_mismatch')
-    for (const step of definition.definition?.steps ?? []) {
-      if (collected.length >= 100) throw new Error('workflow_automation_step_limit')
+    const remaining = [...(definition.definition?.steps ?? [])]
+    while (remaining.length) {
+      const step = remaining.shift()!
+      if (collected.length >= 800) throw new Error('workflow_automation_step_limit')
       collected.push({ definitionId: definition.id, step })
+      const body = step.payload?.body as { steps?: typeof remaining } | undefined
+      if (['control.foreach', 'control.until'].includes(step.type) && Array.isArray(body?.steps))
+        remaining.push(...body.steps)
+      if (step.type === 'control.parallel' && Array.isArray(step.payload?.branches))
+        for (const branch of step.payload.branches)
+          if (branch && typeof branch === 'object' && Array.isArray(branch.steps)) remaining.push(...branch.steps)
       if (step.type === 'workflow') {
         const childId = step.payload?.workflow_definition_id
         if (!Number.isSafeInteger(childId) || Number(childId) < 1)
@@ -297,8 +346,11 @@ export async function configureWorkflowAutomation(
     const program = step.payload?.[step.type === 'agent.dispatch' ? 'prompt' : 'code']
     if (typeof program !== 'string' || !program.trim() || program.includes('{{'))
       throw new Error('workflow_automation_dynamic_program_requires_individual_approval')
-    scriptHashes[definitionId === workflow.id ? step.key : `${definitionId}:${step.key}`] =
-      await workflowTextHash(program)
+    const key = definitionId === workflow.id ? step.key : `${definitionId}:${step.key}`
+    const hash = await workflowTextHash(program)
+    if (Object.hasOwn(scriptHashes, key) && Reflect.get(scriptHashes, key) !== hash)
+      throw new Error('workflow_automation_program_identity_ambiguous')
+    Reflect.set(scriptHashes, key, hash)
   }
   const config: WorkflowAutomationConfig = {
     device_id: account.config.clientId,
@@ -311,7 +363,7 @@ export async function configureWorkflowAutomation(
     egress_hosts: textList(input.egress_hosts ?? [], 30),
     export_results: input.export_results === true,
     script_hashes: scriptHashes,
-    max_steps: bounded(input.max_steps, 100, 100),
+    max_steps: bounded(input.max_steps, 200, 800),
     max_runs_per_hour: bounded(input.max_runs_per_hour, 20, 100),
     max_input_bytes: bounded(input.max_input_bytes, 65536, 1048576),
     max_output_bytes: bounded(input.max_output_bytes, 65536, 1048576),
@@ -362,13 +414,20 @@ export async function configureWorkflowAutomation(
   }
   const grant = await configureGrant(config, 'active', assertWorkspace)
   await assertWorkspace()
-  await store.set(key, {
-    grant,
-    principalId: account.principalId,
-    workspaceUpdatedAt: workspace.updatedAt,
-    approvedAt: Date.now(),
-  } satisfies LocalGrant)
-  await store.save()
+  if (workflowAutomationRevision(scope, workflow.id) !== startingRevision)
+    throw new Error('workflow_automation_authorization_changed')
+  invalidateAutomation(scope, workflow.id)
+  await writeAutomation(scope, workflow.id, workflowAutomationRevision(scope, workflow.id), async store => {
+    assert()
+    await store.set(key, {
+      grant,
+      principalId: account.principalId,
+      workspaceUpdatedAt: workspace.updatedAt!,
+      approvedAt: Date.now(),
+    } satisfies LocalGrant)
+    await store.save()
+    assert()
+  })
   assert()
   window.dispatchEvent(new Event('luczor:workflow-automation-changed'))
   return { ok: true, grant }
@@ -384,11 +443,16 @@ export async function workflowAutomationAllows(
   const metadata = bundle.workflow
   if (!metadata?.definition_id || !metadata.grant || typeof metadata.grant !== 'object') return false
   const grant = metadata.grant as WorkflowAutomationGrant
+  const revision = workflowAutomationRevision(scope, metadata.definition_id)
+  await automationWrites.get(`${scope}:${metadata.definition_id}`)?.catch(() => {})
   const stored = await (await storeForGrant()).get<LocalGrant>(`${scope}:${metadata.definition_id}`)
   if (!stored || stored.principalId !== principalId || stored.grant.status !== 'active') return false
-  const locallyKnown = [stored.grant, ...(stored.predecessors ?? [])].find(item => item.id === grant.id && item.status === 'active')
+  const locallyKnown = [stored.grant, ...(stored.predecessors ?? [])].find(
+    item => item.id === grant.id && item.status === 'active'
+  )
   const sameGrant =
-    grant.status === 'active' && !!locallyKnown &&
+    grant.status === 'active' &&
+    !!locallyKnown &&
     locallyKnown.scope_hash === grant.scope_hash &&
     (await workflowHash(locallyKnown.config)) === (await workflowHash(grant.config))
   const successor = !sameGrant && (await repairGrantAllows(bundle, stored, scope, principalId, apiConfig))
@@ -414,7 +478,8 @@ export async function workflowAutomationAllows(
   if (
     current.data.grant?.status !== 'active' ||
     current.data.grant.id !== (sameGrant || grant.status === 'testing' ? stored.grant.id : grant.id) ||
-    current.data.grant.scope_hash !== (sameGrant || grant.status === 'testing' ? stored.grant.scope_hash : grant.scope_hash)
+    current.data.grant.scope_hash !==
+      (sameGrant || grant.status === 'testing' ? stored.grant.scope_hash : grant.scope_hash)
   )
     return false
   if (
@@ -461,22 +526,36 @@ export async function workflowAutomationAllows(
       return false
     }
   }
+  const store = await storeForGrant()
+  // Re-check every admission after network/identity waits, including normal and testing grants.
+  const latest = await store.get<LocalGrant>(`${scope}:${metadata.definition_id}`)
+  if (
+    latest?.grant.id !== stored.grant.id ||
+    latest.grant.scope_hash !== stored.grant.scope_hash ||
+    workflowAutomationRevision(scope, metadata.definition_id) !== revision
+  )
+    return false
   if (successor && grant.status === 'active') {
-    const store = await storeForGrant()
-    // Re-check the stored predecessor after asynchronous evidence reads. A local revocation wins.
-    const latest = await store.get<LocalGrant>(`${scope}:${metadata.definition_id}`)
-    if (latest?.grant.id !== stored.grant.id || latest.grant.scope_hash !== stored.grant.scope_hash) return false
-    await store.set(`${scope}:${metadata.definition_id}`, { ...stored, grant, predecessors: [stored.grant, ...(stored.predecessors ?? [])].slice(0, 3) })
-    const localPolicy = await store.get<LocalRepairPolicy>(`repair:${scope}:${metadata.definition_id}`)
-    if (localPolicy)
-      await store.set(`repair:${scope}:${metadata.definition_id}`, {
-        ...localPolicy,
-        policy: successor.policy,
-        policyHash: await workflowHash(successor.policy),
+    await writeAutomation(scope, metadata.definition_id, revision, async store => {
+      const latest = await store.get<LocalGrant>(`${scope}:${metadata.definition_id}`)
+      if (latest?.grant.id !== stored.grant.id || latest.grant.scope_hash !== stored.grant.scope_hash)
+        throw new Error('workflow_automation_authorization_changed')
+      await store.set(`${scope}:${metadata.definition_id}`, {
+        ...stored,
+        grant,
+        predecessors: [stored.grant, ...(stored.predecessors ?? [])],
       })
-    await store.save()
+      const localPolicy = await store.get<LocalRepairPolicy>(`repair:${scope}:${metadata.definition_id}`)
+      if (localPolicy)
+        await store.set(`repair:${scope}:${metadata.definition_id}`, {
+          ...localPolicy,
+          policy: successor.policy,
+          policyHash: await workflowHash(successor.policy),
+        })
+      await store.save()
+    })
   }
-  return true
+  return workflowAutomationRevision(scope, metadata.definition_id) === revision
 }
 
 /** Called only by the local UI after its confirmed policy operation completes. */
@@ -490,11 +569,15 @@ export async function rememberLocalWorkflowRepairPolicy(
   const account = await getVerifiedAccountSnapshot()
   if (!account) throw new Error('workflow_verified_account_required')
   const scope = await workflowAccountScope(account.config)
+  const revision = workflowAutomationRevision(scope, workflowId)
   const store = await storeForGrant()
   const key = `repair:${scope}:${workflowId}`
   if (policy.enabled === false) {
-    await store.delete(key)
-    await store.save()
+    invalidateAutomation(scope, workflowId)
+    await writeAutomation(scope, workflowId, null, async store => {
+      await store.delete(key)
+      await store.save()
+    })
     return
   }
   const prior = await store.get<LocalGrant>(`${scope}:${workflowId}`)
@@ -514,13 +597,23 @@ export async function rememberLocalWorkflowRepairPolicy(
   const current = await getVerifiedAccountSnapshot()
   if (!current || current.principalId !== account.principalId || (await workflowAccountScope(current.config)) !== scope)
     throw new Error('workflow_repair_identity_changed')
-  await store.set(key, {
-    policy: structuredClone(policy),
-    policyHash: await workflowHash(policy),
-    principalId: account.principalId,
-    workspaceUpdatedAt: prior.workspaceUpdatedAt,
-  } satisfies LocalRepairPolicy)
-  await store.save()
+  if (workflowAutomationRevision(scope, workflowId) !== revision)
+    throw new Error('workflow_automation_authorization_changed')
+  invalidateAutomation(scope, workflowId)
+  await writeAutomation(scope, workflowId, workflowAutomationRevision(scope, workflowId), async store => {
+    executionGate.assert(ticket, true)
+    const latest = await store.get<LocalGrant>(`${scope}:${workflowId}`)
+    if (latest?.grant.id !== prior.grant.id || latest.grant.scope_hash !== prior.grant.scope_hash)
+      throw new Error('workflow_repair_local_predecessor_required')
+    await store.set(key, {
+      policy: structuredClone(policy),
+      policyHash: await workflowHash(policy),
+      principalId: account.principalId,
+      workspaceUpdatedAt: prior.workspaceUpdatedAt,
+    } satisfies LocalRepairPolicy)
+    await store.save()
+    executionGate.assert(ticket, true)
+  })
 }
 
 async function repairGrantAllows(
@@ -569,6 +662,8 @@ async function repairGrantAllows(
     {},
     apiConfig
   )
+  const environmentHash = await currentWorkflowEnvironmentHash()
+  if (!environmentHash || evidence.device_environment_hash !== environmentHash) return false
   if (
     evidence.mode !== 'real' ||
     evidence.workflow_definition_id !== grant.workflow_definition_id ||

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wf-runtime-capabilities"
+description = "Enables the wf_runtime_capabilities command without any pre-configured scope."
+commands.allow = ["wf_runtime_capabilities"]
+
+[[permission]]
+identifier = "deny-wf-runtime-capabilities"
+description = "Denies the wf_runtime_capabilities command without any pre-configured scope."
+commands.deny = ["wf_runtime_capabilities"]

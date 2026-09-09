@@ -108,6 +108,7 @@ pub fn run() {
             commands::local_tasks::wf_file_read,
             commands::local_tasks::wf_file_write,
             commands::local_tasks::wf_run_script,
+            commands::local_tasks::wf_runtime_capabilities,
             commands::workflow_http::wf_http_request,
             commands::notifications::show_native_notification,
             commands::browser::browser_open,

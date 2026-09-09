@@ -137,6 +137,7 @@ mod tests {
             "wf_browser_action",
             "wf_browser_cleanup",
             "wf_image_action",
+            "wf_runtime_capabilities",
             "local_model_cancel",
             "local_model_stop",
         ] {
