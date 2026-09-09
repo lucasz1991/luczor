@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-agent-default-model-resolve"
+description = "Enables the agent_default_model_resolve command without any pre-configured scope."
+commands.allow = ["agent_default_model_resolve"]
+
+[[permission]]
+identifier = "deny-agent-default-model-resolve"
+description = "Denies the agent_default_model_resolve command without any pre-configured scope."
+commands.deny = ["agent_default_model_resolve"]

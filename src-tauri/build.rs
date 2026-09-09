@@ -90,6 +90,7 @@ const APP_COMMANDS: &[&str] = &[
     "codex_desktop_open",
     "codex_job_start",
     "codex_model_capabilities",
+    "agent_default_model_resolve",
     "claude_runtime_status",
     "claude_job_start",
     "claude_job_status",

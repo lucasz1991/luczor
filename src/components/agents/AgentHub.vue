@@ -19,6 +19,7 @@ import {
 } from '@/services/agents/codexAgent'
 import type { AgentJob, AgentPermission, AgentProjectSnapshot, AgentRole } from '@/services/agents/types'
 import type { LuczorMode } from '@/services/inference/types'
+import { THINKING_DEFAULTS } from '@/services/inference/thinking'
 import AgentTeams from './AgentTeams.vue'
 
 const props = defineProps<{ open: boolean; projectId: string; mode: LuczorMode; killSwitch: boolean }>()
@@ -461,6 +462,25 @@ async function openDesktop() {
           </div>
           <details v-if="job.status === 'awaiting_approval'" open>
             <summary>Vollständigen Auftrag prüfen</summary>
+            <p>
+              Modell: <strong>{{ job.model || 'Noch nicht bestätigt' }}</strong>
+              <template v-if="job.defaultModelSource">
+                · Erkannt aus
+                {{
+                  job.defaultModelSource === 'codex-effective-config'
+                    ? 'der Codex-Projektkonfiguration'
+                    : job.defaultModelSource === 'claude-context-summary'
+                      ? 'dem Claude-Laufzeitkontext'
+                      : job.defaultModelSource
+                }}
+              </template>
+            </p>
+            <p v-if="job.effortSelection">
+              Denktiefe: {{ THINKING_DEFAULTS[job.effortSelection.tier].label }} · Angeforderter Anbieteraufwand:
+              {{ job.effortSelection.requestedEffort || 'Nicht bestätigt' }}
+              <span class="agent-hub__muted">(Tatsächliche Anwendung noch nicht bestätigt.)</span>
+            </p>
+            <p v-else class="agent-hub__muted">Anbieteraufwand: Standard ohne gesonderte Stufenvorgabe.</p>
             <p v-if="job.approvalExpiresAt" class="agent-hub__muted">
               Freigabe möglich bis {{ formatTime(job.approvalExpiresAt) }}
             </p>

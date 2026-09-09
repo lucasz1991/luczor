@@ -273,7 +273,13 @@ function workflowPrimitives(
     runAgentFlow: async (team, params) => {
       const { runWorkflowAgentFlow } = await import('./agentFlow')
       assert()
-      return runWorkflowAgentFlow(team, params, { projectId, ticket, thinkingTier: bundle.workflow.thinking_tier })
+      return runWorkflowAgentFlow(team, params, {
+        projectId,
+        ticket,
+        thinkingTier: bundle.workflow.thinking_tier,
+        runPublicId: bundle.workflow.run,
+        stepId: bundle.workflow.step_id,
+      })
     },
     browserSession: createWorkflowBrowser({
       scope: artifactScope,

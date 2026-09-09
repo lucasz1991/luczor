@@ -4,7 +4,13 @@ import { VueFlow, Handle, Position, useVueFlow, type Connection, type NodeDragEv
 import '@vue-flow/core/dist/style.css'
 import '@vue-flow/core/dist/theme-default.css'
 import type { WorkflowDefinition, WorkflowTask, WorkflowTrigger } from '@/services/workflows/types'
-import { connectWorkflowData, connectWorkflowSteps, moveWorkflowNode, workflowGraph } from '@/services/workflows/graph'
+import {
+  connectWorkflowData,
+  connectWorkflowSteps,
+  moveWorkflowNode,
+  workflowGraph,
+  WORKFLOW_NODE_METRICS,
+} from '@/services/workflows/graph'
 const props = withDefaults(
   defineProps<{
     modelValue: WorkflowDefinition
@@ -155,30 +161,42 @@ function connect(connection: Connection) {
             :position="Position.Left"
             :connectable="false"
           />
-          <div class="workflow-node" :class="{ 'workflow-node--source': data.sourceKind }">
-            <span class="workflow-node__location">{{ data.location }}</span>
-            <strong>{{ data.title }}</strong
-            ><span>{{ data.task }}</span>
-            <dl>
-              <dt>Eingabe</dt>
-              <dd>{{ data.input }}</dd>
-              <dt>Ausgabe</dt>
-              <dd>{{ data.output }}</dd>
-              <dt>Bei Fehler</dt>
-              <dd>{{ data.failure }}</dd>
-            </dl>
+          <div
+            class="workflow-node"
+            :class="{ 'workflow-node--source': data.sourceKind }"
+            :style="{
+              width: `${data.layout.width}px`,
+              height: `${data.layout.height}px`,
+              padding: `${WORKFLOW_NODE_METRICS.padding}px`,
+              '--workflow-summary-height': `${WORKFLOW_NODE_METRICS.summary}px`,
+              '--workflow-port-height': `${WORKFLOW_NODE_METRICS.port}px`,
+            }"
+          >
+            <div class="workflow-node__summary">
+              <span class="workflow-node__location" :title="data.location">{{ data.location }}</span>
+              <strong :title="data.title">{{ data.title }}</strong
+              ><span :title="data.task">{{ data.task }}</span>
+              <dl>
+                <dt>Eingabe</dt>
+                <dd :title="data.input">{{ data.input }}</dd>
+                <dt>Ausgabe</dt>
+                <dd :title="data.output">{{ data.output }}</dd>
+                <dt>Bei Fehler</dt>
+                <dd :title="data.failure">{{ data.failure }}</dd>
+              </dl>
+            </div>
             <div v-if="data.inputs.length || data.outputs.length" class="workflow-node__ports">
               <div v-for="field in data.inputs" :key="`in:${field.path}`" class="workflow-node__port">
                 <Handle :id="`data:${field.path}`" type="target" :position="Position.Left" :connectable="!disabled" />
-                <span>→ {{ field.path }}</span
-                ><small>{{ field.type }}</small>
+                <span :title="field.path">→ {{ field.path }}</span
+                ><small :title="field.type">{{ field.type }}</small>
               </div>
               <div
                 v-for="field in data.outputs"
                 :key="`out:${field.path}`"
                 class="workflow-node__port workflow-node__port--out"
               >
-                <span>{{ field.path }} →</span><small>{{ field.type }}</small>
+                <span :title="field.path">{{ field.path }} →</span><small :title="field.type">{{ field.type }}</small>
                 <Handle :id="`data:${field.path}`" type="source" :position="Position.Right" :connectable="!disabled" />
               </div>
             </div>
@@ -258,19 +276,33 @@ function connect(connection: Connection) {
   border-radius: 6px;
 }
 .workflow-node__ports {
-  margin: 10px -12px -4px;
+  margin: 10px -12px 0;
   border-top: 1px solid var(--ai-border, #3d404b);
   padding-top: 4px;
 }
 .workflow-node__port {
+  box-sizing: border-box;
+  height: var(--workflow-port-height);
   position: relative;
   padding: 3px 12px;
   display: flex;
   gap: 8px;
   justify-content: space-between;
-  overflow-wrap: anywhere;
+  line-height: 20px;
+}
+.workflow-node__port span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .workflow-node__port small {
+  flex: 0 1 90px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--ai-text-muted, #b5b9c7);
 }
 .workflow-node__port--out {
@@ -298,8 +330,7 @@ button:focus-visible {
   background: var(--ai-bg, #181b21);
 }
 .workflow-node {
-  width: 225px;
-  padding: 12px;
+  box-sizing: border-box;
   border: 1px solid var(--ai-border, #525665);
   background: var(--ai-surface, #252933);
   border-radius: 8px;
@@ -308,14 +339,31 @@ button:focus-visible {
     sans-serif;
   text-align: left;
 }
+.workflow-node__summary {
+  display: grid;
+  grid-template-rows: 14px 36px 18px 90px;
+  gap: 4px;
+  height: var(--workflow-summary-height);
+  min-width: 0;
+}
+.workflow-node__summary > span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
 .workflow-node strong,
-.workflow-node > span {
-  display: block;
+.workflow-node dd {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
   overflow-wrap: anywhere;
 }
 .workflow-node strong {
   font-size: 14px;
-  margin: 4px 0;
+  line-height: 18px;
+  margin: 0;
 }
 .workflow-node__location {
   color: var(--ai-text-muted, #b5b9c7);
@@ -324,9 +372,10 @@ button:focus-visible {
   letter-spacing: 0.06em;
 }
 .workflow-node dl {
-  margin: 10px 0 0;
+  margin: 0;
   display: grid;
   grid-template-columns: 54px 1fr;
+  grid-template-rows: repeat(3, 28px);
   gap: 3px 8px;
 }
 .workflow-node dt {
@@ -334,7 +383,8 @@ button:focus-visible {
 }
 .workflow-node dd {
   margin: 0;
-  overflow-wrap: anywhere;
+  min-width: 0;
+  line-height: 14px;
 }
 .workflow-graph p {
   padding: 0 12px;

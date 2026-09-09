@@ -30,6 +30,8 @@ describe('app-owned Claude worker contract without starting a model', () => {
       model: input.model,
       effort: 'high',
       settingSources: [],
+      settings: { autoMemoryEnabled: false },
+      env: expect.objectContaining({ CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1' }),
       strictMcpConfig: true,
       mcpServers: {},
       plugins: [],

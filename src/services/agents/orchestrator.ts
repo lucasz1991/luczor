@@ -128,6 +128,14 @@ export class AgentOrchestrator {
     const role = input.role ?? 'assistant'
     if (!ROLES.includes(role)) throw new Error('Die Agentenrolle ist ungültig.')
     if (input.model !== undefined && !safeIdentifier(input.model)) throw new Error('Das gewählte Modell ist ungültig.')
+    if (
+      input.defaultModelRevision !== undefined &&
+      (!input.model ||
+        !/^[a-f0-9]{64}$/u.test(input.defaultModelRevision) ||
+        !input.defaultModelSource ||
+        !/^[a-zA-Z0-9_.:-]{1,80}$/u.test(input.defaultModelSource))
+    )
+      throw new Error('Ungültige Standardmodell-Bindung.')
     if (input.externalThreadId !== undefined && !safeIdentifier(input.externalThreadId)) {
       throw new Error('Die externe Aufgaben-ID ist ungültig.')
     }
@@ -156,6 +164,8 @@ export class AgentOrchestrator {
         projectId: project.projectId,
         adapterId: adapter.id,
         model: input.model,
+        defaultModelRevision: input.defaultModelRevision,
+        defaultModelSource: input.defaultModelSource,
         thinkingTier: input.thinkingTier,
         effort: input.effort,
         effortSelection: input.effortSelection && Object.freeze({ ...input.effortSelection }),
@@ -378,6 +388,8 @@ export class AgentOrchestrator {
           permission: job.metadata.permission,
           role: job.metadata.role,
           model: job.metadata.model,
+          defaultModelRevision: job.metadata.defaultModelRevision,
+          defaultModelSource: job.metadata.defaultModelSource,
           thinkingTier: job.metadata.thinkingTier,
           effort: job.metadata.effort,
           effortSelection: job.metadata.effortSelection,

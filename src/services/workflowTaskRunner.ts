@@ -95,9 +95,15 @@ export type WorkflowTaskPrimitives = {
     interpreter?: string
     runtime_version?: string
     execution_profile?: 'host-user'
-    input_mode?: 'json-stdin' | 'code-stdin'
+    input_mode?: 'json-stdin' | 'code-stdin' | 'code-file'
     code_sha256?: string
-    environment?: { revision: string; lock_sha256: string | null; dependency_count: number; reused: boolean }
+    environment?: {
+      revision: string
+      lock_sha256: string | null
+      dependency_count: number
+      reused: boolean
+      installed_sha256: string
+    }
   }>
   /** Drive the in-app browser window (P24). */
   browserOpen: (url?: string) => Promise<unknown>
@@ -278,7 +284,13 @@ export async function runWorkflowTask(
       const { validateWorkflowScriptEnvironment } = await import('@/services/workflows/scriptEnvironment')
       const environment = validateWorkflowScriptEnvironment(runtime, params.environment)
       const res = environment
-        ? await primitives.runScript(runtime, code, timeout, params.input as Record<string, unknown> | undefined, environment)
+        ? await primitives.runScript(
+            runtime,
+            code,
+            timeout,
+            params.input as Record<string, unknown> | undefined,
+            environment
+          )
         : params.input !== undefined
           ? await primitives.runScript(runtime, code, timeout, params.input as Record<string, unknown>)
           : await primitives.runScript(runtime, code, timeout)

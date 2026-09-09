@@ -16,6 +16,9 @@ export type AgentExecutionOptions = Readonly<{
   effort?: AgentEffort
   effortSelection?: AgentEffortSelection
   executionProfile?: 'workspace' | 'host-user'
+  /** Native project-bound default configuration observation; never a global model guess. */
+  defaultModelRevision?: string
+  defaultModelSource?: string
   maxTurns?: number
   maxBudgetUsd?: number
 }>

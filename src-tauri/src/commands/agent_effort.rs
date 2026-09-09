@@ -5,6 +5,19 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tauri::WebviewWindow;
 
+#[path = "agent_default_model.rs"]
+mod default_model;
+pub use default_model::{validate_default_binding, DefaultModelRequest, DefaultModelResolution};
+
+#[tauri::command]
+pub async fn agent_default_model_resolve(
+    app: tauri::AppHandle,
+    window: WebviewWindow,
+    payload: DefaultModelRequest,
+) -> Result<DefaultModelResolution, String> {
+    default_model::resolve_for_window(app, window, payload).await
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentEffort {
@@ -131,6 +144,11 @@ pub fn valid_model(model: &str) -> bool {
         && model
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/' | b':'))
+}
+
+/// Claude documents [1m] as an explicit context modifier, not another model alias.
+pub fn valid_claude_model(model: &str) -> bool {
+    model.len() <= 160 && valid_model(model.strip_suffix("[1m]").unwrap_or(model))
 }
 
 pub fn validate_codex_effort(

@@ -61,6 +61,22 @@ function deferred<T>() {
 }
 
 describe('native Codex agent adapter', () => {
+  it('does not dispatch when cancelled during native authorization', async () => {
+    const fixture = harness()
+    const controller = new AbortController()
+    fixture.dependencies.captureExecution = signal => ({
+      signal,
+      authorize: async () => {
+        controller.abort()
+        return { sessionId: 'session', generation: 7 }
+      },
+    })
+    await expect(createCodexAgentAdapter(fixture.dependencies).run(request(controller))).rejects.toMatchObject({
+      name: 'AbortError',
+    })
+    expect(fixture.invoke).not.toHaveBeenCalled()
+  })
+
   it('pins the reviewed model and requested effort with the metadata revision, without claiming it was applied', async () => {
     const fixture = harness()
     fixture.invoke
@@ -73,10 +89,16 @@ describe('native Codex agent adapter', () => {
     const result = await createCodexAgentAdapter(fixture.dependencies).run({
       ...request(),
       model: 'gpt-6-astra',
+      defaultModelRevision: 'a'.repeat(64),
       thinkingTier: 'ultra',
     })
     expect(fixture.invoke).toHaveBeenNthCalledWith(2, 'codex_job_start', {
-      payload: expect.objectContaining({ model: 'gpt-6-astra', effort: 'ultra', capabilityRevision: 'current' }),
+      payload: expect.objectContaining({
+        model: 'gpt-6-astra',
+        effort: 'ultra',
+        capabilityRevision: 'current',
+        defaultModelRevision: 'a'.repeat(64),
+      }),
     })
     expect(result.effortSelection).toMatchObject({
       requestedEffort: 'ultra',

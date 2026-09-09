@@ -1,3 +1,4 @@
+/* eslint id-length: ["error", { "min": 2, "exceptions": ["x", "y"] }] -- Vue Flow's coordinate contract uses x/y. */
 import type { WorkflowDefinition, WorkflowTask, WorkflowTrigger } from './types'
 import {
   inspectWorkflowBinding,
@@ -10,12 +11,72 @@ import {
 
 export type GraphPosition = { x: number; y: number }
 type Layout = Record<string, GraphPosition>
-const validPosition = (v: unknown): v is GraphPosition =>
-  !!v &&
-  typeof v === 'object' &&
+/** Shared with the node template: bounded summary text plus one line for every actual port. */
+export const WORKFLOW_NODE_METRICS = Object.freeze({ width: 280, summary: 170, padding: 12, port: 26, gap: 56 })
+export function workflowNodeSize(inputs: number, outputs: number) {
+  const ports = inputs + outputs
+  return {
+    width: WORKFLOW_NODE_METRICS.width,
+    height:
+      WORKFLOW_NODE_METRICS.summary +
+      WORKFLOW_NODE_METRICS.padding * 2 +
+      2 +
+      (ports ? 15 + ports * WORKFLOW_NODE_METRICS.port : 0),
+  }
+}
+type SizedNode = {
+  id: string
+  position: GraphPosition
+  data: { sourceKind: string; layout: ReturnType<typeof workflowNodeSize> }
+}
+type Rectangle = GraphPosition & { width: number; height: number }
+const intersects = (left: Rectangle, right: Rectangle) =>
+  left.x < right.x + right.width + WORKFLOW_NODE_METRICS.gap &&
+  left.x + left.width + WORKFLOW_NODE_METRICS.gap > right.x &&
+  left.y < right.y + right.height + WORKFLOW_NODE_METRICS.gap &&
+  left.y + left.height + WORKFLOW_NODE_METRICS.gap > right.y
+
+/** Only unpositioned nodes move. Reserve every saved rectangle before placing new nodes. */
+function positionWorkflowNodes(nodes: SizedNode[], positions: Layout | undefined) {
+  const occupied: Rectangle[] = nodes
+    .filter(node => !node.data.sourceKind && validPosition(positions?.[node.id]))
+    .map(node => ({ ...positions![node.id]!, ...node.data.layout }))
+  const pitch = WORKFLOW_NODE_METRICS.width + WORKFLOW_NODE_METRICS.gap
+  const place = (node: SizedNode, initial: GraphPosition) => {
+    const rectangle = { ...initial, ...node.data.layout }
+    let collisions = occupied.filter(other => intersects(rectangle, other))
+    while (collisions.length) {
+      rectangle.y = Math.max(...collisions.map(other => other.y + other.height + WORKFLOW_NODE_METRICS.gap))
+      collisions = occupied.filter(other => intersects(rectangle, other))
+    }
+    node.position = { x: rectangle.x, y: rectangle.y }
+    occupied.push(rectangle)
+    return rectangle.y + rectangle.height + WORKFLOW_NODE_METRICS.gap
+  }
+  for (const kinds of [['trigger'], ['input', 'event']]) {
+    let top = 0
+    for (const node of nodes.filter(item => kinds.includes(item.data.sourceKind)))
+      top = place(node, { x: (kinds[0] === 'trigger' ? -2 : -1) * pitch, y: top })
+  }
+  const steps = nodes.filter(node => !node.data.sourceKind)
+  let top = 0
+  for (let index = 0; index < steps.length; index += 3) {
+    const row = steps.slice(index, index + 3)
+    let bottom = top
+    row.forEach((node, column) => {
+      if (validPosition(positions?.[node.id])) {
+        node.position = { ...positions![node.id]! }
+      } else bottom = Math.max(bottom, place(node, { x: column * pitch, y: top }))
+    })
+    top = bottom
+  }
+}
+const validPosition = (value: unknown): value is GraphPosition =>
+  !!value &&
+  typeof value === 'object' &&
   ['x', 'y'].every(key => {
-    const n = Reflect.get(v, key)
-    return typeof n === 'number' && Number.isFinite(n) && Math.abs(n) <= 100_000
+    const coordinate = Reflect.get(value, key)
+    return typeof coordinate === 'number' && Number.isFinite(coordinate) && Math.abs(coordinate) <= 100_000
   })
 
 /** Layout is presentation metadata. It never determines execution order. */
@@ -101,15 +162,13 @@ export function workflowGraph(
 ) {
   const positions = definition.meta?.node_positions as Layout | undefined
   const keys = new Set(definition.steps.map(step => step.key))
-  const nodes = definition.steps.map((step, index) => {
+  const nodes = definition.steps.map(step => {
     const task = catalog.find(item => item.key === step.type)
     return {
       id: step.key,
       type: 'workflow',
       draggable: true,
-      position: validPosition(positions?.[step.key])
-        ? { ...positions![step.key]! }
-        : { x: (index % 3) * 300, y: Math.floor(index / 3) * 220 },
+      position: { x: 0, y: 0 },
       data: {
         title: typeof step.payload.title === 'string' && step.payload.title ? step.payload.title : step.key,
         task: task?.label ?? step.type,
@@ -154,7 +213,7 @@ export function workflowGraph(
       id,
       type: 'workflow',
       draggable: false,
-      position: { x: -330, y: kind === 'input' ? 0 : 330 },
+      position: { x: 0, y: 0 },
       data: {
         key: id,
         title,
@@ -168,13 +227,13 @@ export function workflowGraph(
       },
     })
   }
-  for (const [index, trigger] of triggers.entries()) {
+  for (const trigger of triggers) {
     const id = `@trigger:${trigger.id}`
     nodes.push({
       id,
       type: 'workflow',
       draggable: false,
-      position: { x: -660, y: index * 220 },
+      position: { x: 0, y: 0 },
       data: {
         key: id,
         title: trigger.name,
@@ -252,5 +311,10 @@ export function workflowGraph(
           style: { stroke: outcome === 'failed' ? '#d68e8e' : '#8cbeb5' },
         })
   }
-  return { nodes, edges }
+  const sizedNodes = nodes.map(node => ({
+    ...node,
+    data: { ...node.data, layout: workflowNodeSize(node.data.inputs.length, node.data.outputs.length) },
+  }))
+  positionWorkflowNodes(sizedNodes, positions)
+  return { nodes: sizedNodes, edges }
 }

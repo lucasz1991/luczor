@@ -1,5 +1,12 @@
+/* eslint id-length: ["error", { "min": 2, "exceptions": ["x", "y"] }] -- Vue Flow's coordinate contract uses x/y. */
 import { describe, expect, it } from 'vitest'
-import { connectWorkflowData, connectWorkflowSteps, moveWorkflowNode, workflowGraph } from '@/services/workflows/graph'
+import {
+  connectWorkflowData,
+  connectWorkflowSteps,
+  moveWorkflowNode,
+  workflowGraph,
+  WORKFLOW_NODE_METRICS,
+} from '@/services/workflows/graph'
 import { inspectWorkflowBinding, WORKFLOW_INPUT_NODE } from '@/services/workflows/bindings'
 import type { WorkflowDefinition, WorkflowTask, WorkflowTrigger } from '@/services/workflows/types'
 const tasks = (items: Array<Partial<WorkflowTask> & { key: string }>): WorkflowTask[] =>
@@ -26,6 +33,110 @@ const definition = (): WorkflowDefinition => ({
   ],
 })
 describe('one workflow definition, independent graph presentation', () => {
+  const overlaps = (
+    left: ReturnType<typeof workflowGraph>['nodes'][number],
+    right: ReturnType<typeof workflowGraph>['nodes'][number]
+  ) =>
+    left.position.x < right.position.x + right.data.layout.width + WORKFLOW_NODE_METRICS.gap &&
+    left.position.x + left.data.layout.width + WORKFLOW_NODE_METRICS.gap > right.position.x &&
+    left.position.y < right.position.y + right.data.layout.height + WORKFLOW_NODE_METRICS.gap &&
+    left.position.y + left.data.layout.height + WORKFLOW_NODE_METRICS.gap > right.position.y
+
+  it('spaces following rows below the tallest actual port list without modifying executable data', () => {
+    const input: WorkflowDefinition = {
+      steps: Array.from({ length: 8 }, (_value, index) => ({
+        key: `step_${index}`,
+        type: index === 0 ? 'many' : 'small',
+        payload: {},
+      })),
+    }
+    const catalog = tasks([
+      {
+        key: 'many',
+        input_schema: {
+          properties: Object.fromEntries(
+            Array.from({ length: 80 }, (_value, index) => [`field_${index}`, { type: 'string' }])
+          ),
+        },
+      },
+      { key: 'small' },
+    ])
+    const before = structuredClone(input)
+    const graph = workflowGraph(input, catalog)
+    expect(graph.nodes[0]!.data.inputs).toHaveLength(80)
+    expect(graph.nodes[3]!.position.y).toBeGreaterThanOrEqual(
+      graph.nodes[0]!.data.layout.height + WORKFLOW_NODE_METRICS.gap
+    )
+    graph.nodes.forEach((node, index) =>
+      graph.nodes.slice(index + 1).forEach(other => expect(overlaps(node, other)).toBe(false))
+    )
+    expect(input).toEqual(before)
+    expect(workflowGraph(input, catalog)).toEqual(graph)
+  })
+
+  it('reserves all saved positions first, keeps them exact and places new sources/steps around them', () => {
+    const pitch = WORKFLOW_NODE_METRICS.width + WORKFLOW_NODE_METRICS.gap
+    const input: WorkflowDefinition = {
+      steps: [
+        { key: 'new', type: 'small', payload: {} },
+        { key: 'saved', type: 'small', payload: {} },
+        { key: 'source-blocker', type: 'small', payload: {} },
+        { key: 'invalid', type: 'small', payload: {} },
+      ],
+      input_schema: { type: 'object', properties: {} },
+      meta: {
+        node_positions: { saved: { x: 0, y: 0 }, 'source-blocker': { x: -pitch, y: 7.5 }, invalid: { x: NaN, y: 0 } },
+      },
+    }
+    const graph = workflowGraph(input)
+    expect(graph.nodes.find(node => node.id === 'saved')!.position).toEqual({ x: 0, y: 0 })
+    expect(graph.nodes.find(node => node.id === 'source-blocker')!.position).toEqual({ x: -pitch, y: 7.5 })
+    expect(graph.nodes.find(node => node.id === '@input')!.position.y).toBeGreaterThan(7.5)
+    graph.nodes.forEach((node, index) =>
+      graph.nodes.slice(index + 1).forEach(other => expect(overlaps(node, other)).toBe(false))
+    )
+    expect(graph.nodes.every(node => Number.isFinite(node.position.x) && Number.isFinite(node.position.y))).toBe(true)
+  })
+
+  it('stacks tall input/event sources and triggers without dropping connected fields beyond schema preview limits', () => {
+    const input = definition()
+    input.input_schema = {
+      type: 'object',
+      properties: Object.fromEntries(
+        Array.from({ length: 130 }, (_value, index) => [`field_${index}`, { type: 'string' }])
+      ),
+    }
+    input.steps[1]!.payload.input_bindings = { text: 'input.field_129', event: 'event.some.nested.field' }
+    const triggers: WorkflowTrigger[] = Array.from({ length: 4 }, (_value, index) => ({
+      id: index + 1,
+      public_id: `trigger_${index}`,
+      name: 'Long trigger title '.repeat(40),
+      kind: 'schedule',
+      enabled: true,
+      config: {},
+    }))
+    const graph = workflowGraph(input, [], triggers)
+    const source = graph.nodes.find(node => node.id === '@input')!
+    expect(source.data.outputs).toHaveLength(101)
+    expect(source.data.outputs.some(field => field.path === 'field_129')).toBe(true)
+    expect(graph.edges.some(edge => edge.sourceHandle === 'data:field_129')).toBe(true)
+    expect(graph.nodes.find(node => node.id === '@event')!.position.y).toBeGreaterThanOrEqual(
+      source.data.layout.height + WORKFLOW_NODE_METRICS.gap
+    )
+    graph.nodes.forEach((node, index) =>
+      graph.nodes.slice(index + 1).forEach(other => expect(overlaps(node, other)).toBe(false))
+    )
+  })
+
+  it('preserves intentionally overlapping manual layouts instead of rewriting the user layout', () => {
+    const input = definition()
+    input.meta = { node_positions: { read: { x: -10, y: -10 }, analyse: { x: -10, y: -10 } } }
+    expect(workflowGraph(input).nodes.map(node => node.position)).toEqual([
+      { x: -10, y: -10 },
+      { x: -10, y: -10 },
+    ])
+  })
+
   it('moves a node without changing executable payload, ordering, dependencies or routes', () => {
     const original = definition()
     const result = moveWorkflowNode(original, 'analyse', { x: 512.7, y: -18.2 })

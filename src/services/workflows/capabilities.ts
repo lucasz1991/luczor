@@ -3,6 +3,8 @@ import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { requestWithConfig, type LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
 import type { NativeLocalModelStatus } from '@/services/inference/tauriLocalRuntime'
 import { workflowHash } from './executionLedger'
+import { CLAUDE_CAPABILITIES } from '@/services/agents/claudeAgent'
+import type { AgentCapabilityCatalog } from '@/services/agents/effort'
 
 type NativeProbe = {
   runtimes: Array<{ runtime: string; available: boolean }>
@@ -12,14 +14,25 @@ type NativeProbe = {
   runtimeFingerprint: string
 }
 type Capability = { type: string; version: 1; adapter: string; available: boolean; reason?: string }
+type ManagedRuntimeProbe = {
+  available: boolean
+  transport?: string
+  sdkVersion?: string
+  cliVersion?: string
+  executableSha256?: string
+  runtimeFingerprint?: string
+}
 const SHA256 = /^[a-f0-9]{64}$/u
 const pending = new Map<string, Promise<unknown>>()
 const recent = new Map<string, number>()
 
 async function probe(config?: LuczorApiConfigSnapshot, signal?: AbortSignal) {
-  const [native, local] = await Promise.all([
+  const [native, local, codex, claude, codexCatalog] = await Promise.all([
     invoke<NativeProbe>('wf_runtime_capabilities'),
     invoke<NativeLocalModelStatus>('local_model_status').catch(() => null),
+    invoke<ManagedRuntimeProbe>('codex_runtime_status').catch(() => ({ available: false }) as ManagedRuntimeProbe),
+    invoke<ManagedRuntimeProbe>('claude_runtime_status').catch(() => ({ available: false }) as ManagedRuntimeProbe),
+    invoke<AgentCapabilityCatalog>('codex_model_capabilities').catch(() => null),
   ])
   const frontend = import.meta.env.VITE_WORKFLOW_CODE_HASH as string | undefined
   if (!native?.build || !SHA256.test(native.runtimeFingerprint) || !SHA256.test(native.build.contractFingerprint))
@@ -39,8 +52,29 @@ async function probe(config?: LuczorApiConfigSnapshot, signal?: AbortSignal) {
     policy: local?.policyVersion ?? null,
     resources: local?.resourceConfig?.appliedRevision ?? null,
     vision: vision?.revision ?? null,
+    agents: {
+      codex: {
+        available: codex.available,
+        transport: codex.transport ?? null,
+        binary: codex.executableSha256 && SHA256.test(codex.executableSha256) ? codex.executableSha256 : 'unconfirmed',
+        catalog: codexCatalog?.revision ?? null,
+        source: codexCatalog?.source ?? null,
+        // Cache TTL changes every second and is not a different execution environment.
+        catalogUsable: !!codexCatalog?.validForSeconds && codexCatalog.validForSeconds > 0,
+      },
+      claude: {
+        available: claude.available,
+        sdk: claude.sdkVersion ?? null,
+        cli: claude.cliVersion ?? null,
+        binary:
+          claude.runtimeFingerprint && SHA256.test(claude.runtimeFingerprint)
+            ? claude.runtimeFingerprint
+            : 'unconfirmed',
+        catalog: CLAUDE_CAPABILITIES.revision,
+      },
+    },
   })
-  return { native, local, released, environmentHash, vision }
+  return { native, local, released, environmentHash, vision, codex, claude }
 }
 export async function currentWorkflowEnvironmentHash(): Promise<string | null> {
   const identity = await getVerifiedAccountSnapshot()
@@ -70,7 +104,7 @@ export async function refreshWorkflowCapabilities(
     identity.config.deviceKey !== config.deviceKey
   )
     throw new Error('workflow_capability_identity_changed')
-  const { native, local, released, environmentHash, vision } = await probe(config, signal)
+  const { native, local, released, environmentHash, vision, codex, claude } = await probe(config, signal)
   const tasks: Capability[] = []
   const add = (types: string[], adapter: string, available: boolean, reason = 'runtime_not_available') => {
     for (const type of types)
@@ -111,14 +145,15 @@ export async function refreshWorkflowCapabilities(
     inference,
     'local_model_not_ready'
   )
-  add(['agent.single', 'agent.team'], 'agent.orchestrator', inference, 'local_orchestrator_not_ready')
-  const agents = await invoke<Array<{ name: string; available: boolean }>>('agent_cli_detect').catch(() => [])
-  const claude = await invoke<{ available: boolean }>('claude_runtime_status').catch(() => ({ available: false }))
-  add(
-    ['agent.dispatch'],
-    'agent.orchestrator',
-    agents.some(agent => agent.name === 'codex' && agent.available) || claude.available
-  )
+  const managed = codex.available || claude.available
+  add(['agent.single'], 'agent.orchestrator', inference || managed, 'agent_runtime_not_available')
+  add(['agent.team'], 'agent.orchestrator', inference, 'local_orchestrator_not_ready')
+  add(['agent.dispatch'], 'agent.orchestrator', managed)
+  // A usable adapter contract is not proof of authentication, model access or approved egress.
+  for (const task of tasks) {
+    if (task.available && managed && (task.type === 'agent.dispatch' || (!inference && task.type === 'agent.single')))
+      task.reason = 'managed_runtime_present_auth_unknown'
+  }
   add(['file.read', 'file.write', 'api.call'], 'desktop.tools', true)
   add(['image.capture'], 'desktop.image', native.image.capture)
   add(['image.ocr'], 'desktop.image', native.image.ocr, 'ocr_language_unavailable')

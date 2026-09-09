@@ -103,6 +103,7 @@ export function createClaudeAgentAdapter(api: ClaudeAgentDependencies = dependen
           prompt: request.prompt,
           model: request.model,
           effort: selection.requestedEffort,
+          defaultModelRevision: request.defaultModelRevision,
           permission: request.permission,
           executionProfile: 'host-user',
           hostAccessAcknowledged: true,

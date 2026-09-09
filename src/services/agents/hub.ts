@@ -9,6 +9,7 @@ import { AgentOrchestrator } from './orchestrator'
 import { createCodexAgentAdapter, listCodexSessions, getCodexModelCapabilities } from './codexAgent'
 import { createClaudeAgentAdapter, CLAUDE_CAPABILITIES } from './claudeAgent'
 import { selectAgentEffort } from './effort'
+import { resolveAgentDefaultModel } from './defaultModel'
 import { createModelAgentAdapter, type ModelAgentApprovalRequest } from './modelAgent'
 import type { AgentJobInput, AgentPermission, AgentProjectSnapshot, AgentExecutionOptions } from './types'
 
@@ -131,6 +132,7 @@ export async function prepareAgentJob(
     promptAssembly?: 'project' | 'exact-reviewed'
   }
 ) {
+  input = { ...input }
   input.assertExecution?.()
   if (!input.prompt.trim() || input.prompt.length > 24_000)
     throw new Error('Bitte einen Arbeitsauftrag mit 1 bis 24000 Zeichen eingeben.')
@@ -177,26 +179,40 @@ export async function prepareAgentJob(
   input.assertExecution?.()
   if (input.resume && input.adapterId === 'claude')
     throw new Error('Claude-Sitzungen können derzeit nicht wiederaufgenommen werden.')
+  const explicitModel = input.model?.trim() || undefined
+  const configuredDefault =
+    !explicitModel && (input.adapterId === 'codex' || input.adapterId === 'claude')
+      ? await resolveAgentDefaultModel(input.adapterId, snapshot)
+      : undefined
+  input.assertExecution?.()
+  await validateAgentScope(snapshot, input.permission)
+  input.assertExecution?.()
+  const model = explicitModel ?? configuredDefault?.model
   const effortSelection =
     (input.adapterId === 'codex' || input.adapterId === 'claude') && (input.thinkingTier || input.effort)
       ? selectAgentEffort({
           adapter: input.adapterId,
           tier: input.thinkingTier,
           role,
-          model: input.model,
+          model,
           override: input.effort,
           catalog: input.adapterId === 'codex' ? await getCodexModelCapabilities() : CLAUDE_CAPABILITIES,
         })
       : undefined
+  if (configuredDefault && effortSelection?.status === 'unknown')
+    throw new Error('agent_default_model_effort_unconfirmed')
   input.assertExecution?.()
   await validateAgentScope(snapshot, input.permission)
+  input.assertExecution?.()
   const job = agentHub.enqueue({
     project: snapshot,
     adapterId: input.adapterId,
     prompt: assembledPrompt,
     role,
     permission: input.permission,
-    model: input.model?.trim() || undefined,
+    model,
+    defaultModelRevision: configuredDefault?.revision,
+    defaultModelSource: configuredDefault?.source,
     thinkingTier: input.thinkingTier,
     effort: input.effort,
     effortSelection,

@@ -46,7 +46,9 @@ export function selectAgentEffort(input: {
 }): AgentEffortSelection {
   const tier = input.tier ?? 'balanced'
   validateAgentExecutionOptions({ thinkingTier: tier, effort: input.override })
-  const capability = input.catalog.models.find(item => item.model === input.model)
+  // The context suffix changes the execution contract. Match base capabilities but retain the exact pin.
+  const capabilityModel = input.adapter === 'claude' ? input.model?.replace(/\[1m\]$/u, '') : input.model
+  const capability = input.catalog.models.find(item => item.model === capabilityModel)
   if (!capability || !capability.supportedEfforts.length) {
     if (input.override) throw new Error('Die gewählte Aufwandstufe ist für dieses Modell nicht bestätigt.')
     return Object.freeze({
@@ -83,7 +85,7 @@ export function selectAgentEffort(input: {
     })
   return Object.freeze({
     tier,
-    model: capability.model,
+    model: input.model ?? capability.model,
     requestedEffort,
     status: 'requested',
     capabilityRevision: input.catalog.revision,

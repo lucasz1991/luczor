@@ -65,6 +65,7 @@ describe('managed Claude adapter', () => {
       ...request(),
       thinkingTier: 'fast',
       model: 'claude-opus-4-7',
+      defaultModelRevision: 'b'.repeat(64),
       maxBudgetUsd: 2,
       maxTurns: 8,
     })
@@ -72,6 +73,7 @@ describe('managed Claude adapter', () => {
       payload: expect.objectContaining({
         expectedWorkspaceUpdatedAt: 2,
         model: 'claude-opus-4-7',
+        defaultModelRevision: 'b'.repeat(64),
         effort: 'high',
         maxTurns: 8,
         maxBudgetUsd: 2,

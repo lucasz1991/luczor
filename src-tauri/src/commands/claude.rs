@@ -1,5 +1,5 @@
 //! App-owned SDK worker. Host user rights are explicit; project binding is not a sandbox.
-use super::agent_effort::{valid_model, AgentEffort};
+use super::agent_effort::{valid_claude_model, AgentEffort};
 use super::codex::{acquire_workspace_lease, LifetimeGuard};
 use super::execution::{admit, ExecutionLease, Guarded};
 use super::project_workspace::agent_workspace_snapshot;
@@ -80,6 +80,7 @@ pub struct ClaudeStart {
     prompt: String,
     model: Option<String>,
     effort: Option<AgentEffort>,
+    default_model_revision: Option<String>,
     permission: String,
     execution_profile: String,
     host_access_acknowledged: bool,
@@ -147,6 +148,12 @@ fn verify_runtime(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn metadata_executable(app: &AppHandle) -> Result<PathBuf, String> {
+    let root = runtime_root(app)?;
+    verify_runtime(&root)?;
+    Ok(root.join("claude.exe"))
+}
+
 #[tauri::command]
 pub fn claude_runtime_status(
     app: AppHandle,
@@ -177,7 +184,7 @@ fn validate_start(input: &ClaudeStart) -> Result<(), String> {
     if input
         .model
         .as_deref()
-        .is_some_and(|model| !valid_model(model))
+        .is_some_and(|model| !valid_claude_model(model))
     {
         return Err("Invalid Claude model.".into());
     }
@@ -213,7 +220,7 @@ fn claude_model_supports_effort(model: &str, effort: AgentEffort) -> bool {
         effort,
         AgentEffort::Low | AgentEffort::Medium | AgentEffort::High | AgentEffort::Max
     );
-    match model {
+    match model.strip_suffix("[1m]").unwrap_or(model) {
         "claude-opus-4-6" | "claude-sonnet-4-6" => common,
         "claude-opus-4-7" | "claude-opus-4-8" | "claude-opus-5" | "claude-sonnet-5"
         | "claude-fable-5" | "claude-fable-5-1" => common || effort == AgentEffort::Xhigh,
@@ -392,6 +399,20 @@ fn run_worker(
     input: &ClaudeStart,
 ) -> Result<(), String> {
     scope(app, job)?;
+    super::agent_effort::validate_default_binding(
+        app,
+        &super::agent_effort::DefaultModelRequest {
+            adapter_id: "claude".into(),
+            principal_id: job.principal.clone(),
+            project_id: job.project.clone(),
+            expected_root_path: job.root.to_string_lossy().into_owned(),
+            expected_workspace_updated_at: job.revision,
+        },
+        input.model.as_deref(),
+        input.default_model_revision.as_deref(),
+        &runtime.join("claude.exe"),
+        &|| scope(app, job),
+    )?;
     let mut command = Command::new(runtime.join("node.exe"));
     command
         .arg(runtime.join("worker.mjs"))
@@ -498,8 +519,9 @@ fn run_worker(
                             }
                         }
                         Some("model") => {
-                            if let Some(model) =
-                                event["model"].as_str().filter(|model| valid_model(model))
+                            if let Some(model) = event["model"]
+                                .as_str()
+                                .filter(|model| valid_claude_model(model))
                             {
                                 if let Ok(mut s) = job.snapshot.lock() {
                                     s.model = Some(model.into());
@@ -601,6 +623,14 @@ mod tests {
 
     #[test]
     fn native_effort_validation_cannot_be_bypassed_by_a_forged_renderer_payload() {
+        assert!(claude_model_supports_effort(
+            "claude-opus-5[1m]",
+            AgentEffort::Xhigh
+        ));
+        assert!(!claude_model_supports_effort(
+            "claude-opus-5[1m][1m]",
+            AgentEffort::Xhigh
+        ));
         assert!(claude_model_supports_effort(
             "claude-opus-4-7",
             AgentEffort::Xhigh

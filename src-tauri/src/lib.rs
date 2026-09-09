@@ -97,6 +97,7 @@ pub fn run() {
             commands::codex::codex_desktop_open,
             commands::codex::codex_job_start,
             commands::agent_effort::codex_model_capabilities,
+            commands::agent_effort::agent_default_model_resolve,
             commands::claude::claude_runtime_status,
             commands::claude::claude_job_start,
             commands::claude::claude_job_status,

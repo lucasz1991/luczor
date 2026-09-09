@@ -298,7 +298,9 @@ fn validate_script(input: &RunScriptPayload) -> Result<(), String> {
         return Err("workflow_script_runtime_unsupported".into());
     }
     if let Some(environment) = &input.environment {
-        if input.scope.is_none() { return Err("workflow_script_environment_requires_project".into()); }
+        if input.scope.is_none() {
+            return Err("workflow_script_environment_requires_project".into());
+        }
         environment.validate(&input.runtime)?;
     }
     if let Some(data) = &input.input {
@@ -468,17 +470,64 @@ fn run_script_blocking(
     check: &dyn Fn() -> Result<(), String>,
 ) -> Result<RunScriptResult, String> {
     let started = Instant::now();
-    let prepared = payload.environment.as_ref().map(|environment| {
-        super::script_environment::prepare(environment, &payload.runtime, exe,
-            version.as_deref().ok_or("workflow_runtime_probe_failed")?,
-            root.ok_or("workflow_script_environment_requires_project")?,
-            started + timeout, execution.clone(), check)
-    }).transpose()?;
+    let prepared = payload
+        .environment
+        .as_ref()
+        .map(|environment| {
+            super::script_environment::prepare(
+                environment,
+                &payload.runtime,
+                exe,
+                version.as_deref().ok_or("workflow_runtime_probe_failed")?,
+                root.ok_or("workflow_script_environment_requires_project")?,
+                started + timeout,
+                execution.clone(),
+                check,
+            )
+        })
+        .transpose()?;
     check()?;
-    let selected_exe = prepared.as_ref().map_or(exe, |env| env.interpreter.as_path());
-    let (mut command, stdin) = script_command(selected_exe, payload, root)?;
-    if let Some(env) = &prepared { env.apply(&mut command, &payload.runtime); }
-    let remaining = timeout.checked_sub(started.elapsed()).filter(|v| !v.is_zero())
+    let selected_exe = prepared
+        .as_ref()
+        .map_or(exe, |env| env.interpreter.as_path());
+    let (mut command, mut stdin) = script_command(selected_exe, payload, root)?;
+    // A CJS file located in the exact environment resolves its own locked packages first,
+    // while process.cwd() remains the explicitly bound project (NODE_PATH alone would not).
+    let code_file = payload.runtime == "node" && prepared.is_some();
+    if let Some(environment) = prepared.as_ref().filter(|_| code_file) {
+        let file = environment.node_script(&payload.code)?;
+        // Rust canonical paths on Windows use the verbatim \\?\ prefix. Node 22's CJS
+        // entrypoint realpath rejects that spelling. Keep canonical scope validation,
+        // but pass the checked project-relative filename to the interpreter.
+        let project = root
+            .ok_or("workflow_script_environment_requires_project")?
+            .canonicalize()
+            .map_err(|_| "workflow_environment_project_unavailable")?;
+        let relative_file = file
+            .strip_prefix(&project)
+            .map_err(|_| "workflow_environment_scope_changed")?;
+        command = Command::new(selected_exe);
+        command
+            .arg(relative_file)
+            .env_remove("NODE_OPTIONS")
+            .env_remove("NODE_PATH");
+        if let Some(root) = root {
+            command.current_dir(root);
+        }
+        stdin = payload
+            .input
+            .as_ref()
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(|_| "workflow_script_json_invalid")?
+            .unwrap_or_default();
+    }
+    if let Some(env) = &prepared {
+        env.apply(&mut command, &payload.runtime);
+    }
+    let remaining = timeout
+        .checked_sub(started.elapsed())
+        .filter(|v| !v.is_zero())
         .ok_or("workflow_script_environment_timeout")?;
     let output = super::process::run_bounded_command_scoped(
         command,
@@ -507,6 +556,8 @@ fn run_script_blocking(
         execution_profile: "host-user",
         input_mode: if payload.input.is_some() {
             "json-stdin"
+        } else if code_file {
+            "code-file"
         } else {
             "code-stdin"
         },
@@ -700,5 +751,106 @@ mod tests {
         })();
         std::fs::remove_dir(directory).unwrap();
         result.unwrap();
+    }
+
+    fn installed_package_probe(runtime: &str) -> Result<(), String> {
+        use super::super::script_environment::{ScriptDependency, ScriptEnvironment};
+        let directory =
+            std::env::temp_dir().join(format!("luczor-package-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).map_err(|_| "probe_directory_unavailable")?;
+        let directory = directory
+            .canonicalize()
+            .map_err(|_| "probe_directory_unavailable")?;
+        let result = (|| {
+            let exe = find_executable(runtime_candidates(runtime).unwrap())
+                .ok_or("probe_runtime_unavailable")?;
+            let version =
+                runtime_version(&exe, runtime).ok_or("probe_runtime_version_unavailable")?;
+            // Npm integrity is already pinned in this repository's pnpm-lock; Python wheel hash is from PyPI's release JSON.
+            let (name, package_version, lock, code) = if runtime == "node" {
+                ("is-number", "7.0.0", serde_json::json!({"name":"luczor-workflow-environment","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"luczor-workflow-environment","version":"1.0.0","dependencies":{"is-number":"7.0.0"}},"node_modules/is-number":{"version":"7.0.0","resolved":"https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz","integrity":"sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng=="}}}).to_string(),
+                "const fs=require('node:fs');const number=require('is-number');const input=JSON.parse(fs.readFileSync(0,'utf8'));process.stdout.write(JSON.stringify({result:number('42'),received:input,cwd:process.cwd()}));")
+            } else {
+                ("six", "1.17.0", "six==1.17.0 --hash=sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274\n".into(),
+                "import six,json,sys,os\njson.dump({'result':isinstance('42',six.string_types),'received':json.load(sys.stdin),'cwd':os.getcwd()},sys.stdout)")
+            };
+            std::fs::write(directory.join("fixture.lock"), &lock)
+                .map_err(|_| "probe_lock_unavailable")?;
+            if runtime == "node" {
+                // A project's own different package must not shadow the explicitly locked environment.
+                std::fs::create_dir_all(directory.join("node_modules/is-number"))
+                    .map_err(|_| "probe_shadow_unavailable")?;
+                std::fs::write(
+                    directory.join("node_modules/is-number/index.js"),
+                    "module.exports=()=>false;",
+                )
+                .map_err(|_| "probe_shadow_unavailable")?;
+            }
+            let mut payload = fixture(runtime);
+            payload.code = code.into();
+            payload.environment = Some(ScriptEnvironment {
+                version: 1,
+                runtime_version: version
+                    .trim_start_matches('v')
+                    .trim_start_matches("Python ")
+                    .into(),
+                dependencies: vec![ScriptDependency {
+                    name: name.into(),
+                    version: package_version.into(),
+                }],
+                lock_path: Some("fixture.lock".into()),
+                lock_sha256: Some(format!("{:x}", Sha256::digest(lock.as_bytes()))),
+            });
+            for reused in [false, true] {
+                let output = run_script_blocking(
+                    &exe,
+                    &payload,
+                    Some(&directory),
+                    Duration::from_secs(120),
+                    None,
+                    Some(version.clone()),
+                    &|| Ok(()),
+                )?;
+                if !output.ok {
+                    return Err(format!(
+                        "probe_script_failed (code={}): {}",
+                        output.code,
+                        output.stderr.chars().take(2400).collect::<String>()
+                    ));
+                }
+                let data: Value = serde_json::from_str(&output.stdout)
+                    .map_err(|_| "probe_script_json_invalid")?;
+                assert_eq!(data["result"], true);
+                assert_eq!(data["received"], payload.input.clone().unwrap());
+                let actual_cwd = PathBuf::from(data["cwd"].as_str().unwrap())
+                    .canonicalize()
+                    .unwrap();
+                assert_eq!(actual_cwd, directory);
+                let environment = output.environment.unwrap();
+                assert_eq!(environment.reused, reused);
+                assert_eq!(environment.installed_sha256.len(), 64);
+                println!("Fixed {runtime} {version} / {name} {package_version}: exact package + stdin + project cwd; reused={reused}; duration_ms={}", output.duration_ms);
+            }
+            Ok(())
+        })();
+        // Only this freshly created, canonical test directory is disposable.
+        if directory.parent().is_some_and(|p| {
+            std::env::temp_dir()
+                .canonicalize()
+                .is_ok_and(|temp| temp == p)
+        }) {
+            let _ = std::fs::remove_dir_all(&directory);
+        }
+        result
+    }
+    #[test]
+    #[ignore = "Opt-in: installs one tiny pinned public npm package in a fresh test project; no models, agents or global changes."]
+    fn installed_node_environment_reuses_pinned_package() {
+        installed_package_probe("node").unwrap();
+    }
+    #[test]
+    #[ignore = "Opt-in: installs one tiny hash-pinned PyPI wheel in a fresh virtualenv; no models, agents or global changes."]
+    fn installed_python_environment_reuses_pinned_package() {
+        installed_package_probe("python").unwrap();
     }
 }

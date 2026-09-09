@@ -138,6 +138,7 @@ pub struct CodexStartPayload {
     model: Option<String>,
     effort: Option<AgentEffort>,
     capability_revision: Option<String>,
+    default_model_revision: Option<String>,
     #[serde(default)]
     permission: CodexPermission,
     external_thread_id: Option<String>,
@@ -836,7 +837,7 @@ fn workspaces_overlap(left: &Path, right: &Path) -> bool {
     left.starts_with(&right) || right.starts_with(&left)
 }
 
-fn find_codex() -> Option<PathBuf> {
+pub(crate) fn find_codex() -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     // Native executable only: Windows .cmd shims invoke a shell and cannot be
     // used safely for arbitrary model-generated prompt data or project names.
@@ -900,6 +901,35 @@ fn run_job(
     }
     check_execution(job)?;
     ensure_binding(app, job)?;
+    super::agent_effort::validate_default_binding(
+        app,
+        &super::agent_effort::DefaultModelRequest {
+            adapter_id: "codex".into(),
+            principal_id: job.principal_id.clone(),
+            project_id: job.project_id.clone(),
+            expected_root_path: job.root.to_string_lossy().into_owned(),
+            expected_workspace_updated_at: job.binding_version,
+        },
+        payload.model.as_deref(),
+        payload.default_model_revision.as_deref(),
+        executable,
+        &|| {
+            check_execution(job)
+                .and_then(|_| ensure_binding(app, job))
+                .and_then(|_| {
+                    if job.cancel.load(Ordering::Acquire) {
+                        Err("Codex job cancelled.".into())
+                    } else {
+                        Ok(())
+                    }
+                })
+        },
+    )?;
+    validate_codex_effort(
+        payload.model.as_deref(),
+        payload.effort,
+        payload.capability_revision.as_deref(),
+    )?;
     let mut command = Command::new(executable);
     command
         .args(codex_args(payload))
@@ -1339,19 +1369,19 @@ fn save_link_scope(
 }
 
 #[cfg(windows)]
-fn configure_process(command: &mut Command) {
+pub(crate) fn configure_process(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     command.creation_flags(0x0000_0004 | 0x0000_0200 | 0x0800_0000);
 }
 
 #[cfg(unix)]
-fn configure_process(command: &mut Command) {
+pub(crate) fn configure_process(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
 }
 
 #[cfg(not(any(windows, unix)))]
-fn configure_process(_command: &mut Command) {}
+pub(crate) fn configure_process(_command: &mut Command) {}
 
 pub(crate) struct LifetimeGuard {
     handle: isize,

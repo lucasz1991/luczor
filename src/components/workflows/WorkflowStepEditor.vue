@@ -6,6 +6,7 @@ import { THINKING_TIERS, THINKING_DEFAULTS } from '@/services/inference/thinking
 import { WORKFLOW_SCRIPT_TEMPLATES } from '@/services/workflows/scriptTemplates'
 import { workflowBindingSource } from '@/services/workflows/bindings'
 import { connectWorkflowData } from '@/services/workflows/graph'
+import { validateWorkflowScriptEnvironment } from '@/services/workflows/scriptEnvironment'
 const props = defineProps<{
   step: WorkflowStepDefinition
   steps: WorkflowStepDefinition[]
@@ -20,11 +21,13 @@ const payloadText = ref('')
 const payloadError = ref('')
 const bindingField = ref('')
 const bindingSource = ref('')
+const environmentText = ref('{}')
 watch(
   () => props.step,
   step => {
     payloadText.value = JSON.stringify(step.payload, null, 2)
     payloadError.value = ''
+    environmentText.value = JSON.stringify(step.payload.environment ?? {}, null, 2)
   },
   { immediate: true }
 )
@@ -70,6 +73,7 @@ const params = computed(() =>
         'output_format',
         'thinking_tier',
         'thinking_config',
+        'environment',
       ].includes(key)
   )
 )
@@ -91,6 +95,24 @@ function applyScriptTemplate() {
       template: { id: template.id, version: template.version, dependencies: template.dependencies },
     },
   })
+}
+function applyEnvironment() {
+  try {
+    const value: unknown = JSON.parse(environmentText.value)
+    const empty = value && typeof value === 'object' && !Array.isArray(value) && !Object.keys(value).length
+    if (empty) {
+      const next = { ...props.step.payload }
+      delete next.environment
+      update({ payload: next })
+    } else
+      payload(
+        'environment',
+        validateWorkflowScriptEnvironment(props.step.type === 'python.run' ? 'python' : 'node', value)
+      )
+    payloadError.value = ''
+  } catch (error) {
+    payloadError.value = error instanceof Error ? error.message : 'Skriptumgebung prüfen.'
+  }
 }
 function update(values: Partial<WorkflowStepDefinition>) {
   emit('update:step', { ...props.step, ...values })
@@ -214,9 +236,26 @@ function applyPayload() {
     <div v-if="['node.run', 'python.run'].includes(step.type)" class="wf-muted">
       <p>Windows · Benutzerrechte · JSON-Eingabe über Standardeingabe, JSON-Ergebnis über Standardausgabe.</p>
       <button type="button" @click="applyScriptTemplate">JSON-Vorlage v1 übernehmen</button>
-      <p v-if="step.payload.template">
-        Vorlage ohne zusätzliche Pakete. Eigener Code bleibt Bestandteil dieser Workflow-Version.
-      </p>
+      <p v-if="step.payload.template">Eigener Code und Skriptumgebung bleiben Bestandteil dieser Workflow-Version.</p>
+      <details>
+        <summary>Runtime und Projektpakete</summary>
+        <p>
+          Feste Runtimeversion, Paketversionen und Lockdatei festlegen. Die geprüfte Umgebung wird im Projekt
+          eingerichtet und für weitere Läufe wiederverwendet. Runtime-Programme müssen bereits installiert sein.
+        </p>
+        <label>Umgebung als JSON<textarea v-model="environmentText" rows="8" spellcheck="false" /></label>
+        <p>
+          Beispiel: <code>{"version":1,"runtime_version":"22.22.0","dependencies":[]}</code>. Für Pakete zusätzlich
+          <code>lock_path</code> und <code>lock_sha256</code> sowie
+          <code>dependencies: [{"name":"…","version":"1.0.0"}]</code> angeben.
+        </p>
+        <p>
+          Node: package-lock.json Version 3. Python: requirements.lock mit festen Versionen und SHA-256-Hashes
+          einschließlich Unterabhängigkeiten. Pakete werden aus npm beziehungsweise PyPI geladen.
+          <code>{}</code> verwendet wieder die installierte Runtime ohne eigene Paketumgebung.
+        </p>
+        <button type="button" @click="applyEnvironment">Skriptumgebung übernehmen</button>
+      </details>
     </div>
     <label v-if="step.type === 'llm' || step.type.startsWith('llm.') || step.type.startsWith('agent.')"
       >Denktiefe

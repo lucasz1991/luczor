@@ -8,6 +8,7 @@ import type { RunAgentOptions, RunAgentResult } from '@/services/agent'
 import type { WorkflowAgentResult } from '@/services/agents/workflowAgent'
 import type { WorkflowAgentAvailability } from '@/services/workflows/agentSelection'
 import type { requestPayloadApproval } from '@/services/payloadApproval'
+import type { readVerifiedWorkflowAgentEvidence } from '@/services/workflows/agentEvidence'
 
 function fixture(overrides: Partial<RunAgentResult> = {}) {
   const controller = new AbortController()
@@ -48,6 +49,7 @@ function fixture(overrides: Partial<RunAgentResult> = {}) {
     mode: () => 'act' as const,
     confirm: vi.fn(async () => ({ approved: true })),
     approve: vi.fn<typeof requestPayloadApproval>(async () => true),
+    evidence: vi.fn<typeof readVerifiedWorkflowAgentEvidence>(async () => null),
     availability: vi.fn<(signal: AbortSignal) => Promise<WorkflowAgentAvailability>>(async () => ({
       externalPolicy: 'ask',
       local: { manifestAvailable: true, state: 'ready', activeModelId: 'signed-model' },
@@ -84,6 +86,7 @@ describe('workflow agent adapter', () => {
       ok: true,
       outcome: 'success',
       model: 'signed-model',
+      model_confirmation: 'runtime',
       thinking_tier: 'thorough',
       tokens: { totalTokens: 7 },
     })
@@ -110,6 +113,23 @@ describe('workflow agent adapter', () => {
     expect(deps.managed).not.toHaveBeenCalled()
     expect(deps.approve).not.toHaveBeenCalled()
   })
+
+  it.each([
+    { model: undefined, inferenceTarget: 'local_llama_cpp' },
+    { model: '', inferenceTarget: 'local_llama_cpp' },
+    { model: 'external-model', inferenceTarget: 'laravel_proxy' },
+    { model: 'unconfirmed-model', inferenceTarget: undefined },
+  ] satisfies Partial<RunAgentResult>[])(
+    'does not infer local runtime confirmation from availability when result identity is incomplete: %j',
+    async identity => {
+      const { deps, context } = fixture(identity)
+      const result = await runWorkflowAgentFlow(false, { instruction: 'Analyse' }, context, deps)
+      expect(result).toMatchObject({ ok: true, model_confirmation: 'unconfirmed' })
+      expect(result.model).toBe(identity.model ?? null)
+      expect(result.model).not.toBe('signed-model')
+      expect(deps.run).toHaveBeenCalledOnce()
+    }
+  )
 
   it('starts a real chat team using separately approved admin specialist packets', async () => {
     const { deps, context, answer } = fixture()
@@ -160,6 +180,7 @@ describe('workflow agent adapter', () => {
       ok: true,
       requested_model: 'user-chosen-model',
       model: null,
+      model_confirmation: 'pinned_request',
       thinking_tier: 'ultra',
       thinking_application: 'adapter_not_confirmed',
     })
@@ -339,6 +360,66 @@ describe('workflow agent adapter', () => {
     )
     expect(deps.managed).not.toHaveBeenCalled()
     expect(deps.approve).toHaveBeenCalledOnce()
+  })
+
+  it.each(['samples', 'scope'])('keeps the approved route stable when evidence %s changes', async change => {
+    const { deps, context } = fixture()
+    const base = await deps.availability(context.ticket.signal)
+    deps.availability.mockResolvedValue({
+      ...base,
+      claude: {
+        available: true,
+        cliVersion: '2.1.266',
+        catalog: {
+          revision: 'revision',
+          source: 'sdk-documentation',
+          models: [{ model: 'proved-model', supportedEfforts: ['high'] }],
+        },
+      },
+    })
+    const proof = {
+      version: 1 as const,
+      revision: 'a'.repeat(64),
+      scope_hash: 'b'.repeat(64),
+      device_environment_hash: 'c'.repeat(64),
+      minimum_samples: 5,
+      rows: [
+        {
+          adapter: 'claude' as const,
+          model: 'proved-model',
+          model_source: 'runtime' as const,
+          samples: 5,
+          passed: 5,
+          failed: 0,
+          latest_test_at: '2026-09-08T10:00:00Z',
+          evidence_ids: [1, 2, 3, 4, 5],
+        },
+      ],
+    }
+    deps.evidence.mockResolvedValueOnce(proof).mockResolvedValueOnce({
+      ...proof,
+      revision: 'd'.repeat(64),
+      scope_hash: change === 'scope' ? 'e'.repeat(64) : proof.scope_hash,
+      rows: [{ ...proof.rows[0]!, samples: 6, passed: 5, failed: 1, evidence_ids: [1, 2, 3, 4, 5, 6] }],
+    })
+    const result = await runWorkflowAgentFlow(
+      false,
+      { instruction: 'Implementiere Code' },
+      { ...context, runPublicId: 'run', stepId: 1 },
+      deps
+    ).catch(() => ({ code: 'scope_changed' }))
+    expect(result).toMatchObject(
+      change === 'scope'
+        ? { code: 'scope_changed' }
+        : {
+            agent: 'claude',
+            selection_quality_evidence: 'verified_real_tests',
+            selection_evidence: { revision: proof.revision, samples: 5 },
+          }
+    )
+    expect(deps.managed).toHaveBeenCalledTimes(change === 'scope' ? 0 : 1)
+    const packet = JSON.parse(deps.approve.mock.calls[0]![0].content)
+    expect(packet).toMatchObject({ model: 'proved-model', evidence: { scopeHash: proof.scope_hash } })
   })
 
   it.each([

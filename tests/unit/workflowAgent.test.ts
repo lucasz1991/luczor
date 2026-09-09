@@ -68,6 +68,12 @@ describe('managed workflow agent bridge', () => {
       reason: 'role_requires_deeper_review',
     }
     const runtimeEvidence = { model: 'actual-runtime-model', modelSource: 'runtime', toolGateChecks: 3 }
+    mocks.prepare.mockResolvedValue({
+      id: 'managed-job',
+      model: 'configured-requested-model',
+      defaultModelRevision: 'a'.repeat(64),
+      defaultModelSource: 'claude-context',
+    })
     mocks.execute.mockResolvedValue({ output: 'Reviewed', effortSelection, runtimeEvidence })
     expect(
       await runWorkflowAgent('claude', 'Review exact', undefined, undefined, 'active', {
@@ -75,7 +81,13 @@ describe('managed workflow agent bridge', () => {
         permission: 'read-only',
         thinkingTier: 'fast',
       })
-    ).toMatchObject({ effortSelection, runtimeEvidence, stdout: 'Reviewed' })
+    ).toMatchObject({
+      effortSelection,
+      runtimeEvidence,
+      stdout: 'Reviewed',
+      requestedModel: 'configured-requested-model',
+      defaultModelRevision: 'a'.repeat(64),
+    })
     expect(mocks.prepare).toHaveBeenCalledWith(
       expect.objectContaining({ permission: 'read-only', role: 'reviewer', prompt: 'Review exact' })
     )

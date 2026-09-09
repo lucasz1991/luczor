@@ -17,12 +17,12 @@ const protectedTargets = new Set([
 const record = (value: unknown): Record<string, unknown> =>
   value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {}
 const validPath = (value: string) =>
-  /^[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*$/u.test(value) && !value.split('.').some(part => forbidden.has(part))
+  value.length <= 1000 && value.split('.').every(part => /^[A-Za-z0-9_-]+$/u.test(part) && !forbidden.has(part))
 const types = (schema: Record<string, unknown>): string[] =>
   typeof schema.type === 'string'
     ? [schema.type]
     : Array.isArray(schema.type)
-      ? schema.type.filter((v): v is string => typeof v === 'string')
+      ? schema.type.filter((value): value is string => typeof value === 'string')
       : []
 export function workflowSchemaFields(schema: unknown, prefix = '', depth = 0): WorkflowField[] {
   if (depth >= 5) return []
@@ -64,7 +64,7 @@ export function workflowBindingSource(definition: WorkflowDefinition, reference:
     if (reference.startsWith(prefix)) return { id, path: reference.slice(prefix.length), reference }
   }
   const step = [...definition.steps]
-    .sort((a, b) => b.key.length - a.key.length)
+    .sort((left, right) => right.key.length - left.key.length)
     .find(item => reference.startsWith(`steps.${item.key}.`))
   return step ? { id: step.key, path: reference.slice(`steps.${step.key}.`.length), reference } : null
 }

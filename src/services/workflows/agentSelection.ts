@@ -7,6 +7,7 @@ import type { AgentEffortSelection, AgentPermission, AgentRole } from '@/service
 import type { NativeLocalModelStatus } from '@/services/inference/tauriLocalRuntime'
 import type { LuczorMode } from '@/services/inference/types'
 import type { ThinkingTier } from '@/services/inference/thinking'
+import { verifiedAgentScore, type VerifiedAgentEvidence } from './agentEvidence'
 
 export type WorkflowAgentAvailability = Readonly<{
   externalPolicy: RepositoryExternalPolicy
@@ -25,7 +26,19 @@ export type WorkflowAgentSelection = Readonly<{
   /** CLI presence cannot confirm login or model access. */
   availability: 'local_policy_admission' | 'runtime_present_auth_unknown'
   cost: 'local' | 'sdk_budget_cap' | 'unknown'
-  qualityEvidence: 'unavailable'
+  qualityEvidence: 'unavailable' | 'verified_real_tests'
+  /** Comparable task fixtures, not proof of general model quality or equal effective tool/effort profiles. */
+  qualityEvidenceLabel?: string
+  evidence?: {
+    revision: string
+    scopeHash: string
+    environmentHash: string
+    samples: number
+    passed: number
+    failed: number
+    modelSource: 'runtime' | 'pinned_request'
+    evidenceIds: readonly number[]
+  }
   excluded: readonly string[]
   externalPolicy: RepositoryExternalPolicy
   runtimeRevision?: string
@@ -39,6 +52,7 @@ type SelectionInput = {
   maxTurns?: number
   maxBudgetUsd?: number
   availability: WorkflowAgentAvailability
+  evidence?: VerifiedAgentEvidence | null
 }
 const EMPTY_CATALOG: AgentCapabilityCatalog = { revision: 'unavailable', models: [] }
 const MODEL = /^[a-zA-Z0-9][a-zA-Z0-9._/:-]{0,159}$/u
@@ -149,34 +163,79 @@ export function selectWorkflowAgent(input: SelectionInput): WorkflowAgentSelecti
       continue
     }
     // Preserve the documented/runtime catalog order; do not pretend it is a price or quality ranking.
-    const model = catalog.models.find(item => MODEL.test(item.model) && item.supportedEfforts.length > 0)?.model
-    if (!model) {
+    const models = catalog.models
+      .filter(item => MODEL.test(item.model) && item.supportedEfforts.length > 0)
+      .slice(0, 100)
+    if (!models.length) {
       excluded.push(`${adapter}:compatible_model_unavailable`)
       continue
     }
-    const effortSelection = selectAgentEffort({ adapter, tier: input.tier, model, role, catalog })
-    if (!effortSelection.requestedEffort) {
-      excluded.push(`${adapter}:supported_effort_unresolved`)
-      continue
+    for (const { model } of models) {
+      const effortSelection = selectAgentEffort({ adapter, tier: input.tier, model, role, catalog })
+      if (!effortSelection.requestedEffort) {
+        excluded.push(`${adapter}:supported_effort_unresolved`)
+        continue
+      }
+      candidates.push({
+        adapter,
+        model,
+        role,
+        permission,
+        task,
+        effortSelection,
+        reason: input.maxBudgetUsd !== undefined ? 'managed_sdk_budget_cap' : `managed_${task}_capability`,
+        availability: 'runtime_present_auth_unknown',
+        cost: input.maxBudgetUsd !== undefined ? 'sdk_budget_cap' : 'unknown',
+        qualityEvidence: 'unavailable',
+        excluded,
+        externalPolicy: availability.externalPolicy,
+        runtimeRevision: adapter === 'claude' ? availability.claude.cliVersion : catalog.revision,
+      })
     }
-    candidates.push({
-      adapter,
-      model,
-      role,
-      permission,
-      task,
-      effortSelection,
-      reason: input.maxBudgetUsd !== undefined ? 'managed_sdk_budget_cap' : `managed_${task}_capability`,
-      availability: 'runtime_present_auth_unknown',
-      cost: input.maxBudgetUsd !== undefined ? 'sdk_budget_cap' : 'unknown',
-      qualityEvidence: 'unavailable',
-      excluded,
-      externalPolicy: availability.externalPolicy,
-      runtimeRevision: adapter === 'claude' ? availability.claude.cliVersion : catalog.revision,
-    })
+  }
+  if (
+    localUsable &&
+    input.maxBudgetUsd === undefined &&
+    availability.local?.activeModelId &&
+    ['ready', 'busy'].includes(availability.local.state)
+  )
+    candidates.push({ ...local('verified_local_task_results'), model: availability.local.activeModelId })
+  const evidence = input.evidence
+  if (evidence) {
+    const ranked = candidates
+      .map((candidate, index) => {
+        const row = evidence.rows
+          .filter(item => item.adapter === candidate.adapter && item.model === candidate.model)
+          .sort(
+            (left, right) =>
+              (verifiedAgentScore(right, evidence.minimum_samples) ?? -1) -
+              (verifiedAgentScore(left, evidence.minimum_samples) ?? -1)
+          )[0]
+        return { candidate, index, row, score: row ? verifiedAgentScore(row, evidence.minimum_samples) : null }
+      })
+      .filter(item => item.score !== null)
+      .sort((left, right) => right.score! - left.score! || left.index - right.index)
+    const best = ranked[0]
+    if (best?.row)
+      return {
+        ...best.candidate,
+        reason: 'verified_comparable_task_test_success',
+        qualityEvidence: 'verified_real_tests',
+        qualityEvidenceLabel: 'Verifizierter Testfallerfolg vergleichbarer Aufgabe',
+        evidence: {
+          revision: evidence.revision,
+          scopeHash: evidence.scope_hash,
+          environmentHash: evidence.device_environment_hash,
+          samples: best.row.samples,
+          passed: best.row.passed,
+          failed: best.row.failed,
+          modelSource: best.row.model_source,
+          evidenceIds: best.row.evidence_ids,
+        },
+      }
   }
   // Codex's project-restricted tool profile wins ties; Claude supplies SDK turns/cost caps when required.
-  return candidates[0] ?? local('no_eligible_managed_agent_local_policy')
+  return candidates.find(candidate => candidate.adapter !== 'local') ?? local('no_eligible_managed_agent_local_policy')
 }
 
 /** A previewed route cannot silently drift while the existing exact-payload approval is open. */

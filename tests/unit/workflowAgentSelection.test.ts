@@ -5,6 +5,7 @@ import {
   workflowAgentTask,
   type WorkflowAgentAvailability,
 } from '@/services/workflows/agentSelection'
+import type { VerifiedAgentEvidence } from '@/services/workflows/agentEvidence'
 
 function availability(): WorkflowAgentAvailability {
   return {
@@ -43,6 +44,101 @@ function choose(changes: Partial<Parameters<typeof selectWorkflowAgent>[0]> = {}
 }
 
 describe('workflow managed adapter selection', () => {
+  it('ranks only comparable verified real-test outcomes after capability and budget filters', () => {
+    const evidence: VerifiedAgentEvidence = {
+      version: 1,
+      revision: 'a'.repeat(64),
+      scope_hash: 'b'.repeat(64),
+      device_environment_hash: 'c'.repeat(64),
+      minimum_samples: 5,
+      rows: [
+        {
+          adapter: 'claude',
+          model: 'claude-test-model',
+          model_source: 'runtime',
+          samples: 6,
+          passed: 6,
+          failed: 0,
+          latest_test_at: '2026-09-08T10:00:00Z',
+          evidence_ids: [1, 2, 3, 4, 5, 6],
+        },
+        {
+          adapter: 'codex',
+          model: 'codex-test-model',
+          model_source: 'pinned_request',
+          samples: 5,
+          passed: 3,
+          failed: 2,
+          latest_test_at: '2026-09-08T10:00:00Z',
+          evidence_ids: [7, 8, 9, 10, 11],
+        },
+      ],
+    }
+    expect(choose({ evidence })).toMatchObject({
+      adapter: 'claude',
+      model: 'claude-test-model',
+      qualityEvidence: 'verified_real_tests',
+      qualityEvidenceLabel: 'Verifizierter Testfallerfolg vergleichbarer Aufgabe',
+      evidence: { samples: 6, passed: 6, failed: 0 },
+    })
+    expect(
+      choose({ evidence, availability: { ...availability(), claude: { ...availability().claude, available: false } } })
+    ).toMatchObject({ adapter: 'codex', qualityEvidence: 'verified_real_tests' })
+    expect(choose({ evidence, availability: { ...availability(), externalPolicy: 'deny' } }).adapter).toBe('local')
+    // Two sub-threshold provenance cohorts cannot be pooled into a qualified model score.
+    const partialRows = (['runtime', 'pinned_request'] as const).map((model_source, index) => ({
+      ...evidence.rows[0]!,
+      model_source,
+      samples: 3,
+      passed: 3,
+      failed: 0,
+      evidence_ids: [1, 2, 3].map(id => id + index * 3),
+    }))
+    expect(choose({ evidence: { ...evidence, rows: partialRows } })).toMatchObject({
+      adapter: 'codex',
+      qualityEvidence: 'unavailable',
+    })
+  })
+
+  it('can select a later compatible model with real evidence but never treats a named unknown model as quality proof', () => {
+    const data = availability()
+    const evidence: VerifiedAgentEvidence = {
+      version: 1,
+      revision: 'a'.repeat(64),
+      scope_hash: 'b'.repeat(64),
+      device_environment_hash: 'c'.repeat(64),
+      minimum_samples: 5,
+      rows: [
+        {
+          adapter: 'codex',
+          model: 'second-model',
+          model_source: 'pinned_request',
+          samples: 5,
+          passed: 5,
+          failed: 0,
+          latest_test_at: '2026-09-08T10:00:00Z',
+          evidence_ids: [1, 2, 3, 4, 5],
+        },
+      ],
+    }
+    expect(
+      choose({
+        evidence,
+        availability: {
+          ...data,
+          codex: {
+            ...data.codex,
+            catalog: {
+              ...data.codex.catalog,
+              models: [...data.codex.catalog.models, { model: 'second-model', supportedEfforts: ['low'] }],
+            },
+          },
+        },
+      })
+    ).toMatchObject({ model: 'second-model', qualityEvidence: 'verified_real_tests' })
+    expect(choose({ evidence })).toMatchObject({ model: 'codex-test-model', qualityEvidence: 'unavailable' })
+    expect(choose({ evidence, maxBudgetUsd: 0.5 }).adapter).toBe('claude')
+  })
   it('selects a compatible installed coding adapter with an explicit pinned model and honest unknown authentication/cost', () => {
     expect(choose()).toMatchObject({
       adapter: 'codex',

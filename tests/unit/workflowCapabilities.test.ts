@@ -32,7 +32,9 @@ beforeEach(() => {
         catalogVersion: 1,
         policyVersion: 1,
       }
-    if (command === 'agent_cli_detect') return [{ name: 'codex', available: true }]
+    if (command === 'codex_runtime_status') return { available: true, transport: 'codex-exec-jsonl' }
+    if (command === 'codex_model_capabilities')
+      return { revision: 'catalog-v1', source: 'codex-cache', validForSeconds: 300, models: [] }
     if (command === 'claude_runtime_status') return { available: false }
     throw new Error('Unexpected preparation command')
   })
@@ -64,6 +66,50 @@ it('drops a report after account identity changes during the probe', async () =>
     .mockResolvedValueOnce({ principalId: 'user:2', config })
   await expect(refreshWorkflowCapabilities(config)).rejects.toThrow('identity_changed')
   expect(mock.request).not.toHaveBeenCalled()
+})
+
+it('reports managed single-agent support without falsely promising a local team or authentication', async () => {
+  const original = mock.invoke.getMockImplementation()!
+  mock.invoke.mockImplementation(async command =>
+    command === 'local_model_status' ? { state: 'stopped', manifestAvailable: true } : original(command)
+  )
+  await refreshWorkflowCapabilities(config)
+  const tasks = mock.request.mock.calls[0]![1].body.capabilities.tasks
+  expect(tasks).toContainEqual(
+    expect.objectContaining({ type: 'agent.single', available: true, reason: 'managed_runtime_present_auth_unknown' })
+  )
+  expect(tasks).toContainEqual(expect.objectContaining({ type: 'agent.team', available: false }))
+  expect(mock.invoke.mock.calls.map(call => call[0])).not.toContain('agent_cli_detect')
+})
+
+it.each(['catalog', 'codex_binary', 'claude_cli', 'claude_binary'])(
+  'binds changed managed %s metadata to the evidence environment',
+  async changed => {
+    const original = mock.invoke.getMockImplementation()!
+    const before = await currentWorkflowEnvironmentHash()
+    mock.invoke.mockImplementation(async command => {
+      const value = await original(command)
+      if (changed === 'catalog' && command === 'codex_model_capabilities') return { ...value, revision: 'different' }
+      if (changed === 'codex_binary' && command === 'codex_runtime_status')
+        return { ...value, executableSha256: 'e'.repeat(64) }
+      if (changed === 'claude_cli' && command === 'claude_runtime_status')
+        return { ...value, cliVersion: 'new-version' }
+      if (changed === 'claude_binary' && command === 'claude_runtime_status')
+        return { ...value, runtimeFingerprint: 'f'.repeat(64) }
+      return value
+    })
+    expect(await currentWorkflowEnvironmentHash()).not.toBe(before)
+  }
+)
+
+it('keeps the same environment for a still-valid catalog TTL decrement', async () => {
+  const original = mock.invoke.getMockImplementation()!
+  const before = await currentWorkflowEnvironmentHash()
+  mock.invoke.mockImplementation(async command => {
+    const value = await original(command)
+    return command === 'codex_model_capabilities' ? { ...value, validForSeconds: 299 } : value
+  })
+  expect(await currentWorkflowEnvironmentHash()).toBe(before)
 })
 
 it('requires both the native PNG adapter and a ready vision policy and binds policy changes to evidence', async () => {

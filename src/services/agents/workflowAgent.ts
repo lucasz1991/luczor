@@ -11,6 +11,9 @@ export type WorkflowAgentResult = Readonly<{
   effortSelection?: AgentRunResult['effortSelection']
   runtimeEvidence?: AgentRunResult['runtimeEvidence']
   externalThreadId?: string
+  requestedModel?: string
+  defaultModelRevision?: string
+  defaultModelSource?: string
 }>
 
 function canonicalPath(path: string): string {
@@ -51,6 +54,7 @@ export async function runWorkflowAgent(
     includeMemory: false,
     expectedProject: snapshot,
     promptAssembly: 'exact-reviewed',
+    assertExecution: () => signal?.throwIfAborted(),
   })
   try {
     const result = await executePreparedAgentJob(job.id, signal)
@@ -59,6 +63,10 @@ export async function runWorkflowAgent(
       code: 0,
       stdout: result.output,
       stderr: '',
+      ...(job.model ? { requestedModel: job.model } : {}),
+      ...(job.defaultModelRevision
+        ? { defaultModelRevision: job.defaultModelRevision, defaultModelSource: job.defaultModelSource }
+        : {}),
       ...(result.effortSelection ? { effortSelection: result.effortSelection } : {}),
       ...(result.runtimeEvidence ? { runtimeEvidence: result.runtimeEvidence } : {}),
       ...(result.externalThreadId ? { externalThreadId: result.externalThreadId } : {}),

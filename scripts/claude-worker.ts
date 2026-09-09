@@ -47,18 +47,16 @@ export function workerOptions(
   }
   const env: Record<string, string | undefined> = { ...process.env }
   // Ignore global effort/model substitutions; preserve the user's own authentication without exposing it.
-  for (const key of [
-    'CLAUDE_CODE_EFFORT_LEVEL',
-    'CLAUDE_CODE_SUBAGENT_MODEL',
-    'CLAUDE_CODE_EXTRA_BODY',
-    'NODE_OPTIONS',
-    'NODE_PATH',
-  ])
-    delete env[key]
+  delete env.CLAUDE_CODE_EFFORT_LEVEL
+  delete env.CLAUDE_CODE_SUBAGENT_MODEL
+  delete env.CLAUDE_CODE_EXTRA_BODY
+  delete env.NODE_OPTIONS
+  delete env.NODE_PATH
   const gitBash = ['C:\\Program Files\\Git\\bin\\bash.exe', 'C:\\Program Files (x86)\\Git\\bin\\bash.exe'].find(
     existsSync
   )
   if (gitBash) env.CLAUDE_CODE_GIT_BASH_PATH = gitBash
+  env.CLAUDE_CODE_DISABLE_AUTO_MEMORY = '1'
   return {
     cwd: input.cwd,
     model: input.model === 'default' ? undefined : input.model,
@@ -79,6 +77,7 @@ export function workerOptions(
     },
     abortController,
     settingSources: [],
+    settings: { autoMemoryEnabled: false },
     strictMcpConfig: true,
     mcpServers: {},
     plugins: [],

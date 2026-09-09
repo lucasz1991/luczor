@@ -18,12 +18,17 @@ const workflow = {
   definition: {
     schema_version: 2 as const,
     thinking_tier: 'balanced' as const,
+    input_schema: { type: 'object', properties: { url: { type: 'string' } }, required: ['url'] },
     steps: [
       {
         key: 'formular',
         type: 'browser.open',
         version: 1,
-        payload: { title: 'Testformular öffnen', url: 'https://example.test/form' },
+        payload: {
+          title: 'Testformular öffnen',
+          url: 'https://example.test/form',
+          input_bindings: { url: 'input.url' },
+        },
       },
       {
         key: 'auswerten',
@@ -51,6 +56,7 @@ const catalog = [
     requires_approval: true,
     allowed_in_definition: true,
     params: { url: { type: 'string', required: true } },
+    output_schema: { type: 'object', properties: { url: { type: 'string' }, session_id: { type: 'string' } } },
   },
   {
     key: 'node.run',
@@ -70,7 +76,17 @@ const state = {
   tests: [],
   repairs: [],
   runs: [],
-  triggers: [],
+  triggers: [
+    {
+      id: 1,
+      public_id: 'fixture-trigger',
+      name: 'Tägliche Formularprüfung',
+      kind: 'schedule',
+      enabled: false,
+      config: { cron: '0 9 * * *' },
+      input: { url: 'https://example.test/form' },
+    },
+  ],
   testCases: [
     {
       id: 1,

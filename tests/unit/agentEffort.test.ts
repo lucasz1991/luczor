@@ -90,4 +90,16 @@ describe('model-specific managed effort selection', () => {
       ).toThrow()
     }
   })
+  it('preserves Claude context suffixes while matching the verified base model capabilities', () => {
+    expect(
+      selectAgentEffort({ adapter: 'claude', tier: 'max', model: 'claude-opus-5[1m]', catalog: CLAUDE_CAPABILITIES })
+    ).toMatchObject({ model: 'claude-opus-5[1m]', requestedEffort: 'xhigh' })
+    expect(
+      selectAgentEffort({ adapter: 'claude', tier: 'max', model: 'claude-opus-5[2m]', catalog: CLAUDE_CAPABILITIES })
+        .status
+    ).toBe('unknown')
+    expect(selectAgentEffort({ adapter: 'codex', tier: 'max', model: 'six-levels[1m]', catalog }).status).toBe(
+      'unknown'
+    )
+  })
 })

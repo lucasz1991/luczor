@@ -119,6 +119,7 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
       let snapshot: CodexJobSnapshot
       try {
         const execution = await guarded.authorize(request.permission)
+        if (signal.aborted) throw new DOMException('Abgebrochen', 'AbortError')
         snapshot = await dependencies.invoke<CodexJobSnapshot>('codex_job_start', {
           payload: {
             ...scope,
@@ -127,6 +128,7 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
             prompt: request.prompt,
             permission: request.permission,
             model: request.model,
+            defaultModelRevision: request.defaultModelRevision,
             effort: effortSelection?.requestedEffort,
             capabilityRevision: effortSelection?.capabilityRevision,
             externalThreadId: request.externalThreadId,

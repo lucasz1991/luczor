@@ -21,9 +21,12 @@ import {
   assertWorkflowAgentSelectionCurrent,
   type WorkflowAgentSelection,
 } from './agentSelection'
+import { readVerifiedWorkflowAgentEvidence } from './agentEvidence'
 
 type AgentFlowContext = {
   projectId: string
+  runPublicId?: string
+  stepId?: number
   ticket: ExecutionTicket
   thinkingTier?: ThinkingTier
   onBudget?: (progress: ThinkingBudgetProgress | null) => void
@@ -38,6 +41,7 @@ type AgentFlowDependencies = {
   confirm: typeof requestConfirmation
   approve: typeof requestPayloadApproval
   availability: typeof readWorkflowAgentAvailability
+  evidence: typeof readVerifiedWorkflowAgentEvidence
 }
 const dependencies: AgentFlowDependencies = {
   account: getVerifiedAccountSnapshot,
@@ -49,6 +53,7 @@ const dependencies: AgentFlowDependencies = {
   confirm: requestConfirmation,
   approve: requestPayloadApproval,
   availability: readWorkflowAgentAvailability,
+  evidence: readVerifiedWorkflowAgentEvidence,
 }
 
 function integer(value: unknown, fallback: number, minimum: number, maximum: number): number {
@@ -184,6 +189,13 @@ export async function runWorkflowAgentFlow(
     if (selection === 'auto' && !team) {
       const availability = await deps.availability(ticket.signal)
       await current()
+      const evidence = await deps.evidence({
+        runPublicId: context.runPublicId,
+        stepId: context.stepId,
+        config: account.config,
+        signal: ticket.signal,
+      })
+      await current()
       decision = selectWorkflowAgent({
         team,
         instruction: params.instruction as string,
@@ -193,6 +205,7 @@ export async function runWorkflowAgentFlow(
         maxTurns: managedTurns,
         maxBudgetUsd: maxBudgetUsd as number | undefined,
         availability,
+        evidence,
       })
       adapter = decision.adapter
       if (adapter === 'local' && maxBudgetUsd !== undefined)
@@ -214,6 +227,9 @@ export async function runWorkflowAgentFlow(
           projectId: project.projectId,
           workspaceUpdatedAt: project.workspaceUpdatedAt,
           prompt,
+          qualityEvidence: decision.qualityEvidence,
+          qualityEvidenceLabel: decision.qualityEvidenceLabel ?? null,
+          evidence: decision.evidence ?? null,
         })
         const hash = await digest(content)
         await current()
@@ -232,6 +248,21 @@ export async function runWorkflowAgentFlow(
         const fresh = await deps.availability(ticket.signal)
         await current()
         assertWorkflowAgentSelectionCurrent(decision, fresh)
+        if (decision.evidence) {
+          const updated = await deps.evidence({
+            runPublicId: context.runPublicId,
+            stepId: context.stepId,
+            config: account.config,
+            signal: ticket.signal,
+          })
+          await current()
+          if (
+            !updated ||
+            updated.scope_hash !== decision.evidence.scopeHash ||
+            updated.device_environment_hash !== decision.evidence.environmentHash
+          )
+            throw new Error('workflow_agent_evidence_scope_changed')
+        }
       }
     }
     let result: Record<string, unknown>
@@ -255,9 +286,15 @@ export async function runWorkflowAgentFlow(
         text: text.slice(0, maxOutput),
         code: complete ? undefined : 'workflow_agent_managed_failed_or_incomplete',
         agent: adapter,
-        requested_model: decision?.model ?? params.model ?? null,
+        requested_model: managed.requestedModel ?? decision?.model ?? params.model ?? null,
+        default_model_revision: managed.defaultModelRevision ?? null,
+        default_model_source: managed.defaultModelSource ?? null,
         model: managed.runtimeEvidence?.model ?? null,
-        model_confirmation: managed.runtimeEvidence?.modelSource ?? 'unconfirmed',
+        model_confirmation:
+          managed.runtimeEvidence?.modelSource ??
+          (complete && selection === 'override' && typeof params.model === 'string' && params.model.trim()
+            ? 'pinned_request'
+            : 'unconfirmed'),
         thinking_tier: thinkingTier,
         thinking_application: managed.effortSelection?.status ?? 'adapter_not_confirmed',
         requested_effort: managed.effortSelection?.requestedEffort ?? null,
@@ -271,6 +308,8 @@ export async function runWorkflowAgentFlow(
         selection_availability: decision?.availability ?? 'explicit_user_override',
         selection_cost: decision?.cost ?? 'explicit_user_override',
         selection_quality_evidence: decision?.qualityEvidence ?? 'unavailable',
+        selection_quality_label: decision?.qualityEvidenceLabel ?? null,
+        selection_evidence: decision?.evidence ?? null,
         selection_excluded: decision?.excluded ?? [],
         duration_ms: Date.now() - started,
       }
@@ -354,6 +393,10 @@ export async function runWorkflowAgentFlow(
         interruption_code: agent.interrupted?.code ?? null,
         agent: team ? 'local_orchestrated_team' : 'local',
         model: agent.model ?? null,
+        // Local runtime provenance is the successful native inference's signed
+        // release/resident.model_id binding, not a provider model-name echo.
+        // Availability alone never supplies a missing result identity here.
+        model_confirmation: agent.model && agent.inferenceTarget === 'local_llama_cpp' ? 'runtime' : 'unconfirmed',
         inference_target: agent.inferenceTarget ?? null,
         thinking_tier: thinkingTier,
         thinking_application: agent.inferenceTarget === 'local_llama_cpp' ? 'native_context_bounded' : 'unconfirmed',
@@ -363,7 +406,9 @@ export async function runWorkflowAgentFlow(
             : team
               ? 'local_orchestrator_with_approved_admin_specialists'
               : (decision?.reason ?? 'signed_local_policy'),
-        selection_quality_evidence: 'unavailable',
+        selection_quality_evidence: decision?.qualityEvidence ?? 'unavailable',
+        selection_quality_label: decision?.qualityEvidenceLabel ?? null,
+        selection_evidence: decision?.evidence ?? null,
         selection_excluded: decision?.excluded ?? [],
         request_id: agent.requestId ?? null,
         tokens: agent.tokenUsage,
