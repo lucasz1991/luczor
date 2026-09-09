@@ -64,6 +64,24 @@ const successfulResult: InferenceResult = {
 }
 
 describe('LocalModelManager runtime safety', () => {
+  it.each(['off', 'auto', undefined] as const)(
+    'preserves local request reasoning mode %s through the resident gateway',
+    async reasoningMode => {
+      const model = await release()
+      const transport: LocalRuntimeTransport = {
+        prepare: vi.fn(),
+        stream: vi.fn(async () => successfulResult),
+        cancel: vi.fn(),
+        stop: vi.fn(),
+      }
+      const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
+      const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+      await gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'Kurzer Arbeitsplan.' }], reasoningMode })
+      expect(vi.mocked(transport.stream).mock.calls[0]?.[1].reasoningMode).toBe(reasoningMode)
+      expect(transport.prepare).not.toHaveBeenCalled()
+    }
+  )
+
   it('bounds idle inference to a tool-free local request and never renews its expired readiness', async () => {
     const model = await release()
     let now = Date.parse('2026-08-30T12:30:00Z')
@@ -80,6 +98,7 @@ describe('LocalModelManager runtime safety', () => {
       tools: ['untrusted'],
       toolChoice: 'required',
       taskType: 'chat.general',
+      reasoningMode: 'auto',
     })
     expect(transport.stream).toHaveBeenCalledExactlyOnceWith(
       model,

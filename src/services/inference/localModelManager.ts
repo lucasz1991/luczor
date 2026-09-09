@@ -39,7 +39,6 @@ export type LocalRuntimeRequest = InferenceRequest & {
   catalogBinding: LocalCatalogBinding
   maxOutputTokens?: number
   contextLimit?: number
-  reasoningMode?: 'auto' | 'off'
 }
 
 export interface LocalRuntimeTransport {

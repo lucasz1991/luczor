@@ -47,6 +47,8 @@ mod gpu_runtime;
 mod local_messages;
 #[path = "local_model_install.rs"]
 mod install;
+#[path = "local_model_reasoning.rs"]
+mod reasoning_budget;
 #[path = "local_model_acceptance.rs"]
 mod resource_acceptance;
 #[path = "local_model_resource_config.rs"]
@@ -3356,7 +3358,6 @@ fn stream_completion(
         // Keep model weights resident while each request supplies its entire conversation.
         "cache_prompt": false,
         "chat_template_kwargs": {
-            "enable_thinking": request.reasoning_mode != "off",
             "parse_tool_calls": true
         }
     });
@@ -3369,6 +3370,7 @@ fn stream_completion(
         &mut body,
         u64::from(context_limit),
         |candidate| {
+            reasoning_budget::apply(candidate, &request.reasoning_mode)?;
             require_runtime_operation_checkpoint(
                 &request.request_id,
                 &request.catalog_binding,

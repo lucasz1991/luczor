@@ -87,6 +87,8 @@ export type RunAgentOptions = {
   getMode?: () => LuczorMode
   /** Force a tool call in the first round for an explicit execution request. */
   toolChoice?: ToolChoice
+  /** Internal local generation preference; cannot alter an approved external request. */
+  localReasoningMode?: 'auto' | 'off'
   taskType?: string
   contextId?: string
   repoId?: string
@@ -906,6 +908,9 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
         messages,
         tools,
         toolChoice: nextToolChoice,
+        ...(inferenceGateway.target === 'local_llama_cpp' && opts.localReasoningMode
+          ? { reasoningMode: opts.localReasoningMode }
+          : {}),
         projectId,
         taskType: opts.taskType,
         contextId: opts.contextId,

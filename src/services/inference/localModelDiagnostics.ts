@@ -98,11 +98,20 @@ export function createLocalModelDiagnostics(now = Date.now) {
         run.finishReason = ['stop', 'length', 'tool_calls', 'content_filter'].includes(result.finishReason)
           ? result.finishReason
           : 'other'
-        run.state = 'done'
+        const hasPublicResult = run.toolCount > 0 || run.output.trim().length > 0
+        run.state = hasPublicResult ? 'done' : 'error'
         run.endedAt = now()
         run.events.push({
           at: now(),
-          label: run.toolCount ? `${run.toolCount} Werkzeugaufrufe vom Modell angefordert` : 'Antwort abgeschlossen',
+          label: run.toolCount
+            ? `${run.toolCount} Werkzeugaufrufe vom Modell angefordert`
+            : !hasPublicResult
+              ? run.finishReason === 'length'
+                ? 'Ausgabelimit ohne öffentliche Antwort erreicht'
+                : 'Keine öffentliche Antwort vom Modell erhalten'
+              : run.finishReason === 'length'
+                ? 'Ausgabelimit erreicht · Antwort unvollständig'
+                : 'Antwort abgeschlossen',
         })
       },
       fail(cancelled: boolean) {

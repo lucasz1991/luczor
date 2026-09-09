@@ -278,6 +278,9 @@ export async function runChatAgentTeam(
         signal: opts.signal,
         interruptionSignal: request.signal,
         maxRounds: request.nodeId === 'planner' ? 1 : worker ? limits.agent : 3,
+        // This node emits a short handoff, not a long private planning trace.
+        // Reserve its output budget for the six public steps the worker needs.
+        localReasoningMode: request.nodeId === 'planner' ? 'off' : opts.localReasoningMode,
         toolChoice: 'auto',
         toolAccess: worker ? opts.toolAccess : request.nodeId === 'planner' ? 'none' : 'read-only',
         disabledTools,

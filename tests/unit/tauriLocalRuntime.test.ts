@@ -26,6 +26,32 @@ const catalogBinding = {
 } as const
 
 describe('Tauri local runtime catalog boundary', () => {
+  it.each(['off', 'auto', undefined] as const)(
+    'serializes local reasoning mode %s into native inference without changing output/context limits',
+    async reasoningMode => {
+      await new TauriLocalRuntimeTransport().stream({} as LocalModelReleaseManifest, {
+        requestId: 'request-1',
+        modelReleaseId: 'model-1',
+        scopeDigest: 'd'.repeat(64),
+        catalogBinding,
+        messages: [{ role: 'user', content: 'Plane drei kurze, überprüfbare Schritte.' }],
+        reasoningMode,
+        maxOutputTokens: 2048,
+        contextLimit: 32768,
+      })
+      expect(tauri.invoke).toHaveBeenCalledWith(
+        'local_model_infer',
+        expect.objectContaining({
+          request: expect.objectContaining({
+            reasoningMode: reasoningMode ?? 'auto',
+            maxOutputTokens: 2048,
+            contextLimit: 32768,
+          }),
+        })
+      )
+      expect(tauri.invoke.mock.calls.map(([command]) => command)).toEqual(['local_model_infer'])
+    }
+  )
   it('connects public stream and final reported telemetry to the analysis without retaining private channels', async () => {
     localModelDiagnostics.clear()
     tauri.invoke.mockImplementationOnce(async (_command, args) => {

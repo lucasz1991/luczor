@@ -57,6 +57,11 @@ vi.mock('@/services/api/sync', () => ({ logAgentEvent: mocks.logAgentEvent }))
 import { buildSystemPreamble, looksLikeInternalReasoningLeak, runAgent, shouldRequireToolCall } from '@/services/agent'
 import { LocalInferenceError } from '@/services/inference/localModelManager'
 import type { InferenceRequest } from '@/services/inference/types'
+import {
+  buildLaravelProxyBody,
+  hashLaravelProxyBody,
+  serializeLaravelProxyBody,
+} from '@/services/inference/laravelProxyBody'
 
 const toolCallResult = {
   content: 'interne Tool-Überlegung',
@@ -77,6 +82,53 @@ const durableTaskCreate = {
 } as const
 
 describe('agent mode and tool reliability', () => {
+  it.each(['off', 'auto', undefined] as const)(
+    'forwards local reasoning mode %s only to local inference',
+    async localReasoningMode => {
+      mocks.streamChatWithTools.mockResolvedValue({
+        content: 'Drei beleggebundene Schritte.',
+        toolCalls: [],
+        rawToolCalls: [],
+        finishReason: 'stop',
+      })
+      await runAgent({
+        projectId: 'project-2',
+        baseMessages: [{ role: 'user', content: 'Plane kurz drei Schritte.' }],
+        mode: 'observe',
+        maxRounds: 1,
+        toolAccess: 'none',
+        localReasoningMode,
+        inferenceGateway: {
+          id: 'local-planner',
+          target: 'local_llama_cpp',
+          streamChatWithTools: mocks.streamChatWithTools,
+        },
+      })
+      const sent = mocks.streamChatWithTools.mock.calls[0]?.[0] as InferenceRequest
+      expect(sent.reasoningMode).toBe(localReasoningMode)
+      expect('reasoningMode' in sent).toBe(localReasoningMode !== undefined)
+    }
+  )
+
+  it('keeps external approval bytes and hashes independent of local reasoning metadata', async () => {
+    const request: InferenceRequest = {
+      messages: [{ role: 'user', content: 'Approved external question' }],
+      projectId: 'project-2',
+      taskType: 'agent.plan',
+      tools: [],
+      toolChoice: 'none',
+    }
+    const base = serializeLaravelProxyBody(buildLaravelProxyBody(request, 'client-1', true))
+    const modes = ['auto', 'off'] as const
+    for (const reasoningMode of modes) {
+      const withLocalMode = { ...request, reasoningMode }
+      expect(serializeLaravelProxyBody(buildLaravelProxyBody(withLocalMode, 'client-1', true))).toBe(base)
+      expect(await hashLaravelProxyBody(withLocalMode, 'client-1')).toBe(
+        await hashLaravelProxyBody(request, 'client-1')
+      )
+    }
+  })
+
   it('dispatches active agent mode immediately without an ordinary chat round', async () => {
     const gateway = { id: 'local', target: 'local_llama_cpp' as const, streamChatWithTools: mocks.streamChatWithTools }
     mocks.runChatAgentTeam.mockResolvedValue({ finalText: 'Team fertig' })
@@ -1771,6 +1823,7 @@ describe('agent mode and tool reliability', () => {
       baseMessages: [{ role: 'system', content: 'LOCAL_ONLY_SECRET' }],
       externalBaseMessages: [{ role: 'user', content: 'Provider-sichere Frage' }],
       mode: 'observe',
+      localReasoningMode: 'off',
       routingSettings: { experimentalFlashNext: true },
       requestExternalApproval: approve,
     })
@@ -1791,6 +1844,7 @@ describe('agent mode and tool reliability', () => {
     expect(JSON.stringify(sent.messages)).not.toContain('LOCAL_ONLY_SECRET')
     expect(JSON.stringify(sent.messages)).not.toContain('approval required')
     expect(sent).toMatchObject({ tools: [], toolChoice: 'none' })
+    expect(sent).not.toHaveProperty('reasoningMode')
     expect(result).toMatchObject({ finalText: 'Sichere externe Antwort', inferenceTarget: 'laravel_proxy' })
   })
 

@@ -66,6 +66,8 @@ export type InferenceRequest = {
   messages: WireMessage[]
   tools?: unknown[]
   toolChoice?: ToolChoice
+  /** Local generation only; never part of the approved external provider body. */
+  reasoningMode?: 'auto' | 'off'
   projectId?: string
   taskType?: string
   /** Admin team policy displayed in the exact approved packet. */

@@ -9,6 +9,38 @@ const result = {
 }
 
 describe('local model observation boundary', () => {
+  it.each(['length', 'stop'])('does not report an empty %s completion as a completed answer', finishReason => {
+    const monitor = createLocalModelDiagnostics()
+    const run = monitor.begin('local', [])
+    run.finish({ ...result, content: '<think>private</think>', finishReason })
+    const observation = monitor.state.runs[0]!
+    expect(observation.state).toBe('error')
+    expect(observation.output).toBe('')
+    expect(observation.finishReason).toBe(finishReason)
+    expect(observation.events.at(-1)?.label).toBe(
+      finishReason === 'length'
+        ? 'Ausgabelimit ohne öffentliche Antwort erreicht'
+        : 'Keine öffentliche Antwort vom Modell erhalten'
+    )
+    expect(JSON.stringify(observation)).not.toContain('private')
+  })
+  it('preserves a visible answer stopped by its output limit and labels it incomplete', () => {
+    const monitor = createLocalModelDiagnostics()
+    monitor.begin('local', []).finish({ ...result, finishReason: 'length' })
+    expect(monitor.state.runs[0]).toMatchObject({ state: 'done', output: result.content, finishReason: 'length' })
+    expect(monitor.state.runs[0]?.events.at(-1)?.label).toBe('Ausgabelimit erreicht · Antwort unvollständig')
+  })
+  it('does not require public prose when the model returned tool calls', () => {
+    const monitor = createLocalModelDiagnostics()
+    monitor.begin('local', []).finish({
+      ...result,
+      content: '',
+      finishReason: 'tool_calls',
+      rawToolCalls: [{ id: 'call-1', type: 'function', function: { name: 'local_model_status', arguments: '{}' } }],
+    })
+    expect(monitor.state.runs[0]).toMatchObject({ state: 'done', toolCount: 1 })
+    expect(monitor.state.runs[0]?.events.at(-1)?.label).toBe('1 Werkzeugaufrufe vom Modell angefordert')
+  })
   it('records only public output and character counts, never input text or private tags', () => {
     const monitor = createLocalModelDiagnostics()
     const run = monitor.begin('local', [{ role: 'system', content: 'secret prompt' }])

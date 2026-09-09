@@ -68,6 +68,7 @@ it('runs a sequential planner-worker-reviewer graph with configured worker limit
   )
   expect(calls.map(call => call.maxRounds)).toEqual([1, 17, 3])
   expect(calls.map(call => call.toolAccess)).toEqual(['none', undefined, 'read-only'])
+  expect(calls.map(call => call.localReasoningMode)).toEqual(['off', undefined, undefined])
   expect(
     calls.every(
       call =>
@@ -81,6 +82,22 @@ it('runs a sequential planner-worker-reviewer graph with configured worker limit
   expect(response.ephemeralDataUsed).toBe(true)
   expect(response.tokenUsage.totalTokens).toBe(21)
   expect(response.finalText).toContain('Rundenlimit')
+})
+
+it('keeps short planning public while retaining caller reasoning for worker and reviewer', async () => {
+  const calls: RunAgentOptions[] = []
+  await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'observe', localReasoningMode: 'auto' },
+    gateway,
+    { ...checkpoint },
+    async options => {
+      calls.push(options)
+      return result
+    }
+  )
+  expect(calls.map(call => call.localReasoningMode)).toEqual(['off', 'auto', 'auto'])
+  expect(calls.map(call => call.maxRounds)).toEqual([1, 17, 3])
+  expect(calls.map(call => call.toolAccess)).toEqual(['none', undefined, 'read-only'])
 })
 it('stops scheduling dependent agents after cancellation', async () => {
   const controller = new AbortController()

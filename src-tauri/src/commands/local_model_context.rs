@@ -61,16 +61,17 @@ fn shorten_tool_result(messages: &mut [Value]) -> bool {
 pub(super) fn fit_context<E>(
     body: &mut Value,
     context_tokens: u64,
-    mut count: impl FnMut(&Value) -> Result<u64, E>,
+    mut count: impl FnMut(&mut Value) -> Result<u64, E>,
     cannot_fit: impl Fn() -> E,
 ) -> Result<ContextUsage, E> {
-    let requested_output = body["max_tokens"].as_u64().ok_or_else(&cannot_fit)?;
+    let mut requested_output = body["max_tokens"].as_u64().ok_or_else(&cannot_fit)?;
     let mut usage = ContextUsage {
         context_tokens,
         ..Default::default()
     };
-    // At most 256 messages are admitted natively. Every pass removes a complete
-    // old round or halves a tool result; the separate bound also caps tokenizer work.
+    // At most 256 messages are admitted natively. Each continued pass removes a
+    // complete old round, halves a tool result, or reduces the output reservation;
+    // the separate bound also caps tokenizer work.
     for _ in 0..272 {
         let input_tokens = count(body)?;
         let available = context_tokens.saturating_sub(input_tokens.saturating_add(64));
@@ -92,10 +93,11 @@ pub(super) fn fit_context<E>(
         // Keep the complete current request. When it fits, use the remaining
         // answer space rather than rejecting because of a fixed output default.
         if available >= requested_output.min(256) {
-            body["max_tokens"] = json!(available.min(requested_output));
-            usage.input_tokens = input_tokens;
-            usage.output_tokens = available.min(requested_output);
-            return Ok(usage);
+            requested_output = available.min(requested_output);
+            body["max_tokens"] = json!(requested_output);
+            // Recount the final body: output-dependent template controls may
+            // change when the remaining answer budget disables reasoning.
+            continue;
         }
         return Err(cannot_fit());
     }
