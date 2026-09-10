@@ -26,9 +26,12 @@ to Vite and the WebView. Other running projects are not stopped. `pnpm dev` stil
 uses the fixed frontend-only port; use `pnpm tauri dev` for the complete app.
 
 To create a local Debian package, run `pnpm tauri build --bundles deb` after the
-setup step. The build detects the native host and target architecture and bundles
-only the matching Claude package. If that optional package is not installed,
-Claude remains visibly unavailable with a concrete readiness reason.
+setup step. The launcher detects the native host and target architecture and
+prepares the matching Claude package when it is available. Development never
+declares the optional directory as a static Tauri resource. A package build adds
+the resource through Tauri's runtime configuration only after its manifest and
+required files exist. If the optional package is not installed, Luczor still
+starts and Claude remains visibly unavailable with a concrete readiness reason.
 
 ## Installing the app without development tools
 
@@ -69,9 +72,9 @@ the separate backend, not for using the desktop app.
 
 The managed Claude worker is selected per platform and architecture. Windows uses
 `claude.exe`/`node.exe`; Linux and macOS use their native `claude`/`node` assets.
-The Tauri platform overlays point to the same app-owned resource location, while
-the build script copies only the package selected for the current native target.
-Cross-target builds are rejected for this bundle because the host Node executable
+Static Tauri configurations never require this optional directory. The project
+launcher adds it only to a package build whose generated runtime matches the host
+and target. Cross-target builds omit the bundle because the host Node executable
 must have the same platform as the packaged worker. This is independent of the
 ordinary Luczor chat and of the local `llama-server` model path.
 

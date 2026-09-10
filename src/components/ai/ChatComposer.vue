@@ -72,7 +72,7 @@ defineExpose({ scrollToBottom })
   min-height: 0;
 }
 .ai-chat--with-overlay > .ai-chat__messages {
-  padding-block-start: 70px;
-  scroll-padding-block-start: 70px;
+  padding-block-start: 72px;
+  scroll-padding-block-start: 72px;
 }
 </style>

@@ -1,9 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
-    "resources": {
-      "../../.lmzdev/artifacts/runtime/claude-agent/": "claude-agent/"
-    },
     "targets": ["deb"],
     "linux": {
       "deb": {

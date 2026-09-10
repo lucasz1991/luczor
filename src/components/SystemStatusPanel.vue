@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { watch } from 'vue'
 import type { OrbPhase } from '@/services/miniChat/presentation'
 import {
   systemStatusIcon,
@@ -32,7 +33,7 @@ const props = withDefaults(
     sidebarCollapsed: false,
   }
 )
-const emit = defineEmits<{ close: []; openMini: [] }>()
+const emit = defineEmits<{ close: []; openMini: []; displayMode: [mode: SystemStatusDisplayMode] }>()
 const {
   activeSection,
   content,
@@ -46,6 +47,8 @@ const {
   setDisplayMode,
   statusFor,
 } = useSystemStatusController(props, () => emit('close'))
+
+watch(displayMode, mode => emit('displayMode', mode), { immediate: true })
 </script>
 
 <template>
@@ -397,9 +400,9 @@ details[open] > summary .disclosure-arrow {
   --system-sidebar-width: 232px;
   top: 82px;
   right: auto;
-  bottom: 14px;
+  bottom: var(--system-composer-clearance, 142px);
   left: calc(var(--system-sidebar-width) + 12px);
-  width: 176px;
+  width: 154px;
   min-width: 0;
   max-width: calc(100vw - var(--system-sidebar-width) - 24px);
   max-height: none;
@@ -410,8 +413,8 @@ details[open] > summary .disclosure-arrow {
   --system-sidebar-width: 62px;
 }
 .system-status-panel[data-mode='mini'] :deep(.resource-grid) {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 5px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
 }
 .system-status-panel[data-mode='dashboard'] {
   inset: 0;
@@ -469,11 +472,28 @@ details[open] > summary .disclosure-arrow {
 
 <style scoped>
 [data-mode='mini'] :deep(.resource-dial-wrap) {
-  max-width: 80px;
+  max-width: 112px;
 }
 [data-mode='mini'] .system-status-panel__header {
   min-height: 38px;
-  padding: 5px 9px;
+  padding: 5px 7px 5px 9px;
+}
+[data-mode='mini'] .system-status-panel__header h2 {
+  font-size: 10px;
+  letter-spacing: -0.02em;
+}
+[data-mode='mini'] .system-status-panel__actions {
+  gap: 2px;
+}
+[data-mode='mini'] .panel-close,
+[data-mode='mini'] :deep(.system-stop) {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+[data-mode='mini'] :deep(.system-stop) {
+  gap: 0;
+  font-size: 0;
 }
 [data-mode='mini'] .system-status-panel__content {
   padding: 7px 9px;
@@ -482,6 +502,7 @@ details[open] > summary .disclosure-arrow {
   padding: 0 0 8px;
 }
 [data-mode='mini'] :deep(.resource-heading > span),
+[data-mode='mini'] :deep(.resource-mode),
 [data-mode='mini'] :deep(.resource-context),
 [data-mode='mini'] :deep(.resource-explanation) {
   display: none;
@@ -580,7 +601,7 @@ details[open] > summary .disclosure-arrow {
   .system-status-panel[data-mode='mini'] {
     --system-sidebar-width: 54px;
     left: calc(var(--system-sidebar-width) + 8px);
-    width: min(166px, calc(100vw - var(--system-sidebar-width) - 16px));
+    width: min(148px, calc(100vw - var(--system-sidebar-width) - 16px));
   }
 }
 </style>

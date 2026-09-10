@@ -235,17 +235,17 @@ defineProps<{
   opacity: 0.55;
 }
 .resource.is-compact .resource-dial-wrap {
-  width: min(100%, 80px);
+  width: min(100%, 112px);
   aspect-ratio: 1;
 }
 .resource.is-compact .resource-dial {
   width: 100%;
 }
 .resource.is-compact .dial-badges {
-  inset: auto auto 1px 46%;
+  inset: auto auto 5px 50%;
   display: grid;
   grid-template-columns: repeat(2, max-content);
-  gap: 2px;
+  gap: 2px 3px;
   align-content: end;
 }
 .resource.is-compact .dial-badge {
@@ -253,7 +253,7 @@ defineProps<{
   min-width: 0;
   padding: 1px 3px;
   border-radius: 3px;
-  font-size: 6.5px;
+  font-size: 7px;
   line-height: 1.25;
 }
 .resource.is-compact .dial-badge::after,

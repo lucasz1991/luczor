@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { nextTick, ref, useId, watch } from 'vue'
+import AiIcon from './ai/AiIcon.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -44,22 +45,35 @@ async function collapse(event: KeyboardEvent) {
   await nextTick()
   focusTarget?.focus()
 }
+
+function toggleContext() {
+  contextExpanded.value = !contextExpanded.value
+  if (contextExpanded.value) checklistExpanded.value = false
+}
+
+function toggleChecklist() {
+  checklistExpanded.value = !checklistExpanded.value
+  if (checklistExpanded.value) contextExpanded.value = false
+}
 </script>
 
 <template>
   <section class="chat-project-overlay" aria-label="Projektziele und Checkliste" @keydown.esc="collapse">
-    <div class="chat-project-overlay__controls">
+    <div class="chat-project-overlay__controls" role="tablist" aria-label="Projektinformationen">
       <button
         :id="`${id}-context-toggle`"
         ref="contextToggle"
         type="button"
         class="chat-project-overlay__toggle"
         :class="{ 'is-open': contextExpanded }"
+        role="tab"
+        :aria-selected="contextExpanded"
         :aria-expanded="contextExpanded"
         :aria-controls="`${id}-context`"
         :title="contextExpanded ? 'Projektziele und Kontext einklappen' : 'Projektziele und Kontext ausklappen'"
-        @click="contextExpanded = !contextExpanded"
+        @click="toggleContext"
       >
+        <AiIcon name="check" :size="14" />
         <span class="chat-project-overlay__label">Projektziele</span>
         <span class="chat-project-overlay__count" :aria-label="`${goalsDone} von ${goalCount} Zielen erledigt`">
           {{ goalsDone }}/{{ goalCount }}
@@ -73,12 +87,15 @@ async function collapse(event: KeyboardEvent) {
         type="button"
         class="chat-project-overlay__toggle"
         :class="{ 'is-open': checklistExpanded }"
+        role="tab"
+        :aria-selected="checklistExpanded"
         :aria-expanded="checklistExpanded"
         :aria-controls="`${id}-checklist`"
         :title="checklistExpanded ? 'Checkliste einklappen' : 'Checkliste ausklappen'"
         data-project-checklist
-        @click="checklistExpanded = !checklistExpanded"
+        @click="toggleChecklist"
       >
+        <AiIcon name="grid" :size="14" />
         <span class="chat-project-overlay__label">Checkliste</span>
         <span
           v-if="checklistCount"
@@ -95,6 +112,7 @@ async function collapse(event: KeyboardEvent) {
         v-show="contextExpanded"
         :id="`${id}-context`"
         class="chat-project-overlay__panel"
+        role="tabpanel"
         :aria-labelledby="`${id}-context-toggle`"
       >
         <slot name="context" />
@@ -104,6 +122,7 @@ async function collapse(event: KeyboardEvent) {
         v-show="checklistExpanded"
         :id="`${id}-checklist`"
         class="chat-project-overlay__panel"
+        role="tabpanel"
         :aria-labelledby="`${id}-checklist-toggle`"
         data-project-checklist
       >
@@ -117,40 +136,57 @@ async function collapse(event: KeyboardEvent) {
 .chat-project-overlay {
   position: absolute;
   z-index: 12;
-  inset-block-start: 8px;
-  inset-inline: 16px;
+  inset-block-start: 0;
+  inset-inline: 0;
   display: grid;
-  gap: 8px;
+  gap: 0;
   min-width: 0;
   pointer-events: none;
 }
 .chat-project-overlay__controls {
   display: flex;
-  justify-content: center;
-  gap: 8px;
+  justify-content: flex-start;
+  gap: 2px;
   min-width: 0;
+  min-height: 48px;
+  padding: 6px 24px;
+  border-bottom: 1px solid var(--ai-line, #29313b);
+  background: color-mix(in srgb, var(--ai-page, #101317) 94%, transparent);
+  backdrop-filter: blur(18px);
+  pointer-events: auto;
 }
 .chat-project-overlay__toggle {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
-  min-height: 38px;
-  padding: 7px 12px;
-  border: 1px solid var(--border-soft, #344050);
-  border-radius: var(--r-md, 9px);
-  background: var(--ai-surface, #131b27);
+  min-height: 36px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
   color: var(--text-secondary, #c3cedd);
   font: inherit;
   font-size: 12px;
   cursor: pointer;
   pointer-events: auto;
-  box-shadow: 0 3px 12px rgb(0 0 0 / 12%);
+  box-shadow: none;
 }
 .chat-project-overlay__toggle:hover,
 .chat-project-overlay__toggle.is-open {
-  border-color: var(--border-strong, #5e7b99);
+  background: var(--ai-hover, #1b222b);
   color: var(--text-primary, #edf2f9);
+}
+.chat-project-overlay__toggle.is-open::after {
+  content: '';
+  position: absolute;
+  right: 9px;
+  bottom: -6px;
+  left: 9px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--ai-accent, #7c9cff);
 }
 .chat-project-overlay__toggle:focus-visible {
   outline: 2px solid var(--cy, #4ea8de);
@@ -176,22 +212,23 @@ async function collapse(event: KeyboardEvent) {
 .chat-project-overlay__content {
   display: grid;
   gap: 12px;
-  width: min(100%, 900px);
-  max-height: min(52vh, 480px);
+  width: 100%;
+  max-height: min(48vh, 520px);
   min-height: 0;
   margin-inline: auto;
   overflow: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
-  border: 1px solid var(--border-soft, #344050);
-  border-radius: var(--r-lg, 12px);
-  background: var(--ai-surface, #131b27);
-  box-shadow: 0 12px 30px rgb(0 0 0 / 20%);
+  border: 0;
+  border-bottom: 1px solid var(--border-soft, #344050);
+  border-radius: 0 0 12px 12px;
+  background: color-mix(in srgb, var(--ai-surface, #131b27) 97%, transparent);
+  box-shadow: 0 16px 34px rgb(0 0 0 / 24%);
   pointer-events: auto;
 }
 .chat-project-overlay__panel {
   min-width: 0;
-  padding: 12px;
+  padding: 16px 24px 20px;
   overflow-wrap: anywhere;
 }
 .chat-project-overlay__panel :deep(.info-strip) {
@@ -209,11 +246,9 @@ async function collapse(event: KeyboardEvent) {
   flex-wrap: wrap;
 }
 @media (max-width: 600px) {
-  .chat-project-overlay {
-    inset-inline: 8px;
-  }
   .chat-project-overlay__controls {
     gap: 6px;
+    padding-inline: 10px;
   }
   .chat-project-overlay__toggle {
     gap: 5px;
@@ -222,7 +257,7 @@ async function collapse(event: KeyboardEvent) {
     font-size: 11px;
   }
   .chat-project-overlay__panel {
-    padding: 10px;
+    padding: 12px;
   }
   .chat-project-overlay__panel :deep(.info-strip) {
     grid-template-columns: minmax(0, 1fr);

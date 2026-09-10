@@ -5,6 +5,7 @@ import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import { loadPendingTaskCreates, replacePendingTaskCreates } from '@/services/agents/taskCreateRecoveryLedger'
 import Settings from './components/Settings.vue'
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
+import type { SystemStatusDisplayMode } from '@/features/system-status/model'
 import TokenCounter from './components/ai/TokenCounter.vue'
 import AgentTeamResults from './components/ai/AgentTeamResults.vue'
 import ChatCommentary from './components/ai/ChatCommentary.vue'
@@ -157,10 +158,26 @@ type SettingsStartTab = 'server' | 'notifications' | 'execution'
 const showSettings = ref(false)
 const settingsStartTab = ref<SettingsStartTab>('server')
 const showSystemPanel = ref(false)
+const systemStatusDisplayMode = ref<SystemStatusDisplayMode>('tabs')
 const showAgentHub = ref(false)
 const showPlanning = ref(false)
 const showWorkflows = ref(false)
 const showToolCenter = ref(false)
+const composerShell = ref<HTMLElement | null>(null)
+const composerClearance = ref(142)
+const appShellStyle = computed<Record<string, string>>(() => ({
+  '--system-composer-clearance': `${composerClearance.value}px`,
+}))
+let composerResizeObserver: ResizeObserver | undefined
+onMounted(() => {
+  composerResizeObserver = new ResizeObserver(entries => {
+    const height =
+      entries[0]?.borderBoxSize?.[0]?.blockSize ?? composerShell.value?.getBoundingClientRect().height ?? 134
+    composerClearance.value = Math.ceil(height) + 8
+  })
+  if (composerShell.value) composerResizeObserver.observe(composerShell.value)
+})
+onBeforeUnmount(() => composerResizeObserver?.disconnect())
 const selectedWorkflowId = ref<number>()
 const selectedWorkflowRunId = ref<string>()
 const planningObjective = ref('')
@@ -2064,7 +2081,14 @@ useWorkflowWatchers()
     />
   </Teleport>
 
-  <div class="app-shell ai-workspace" :class="{ 'ai-workspace--collapsed': sidebarCollapsed }">
+  <div
+    class="app-shell ai-workspace"
+    :style="appShellStyle"
+    :class="{
+      'ai-workspace--collapsed': sidebarCollapsed,
+      'ai-workspace--system-mini': showSystemPanel && systemStatusDisplayMode === 'mini',
+    }"
+  >
     <SidebarNav
       v-model:collapsed="sidebarCollapsed"
       :title="appearance.assistantName"
@@ -2626,7 +2650,7 @@ useWorkflowWatchers()
         <button v-else type="button" @click="speechError = ''">Schließen</button>
       </div>
 
-      <div class="ai-main-composer">
+      <div ref="composerShell" class="ai-main-composer">
         <ThinkingBudgetControl
           v-if="visibleThinkingBudget"
           :progress="visibleThinkingBudget"
@@ -2681,6 +2705,7 @@ useWorkflowWatchers()
       :project-name="activeProject?.name"
       :sidebar-collapsed="sidebarCollapsed"
       @close="showSystemPanel = false"
+      @display-mode="systemStatusDisplayMode = $event"
       @open-mini="miniChat.open()"
     />
   </div>

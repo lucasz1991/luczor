@@ -398,3 +398,7 @@ Append-only communication log. Source and runtime evidence override stale entrie
 - Systemstatus in Feature-Models, Vue-Controller und zwei kleine View-Komponenten zerlegt; Panel/HUD bleiben kompatible Einstiegspunkte.
 - Nativen `system_metrics`-Command und serialisierten Vertrag in eigene Controller-/Modelmodule verschoben; Collector und Berechtigungsgrenzen unverändert.
 - 28 fokussierte Frontendtests, 13 Rusttests, Typecheck, aktuelle Frontend-Buildschritte, Cargo check, scoped Lint und Browserprüfung für alle drei Modi bestanden. Voll-Lint hat bestehende fremde Befunde; Runtime-Kopie eines zweiten Komplettbuilds war durch laufende claude.exe gesperrt. Kein Prozess beendet, kein Modell/Deploy/Package/Commit.
+
+## 2026-09-10T19:33:54Z | Codex -> all | status
+
+- Message: Started: Linux Tauri dev optional Claude resource fix
