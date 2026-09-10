@@ -35,7 +35,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential pkg-config libssl-dev libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev librsvg2-dev patchelf libpipewire-0.3-dev \
-            clang libclang-dev libgbm-dev libxdo-dev libwayland-dev libegl1-mesa-dev libxcb1-dev
+            clang libclang-dev libgbm-dev libxdo-dev libwayland-dev libegl1-mesa-dev libxcb1-dev \
+            gstreamer1.0-tools
       - uses: dtolnay/rust-toolchain@stable
       - name: Apple Silicon and Intel targets
         if: runner.os == 'macOS'
@@ -48,6 +49,18 @@ jobs:
       - run: cargo test --manifest-path src-tauri/Cargo.toml --lib
       - name: Build native test package (not a signed production release)
         run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
+      - name: Verify Linux package installation and multimedia dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          packages=(src-tauri/target/${{ matrix.target }}/release/bundle/deb/*.deb)
+          test "${#packages[@]}" -eq 1
+          test -f "${packages[0]}"
+          node scripts/check-debian-dependencies.cjs "${packages[0]}"
+          sudo apt-get install -y --no-install-recommends "./${packages[0]}"
+          gst-inspect-1.0 fakevideosink >/dev/null
+          gst-inspect-1.0 webvttenc >/dev/null
       - uses: actions/upload-artifact@v4
         with:
           name: luczor-test-${{ matrix.target }}
