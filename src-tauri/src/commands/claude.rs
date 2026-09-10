@@ -105,6 +105,7 @@ pub struct ClaudeRuntimeStatus {
     reason: Option<String>,
 }
 
+#[cfg(windows)]
 fn runtime_root(app: &AppHandle) -> Result<PathBuf, String> {
     let packaged = app
         .path()
@@ -123,6 +124,15 @@ fn runtime_root(app: &AppHandle) -> Result<PathBuf, String> {
         }
     }
     Err("Managed Claude runtime is not packaged. Build the app-owned agent runtime first.".into())
+}
+
+#[cfg(not(windows))]
+const UNSUPPORTED_RUNTIME_REASON: &str =
+    "Managed Claude runtime is unavailable on this platform; a signed Linux/macOS runtime is not bundled.";
+
+#[cfg(not(windows))]
+fn runtime_root(_app: &AppHandle) -> Result<PathBuf, String> {
+    Err(UNSUPPORTED_RUNTIME_REASON.into())
 }
 fn verify_runtime(root: &Path) -> Result<(), String> {
     let bytes = std::fs::read(root.join("runtime.json"))
@@ -645,5 +655,12 @@ mod tests {
             "claude-opus-4-7",
             AgentEffort::Ultra
         ));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn managed_claude_reports_platform_unavailability_without_resolving_an_executable() {
+        assert!(UNSUPPORTED_RUNTIME_REASON.contains("not bundled"));
+        assert!(!UNSUPPORTED_RUNTIME_REASON.contains(".exe"));
     }
 }

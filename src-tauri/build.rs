@@ -202,11 +202,13 @@ fn main() {
     } else {
         println!("cargo:warning=Local-model verification will use the Luczor HTTPS signing-key endpoint.");
     }
-    tauri_build::try_build(
+    if let Err(error) = tauri_build::try_build(
         tauri_build::Attributes::new()
             .app_manifest(tauri_build::AppManifest::new().commands(APP_COMMANDS)),
-    )
-    .expect("failed to build the Tauri application manifest");
+    ) {
+        let target = env::var("TARGET").unwrap_or_else(|_| "unknown-target".into());
+        panic!("failed to build the Tauri application manifest for {target}: {error}");
+    }
     println!(
         "cargo:rustc-env=LUCZOR_NATIVE_WORKFLOW_CODE_HASH={}",
         workflow_source_fingerprint()

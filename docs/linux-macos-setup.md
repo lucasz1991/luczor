@@ -25,6 +25,11 @@ The Tauri launcher selects a free port starting at 1420 and gives the same port
 to Vite and the WebView. Other running projects are not stopped. `pnpm dev` still
 uses the fixed frontend-only port; use `pnpm tauri dev` for the complete app.
 
+To create a local Debian package, run `pnpm tauri build --bundles deb` after the
+setup step. Linux builds intentionally omit the Windows-only managed Claude
+bundle; Claude therefore remains visibly unavailable until a signed Linux
+runtime is supplied.
+
 ## Installing the app without development tools
 
 Node, pnpm and Rust are build tools and are not required by end users.
@@ -61,6 +66,12 @@ does not invent artifact hashes or distribute Windows binaries on Linux/macOS.
 Their platform builds and signed catalog entries must be provided before these
 optional local features are available. PHP/Composer are needed only for developing
 the separate backend, not for using the desktop app.
+
+The managed Claude worker is currently a Windows x64-only resource. The Windows
+configuration bundles the signed app-owned `claude.exe`/`node.exe` runtime; Linux
+and macOS builds deliberately omit it and continue with Claude marked unavailable
+until a platform-matching signed runtime is supplied. This is independent of the
+ordinary Luczor chat and of the local `llama-server` model path.
 
 References: https://v2.tauri.app/start/prerequisites/ and
 https://v2.tauri.app/distribute/debian/ and

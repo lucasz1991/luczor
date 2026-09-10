@@ -2,6 +2,12 @@
 
 This path deliberately separates a local test installer from a publishable Luczor release.
 
+The managed Claude runtime is bundled only by `src-tauri/tauri.windows.conf.json`
+for Windows x64. Linux and macOS builds use the shared Tauri configuration without
+that Windows resource and report Claude as unavailable until a signed,
+platform-matching runtime is supplied. The ordinary local `llama-server` path is
+independent of this optional bundle.
+
 ## Pinned Node runtime
 
 The exact Node version lives in `.nvmrc`; `package.json` keeps the supported major range. On Windows, install the pin without changing the globally active NVM symlink:
