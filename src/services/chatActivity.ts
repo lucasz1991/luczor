@@ -87,6 +87,8 @@ export function presentToolCall(call: PendingToolCall): ActivityStep {
     label: call.name,
     status: TOOL_STATUS[call.status],
     capability,
+    model: typeof call.args.model === 'string' ? call.args.model.slice(0, 80) : undefined,
+    provider: typeof call.args.provider === 'string' ? call.args.provider.slice(0, 48) : undefined,
     dataHandling: call.dataHandling,
     detail: call.status === 'proposed' && !call.requiresApproval ? 'Zur Ausführung vorbereitet' : undefined,
   }

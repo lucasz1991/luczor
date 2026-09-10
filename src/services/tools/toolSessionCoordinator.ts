@@ -9,7 +9,7 @@ export type ToolSessionStatus = 'active' | 'stopped' | 'expired'
 export type ToolSession = Readonly<{
   id: string
   projectId: string
-  kind: 'browser' | 'terminal' | 'vision'
+  kind: 'browser' | 'terminal' | 'vision' | 'model'
   status: ToolSessionStatus
   createdAt: number
   updatedAt: number

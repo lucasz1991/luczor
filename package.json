@@ -34,7 +34,7 @@
     "node:check": "node scripts/release-readiness.cjs --mode node",
     "release:check:local": "node scripts/release-readiness.cjs --mode local-test",
     "release:check:production": "node scripts/release-readiness.cjs --mode production",
-    "release:check:test": "node --test scripts/release-readiness.test.cjs scripts/check-unsigned-pe.test.cjs",
+    "release:check:test": "node --test scripts/release-readiness.test.cjs scripts/check-unsigned-pe.test.cjs scripts/platform-config.test.cjs scripts/agent-runtime-platform.test.cjs",
     "release:installer:windows:test": "powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-test-installer.ps1",
     "check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "security:audit": "pnpm audit --audit-level=moderate"

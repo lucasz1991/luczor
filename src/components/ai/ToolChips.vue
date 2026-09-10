@@ -13,6 +13,8 @@ defineProps<{ tools: ActivityStep[] }>()
           :class="{ 'ai-spin': tool.status === 'running' }"
         /><span>{{ tool.label }}</span
         ><span v-if="tool.capability" class="ai-tool__capability">{{ tool.capability }}</span
+        ><span v-if="tool.provider" class="ai-tool__retention">{{ tool.provider }}</span
+        ><span v-if="tool.model" class="ai-tool__retention">{{ tool.model }}</span
         ><span v-if="tool.dataHandling === 'ephemeral'" class="ai-tool__retention">temporär</span
         ><span class="ai-tool__status">{{ statusLabels[tool.status] }}</span>
       </summary>

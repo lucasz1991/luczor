@@ -274,4 +274,7 @@ export type AppState = {
   summaries: SummaryItem[]
 
   pending: PendingState
+
+  /** Explicitly saved, redacted Tool-Center artifact references. */
+  toolArtifacts?: import('@/services/tools/toolArtifacts').SavedToolArtifact[]
 }

@@ -26,8 +26,29 @@ function hosts(args: Record<string, unknown>): readonly string[] {
     : []
 }
 
+function assertAllowedHost(action: string, args: Record<string, unknown>, allowedHosts: readonly string[]): void {
+  if (!['navigate', 'download'].includes(action) || typeof args.url !== 'string') return
+  if (!allowedHosts.length)
+    throw new Error('Für Browser-Navigation muss mindestens ein bestätigter Host angegeben werden.')
+  let hostname: string
+  try {
+    hostname = new URL(args.url).hostname.toLowerCase()
+  } catch {
+    throw new Error('Browser-URL ist ungültig.')
+  }
+  const allowed = allowedHosts.some(host => {
+    const normalized = host
+      .toLowerCase()
+      .replace(/^https?:\/\//u, '')
+      .split('/')[0]
+    return hostname === normalized || hostname.endsWith(`.${normalized}`)
+  })
+  if (!allowed) throw new Error('Browser-URL liegt außerhalb der bestätigten Hosts.')
+}
+
 async function browser(ctx: ToolContext, action: string, args: Record<string, unknown>) {
   const allowedHosts = hosts(args)
+  assertAllowedHost(action, args, allowedHosts)
   const session = await getToolSession(ctx, 'browser', allowedHosts)
   const browser = session.browser
   if (!browser) throw new Error('Browser-Sitzung konnte nicht initialisiert werden.')

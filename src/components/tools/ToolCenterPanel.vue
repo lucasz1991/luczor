@@ -13,6 +13,7 @@ import ToolArtifactPicker from './ToolArtifactPicker.vue'
 import ToolCapabilityCard from './ToolCapabilityCard.vue'
 import ToolRunInspector from './ToolRunInspector.vue'
 import ModelControlPanel from './ModelControlPanel.vue'
+import { listSavedToolArtifacts, saveToolArtifact } from '@/services/tools/toolArtifacts'
 
 const props = withDefaults(
   defineProps<{ open: boolean; projectId: string; mode?: LuczorMode; killSwitch?: boolean }>(),
@@ -25,11 +26,15 @@ const sessions = computed(() => {
   return listToolSessions().filter(session => session.projectId === props.projectId)
 })
 const groups = computed(() => [...new Set(tools.value.map(tool => tool.capabilityKey?.split('.')[0] ?? 'tool'))])
+const savedArtifacts = computed(() => listSavedToolArtifacts(props.projectId))
 function stop(id: string) {
   stopToolSession(id)
 }
-function saveArtifact() {
-  // The result remains local until a future artifact write is explicitly selected.
+async function saveArtifact() {
+  await saveToolArtifact(props.projectId, {
+    label: 'Tool-Center-Ergebnis',
+    sourceSessionIds: sessions.value.map(session => session.id),
+  })
 }
 function close() {
   emit('update:open', false)
@@ -52,7 +57,7 @@ function close() {
         <div class="tool-center-body">
           <ToolRunInspector :sessions="sessions" @stop="stop" />
           <ModelControlPanel />
-          <ToolArtifactPicker :ephemeral="true" @save="saveArtifact" />
+          <ToolArtifactPicker :ephemeral="true" :saved-count="savedArtifacts.length" @save="saveArtifact" />
           <section class="tool-capabilities" aria-labelledby="tool-capabilities-title">
             <div class="tool-section-heading">
               <span id="tool-capabilities-title">Werkzeugkatalog</span
@@ -176,6 +181,11 @@ function close() {
 .tool-artifact-picker {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 10px;
+}
+.tool-artifact-picker small {
+  margin-left: auto;
+  color: var(--text-faint, #788298);
+  font: 9px var(--font-mono, monospace);
 }
 .tool-artifact-picker button,
 .tool-center-footer button,
