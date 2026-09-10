@@ -5,7 +5,7 @@ use super::resource_config::{DeviceBinding, LocalResourceConfig};
 use super::resource_runtime::RuntimeOptions;
 use super::{
     attach_process_lifetime_guard, configure_process, copy_minimal_environment, nvml_gpu_snapshot,
-    open_artifact_guard, reject_runtime_reparse_points, sha256_open_file_cancellable,
+    open_artifact_guard_cancellable, reject_runtime_reparse_points, sha256_open_file_cancellable,
     terminate_process, valid_hash, RuntimeArtifact,
 };
 use serde::Serialize;
@@ -172,7 +172,7 @@ pub(super) fn verify_support_files(
     for support in runtime.files.as_deref().unwrap_or_default() {
         let path = directory.join(&support.name);
         reject_runtime_reparse_points(&path)?;
-        let mut guard = open_artifact_guard(&path)?;
+        let mut guard = open_artifact_guard_cancellable(&path, cancel)?;
         if !guard
             .metadata()
             .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= 2 * 1024 * 1024 * 1024)

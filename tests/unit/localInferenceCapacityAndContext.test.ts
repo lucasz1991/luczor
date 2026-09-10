@@ -546,3 +546,20 @@ describe('local inference capacity and scoped context', () => {
     )
   })
 })
+
+describe('CPU resource mode admission', () => {
+  it('admits a CPU profile without any GPU', () => {
+    expect(assessModelCapacity({ ...gpuCapacityInput([], { minVramBytes: 0 }), executionMode: 'cpu' }).status).toBe(
+      'eligible'
+    )
+  })
+  it('reports a profile conflict instead of GPU shortage for GPU-only releases in CPU mode', () => {
+    const result = assessModelCapacity({ ...gpuCapacityInput([]), executionMode: 'cpu' })
+    expect(result.reasons).toEqual(['cpu_mode_disallowed_by_manifest'])
+  })
+  it('retains GPU checks in automatic mode', () => {
+    expect(assessModelCapacity({ ...gpuCapacityInput([]), executionMode: 'auto' }).reasons).toContain(
+      'accelerator_unavailable'
+    )
+  })
+})

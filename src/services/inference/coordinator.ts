@@ -1,5 +1,5 @@
 import type { BootstrapResponse, LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
-import { onLocalResourcesApplied } from './resources'
+import { localResources, onLocalResourcesApplied } from './resources'
 import { localModelManifestWithApiConfig, LuczorApi } from '@/services/api/luczorApi'
 import {
   deriveLocalModelManifestTrustDomain,
@@ -218,6 +218,7 @@ export type LocalInferenceCoordinatorDependencies = {
   fetchManifest: (config: LuczorApiConfigSnapshot) => Promise<Record<string, unknown>>
   verifyManifest: typeof verifyLocalModelManifest
   hardwareSnapshot: () => Promise<HardwareSnapshot>
+  resourceMode?: () => Promise<'auto' | 'gpu' | 'cpu'>
   recoverMemory?: () => Promise<HardwareSnapshot>
   nativeStatus?: () => Promise<NativeLocalModelStatus>
   prepareModel: (modelReleaseId: string, catalogBinding: LocalCatalogBinding) => Promise<LocalReadinessEvidence>
@@ -246,6 +247,21 @@ function externalSpecialistUnavailableMessage(reason: RouteDecision['reason']): 
 }
 
 const localReadinessMessages = new Map<string, string>([
+  ['runtime_platform_mismatch', 'Die hinterlegte Runtime passt nicht zur Linux-Plattform oder Prozessorarchitektur.'],
+  ['runtime_download_unavailable', 'Die signierte Runtime oder Modelldatei wurde vom Server nicht bereitgestellt.'],
+  [
+    'runtime_download_failed',
+    'Der Download einer lokalen Modellressource ist fehlgeschlagen. Bitte die Verbindung pr�fen.',
+  ],
+  [
+    'runtime_installation_failed',
+    'Die lokale Modellinstallation kann Dateien nicht anlegen oder lesen. Bitte Speicherplatz und Zugriffsrechte pr�fen.',
+  ],
+  [
+    'runtime_installed_checksum_mismatch',
+    'Eine bereits installierte Modellressource stimmt nicht mit der signierten Pr�fsumme �berein.',
+  ],
+
   ['model_disabled', 'Der signierte Katalog hat das lokale Modell noch nicht aktiviert.'],
   ['release_not_executable', 'Im signierten Katalog fehlen ausführbare Modell- oder Runtime-Metadaten.'],
   ['capability_unavailable', 'Die lokalen Modelle unterstützen die angeforderte Aufgabe nicht.'],
@@ -256,6 +272,10 @@ const localReadinessMessages = new Map<string, string>([
   [
     'accelerator_runtime_unavailable',
     'Die geprüfte Modellruntime kann keine GPU gemäß den Modellanforderungen nutzen.',
+  ],
+  [
+    'cpu_mode_disallowed_by_manifest',
+    'Dieses Modellprofil verlangt laut Serverfreigabe eine GPU und passt nicht zu Nur CPU/RAM. Bitte ein CPU-freigegebenes Profil oder die automatische Modellwahl verwenden.',
   ],
   ['vram_below_minimum', 'Der GPU-Speicher unterschreitet die signierte Modellanforderung.'],
   ['storage_unavailable', 'Für das lokale Modell ist kein geeigneter Speicherplatz verfügbar.'],
@@ -308,6 +328,10 @@ const localReadinessMessages = new Map<string, string>([
   ['runtime_gpu_capacity_unavailable', 'Der freie Grafikspeicher reicht unter Berücksichtigung der Reserve nicht aus.'],
   ['gpu_full_offload_not_verified', 'Die vollständige GPU-Auslagerung wurde nicht bestätigt.'],
   [
+    'runtime_platform_protection_unavailable',
+    'Die lokale Runtime ist in diesem App-Build unter Linux/macOS noch gesperrt: Dateischutz oder Prozessabsicherung fehlen. Dies ist kein RAM- oder GPU-Mangel.',
+  ],
+  [
     'local_preparation_failed',
     'Die lokale Modellvorbereitung ist fehlgeschlagen. Bitte die lokale Einrichtung prüfen.',
   ],
@@ -317,6 +341,25 @@ const localReadinessMessages = new Map<string, string>([
 function preparationFailureReason(error: unknown): string {
   const nativeMessage = typeof error === 'string' ? error : error instanceof Error ? error.message : ''
   const reasons = new Map<string, string>([
+    ['The server runtime does not match this Linux architecture.', 'runtime_platform_mismatch'],
+    ['The signed runtime libraries are not a Linux release.', 'runtime_platform_mismatch'],
+    ['The server has not provided the signed Linux runtime or model resource.', 'runtime_download_unavailable'],
+    ['Model resource download failed.', 'runtime_download_failed'],
+    ['Model download interrupted.', 'runtime_download_failed'],
+    ['Cannot create local-model installation directory.', 'runtime_installation_failed'],
+    ['Cannot make verified local runtime executable.', 'runtime_installation_failed'],
+    ['Cannot create model download file.', 'runtime_installation_failed'],
+    ['Insufficient storage for model download.', 'storage_unavailable'],
+    ['Installed model resource checksum mismatch.', 'runtime_installed_checksum_mismatch'],
+    ['Installed model resource size mismatch.', 'runtime_installed_checksum_mismatch'],
+    [
+      'Local-model execution is disabled on this platform until immutable artifact guards are available.',
+      'runtime_platform_protection_unavailable',
+    ],
+    [
+      'Local-model execution is disabled on this platform until parent-death process protection is available.',
+      'runtime_platform_protection_unavailable',
+    ],
     [
       'Local-model runtime paths are not configured. Configure local-model/runtime-paths.json or both runtime environment paths.',
       'runtime_not_configured',
@@ -775,6 +818,7 @@ export class LocalInferenceCoordinator {
       }
 
       failureReason = 'hardware_snapshot_failed'
+      const executionMode = await this.dependencies.resourceMode?.()
       const snapshot = await this.dependencies.hardwareSnapshot()
       if (!this.isCurrent(generation)) return false
       const assessments = new Map<string, CapacityAssessment>()
@@ -785,6 +829,7 @@ export class LocalInferenceCoordinator {
           model.id,
           assessModelCapacity({
             snapshot,
+            executionMode,
             modelReleaseId: model.id,
             manifestPayloadSha256: verified.payloadSha256,
             policy: capacity.policy,
@@ -1091,7 +1136,8 @@ export class LocalInferenceCoordinator {
     )
     const admissions = this.modelAdmissions(taskType).filter(model => candidates.has(model.modelReleaseId))
     const enabledCandidates = admissions.filter(model => model.enabled)
-    const diagnostics = (enabledCandidates.length ? enabledCandidates : admissions)
+    const attempted = enabledCandidates.filter(model => this.preparationFailures.has(model.modelReleaseId))
+    const diagnostics = (attempted.length ? attempted : enabledCandidates.length ? enabledCandidates : admissions)
       .filter(model => candidates.has(model.modelReleaseId))
       .flatMap(model => {
         if (!model.enabled) return ['model_disabled']
@@ -1132,6 +1178,8 @@ export class LocalInferenceCoordinator {
   private async refreshCapacityIfStale(generation: number, recheckRejected = true): Promise<void> {
     if (!this.isCurrent(generation) || !this.manifest) return
     const manifest = this.manifest
+    const executionMode = await this.dependencies.resourceMode?.()
+    if (!this.isCurrent(generation)) return
     const now = this.dependencies.now().getTime()
     const residentCandidate = manifest.models.some(model => {
       const assessment = this.assessments.get(model.id)
@@ -1193,6 +1241,7 @@ export class LocalInferenceCoordinator {
         model.id,
         assessModelCapacity({
           snapshot,
+          executionMode,
           modelReleaseId: model.id,
           manifestPayloadSha256: manifest.payloadSha256,
           policy: capacity.policy,
@@ -1280,6 +1329,7 @@ export const localInferenceCoordinator = new LocalInferenceCoordinator({
   fetchManifest: config => localModelManifestWithApiConfig(config),
   verifyManifest: verifyLocalModelManifest,
   hardwareSnapshot: getNativeHardwareSnapshot,
+  resourceMode: async () => (await localResources.get()).applied.mode,
   recoverMemory: recoverNativeModelMemory,
   nativeStatus: getNativeLocalModelStatus,
   prepareModel: prepareNativeLocalModel,

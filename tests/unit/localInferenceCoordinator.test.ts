@@ -824,6 +824,23 @@ describe('local inference coordinator and approved external gateway', () => {
   })
 
   it.each([
+    [
+      'Local-model execution is disabled on this platform until immutable artifact guards are available.',
+      'runtime_platform_protection_unavailable',
+      'Dateischutz oder Prozessabsicherung fehlen',
+    ],
+    [
+      'Local-model execution is disabled on this platform until parent-death process protection is available.',
+      'runtime_platform_protection_unavailable',
+      'Dateischutz oder Prozessabsicherung fehlen',
+    ],
+    [
+      'The server has not provided the signed Linux runtime or model resource.',
+      'runtime_download_unavailable',
+      'nicht bereitgestellt',
+    ],
+    ['The server runtime does not match this Linux architecture.', 'runtime_platform_mismatch', 'Prozessorarchitektur'],
+    ['Installed model resource checksum mismatch.', 'runtime_installed_checksum_mismatch', 'Pr�fsumme'],
     ['LUCZOR_LLAMA_CPP_BIN is not configured.', 'runtime_not_configured', 'noch nicht eingerichtet'],
     [
       'Local runtime startup stopped to protect available RAM (runtime_startup_ram_pressure).',

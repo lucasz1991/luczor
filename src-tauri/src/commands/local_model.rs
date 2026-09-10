@@ -24,6 +24,10 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, WebviewWindow};
 use uuid::Uuid;
 
+#[cfg(target_os = "linux")]
+#[path = "local_model_linux.rs"]
+mod linux_protection;
+
 use super::{ensure_main_or_system_status_webview, ensure_main_webview};
 
 #[path = "local_model_stream.rs"]
@@ -45,10 +49,10 @@ mod context_budget;
 use context_budget::ContextUsage;
 #[path = "local_model_gpu.rs"]
 mod gpu_runtime;
-#[path = "local_model_messages.rs"]
-mod local_messages;
 #[path = "local_model_install.rs"]
 mod install;
+#[path = "local_model_messages.rs"]
+mod local_messages;
 #[path = "local_model_reasoning.rs"]
 mod reasoning_budget;
 #[path = "local_model_acceptance.rs"]
@@ -256,6 +260,8 @@ struct ManagedRuntime {
     acceleration: Arc<Mutex<gpu_runtime::RuntimeAcceleration>>,
     resource_plan: resource_runtime::ResourcePlan,
     model_storage: ModelStorage,
+    #[cfg(target_os = "linux")]
+    _linux_bundle: Arc<linux_protection::Bundle>,
     _runtime_guard: File,
     _support_guards: Vec<File>,
     _model_guard: File,
@@ -286,6 +292,10 @@ impl RuntimeScope {
 
 #[derive(Debug)]
 struct VerifiedArtifactFiles {
+    #[cfg(target_os = "linux")]
+    linux_bundle: Arc<linux_protection::Bundle>,
+    #[cfg(target_os = "linux")]
+    storage_path: PathBuf,
     runtime_path: PathBuf,
     model_path: PathBuf,
     runtime_guard: File,
@@ -309,7 +319,10 @@ impl Drop for ProcessLifetimeGuard {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+type ProcessLifetimeGuard = linux_protection::LifetimeGuard;
+
+#[cfg(not(any(windows, target_os = "linux")))]
 #[derive(Debug)]
 struct ProcessLifetimeGuard;
 
@@ -2274,15 +2287,19 @@ fn verify_configured_artifacts(
         .ok_or("Runtime metadata is unavailable.")?;
     let paths_configured = std::env::var_os("LUCZOR_LLAMA_CPP_BIN").is_some()
         || std::env::var_os("LUCZOR_LOCAL_MODEL_DIR").is_some()
-        || app.path().app_data_dir().map_err(|_| "Local-model data directory unavailable.")?
-            .join("local-model/runtime-paths.json").exists();
+        || app
+            .path()
+            .app_data_dir()
+            .map_err(|_| "Local-model data directory unavailable.")?
+            .join("local-model/runtime-paths.json")
+            .exists();
     let (runtime_path, model_path) = if cfg!(target_os = "linux") && !paths_configured {
         install::ensure(app, model, cancel)?
     } else {
         configured_paths(app, model, catalog_binding)?
     };
-    let mut model_guard = open_artifact_guard(&model_path)?;
-    let mut runtime_guard = open_artifact_guard(&runtime_path)?;
+    let mut model_guard = open_artifact_guard_cancellable(&model_path, cancel)?;
+    let mut runtime_guard = open_artifact_guard_cancellable(&runtime_path, cancel)?;
     if model_guard
         .metadata()
         .map_err(|_| "Configured GGUF file is unavailable.")?
@@ -2298,7 +2315,40 @@ fn verify_configured_artifacts(
         return Err("Configured llama.cpp runtime hash does not match the signed manifest.".into());
     }
     let support_guards = gpu_runtime::verify_support_files(&runtime_path, runtime, cancel)?;
+    #[cfg(target_os = "linux")]
+    let storage_path = model_path.clone();
+    #[cfg(target_os = "linux")]
+    let linux_bundle = {
+        let mut entries = vec![
+            ("llama-server".to_string(), &runtime_guard),
+            ("model.gguf".to_string(), &model_guard),
+        ];
+        for (entry, guard) in runtime
+            .files
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .zip(&support_guards)
+        {
+            entries.push((entry.name.clone(), guard));
+        }
+        Arc::new(linux_protection::Bundle::new(
+            runtime_path
+                .parent()
+                .ok_or("linux_artifact_namespace_failed")?,
+            entries,
+        )?)
+    };
+    #[cfg(target_os = "linux")]
+    let (runtime_path, model_path) = (
+        linux_bundle.path("llama-server"),
+        linux_bundle.path("model.gguf"),
+    );
     Ok(VerifiedArtifactFiles {
+        #[cfg(target_os = "linux")]
+        linux_bundle,
+        #[cfg(target_os = "linux")]
+        storage_path,
         runtime_path,
         model_path,
         runtime_guard,
@@ -3010,7 +3060,16 @@ fn start_runtime(
     // Every process replacement retains the signed hashes and immutable read guards.
     let artifacts = verify_configured_artifacts(app, model, catalog_binding, cancel)?;
     let model_storage = ensure_model_storage(
-        &artifacts.model_path,
+        {
+            #[cfg(target_os = "linux")]
+            {
+                &artifacts.storage_path
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                &artifacts.model_path
+            }
+        },
         model
             .artifact
             .as_ref()
@@ -3286,6 +3345,8 @@ fn start_runtime_attempt(
         acceleration,
         resource_plan,
         model_storage: model_storage.clone(),
+        #[cfg(target_os = "linux")]
+        _linux_bundle: artifacts.linux_bundle.clone(),
         _runtime_guard: runtime_guard,
         _support_guards: support_guards,
         _model_guard: model_guard,
@@ -4173,12 +4234,29 @@ fn open_artifact_guard(path: &Path) -> Result<File, String> {
         .map_err(|_| "Configured local-model artifact cannot be locked for read-only use.".into())
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn open_artifact_guard(_path: &Path) -> Result<File, String> {
     Err(
         "Local-model execution is disabled on this platform until immutable artifact guards are available."
             .into(),
     )
+}
+
+#[cfg(target_os = "linux")]
+fn open_artifact_guard(path: &Path) -> Result<File, String> {
+    linux_protection::snapshot(path, &AtomicBool::new(false))
+}
+
+fn open_artifact_guard_cancellable(path: &Path, cancel: &AtomicBool) -> Result<File, String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_protection::snapshot(path, cancel)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = cancel;
+        open_artifact_guard(path)
+    }
 }
 
 fn sha256_bytes(bytes: &[u8]) -> String {
@@ -4261,6 +4339,15 @@ fn loopback_listener_owned_by(port: u16, process_id: u32) -> Result<bool, String
 }
 
 fn copy_minimal_environment(command: &mut Command) {
+    #[cfg(target_os = "linux")]
+    if let Some(directory) = Path::new(command.get_program())
+        .parent()
+        .map(Path::to_path_buf)
+    {
+        // Only the per-preparation sealed bundle is passed by this runtime path.
+        command.env("LD_LIBRARY_PATH", &directory);
+        command.current_dir(directory);
+    }
     for key in ["SYSTEMROOT", "WINDIR", "TEMP", "TMP", "LANG", "LC_ALL"] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
@@ -4312,18 +4399,28 @@ fn attach_process_lifetime_guard(child: &Child) -> Result<ProcessLifetimeGuard, 
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn configure_process(command: &mut Command) {
     use std::os::unix::process::CommandExt;
     command.process_group(0);
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn attach_process_lifetime_guard(_child: &Child) -> Result<ProcessLifetimeGuard, String> {
     Err(
         "Local-model execution is disabled on this platform until parent-death process protection is available."
             .into(),
     )
+}
+
+#[cfg(target_os = "linux")]
+fn configure_process(command: &mut Command) {
+    linux_protection::configure(command);
+}
+
+#[cfg(target_os = "linux")]
+fn attach_process_lifetime_guard(child: &Child) -> Result<ProcessLifetimeGuard, String> {
+    linux_protection::LifetimeGuard::attach(child)
 }
 
 #[cfg(not(any(windows, unix)))]

@@ -85,6 +85,7 @@ export type CapacityReason =
   | 'available_ram_below_minimum'
   | 'accelerator_unavailable'
   | 'vram_below_minimum'
+  | 'cpu_mode_disallowed_by_manifest'
   | 'storage_unavailable'
   | 'fixed_nvme_storage_required'
   | 'resource_pressure'
@@ -162,6 +163,7 @@ export function assessModelCapacity(input: {
   manifestPayloadSha256?: string
   policy: ModelCapacityPolicy
   artifactSizeBytes: number
+  executionMode?: 'auto' | 'gpu' | 'cpu'
   now?: Date
   validForMs?: number
 }): CapacityAssessment {
@@ -203,9 +205,11 @@ export function assessModelCapacity(input: {
   const runtimeVerificationRequired =
     minimumVram > 0 &&
     ((!knownVramSufficient && inventoryVramSufficient) || policy.acceleratorMemoryScope === 'compatible_group')
-  if (!accelerators.length && !inventoryCandidates.length && minimumVram > 0) {
+  if (input.executionMode === 'cpu' && minimumVram > 0) {
+    reasons.push('cpu_mode_disallowed_by_manifest')
+  } else if (input.executionMode !== 'cpu' && !accelerators.length && !inventoryCandidates.length && minimumVram > 0) {
     reasons.push('accelerator_unavailable')
-  } else if (minimumVram > 0 && !knownVramSufficient && !inventoryVramSufficient) {
+  } else if (input.executionMode !== 'cpu' && minimumVram > 0 && !knownVramSufficient && !inventoryVramSufficient) {
     reasons.push('vram_below_minimum')
   }
 
