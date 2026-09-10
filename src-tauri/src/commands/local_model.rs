@@ -68,6 +68,9 @@ mod trust;
 
 const PUBLIC_KEY_B64: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64");
 const EXPECTED_KEY_ID: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID");
+// The signed catalog has no size class field yet. GGUF artifacts up to 6 GiB
+// are the compact local profiles (including the laptop Qwen 4B release).
+const COMPACT_MODEL_MAX_ARTIFACT_BYTES: u64 = 6 * 1024 * 1024 * 1024;
 const FLASH_MODEL_ID: &str = "qwen3.8-flash-next";
 const FALLBACK_MODEL_ID: &str = "orcarouter-qwen3.8-27b-uncensored-q4-k-m";
 // SSE framing/timings can exceed the text size many times. The HTTP queue is
@@ -3666,7 +3669,12 @@ fn stream_completion(
     });
     let tokenizer_client = local_http_client(Duration::from_secs(15), Duration::from_secs(15))?;
     let started = Instant::now();
-    let usage = context_budget::fit_adaptive_context(
+    let compact_model = model
+        .artifact
+        .as_ref()
+        .is_some_and(|artifact| artifact.size_bytes <= COMPACT_MODEL_MAX_ARTIFACT_BYTES);
+    let compact_ingress = compact_model.then_some((u64::from(context_limit) / 2).max(1024));
+    let usage = context_budget::fit_adaptive_context_with_ingress(
         &mut body,
         u64::from(context_limit),
         |candidate| {
@@ -3719,6 +3727,7 @@ fn stream_completion(
                 .ok_or_else(|| "Local tokenizer token count is unavailable.".into())
         },
         || LocalInferenceFailure::http(400, LlamaHttpFailureKind::ContextWindowExceeded),
+        compact_ingress,
     )?;
     require_runtime_operation_checkpoint(&request.request_id, &request.catalog_binding, &cancel)?;
     if request.use_case == IDLE_CONTEXT_USE_CASE {

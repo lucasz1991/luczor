@@ -65,7 +65,7 @@ pub(super) fn fit_context<E>(
     count: impl FnMut(&mut Value) -> Result<u64, E>,
     cannot_fit: impl Fn() -> E,
 ) -> Result<ContextUsage, E> {
-    fit(body, context_tokens, count, cannot_fit, false)
+    fit(body, context_tokens, count, cannot_fit, false, None)
 }
 
 /// Optional future thinking headroom must never evict usable history. First
@@ -76,7 +76,38 @@ pub(super) fn fit_adaptive_context<E>(
     count: impl FnMut(&mut Value) -> Result<u64, E>,
     cannot_fit: impl Fn() -> E,
 ) -> Result<ContextUsage, E> {
-    fit(body, context_tokens, count, cannot_fit, true)
+    fit_adaptive_context_with_ingress(body, context_tokens, count, cannot_fit, None)
+}
+
+pub(super) fn fit_adaptive_context_with_ingress<E>(
+    body: &mut Value,
+    context_tokens: u64,
+    count: impl FnMut(&mut Value) -> Result<u64, E>,
+    cannot_fit: impl Fn() -> E,
+    input_target: Option<u64>,
+) -> Result<ContextUsage, E> {
+    fit(body, context_tokens, count, cannot_fit, true, input_target)
+}
+
+/// Compact models receive a deliberately smaller ingress package. It keeps the
+/// complete current request and policy intact, but sheds older rounds before
+/// they consume the working context needed for an answer or tool result.
+#[cfg(test)]
+pub(super) fn fit_compact_context<E>(
+    body: &mut Value,
+    context_tokens: u64,
+    count: impl FnMut(&mut Value) -> Result<u64, E>,
+    cannot_fit: impl Fn() -> E,
+) -> Result<ContextUsage, E> {
+    // Half the window is a ceiling for injected history, memories and prior
+    // tool results. The remainder remains available for a useful public reply.
+    fit_adaptive_context_with_ingress(
+        body,
+        context_tokens,
+        count,
+        cannot_fit,
+        Some((context_tokens / 2).max(1024)),
+    )
 }
 
 fn fit<E>(
@@ -85,6 +116,7 @@ fn fit<E>(
     mut count: impl FnMut(&mut Value) -> Result<u64, E>,
     cannot_fit: impl Fn() -> E,
     prefer_history: bool,
+    input_target: Option<u64>,
 ) -> Result<ContextUsage, E> {
     let mut requested_output = body["max_tokens"].as_u64().ok_or_else(&cannot_fit)?;
     let mut usage = ContextUsage {
@@ -96,6 +128,18 @@ fn fit<E>(
     // the separate bound also caps tokenizer work.
     for _ in 0..272 {
         let input_tokens = count(body)?;
+        if input_target.is_some_and(|target| input_tokens > target) {
+            let messages = body["messages"].as_array_mut().ok_or_else(&cannot_fit)?;
+            let removed = remove_oldest_round(messages);
+            if removed > 0 {
+                usage.omitted_messages += removed;
+                continue;
+            }
+            if shorten_tool_result(messages) {
+                usage.shortened_tool_results += 1;
+                continue;
+            }
+        }
         let available = context_tokens.saturating_sub(input_tokens.saturating_add(64));
         if available >= requested_output {
             usage.input_tokens = input_tokens;
@@ -192,6 +236,28 @@ mod tests {
         assert_eq!(usage.output_tokens, 704);
         assert_eq!(body["reasoning_effort"], "none");
         assert_eq!(body["reasoning_budget_tokens"], 0);
+    }
+
+    #[test]
+    fn compact_fit_removes_old_rounds_before_reducing_answer_headroom() {
+        let mut body = json!({"max_tokens": 2048, "messages": [
+            {"role":"system","content":"policy"},
+            {"role":"user","content":"old request"},
+            {"role":"assistant","content":"old answer"},
+            {"role":"user","content":"current request"}
+        ]});
+        let usage = fit_compact_context(
+            &mut body,
+            8192,
+            |candidate| Ok::<_, ()>(candidate["messages"].as_array().unwrap().len() as u64 * 1600),
+            || (),
+        )
+        .unwrap();
+        assert_eq!(usage.input_tokens, 3200);
+        assert_eq!(usage.output_tokens, 2048);
+        assert_eq!(usage.omitted_messages, 2);
+        assert_eq!(body["messages"][0]["role"], "system");
+        assert_eq!(body["messages"][1]["content"], "current request");
     }
 
     #[test]
