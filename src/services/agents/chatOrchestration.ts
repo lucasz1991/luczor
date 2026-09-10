@@ -3,6 +3,7 @@ import type { InferenceGateway } from '@/services/inference/types'
 import type { TokenUsage } from '@/services/tokenUsage'
 import { loadToolLimits } from '@/services/toolLimits'
 import { localResources } from '@/services/inference/resources'
+import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 import { agentProjectSnapshot } from './hub'
 import { agentTeams, prepareChatAgentTeam } from './teamHub'
 import { teamMessages, type AgentCheckpoint } from './chatCheckpoint'
@@ -62,6 +63,7 @@ export async function runChatAgentTeam(
   const notices: string[] = []
   let specialists: Awaited<ReturnType<typeof prepareExternalSpecialists>> = null
   if (
+    modelUsageSettings.value.externalEnabled &&
     opts.agentTeamPreset !== 'local' &&
     opts.requestAgentTeamApproval &&
     opts.externalBaseMessages?.length &&

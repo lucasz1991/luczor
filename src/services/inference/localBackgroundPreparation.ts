@@ -5,6 +5,7 @@ import {
 } from './coordinator'
 import { BackgroundModelPreparation, type BackgroundPreparationPolicy } from './backgroundPreparation'
 import type { HybridRoutingSettings } from './hybridRouter'
+import { modelUsageSettings } from './modelUsageSettings'
 
 export type BackgroundRoutingSettings = Pick<HybridRoutingSettings, 'experimentalFlashNext'>
 
@@ -28,13 +29,16 @@ export const recoverLocalBackgroundPolicy = () => reinitializeLocalInferenceForC
 export function localBackgroundPreparationPolicy(settings?: BackgroundRoutingSettings): BackgroundPreparationPolicy {
   const status = localInferenceCoordinator.status()
   const manifest = status.manifest
-  const order = manifest
-    ? [
-        ...(settings?.experimentalFlashNext ? (manifest.routing.experimentalModelIds ?? []) : []),
-        manifest.routing.defaultModelId,
-        ...manifest.routing.fallbackModelIds,
-      ]
-    : []
+  const selection = modelUsageSettings.value.localModelId
+  const order = selection
+    ? [selection]
+    : manifest
+      ? [
+          ...(settings?.experimentalFlashNext ? (manifest.routing.experimentalModelIds ?? []) : []),
+          manifest.routing.defaultModelId,
+          ...manifest.routing.fallbackModelIds,
+        ]
+      : []
   const readyModelId = order.find(id =>
     status.admissions.some(
       model =>
@@ -50,7 +54,9 @@ export function localBackgroundPreparationPolicy(settings?: BackgroundRoutingSet
     active: status.mode === 'active',
     mode: status.mode,
     reason: status.reason,
-    fingerprint: manifest ? `${manifest.payloadSha256}:resources:${status.appliedResourceRevision ?? 0}` : undefined,
+    fingerprint: manifest
+      ? `${manifest.payloadSha256}:resources:${status.appliedResourceRevision ?? 0}:model:${selection ?? 'auto'}`
+      : undefined,
     expiresAt: manifest ? Date.parse(manifest.expiresAt) : undefined,
     readyModelId,
   }

@@ -4,6 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import { loadPendingTaskCreates, replacePendingTaskCreates } from '@/services/agents/taskCreateRecoveryLedger'
 import Settings from './components/Settings.vue'
+import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import type { SystemStatusDisplayMode } from '@/features/system-status/model'
 import TokenCounter from './components/ai/TokenCounter.vue'
@@ -154,7 +155,7 @@ import {
 /* -------------------------------------------------
  * Local UI state
  * ------------------------------------------------- */
-type SettingsStartTab = 'server' | 'notifications' | 'execution'
+type SettingsStartTab = 'server' | 'notifications' | 'execution' | 'chat'
 const showSettings = ref(false)
 const settingsStartTab = ref<SettingsStartTab>('server')
 const showSystemPanel = ref(false)
@@ -204,15 +205,22 @@ const sending = ref(false)
 const sendAdmission = ref(false)
 // External fallback is a conscious choice for this project in this session.
 // Capture it at turn admission so later UI changes cannot change an in-flight route.
-const allowChatExternalFallback = ref(false)
-const agentMode = ref(false)
+const allowChatExternalFallback = ref(modelUsageSettings.value.externalEnabled)
+const agentMode = ref(modelUsageSettings.value.agentsByDefault)
 const chatThinkingChoices = ref(new Map<string, ThinkingTier>())
 const activeThinkingBudget = shallowRef<{
   projectId: string
   messageId: string
   progress: ThinkingBudgetProgress
 } | null>(null)
-const agentTeamPreset = ref<import('@/services/agents/teamPolicy').TeamPresetChoice>('server')
+const agentTeamPreset = ref<import('@/services/agents/teamPolicy').TeamPresetChoice>(
+  modelUsageSettings.value.teamPreset
+)
+watch(modelUsageSettings, value => {
+  agentMode.value = value.agentsByDefault
+  agentTeamPreset.value = value.externalEnabled ? value.teamPreset : 'local'
+  allowChatExternalFallback.value = value.externalEnabled
+})
 const continuations = shallowRef<Record<string, AgentCheckpoint>>({})
 const resetChatRouting = () => {
   chatThinkingChoices.value = new Map()
@@ -1410,7 +1418,8 @@ async function send(
   const turnThinking = resume?.checkpoint.thinkingTier
     ? { thinkingTier: resume.checkpoint.thinkingTier, thinkingConfig: resume.checkpoint.thinkingConfig }
     : captureThinking(thinkingTier.value)
-  const externalFallbackAllowed = !useAgents && !resume && allowChatExternalFallback.value
+  const externalFallbackAllowed =
+    modelUsageSettings.value.externalEnabled && !useAgents && !resume && allowChatExternalFallback.value
   const rawText = resume?.checkpoint.objective ?? (miniInput?.text ?? input.value).trim()
   if (!rawText || conversationBusy.value) return
   if (miniInput && miniInput.projectId !== pid) throw new Error('Der Projektchat wurde inzwischen gewechselt.')
@@ -2672,6 +2681,7 @@ useWorkflowWatchers()
           v-model:agent-mode="agentMode"
           v-model:thinking-tier="thinkingTier"
           v-model:external-fallback="allowChatExternalFallback"
+          :external-allowed="modelUsageSettings.externalEnabled"
           :busy="conversationBusy"
           :recording="isRecording"
           :listening="listening"
@@ -2692,7 +2702,7 @@ useWorkflowWatchers()
           @listen="toggleListening"
           @voice-start="startConfiguredVoice"
           @voice-stop="voiceInputSession.stop()"
-          @model="openSettings()"
+          @model="openSettings('chat')"
           @context="showContext = !showContext"
           @command="handlePromptCommand"
         />

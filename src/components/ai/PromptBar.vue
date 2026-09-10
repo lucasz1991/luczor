@@ -12,6 +12,7 @@ const props = withDefaults(
     thinkingTier?: ThinkingTier
     agentMode?: boolean
     externalFallback?: boolean
+    externalAllowed?: boolean
     busy?: boolean
     recording?: boolean
     listening?: boolean
@@ -21,7 +22,13 @@ const props = withDefaults(
     contextLabel?: string
     commands?: SearchItem[]
   }>(),
-  { placeholder: 'Was möchtest du als Nächstes tun?', modelLabel: 'Automatisch', commands: () => [], contextLabel: '' }
+  {
+    placeholder: 'Was möchtest du als Nächstes tun?',
+    modelLabel: 'Automatisch',
+    commands: () => [],
+    contextLabel: '',
+    externalAllowed: true,
+  }
 )
 const emit = defineEmits<{
   'update:agentMode': [value: boolean]
@@ -120,9 +127,13 @@ defineExpose({ focus: () => field.value?.focus() })
             class="ai-agent-mode"
             :class="{ 'is-active': externalFallback }"
             :aria-pressed="!!externalFallback"
-            :disabled="busy"
+            :disabled="busy || !externalAllowed"
             aria-label="Externen Fallback nach Freigabe erlauben"
-            title="Erlaubt nach einer ausdrücklichen Freigabe den Wechsel vom lokalen Modell zu einem externen Modell"
+            :title="
+              externalAllowed
+                ? 'Erlaubt nach einer ausdrücklichen Freigabe den Wechsel zu einem externen Modell'
+                : 'Externe Modelle zuerst unter Einstellungen → Chat & Agenten zulassen'
+            "
             @click="emit('update:externalFallback', !externalFallback)"
           >
             <AiIcon name="shield" :size="13" />Fallback

@@ -2,6 +2,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 import { runAgent, buildSystemPreamble } from '@/services/agent'
+import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 import { createMiniChatController } from '@/services/miniChat/controller'
 import { MINI_ACTION_EVENT, type MiniAction, type MiniDecision, type MiniSnapshot } from '@/services/miniChat/types'
 import type { LuczorMode } from '@/services/inference/types'
@@ -61,13 +62,15 @@ export function useMiniChatHost(deps: Dependencies) {
         executionGate.assert(ticket)
         return await runAgent({
           ...options,
+          agentMode: deps.agentMode(),
+          agentTeamPreset: 'local',
           workspaceScope: Object.freeze({ principalId, projectIds: Object.freeze(projectIds) }),
           principalScopeId,
           workspaceBindingId: deps.context().workspaceBindingId ?? '',
           pendingTaskCreateVerifications,
           taskCreateRecoveryReady,
           contextEgress: 'local_only',
-          routingSettings: { preference: 'local_only' },
+          routingSettings: { preference: 'local_only', localModelId: modelUsageSettings.value.localModelId },
           externalBaseMessages: undefined,
           requestExternalApproval: undefined,
           onCheckpoint: async checkpoint => {

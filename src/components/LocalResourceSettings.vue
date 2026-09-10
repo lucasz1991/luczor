@@ -29,7 +29,11 @@ const client = props.client ?? {
 }
 const defaults = (): LocalResourceConfig => ({ ...DEFAULT_LOCAL_RESOURCE_CONFIG })
 const modes = [
-  { id: 'auto', title: 'Automatisch – alle Ressourcen', detail: 'GPU, CPU und RAM passend zum Gerät einsetzen.' },
+  {
+    id: 'auto',
+    title: 'Automatisch – alle Ressourcen',
+    detail: 'GPU bevorzugen; größere Modelle bei Bedarf auf GPU und CPU/RAM verteilen (Hybrid).',
+  },
   {
     id: 'gpu',
     title: 'GPU – Automatik als Ersatz',
@@ -251,6 +255,13 @@ onBeforeUnmount(() => {
       </div>
       <details class="resource-settings__expert">
         <summary>Details: Grafikkarten, Threads und Speicherpuffer</summary>
+        <p>
+          Im Hybridbetrieb verbleiben Modellschichten im RAM und werden dort von der CPU berechnet. Auf die GPU passen
+          so viele Schichten, wie freier VRAM und Kontextcache erlauben. Eine SSD speichert die Modelldatei;
+          Memory-Mapping und Auslagerung können Speicherbedarf abfedern, sind aber deutlich langsamer als RAM.
+          SSD-Kapazität wird deshalb nicht als zusätzlicher RAM oder VRAM gezählt. Die Runtime wählt den passenden
+          Ladeweg; signierte Mindestanforderungen und RAM-Notfallschutz bleiben gültig.
+        </p>
         <p>
           Leere Felder verwenden die Automatik. Speicherpuffer sind Sicherheitsabstände für andere Anwendungen; sie
           sperren keinen RAM.

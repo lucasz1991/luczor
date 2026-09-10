@@ -40,6 +40,7 @@ import {
   type NativeLocalModelStatus,
 } from '@/services/inference/tauriLocalRuntime'
 import type { ApprovedProxyConfig, InferenceGateway, InferenceRequest, WireMessage } from '@/services/inference/types'
+import { modelUsageSettings } from './modelUsageSettings'
 
 export type ExternalTurnPackage = {
   /** Provider-safe messages assembled independently from local-only context. */
@@ -1038,9 +1039,9 @@ export class LocalInferenceCoordinator {
           return model && !model.promoted
         })
       : []
-    const ids = [
-      ...new Set([...experimental, this.manifest.routing.defaultModelId, ...this.manifest.routing.fallbackModelIds]),
-    ]
+    const ids = settings.localModelId
+      ? [settings.localModelId]
+      : [...new Set([...experimental, this.manifest.routing.defaultModelId, ...this.manifest.routing.fallbackModelIds])]
     if (this.manifest.schemaVersion === 2) {
       ids.sort(
         (left, right) =>
@@ -1324,5 +1325,14 @@ export function reinitializeLocalInferenceForCurrentApi(
 }
 
 export function resolveInferenceRouteForTurn(input: TurnRoutingInput): Promise<ResolvedTurnRoute> {
-  return localInferenceCoordinator.resolveTurn(input)
+  const usage = modelUsageSettings.value
+  return localInferenceCoordinator.resolveTurn({
+    ...input,
+    routingSettings: {
+      ...input.routingSettings,
+      localModelId: input.routingSettings?.localModelId ?? usage.localModelId,
+      ...(!usage.externalEnabled ? { preference: 'local_only' as const } : {}),
+    },
+    ...(!usage.externalEnabled ? { contextEgress: 'local_only' as const, externalPackage: undefined } : {}),
+  })
 }

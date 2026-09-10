@@ -192,6 +192,31 @@ const basicRequest: InferenceRequest = {
   taskType: 'chat',
 }
 
+it('honors a fixed local selection even when another signed model is ready', async () => {
+  const verified = await manifest('hardware_tiers')
+  const input = readyRoutingInput(verified)
+  const selected = verified.models[0]!.id
+  input.settings.localModelId = selected
+  expect(decideHybridRoute(input).modelReleaseId).toBe(selected)
+  input.readiness = new Map([...input.readiness].filter(([id]) => id !== selected))
+  input.settings.preference = 'local_only'
+  expect(decideHybridRoute(input).target).toBe('blocked')
+})
+
+it('prepares only the selected model and does not prepare a fallback for an unknown selection', async () => {
+  const verified = await manifest('hardware_tiers')
+  const harness = makeHarness(verified)
+  await harness.coordinator.initialize(bootstrap())
+  harness.prepareModel.mockClear()
+  await expect(
+    harness.coordinator.resolveTurn({
+      projectId: 'project-1',
+      routingSettings: { localModelId: 'missing-model', preference: 'local_only' },
+    })
+  ).rejects.toBeDefined()
+  expect(harness.prepareModel).not.toHaveBeenCalled()
+})
+
 async function approvedSpecialist(taskType = 'agent.research') {
   const request: InferenceRequest = { ...basicRequest, taskType }
   const packetHash = await hashInferenceEgressRequest(request, 'desktop-1')

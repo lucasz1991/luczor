@@ -32,6 +32,7 @@ vi.mock('@/services/agents/teamHub', async () => {
   }
 })
 import { runChatAgentTeam } from '@/services/agents/chatOrchestration'
+import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 const checkpoint: AgentCheckpoint = {
   projectId: 'p',
   sessionId: 's',
@@ -695,6 +696,7 @@ it.each(['team_node_interrupted', 'runtime_empty_response'])(
 )
 
 it('uses parallel distinct external roles and passes their proposals only to the local tool worker', async () => {
+  modelUsageSettings.value = { ...modelUsageSettings.value, externalEnabled: true }
   const outcomes: Array<{ role: string }> = []
   prepareSpecialists.mockResolvedValue({
     roles: ['research', 'coding', 'review'],

@@ -44,6 +44,7 @@ declare module 'vue' {
     MiniChatSurface: typeof import('./src/components/mini/MiniChatSurface.vue')['default']
     MiniChatWindow: typeof import('./src/components/mini/MiniChatWindow.vue')['default']
     ModelControlPanel: typeof import('./src/components/tools/ModelControlPanel.vue')['default']
+    ModelUsageSettings: typeof import('./src/components/settings/ModelUsageSettings.vue')['default']
     PayloadApproval: typeof import('./src/components/ai/PayloadApproval.vue')['default']
     PlanningWorkspace: typeof import('./src/components/planning/PlanningWorkspace.vue')['default']
     PlanPanel: typeof import('./src/components/PlanPanel.vue')['default']

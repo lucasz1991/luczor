@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import ModelUsageSettings from './ModelUsageSettings.vue'
 
 type ChatAutoSpeechMode = 'off' | 'assistant_only' | 'all'
 
@@ -30,6 +31,7 @@ const historyTokenBudgetModel = computed({
 
 <template>
   <div class="lz-section">
+    <ModelUsageSettings />
     <div class="lz-section__head">
       <h3>Chat</h3>
       <p>Zwischenkommentare und Antworten automatisch nacheinander vorlesen.</p>

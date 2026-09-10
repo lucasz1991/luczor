@@ -597,7 +597,7 @@ const tabs: Array<{
   { id: 'notifications', title: 'Benachrichtigungen', desc: 'Native Pushs', icon: 'bell' },
   { id: 'execution', title: 'Ausführung', desc: 'Freigaben & Sicherheit', icon: 'shield' },
   { id: 'voice', title: 'Voice', desc: 'Lokale STT · Server-TTS', icon: 'mic' },
-  { id: 'chat', title: 'Chat', desc: 'Auto Speech', icon: 'chat' },
+  { id: 'chat', title: 'Chat & Agenten', desc: 'Modelle, Ressourcen & Sprache', icon: 'chat' },
   { id: 'appearance', title: 'Appearance', desc: 'UI (später)', icon: 'palette' },
   { id: 'privacy', title: 'Datenschutz', desc: 'Diagnose & Freigabe', icon: 'shield' },
 ]

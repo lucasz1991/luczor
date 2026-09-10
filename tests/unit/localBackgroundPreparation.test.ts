@@ -12,6 +12,7 @@ import {
   localBackgroundPreparationPolicy,
   canRetryBackgroundPolicy,
 } from '@/services/inference/localBackgroundPreparation'
+import { modelUsageSettings, DEFAULT_MODEL_USAGE } from '@/services/inference/modelUsageSettings'
 
 function status(ready = false) {
   return {
@@ -28,6 +29,7 @@ function status(ready = false) {
 }
 
 beforeEach(() => {
+  modelUsageSettings.value = { ...DEFAULT_MODEL_USAGE }
   vi.useFakeTimers()
   vi.setSystemTime(0)
   vi.resetAllMocks()
@@ -36,6 +38,15 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('local background preparation adapter', () => {
+  it('does not consider a different resident model ready after a fixed selection changes', () => {
+    dependencies.status.mockReturnValue(status(true))
+    const initial = localBackgroundPreparationPolicy()
+    modelUsageSettings.value = { ...DEFAULT_MODEL_USAGE, localModelId: 'laptop' }
+    const next = localBackgroundPreparationPolicy()
+    expect(initial.readyModelId).toBe('primary')
+    expect(next.readyModelId).toBeUndefined()
+    expect(next.fingerprint).not.toBe(initial.fingerprint)
+  })
   it('prepares once after an applied resource change without waiting for the previous retry delay', async () => {
     const current = { ...status(), appliedResourceRevision: 1 }
     dependencies.status.mockReturnValue(current)

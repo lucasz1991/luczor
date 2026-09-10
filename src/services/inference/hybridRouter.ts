@@ -12,6 +12,8 @@ export const FLASH_EXPERIMENT_SETTING_KEY = 'local_model_flash_experiment'
 export type RoutingPreference = 'local_only' | 'ask_external' | 'allow_external'
 
 export type HybridRoutingSettings = {
+  /** Device selection narrows the signed catalog; it never bypasses readiness. */
+  localModelId?: string | null
   preference: RoutingPreference
   experimentalFlashNext: boolean
   allowDegradedLocal: boolean
@@ -76,6 +78,7 @@ function availableLocally(
   now: Date
 ): boolean {
   if (
+    (settings.localModelId && model?.id !== settings.localModelId) ||
     !model?.enabled ||
     !model.capabilities.includes(requiredCapability) ||
     model.executionTarget !== 'local_llama_cpp' ||
@@ -127,7 +130,9 @@ export function decideHybridRoute(input: {
   const flash = models.get(FLASH_NEXT_MODEL_ID)
 
   if (input.manifest.schemaVersion === 2 && !input.preferExternal) {
-    const order = [input.manifest.routing.defaultModelId, ...input.manifest.routing.fallbackModelIds]
+    const order = input.settings.localModelId
+      ? [input.settings.localModelId]
+      : [input.manifest.routing.defaultModelId, ...input.manifest.routing.fallbackModelIds]
     order.sort(
       (left, right) =>
         Number(!!input.assessments.get(right)?.memory?.resident) -
