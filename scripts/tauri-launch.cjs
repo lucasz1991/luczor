@@ -8,6 +8,44 @@ const appRoot = path.resolve(__dirname, '..')
 const managedRuntimeRoot = path.resolve(appRoot, '../.lmzdev/artifacts/runtime/claude-agent')
 const managedRuntimeResource = '../../.lmzdev/artifacts/runtime/claude-agent/'
 
+function declaredWorkspaceDependencies(manifest = require(path.join(appRoot, 'package.json'))) {
+  return [...new Set([...Object.keys(manifest.dependencies || {}), ...Object.keys(manifest.devDependencies || {})])]
+}
+
+function missingWorkspaceDependencies(dependencies = declaredWorkspaceDependencies(), root = appRoot) {
+  return dependencies.filter(dependency => !fs.existsSync(path.join(root, 'node_modules', dependency, 'package.json')))
+}
+
+function pnpmInvocation(env = process.env, platform = process.platform) {
+  const npmExecPath = env.npm_execpath
+  if (npmExecPath && path.basename(npmExecPath).toLowerCase().includes('pnpm')) {
+    return { command: process.execPath, args: [npmExecPath] }
+  }
+  return { command: platform === 'win32' ? 'pnpm.cmd' : 'pnpm', args: [] }
+}
+
+function ensureWorkspaceDependencies(env = process.env) {
+  const missing = missingWorkspaceDependencies()
+  if (missing.length === 0) return
+
+  console.warn(`Luczor dependencies are incomplete (${missing.join(', ')}); restoring the locked workspace install.`)
+  const invocation = pnpmInvocation(env)
+  const result = spawnSync(invocation.command, [...invocation.args, 'install', '--frozen-lockfile'], {
+    cwd: appRoot,
+    env,
+    stdio: 'inherit',
+  })
+  if (result.error || result.status !== 0) {
+    const reason = result.error?.message || `exit code ${result.status ?? 'unknown'}`
+    throw new Error(`Luczor dependency installation failed: ${reason}`)
+  }
+
+  const remaining = missingWorkspaceDependencies()
+  if (remaining.length > 0) {
+    throw new Error(`Luczor dependencies remain unavailable after pnpm install: ${remaining.join(', ')}`)
+  }
+}
+
 async function freePort(start = 1420, host = '127.0.0.1') {
   for (let port = start; port < start + 100; port++) {
     const available = await new Promise((resolve, reject) => {
@@ -94,6 +132,7 @@ async function main() {
   const env = { ...process.env }
   const command = args[0]
   const isHelp = args.includes('--help') || args.includes('-h')
+  if (!isHelp && ['dev', 'build', 'bundle'].includes(command)) ensureWorkspaceDependencies(env)
   let devUrl
   if (args[0] === 'dev') {
     const host = env.TAURI_DEV_HOST || '127.0.0.1'
@@ -127,7 +166,16 @@ async function main() {
   })
 }
 
-module.exports = { dynamicTauriConfig, freePort, runtimeManifestMatches, targetTripleFromArgs }
+module.exports = {
+  declaredWorkspaceDependencies,
+  dynamicTauriConfig,
+  ensureWorkspaceDependencies,
+  freePort,
+  missingWorkspaceDependencies,
+  pnpmInvocation,
+  runtimeManifestMatches,
+  targetTripleFromArgs,
+}
 if (require.main === module)
   main().catch(error => {
     console.error(error.message)

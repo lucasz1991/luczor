@@ -33,6 +33,12 @@ the resource through Tauri's runtime configuration only after its manifest and
 required files exist. If the optional package is not installed, Luczor still
 starts and Claude remains visibly unavailable with a concrete readiness reason.
 
+`pnpm tauri dev` also verifies all direct dependencies from `package.json` before
+starting Vite. If a checkout has stale or incomplete `node_modules` data after an
+update, the launcher runs `pnpm install --frozen-lockfile` once and verifies the
+result. This keeps imports such as `@vue-flow/core` consistent on Windows, Linux
+and macOS without changing the locked dependency versions.
+
 ## Installing the app without development tools
 
 Node, pnpm and Rust are build tools and are not required by end users.

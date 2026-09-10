@@ -4,7 +4,15 @@ const fs = require('node:fs')
 const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
-const { dynamicTauriConfig, freePort, runtimeManifestMatches, targetTripleFromArgs } = require('./tauri-launch.cjs')
+const {
+  declaredWorkspaceDependencies,
+  dynamicTauriConfig,
+  freePort,
+  missingWorkspaceDependencies,
+  pnpmInvocation,
+  runtimeManifestMatches,
+  targetTripleFromArgs,
+} = require('./tauri-launch.cjs')
 
 test('uses another port without interrupting an existing server', async () => {
   const server = net.createServer()
@@ -65,4 +73,35 @@ test('accepts only a complete runtime for the selected native profile', () => {
     assert.equal(resolved.startsWith(`${temporaryRoot}${path.sep}`), true)
     fs.rmSync(resolved, { recursive: true, force: true })
   }
+})
+
+test('detects missing direct dependencies including scoped packages', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'luczor-dependencies-'))
+  try {
+    const installedManifest = path.join(root, 'node_modules/vue/package.json')
+    fs.mkdirSync(path.dirname(installedManifest), { recursive: true })
+    fs.writeFileSync(installedManifest, '{}')
+    assert.deepEqual(missingWorkspaceDependencies(['vue', '@vue-flow/core'], root), ['@vue-flow/core'])
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true })
+  }
+})
+
+test('collects production and development dependencies without duplicates', () => {
+  assert.deepEqual(
+    declaredWorkspaceDependencies({
+      dependencies: { vue: '1', shared: '1' },
+      devDependencies: { vite: '1', shared: '1' },
+    }),
+    ['vue', 'shared', 'vite']
+  )
+})
+
+test('uses the active pnpm executable and a cross-platform fallback', () => {
+  assert.deepEqual(pnpmInvocation({ npm_execpath: '/tools/pnpm.cjs' }, 'linux'), {
+    command: process.execPath,
+    args: ['/tools/pnpm.cjs'],
+  })
+  assert.deepEqual(pnpmInvocation({}, 'linux'), { command: 'pnpm', args: [] })
+  assert.deepEqual(pnpmInvocation({}, 'win32'), { command: 'pnpm.cmd', args: [] })
 })
