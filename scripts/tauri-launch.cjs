@@ -3,6 +3,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawn, spawnSync } = require('node:child_process')
+const { reportLinuxMedia } = require('./linux-media-check.cjs')
 
 const appRoot = path.resolve(__dirname, '..')
 const managedRuntimeRoot = path.resolve(appRoot, '../.lmzdev/artifacts/runtime/claude-agent')
@@ -133,6 +134,7 @@ async function main() {
   const command = args[0]
   const isHelp = args.includes('--help') || args.includes('-h')
   if (!isHelp && ['dev', 'build', 'bundle'].includes(command)) ensureWorkspaceDependencies(env)
+  if (!isHelp && command === 'dev') reportLinuxMedia()
   let devUrl
   if (args[0] === 'dev') {
     const host = env.TAURI_DEV_HOST || '127.0.0.1'

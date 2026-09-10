@@ -4,7 +4,7 @@
     "targets": ["deb"],
     "linux": {
       "deb": {
-        "recommends": ["gnome-keyring", "xdg-desktop-portal", "gstreamer1.0-plugins-good"],
+        "recommends": ["gnome-keyring", "xdg-desktop-portal"],
         "depends": [
           "libgbm1",
           "libxdo3",
@@ -12,7 +12,10 @@
           "libegl1",
           "libxcb1",
           "libwayland-client0",
-          "libwayland-server0"
+          "libwayland-server0",
+          "gstreamer1.0-plugins-base",
+          "gstreamer1.0-plugins-good",
+          "gstreamer1.0-plugins-bad"
         ]
       }
     }

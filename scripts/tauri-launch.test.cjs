@@ -4,6 +4,49 @@ const fs = require('node:fs')
 const net = require('node:net')
 const os = require('node:os')
 const path = require('node:path')
+const { checkLinuxMedia, reportLinuxMedia } = require('./linux-media-check.cjs')
+
+test('Linux media probes are bounded and are skipped on other hosts', () => {
+  const calls = []
+  const run = (command, args, options) => {
+    calls.push(args[0])
+    assert.equal(command, 'gst-inspect-1.0')
+    assert.equal(options.timeout, 5000)
+    return { status: 0 }
+  }
+  assert.deepEqual(checkLinuxMedia('win32', run), [])
+  assert.deepEqual(checkLinuxMedia('darwin', run), [])
+  assert.deepEqual(calls, [])
+  assert.deepEqual(checkLinuxMedia('linux', run), [])
+  assert.deepEqual(calls, ['fakevideosink', 'webvttenc'])
+})
+
+test('missing plugins have an actionable media repair without claiming a model failure', () => {
+  const warnings = []
+  const missing = reportLinuxMedia(
+    'linux',
+    (_, args) => ({ status: args[0] === 'webvttenc' ? 1 : 0 }),
+    text => warnings.push(text)
+  )
+  assert.deepEqual(missing, ['webvttenc'])
+  assert.match(warnings[0], /--install-media/)
+  assert.match(warnings[0], /not model RAM\/VRAM/)
+})
+
+test('missing inspector, timeouts and terminated probes do not report multimedia ready', () => {
+  assert.deepEqual(
+    checkLinuxMedia('linux', () => ({ error: { code: 'ENOENT' } })),
+    ['gst-inspect-1.0 (GStreamer tools)']
+  )
+  assert.deepEqual(
+    checkLinuxMedia('linux', () => ({ error: { code: 'ETIMEDOUT' } })),
+    ['fakevideosink', 'webvttenc']
+  )
+  assert.deepEqual(
+    checkLinuxMedia('linux', () => ({ status: null, signal: 'SIGTERM' })),
+    ['fakevideosink', 'webvttenc']
+  )
+})
 const {
   declaredWorkspaceDependencies,
   dynamicTauriConfig,

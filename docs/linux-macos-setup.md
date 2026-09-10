@@ -50,7 +50,15 @@ WebKitGTK, GTK, PipeWire, GBM, X11/Wayland and libxdo runtime dependencies:
 sudo apt install ./Luczor_VERSION_amd64.deb
 ```
 
-Use the actual downloaded filename. For portable Linux packages, build on the
+Use the actual downloaded filename. The Debian package declares the required GStreamer
+base/good/bad plugins as mandatory dependencies, so installation through apt or
+a graphical package manager installs them automatically, including when recommended
+packages are disabled. Internet access or an existing local package cache is needed
+for missing dependencies. A raw `dpkg -i` does not download dependencies; use apt
+as shown above. These dependencies also apply when updating an existing installation
+with a newly built package. Existing binaries are not updated by source changes.
+
+For portable Linux packages, build on the
 oldest supported distribution (the workflow uses Ubuntu 22.04). A package built
 locally on Ubuntu 26.04 is only a local test artifact, not proof of compatibility
 with older distributions. Fedora development is supported by the setup script;
@@ -67,6 +75,56 @@ distribution still requires Apple signing and notarization, using the existing
 release-readiness process. Test builds do not bypass Gatekeeper.
 
 ## Models and speech
+
+### Existing Linux installs: WebKit multimedia warnings
+
+`fakevideosink not found` and `WebVTT encoder` refer to missing GStreamer
+plugins, not CUDA or model memory. Repair only the multimedia packages with:
+
+```sh
+bash scripts/setup-desktop.sh --install-media
+pnpm tauri dev
+```
+
+This does not reinstall Node/Rust or download models. Ubuntu/Debian use
+`gstreamer1.0-tools` plus `gstreamer1.0-plugins-base`, `-good`, and `-bad`;
+Fedora uses `gstreamer1` plus `gstreamer1-plugins-base`, `-good`, and `-bad-free`.
+The repair checks both elements with `gst-inspect-1.0`. The desktop doctor also
+checks them; development startup prints an actionable warning without blocking
+ordinary chat. New Debian packages require the plugin packages explicitly.
+
+The appindicator deprecation message is separate and does not establish an app
+crash. `Finished dev profile` followed by `Running target/debug/tauri-app`
+means the build succeeded. Earlier failed invocations in a pasted terminal history
+must not be confused with the final invocation.
+
+### Small NVIDIA laptops: diagnose the actual model route
+
+4 GiB of physical VRAM alone does not establish model readiness. In Luczor's
+Systemstatus / LocalModel, check the selected model ID, published catalog
+availability, installed model and Linux runtime, readiness reason, and GPU offload.
+The Qwen3-4B Q4_K_M admin laptop preset is initially a disabled draft; it requires
+matching runtime/template/evaluation evidence and catalog publication. Merely
+adding the draft does not install or activate the model on any device.
+
+For a hardware snapshot on the affected NVIDIA laptop (read-only):
+
+```sh
+nvidia-smi --query-gpu=name,driver_version,memory.total,memory.free --format=csv
+free -h
+```
+
+If NVIDIA's tool cannot connect to the driver, investigate the driver first.
+Successful `nvidia-smi` still does not prove the selected llama-server has a CUDA
+backend. Use the app's measured readiness/offload status for that conclusion.
+Automatic resource mode may distribute layers between GPU and CPU/RAM, subject
+to signed model limits; CPU-resident layers also compute on CPU. SSD paging is
+not additional fast VRAM. Do not lower memory safeguards to bypass a missing
+runtime, unpublished model, or failed readiness probe.
+
+Plugin references:
+https://gstreamer.freedesktop.org/documentation/debugutilsbad/fakevideosink.html
+and https://gstreamer.freedesktop.org/documentation/subenc/webvttenc.html.
 
 Model policy and public trust are supplied by the backend. A production deployment
 of the signing-key endpoint must exist. Model weights, a platform-matching

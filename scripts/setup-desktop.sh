@@ -2,14 +2,38 @@
 set -euo pipefail
 
 mode="${1:---check}"
-case "$mode" in --install|--check) ;; *) echo 'Usage: bash scripts/setup-desktop.sh [--check|--install]'; exit 2 ;; esac
+case "$mode" in --install|--check|--install-media) ;; *) echo 'Usage: bash scripts/setup-desktop.sh [--check|--install|--install-media]'; exit 2 ;; esac
 project_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 platform="$(uname -s)"
 cd "$project_dir"
 
+install_linux_media() {
+  if command -v apt-get >/dev/null; then
+    sudo apt-get update
+    sudo apt-get install -y gstreamer1.0-tools gstreamer1.0-plugins-base \
+      gstreamer1.0-plugins-good gstreamer1.0-plugins-bad
+  elif command -v dnf >/dev/null; then
+    sudo dnf install -y gstreamer1 gstreamer1-plugins-base \
+      gstreamer1-plugins-good gstreamer1-plugins-bad-free
+  else
+    echo 'Install GStreamer tools and the plugins providing fakevideosink and webvttenc.'; return 1
+  fi
+}
+
+if [[ "$mode" == --install-media ]]; then
+  if [[ "$platform" != Linux ]]; then echo 'Linux multimedia repair is only needed on Linux.'; exit 0; fi
+  install_linux_media
+  for element in fakevideosink webvttenc; do
+    gst-inspect-1.0 "$element" >/dev/null
+    echo "OK: $element"
+  done
+  exit 0
+fi
+
 if [[ "$mode" == --install ]]; then
   case "$platform" in
     Linux)
+      install_linux_media
       if command -v apt-get >/dev/null; then
         sudo apt-get update
         sudo apt-get install -y curl ca-certificates git build-essential pkg-config \
@@ -75,6 +99,7 @@ done
 if command -v node >/dev/null; then node scripts/release-readiness.cjs --mode node || failed=1; fi
 if command -v pnpm >/dev/null && [[ "$(pnpm --version)" != 10.27.0 ]]; then echo 'pnpm 10.27.0 required'; failed=1; fi
 if [[ "$platform" == Linux ]]; then
+  if command -v node >/dev/null; then node scripts/linux-media-check.cjs || failed=1; fi
   for library in webkit2gtk-4.1 ayatana-appindicator3-0.1 libpipewire-0.3 gbm wayland-client egl; do
     if pkg-config --exists "$library"; then echo "OK: $library"; else echo "Missing: $library development files"; failed=1; fi
   done
