@@ -284,6 +284,7 @@ pub async fn system_metrics(window: WebviewWindow) -> Result<SystemMetrics, Stri
         .map_err(|_| "System metric worker could not finish.".to_string())?
 }
 
+#[cfg(test)]
 fn collect_system_metrics() -> Result<SystemMetrics, String> {
     collect_system_metrics_for_app(None)
 }
@@ -1230,6 +1231,15 @@ mod tests {
                 .cpu
                 .is_none()
         );
+    }
+
+    #[test]
+    fn temperature_labels_never_treat_an_unrelated_thermal_zone_as_cpu() {
+        assert!(super::is_cpu_component("cpu package"));
+        assert!(super::is_cpu_component("k10temp tdie"));
+        assert!(super::is_gpu_component("nvidia geforce gpu"));
+        assert!(!super::is_cpu_component("acpi thermal zone"));
+        assert!(!super::is_gpu_component("acpi thermal zone"));
     }
 
     #[test]

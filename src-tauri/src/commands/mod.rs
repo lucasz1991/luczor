@@ -115,8 +115,20 @@ mod tests {
             .contains(&serde_json::json!("store:allow-delete")));
         assert_eq!(
             config["app"]["security"]["capabilities"],
-            serde_json::json!(["default", "browser", "mini-chat"])
+            serde_json::json!(["default", "browser", "mini-chat", "system-status"])
         );
+
+        let status_capability: serde_json::Value =
+            serde_json::from_str(include_str!("../../capabilities/system-status.json"))
+                .expect("system-status capability must be valid JSON");
+        assert_eq!(
+            status_capability["windows"],
+            serde_json::json!([system_status_window::SYSTEM_STATUS_LABEL])
+        );
+        assert!(status_capability["permissions"]
+            .as_array()
+            .expect("system-status permissions")
+            .contains(&serde_json::json!("system-status-client")));
 
         let main_runtime = include_str!("../../permissions/main-runtime.toml");
         for command in [

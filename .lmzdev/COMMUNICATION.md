@@ -374,3 +374,11 @@ Append-only communication log. Source and runtime evidence override stale entrie
 ## 2026-09-10T15:37:02Z | Codex -> all | status
 
 - Message: Started: Systemstatus temperature fidelity, scoped storage rings, compact sidebar, and native status windows.
+
+## 2026-09-10 | Codex/root | Systemstatus telemetry and native windows completed-local
+
+- Implemented verified CPU/GPU temperature fidelity: only clearly named CPU/GPU sensors are shown; unrelated thermal zones are never relabeled as CPU values.
+- Resource rings now include CPU/GPU temperature and Luczor-scoped volume capacity. Disk sampling returns only the executable-app volume and, when configured, the local-model volume; it does not expose arbitrary drives or attribute system I/O to Luczor.
+- Added the narrow left second-sidebar mini display, and dedicated, movable native Tauri windows for Tabs and dashboard modes. The detached window has a read-only capability limited to system metrics and local-model status.
+- Verified: Vue typecheck; 28 focused system-status monitor tests; scoped Prettier and ESLint; cargo check; system telemetry tests 13 passed (2 opt-in hardware tests ignored in normal run); detached-window and capability tests passed; read-only native disk observation passed. Browser fixture was visually checked for rings, temperature/capacity badges, mini sidebar, tabs fallback, and dashboard.
+- No model was started, no deployment/package/commit was created by this handoff. Detached native-window drag behavior still needs an interactive Tauri desktop acceptance run; browser fixture is not native-window proof.
