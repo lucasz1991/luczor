@@ -1,8 +1,12 @@
 <script setup lang="ts">
-import { invoke } from '@tauri-apps/api/core'
-import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { OrbPhase } from '@/services/miniChat/presentation'
-import { localModelDiagnostics } from '@/services/inference/localModelDiagnostics'
+import {
+  systemStatusIcon,
+  systemStatusLabel,
+  systemStatusTabs,
+  type SystemStatusDisplayMode,
+} from '@/features/system-status/model'
+import { useSystemStatusController } from '@/features/system-status/useSystemStatusController'
 import LocalModelAnalysis from './LocalModelAnalysis.vue'
 import JarvisHud from './JarvisHud.vue'
 import LocalModelStatus from './LocalModelStatus.vue'
@@ -10,14 +14,13 @@ import AssistantProfileStatus from './AssistantProfileStatus.vue'
 import AiIcon from './ai/AiIcon.vue'
 import SystemStopButton from './SystemStopButton.vue'
 
-type DisplayMode = 'mini' | 'tabs' | 'dashboard'
 const props = withDefaults(
   defineProps<{
     projectName?: string
     active?: boolean
     assistantPhase?: OrbPhase
     nativeWindow?: boolean
-    initialDisplayMode?: Exclude<DisplayMode, 'mini'>
+    initialDisplayMode?: Exclude<SystemStatusDisplayMode, 'mini'>
     sidebarCollapsed?: boolean
   }>(),
   {
@@ -30,151 +33,19 @@ const props = withDefaults(
   }
 )
 const emit = defineEmits<{ close: []; openMini: [] }>()
-type SystemSection = 'resources' | 'localmodel' | 'memory' | 'network' | 'details'
-type IndicatorState = 'ok' | 'active' | 'warning' | 'unknown'
-type SystemIndicators = Record<Exclude<SystemSection, 'localmodel'>, IndicatorState>
-const tabs: ReadonlyArray<{ id: SystemSection; label: string }> = [
-  { id: 'resources', label: 'Ressourcen' },
-  { id: 'localmodel', label: 'LocalModel' },
-  { id: 'memory', label: 'Gedächtnis' },
-  { id: 'network', label: 'Netzwerk' },
-  { id: 'details', label: 'Details' },
-]
-const displayMode = ref<DisplayMode>(props.initialDisplayMode)
-function applyDisplayMode(mode: DisplayMode) {
-  displayMode.value = mode
-  if (mode === 'mini') activeSection.value = 'resources'
-  if (content.value) content.value.scrollTop = 0
-}
-async function setDisplayMode(mode: DisplayMode) {
-  if (mode === 'mini') {
-    applyDisplayMode(mode)
-    return
-  }
-  if (props.nativeWindow) {
-    applyDisplayMode(mode)
-    try {
-      await invoke('system_status_window_set_mode', { mode })
-    } catch {
-      // Browser previews keep the selected responsive view without a native bridge.
-    }
-    return
-  }
-  try {
-    await invoke('system_status_window_open', { mode })
-    emit('close')
-  } catch {
-    // Synthetic previews do not have a native window manager.
-    applyDisplayMode(mode)
-  }
-}
-watch(
-  () => props.initialDisplayMode,
-  mode => {
-    if (props.nativeWindow) applyDisplayMode(mode)
-  }
-)
-const activeSection = ref<SystemSection>('resources')
-const indicators = ref<SystemIndicators>({
-  resources: 'unknown',
-  memory: 'unknown',
-  network: 'unknown',
-  details: 'unknown',
-})
-const panel = ref<HTMLElement | null>(null)
-const content = ref<HTMLElement | null>(null)
-const modelOpen = ref(false)
-const profileOpen = ref(false)
-let previousFocus: HTMLElement | null = null
-
-function statusFor(section: SystemSection): IndicatorState {
-  switch (section) {
-    case 'localmodel': {
-      const latest = localModelDiagnostics.state.runs[0]
-      return !latest ? 'unknown' : latest.state === 'error' ? 'warning' : latest.endedAt === null ? 'active' : 'ok'
-    }
-    case 'resources':
-      return indicators.value.resources
-    case 'memory':
-      return indicators.value.memory
-    case 'network':
-      return indicators.value.network
-    case 'details':
-      return indicators.value.details
-  }
-}
-function statusLabel(status: IndicatorState): string {
-  switch (status) {
-    case 'ok':
-      return 'Aktuell'
-    case 'active':
-      return 'Aktiv'
-    case 'warning':
-      return 'Hinweis'
-    case 'unknown':
-      return 'Status unbekannt'
-  }
-}
-function statusIcon(status: IndicatorState): string {
-  switch (status) {
-    case 'ok':
-      return 'm5 12 4 4L19 6'
-    case 'active':
-      return 'M12 7v5l3 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0'
-    case 'warning':
-      return 'M12 3 2 21h20ZM12 9v5m0 3v.1'
-    case 'unknown':
-      return 'M8 12h8M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0'
-  }
-}
-async function selectSection(section: SystemSection, focus = false) {
-  activeSection.value = section
-  await nextTick()
-  if (content.value) content.value.scrollTop = 0
-  if (focus && props.active) panel.value?.querySelector<HTMLButtonElement>(`#system-tab-${section}`)?.focus()
-}
-function onTabKeydown(event: KeyboardEvent, section: SystemSection) {
-  const index = tabs.findIndex(tab => tab.id === section)
-  let nextIndex: number
-  switch (event.key) {
-    case 'ArrowRight':
-      nextIndex = (index + 1) % tabs.length
-      break
-    case 'ArrowLeft':
-      nextIndex = (index + tabs.length - 1) % tabs.length
-      break
-    case 'Home':
-      nextIndex = 0
-      break
-    case 'End':
-      nextIndex = tabs.length - 1
-      break
-    default:
-      return
-  }
-  event.preventDefault()
-  event.stopPropagation()
-  const next = tabs.at(nextIndex)
-  if (next) void selectSection(next.id, true)
-}
-function restoreFocus() {
-  if (panel.value?.contains(document.activeElement) || document.activeElement === document.body)
-    previousFocus?.focus({ preventScroll: true })
-}
-watch(
-  () => props.active,
-  async active => {
-    if (!active) {
-      restoreFocus()
-      return
-    }
-    previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
-    await nextTick()
-    if (props.active) panel.value?.focus({ preventScroll: true })
-  },
-  { immediate: true }
-)
-onBeforeUnmount(restoreFocus)
+const {
+  activeSection,
+  content,
+  displayMode,
+  indicators,
+  modelOpen,
+  onTabKeydown,
+  panel,
+  profileOpen,
+  selectSection,
+  setDisplayMode,
+  statusFor,
+} = useSystemStatusController(props, () => emit('close'))
 </script>
 
 <template>
@@ -222,15 +93,15 @@ onBeforeUnmount(restoreFocus)
       aria-label="Systemstatus-Bereiche"
     >
       <button
-        v-for="tab in tabs"
+        v-for="tab in systemStatusTabs"
         :id="`system-tab-${tab.id}`"
         :key="tab.id"
         type="button"
         role="tab"
         :aria-selected="activeSection === tab.id"
         :aria-controls="`system-tabpanel-${tab.id}`"
-        :aria-label="`${tab.label}: ${statusLabel(statusFor(tab.id))}`"
-        :title="`${tab.label}: ${statusLabel(statusFor(tab.id))}`"
+        :aria-label="`${tab.label}: ${systemStatusLabel(statusFor(tab.id))}`"
+        :title="`${tab.label}: ${systemStatusLabel(statusFor(tab.id))}`"
         :tabindex="activeSection === tab.id ? 0 : -1"
         @click="selectSection(tab.id)"
         @keydown="onTabKeydown($event, tab.id)"
@@ -252,7 +123,7 @@ onBeforeUnmount(restoreFocus)
             <path d="M7 3v16m-4-4 4 4 4-4"><title>Lesen</title></path>
             <path d="M17 21V5m-4 4 4-4 4 4"><title>Schreiben</title></path>
           </template>
-          <path v-else :d="statusIcon(statusFor(tab.id))" />
+          <path v-else :d="systemStatusIcon(statusFor(tab.id))" />
         </svg>
         <span>{{ tab.label }}</span>
       </button>
@@ -275,6 +146,7 @@ onBeforeUnmount(restoreFocus)
       <JarvisHud
         embedded
         :active="active"
+        :compact="displayMode === 'mini'"
         :section="displayMode === 'dashboard' ? 'all' : activeSection"
         :assistant-phase="assistantPhase"
         @indicators="indicators = $event"
@@ -527,7 +399,7 @@ details[open] > summary .disclosure-arrow {
   right: auto;
   bottom: 14px;
   left: calc(var(--system-sidebar-width) + 12px);
-  width: 204px;
+  width: 176px;
   min-width: 0;
   max-width: calc(100vw - var(--system-sidebar-width) - 24px);
   max-height: none;
@@ -538,8 +410,8 @@ details[open] > summary .disclosure-arrow {
   --system-sidebar-width: 62px;
 }
 .system-status-panel[data-mode='mini'] :deep(.resource-grid) {
-  grid-template-columns: minmax(0, 1fr);
-  gap: 14px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 5px;
 }
 .system-status-panel[data-mode='dashboard'] {
   inset: 0;
@@ -597,7 +469,7 @@ details[open] > summary .disclosure-arrow {
 
 <style scoped>
 [data-mode='mini'] :deep(.resource-dial-wrap) {
-  max-width: 164px;
+  max-width: 80px;
 }
 [data-mode='mini'] .system-status-panel__header {
   min-height: 38px;
@@ -615,7 +487,7 @@ details[open] > summary .disclosure-arrow {
   display: none;
 }
 [data-mode='mini'] :deep(.resource-storage-note) {
-  padding-left: 5px;
+  display: none;
 }
 [data-mode='dashboard'] :deep(.resource-pane) {
   grid-column: 1;
@@ -708,7 +580,7 @@ details[open] > summary .disclosure-arrow {
   .system-status-panel[data-mode='mini'] {
     --system-sidebar-width: 54px;
     left: calc(var(--system-sidebar-width) + 8px);
-    width: min(192px, calc(100vw - var(--system-sidebar-width) - 16px));
+    width: min(166px, calc(100vw - var(--system-sidebar-width) - 16px));
   }
 }
 </style>

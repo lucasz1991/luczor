@@ -75,7 +75,7 @@ pub fn run() {
             commands::system::read_clipboard,
             commands::system::list_windows,
             commands::system::list_monitors,
-            commands::system::system_metrics,
+            commands::system_status_controller::system_metrics,
             commands::system::system_diagnostics,
             commands::system::move_mouse,
             commands::system::mouse_click,

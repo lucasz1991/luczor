@@ -168,3 +168,10 @@
 - Separate resource controls in Execution settings with auto/GPU-preferred/CPU modes, manual GPU(s), threads, RAM/VRAM reserve targets, requested/applied/pending state. Save uses native-backed Rootservice, not synced Store keys or API reinitialization.
 - 36 UI/status/scheduler-controller integration tests passed; scoped ESLint/Prettier/diff passed. Root performs visual fixture review on own CUA; no native acceptance by this agent.
 - Report: ../.lmzdev/artifacts/reports/2026-09-08-device-resource-settings-ui.md. Source ownership returned; own Vite1448 PID86184 handed to Root for review/cleanup.
+
+## 2026-09-10T17:24:03Z | Codex/root | Systemstatus-Struktur completed-local
+
+- `features/system-status` enthält jetzt das Vue-Datenmodell, den UI-Controller und getrennte Ressourcen-/Mini-Modell-Views. `SystemStatusPanel` und `JarvisHud` sind dadurch reine Orchestrierungs-Views mit deutlich weniger eigener Logik.
+- Das Tauri-Backend trennt `system_status_controller.rs` und `system_status_model.rs` vom bestehenden Collector. Commandname, Webview-Prüfung und Messverhalten bleiben kompatibel.
+- Verifiziert: 28 Systemstatus-Monitor-Tests, 13 native Systemtests (2 opt-in Hardware-Smokes ignoriert), Vue-Typecheck, Vite-/Workflow-Editor-Build, Cargo check, scoped ESLint ohne Suppressions und Browser-Sichtprüfung für Tabs, Mini und Dashboard.
+- Der komplette `pnpm lint` bleibt wegen vorhandener Befunde in ThinkingSettings/thinking/thinkingSettings/store rot. Ein erneuter vollständiger `pnpm build` wurde nur durch eine laufende `claude.exe` beim Runtime-Kopieren blockiert; der frühere Komplettbuild und die aktuellen einzelnen Frontend-Buildschritte waren erfolgreich. Kein Prozess beendet, kein Modell gestartet, kein Deploy/Package/Commit.

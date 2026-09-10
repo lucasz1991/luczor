@@ -382,3 +382,19 @@ Append-only communication log. Source and runtime evidence override stale entrie
 - Added the narrow left second-sidebar mini display, and dedicated, movable native Tauri windows for Tabs and dashboard modes. The detached window has a read-only capability limited to system metrics and local-model status.
 - Verified: Vue typecheck; 28 focused system-status monitor tests; scoped Prettier and ESLint; cargo check; system telemetry tests 13 passed (2 opt-in hardware tests ignored in normal run); detached-window and capability tests passed; read-only native disk observation passed. Browser fixture was visually checked for rings, temperature/capacity badges, mini sidebar, tabs fallback, and dashboard.
 - No model was started, no deployment/package/commit was created by this handoff. Detached native-window drag behavior still needs an interactive Tauri desktop acceptance run; browser fixture is not native-window proof.
+
+## 2026-09-10 | Codex/root | Mini-Systemstatus verdichtet
+
+- Mini-Statusleiste auf 176 px reduziert und Ressourcen zu einem 2x2-Raster mit kleinsten Ringen verdichtet. Die Werte liegen als kompakte 2x2-Badges an den unteren Ringoeffnungen; der Mini-Modus hat keine Kreise/Verlauf-Umschaltung mehr und bleibt stets bei Ringen.
+- Unterhalb der Ressourcen zeigt die Mini-Leiste einen lokalen Modellblock mit Prozessstatus, CPU/RAM/GPU sowie nur oeffentlich gemeldeten Kontext-, Ausgabe- und Cachewerten. Fehlende Berichte bleiben als "—" sichtbar.
+- Verified: Vue typecheck, 28 focused system-status monitor tests, scoped ESLint/Prettier, diff check and browser fixture visual checks for normal mini state and an injected public local-inference observation. No model was started, deployment/package/commit omitted.
+
+## 2026-09-10T16:47:05Z | Codex -> all | status
+
+- Message: Started: analyze and refactor Systemstatus into feature-scoped model, controller, and view components.
+
+## 2026-09-10T17:24:03Z | Codex/root -> all | completed-local
+
+- Systemstatus in Feature-Models, Vue-Controller und zwei kleine View-Komponenten zerlegt; Panel/HUD bleiben kompatible Einstiegspunkte.
+- Nativen `system_metrics`-Command und serialisierten Vertrag in eigene Controller-/Modelmodule verschoben; Collector und Berechtigungsgrenzen unverändert.
+- 28 fokussierte Frontendtests, 13 Rusttests, Typecheck, aktuelle Frontend-Buildschritte, Cargo check, scoped Lint und Browserprüfung für alle drei Modi bestanden. Voll-Lint hat bestehende fremde Befunde; Runtime-Kopie eines zweiten Komplettbuilds war durch laufende claude.exe gesperrt. Kein Prozess beendet, kein Modell/Deploy/Package/Commit.

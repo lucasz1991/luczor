@@ -113,3 +113,9 @@ Record durable decisions with date, context, decision, and consequences.
 ## 2026-09-08T14:09:39Z | Separate device resources save and actual runtime status
 - Resource edits use an independent native-backed save action, keeping API identity/bootstrap unchanged. Reset stages an editable draft; concurrency requires explicit reload, not automatic overwrite. Applied config is distinct from measured GPU computation.
 - DXGI shared-system limits are not free VRAM. UI reserve values are protective targets rather than OS memory locks; native hardware and signed constraints remain authoritative.
+
+## 2026-09-10 | Systemstatus als Feature mit MVC-Zuständigkeiten
+
+- Systemstatus-Views rendern nur Shells oder einzelne Anzeigen. Moduswechsel, native Fensteraufrufe, Tastaturnavigation und Fokusverwaltung liegen im Vue-Controller-Composable.
+- Statische Statusverträge und abgeleitete Ressourcenreihen liegen in Feature-Models; Polling und IPC-Transport bleiben getrennte Services.
+- Der native `system_metrics`-Command liegt in einem eigenen Controller und serialisiert ein eigenes Rust-Modell. Die bestehende begrenzte Collector-Logik bleibt Servicecode und behält ihre Webview- und Datenschutzgrenzen.

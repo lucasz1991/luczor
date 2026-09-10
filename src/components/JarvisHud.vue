@@ -5,8 +5,11 @@ import type { OrbPhase } from '@/services/miniChat/presentation'
 import { lastScreenshot } from '@/services/tools/registry'
 import { syncNow } from '@/services/status'
 import { appearance } from '@/services/appearance'
-import { createSystemStatusMonitor, percent } from '@/services/systemStatusMonitor'
-import type { DiskMetrics } from '@/services/systemMetrics'
+import { createSystemStatusMonitor } from '@/services/systemStatusMonitor'
+import type { SystemStatusIndicator as Indicator } from '@/features/system-status/model'
+import { useSystemResourceModel, type ResourceView } from '@/features/system-status/resourceModel'
+import SystemMiniModelUsage from '@/features/system-status/components/SystemMiniModelUsage.vue'
+import SystemResourceMeter from '@/features/system-status/components/SystemResourceMeter.vue'
 import AiIcon from './ai/AiIcon.vue'
 import SystemStopButton from './SystemStopButton.vue'
 import SystemActivityCharts from './SystemActivityCharts.vue'
@@ -17,23 +20,25 @@ const props = withDefaults(
     active?: boolean
     assistantPhase?: OrbPhase
     section?: 'all' | 'resources' | 'localmodel' | 'memory' | 'network' | 'details'
+    compact?: boolean
   }>(),
   {
     embedded: false,
     active: true,
     assistantPhase: undefined,
     section: 'resources',
+    compact: false,
   }
 )
-type Indicator = 'ok' | 'active' | 'warning' | 'unknown'
 const emit = defineEmits<{
   indicators: [value: { resources: Indicator; memory: Indicator; network: Indicator; details: Indicator }]
 }>()
 const flowIndicators = ref<{ memory: Indicator; network: Indicator }>({ memory: 'unknown', network: 'unknown' })
-const resourceView = ref<'circles' | 'history'>('circles')
+const resourceView = ref<ResourceView>('circles')
 const collapsed = ref(false)
 const monitor = createSystemStatusMonitor()
 const metrics = monitor.state
+const { compactModelUsage, gpuProcessUnavailable, hardware, modelStatus } = useSystemResourceModel(metrics)
 watchEffect(() =>
   emit('indicators', {
     resources: metrics.availability === 'live' ? 'ok' : metrics.availability === 'stale' ? 'warning' : 'unknown',
@@ -107,200 +112,6 @@ const freshness = computed(() => {
       return 'Messwerte werden gelesen …'
   }
 })
-type ResourceKey = 'cpu' | 'ram' | 'gpu' | 'disk'
-type Scope = 'system' | 'app' | 'model'
-type DialKey = Scope | 'temperature' | 'capacity'
-type DialSeries = {
-  key: DialKey
-  label: string
-  detail: string
-  value: number | null
-  display?: string
-  tone?: 'safe' | 'warning' | 'danger' | 'unknown'
-  chart?: { path: string; last: { x: number; y: number } | null }
-}
-type ResourceMeter = {
-  key: string
-  label: string
-  detail: string
-  series: DialSeries[]
-  disk?: DiskMetrics
-}
-const scopes = [
-  { key: 'system' as const, label: 'Rechner', detail: 'Gesamter Rechner' },
-  { key: 'app' as const, label: 'App', detail: 'Luczor-App ohne lokalen Modellprozess' },
-  { key: 'model' as const, label: 'Modell', detail: 'Verwaltetes lokales Modell' },
-]
-const modelStatus = computed(() =>
-  metrics.sample?.model_running === true
-    ? 'Lokales Modell aktiv'
-    : metrics.sample?.model_running === false
-      ? 'Kein lokales Modell aktiv'
-      : 'Modellprozess nicht bestätigt'
-)
-const gpuProcessUnavailable = computed(
-  () =>
-    metrics.sample &&
-    (percent(metrics.sample.app_gpu_percent) === null ||
-      (metrics.sample.model_running === true && percent(metrics.sample.model_gpu_percent) === null))
-)
-function chart(
-  key: ResourceKey,
-  scope: Scope,
-  mount?: string
-): { path: string; last: { x: number; y: number } | null } {
-  let path = ''
-  let connected = false
-  let last: { x: number; y: number } | null = null
-  metrics.history.forEach((point, index) => {
-    const values = scope === 'system' ? point : scope === 'app' ? point.app : point.model
-    const value =
-      key === 'disk'
-        ? ((scope === 'system'
-            ? mount
-              ? point.disks?.[mount]?.busy
-              : point.disk?.busy
-            : scope === 'app'
-              ? mount
-                ? point.disks?.[mount]?.read
-                : point.disk?.read
-              : mount
-                ? point.disks?.[mount]?.write
-                : point.disk?.write) ?? null)
-        : key === 'cpu'
-          ? values.cpu
-          : key === 'ram'
-            ? values.ram
-            : values.gpu
-    if (value === null) {
-      connected = false
-      last = null
-      return
-    }
-    const x = 4 + (index / Math.max(1, metrics.history.length - 1)) * 172
-    const y = 68 - value * 0.6
-    path += `${connected ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)} `
-    connected = true
-    last = { x, y }
-  })
-  return { path, last }
-}
-function resource(key: ResourceKey, label: string, detail: string, values: unknown[], mount?: string): ResourceMeter {
-  return {
-    key,
-    label,
-    detail,
-    series: scopes.map((scope, index) => ({
-      ...scope,
-      value:
-        key !== 'disk' && scope.key === 'model' && metrics.sample?.model_running === false
-          ? null
-          : percent(values.at(index)),
-      chart: chart(key, scope.key, mount),
-    })),
-  }
-}
-function temperatureTone(value: number | null): DialSeries['tone'] {
-  if (value === null) return 'unknown'
-  if (value >= 85) return 'danger'
-  if (value >= 75) return 'warning'
-  return 'safe'
-}
-function temperatureSeries(label: string, value: unknown): DialSeries {
-  const temperature = typeof value === 'number' && Number.isFinite(value) ? value : null
-  return {
-    key: 'temperature',
-    label: 'Temperatur',
-    detail:
-      temperature === null
-        ? `${label}-Temperatur wird vom System nicht eindeutig gemeldet.`
-        : `${label}-Temperatur · ab 75 °C Hinweis, ab 85 °C kritisch`,
-    value: temperature === null ? null : Math.min(100, Math.max(0, temperature)),
-    display: temperature === null ? '—' : `${temperature.toLocaleString('de-DE', { maximumFractionDigits: 1 })} °C`,
-    tone: temperatureTone(temperature),
-  }
-}
-function storageUsed(disk: DiskMetrics): number | null {
-  return disk.total_bytes > 0 ? Math.min(100, (disk.used_bytes / disk.total_bytes) * 100) : null
-}
-function diskScopes(disk: DiskMetrics): string {
-  const labels = (disk.scopes ?? ['app']).map(scope => (scope === 'model' ? 'Modell' : 'App'))
-  return labels.join(' + ')
-}
-function diskResource(disk: DiskMetrics): ResourceMeter {
-  const base = resource(
-    'disk',
-    disk.kind === 'ssd' ? 'SSD' : disk.kind === 'hdd' ? 'HDD' : 'Disk',
-    `Volume für Luczor ${diskScopes(disk)}`,
-    [disk.busy_percent, disk.read_percent, disk.write_percent],
-    disk.mount
-  )
-  const details = [
-    'Aktive Zeit dieses Luczor-Volumes',
-    'Lesezeit dieses Luczor-Volumes',
-    'Schreibzeit dieses Luczor-Volumes',
-  ]
-  const used = storageUsed(disk)
-  return {
-    ...base,
-    key: `disk:${disk.mount}`,
-    disk,
-    series: [
-      ...base.series.map((series, index) => ({ ...series, detail: details[index] ?? series.detail })),
-      {
-        key: 'capacity',
-        label: 'Belegt',
-        detail: `${disk.mount} · Speicherbelegung des Luczor-Volumes`,
-        value: used,
-      },
-    ],
-  }
-}
-const hardware = computed<ResourceMeter[]>(() => {
-  const s = metrics.sample
-  const scopedDisks = Array.isArray(s?.disks) ? s.disks : s?.disk ? [s.disk] : []
-  return [
-    {
-      ...resource('cpu', 'CPU', 'Anteil der gesamten CPU-Kapazität', [
-        s?.cpu_percent,
-        s?.app_cpu_percent,
-        s?.model_cpu_percent,
-      ]),
-      series: [
-        ...resource('cpu', 'CPU', '', [s?.cpu_percent, s?.app_cpu_percent, s?.model_cpu_percent]).series,
-        temperatureSeries('CPU', s?.cpu_temp_c),
-      ],
-    },
-    resource('ram', 'RAM', 'Anteil am gesamten Arbeitsspeicher', [
-      s?.ram_percent,
-      s?.app_ram_percent,
-      s?.model_ram_percent,
-    ]),
-    {
-      ...resource(
-        'gpu',
-        'GPU',
-        s?.gpu_source === 'nvml' ? 'Geräteauslastung · NVIDIA' : 'Höchste GPU-Engine-Auslastung',
-        [s?.gpu_percent, s?.app_gpu_percent, s?.model_gpu_percent]
-      ),
-      series: [
-        ...resource('gpu', 'GPU', '', [s?.gpu_percent, s?.app_gpu_percent, s?.model_gpu_percent]).series,
-        temperatureSeries('GPU', s?.gpu_temp_c),
-      ],
-    },
-    ...scopedDisks.map(diskResource),
-  ]
-})
-const gib = (bytes: number) => (bytes / 1024 ** 3).toLocaleString('de-DE', { maximumFractionDigits: 1 })
-const formatPercent = (value: number) => value.toLocaleString('de-DE', { maximumFractionDigits: 1 })
-function dialDisplay(series: DialSeries): string {
-  return series.value === null ? '—' : (series.display ?? `${formatPercent(series.value)} %`)
-}
-function dialScope(series: DialSeries): string {
-  if (series.key === 'temperature') return `temperature-${series.tone ?? 'unknown'}`
-  if (series.key === 'capacity') return 'capacity'
-  return series.key
-}
 const connectionLabels: Record<ConnState, string> = {
   online: 'Verbunden',
   offline: 'Nicht erreichbar',
@@ -342,7 +153,7 @@ const position = computed(() =>
 <template>
   <section
     class="status-dashboard"
-    :class="{ embedded, 'reduce-motion': appearance.reduceMotion }"
+    :class="{ embedded, 'reduce-motion': appearance.reduceMotion, 'is-compact': compact }"
     :style="position"
     aria-label="Gerät und Verbindungen"
   >
@@ -374,7 +185,7 @@ const position = computed(() =>
         </div>
       </div>
       <div v-show="section === 'all' || section === 'resources'" class="resource-pane">
-        <div class="resource-heading">
+        <div v-if="!compact" class="resource-heading">
           <div class="resource-mode" role="group" aria-label="Ressourcendarstellung">
             <button type="button" :aria-pressed="resourceView === 'circles'" @click="resourceView = 'circles'">
               Kreise</button
@@ -385,75 +196,14 @@ const position = computed(() =>
           <span :data-stale="metrics.availability === 'stale'">{{ freshness }}</span>
         </div>
         <div class="resource-grid" :class="{ 'is-stale': metrics.availability === 'stale' }">
-          <article v-for="meter in hardware" :key="meter.key" class="resource">
-            <h5 :class="{ 'ai-sr-only': resourceView === 'circles' }">{{ meter.label }}</h5>
-            <div v-if="resourceView === 'circles'" class="resource-dial-wrap">
-              <svg class="resource-dial" viewBox="0 0 120 120" aria-hidden="true">
-                <g
-                  v-for="(series, index) in meter.series"
-                  :key="series.key"
-                  :data-scope="dialScope(series)"
-                  transform="rotate(135 60 60)"
-                >
-                  <circle
-                    class="dial-track"
-                    cx="60"
-                    cy="60"
-                    :r="49 - index * 10"
-                    pathLength="100"
-                    stroke-dasharray="75 100"
-                  />
-                  <circle
-                    v-if="series.value !== null"
-                    class="dial-value"
-                    cx="60"
-                    cy="60"
-                    :r="49 - index * 10"
-                    pathLength="100"
-                    :stroke-dasharray="`${series.value * 0.75} 100`"
-                  />
-                </g>
-                <text x="60" y="63" text-anchor="middle">{{ meter.label }}</text>
-              </svg>
-              <span
-                v-for="(series, index) in meter.series"
-                :key="series.key"
-                class="dial-badge"
-                :data-scope="dialScope(series)"
-                :style="{ top: `${15 + index * 21}%` }"
-                tabindex="0"
-                :aria-label="`${meter.label} · ${series.detail}: ${series.value === null ? 'nicht verfügbar oder nicht aktiv' : dialDisplay(series)}`"
-                :data-tip="series.detail"
-                >{{ dialDisplay(series) }}</span
-              >
-            </div>
-            <div v-else class="resource-history">
-              <div class="history-values">
-                <span
-                  v-for="series in meter.series"
-                  :key="series.key"
-                  :data-scope="dialScope(series)"
-                  :title="series.detail"
-                  >{{ dialDisplay(series) }}</span
-                >
-              </div>
-              <svg class="resource__chart" viewBox="0 0 180 74" preserveAspectRatio="none" aria-hidden="true">
-                <path class="chart-baseline" d="M4 8H176M4 68H176" />
-                <g
-                  v-for="series in meter.series.filter(series => series.chart)"
-                  :key="series.key"
-                  :data-scope="dialScope(series)"
-                >
-                  <path class="chart-line" :d="series.chart?.path" />
-                  <circle v-if="series.chart?.last" :cx="series.chart.last.x" :cy="series.chart.last.y" r="2.3" />
-                </g>
-              </svg>
-            </div>
-            <div v-if="meter.disk" class="resource-storage-note">
-              <span>{{ meter.disk.mount }} · {{ diskScopes(meter.disk) }}</span>
-              <span>{{ gib(meter.disk.used_bytes) }} / {{ gib(meter.disk.total_bytes) }} GiB</span>
-            </div>
-          </article>
+          <SystemResourceMeter
+            v-for="meter in hardware"
+            :key="meter.key"
+            :meter="meter"
+            :view="resourceView"
+            :compact="compact"
+            :stale="metrics.availability === 'stale'"
+          />
         </div>
         <p v-if="resourceView === 'history'" class="resource-note">
           {{
@@ -462,6 +212,12 @@ const position = computed(() =>
               : 'Der Verlauf entsteht aus den Messungen während dieser Ansicht.'
           }}
         </p>
+        <SystemMiniModelUsage
+          v-if="compact"
+          :metrics="compactModelUsage"
+          :model-status="modelStatus"
+          :running="metrics.sample?.model_running === true"
+        />
         <div class="resource-context">
           <span v-if="gpuProcessUnavailable">GPU-Prozessmessung teilweise nicht verfügbar.</span>
         </div>
@@ -716,62 +472,6 @@ const position = computed(() =>
   background: var(--ai-hover);
   color: var(--ai-ink);
 }
-.resource-dial-wrap {
-  position: relative;
-  width: 100%;
-  aspect-ratio: 180 / 152;
-  margin: auto;
-}
-.dial-badge {
-  position: absolute;
-  right: 0;
-  min-width: 40px;
-  padding: 3px 6px;
-  border: 1px solid color-mix(in srgb, var(--scope-color) 35%, transparent);
-  border-radius: 5px;
-  background: var(--ai-surface);
-  color: var(--scope-color);
-  font: 500 11px/1.4 var(--ai-font);
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-  cursor: default;
-}
-.dial-badge:focus-visible {
-  outline: 2px solid var(--scope-color);
-  outline-offset: 3px;
-}
-.dial-badge::after {
-  content: attr(data-tip);
-  display: none;
-  position: absolute;
-  bottom: calc(100% + 7px);
-  right: 0;
-  width: max-content;
-  max-width: 165px;
-  padding: 7px 9px;
-  border-radius: 5px;
-  background: var(--ai-hover);
-  color: var(--ai-ink);
-  font-weight: 400;
-  z-index: 2;
-  text-align: left;
-}
-.dial-badge:is(:hover, :focus-visible)::after {
-  display: block;
-}
-.history-values {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 10px;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-.history-values span {
-  color: var(--scope-color);
-}
-.resource-history {
-  min-height: 152px;
-}
 .resource-heading h4 {
   font-size: 12px;
   font-weight: 500;
@@ -789,148 +489,6 @@ const position = computed(() =>
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
   gap: 18px;
-}
-.resource {
-  min-width: 0;
-  padding: 0;
-}
-.resource:first-child {
-  padding-left: 0;
-  border: 0;
-}
-.resource:last-child {
-  padding-right: 0;
-}
-.resource h5 {
-  margin: 0 0 13px;
-  font-size: 12px;
-  font-weight: 600;
-}
-.resource-dial {
-  display: block;
-  width: 82%;
-  margin: 0;
-  overflow: visible;
-}
-.resource-dial circle {
-  fill: none;
-  stroke-width: 5;
-  stroke-linecap: round;
-}
-.dial-track {
-  stroke: var(--ai-line);
-}
-.dial-value {
-  stroke: var(--scope-color);
-}
-.resource-dial text {
-  fill: var(--ai-ink);
-  font: 500 12px var(--ai-font);
-  letter-spacing: 0.06em;
-}
-[data-scope='system'] {
-  --scope-color: var(--ai-green);
-}
-[data-scope='app'] {
-  --scope-color: #b3a0f7;
-}
-[data-scope='model'] {
-  --scope-color: var(--ai-orange);
-}
-[data-scope='capacity'] {
-  --scope-color: #8ba4ca;
-}
-[data-scope='temperature-safe'] {
-  --scope-color: var(--ai-green);
-}
-[data-scope='temperature-warning'] {
-  --scope-color: var(--ai-orange);
-}
-[data-scope='temperature-danger'] {
-  --scope-color: var(--ai-red);
-}
-[data-scope='temperature-unknown'] {
-  --scope-color: var(--ai-muted);
-}
-.resource-values {
-  display: grid;
-  gap: 8px;
-  margin: 0 0 14px;
-}
-.resource-values > div {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-}
-.resource-values dt {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: var(--ai-muted);
-  font-size: 11px;
-}
-.resource-values dt i {
-  width: 5px;
-  height: 5px;
-  background: var(--scope-color);
-  border-radius: 50%;
-  flex-shrink: 0;
-}
-.resource-values dd {
-  margin: 0;
-  color: var(--scope-color);
-  font-size: 19px;
-  font-weight: 500;
-  line-height: 1.2;
-  font-variant-numeric: tabular-nums;
-  letter-spacing: -0.03em;
-  white-space: nowrap;
-}
-.resource-values small {
-  font-size: 10px;
-  margin-left: 3px;
-  color: var(--ai-muted);
-}
-.resource__detail {
-  margin-top: 10px;
-  overflow-wrap: anywhere;
-  display: block;
-  min-height: 30px;
-  color: var(--ai-muted);
-  font-size: 10px;
-  line-height: 1.4;
-}
-.resource__chart {
-  display: block;
-  width: 100%;
-  height: 74px;
-  margin-top: 4px;
-  overflow: visible;
-}
-.resource__chart g {
-  fill: var(--scope-color);
-}
-.chart-baseline {
-  stroke: var(--ai-line);
-  fill: none;
-  stroke-dasharray: 2 4;
-}
-.chart-line {
-  fill: none;
-  stroke: var(--scope-color);
-  stroke-width: 1.5;
-  vector-effect: non-scaling-stroke;
-  stroke-linejoin: round;
-}
-.is-stale .resource__chart {
-  opacity: 0.55;
-}
-.resource__chart [data-scope='app'] .chart-line {
-  stroke-dasharray: 3 2;
-}
-.resource__chart [data-scope='model'] .chart-line {
-  stroke-dasharray: 7 2;
 }
 .resource-note {
   margin: 12px 0 8px;
@@ -954,6 +512,10 @@ const position = computed(() =>
 .resource-explanation p {
   line-height: 1.6;
   margin: 8px 0;
+}
+.status-dashboard.is-compact .resource-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 5px;
 }
 .connection-grid {
   display: grid;
@@ -1077,19 +639,6 @@ const position = computed(() =>
     width: 98px;
     height: 96px;
   }
-  .resource {
-    padding: 0 6px;
-  }
-  .resource-values > div {
-    display: grid;
-    gap: 3px;
-  }
-  .resource-values dd {
-    font-size: 18px;
-  }
-  .resource__detail {
-    min-height: 42px;
-  }
   .resource-heading {
     gap: 5px;
   }
@@ -1098,22 +647,6 @@ const position = computed(() =>
   }
   .sync-line {
     align-items: flex-start;
-  }
-}
-.resource-storage-note {
-  display: grid;
-  gap: 3px;
-  margin-top: 8px;
-  font-size: 10px;
-  color: var(--ai-muted);
-  font-variant-numeric: tabular-nums;
-}
-@media (max-width: 480px) {
-  .resource {
-    padding: 0;
-  }
-  .resource-dial-wrap {
-    max-width: 230px;
   }
 }
 </style>

@@ -7,14 +7,6 @@
       "count": 30
     }
   },
-  "src/components/JarvisHud.vue": {
-    "id-length": {
-      "count": 15
-    },
-    "security/detect-object-injection": {
-      "count": 4
-    }
-  },
   "src/components/Settings.vue": {
     "@typescript-eslint/no-explicit-any": {
       "count": 6

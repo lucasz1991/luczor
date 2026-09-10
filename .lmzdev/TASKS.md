@@ -61,3 +61,5 @@
 | Bounded native DXGI GPU inventory | Codex/agent_team_recovery | completed-local; 8 unit tests plus 1 real readonly probe passed; ownership returned | 2026-09-08T12:22:56Z |
 
 | Device-local resource settings and status UI, independent workflow review | Codex/agent_team_recovery | completed-local; 36 focused tests passed; source ownership returned, final native/browser gates at Root | 2026-09-08T14:09:39Z |
+
+| Systemstatus in Feature-Model, Controller und kleine View-Komponenten aufteilen | Codex/root | completed-local | 2026-09-10T17:24:03Z |

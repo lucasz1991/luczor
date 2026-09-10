@@ -15,6 +15,8 @@ pub mod notifications;
 pub mod project_workspace;
 pub mod repository_graph;
 pub mod system;
+pub mod system_status_controller;
+mod system_status_model;
 pub mod system_status_window;
 mod system_diagnostics;
 pub mod voice;

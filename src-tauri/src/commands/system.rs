@@ -19,14 +19,15 @@ use std::time::{Duration, Instant};
 use sysinfo::{
     Components, ProcessRefreshKind, ProcessesToUpdate, System, MINIMUM_CPU_UPDATE_INTERVAL,
 };
-use tauri::{Manager, WebviewWindow};
+use tauri::WebviewWindow;
 
 use super::desktop_target::{DesktopActionGuard, DesktopObservation, InputPayload, ObservePayload};
 use super::ensure_main_webview;
 use super::execution::{admit, Guarded};
+use super::system_status_model::SystemMetrics;
 
 #[path = "system_disk.rs"]
-mod system_disk;
+pub(crate) mod system_disk;
 
 #[cfg(windows)]
 #[path = "system_gpu.rs"]
@@ -247,49 +248,16 @@ pub async fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, Stri
     Ok(out)
 }
 
-#[derive(Debug, Serialize, Clone)]
-pub struct SystemMetrics {
-    pub cpu_percent: f32,
-    pub ram_percent: f32,
-    pub ram_used_mb: u64,
-    pub ram_total_mb: u64,
-    pub gpu_percent: Option<f32>,
-    pub cpu_temp_c: Option<f32>,
-    pub gpu_temp_c: Option<f32>,
-    pub app_cpu_percent: Option<f32>,
-    pub app_ram_percent: Option<f32>,
-    pub app_ram_used_mb: Option<u64>,
-    pub app_gpu_percent: Option<f32>,
-    pub model_cpu_percent: Option<f32>,
-    pub model_ram_percent: Option<f32>,
-    pub model_ram_used_mb: Option<u64>,
-    pub model_gpu_percent: Option<f32>,
-    pub model_running: Option<bool>,
-    /// Volumes containing the Luczor app and configured local-model directory only.
-    pub disks: Vec<system_disk::DiskSample>,
-    /// Legacy primary app volume for older clients. New clients should use `disks`.
-    pub disk: Option<system_disk::DiskSample>,
-    pub gpu_source: &'static str,
-    pub network_local: super::local_model::LocalNetworkSnapshot,
-}
-
 static METRICS_CACHE: OnceLock<Mutex<Option<(Instant, SystemMetrics)>>> = OnceLock::new();
-
-#[tauri::command]
-pub async fn system_metrics(window: WebviewWindow) -> Result<SystemMetrics, String> {
-    super::ensure_main_or_system_status_webview(&window)?;
-    let app = window.app_handle().clone();
-    tauri::async_runtime::spawn_blocking(move || collect_system_metrics_for_app(Some(&app)))
-        .await
-        .map_err(|_| "System metric worker could not finish.".to_string())?
-}
 
 #[cfg(test)]
 fn collect_system_metrics() -> Result<SystemMetrics, String> {
     collect_system_metrics_for_app(None)
 }
 
-fn collect_system_metrics_for_app(app: Option<&tauri::AppHandle>) -> Result<SystemMetrics, String> {
+pub(crate) fn collect_system_metrics_for_app(
+    app: Option<&tauri::AppHandle>,
+) -> Result<SystemMetrics, String> {
     let cache = METRICS_CACHE.get_or_init(|| Mutex::new(None));
     // A status view and a read-only tool can request the same sample together.
     // Serialize the short native observation instead of collecting overlapping windows.
