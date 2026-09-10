@@ -36,6 +36,23 @@ beforeAll(async () => {
 
 afterEach(() => vi.useRealTimers())
 
+it('shows the selected model before preparation instead of the server default', () => {
+  const { coordinator, native } = snapshots()
+  native.activeModelId = undefined
+  const selected = manifest.models.find(item => item.id !== manifest.routing.defaultModelId)!
+  const view = presentLocalModelStatus(coordinator, native, now, selected.id)
+  expect(view.modelId).toBe(selected.id)
+  expect(view.modelName).toBe(selected.displayName)
+})
+
+it('shows the admissible automatic fallback when the default cannot run', () => {
+  const { coordinator, native } = snapshots()
+  native.activeModelId = undefined
+  const fallback = manifest.routing.fallbackModelIds[0]!
+  coordinator.admissions = [{ ...coordinator.admissions[0]!, modelReleaseId: fallback, admissible: true }]
+  expect(presentLocalModelStatus(coordinator, native, now).modelId).toBe(fallback)
+})
+
 function snapshots() {
   const model = manifest.models.find(item => item.id === manifest.routing.defaultModelId)!
   const coordinator: CoordinatorStatus = {

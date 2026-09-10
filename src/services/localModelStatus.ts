@@ -2,6 +2,7 @@ import { localInferenceCoordinator, localPolicyDiagnostic } from '@/services/inf
 import { hasVerifiedLocalReadiness } from '@/services/inference/hybridRouter'
 import { getNativeLocalModelStatus, type NativeLocalModelStatus } from '@/services/inference/tauriLocalRuntime'
 import type { LocalResourceConfigState } from '@/services/inference/resources'
+import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 
 type CoordinatorStatus = ReturnType<typeof localInferenceCoordinator.status>
 type StatusState = 'unavailable' | 'loading' | 'unprepared' | 'cold' | 'ready' | 'busy' | 'blocked' | 'error'
@@ -200,7 +201,8 @@ function matchesResourceRevision(revision: unknown, appliedRevision: unknown): b
 export function presentLocalModelStatus(
   coordinator: CoordinatorStatus,
   native: NativeLocalModelStatus,
-  nowMs: number
+  nowMs: number,
+  selectedModelId?: string | null
 ): LocalModelStatusView {
   const view = blankStatus(nowMs)
   if (native.resourceConfig) view.resourceConfig = structuredClone(native.resourceConfig)
@@ -212,9 +214,12 @@ export function presentLocalModelStatus(
     return view
   }
 
+  const eligibleId = [manifest.routing.defaultModelId, ...manifest.routing.fallbackModelIds].find(id =>
+    coordinator.admissions.some(admission => admission.modelReleaseId === id && admission.admissible)
+  )
   const model =
     manifest.models.find(item => item.id === native.activeModelId) ??
-    manifest.models.find(item => item.id === manifest.routing.defaultModelId)
+    manifest.models.find(item => item.id === (selectedModelId ?? eligibleId ?? manifest.routing.defaultModelId))
   view.modelName = model?.displayName ?? 'Lokales Modell'
   if (model) view.modelId = model.id
   const catalogValid =
@@ -431,7 +436,7 @@ export async function readLocalModelStatus(
         detail: 'Die Modellrichtlinie hat sich während der Abfrage geändert. Der Status wird erneut abgeglichen.',
       }
     }
-    return presentLocalModelStatus(after, native, dependencies.now())
+    return presentLocalModelStatus(after, native, dependencies.now(), modelUsageSettings.value.localModelId)
   } catch {
     // Native exceptions may contain private file paths or runtime credentials.
     return blankStatus(dependencies.now())
