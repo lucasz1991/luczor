@@ -1520,6 +1520,15 @@ async function send(
         400,
         12000
       )
+      // The laptop profile has an 8k context window. Reduce history and
+      // retrieved project context before native tokenization, rather than
+      // relying on the runtime to recover after a complete prompt is built.
+      const compactLocalProfile = modelUsageSettings.value.localModelId === 'local-tier-light'
+      const localHistory = normalizeConversationHistory(
+        compactLocalProfile
+          ? compactHistory(normalizeConversationHistory(fullHistory), Math.min(historyBudget, 900))
+          : fullHistory
+      )
       const experimentalFlashNext = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
       const history = normalizeConversationHistory(
         compactHistory(normalizeConversationHistory(fullHistory), historyBudget)
@@ -1631,7 +1640,9 @@ async function send(
           audiences: ['local_model', 'external_provider'],
           contentHash: '',
         })),
-        budget: { maxChars: 9_000, maxFragments: 20, maxFragmentChars: 1_800 },
+        budget: compactLocalProfile
+          ? { maxChars: 2_400, maxFragments: 6, maxFragmentChars: 500 }
+          : { maxChars: 9_000, maxFragments: 20, maxFragmentChars: 1_800 },
       })
       const assistantProfile = await refreshAssistantProfile()
       executionGate.assert(turnExecution)
@@ -1644,7 +1655,7 @@ async function send(
             [localProfilePrompt, packages.local.text].filter(Boolean).join('\n\n')
           ),
         },
-        ...sanitizeInferenceMessagesForTarget(localConversationHistory(fullHistory), 'local_llama_cpp'),
+        ...sanitizeInferenceMessagesForTarget(localConversationHistory(localHistory), 'local_llama_cpp'),
       ]
       const externalBaseMessages: WireMessage[] = [
         {
