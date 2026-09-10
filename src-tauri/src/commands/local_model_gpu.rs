@@ -4,8 +4,8 @@
 use super::resource_config::{DeviceBinding, LocalResourceConfig};
 use super::resource_runtime::RuntimeOptions;
 use super::{
-    attach_process_lifetime_guard, configure_process, copy_minimal_environment, nvml_gpu_snapshot,
-    open_artifact_guard_cancellable, reject_runtime_reparse_points, sha256_open_file_cancellable,
+    copy_minimal_environment, nvml_gpu_snapshot, open_artifact_guard_cancellable,
+    reject_runtime_reparse_points, sha256_open_file_cancellable, spawn_owned_runtime,
     terminate_process, valid_hash, RuntimeArtifact,
 };
 use serde::Serialize;
@@ -640,17 +640,7 @@ fn probe(executable: &Path, argument: &str, cancel: &AtomicBool) -> Result<Strin
         command.current_dir(directory);
     }
     copy_minimal_environment(&mut command);
-    configure_process(&mut command);
-    let mut child = command
-        .spawn()
-        .map_err(|_| "Local runtime GPU probe could not start.")?;
-    let _lifetime = match attach_process_lifetime_guard(&child) {
-        Ok(guard) => guard,
-        Err(error) => {
-            terminate_process(&mut child);
-            return Err(error);
-        }
-    };
+    let (mut child, _lifetime) = spawn_owned_runtime(command)?;
     let stdout = child
         .stdout
         .take()
@@ -789,6 +779,43 @@ pub(super) fn finish_measurement(
 
 pub(super) fn capacity_failure(state: &Arc<Mutex<RuntimeAcceleration>>) -> bool {
     state.lock().is_ok_and(|s| s.capacity_failure)
+}
+
+// A bounded second fit leaves room for allocations the initial device probe
+// could not predict. Keep GPU placement enabled and rebudget host RAM too.
+pub(super) fn hybrid_retry(plan: &AccelerationPlan) -> Option<AccelerationPlan> {
+    if !plan.uses_gpu() || plan.device_budgets.is_empty() {
+        return None;
+    }
+    let mut retry = auto_fallback(plan, "runtime_gpu_capacity_unavailable");
+    let index = retry
+        .arguments
+        .iter()
+        .position(|arg| arg == "--fit-target")?;
+    let reserves = retry
+        .arguments
+        .get(index + 1)?
+        .split(',')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    if reserves.len() != retry.status.device_ids.len() {
+        return None;
+    }
+    let mut targets = Vec::new();
+    for (id, reserve) in retry.status.device_ids.iter().zip(reserves) {
+        let budget = retry.device_budgets.get_mut(id)?;
+        let extra = (*budget / 4).max(256 * MIB).div_ceil(MIB) * MIB;
+        if *budget < extra + 256 * MIB {
+            return None;
+        }
+        *budget -= extra;
+        targets.push((reserve + extra / MIB).to_string());
+    }
+    retry.gpu_budget_bytes = retry.device_budgets.values().sum();
+    retry.arguments[index + 1] = targets.join(",");
+    retry.status.fallback_reason_code = Some("runtime_gpu_hybrid_retry".into());
+    Some(retry)
 }
 
 pub(super) fn auto_fallback(plan: &AccelerationPlan, cause: &str) -> AccelerationPlan {
@@ -940,6 +967,31 @@ fn apply_measurement(status: &mut RuntimeAcceleration, line: &str) {
 mod tests {
     use super::*;
     const HELP: &str = "--fit [on|off]\n--fit-target MiB\n--device devices\n--n-gpu-layers N";
+    #[test]
+    fn hybrid_retry_keeps_gpu_and_rebudgets_host_share() {
+        let devices = parse_devices("CUDA0: Laptop (4096 MiB, 3500 MiB free)");
+        let plan = select_configured_plan(
+            &devices,
+            HELP,
+            None,
+            0,
+            "single_device",
+            6000 * MIB,
+            &LocalResourceConfig::default(),
+        )
+        .unwrap();
+        let retry = hybrid_retry(&plan).unwrap();
+        assert!(retry.uses_gpu());
+        assert!(retry.gpu_budget_bytes < plan.gpu_budget_bytes);
+        assert!(retry.gpu_budget_bytes >= 256 * MIB);
+        assert!(retry
+            .arguments
+            .windows(2)
+            .any(|v| v == ["--n-gpu-layers", "auto"]));
+        assert!(retry.arguments.windows(2).any(|v| v == ["--fit", "on"]));
+        assert_eq!(retry.status.device_ids, plan.status.device_ids);
+        assert!(hybrid_retry(&AccelerationPlan::cpu("test")).is_none());
+    }
     fn multi_help() -> String {
         format!("{HELP}\n'auto', or 'all'\n--split-mode layer\n--tensor-split N0,N1")
     }

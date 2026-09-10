@@ -25,6 +25,10 @@ export const localResourceModeLabels = { auto: 'Automatisch', gpu: 'GPU mit Auto
 
 const gpuMessages = new Map<string, string>([
   [
+    'runtime_gpu_hybrid_retry',
+    'GPU-Speicher war knapp: erneute automatische Aufteilung mit mehr VRAM-Reserve und größerem CPU/RAM-Anteil. Die Messwerte zeigen die tatsächlich aktive Aufteilung.',
+  ],
+  [
     'gpu_mode_auto_fallback_unavailable',
     'GPU-Wunsch konnte nicht erfüllt werden: keine passende Grafikkarte verfügbar. Automatik übernimmt.',
   ],

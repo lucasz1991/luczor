@@ -3165,6 +3165,29 @@ fn start_runtime(
             timeout.saturating_sub(started.elapsed()),
         );
     }
+    if result
+        .as_ref()
+        .err()
+        .is_some_and(|error| error == "runtime_gpu_capacity_unavailable")
+        && !cancel.load(Ordering::SeqCst)
+        && started.elapsed() < timeout
+    {
+        if let Some(hybrid) = gpu_runtime::hybrid_retry(&plan) {
+            require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)?;
+            result = start_runtime_attempt(
+                app,
+                model,
+                scope_digest,
+                operation_id,
+                catalog_binding,
+                cancel,
+                &artifacts,
+                &hybrid,
+                &model_storage,
+                timeout.saturating_sub(started.elapsed()),
+            );
+        }
+    }
     match result {
         Err(error)
             if plan.uses_gpu()
@@ -3311,17 +3334,9 @@ fn start_runtime_attempt(
         let _ = fs::remove_file(&api_key_file);
         return Err(error);
     }
-    let mut child = match command.spawn() {
-        Ok(child) => child,
+    let (mut child, process_lifetime_guard) = match spawn_owned_runtime(command) {
+        Ok(result) => result,
         Err(error) => {
-            let _ = fs::remove_file(&api_key_file);
-            return Err(format!("llama.cpp start failed: {error}"));
-        }
-    };
-    let process_lifetime_guard = match attach_process_lifetime_guard(&child) {
-        Ok(guard) => guard,
-        Err(error) => {
-            terminate_process(&mut child);
             let _ = fs::remove_file(&api_key_file);
             return Err(error);
         }
@@ -4351,6 +4366,28 @@ fn copy_minimal_environment(command: &mut Command) {
     for key in ["SYSTEMROOT", "WINDIR", "TEMP", "TMP", "LANG", "LC_ALL"] {
         if let Some(value) = std::env::var_os(key) {
             command.env(key, value);
+        }
+    }
+}
+
+fn spawn_owned_runtime(command: Command) -> Result<(Child, ProcessLifetimeGuard), String> {
+    #[cfg(target_os = "linux")]
+    {
+        linux_protection::spawn(command)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut command = command;
+        configure_process(&mut command);
+        let mut child = command
+            .spawn()
+            .map_err(|error| format!("llama.cpp start failed: {error}"))?;
+        match attach_process_lifetime_guard(&child) {
+            Ok(guard) => Ok((child, guard)),
+            Err(error) => {
+                terminate_process(&mut child);
+                Err(error)
+            }
         }
     }
 }

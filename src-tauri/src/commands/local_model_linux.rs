@@ -79,7 +79,7 @@ pub(super) fn snapshot(path: &Path, cancel: &AtomicBool) -> Result<File, String>
     sealed
         .seek(SeekFrom::Start(0))
         .map_err(|_| "linux_artifact_snapshot_failed")?;
-    Ok(sealed)
+    File::open(format!("/proc/self/fd/{fd}")).map_err(|_| "linux_artifact_snapshot_failed".into())
 }
 
 fn check_memory_reserve() -> Result<(), String> {
@@ -187,22 +187,237 @@ pub(super) fn configure(command: &mut Command) {
 }
 
 #[derive(Debug)]
-pub(super) struct LifetimeGuard(File);
+pub(super) struct LifetimeGuard {
+    pid: File,
+    spawning_thread: Option<(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>)>,
+}
 impl LifetimeGuard {
     pub(super) fn attach(child: &Child) -> Result<Self, String> {
-        // pidfd syscall numbers are identical on supported x86_64/aarch64 Linux.
         let fd = unsafe { syscall(434, child.id() as i32, 0u32) };
         if fd < 0 {
             return Err("linux_process_protection_unavailable".into());
         }
-        Ok(Self(unsafe { File::from_raw_fd(fd as i32) }))
+        Ok(Self {
+            pid: unsafe { File::from_raw_fd(fd as i32) },
+            spawning_thread: None,
+        })
     }
+}
+/// Parent-death signals follow the spawning THREAD. Keep that thread alive for
+/// the whole resident lifetime rather than relying on a temporary async worker.
+pub(super) fn spawn(mut command: Command) -> Result<(Child, LifetimeGuard), String> {
+    let (send, receive) = std::sync::mpsc::sync_channel(1);
+    let (release, wait) = std::sync::mpsc::channel();
+    let thread = std::thread::Builder::new()
+        .name("luczor-runtime-owner".into())
+        .spawn(move || {
+            configure(&mut command);
+            match command.spawn() {
+                Ok(mut child) => {
+                    if let Err(error) = send.send(Ok(child)) {
+                        child = error.0.unwrap();
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return;
+                    }
+                    let _ = wait.recv();
+                }
+                Err(_) => {
+                    let _ = send.send(Err("linux_runtime_spawn_failed".to_string()));
+                }
+            }
+        })
+        .map_err(|_| "linux_process_protection_unavailable")?;
+    let mut child = receive
+        .recv()
+        .map_err(|_| "linux_process_protection_unavailable")??;
+    let mut guard = match LifetimeGuard::attach(&child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    guard.spawning_thread = Some((release, thread));
+    Ok((child, guard))
 }
 impl Drop for LifetimeGuard {
     fn drop(&mut self) {
-        // A pidfd never targets a reused PID. ESRCH for an already reaped child is harmless.
+        // pidfd signalling cannot kill an unrelated process after PID reuse.
         unsafe {
-            syscall(424, self.0.as_raw_fd(), 9i32, std::ptr::null::<u8>(), 0u32);
+            syscall(
+                424,
+                self.pid.as_raw_fd(),
+                9i32,
+                std::ptr::null::<u8>(),
+                0u32,
+            );
         }
+        if let Some((release, thread)) = self.spawning_thread.take() {
+            let _ = release.send(());
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    fn directory() -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "luczor-seal-test-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir(&p).unwrap();
+        p
+    }
+    #[test]
+    fn snapshot_is_sealed_and_survives_source_replacement() {
+        let dir = directory();
+        let path = dir.join("model");
+        fs::write(&path, b"signed bytes").unwrap();
+        let mut file = snapshot(&path, &AtomicBool::new(false)).unwrap();
+        fs::write(&path, b"other bytes!").unwrap();
+        fs::remove_file(&path).unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"signed bytes");
+        assert!(file.write_all(b"changed").is_err());
+        assert!(file.set_len(0).is_err());
+        if let Ok(mut writable) = OpenOptions::new()
+            .write(true)
+            .open(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        {
+            assert!(writable.write_all(b"changed").is_err());
+        }
+        assert_eq!(
+            unsafe { fcntl(file.as_raw_fd(), F_GET_SEALS) } & SEALS,
+            SEALS
+        );
+        fs::remove_dir(dir).unwrap();
+    }
+    #[test]
+    fn resident_survives_temporary_calling_thread() {
+        let (mut child, guard) = std::thread::spawn(|| {
+            let mut command = Command::new("/usr/bin/sleep");
+            command.arg("30");
+            spawn(command).unwrap()
+        })
+        .join()
+        .unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(child.try_wait().unwrap().is_none());
+        drop(guard);
+        assert!(!child.wait().unwrap().success());
+    }
+    #[test]
+    fn cancels_and_rejects_symlinks() {
+        let dir = directory();
+        let path = dir.join("model");
+        fs::write(&path, b"ok").unwrap();
+        assert!(snapshot(&path, &AtomicBool::new(true)).is_err());
+        symlink(&path, dir.join("link")).unwrap();
+        assert!(snapshot(&dir.join("link"), &AtomicBool::new(false)).is_err());
+        fs::remove_file(dir.join("link")).unwrap();
+        fs::remove_file(path).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+    #[test]
+    fn bundle_retains_descriptors_executes_and_cleans_up() {
+        let dir = directory();
+        let sealed = snapshot(Path::new("/usr/bin/true"), &AtomicBool::new(false)).unwrap();
+        let bundle = Bundle::new(&dir, vec![("llama-server".into(), &sealed)]).unwrap();
+        let path = bundle.path("llama-server");
+        drop(sealed);
+        let mut command = Command::new(&path);
+        configure(&mut command);
+        let mut child = command.spawn().unwrap();
+        let guard = LifetimeGuard::attach(&child).unwrap();
+        assert!(child.wait().unwrap().success());
+        drop(guard);
+        drop(bundle);
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 0);
+        fs::remove_dir(dir).unwrap();
+    }
+    #[test]
+    fn guard_drop_kills_owned_child() {
+        let mut command = Command::new("/usr/bin/sleep");
+        command.arg("30");
+        configure(&mut command);
+        let mut child = command.spawn().unwrap();
+        let guard = LifetimeGuard::attach(&child).unwrap();
+        drop(guard);
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                panic!("child survived guard drop");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    #[test]
+    fn parent_helper() {
+        let Ok(report) = std::env::var("LUCZOR_PARENT_DEATH_TEST_REPORT") else {
+            return;
+        };
+        let mut command = Command::new("/usr/bin/sleep");
+        command
+            .arg("30")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        configure(&mut command);
+        let child = command.spawn().unwrap();
+        let _guard = LifetimeGuard::attach(&child).unwrap();
+        fs::write(report, child.id().to_string()).unwrap();
+        std::thread::sleep(Duration::from_secs(30));
+    }
+    #[test]
+    fn kernel_kills_child_when_parent_is_killed() {
+        let dir = directory();
+        let report = dir.join("pid");
+        let mut parent = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                &format!(
+                    "{}::parent_helper",
+                    module_path!().split_once("::").unwrap().1
+                ),
+                "--nocapture",
+            ])
+            .env("LUCZOR_PARENT_DEATH_TEST_REPORT", &report)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !report.exists() {
+            if Instant::now() > deadline {
+                let _ = parent.kill();
+                let _ = parent.wait();
+                panic!("helper did not start");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid = fs::read_to_string(&report).unwrap();
+        parent.kill().unwrap();
+        parent.wait().unwrap();
+        loop {
+            let stopped = fs::read_to_string(format!("/proc/{pid}/stat"))
+                .map(|s| s.split_whitespace().nth(2) == Some("Z"))
+                .unwrap_or(true);
+            if stopped {
+                break;
+            }
+            assert!(Instant::now() < deadline, "child survived parent death");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        fs::remove_file(report).unwrap();
+        fs::remove_dir(dir).unwrap();
     }
 }
