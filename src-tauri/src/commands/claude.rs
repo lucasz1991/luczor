@@ -105,7 +105,6 @@ pub struct ClaudeRuntimeStatus {
     reason: Option<String>,
 }
 
-#[cfg(windows)]
 fn runtime_root(app: &AppHandle) -> Result<PathBuf, String> {
     let packaged = app
         .path()
@@ -123,17 +122,39 @@ fn runtime_root(app: &AppHandle) -> Result<PathBuf, String> {
             return Ok(development);
         }
     }
-    Err("Managed Claude runtime is not packaged. Build the app-owned agent runtime first.".into())
+    Err("Managed Claude runtime is not packaged for this platform. Build the app-owned agent runtime first.".into())
 }
 
-#[cfg(not(windows))]
-const UNSUPPORTED_RUNTIME_REASON: &str =
-    "Managed Claude runtime is unavailable on this platform; a signed Linux/macOS runtime is not bundled.";
-
-#[cfg(not(windows))]
-fn runtime_root(_app: &AppHandle) -> Result<PathBuf, String> {
-    Err(UNSUPPORTED_RUNTIME_REASON.into())
+fn runtime_executable_names() -> (&'static str, &'static str) {
+    if cfg!(windows) {
+        ("node.exe", "claude.exe")
+    } else {
+        ("node", "claude")
+    }
 }
+
+fn runtime_platform() -> &'static str {
+    if cfg!(windows) {
+        "win32"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
+    } else if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "unsupported"
+    }
+}
+
+fn runtime_arch() -> &'static str {
+    if cfg!(target_arch = "x86_64") {
+        "x64"
+    } else if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "unsupported"
+    }
+}
+
 fn verify_runtime(root: &Path) -> Result<(), String> {
     let bytes = std::fs::read(root.join("runtime.json"))
         .map_err(|_| "Agent runtime manifest unavailable.")?;
@@ -145,9 +166,29 @@ fn verify_runtime(root: &Path) -> Result<(), String> {
     if manifest["sdkVersion"] != "0.3.266" || manifest["cliVersion"] != "2.1.266" {
         return Err("Unsupported managed Claude runtime version.".into());
     }
+    let (node_executable, cli_executable) = runtime_executable_names();
+    if manifest
+        .get("platform")
+        .and_then(Value::as_str)
+        .is_some_and(|platform| platform != runtime_platform())
+        || manifest
+            .get("arch")
+            .and_then(Value::as_str)
+            .is_some_and(|arch| arch != runtime_arch())
+        || manifest
+            .get("nodeExecutable")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name != node_executable)
+        || manifest
+            .get("cliExecutable")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name != cli_executable)
+    {
+        return Err("Managed Claude runtime targets a different platform.".into());
+    }
     for file in [
-        "node.exe",
-        "claude.exe",
+        node_executable,
+        cli_executable,
         "worker.mjs",
         "node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs",
     ] {
@@ -161,7 +202,7 @@ fn verify_runtime(root: &Path) -> Result<(), String> {
 pub(crate) fn metadata_executable(app: &AppHandle) -> Result<PathBuf, String> {
     let root = runtime_root(app)?;
     verify_runtime(&root)?;
-    Ok(root.join("claude.exe"))
+    Ok(root.join(runtime_executable_names().1))
 }
 
 #[tauri::command]
@@ -189,7 +230,7 @@ fn validate_start(input: &ClaudeStart) -> Result<(), String> {
         || input.execution_profile != "host-user"
         || !input.host_access_acknowledged
     {
-        return Err("Claude requires the reviewed Windows host-user execution profile.".into());
+        return Err("Claude requires the reviewed host-user execution profile.".into());
     }
     if input
         .model
@@ -420,10 +461,10 @@ fn run_worker(
         },
         input.model.as_deref(),
         input.default_model_revision.as_deref(),
-        &runtime.join("claude.exe"),
+        &runtime.join(runtime_executable_names().1),
         &|| scope(app, job),
     )?;
-    let mut command = Command::new(runtime.join("node.exe"));
+    let mut command = Command::new(runtime.join(runtime_executable_names().0));
     command
         .arg(runtime.join("worker.mjs"))
         .current_dir(&job.root)
@@ -657,10 +698,13 @@ mod tests {
         ));
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn managed_claude_reports_platform_unavailability_without_resolving_an_executable() {
-        assert!(UNSUPPORTED_RUNTIME_REASON.contains("not bundled"));
-        assert!(!UNSUPPORTED_RUNTIME_REASON.contains(".exe"));
+    fn managed_claude_uses_native_executable_names() {
+        let (node, cli) = runtime_executable_names();
+        if cfg!(windows) {
+            assert_eq!((node, cli), ("node.exe", "claude.exe"));
+        } else {
+            assert_eq!((node, cli), ("node", "claude"));
+        }
     }
 }

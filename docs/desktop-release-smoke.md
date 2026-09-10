@@ -2,11 +2,12 @@
 
 This path deliberately separates a local test installer from a publishable Luczor release.
 
-The managed Claude runtime is bundled only by `src-tauri/tauri.windows.conf.json`
-for Windows x64. Linux and macOS builds use the shared Tauri configuration without
-that Windows resource and report Claude as unavailable until a signed,
-platform-matching runtime is supplied. The ordinary local `llama-server` path is
-independent of this optional bundle.
+The managed Claude runtime is selected by host platform and architecture. The
+Windows, Linux and macOS Tauri overlays all bundle the same resource location, but
+the build script places only the matching native package there (`claude.exe` on
+Windows, `claude` on Linux/macOS). A cross-target build leaves this optional
+bundle out when the host cannot provide a compatible Node executable. The ordinary
+local `llama-server` path is independent of this optional bundle.
 
 ## Pinned Node runtime
 

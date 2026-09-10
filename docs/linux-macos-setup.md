@@ -26,9 +26,9 @@ to Vite and the WebView. Other running projects are not stopped. `pnpm dev` stil
 uses the fixed frontend-only port; use `pnpm tauri dev` for the complete app.
 
 To create a local Debian package, run `pnpm tauri build --bundles deb` after the
-setup step. Linux builds intentionally omit the Windows-only managed Claude
-bundle; Claude therefore remains visibly unavailable until a signed Linux
-runtime is supplied.
+setup step. The build detects the native host and target architecture and bundles
+only the matching Claude package. If that optional package is not installed,
+Claude remains visibly unavailable with a concrete readiness reason.
 
 ## Installing the app without development tools
 
@@ -67,10 +67,12 @@ Their platform builds and signed catalog entries must be provided before these
 optional local features are available. PHP/Composer are needed only for developing
 the separate backend, not for using the desktop app.
 
-The managed Claude worker is currently a Windows x64-only resource. The Windows
-configuration bundles the signed app-owned `claude.exe`/`node.exe` runtime; Linux
-and macOS builds deliberately omit it and continue with Claude marked unavailable
-until a platform-matching signed runtime is supplied. This is independent of the
+The managed Claude worker is selected per platform and architecture. Windows uses
+`claude.exe`/`node.exe`; Linux and macOS use their native `claude`/`node` assets.
+The Tauri platform overlays point to the same app-owned resource location, while
+the build script copies only the package selected for the current native target.
+Cross-target builds are rejected for this bundle because the host Node executable
+must have the same platform as the packaged worker. This is independent of the
 ordinary Luczor chat and of the local `llama-server` model path.
 
 References: https://v2.tauri.app/start/prerequisites/ and

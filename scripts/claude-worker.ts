@@ -46,6 +46,7 @@ export function workerOptions(
     }
   }
   const env: Record<string, string | undefined> = { ...process.env }
+  const host = process.platform === 'win32' ? 'Windows' : process.platform === 'darwin' ? 'macOS' : 'Linux'
   // Ignore global effort/model substitutions; preserve the user's own authentication without exposing it.
   delete env.CLAUDE_CODE_EFFORT_LEVEL
   delete env.CLAUDE_CODE_SUBAGENT_MODEL
@@ -91,8 +92,7 @@ export function workerOptions(
     systemPrompt: {
       type: 'preset',
       preset: 'claude_code',
-      append:
-        'Du arbeitest als verwalteter Luczor-Agent direkt auf Windows mit Benutzerrechten. Der Projektordner ist keine Dateisandbox. Bleibe beim freigegebenen Auftrag. Starte keine dauerhaften Hintergrunddienste, zusätzlichen Agenten oder Zeitpläne. Berichte nur öffentliche Ergebnisse, ausgeführte Prüfungen und verbleibende Grenzen.',
+      append: `Du arbeitest als verwalteter Luczor-Agent direkt auf ${host} mit Benutzerrechten. Der Projektordner ist keine Dateisandbox. Bleibe beim freigegebenen Auftrag. Starte keine dauerhaften Hintergrunddienste, zusätzlichen Agenten oder Zeitpläne. Berichte nur öffentliche Ergebnisse, ausgeführte Prüfungen und verbleibende Grenzen.`,
     },
   }
 }
@@ -187,7 +187,8 @@ async function main() {
       void (async () => {
         let running: ReturnType<typeof query> | undefined
         try {
-          const cli = join(dirname(fileURLToPath(import.meta.url)), 'claude.exe')
+          const cliName = process.platform === 'win32' ? 'claude.exe' : 'claude'
+          const cli = join(dirname(fileURLToPath(import.meta.url)), cliName)
           running = query({ prompt: input.prompt, options: workerOptions(input, gate, abort, cli, emit) })
           for await (const message of running) {
             if (abort.signal.aborted) break
