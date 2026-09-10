@@ -39,8 +39,8 @@ mockIPC(command => {
       ram_used_mb: 15729,
       ram_total_mb: 32768,
       gpu_percent: unavailableGpu.value ? null : cpu + 16,
-      cpu_temp_c: null,
-      gpu_temp_c: null,
+      cpu_temp_c: 54,
+      gpu_temp_c: unavailableGpu.value ? null : 62,
       gpu_source: 'windows_engine',
       network_local: {
         sent_bytes: reads.value * 768,

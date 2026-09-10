@@ -9,7 +9,7 @@ const props = withDefaults(
     active: boolean
     nativeNetwork?: LocalNetworkCounters
     nativeLive: boolean
-    view?: 'memory' | 'network'
+    view?: 'all' | 'memory' | 'network'
   }>(),
   { view: 'memory', nativeNetwork: undefined }
 )
@@ -177,7 +177,9 @@ const cards = computed(() => [
   },
 ])
 const visibleCards = computed(() =>
-  cards.value.filter(card => (props.view === 'memory' ? card.id === 'memory' : card.id !== 'memory'))
+  cards.value.filter(
+    card => props.view === 'all' || (props.view === 'memory' ? card.id === 'memory' : card.id !== 'memory')
+  )
 )
 </script>
 <template>

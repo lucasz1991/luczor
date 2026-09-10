@@ -25,6 +25,12 @@ const tabs: ReadonlyArray<{ id: SystemSection; label: string }> = [
   { id: 'network', label: 'Netzwerk' },
   { id: 'details', label: 'Details' },
 ]
+const displayMode = ref<'mini' | 'tabs' | 'dashboard'>('tabs')
+function setDisplayMode(mode: 'mini' | 'tabs' | 'dashboard') {
+  displayMode.value = mode
+  if (mode === 'mini') activeSection.value = 'resources'
+  if (content.value) content.value.scrollTop = 0
+}
 const activeSection = ref<SystemSection>('resources')
 const indicators = ref<SystemIndicators>({
   resources: 'unknown',
@@ -134,6 +140,7 @@ onBeforeUnmount(restoreFocus)
     id="system-panel"
     ref="panel"
     class="system-status-panel"
+    :data-mode="displayMode"
     role="dialog"
     aria-label="Systemstatus"
     tabindex="-1"
@@ -154,7 +161,19 @@ onBeforeUnmount(restoreFocus)
         </button>
       </div>
     </header>
-    <nav class="system-status-panel__tabs" role="tablist" aria-label="Systemstatus-Bereiche">
+    <div class="system-view-switch" role="group" aria-label="Systemstatus-Anzeigemodus">
+      <button type="button" :aria-pressed="displayMode === 'mini'" @click="setDisplayMode('mini')">Mini</button>
+      <button type="button" :aria-pressed="displayMode === 'tabs'" @click="setDisplayMode('tabs')">Tabs</button>
+      <button type="button" :aria-pressed="displayMode === 'dashboard'" @click="setDisplayMode('dashboard')">
+        Vollbild
+      </button>
+    </div>
+    <nav
+      v-show="displayMode === 'tabs'"
+      class="system-status-panel__tabs"
+      role="tablist"
+      aria-label="Systemstatus-Bereiche"
+    >
       <button
         v-for="tab in tabs"
         :id="`system-tab-${tab.id}`"
@@ -195,38 +214,54 @@ onBeforeUnmount(restoreFocus)
       :id="`system-tabpanel-${activeSection}`"
       ref="content"
       class="system-status-panel__content"
-      role="tabpanel"
-      :aria-labelledby="`system-tab-${activeSection}`"
+      :role="displayMode === 'tabs' ? 'tabpanel' : 'region'"
+      :aria-labelledby="displayMode === 'tabs' ? `system-tab-${activeSection}` : undefined"
+      :aria-label="
+        displayMode === 'dashboard'
+          ? 'Systemstatus-Dashboard'
+          : displayMode === 'mini'
+            ? 'Kompakte Ressourcen'
+            : undefined
+      "
       tabindex="0"
     >
       <JarvisHud
         embedded
         :active="active"
-        :section="activeSection"
+        :section="displayMode === 'dashboard' ? 'all' : activeSection"
         :assistant-phase="assistantPhase"
         @indicators="indicators = $event"
       />
-      <LocalModelAnalysis v-show="activeSection === 'localmodel'" />
-      <div v-show="activeSection === 'localmodel' || activeSection === 'details'" class="system-status-panel__details">
+      <LocalModelAnalysis v-show="displayMode === 'dashboard' || activeSection === 'localmodel'" />
+      <div
+        v-show="displayMode === 'dashboard' || activeSection === 'localmodel' || activeSection === 'details'"
+        class="system-status-panel__details"
+      >
         <details
-          v-show="activeSection === 'localmodel'"
+          v-show="displayMode === 'dashboard' || activeSection === 'localmodel'"
+          :open="displayMode === 'dashboard'"
           @toggle="modelOpen = ($event.target as HTMLDetailsElement).open"
         >
           <summary>
             <AiIcon name="grid" :size="15" /><span>Lokales Modell</span
             ><AiIcon class="disclosure-arrow" name="chevron" :size="13" />
           </summary>
-          <LocalModelStatus :active="active && activeSection === 'localmodel' && modelOpen" />
+          <LocalModelStatus
+            :active="active && (displayMode === 'dashboard' || (activeSection === 'localmodel' && modelOpen))"
+          />
         </details>
         <details
-          v-show="activeSection === 'details'"
+          v-show="displayMode === 'dashboard' || activeSection === 'details'"
+          :open="displayMode === 'dashboard'"
           @toggle="profileOpen = ($event.target as HTMLDetailsElement).open"
         >
           <summary>
             <AiIcon name="spark" :size="15" /><span>Persönlichkeit &amp; Skills</span
             ><AiIcon class="disclosure-arrow" name="chevron" :size="13" />
           </summary>
-          <AssistantProfileStatus :active="active && activeSection === 'details' && profileOpen" />
+          <AssistantProfileStatus
+            :active="active && (displayMode === 'dashboard' || (activeSection === 'details' && profileOpen))"
+          />
         </details>
       </div>
     </div>
@@ -414,6 +449,165 @@ details[open] > summary .disclosure-arrow {
     gap: 5px;
     padding: 11px 2px;
     font-size: 10px;
+  }
+}
+</style>
+
+<style scoped>
+.system-view-switch {
+  display: flex;
+  gap: 4px;
+  padding: 10px 24px;
+  border-bottom: 1px solid var(--ai-line);
+  flex-shrink: 0;
+}
+.system-view-switch button {
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ai-muted);
+  padding: 5px 10px;
+  font: inherit;
+}
+.system-view-switch button[aria-pressed='true'] {
+  background: var(--ai-hover);
+  color: var(--ai-ink);
+}
+.system-status-panel[data-mode='mini'] {
+  top: auto;
+  bottom: 20px;
+  width: min(410px, calc(100vw - 40px));
+  max-height: calc(100dvh - 40px);
+}
+.system-status-panel[data-mode='mini'] :deep(.resource-grid) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+.system-status-panel[data-mode='dashboard'] {
+  inset: 0;
+  width: 100vw;
+  max-width: 100vw;
+  height: 100dvh;
+  max-height: 100dvh;
+  border-radius: 0;
+  resize: none;
+}
+[data-mode='dashboard'] .system-status-panel__content {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 20px 32px;
+  align-content: start;
+  padding: 20px 28px;
+}
+[data-mode='dashboard'] :deep(.status-dashboard),
+[data-mode='dashboard'] :deep(.status-dashboard__body) {
+  display: contents;
+}
+[data-mode='dashboard'] :deep(.resource-pane),
+[data-mode='dashboard'] :deep(.activity-charts) {
+  grid-column: 1 / -1;
+}
+[data-mode='dashboard'] :deep(.resource-grid) {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+[data-mode='dashboard'] :deep(.resource-dial-wrap) {
+  max-width: 180px;
+}
+[data-mode='dashboard'] :deep(.status-overview) {
+  grid-column: 1 / -1;
+  min-height: 0;
+}
+[data-mode='dashboard'] :deep(.model-analysis) {
+  grid-column: 1;
+}
+[data-mode='dashboard'] .system-status-panel__details {
+  grid-column: 2;
+}
+@media (max-width: 700px) {
+  [data-mode='dashboard'] .system-status-panel__content {
+    grid-template-columns: minmax(0, 1fr);
+    padding: 16px;
+  }
+  [data-mode='dashboard'] .system-status-panel__details {
+    grid-column: 1;
+  }
+  [data-mode='dashboard'] :deep(.resource-grid) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+</style>
+
+<style scoped>
+[data-mode='mini'] :deep(.resource-dial-wrap) {
+  max-width: 140px;
+}
+[data-mode='mini'] .system-status-panel__header {
+  padding: 12px 16px;
+}
+[data-mode='mini'] .system-status-panel__content {
+  padding: 8px 16px;
+}
+[data-mode='dashboard'] :deep(.resource-pane) {
+  grid-column: 1;
+  grid-row: 2;
+}
+[data-mode='dashboard'] :deep(.resource-grid) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+[data-mode='dashboard'] :deep(.resource-dial-wrap) {
+  max-width: 132px;
+}
+[data-mode='dashboard'] :deep(.activity-charts) {
+  grid-column: 2;
+  grid-row: 2;
+}
+[data-mode='dashboard'] :deep(.activity-charts__grid) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+[data-mode='dashboard'] :deep(.resource-note) {
+  display: none;
+}
+[data-mode='dashboard'] :deep(.resource-heading) {
+  padding-bottom: 10px;
+}
+[data-mode='dashboard'] :deep(.resource-explanation) {
+  margin-bottom: 0;
+}
+[data-mode='dashboard'] :deep(.model-analysis) {
+  grid-row: 3 / span 2;
+}
+[data-mode='dashboard'] :deep(.system-details-overview) {
+  grid-column: 2;
+  grid-row: 3;
+}
+[data-mode='dashboard'] .system-status-panel__details {
+  grid-row: 4;
+}
+@media (min-width: 1600px) {
+  [data-mode='dashboard'] .system-status-panel__content {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+  }
+  [data-mode='dashboard'] :deep(.model-analysis) {
+    grid-column: 3;
+    grid-row: 2 / span 3;
+  }
+  [data-mode='dashboard'] .system-status-panel__details {
+    grid-column: 1;
+    grid-row: 3;
+  }
+}
+@media (max-width: 700px) {
+  [data-mode='dashboard'] :deep(.resource-pane),
+  [data-mode='dashboard'] :deep(.activity-charts),
+  [data-mode='dashboard'] :deep(.model-analysis),
+  [data-mode='dashboard'] :deep(.system-details-overview),
+  [data-mode='dashboard'] .system-status-panel__details {
+    grid-column: 1;
+    grid-row: auto;
+  }
+  [data-mode='dashboard'] :deep(.activity-charts__grid) {
+    grid-template-columns: 1fr;
   }
 }
 </style>

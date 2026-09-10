@@ -15,7 +15,7 @@ const props = withDefaults(
     embedded?: boolean
     active?: boolean
     assistantPhase?: OrbPhase
-    section?: 'resources' | 'localmodel' | 'memory' | 'network' | 'details'
+    section?: 'all' | 'resources' | 'localmodel' | 'memory' | 'network' | 'details'
   }>(),
   {
     embedded: false,
@@ -211,6 +211,12 @@ const storageUsed = computed(() =>
     : null
 )
 const gib = (bytes: number) => (bytes / 1024 ** 3).toLocaleString('de-DE', { maximumFractionDigits: 1 })
+function temperature(key: string) {
+  const value = key === 'cpu' ? metrics.sample?.cpu_temp_c : metrics.sample?.gpu_temp_c
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${value.toLocaleString('de-DE', { maximumFractionDigits: 1 })} °C`
+    : '— °C'
+}
 const formatPercent = (value: number) => value.toLocaleString('de-DE', { maximumFractionDigits: 1 })
 const connectionLabels: Record<ConnState, string> = {
   online: 'Verbunden',
@@ -267,7 +273,7 @@ const position = computed(() =>
       <AiIcon name="spark" /> Systemstatus <AiIcon :name="collapsed ? 'plus' : 'close'" />
     </button>
     <div v-if="!collapsed" class="status-dashboard__body">
-      <div v-show="section === 'localmodel'" class="status-overview" :data-tone="phase.tone">
+      <div v-show="section === 'all' || section === 'localmodel'" class="status-overview" :data-tone="phase.tone">
         <div class="status-overview__text">
           <h3 role="status"><i class="phase-dot" />{{ phase.label }}</h3>
           <p>{{ phase.detail }}</p>
@@ -284,7 +290,7 @@ const position = computed(() =>
           </div>
         </div>
       </div>
-      <div v-show="section === 'resources'" class="resource-pane">
+      <div v-show="section === 'all' || section === 'resources'" class="resource-pane">
         <div class="resource-heading">
           <div class="resource-mode" role="group" aria-label="Ressourcendarstellung">
             <button type="button" :aria-pressed="resourceView === 'circles'" @click="resourceView = 'circles'">
@@ -356,6 +362,18 @@ const position = computed(() =>
                 </g>
               </svg>
             </div>
+            <div
+              v-if="meter.key === 'cpu' || meter.key === 'gpu'"
+              class="resource-temperature"
+              :aria-label="`${meter.label}-Temperatur: ${temperature(meter.key)}`"
+            >
+              <svg width="13" height="16" viewBox="0 0 16 20" fill="none" stroke="currentColor" aria-hidden="true">
+                <path d="M6 12V4a2 2 0 0 1 4 0v8a4 4 0 1 1-4 0Z" />
+                <path d="M8 6v9" />
+              </svg>
+              <span>{{ temperature(meter.key) }}</span
+              ><small v-if="temperature(meter.key) === '— °C'">Sensor nicht verfügbar</small>
+            </div>
             <div v-if="meter.key === 'disk'" class="disk-capacity">
               <template v-if="metrics.sample?.disk && storageUsed !== null"
                 ><span>{{ metrics.sample.disk.mount }} · {{ formatPercent(storageUsed) }} % belegt</span>
@@ -402,16 +420,16 @@ const position = computed(() =>
           </p>
         </details>
       </div>
-      <p v-show="section === 'localmodel'" class="resource-note">{{ modelStatus }}</p>
+      <p v-show="section === 'all' || section === 'localmodel'" class="resource-note">{{ modelStatus }}</p>
       <SystemActivityCharts
-        v-show="section === 'memory' || section === 'network'"
-        :view="section === 'memory' ? 'memory' : 'network'"
+        v-show="section === 'all' || section === 'memory' || section === 'network'"
+        :view="section === 'all' ? 'all' : section === 'memory' ? 'memory' : 'network'"
         :active="active && !collapsed"
         :native-network="metrics.sample?.network_local"
         :native-live="metrics.availability === 'live'"
         @indicators="flowIndicators = $event"
       />
-      <div v-show="section === 'details'">
+      <div v-show="section === 'all' || section === 'details'" class="system-details-overview">
         <div class="connection-grid">
           <div v-for="connection in connections" :key="connection.label" class="connection">
             <span>{{ connection.label }}</span
@@ -452,6 +470,20 @@ const position = computed(() =>
 </template>
 
 <style scoped>
+.resource-temperature {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  color: var(--ai-muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  margin-top: 8px;
+}
+.resource-temperature small {
+  font-size: 10px;
+}
 .status-dashboard {
   --status-color: var(--ai-muted);
   position: fixed;
