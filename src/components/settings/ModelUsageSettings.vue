@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
-import { localInferenceCoordinator } from '@/services/inference/coordinator'
+import { localInferenceCoordinator, reinitializeLocalInferenceForCurrentApi } from '@/services/inference/coordinator'
 import {
   modelUsageSettings,
   saveModelUsageSettings,
@@ -12,16 +12,34 @@ import ThinkingSettings from './ThinkingSettings.vue'
 const draft = ref({ ...modelUsageSettings.value })
 const status = ref(localInferenceCoordinator.status())
 const message = ref('')
+const busy = ref(false)
 watch(modelUsageSettings, value => {
   draft.value = { ...value }
 })
-function save() {
+async function save() {
+  busy.value = true
   try {
-    saveModelUsageSettings(draft.value)
+    await saveModelUsageSettings(draft.value)
     message.value =
       'Gespeichert. Modellwahl und Teamstandard gelten für neue Aufträge; externe Freigaben bleiben erforderlich.'
   } catch {
     message.value = 'Die Einstellungen konnten nicht gespeichert werden.'
+  } finally {
+    busy.value = false
+  }
+}
+async function refreshCatalog() {
+  busy.value = true
+  try {
+    const result = await reinitializeLocalInferenceForCurrentApi({ diagnoseUnavailable: true })
+    status.value = localInferenceCoordinator.status()
+    message.value = result.ok
+      ? 'Katalogabruf abgeschlossen. Die aktuelle Modellfreigabe wird angezeigt.'
+      : result.message
+  } catch {
+    message.value = 'Der Modellkatalog konnte nicht aktualisiert werden. Bitte die Serververbindung prüfen.'
+  } finally {
+    busy.value = false
   }
 }
 </script>
@@ -56,8 +74,8 @@ function save() {
         Eine feste Auswahl verwendet ausschließlich dieses lokale Modell. Installation und Bereitschaft werden vor dem
         Auftrag geprüft.
       </p>
-      <button type="button" class="lz-btn" @click="status = localInferenceCoordinator.status()">
-        Kataloganzeige aktualisieren
+      <button type="button" class="lz-btn" :disabled="busy" @click="refreshCatalog">
+        Modellkatalog vom Server aktualisieren
       </button>
       <p v-if="!status.manifest" role="status" class="lz-hint">
         Noch kein verifizierter Modellkatalog verfügbar. Bitte die Serververbindung prüfen.
@@ -81,7 +99,7 @@ function save() {
       </select>
       <p v-if="!draft.externalEnabled" class="lz-hint">Externe Modelle sind gesperrt. Teams arbeiten lokal.</p>
       <div class="model-usage-actions">
-        <button type="button" class="lz-btn" @click="save">Modellnutzung speichern</button>
+        <button type="button" class="lz-btn" :disabled="busy" @click="save">Modellnutzung speichern</button>
         <button type="button" class="lz-btn" @click="draft = { ...DEFAULT_MODEL_USAGE }">Zurücksetzen</button>
       </div>
       <p role="status" class="lz-hint">{{ message }}</p>

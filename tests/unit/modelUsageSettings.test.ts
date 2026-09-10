@@ -20,22 +20,24 @@ it('defaults external routing off and rejects invalid stored selections', () => 
     DEFAULT_MODEL_USAGE
   )
 })
-it('persists model and team choices together before publishing them', () => {
+it('persists model and team choices together before publishing them', async () => {
   const choice = {
     localModelId: 'local-tier-light',
     externalEnabled: true,
     agentsByDefault: true,
     teamPreset: 'free' as const,
   }
-  saveModelUsageSettings(choice)
+  await saveModelUsageSettings(choice)
   expect(modelUsageSettings.value).toEqual(choice)
   expect(localStorage.setItem).toHaveBeenCalledWith('luczor.device.model-usage.v1', JSON.stringify(choice))
 })
-it('does not publish unsaved choices when device storage rejects the write', () => {
+it('does not publish unsaved choices when device storage rejects the write', async () => {
   vi.mocked(localStorage.setItem).mockImplementation(() => {
     throw new Error('storage full')
   })
-  expect(() => saveModelUsageSettings({ ...DEFAULT_MODEL_USAGE, externalEnabled: true })).toThrow('storage full')
+  await expect(saveModelUsageSettings({ ...DEFAULT_MODEL_USAGE, externalEnabled: true })).rejects.toThrow(
+    'storage full'
+  )
   expect(modelUsageSettings.value.externalEnabled).toBe(false)
 })
 

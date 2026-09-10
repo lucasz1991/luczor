@@ -1080,11 +1080,15 @@ export class LocalInferenceCoordinator {
     reason: RouteDecision['reason']
   ): string {
     const manifest = this.manifest!
-    const candidates = new Set<string>([
-      ...(settings.experimentalFlashNext ? manifest.routing.experimentalModelIds : []),
-      manifest.routing.defaultModelId,
-      ...manifest.routing.fallbackModelIds,
-    ])
+    const candidates = new Set<string>(
+      settings.localModelId
+        ? [settings.localModelId]
+        : [
+            ...(settings.experimentalFlashNext ? manifest.routing.experimentalModelIds : []),
+            manifest.routing.defaultModelId,
+            ...manifest.routing.fallbackModelIds,
+          ]
+    )
     const admissions = this.modelAdmissions(taskType).filter(model => candidates.has(model.modelReleaseId))
     const enabledCandidates = admissions.filter(model => model.enabled)
     const diagnostics = (enabledCandidates.length ? enabledCandidates : admissions)
