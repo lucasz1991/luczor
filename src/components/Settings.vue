@@ -1,12 +1,13 @@
 <!-- src/components/Settings.vue -->
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { loadLocalSpeechConsent, saveLocalSpeechConsent } from '@/services/voice/speechConsent'
 import { Store } from '@tauri-apps/plugin-store'
 import PrivacyDiagnosticsSettings from '@/components/PrivacyDiagnosticsSettings.vue'
 import AppearanceSettingsSection from '@/components/settings/AppearanceSettingsSection.vue'
 import AccountConnection from '@/components/settings/AccountConnection.vue'
 import ChatSettingsSection from '@/components/settings/ChatSettingsSection.vue'
+import { modelUsageSettings, saveModelUsageSettings } from '@/services/inference/modelUsageSettings'
 import { DEFAULT_TOOL_LIMITS, loadToolLimits, validToolRounds } from '@/services/toolLimits'
 import ExecutionSettingsSection from '@/components/settings/ExecutionSettingsSection.vue'
 import { listTools } from '@/services/tools/registry'
@@ -187,11 +188,13 @@ const notificationUi = reactive({
 })
 
 const settings = reactive<AppSettings>({ ...DEFAULTS })
+const modelUsageDraft = ref({ ...modelUsageSettings.value })
+const saving = ref(false)
 const registeredTools = listTools()
 
 let settingsStore: Store | null = null
 
-const canSave = computed(() => true)
+const canSave = computed(() => ui.loaded && !saving.value)
 
 function closeModal() {
   emit('update:open', false)
@@ -302,8 +305,20 @@ async function ensureStoreLoaded() {
 }
 
 async function saveAll() {
-  if (!settingsStore) return
+  if (!settingsStore || saving.value) return
+  saving.value = true
+  ui.saved = false
+  try {
+    await persistAll()
+  } catch (error) {
+    ui.error = error instanceof Error ? error.message : 'Die Einstellungen konnten nicht gespeichert werden.'
+  } finally {
+    saving.value = false
+  }
+}
 
+async function persistAll() {
+  if (!settingsStore) return
   ui.error = null
 
   if (!validToolRounds(settings.chat_tool_rounds) || !validToolRounds(settings.agent_tool_rounds)) {
@@ -391,6 +406,7 @@ async function saveAll() {
   await settingsStore.set('use_server_proxy', true)
 
   await settingsStore.save()
+  await saveModelUsageSettings({ ...modelUsageDraft.value })
   Object.assign(settings, voiceValues)
   window.dispatchEvent(new Event('luczor:voice-settings-changed'))
   if (apiIdentityChanged) void refreshServerPolicy()
@@ -566,6 +582,7 @@ watch(
       document.body.style.overflow = 'hidden'
       ui.saved = false
       ui.error = null
+      modelUsageDraft.value = { ...modelUsageSettings.value }
       ui.tab = props.initialTab
       await ensureStoreLoaded()
       if (ui.tab === 'notifications') await loadNotificationSettings(true)
@@ -995,6 +1012,7 @@ function iconPath(kind: string) {
               <!-- CHAT -->
               <ChatSettingsSection
                 v-else-if="ui.tab === 'chat'"
+                v-model:model-usage="modelUsageDraft"
                 v-model:auto-speech="settings.chat_auto_speech"
                 v-model:auto-speech-mode="settings.chat_auto_speech_mode"
                 v-model:allow-local-speech="settings.voice_tts_allow_local_content"

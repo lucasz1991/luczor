@@ -6,6 +6,15 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import settingsSource from '@/components/Settings.vue?raw'
 import type { InferenceConnectionResult } from '@/services/inference/coordinator'
 
+const appliedModelUsage = VueRuntime.ref({
+  localModelId: null as string | null,
+  externalEnabled: false,
+  agentsByDefault: false,
+  teamPreset: 'local',
+})
+const saveModels = vi.fn(async (value: typeof appliedModelUsage.value) => {
+  appliedModelUsage.value = { ...value }
+})
 const persist = vi.fn(async () => false)
 const recover = vi.fn<() => Promise<InferenceConnectionResult>>()
 const legacyConnectionTest = vi.fn()
@@ -17,17 +26,28 @@ const transpiled = ts.transpileModule(compiled.content, {
 }).outputText
 
 type SettingsSetup = {
+  modelUsageDraft: typeof appliedModelUsage
+  selectTab(id: string): void
   ensureStoreLoaded(): Promise<void>
   testServer(): Promise<void>
   saveAll(): Promise<void>
   settings: { chat_tool_rounds: number; agent_tool_rounds: number; voice_tts_voice_id: string }
-  ui: { error: string | null; serverBusy: boolean; serverResult: { ok: boolean; message: string } | null }
+  ui: {
+    saved: boolean
+    error: string | null
+    serverBusy: boolean
+    serverResult: { ok: boolean; message: string } | null
+  }
 }
 
 function setup(): SettingsSetup {
   const module = { exports: {} as { default?: { setup: (props: unknown, context: unknown) => SettingsSetup } } }
   const modules = new Map<string, unknown>([
     ['vue', { ...VueRuntime, onMounted() {}, onBeforeUnmount() {}, watch() {} }],
+    [
+      '@/services/inference/modelUsageSettings',
+      { modelUsageSettings: appliedModelUsage, saveModelUsageSettings: saveModels },
+    ],
     ['@tauri-apps/plugin-store', { Store: { load: async () => store } }],
     [
       '@/services/voice/speechConsent',
@@ -68,6 +88,7 @@ function setup(): SettingsSetup {
   ])
   runInNewContext(transpiled, {
     module,
+    Error,
     Event,
     window: { dispatchEvent() {}, setTimeout() {} },
     exports: module.exports,
@@ -91,6 +112,8 @@ function result(ok: boolean, stale = false): InferenceConnectionResult {
 }
 
 beforeEach(() => {
+  appliedModelUsage.value = { localModelId: null, externalEnabled: false, agentsByDefault: false, teamPreset: 'local' }
+  saveModels.mockClear()
   persist.mockReset().mockResolvedValue(false)
   recover.mockReset().mockResolvedValue(result(true))
   legacyConnectionTest.mockReset()
@@ -175,5 +198,36 @@ describe('Settings connection retry', () => {
     await settings.testServer()
     expect(settings.ui.serverResult?.ok).toBe(false)
     expect(settings.ui.serverResult?.message).not.toContain('SECRET_KEYCHAIN_DATA')
+  })
+})
+
+describe('model selection through the shared settings save action', () => {
+  it('retains all model options across tab switches and a fresh settings instance', async () => {
+    const first = setup()
+    await first.ensureStoreLoaded()
+    const choice = {
+      localModelId: 'local-tier-light',
+      externalEnabled: true,
+      agentsByDefault: true,
+      teamPreset: 'free',
+    }
+    first.modelUsageDraft.value = choice
+    first.selectTab('server')
+    await first.saveAll()
+    expect(saveModels).toHaveBeenCalledWith(choice)
+    expect(first.ui.saved).toBe(true)
+    const reopened = setup()
+    await reopened.ensureStoreLoaded()
+    expect(reopened.modelUsageDraft.value).toEqual(choice)
+  })
+  it('reports a model persistence failure without claiming success or replacing applied values', async () => {
+    const view = setup()
+    await view.ensureStoreLoaded()
+    view.modelUsageDraft.value.localModelId = 'local-tier-light'
+    saveModels.mockRejectedValueOnce(new Error('Disk write failed'))
+    await view.saveAll()
+    expect(view.ui.error).toBe('Disk write failed')
+    expect(view.ui.saved).toBe(false)
+    expect(appliedModelUsage.value.localModelId).toBeNull()
   })
 })

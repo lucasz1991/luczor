@@ -5,16 +5,18 @@ import {
   modelUsageSettings,
   saveModelUsageSettings,
   DEFAULT_MODEL_USAGE,
+  type ModelUsageSettings as ModelUsageConfig,
 } from '@/services/inference/modelUsageSettings'
 import LocalResourceSettings from '@/components/LocalResourceSettings.vue'
 import ThinkingSettings from './ThinkingSettings.vue'
 
-const draft = ref({ ...modelUsageSettings.value })
+const props = defineProps<{ managed?: boolean }>()
+const draft = defineModel<ModelUsageConfig>({ default: () => ({ ...modelUsageSettings.value }) })
 const status = ref(localInferenceCoordinator.status())
 const message = ref('')
 const busy = ref(false)
 watch(modelUsageSettings, value => {
-  draft.value = { ...value }
+  if (!props.managed) draft.value = { ...value }
 })
 async function save() {
   busy.value = true
@@ -99,9 +101,12 @@ async function refreshCatalog() {
       </select>
       <p v-if="!draft.externalEnabled" class="lz-hint">Externe Modelle sind gesperrt. Teams arbeiten lokal.</p>
       <div class="model-usage-actions">
-        <button type="button" class="lz-btn" :disabled="busy" @click="save">Modellnutzung speichern</button>
+        <button v-if="!managed" type="button" class="lz-btn" :disabled="busy" @click="save">
+          Modellnutzung speichern
+        </button>
         <button type="button" class="lz-btn" @click="draft = { ...DEFAULT_MODEL_USAGE }">Zurücksetzen</button>
       </div>
+      <p v-if="managed" class="lz-hint">�nderungen mit �Speichern� unten im Einstellungsfenster �bernehmen.</p>
       <p role="status" class="lz-hint">{{ message }}</p>
     </div>
     <LocalResourceSettings />

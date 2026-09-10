@@ -109,6 +109,25 @@ describe('settings section contracts', () => {
     )
   })
 
+  it('uses the shared save action for a parent-owned model draft', async () => {
+    const html = await render(ChatSettingsSection, {
+      autoSpeech: false,
+      autoSpeechMode: 'off',
+      historyTokenBudget: 2400,
+      modelUsage: {
+        localModelId: 'local-tier-light',
+        externalEnabled: true,
+        agentsByDefault: true,
+        teamPreset: 'free',
+      },
+    })
+    expect(html).not.toContain('Modellnutzung speichern')
+    expect(html).toContain('unten im Einstellungsfenster')
+    expect(html).toMatch(/<option[^>]*value="free"[^>]*selected/)
+    expect(html).toContain('local-tier-light')
+    expect(emittedEvents(ChatSettingsSection)).toContain('update:modelUsage')
+  })
+
   it('renders Appearance values and exposes only update events', async () => {
     const html = await render(AppearanceSettingsSection, {
       assistantName: 'Luczor',

@@ -2,6 +2,10 @@
 import { computed } from 'vue'
 import ModelUsageSettings from './ModelUsageSettings.vue'
 
+import type { ModelUsageSettings as ModelUsageConfig } from '@/services/inference/modelUsageSettings'
+
+const modelUsage = defineModel<ModelUsageConfig>('modelUsage')
+
 type ChatAutoSpeechMode = 'off' | 'assistant_only' | 'all'
 
 const props = defineProps<{
@@ -31,7 +35,7 @@ const historyTokenBudgetModel = computed({
 
 <template>
   <div class="lz-section">
-    <ModelUsageSettings />
+    <ModelUsageSettings v-model="modelUsage" :managed="modelUsage !== undefined" />
     <div class="lz-section__head">
       <h3>Chat</h3>
       <p>Zwischenkommentare und Antworten automatisch nacheinander vorlesen.</p>
