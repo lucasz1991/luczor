@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   flushProjectSyncQueue: vi.fn(),
   createProject: vi.fn(),
   getConfigSnapshot: vi.fn(),
+  requestWithConfig: vi.fn(),
   createConversation: vi.fn(),
   listConversations: vi.fn(),
   verifyConversationCreate: vi.fn(),
@@ -65,7 +66,9 @@ vi.mock('@/services/api/luczorApi', () => ({
     verifyTaskCreate: mocks.verifyTaskCreate,
     updateTask: mocks.updateTask,
   },
+  requestWithConfig: mocks.requestWithConfig,
 }))
+vi.mock('@/services/payloadApproval', () => ({ requestPayloadApproval: vi.fn() }))
 vi.mock('@/services/api/projectSyncQueue', () => ({
   enqueueProjectSync: mocks.enqueueProjectSync,
   commitProjectSync: mocks.commitProjectSync,
@@ -127,6 +130,18 @@ const TOOL_CONTRACT = [
   { name: 'os_open_url', category: 'os', mutating: true, requiresApproval: true },
   { name: 'os_environment', category: 'os', mutating: false, requiresApproval: true },
   { name: 'os_observe_desktop', category: 'os', mutating: false, requiresApproval: true },
+  { name: 'browser_open', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'browser_navigate', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'browser_dom_read', category: 'app', mutating: false, requiresApproval: true },
+  { name: 'browser_screenshot', category: 'app', mutating: false, requiresApproval: true },
+  { name: 'browser_click', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'browser_fill', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'browser_select', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'browser_download', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'image_analyze', category: 'app', mutating: false, requiresApproval: true },
+  { name: 'project_terminal_run', category: 'project', mutating: true, requiresApproval: true },
+  { name: 'model_capabilities', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'model_control_validate', category: 'app', mutating: false, requiresApproval: false },
   { name: 'local_model_status', category: 'app', mutating: false, requiresApproval: false },
   { name: 'project_create', category: 'project', mutating: true, requiresApproval: true },
   { name: 'chat_create', category: 'app', mutating: true, requiresApproval: true },
@@ -171,8 +186,8 @@ const TOOL_CONTRACT = [
 ] as const
 
 // Reviewed additions: managed effort and versioned workflows with bounded execution budgets.
-const TOOL_SCHEMA_SHA256 = '846ad1c036023c0aa3a4d9a6a5d4e9e1958712dd7681bc70cf60edcf5429a3dd'
-const CORE_TOOL_SCHEMA_SHA256 = '7b66786e79efcc6053122b428adf6b96d3fd66b2fca8f6376ba14c3bce1f67a1'
+const TOOL_SCHEMA_SHA256 = '6262f67efe954f2d1b485df970d98716623170581fc06186a1ea6863a73b0c6a'
+const CORE_TOOL_SCHEMA_SHA256 = 'c7f26eecccbfc730a3d039075c524869ce7af6864a3ffe139317ef7e48bd8cdc'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {
@@ -306,7 +321,9 @@ describe('tool registry contract', () => {
     const fingerprint = createHash('sha256').update(JSON.stringify(toOpenAITools())).digest('hex')
 
     expect(fingerprint).toBe(TOOL_SCHEMA_SHA256)
-    for (const tool of toOpenAITools().filter(item => item.function.name !== 'local_model_status')) {
+    for (const tool of toOpenAITools().filter(
+      item => !['local_model_status', 'model_capabilities'].includes(item.function.name)
+    )) {
       const parameters = tool.function.parameters as { properties?: Record<string, unknown> }
       expect(Object.keys(parameters.properties ?? {})).not.toHaveLength(0)
     }

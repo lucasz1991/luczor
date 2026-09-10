@@ -14,6 +14,10 @@ import { planTools } from './plans'
 import { projectCreationTools, projectStateTools } from './project'
 import { taskTools } from './tasks'
 import { workspaceTools } from './workspace'
+import { browserTools } from './browser'
+import { visionTools } from './vision'
+import { terminalTools } from './terminal'
+import { modelTools } from './modelControl'
 import { workflowTools } from './workflows'
 import type { ToolDef } from './types'
 
@@ -28,6 +32,10 @@ const TOOLS: ToolDef[] = [
   ...projectStateTools,
   ...filesystemTools,
   ...osTools,
+  ...browserTools,
+  ...visionTools,
+  ...terminalTools,
+  ...modelTools,
   ...localModelTools,
   ...projectCreationTools,
   ...taskTools,

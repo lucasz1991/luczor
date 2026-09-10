@@ -68,6 +68,18 @@ const titles: Record<string, string> = {
   workflow_trigger_save: 'Workflow-Auslöser konfigurieren',
   workflow_trigger_delete: 'Workflow-Auslöser entfernen',
   workflow_automation_configure: 'Workflow-Automatisierung freigeben',
+  browser_open: 'Luczor-Browser öffnen',
+  browser_navigate: 'Browser navigieren',
+  browser_dom_read: 'DOM lesen',
+  browser_screenshot: 'Browser-Screenshot',
+  browser_click: 'Browserklick',
+  browser_fill: 'Formularfeld füllen',
+  browser_select: 'Auswahl treffen',
+  browser_download: 'Browser-Download',
+  image_analyze: 'Bild analysieren',
+  project_terminal_run: 'Projekt-Terminal ausführen',
+  model_capabilities: 'Modellfähigkeiten lesen',
+  model_control_validate: 'Modellparameter prüfen',
 }
 
 export function capabilityTitle(tool: ToolCapability): string {
@@ -81,6 +93,10 @@ export function capabilityGroup(tool: ToolCapability): string {
   if (tool.name.startsWith('os_')) return 'Computer'
   if (tool.name.startsWith('fs_') || tool.name === 'workspace_get') return 'Dateien'
   if (tool.name.startsWith('agent_')) return 'Coding-Agenten'
+  if (tool.name.startsWith('browser_')) return 'Interner Browser'
+  if (tool.name.startsWith('image_')) return 'Bildanalyse'
+  if (tool.name.startsWith('model_')) return 'Modelle'
+  if (tool.name.startsWith('project_terminal')) return 'Projekt-Terminal'
   return 'Projekte & Aufgaben'
 }
 

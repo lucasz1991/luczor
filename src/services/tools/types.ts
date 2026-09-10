@@ -10,6 +10,8 @@ export type ToolDataHandling = 'syncable' | 'ephemeral'
 export type ToolRisk = 'low' | 'sensitive' | 'critical'
 export type ToolScope = 'app' | 'project' | 'desktop' | 'network'
 export type ToolEffect = 'read' | 'write' | 'input' | 'execute'
+export type ToolApprovalMode = 'call' | 'session'
+export type ToolSessionKind = 'browser' | 'vision' | 'terminal' | 'model'
 
 export type WorkspaceScope = { principalId: string; projectIds: readonly string[] }
 
@@ -19,6 +21,8 @@ export type ToolContext = {
   execution?: import('@/services/executionGate').ExecutionTicket
   inferenceTarget?: 'local' | 'external'
   workspaceScope?: WorkspaceScope
+  /** Shared run identity used by the main window and the mini chat. */
+  toolSessionId?: string
 }
 
 export type ToolDef = {
@@ -41,6 +45,12 @@ export type ToolDef = {
   risk?: ToolRisk
   scope?: ToolScope
   effects?: ToolEffect[]
+  /** Capability exposed by the Tool Center and device capability catalog. */
+  capabilityKey?: string
+  /** Optional native session family retained across related tool calls. */
+  sessionKind?: ToolSessionKind
+  /** Approval applies to one call or to the bounded session. */
+  approvalMode?: ToolApprovalMode
   /** Execute the tool. Return value must be JSON-serializable. */
   execute: (args: Record<string, unknown>, ctx: ToolContext) => Promise<unknown>
 }

@@ -1,6 +1,15 @@
 /** Vue adaptations of Beautiful UI. See vendor/beautiful-ui/LICENSE. */
 export type ActivityStatus = 'pending' | 'running' | 'done' | 'failed' | 'waiting' | 'canceled'
-export type ActivityStep = { id: string; label: string; detail?: string; status: ActivityStatus }
+export type ActivityStep = {
+  id: string
+  label: string
+  detail?: string
+  status: ActivityStatus
+  capability?: string
+  model?: string
+  provider?: string
+  dataHandling?: 'syncable' | 'ephemeral'
+}
 export type ContextItem = { id: string; title: string; content: string; source: string; kind?: string }
 export type SearchItem = { id: string; label: string; description?: string; icon?: string; busy?: boolean }
 export type TableColumn = { key: string; label: string }

@@ -51,6 +51,7 @@ import RecommendationCard from './components/ai/RecommendationCard.vue'
 import SelectionActions from './components/ai/SelectionActions.vue'
 import AiIcon from './components/ai/AiIcon.vue'
 import MiniChatSurface from './components/mini/MiniChatSurface.vue'
+import ToolCenterPanel from './components/tools/ToolCenterPanel.vue'
 import { useMiniChatHost } from '@/composables/useMiniChatHost'
 import ThinkingBudgetControl from '@/components/ai/ThinkingBudgetControl.vue'
 import {
@@ -159,6 +160,7 @@ const showSystemPanel = ref(false)
 const showAgentHub = ref(false)
 const showPlanning = ref(false)
 const showWorkflows = ref(false)
+const showToolCenter = ref(false)
 const selectedWorkflowId = ref<number>()
 const selectedWorkflowRunId = ref<string>()
 const planningObjective = ref('')
@@ -2045,6 +2047,13 @@ useWorkflowWatchers()
     :test-speech="testSelectedVoice"
     @update:open="showSettings = $event"
   />
+  <ToolCenterPanel
+    :open="showToolCenter"
+    :project-id="activeProjectId"
+    :mode="mode"
+    :kill-switch="hud.killSwitch"
+    @update:open="showToolCenter = $event"
+  />
   <Teleport to="body">
     <MiniChatSurface
       v-if="miniChat.browserVisible.value"
@@ -2112,6 +2121,17 @@ useWorkflowWatchers()
         >
           <span class="mode-toggle__dot" />
           {{ modeLabel }}
+        </button>
+        <button
+          type="button"
+          class="icon-btn"
+          :class="{ 'is-on': showToolCenter }"
+          title="Tool-Center öffnen"
+          aria-label="Tool-Center öffnen"
+          :aria-expanded="showToolCenter"
+          @click="showToolCenter = true"
+        >
+          <AiIcon name="tool" :size="16" />
         </button>
         <p v-if="modeConfirmationError" class="repo-graph-message" role="alert">{{ modeConfirmationError }}</p>
 

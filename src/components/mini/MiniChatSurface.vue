@@ -25,6 +25,7 @@ import { miniStatus } from '@/services/miniChat/presentation'
 import type { MiniAction, MiniSnapshot, MiniPanel, MiniView } from '@/services/miniChat/types'
 import type { ActivityStatus } from '../ai/types'
 import { useClipboard } from '@/composables/useClipboard'
+import { listToolSessions, stopToolSession, toolSessionRevision } from '@/services/tools/toolSessionCoordinator'
 
 const props = withDefaults(defineProps<{ snapshot: MiniSnapshot; native?: boolean; connectionError?: string }>(), {
   connectionError: '',
@@ -92,6 +93,11 @@ const toolStatus: Record<string, ActivityStatus> = {
 const tools = computed(() =>
   props.snapshot.tools.map(tool => ({ id: tool.id, label: tool.name, status: toolStatus[tool.status] ?? 'pending' }))
 )
+const sharedToolSessions = computed(() => {
+  void toolSessionRevision.value
+  const projectId = props.snapshot.project?.id
+  return listToolSessions().filter(session => !projectId || session.projectId === projectId)
+})
 const lastAssistant = computed(() =>
   [...props.snapshot.messages].reverse().find(message => message.role === 'assistant')
 )
@@ -483,6 +489,17 @@ onBeforeUnmount(() => {
         >
           i
         </button>
+      </div>
+      <div v-if="sharedToolSessions.length" class="mini-tool-sessions" aria-label="Gemeinsame Tool-Sitzungen">
+        <div class="mini-tool-sessions__heading">
+          <span>Gemeinsame Läufe</span><small>{{ sharedToolSessions.length }}</small>
+        </div>
+        <div v-for="session in sharedToolSessions" :key="session.id" class="mini-tool-session">
+          <span class="mini-tool-session__dot" :data-status="session.status" aria-hidden="true"></span>
+          <span>{{ session.kind }}</span>
+          <small>{{ session.status === 'active' ? 'läuft' : session.status }}</small>
+          <button type="button" aria-label="Tool-Sitzung stoppen" @click="stopToolSession(session.id)">Stop</button>
+        </div>
       </div>
       <div v-if="showLegend" class="mini-legend">
         <p><b>Akzentfarbe, drehend:</b> Modell arbeitet. <b>Orange, drehend:</b> ein Tool läuft.</p>

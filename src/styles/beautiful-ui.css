@@ -363,6 +363,20 @@
   font-size: 10px;
   color: var(--ai-faint);
 }
+.ai-tool__capability,
+.ai-tool__retention {
+  border: 1px solid var(--ai-line);
+  border-radius: 999px;
+  padding: 1px 5px;
+  font: 9px var(--font-mono, monospace);
+  color: var(--ai-faint);
+}
+.ai-tool__capability {
+  color: var(--ai-accent, #a78bfa);
+}
+.ai-tool__retention {
+  color: #8bd5bd;
+}
 .ai-tool pre {
   white-space: pre-wrap;
   overflow-wrap: anywhere;

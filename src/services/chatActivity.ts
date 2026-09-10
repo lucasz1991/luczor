@@ -71,10 +71,23 @@ const TOOL_STATUS: Record<PendingToolCall['status'], ActivityStatus> = {
   canceled: 'canceled',
 }
 export function presentToolCall(call: PendingToolCall): ActivityStep {
+  const capability = call.name.startsWith('browser_')
+    ? 'Browser'
+    : call.name.startsWith('image_')
+      ? 'Vision'
+      : call.name === 'project_terminal_run' || call.name.endsWith('.run')
+        ? 'Terminal'
+        : call.name.startsWith('model_') || call.name.startsWith('local_model')
+          ? 'Modell'
+          : call.category === 'os'
+            ? 'Desktop'
+            : undefined
   return {
     id: call.id,
     label: call.name,
     status: TOOL_STATUS[call.status],
+    capability,
+    dataHandling: call.dataHandling,
     detail: call.status === 'proposed' && !call.requiresApproval ? 'Zur Ausführung vorbereitet' : undefined,
   }
 }
