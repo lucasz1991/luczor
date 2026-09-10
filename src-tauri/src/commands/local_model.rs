@@ -24,7 +24,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, WebviewWindow};
 use uuid::Uuid;
 
-use super::ensure_main_webview;
+use super::{ensure_main_or_system_status_webview, ensure_main_webview};
 
 #[path = "local_model_stream.rs"]
 mod generation_stream;
@@ -916,7 +916,7 @@ pub async fn local_model_status(
     window: WebviewWindow,
     app: AppHandle,
 ) -> Result<LocalModelStatus, String> {
-    ensure_main_webview(&window)?;
+    ensure_main_or_system_status_webview(&window)?;
     let mut guard = state()
         .lock()
         .map_err(|_| "Local model manager is unavailable.".to_string())?;
@@ -1994,6 +1994,12 @@ fn configured_model_directory(app: Option<&AppHandle>) -> Option<Option<PathBuf>
             .ok()
             .filter(|path| path.is_dir())
     }))
+}
+
+/// Read-only path discovery for system telemetry. It returns only a verified
+/// directory to select its containing volume; the path itself is never sent to the frontend.
+pub(crate) fn configured_model_directory_for_metrics(app: &AppHandle) -> Option<PathBuf> {
+    configured_model_directory(Some(app)).flatten()
 }
 
 fn gpu_snapshot() -> Vec<AcceleratorSnapshot> {

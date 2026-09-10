@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use sysinfo::{
     Components, ProcessRefreshKind, ProcessesToUpdate, System, MINIMUM_CPU_UPDATE_INTERVAL,
 };
-use tauri::WebviewWindow;
+use tauri::{Manager, WebviewWindow};
 
 use super::desktop_target::{DesktopActionGuard, DesktopObservation, InputPayload, ObservePayload};
 use super::ensure_main_webview;
@@ -265,6 +265,9 @@ pub struct SystemMetrics {
     pub model_ram_used_mb: Option<u64>,
     pub model_gpu_percent: Option<f32>,
     pub model_running: Option<bool>,
+    /// Volumes containing the Luczor app and configured local-model directory only.
+    pub disks: Vec<system_disk::DiskSample>,
+    /// Legacy primary app volume for older clients. New clients should use `disks`.
     pub disk: Option<system_disk::DiskSample>,
     pub gpu_source: &'static str,
     pub network_local: super::local_model::LocalNetworkSnapshot,
@@ -274,13 +277,18 @@ static METRICS_CACHE: OnceLock<Mutex<Option<(Instant, SystemMetrics)>>> = OnceLo
 
 #[tauri::command]
 pub async fn system_metrics(window: WebviewWindow) -> Result<SystemMetrics, String> {
-    ensure_main_webview(&window)?;
-    tauri::async_runtime::spawn_blocking(collect_system_metrics)
+    super::ensure_main_or_system_status_webview(&window)?;
+    let app = window.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || collect_system_metrics_for_app(Some(&app)))
         .await
         .map_err(|_| "System metric worker could not finish.".to_string())?
 }
 
 fn collect_system_metrics() -> Result<SystemMetrics, String> {
+    collect_system_metrics_for_app(None)
+}
+
+fn collect_system_metrics_for_app(app: Option<&tauri::AppHandle>) -> Result<SystemMetrics, String> {
     let cache = METRICS_CACHE.get_or_init(|| Mutex::new(None));
     // A status view and a read-only tool can request the same sample together.
     // Serialize the short native observation instead of collecting overlapping windows.
@@ -299,7 +307,8 @@ fn collect_system_metrics() -> Result<SystemMetrics, String> {
     let process_refresh = ProcessRefreshKind::new().with_memory().with_cpu();
     system.refresh_processes_specifics(ProcessesToUpdate::All, true, process_refresh);
     let before = process_samples(&system);
-    let disk_sampler = system_disk::DiskSampler::start();
+    let model_directory = app.and_then(super::local_model::configured_model_directory_for_metrics);
+    let disk_samplers = system_disk::DiskSampler::start(model_directory.as_deref());
     let model_before = super::local_model::managed_runtime_process_id();
     #[cfg(windows)]
     let gpu_sampler = system_gpu::WindowsGpuSampler::start();
@@ -372,8 +381,18 @@ fn collect_system_metrics() -> Result<SystemMetrics, String> {
         "unavailable"
     };
 
+    let disks: Vec<_> = disk_samplers
+        .into_iter()
+        .map(system_disk::DiskSampler::finish)
+        .collect();
+    let app_disk = disks
+        .iter()
+        .find(|disk| disk.scopes.contains(&"app"))
+        .cloned()
+        .or_else(|| disks.first().cloned());
     let metrics = SystemMetrics {
-        disk: disk_sampler.map(|sampler| sampler.finish()),
+        disks,
+        disk: app_disk,
         cpu_percent: clamp_percent(system.global_cpu_usage()),
         ram_percent: clamp_percent(ram_percent),
         ram_used_mb: used_memory / 1024 / 1024,
@@ -570,38 +589,47 @@ fn hotter(current: Option<f32>, next: f32) -> Option<f32> {
     }
 }
 
+fn is_gpu_component(label: &str) -> bool {
+    label.contains("gpu")
+        || label.contains("nvidia")
+        || label.contains("geforce")
+        || label.contains("radeon")
+        || label.contains("amd graphics")
+}
+
+fn is_cpu_component(label: &str) -> bool {
+    label.contains("cpu")
+        || label.contains("package")
+        || label.contains("core")
+        || label.contains("tctl")
+        || label.contains("tdie")
+        || label.contains("k10temp")
+        || label.contains("zenpower")
+        || label.contains("ryzen")
+        || label.contains("intel core")
+}
+
 fn component_temperatures() -> (Option<f32>, Option<f32>) {
     let components = Components::new_with_refreshed_list();
     let mut cpu_temp = None;
     let mut gpu_temp = None;
-    let mut fallback_temp = None;
 
     for component in &components {
         let Some(temp) = clean_temp(component.temperature()) else {
             continue;
         };
 
-        let label = component.label().to_lowercase();
-        fallback_temp = hotter(fallback_temp, temp);
-
-        if label.contains("gpu")
-            || label.contains("nvidia")
-            || label.contains("geforce")
-            || label.contains("radeon")
-            || label.contains("amd graphics")
-        {
+        let label = component.label().to_ascii_lowercase();
+        if is_gpu_component(&label) {
             gpu_temp = hotter(gpu_temp, temp);
-        } else if label.contains("cpu")
-            || label.contains("package")
-            || label.contains("core")
-            || label.contains("tctl")
-            || label.contains("tdie")
-        {
+        } else if is_cpu_component(&label) {
             cpu_temp = hotter(cpu_temp, temp);
         }
     }
 
-    (cpu_temp.or(fallback_temp), gpu_temp)
+    // Do not map an arbitrary thermal-zone value to CPU. An unavailable CPU
+    // sensor is more useful and safer than a temperature from another device.
+    (cpu_temp, gpu_temp)
 }
 
 fn gpu_telemetry() -> (Option<f32>, Option<f32>) {

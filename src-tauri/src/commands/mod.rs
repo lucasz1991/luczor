@@ -15,6 +15,7 @@ pub mod notifications;
 pub mod project_workspace;
 pub mod repository_graph;
 pub mod system;
+pub mod system_status_window;
 mod system_diagnostics;
 pub mod voice;
 pub mod voice_input;
@@ -43,13 +44,25 @@ pub(crate) fn ensure_main_webview(window: &WebviewWindow) -> Result<(), String> 
     ensure_webview_label(window.label(), MAIN_WEBVIEW_LABEL)
 }
 
+/// The detached Systemstatus display has a deliberately narrow, read-only
+/// capability. It may use the two status reads below, never the main runtime.
+pub(crate) fn ensure_main_or_system_status_webview(window: &WebviewWindow) -> Result<(), String> {
+    if window.label() == MAIN_WEBVIEW_LABEL || window.label() == system_status_window::SYSTEM_STATUS_LABEL {
+        Ok(())
+    } else {
+        Err("This command is not available to the calling webview.".into())
+    }
+}
+
 pub(crate) fn ensure_browser_webview(window: &WebviewWindow) -> Result<(), String> {
     ensure_webview_label(window.label(), BROWSER_WEBVIEW_LABEL)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_webview_label, BROWSER_WEBVIEW_LABEL, MAIN_WEBVIEW_LABEL};
+    use super::{
+        ensure_webview_label, system_status_window, BROWSER_WEBVIEW_LABEL, MAIN_WEBVIEW_LABEL,
+    };
 
     #[test]
     fn native_commands_keep_main_and_remote_browser_trust_separate() {
@@ -57,6 +70,17 @@ mod tests {
         assert!(ensure_webview_label(BROWSER_WEBVIEW_LABEL, BROWSER_WEBVIEW_LABEL).is_ok());
         assert!(ensure_webview_label(BROWSER_WEBVIEW_LABEL, MAIN_WEBVIEW_LABEL).is_err());
         assert!(ensure_webview_label(MAIN_WEBVIEW_LABEL, BROWSER_WEBVIEW_LABEL).is_err());
+    }
+
+    #[test]
+    fn status_window_label_stays_distinct_from_main_and_remote_browser() {
+        assert!(ensure_webview_label(
+            system_status_window::SYSTEM_STATUS_LABEL,
+            system_status_window::SYSTEM_STATUS_LABEL
+        )
+        .is_ok());
+        assert!(ensure_webview_label(system_status_window::SYSTEM_STATUS_LABEL, MAIN_WEBVIEW_LABEL).is_err());
+        assert!(ensure_webview_label(system_status_window::SYSTEM_STATUS_LABEL, BROWSER_WEBVIEW_LABEL).is_err());
     }
 
     #[test]

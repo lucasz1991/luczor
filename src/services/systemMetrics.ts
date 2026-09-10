@@ -11,6 +11,8 @@ export type LocalNetworkCounters = {
 export type DiskMetrics = {
   mount: string
   kind: 'ssd' | 'hdd' | 'unknown'
+  /** Luczor locations on this volume, not a process-I/O attribution. */
+  scopes?: Array<'app' | 'model'>
   total_bytes: number
   used_bytes: number
   busy_percent: number | null
@@ -19,6 +21,9 @@ export type DiskMetrics = {
 }
 
 export type SystemMetrics = {
+  /** All volumes containing the Luczor executable or configured local-model directory. */
+  disks?: DiskMetrics[]
+  /** Legacy primary app volume. Use `disks` when it is present. */
   disk?: DiskMetrics | null
   cpu_percent: number
   ram_percent: number

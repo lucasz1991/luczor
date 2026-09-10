@@ -1,0 +1,14 @@
+[[permission]]
+identifier = "system-status-host"
+description = "Trusted main window can open the detached, read-only Systemstatus window."
+commands.allow = ["system_status_window_open"]
+
+[[permission]]
+identifier = "system-status-client"
+description = "Detached Systemstatus window can read telemetry and control only its own presentation."
+commands.allow = [
+    "system_metrics",
+    "local_model_status",
+    "system_status_window_set_mode",
+    "system_status_window_close",
+]

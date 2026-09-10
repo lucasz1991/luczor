@@ -19,7 +19,7 @@
       }
     ],
     "security": {
-      "capabilities": ["default", "browser", "mini-chat"],
+      "capabilities": ["default", "browser", "mini-chat", "system-status"],
       "csp": {
         "default-src": "'self' customprotocol: asset:",
         "connect-src": "ipc: http://ipc.localhost https://luczor.follow-flow.de https://*.follow-flow.de wss://luczor.follow-flow.de wss://*.follow-flow.de http://localhost:* http://127.0.0.1:* https://localhost:* https://127.0.0.1:* ws://localhost:* ws://127.0.0.1:* wss://localhost:* wss://127.0.0.1:*",

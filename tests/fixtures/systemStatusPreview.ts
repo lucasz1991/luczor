@@ -62,6 +62,8 @@ mockIPC(command => {
   }
   if (command === 'plugin:store|load') return 1
   if (command === 'plugin:store|get') return [null, false]
+  if (command === 'system_status_window_open')
+    throw new Error('Native status windows are disabled in this synthetic preview')
   throw new Error('Native operations are disabled in this synthetic preview')
 })
 window.fetch = async input => {

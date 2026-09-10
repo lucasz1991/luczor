@@ -1,11 +1,16 @@
-//! One bounded observation of the application's volume; no directory traversal.
+//! Bounded observation of the volumes that contain Luczor and its configured local models.
+//! No directory traversal or process-level disk attribution is performed.
 use serde::Serialize;
+use std::collections::BTreeMap;
+use std::path::Path;
 use sysinfo::{DiskKind, Disks};
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub(crate) struct DiskSample {
     pub mount: String,
     pub kind: &'static str,
+    /// Which Luczor-owned location maps to this volume. This is not an I/O attribution.
+    pub scopes: Vec<&'static str>,
     pub total_bytes: u64,
     pub used_bytes: u64,
     pub busy_percent: Option<f32>,
@@ -20,31 +25,64 @@ pub(crate) struct DiskSampler {
 }
 
 impl DiskSampler {
-    pub(super) fn start() -> Option<Self> {
-        let exe = std::env::current_exe().ok()?;
-        let disks = Disks::new_with_refreshed_list();
-        let disk = disks
-            .list()
-            .iter()
-            .filter(|disk| exe.starts_with(disk.mount_point()))
-            .max_by_key(|disk| disk.mount_point().as_os_str().len())?;
-        let mount = disk.mount_point().to_str()?.to_string();
-        let sample = DiskSample {
-            mount: mount.clone(),
-            kind: match disk.kind() {
-                DiskKind::SSD => "ssd",
-                DiskKind::HDD => "hdd",
-                _ => "unknown",
-            },
-            total_bytes: disk.total_space(),
-            used_bytes: disk.total_space().saturating_sub(disk.available_space()),
-            ..Default::default()
+    /// Samples only the app executable volume and, when configured, the local-model volume.
+    /// A shared volume is reported once with both scopes.
+    pub(super) fn start(model_directory: Option<&Path>) -> Vec<Self> {
+        let Ok(exe) = std::env::current_exe() else {
+            return Vec::new();
         };
-        Some(Self {
-            sample,
-            #[cfg(windows)]
-            counters: windows::Counters::start(&mount),
-        })
+        let disks = Disks::new_with_refreshed_list();
+        let mut selected: BTreeMap<String, Vec<&'static str>> = BTreeMap::new();
+        for (scope, path) in [
+            ("app", exe.as_path()),
+            ("model", model_directory.unwrap_or(Path::new(""))),
+        ] {
+            if scope == "model" && model_directory.is_none() {
+                continue;
+            }
+            let Some(disk) = disks
+                .list()
+                .iter()
+                .filter(|disk| path.starts_with(disk.mount_point()))
+                .max_by_key(|disk| disk.mount_point().as_os_str().len())
+            else {
+                continue;
+            };
+            let Some(mount) = disk.mount_point().to_str() else {
+                continue;
+            };
+            let scopes = selected.entry(mount.to_string()).or_default();
+            if !scopes.contains(&scope) {
+                scopes.push(scope);
+            }
+        }
+
+        selected
+            .into_iter()
+            .filter_map(|(mount, scopes)| {
+                let disk = disks
+                    .list()
+                    .iter()
+                    .find(|disk| disk.mount_point().to_str() == Some(&mount))?;
+                let sample = DiskSample {
+                    mount: mount.clone(),
+                    kind: match disk.kind() {
+                        DiskKind::SSD => "ssd",
+                        DiskKind::HDD => "hdd",
+                        _ => "unknown",
+                    },
+                    scopes,
+                    total_bytes: disk.total_space(),
+                    used_bytes: disk.total_space().saturating_sub(disk.available_space()),
+                    ..Default::default()
+                };
+                Some(Self {
+                    sample,
+                    #[cfg(windows)]
+                    counters: windows::Counters::start(&mount),
+                })
+            })
+            .collect()
     }
 
     pub(super) fn finish(mut self) -> DiskSample {
@@ -169,12 +207,14 @@ mod windows {
 mod tests {
     #[test]
     #[ignore = "explicit read-only device observation"]
-    fn observe_app_volume() {
-        let sampler = super::DiskSampler::start().expect("App volume available");
+    fn observe_luczor_volumes() {
+        let samplers = super::DiskSampler::start(None);
+        assert!(!samplers.is_empty());
         std::thread::sleep(std::time::Duration::from_millis(250));
-        let sample = sampler.finish();
-        assert!(sample.total_bytes > 0);
-        assert!(sample.used_bytes <= sample.total_bytes);
-        println!("{}", serde_json::to_string(&sample).unwrap());
+        for sample in samplers.into_iter().map(super::DiskSampler::finish) {
+            assert!(sample.total_bytes > 0);
+            assert!(sample.used_bytes <= sample.total_bytes);
+            println!("{}", serde_json::to_string(&sample).unwrap());
+        }
     }
 }

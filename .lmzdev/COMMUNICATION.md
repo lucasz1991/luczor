@@ -370,3 +370,7 @@ Append-only communication log. Source and runtime evidence override stale entrie
 
 ## 2026-09-08 | Codex/root | Workflow integration completed-local
 - Combined implementation/release verified. All root and subagent source ownership released; see E:/projekte/luczor/.lmzdev/artifacts/reports/2026-09-08-dynamic-workflows-implementation.md for final evidence and acceptance boundaries. No deployment or own commit.
+
+## 2026-09-10T15:37:02Z | Codex -> all | status
+
+- Message: Started: Systemstatus temperature fidelity, scoped storage rings, compact sidebar, and native status windows.

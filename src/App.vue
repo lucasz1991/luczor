@@ -2659,6 +2659,7 @@ useWorkflowWatchers()
       :active="showSystemPanel"
       :assistant-phase="liveStatus.phase"
       :project-name="activeProject?.name"
+      :sidebar-collapsed="sidebarCollapsed"
       @close="showSystemPanel = false"
       @open-mini="miniChat.open()"
     />

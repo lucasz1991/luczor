@@ -1,0 +1,6 @@
+{
+  "identifier": "system-status",
+  "description": "Detached, movable Systemstatus display with bounded read-only telemetry.",
+  "windows": ["luczor-system-status"],
+  "permissions": ["core:default", "system-status-client"]
+}

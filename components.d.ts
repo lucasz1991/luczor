@@ -61,6 +61,7 @@ declare module 'vue' {
     StreamingText: typeof import('./src/components/ai/StreamingText.vue')['default']
     SystemActivityCharts: typeof import('./src/components/SystemActivityCharts.vue')['default']
     SystemStatusPanel: typeof import('./src/components/SystemStatusPanel.vue')['default']
+    SystemStatusWindow: typeof import('./src/components/SystemStatusWindow.vue')['default']
     SystemStopButton: typeof import('./src/components/SystemStopButton.vue')['default']
     TaskRows: typeof import('./src/components/ai/TaskRows.vue')['default']
     ThinkingBudgetControl: typeof import('./src/components/ai/ThinkingBudgetControl.vue')['default']

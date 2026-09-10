@@ -6,6 +6,7 @@ export type SystemStatusResources = { cpu: number | null; ram: number | null; gp
 export type SystemStatusPoint = SystemStatusResources & {
   at: number
   disk?: { busy: number | null; read: number | null; write: number | null }
+  disks?: Record<string, { busy: number | null; read: number | null; write: number | null }>
   app: SystemStatusResources
   model: SystemStatusResources
 }
@@ -77,8 +78,14 @@ export function createSystemStatusMonitor(options: MonitorOptions = {}) {
       .then(sample => {
         if (!current() || sample === null) return
         const at = now()
+        const disks = (Array.isArray(sample.disks) ? sample.disks : sample.disk ? [sample.disk] : []).map(disk => ({
+          ...disk,
+          scopes: disk.scopes ? [...disk.scopes] : undefined,
+        }))
+        const appDisk = disks.find(disk => disk.scopes?.includes('app')) ?? disks[0] ?? null
         state.sample = {
-          disk: sample.disk ? { ...sample.disk } : null,
+          disks,
+          disk: appDisk,
           cpu_percent: sample.cpu_percent,
           ram_percent: sample.ram_percent,
           ram_used_mb: sample.ram_used_mb,
@@ -100,17 +107,28 @@ export function createSystemStatusMonitor(options: MonitorOptions = {}) {
         }
         state.lastUpdatedAt = at
         state.availability = 'live'
+        const diskHistory = Object.fromEntries(
+          disks.map(disk => [
+            disk.mount,
+            {
+              busy: percent(disk.busy_percent),
+              read: percent(disk.read_percent),
+              write: percent(disk.write_percent),
+            },
+          ])
+        )
         append({
           at,
-          ...(sample.disk
+          ...(appDisk
             ? {
                 disk: {
-                  busy: percent(sample.disk.busy_percent),
-                  read: percent(sample.disk.read_percent),
-                  write: percent(sample.disk.write_percent),
+                  busy: percent(appDisk.busy_percent),
+                  read: percent(appDisk.read_percent),
+                  write: percent(appDisk.write_percent),
                 },
               }
             : {}),
+          ...(Object.keys(diskHistory).length ? { disks: diskHistory } : {}),
           cpu: percent(sample.cpu_percent),
           ram: percent(sample.ram_percent),
           gpu: percent(sample.gpu_percent),

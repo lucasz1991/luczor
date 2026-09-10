@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { invoke } from '@tauri-apps/api/core'
 import { nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { OrbPhase } from '@/services/miniChat/presentation'
 import { localModelDiagnostics } from '@/services/inference/localModelDiagnostics'
@@ -9,11 +10,25 @@ import AssistantProfileStatus from './AssistantProfileStatus.vue'
 import AiIcon from './ai/AiIcon.vue'
 import SystemStopButton from './SystemStopButton.vue'
 
-const props = withDefaults(defineProps<{ projectName?: string; active?: boolean; assistantPhase?: OrbPhase }>(), {
-  projectName: '',
-  active: true,
-  assistantPhase: undefined,
-})
+type DisplayMode = 'mini' | 'tabs' | 'dashboard'
+const props = withDefaults(
+  defineProps<{
+    projectName?: string
+    active?: boolean
+    assistantPhase?: OrbPhase
+    nativeWindow?: boolean
+    initialDisplayMode?: Exclude<DisplayMode, 'mini'>
+    sidebarCollapsed?: boolean
+  }>(),
+  {
+    projectName: '',
+    active: true,
+    assistantPhase: undefined,
+    nativeWindow: false,
+    initialDisplayMode: 'tabs',
+    sidebarCollapsed: false,
+  }
+)
 const emit = defineEmits<{ close: []; openMini: [] }>()
 type SystemSection = 'resources' | 'localmodel' | 'memory' | 'network' | 'details'
 type IndicatorState = 'ok' | 'active' | 'warning' | 'unknown'
@@ -25,12 +40,40 @@ const tabs: ReadonlyArray<{ id: SystemSection; label: string }> = [
   { id: 'network', label: 'Netzwerk' },
   { id: 'details', label: 'Details' },
 ]
-const displayMode = ref<'mini' | 'tabs' | 'dashboard'>('tabs')
-function setDisplayMode(mode: 'mini' | 'tabs' | 'dashboard') {
+const displayMode = ref<DisplayMode>(props.initialDisplayMode)
+function applyDisplayMode(mode: DisplayMode) {
   displayMode.value = mode
   if (mode === 'mini') activeSection.value = 'resources'
   if (content.value) content.value.scrollTop = 0
 }
+async function setDisplayMode(mode: DisplayMode) {
+  if (mode === 'mini') {
+    applyDisplayMode(mode)
+    return
+  }
+  if (props.nativeWindow) {
+    applyDisplayMode(mode)
+    try {
+      await invoke('system_status_window_set_mode', { mode })
+    } catch {
+      // Browser previews keep the selected responsive view without a native bridge.
+    }
+    return
+  }
+  try {
+    await invoke('system_status_window_open', { mode })
+    emit('close')
+  } catch {
+    // Synthetic previews do not have a native window manager.
+    applyDisplayMode(mode)
+  }
+}
+watch(
+  () => props.initialDisplayMode,
+  mode => {
+    if (props.nativeWindow) applyDisplayMode(mode)
+  }
+)
 const activeSection = ref<SystemSection>('resources')
 const indicators = ref<SystemIndicators>({
   resources: 'unknown',
@@ -141,6 +184,8 @@ onBeforeUnmount(restoreFocus)
     ref="panel"
     class="system-status-panel"
     :data-mode="displayMode"
+    :data-native-window="nativeWindow"
+    :data-sidebar-collapsed="sidebarCollapsed"
     role="dialog"
     aria-label="Systemstatus"
     tabindex="-1"
@@ -151,7 +196,7 @@ onBeforeUnmount(restoreFocus)
         <h2>Systemstatus</h2>
       </div>
       <div class="system-status-panel__actions">
-        <SystemStopButton /><button
+        <SystemStopButton v-if="!nativeWindow" /><button
           type="button"
           class="panel-close"
           aria-label="Systembereich schließen"
@@ -162,7 +207,9 @@ onBeforeUnmount(restoreFocus)
       </div>
     </header>
     <div class="system-view-switch" role="group" aria-label="Systemstatus-Anzeigemodus">
-      <button type="button" :aria-pressed="displayMode === 'mini'" @click="setDisplayMode('mini')">Mini</button>
+      <button v-if="!nativeWindow" type="button" :aria-pressed="displayMode === 'mini'" @click="setDisplayMode('mini')">
+        Mini
+      </button>
       <button type="button" :aria-pressed="displayMode === 'tabs'" @click="setDisplayMode('tabs')">Tabs</button>
       <button type="button" :aria-pressed="displayMode === 'dashboard'" @click="setDisplayMode('dashboard')">
         Vollbild
@@ -296,7 +343,8 @@ onBeforeUnmount(restoreFocus)
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 20px 24px 16px;
+  min-height: 46px;
+  padding: 8px 14px;
   border-bottom: 1px solid var(--ai-line);
   flex-shrink: 0;
 }
@@ -307,9 +355,9 @@ onBeforeUnmount(restoreFocus)
 }
 .system-status-panel h2 {
   margin: 0;
-  font-size: 17px;
-  font-weight: 500;
-  letter-spacing: -0.025em;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: -0.015em;
 }
 .system-status-panel button {
   font: inherit;
@@ -457,7 +505,7 @@ details[open] > summary .disclosure-arrow {
 .system-view-switch {
   display: flex;
   gap: 4px;
-  padding: 10px 24px;
+  padding: 7px 12px;
   border-bottom: 1px solid var(--ai-line);
   flex-shrink: 0;
 }
@@ -466,7 +514,7 @@ details[open] > summary .disclosure-arrow {
   border-radius: 5px;
   background: transparent;
   color: var(--ai-muted);
-  padding: 5px 10px;
+  padding: 4px 8px;
   font: inherit;
 }
 .system-view-switch button[aria-pressed='true'] {
@@ -474,14 +522,24 @@ details[open] > summary .disclosure-arrow {
   color: var(--ai-ink);
 }
 .system-status-panel[data-mode='mini'] {
-  top: auto;
-  bottom: 20px;
-  width: min(410px, calc(100vw - 40px));
-  max-height: calc(100dvh - 40px);
+  --system-sidebar-width: 232px;
+  top: 82px;
+  right: auto;
+  bottom: 14px;
+  left: calc(var(--system-sidebar-width) + 12px);
+  width: 204px;
+  min-width: 0;
+  max-width: calc(100vw - var(--system-sidebar-width) - 24px);
+  max-height: none;
+  resize: none;
+  border-radius: 10px;
+}
+.system-status-panel[data-mode='mini'][data-sidebar-collapsed='true'] {
+  --system-sidebar-width: 62px;
 }
 .system-status-panel[data-mode='mini'] :deep(.resource-grid) {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
 }
 .system-status-panel[data-mode='dashboard'] {
   inset: 0;
@@ -539,13 +597,25 @@ details[open] > summary .disclosure-arrow {
 
 <style scoped>
 [data-mode='mini'] :deep(.resource-dial-wrap) {
-  max-width: 140px;
+  max-width: 164px;
 }
 [data-mode='mini'] .system-status-panel__header {
-  padding: 12px 16px;
+  min-height: 38px;
+  padding: 5px 9px;
 }
 [data-mode='mini'] .system-status-panel__content {
-  padding: 8px 16px;
+  padding: 7px 9px;
+}
+[data-mode='mini'] :deep(.resource-heading) {
+  padding: 0 0 8px;
+}
+[data-mode='mini'] :deep(.resource-heading > span),
+[data-mode='mini'] :deep(.resource-context),
+[data-mode='mini'] :deep(.resource-explanation) {
+  display: none;
+}
+[data-mode='mini'] :deep(.resource-storage-note) {
+  padding-left: 5px;
 }
 [data-mode='dashboard'] :deep(.resource-pane) {
   grid-column: 1;
@@ -608,6 +678,37 @@ details[open] > summary .disclosure-arrow {
   }
   [data-mode='dashboard'] :deep(.activity-charts__grid) {
     grid-template-columns: 1fr;
+  }
+}
+.system-status-panel[data-native-window='true'] {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  max-width: none;
+  min-width: 0;
+  height: 100dvh;
+  max-height: 100dvh;
+  resize: none;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.system-status-panel[data-native-window='true'] .system-status-panel__content {
+  padding-bottom: 20px;
+}
+@media (max-width: 900px) {
+  .system-status-panel[data-mode='mini'] {
+    --system-sidebar-width: 190px;
+  }
+  .system-status-panel[data-mode='mini'][data-sidebar-collapsed='true'] {
+    --system-sidebar-width: 62px;
+  }
+}
+@media (max-width: 700px) {
+  .system-status-panel[data-mode='mini'] {
+    --system-sidebar-width: 54px;
+    left: calc(var(--system-sidebar-width) + 8px);
+    width: min(192px, calc(100vw - var(--system-sidebar-width) - 16px));
   }
 }
 </style>

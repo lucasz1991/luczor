@@ -6,6 +6,7 @@ import { lastScreenshot } from '@/services/tools/registry'
 import { syncNow } from '@/services/status'
 import { appearance } from '@/services/appearance'
 import { createSystemStatusMonitor, percent } from '@/services/systemStatusMonitor'
+import type { DiskMetrics } from '@/services/systemMetrics'
 import AiIcon from './ai/AiIcon.vue'
 import SystemStopButton from './SystemStopButton.vue'
 import SystemActivityCharts from './SystemActivityCharts.vue'
@@ -108,6 +109,23 @@ const freshness = computed(() => {
 })
 type ResourceKey = 'cpu' | 'ram' | 'gpu' | 'disk'
 type Scope = 'system' | 'app' | 'model'
+type DialKey = Scope | 'temperature' | 'capacity'
+type DialSeries = {
+  key: DialKey
+  label: string
+  detail: string
+  value: number | null
+  display?: string
+  tone?: 'safe' | 'warning' | 'danger' | 'unknown'
+  chart?: { path: string; last: { x: number; y: number } | null }
+}
+type ResourceMeter = {
+  key: string
+  label: string
+  detail: string
+  series: DialSeries[]
+  disk?: DiskMetrics
+}
 const scopes = [
   { key: 'system' as const, label: 'Rechner', detail: 'Gesamter Rechner' },
   { key: 'app' as const, label: 'App', detail: 'Luczor-App ohne lokalen Modellprozess' },
@@ -126,7 +144,11 @@ const gpuProcessUnavailable = computed(
     (percent(metrics.sample.app_gpu_percent) === null ||
       (metrics.sample.model_running === true && percent(metrics.sample.model_gpu_percent) === null))
 )
-function chart(key: ResourceKey, scope: Scope): { path: string; last: { x: number; y: number } | null } {
+function chart(
+  key: ResourceKey,
+  scope: Scope,
+  mount?: string
+): { path: string; last: { x: number; y: number } | null } {
   let path = ''
   let connected = false
   let last: { x: number; y: number } | null = null
@@ -134,7 +156,17 @@ function chart(key: ResourceKey, scope: Scope): { path: string; last: { x: numbe
     const values = scope === 'system' ? point : scope === 'app' ? point.app : point.model
     const value =
       key === 'disk'
-        ? ((scope === 'system' ? point.disk?.busy : scope === 'app' ? point.disk?.read : point.disk?.write) ?? null)
+        ? ((scope === 'system'
+            ? mount
+              ? point.disks?.[mount]?.busy
+              : point.disk?.busy
+            : scope === 'app'
+              ? mount
+                ? point.disks?.[mount]?.read
+                : point.disk?.read
+              : mount
+                ? point.disks?.[mount]?.write
+                : point.disk?.write) ?? null)
         : key === 'cpu'
           ? values.cpu
           : key === 'ram'
@@ -153,7 +185,7 @@ function chart(key: ResourceKey, scope: Scope): { path: string; last: { x: numbe
   })
   return { path, last }
 }
-function resource(key: ResourceKey, label: string, detail: string, values: unknown[]) {
+function resource(key: ResourceKey, label: string, detail: string, values: unknown[], mount?: string): ResourceMeter {
   return {
     key,
     label,
@@ -164,60 +196,111 @@ function resource(key: ResourceKey, label: string, detail: string, values: unkno
         key !== 'disk' && scope.key === 'model' && metrics.sample?.model_running === false
           ? null
           : percent(values.at(index)),
-      chart: chart(key, scope.key),
+      chart: chart(key, scope.key, mount),
     })),
   }
 }
-const hardware = computed(() => {
+function temperatureTone(value: number | null): DialSeries['tone'] {
+  if (value === null) return 'unknown'
+  if (value >= 85) return 'danger'
+  if (value >= 75) return 'warning'
+  return 'safe'
+}
+function temperatureSeries(label: string, value: unknown): DialSeries {
+  const temperature = typeof value === 'number' && Number.isFinite(value) ? value : null
+  return {
+    key: 'temperature',
+    label: 'Temperatur',
+    detail:
+      temperature === null
+        ? `${label}-Temperatur wird vom System nicht eindeutig gemeldet.`
+        : `${label}-Temperatur · ab 75 °C Hinweis, ab 85 °C kritisch`,
+    value: temperature === null ? null : Math.min(100, Math.max(0, temperature)),
+    display: temperature === null ? '—' : `${temperature.toLocaleString('de-DE', { maximumFractionDigits: 1 })} °C`,
+    tone: temperatureTone(temperature),
+  }
+}
+function storageUsed(disk: DiskMetrics): number | null {
+  return disk.total_bytes > 0 ? Math.min(100, (disk.used_bytes / disk.total_bytes) * 100) : null
+}
+function diskScopes(disk: DiskMetrics): string {
+  const labels = (disk.scopes ?? ['app']).map(scope => (scope === 'model' ? 'Modell' : 'App'))
+  return labels.join(' + ')
+}
+function diskResource(disk: DiskMetrics): ResourceMeter {
+  const base = resource(
+    'disk',
+    disk.kind === 'ssd' ? 'SSD' : disk.kind === 'hdd' ? 'HDD' : 'Disk',
+    `Volume für Luczor ${diskScopes(disk)}`,
+    [disk.busy_percent, disk.read_percent, disk.write_percent],
+    disk.mount
+  )
+  const details = [
+    'Aktive Zeit dieses Luczor-Volumes',
+    'Lesezeit dieses Luczor-Volumes',
+    'Schreibzeit dieses Luczor-Volumes',
+  ]
+  const used = storageUsed(disk)
+  return {
+    ...base,
+    key: `disk:${disk.mount}`,
+    disk,
+    series: [
+      ...base.series.map((series, index) => ({ ...series, detail: details[index] ?? series.detail })),
+      {
+        key: 'capacity',
+        label: 'Belegt',
+        detail: `${disk.mount} · Speicherbelegung des Luczor-Volumes`,
+        value: used,
+      },
+    ],
+  }
+}
+const hardware = computed<ResourceMeter[]>(() => {
   const s = metrics.sample
+  const scopedDisks = Array.isArray(s?.disks) ? s.disks : s?.disk ? [s.disk] : []
   return [
-    resource('cpu', 'CPU', 'Anteil der gesamten CPU-Kapazität', [
-      s?.cpu_percent,
-      s?.app_cpu_percent,
-      s?.model_cpu_percent,
-    ]),
+    {
+      ...resource('cpu', 'CPU', 'Anteil der gesamten CPU-Kapazität', [
+        s?.cpu_percent,
+        s?.app_cpu_percent,
+        s?.model_cpu_percent,
+      ]),
+      series: [
+        ...resource('cpu', 'CPU', '', [s?.cpu_percent, s?.app_cpu_percent, s?.model_cpu_percent]).series,
+        temperatureSeries('CPU', s?.cpu_temp_c),
+      ],
+    },
     resource('ram', 'RAM', 'Anteil am gesamten Arbeitsspeicher', [
       s?.ram_percent,
       s?.app_ram_percent,
       s?.model_ram_percent,
     ]),
-    resource('gpu', 'GPU', s?.gpu_source === 'nvml' ? 'Geräteauslastung · NVIDIA' : 'Höchste GPU-Engine-Auslastung', [
-      s?.gpu_percent,
-      s?.app_gpu_percent,
-      s?.model_gpu_percent,
-    ]),
     {
-      ...resource('disk', s?.disk?.kind === 'ssd' ? 'SSD' : 'Disk', 'Aktivität des App-Laufwerks', [
-        s?.disk?.busy_percent,
-        s?.disk?.read_percent,
-        s?.disk?.write_percent,
-      ]),
-      series: resource('disk', 'SSD', '', [
-        s?.disk?.busy_percent,
-        s?.disk?.read_percent,
-        s?.disk?.write_percent,
-      ]).series.map((series, index) => ({
-        ...series,
-        detail: ['Aktive Zeit des App-Laufwerks', 'Lesezeit des App-Laufwerks', 'Schreibzeit des App-Laufwerks'][
-          index
-        ]!,
-      })),
+      ...resource(
+        'gpu',
+        'GPU',
+        s?.gpu_source === 'nvml' ? 'Geräteauslastung · NVIDIA' : 'Höchste GPU-Engine-Auslastung',
+        [s?.gpu_percent, s?.app_gpu_percent, s?.model_gpu_percent]
+      ),
+      series: [
+        ...resource('gpu', 'GPU', '', [s?.gpu_percent, s?.app_gpu_percent, s?.model_gpu_percent]).series,
+        temperatureSeries('GPU', s?.gpu_temp_c),
+      ],
     },
+    ...scopedDisks.map(diskResource),
   ]
 })
-const storageUsed = computed(() =>
-  metrics.sample?.disk?.total_bytes
-    ? Math.min(100, (metrics.sample.disk.used_bytes / metrics.sample.disk.total_bytes) * 100)
-    : null
-)
 const gib = (bytes: number) => (bytes / 1024 ** 3).toLocaleString('de-DE', { maximumFractionDigits: 1 })
-function temperature(key: string) {
-  const value = key === 'cpu' ? metrics.sample?.cpu_temp_c : metrics.sample?.gpu_temp_c
-  return typeof value === 'number' && Number.isFinite(value)
-    ? `${value.toLocaleString('de-DE', { maximumFractionDigits: 1 })} °C`
-    : '— °C'
-}
 const formatPercent = (value: number) => value.toLocaleString('de-DE', { maximumFractionDigits: 1 })
+function dialDisplay(series: DialSeries): string {
+  return series.value === null ? '—' : (series.display ?? `${formatPercent(series.value)} %`)
+}
+function dialScope(series: DialSeries): string {
+  if (series.key === 'temperature') return `temperature-${series.tone ?? 'unknown'}`
+  if (series.key === 'capacity') return 'capacity'
+  return series.key
+}
 const connectionLabels: Record<ConnState, string> = {
   online: 'Verbunden',
   offline: 'Nicht erreichbar',
@@ -309,7 +392,7 @@ const position = computed(() =>
                 <g
                   v-for="(series, index) in meter.series"
                   :key="series.key"
-                  :data-scope="series.key"
+                  :data-scope="dialScope(series)"
                   transform="rotate(135 60 60)"
                 >
                   <circle
@@ -336,12 +419,12 @@ const position = computed(() =>
                 v-for="(series, index) in meter.series"
                 :key="series.key"
                 class="dial-badge"
-                :data-scope="series.key"
+                :data-scope="dialScope(series)"
                 :style="{ top: `${15 + index * 21}%` }"
                 tabindex="0"
-                :aria-label="`${meter.label} · ${series.detail}: ${series.value === null ? 'nicht verfügbar oder nicht aktiv' : formatPercent(series.value) + ' Prozent'}`"
+                :aria-label="`${meter.label} · ${series.detail}: ${series.value === null ? 'nicht verfügbar oder nicht aktiv' : dialDisplay(series)}`"
                 :data-tip="series.detail"
-                >{{ series.value === null ? '—' : formatPercent(series.value) + ' %' }}</span
+                >{{ dialDisplay(series) }}</span
               >
             </div>
             <div v-else class="resource-history">
@@ -349,48 +432,26 @@ const position = computed(() =>
                 <span
                   v-for="series in meter.series"
                   :key="series.key"
-                  :data-scope="series.key"
+                  :data-scope="dialScope(series)"
                   :title="series.detail"
-                  >{{ series.value === null ? '—' : formatPercent(series.value) + ' %' }}</span
+                  >{{ dialDisplay(series) }}</span
                 >
               </div>
               <svg class="resource__chart" viewBox="0 0 180 74" preserveAspectRatio="none" aria-hidden="true">
                 <path class="chart-baseline" d="M4 8H176M4 68H176" />
-                <g v-for="series in meter.series" :key="series.key" :data-scope="series.key">
-                  <path class="chart-line" :d="series.chart.path" />
-                  <circle v-if="series.chart.last" :cx="series.chart.last.x" :cy="series.chart.last.y" r="2.3" />
+                <g
+                  v-for="series in meter.series.filter(series => series.chart)"
+                  :key="series.key"
+                  :data-scope="dialScope(series)"
+                >
+                  <path class="chart-line" :d="series.chart?.path" />
+                  <circle v-if="series.chart?.last" :cx="series.chart.last.x" :cy="series.chart.last.y" r="2.3" />
                 </g>
               </svg>
             </div>
-            <div
-              v-if="meter.key === 'cpu' || meter.key === 'gpu'"
-              class="resource-temperature"
-              :aria-label="`${meter.label}-Temperatur: ${temperature(meter.key)}`"
-            >
-              <svg width="13" height="16" viewBox="0 0 16 20" fill="none" stroke="currentColor" aria-hidden="true">
-                <path d="M6 12V4a2 2 0 0 1 4 0v8a4 4 0 1 1-4 0Z" />
-                <path d="M8 6v9" />
-              </svg>
-              <span>{{ temperature(meter.key) }}</span
-              ><small v-if="temperature(meter.key) === '— °C'">Sensor nicht verfügbar</small>
-            </div>
-            <div v-if="meter.key === 'disk'" class="disk-capacity">
-              <template v-if="metrics.sample?.disk && storageUsed !== null"
-                ><span>{{ metrics.sample.disk.mount }} · {{ formatPercent(storageUsed) }} % belegt</span>
-                <div
-                  class="disk-capacity-bar"
-                  role="meter"
-                  aria-label="Datenträgerbelegung"
-                  :aria-valuenow="storageUsed"
-                  :aria-valuemin="0"
-                  :aria-valuemax="100"
-                >
-                  <i :style="{ width: `${storageUsed}%` }" />
-                </div>
-                <span
-                  >{{ gib(metrics.sample.disk.used_bytes) }} / {{ gib(metrics.sample.disk.total_bytes) }} GiB</span
-                ></template
-              ><span v-else>Belegung nicht verfügbar</span>
+            <div v-if="meter.disk" class="resource-storage-note">
+              <span>{{ meter.disk.mount }} · {{ diskScopes(meter.disk) }}</span>
+              <span>{{ gib(meter.disk.used_bytes) }} / {{ gib(meter.disk.total_bytes) }} GiB</span>
             </div>
           </article>
         </div>
@@ -414,9 +475,10 @@ const position = computed(() =>
           <p>
             GPU zeigt pro Bereich die höchste Windows-GPU-Engine-Auslastung. Fehlt diese Messung, kann für den Rechner
             die höchste Geräteauslastung einer NVIDIA-Karte angezeigt werden. Die Kurven werden nicht addiert. Ein
-            Strich bedeutet nicht verfügbar oder nicht aktiv. SSD zeigt aktive Zeit, Lesezeit und Schreibzeit des
-            App-Laufwerks (grün/violett/amber), darunter dessen Speicherbelegung. Diese Zeitanteile überlappen und sind
-            keine App-/Modellanteile.
+            Strich bedeutet nicht verfügbar oder nicht aktiv. CPU und GPU ergänzen die drei Auslastungsringe um die
+            gemeldete Temperatur; ab 75 °C wird sie amber, ab 85 °C rot. Jedes Volume gehört zur Luczor-App oder zum
+            konfigurierten Modellordner. Die drei Aktivitätsringe und die Belegung sind Volume-Werte, keine
+            Prozessanteile.
           </p>
         </details>
       </div>
@@ -470,20 +532,6 @@ const position = computed(() =>
 </template>
 
 <style scoped>
-.resource-temperature {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  color: var(--ai-muted);
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  margin-top: 8px;
-}
-.resource-temperature small {
-  font-size: 10px;
-}
 .status-dashboard {
   --status-color: var(--ai-muted);
   position: fixed;
@@ -789,6 +837,21 @@ const position = computed(() =>
 [data-scope='model'] {
   --scope-color: var(--ai-orange);
 }
+[data-scope='capacity'] {
+  --scope-color: #8ba4ca;
+}
+[data-scope='temperature-safe'] {
+  --scope-color: var(--ai-green);
+}
+[data-scope='temperature-warning'] {
+  --scope-color: var(--ai-orange);
+}
+[data-scope='temperature-danger'] {
+  --scope-color: var(--ai-red);
+}
+[data-scope='temperature-unknown'] {
+  --scope-color: var(--ai-muted);
+}
 .resource-values {
   display: grid;
   gap: 8px;
@@ -1037,24 +1100,13 @@ const position = computed(() =>
     align-items: flex-start;
   }
 }
-.disk-capacity {
+.resource-storage-note {
   display: grid;
-  gap: 6px;
+  gap: 3px;
   margin-top: 8px;
   font-size: 10px;
   color: var(--ai-muted);
   font-variant-numeric: tabular-nums;
-}
-.disk-capacity-bar {
-  height: 3px;
-  background: var(--ai-line);
-  overflow: hidden;
-  border-radius: 2px;
-}
-.disk-capacity-bar i {
-  display: block;
-  height: 100%;
-  background: var(--ai-green);
 }
 @media (max-width: 480px) {
   .resource {
