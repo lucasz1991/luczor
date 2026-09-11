@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
   snapshot: vi.fn(),
   prepare: vi.fn(),
   getRun: vi.fn(),
+  listRuns: vi.fn(),
   cancelRun: vi.fn(),
   executionAssert: vi.fn(),
 }))
@@ -26,7 +27,7 @@ vi.mock('@/services/executionGate', () => ({
 vi.mock('@/services/agents/hub', () => ({ agentProjectSnapshot: mocks.snapshot }))
 vi.mock('@/services/agents/teamHub', () => ({
   prepareAgentTeam: mocks.prepare,
-  agentTeams: { getRun: mocks.getRun, cancelRun: mocks.cancelRun },
+  agentTeams: { getRun: mocks.getRun, listRuns: mocks.listRuns, cancelRun: mocks.cancelRun },
 }))
 
 import { agentTeamTools } from '@/services/tools/agentTeams'
@@ -81,6 +82,23 @@ beforeEach(() => {
 })
 
 describe('agent team tools', () => {
+  it('discovers bounded teams only in the current account and workspace binding', async () => {
+    mocks.listRuns.mockReturnValue([
+      run(),
+      { ...run(), project: { ...project, principalId: 'other' } },
+      { ...run(), project: { ...project, workspaceUpdatedAt: 0 } },
+    ])
+    expect(await tool('agent_team_status').execute({}, context)).toEqual({
+      ok: true,
+      runs: [{ run_id: 'team-run', status: 'running', error_code: undefined }],
+      truncated: false,
+    })
+    mocks.listRuns.mockReturnValue(Array.from({ length: 51 }, run))
+    const result = (await tool('agent_team_status').execute({}, context)) as { runs: unknown[]; truncated: boolean }
+    expect(result.runs).toHaveLength(50)
+    expect(result.truncated).toBe(true)
+    expect(JSON.stringify(result)).not.toContain('Private objective')
+  })
   it('stages the fixed DAG without executing it and leaves final approval in Agent Hub', async () => {
     const result = await tool('agent_team_prepare').execute(
       {

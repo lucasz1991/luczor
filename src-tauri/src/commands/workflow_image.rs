@@ -367,6 +367,23 @@ fn recognize(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "Explicit synthetic OCR fixture test; use scripts/test-native-ocr.ps1"]
+    fn native_synthetic_ocr_smoke() {
+        let path = std::env::var("LUCZOR_OCR_TEST_FIXTURE").expect("synthetic fixture path");
+        let bytes = std::fs::read(path).expect("read synthetic fixture");
+        let capabilities = ocr_capabilities().expect("OCR capabilities");
+        assert_eq!(capabilities["ocrAvailable"], true);
+        let result = recognize(&bytes, None, 1000, &|| Ok(())).expect("native OCR");
+        let text = result["text"].as_str().expect("public OCR text").to_uppercase();
+        assert!(text.contains("LUCZOR"), "Synthetic marker not recognized");
+        let bounded = recognize(&bytes, None, 3, &|| Ok(())).expect("bounded OCR");
+        assert_eq!(bounded["text"].as_str().unwrap().chars().count(), 3);
+        assert_eq!(bounded["truncated"], true);
+        assert!(recognize(&bytes, None, 1000, &|| Err("revoked".into())).is_err());
+        println!("NATIVE_OCR_PROBE_OK: synthetic marker, output bound and revocation");
+    }
     fn png(pixel: [u8; 4]) -> Vec<u8> {
         use image::ImageEncoder;
         let mut bytes = Vec::new();

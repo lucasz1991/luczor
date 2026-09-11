@@ -695,9 +695,11 @@ export function bootstrapWithApiConfig(
 /** Fetch the signed local-model envelope with the exact verified API identity. */
 export function localModelManifestWithApiConfig(
   config: LuczorApiConfigSnapshot,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  platform?: string
 ): Promise<Record<string, unknown>> {
-  return requestWithConfig<Record<string, unknown>>('/local-model/manifest', { signal }, config)
+  const path = platform ? `/local-model/manifest?platform=${encodeURIComponent(platform)}` : '/local-model/manifest'
+  return requestWithConfig<Record<string, unknown>>(path, { signal }, config)
 }
 
 export function assistantProfileWithApiConfig(

@@ -187,8 +187,8 @@ const TOOL_CONTRACT = [
 ] as const
 
 // Reviewed additions: managed effort and versioned workflows with bounded execution budgets.
-const TOOL_SCHEMA_SHA256 = '1a3eb60ab2e6e24158587e979799bb1c784fae09123ca8fdb133ba22aeff5797'
-const CORE_TOOL_SCHEMA_SHA256 = '84162d8b0bfb362d37be6fc9ae89cc85190635c81435a85445ca8ada7fcebc5f'
+const TOOL_SCHEMA_SHA256 = 'a6013bb8594cda4465759efc8304914542a56424a1f3e5890062a6c6e24ea8c3'
+const CORE_TOOL_SCHEMA_SHA256 = '7aca890677b09811f1135913e1e525d88c6defdb5d955b90ccf4145e6386dd04'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {

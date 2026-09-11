@@ -1,6 +1,7 @@
 import type { BootstrapResponse, LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
 import { localResources, onLocalResourcesApplied } from './resources'
 import { localModelManifestWithApiConfig, LuczorApi } from '@/services/api/luczorApi'
+import { modelPlatformTarget } from './modelPlatform'
 import {
   deriveLocalModelManifestTrustDomain,
   getVerifiedAccountSnapshot,
@@ -1326,7 +1327,8 @@ const defaultManager = new LocalModelManager(new TauriLocalRuntimeTransport())
 
 export const localInferenceCoordinator = new LocalInferenceCoordinator({
   bootstrap: () => LuczorApi.bootstrap(),
-  fetchManifest: config => localModelManifestWithApiConfig(config),
+  fetchManifest: async config =>
+    localModelManifestWithApiConfig(config, undefined, modelPlatformTarget(await getNativeHardwareSnapshot())),
   verifyManifest: verifyLocalModelManifest,
   hardwareSnapshot: getNativeHardwareSnapshot,
   resourceMode: async () => (await localResources.get()).applied.mode,

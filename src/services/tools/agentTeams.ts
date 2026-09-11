@@ -98,7 +98,7 @@ export const agentTeamTools: ToolDef[] = [
     name: 'agent_team_status',
     category: 'app',
     description:
-      'Read bounded lifecycle metadata for a managed team in the active project. It returns no prompts and no agent output; review results in Agenten & Erinnerungen.',
+      'Without run_id, list up to 50 current-project teams to discover valid IDs. With run_id, read bounded lifecycle metadata. No prompts or agent output are returned; review results in Agenten & Erinnerungen.',
     mutating: false,
     requiresApproval: false,
     dataHandling: 'ephemeral',
@@ -109,10 +109,20 @@ export const agentTeamTools: ToolDef[] = [
       type: 'object',
       additionalProperties: false,
       properties: { run_id: { type: 'string', minLength: 1, maxLength: 256 } },
-      required: ['run_id'],
+      required: [],
     },
     async execute(args, ctx) {
       const project = await agentProjectSnapshot(ctx.projectId)
+      if (args.run_id === undefined) {
+        const runs = agentTeams
+          .listRuns(project.principalId, ctx.projectId)
+          .filter(run => sameProject(run.project, project))
+        return {
+          ok: true,
+          runs: runs.slice(0, 50).map(run => ({ run_id: run.id, status: run.status, error_code: run.errorCode })),
+          truncated: runs.length > 50,
+        }
+      }
       const run = agentTeams.getRun(asString(args.run_id))
       if (!run || !sameProject(run.project, project))
         throw new Error('Teamlauf gehört nicht zur aktuellen Projektzuordnung.')

@@ -4,6 +4,7 @@ const harness = vi.hoisted(() => ({
   prepare: vi.fn(),
   snapshot: vi.fn(),
   getJob: vi.fn(),
+  listJobs: vi.fn(),
   getOutput: vi.fn(),
   cancel: vi.fn(),
   externalPolicy: vi.fn(),
@@ -19,7 +20,12 @@ vi.mock('@/services/repositoryGraph', () => ({ getRepositoryExternalPolicy: harn
 vi.mock('@/services/agents/hub', () => ({
   prepareAgentJob: harness.prepare,
   agentProjectSnapshot: harness.snapshot,
-  agentHub: { getJob: harness.getJob, getOutput: harness.getOutput, cancel: harness.cancel },
+  agentHub: {
+    getJob: harness.getJob,
+    listJobs: harness.listJobs,
+    getOutput: harness.getOutput,
+    cancel: harness.cancel,
+  },
 }))
 import { agentJobTools } from '@/services/tools/agentJobs'
 
@@ -32,6 +38,23 @@ function tool(name: string) {
 }
 
 describe('managed agent tools', () => {
+  it('discovers only current-binding jobs without exposing prompts or results', async () => {
+    const job = harness.getJob()
+    harness.listJobs.mockReturnValue([
+      job,
+      { ...job, project: { ...project, workspaceUpdatedAt: 0 } },
+      { ...job, principalId: 'other' },
+    ])
+    expect(await tool('agent_job_status').execute({}, context)).toEqual({
+      ok: true,
+      jobs: [{ job_id: 'job-a', agent: 'codex', status: 'completed', error_code: undefined }],
+      truncated: false,
+    })
+    expect(harness.getOutput).not.toHaveBeenCalled()
+    await expect(tool('agent_job_status').execute({ include_output: true }, context)).rejects.toThrow('job_id')
+    harness.listJobs.mockReturnValue([])
+    expect(await tool('agent_job_status').execute({}, context)).toMatchObject({ ok: true, jobs: [] })
+  })
   beforeEach(() => {
     vi.clearAllMocks()
     harness.snapshot.mockResolvedValue(project)
