@@ -10,6 +10,7 @@ import { teamMessages, type AgentCheckpoint } from './chatCheckpoint'
 import type { AgentTeamRun, AgentTeamNodeDefinition } from './teams'
 import { prepareExternalSpecialists, type SpecialistOutcome } from './externalSpecialists'
 import { roleValue, SPECIALIST_LABELS, type SpecialistRole } from './teamPolicy'
+import { chatTeamBudget } from './chatTeamBudget'
 
 type Result = Awaited<ReturnType<typeof runAgent>>
 
@@ -174,6 +175,7 @@ export async function runChatAgentTeam(
       id: 'chat-team',
       label: 'Chat-Agententeam',
       maxParallel: specialists?.preset.max_parallel ?? 1,
+      deadlineMs: chatTeamBudget(limits.agent, externalNodes.length, specialists?.preset.max_parallel ?? 1).deadlineMs,
       maxPromptCharacters: 512_000,
       nodes: [
         {
@@ -190,6 +192,8 @@ export async function runChatAgentTeam(
         ...externalNodes,
         {
           id: 'worker',
+          timeoutMs: chatTeamBudget(limits.agent, externalNodes.length, specialists?.preset.max_parallel ?? 1)
+            .workerTimeoutMs,
           label: 'Auftrag bearbeiten',
           role: 'implementer',
           adapterId: 'chat',

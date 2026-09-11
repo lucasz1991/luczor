@@ -71,14 +71,16 @@ describe('confirmation transport', () => {
   it('grants the installed message command only to the trusted main window', () => {
     const capability = (json: string) =>
       JSON.parse(json) as {
-        windows: string[]
+        windows?: string[]
+        webviews?: string[]
         permissions: string[]
         remote?: unknown
       }
     const main = capability(readFileSync('src-tauri/capabilities/default.json', 'utf8'))
     const browser = capability(readFileSync('src-tauri/capabilities/browser.json', 'utf8'))
     const miniChat = capability(readFileSync('src-tauri/capabilities/mini-chat.json', 'utf8'))
-    expect(main.windows).toEqual(['main'])
+    expect(main.webviews).toEqual(['main'])
+    expect(main.windows).toBeUndefined()
     expect(main.remote).toBeUndefined()
     expect(main.permissions).toContain('dialog:allow-message')
     expect(browser.permissions.some(permission => permission.startsWith('dialog:'))).toBe(false)

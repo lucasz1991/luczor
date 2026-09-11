@@ -1,7 +1,8 @@
 import { expect, it, vi } from 'vitest'
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import type { AgentInterruption, RunAgentOptions } from '@/services/agent'
-const { prepareSpecialists, projectSnapshot } = vi.hoisted(() => ({
+const { prepareSpecialists, projectSnapshot, preparedDefinition } = vi.hoisted(() => ({
+  preparedDefinition: vi.fn(),
   prepareSpecialists: vi.fn(),
   projectSnapshot: vi.fn(async (): Promise<import('@/services/agents/types').AgentProjectSnapshot> => ({
     projectId: 'p',
@@ -27,7 +28,9 @@ vi.mock('@/services/agents/teamHub', async () => {
       executor: Executor
     ) => {
       execute = executor
-      return agentTeams.prepare({ ...definition, deadlineMs: definition.deadlineMs ?? 5_000 }, input)
+      preparedDefinition(definition)
+      // Keep deadline tests fast even when production budgets scale with tool rounds.
+      return agentTeams.prepare({ ...definition, deadlineMs: 5_000 }, input)
     },
   }
 })
@@ -68,6 +71,10 @@ it('runs a sequential planner-worker-reviewer graph with configured worker limit
     execute
   )
   expect(calls.map(call => call.maxRounds)).toEqual([1, 17, 3])
+  expect(
+    preparedDefinition.mock.lastCall?.[0].nodes.find((node: { id: string }) => node.id === 'worker').timeoutMs
+  ).toBe(51 * 60_000)
+  expect(preparedDefinition.mock.lastCall?.[0].deadlineMs).toBe(81 * 60_000)
   expect(calls.map(call => call.toolAccess)).toEqual(['none', undefined, 'read-only'])
   expect(calls.map(call => call.localReasoningMode)).toEqual([undefined, undefined, undefined])
   expect(

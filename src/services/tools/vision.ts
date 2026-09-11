@@ -32,6 +32,7 @@ function input(args: Record<string, unknown>): WorkflowImageInput {
     inference: args.inference === 'local' || args.inference === 'external' ? args.inference : undefined,
     outputFormat: args.output_format === 'json' ? 'json' : 'text',
     maxOutputChars: typeof args.max_output_chars === 'number' ? args.max_output_chars : undefined,
+    maxChars: typeof args.max_output_chars === 'number' ? args.max_output_chars : undefined,
   }
 }
 

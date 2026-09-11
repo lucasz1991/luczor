@@ -130,6 +130,7 @@ const TOOL_CONTRACT = [
   { name: 'os_open_url', category: 'os', mutating: true, requiresApproval: true },
   { name: 'os_environment', category: 'os', mutating: false, requiresApproval: true },
   { name: 'os_observe_desktop', category: 'os', mutating: false, requiresApproval: true },
+  { name: 'browser_close', category: 'app', mutating: true, requiresApproval: true },
   { name: 'browser_open', category: 'app', mutating: true, requiresApproval: true },
   { name: 'browser_navigate', category: 'app', mutating: true, requiresApproval: true },
   { name: 'browser_dom_read', category: 'app', mutating: false, requiresApproval: true },
@@ -186,8 +187,8 @@ const TOOL_CONTRACT = [
 ] as const
 
 // Reviewed additions: managed effort and versioned workflows with bounded execution budgets.
-const TOOL_SCHEMA_SHA256 = '6262f67efe954f2d1b485df970d98716623170581fc06186a1ea6863a73b0c6a'
-const CORE_TOOL_SCHEMA_SHA256 = 'c7f26eecccbfc730a3d039075c524869ce7af6864a3ffe139317ef7e48bd8cdc'
+const TOOL_SCHEMA_SHA256 = '1a3eb60ab2e6e24158587e979799bb1c784fae09123ca8fdb133ba22aeff5797'
+const CORE_TOOL_SCHEMA_SHA256 = '84162d8b0bfb362d37be6fc9ae89cc85190635c81435a85445ca8ada7fcebc5f'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {
