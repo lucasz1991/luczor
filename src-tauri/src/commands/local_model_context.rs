@@ -3,6 +3,20 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
+/// Grow only for measured input plus a small public-answer reserve. Thinking
+/// presets never determine the allocation. The signed runtime ceiling is final.
+pub(super) fn growth_target(current: u32, ceiling: u32, input: u64) -> Option<u32> {
+    let needed = input.checked_add(2048 + 64)?;
+    if needed <= u64::from(current) || current >= ceiling || needed > u64::from(ceiling) {
+        return None;
+    }
+    let mut target = current.max(1);
+    while u64::from(target) < needed {
+        target = target.saturating_mul(2).min(ceiling);
+    }
+    Some(target)
+}
+
 #[derive(Debug, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct ContextUsage {
@@ -178,6 +192,17 @@ fn fit<E>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn growth_is_demand_driven_bounded_and_not_an_output_target() {
+        assert_eq!(growth_target(32768, 262144, 14000), None);
+        assert_eq!(growth_target(32768, 262144, 31000), Some(65536));
+        assert_eq!(growth_target(65536, 262144, 70000), Some(131072));
+        assert_eq!(growth_target(16384, 32768, 17000), Some(32768));
+        assert_eq!(growth_target(32768, 32768, 32000), None);
+        assert_eq!(growth_target(32768, 262144, 262144), None);
+        assert_eq!(growth_target(32768, 262144, u64::MAX), None);
+    }
 
     #[test]
     fn adaptive_headroom_preserves_existing_rounds_and_clamps_ultra_to_real_context() {

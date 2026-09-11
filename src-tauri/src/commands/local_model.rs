@@ -2853,7 +2853,7 @@ fn infer_blocking(
     let _ = on_event.send(LocalInferenceEvent::Started {
         request_id: request.request_id.clone(),
     });
-    let result = stream_completion(&model, &request, cancel.clone(), &on_event);
+    let result = stream_completion(app, &model, &request, cancel.clone(), &on_event, true);
     let outcome = if cancel.load(Ordering::SeqCst) {
         RequestOutcome::Cancelled
     } else if result.is_ok() {
@@ -3005,6 +3005,10 @@ fn ensure_runtime(
         let resource_revision = guard.resource_settings.state.applied_revision;
         let reuse = if let Some(runtime) = guard.runtime.as_mut() {
             runtime.resource_revision == resource_revision
+                && serde_json::to_value(&runtime.resource_plan)
+                    .ok()
+                    .and_then(|value| value["contextTokens"].as_u64())
+                    .is_some_and(|active| active >= u64::from(model.context_limit.unwrap_or(0)))
                 && runtime.reuse(&model.id, scope_digest)?
         } else {
             false
@@ -3586,10 +3590,12 @@ fn classify_llama_http_status(status: u16) -> LlamaHttpFailureKind {
 }
 
 fn stream_completion(
+    app: &AppHandle,
     model: &ModelRelease,
     request: &LocalInferenceRequest,
     cancel: Arc<AtomicBool>,
     on_event: &Channel<LocalInferenceEvent>,
+    may_grow: bool,
 ) -> Result<LocalInferenceResult, LocalInferenceFailure> {
     if !local_messages::valid_tool_arguments(&request.messages) {
         return Err(LocalInferenceFailure::http(
@@ -3622,9 +3628,13 @@ fn stream_completion(
         .benchmark_thresholds
         .as_ref()
         .ok_or("Capacity policy has no read-time threshold.")?;
+    // context_limit is the initial window; the signed runtime contract bounds
+    // automatic growth. The renderer cannot request a different model/window.
     let signed_context = model
-        .context_limit
-        .ok_or("Model context limit is unavailable.")?;
+        .runtime
+        .as_ref()
+        .ok_or("Runtime context limit is unavailable.")?
+        .max_context_tokens;
     let mut props = Value::Null;
     if request.use_case != IDLE_CONTEXT_USE_CASE {
         let client = local_http_client(Duration::from_secs(3), Duration::from_secs(3))?;
@@ -3677,6 +3687,7 @@ fn stream_completion(
         .as_ref()
         .is_some_and(|artifact| artifact.size_bytes <= COMPACT_MODEL_MAX_ARTIFACT_BYTES);
     let compact_ingress = compact_model.then_some((u64::from(context_limit) / 2).max(1024));
+    let mut measured_input = 0;
     let usage = context_budget::fit_adaptive_context_with_ingress(
         &mut body,
         u64::from(context_limit),
@@ -3725,13 +3736,73 @@ fn stream_completion(
             };
             let value: Value = serde_json::from_slice(&bytes)
                 .map_err(|_| "Local tokenizer response is invalid.")?;
-            value["input_tokens"]
-                .as_u64()
-                .ok_or_else(|| "Local tokenizer token count is unavailable.".into())
+            let tokens = value["input_tokens"].as_u64().ok_or_else(|| {
+                LocalInferenceFailure::from("Local tokenizer token count is unavailable.")
+            })?;
+            if measured_input == 0 {
+                measured_input = tokens;
+            }
+            Ok(tokens)
         },
         || LocalInferenceFailure::http(400, LlamaHttpFailureKind::ContextWindowExceeded),
         compact_ingress,
-    )?;
+    );
+    // This point is strictly before any completion request or public/tool delta.
+    // Only a locally measured context shortage can restart; never replay a
+    // completion that may already have produced output or requested a tool.
+    let context_shortage = usage
+        .as_ref()
+        .err()
+        .is_none_or(|failure| failure.code == "runtime_context_exceeded");
+    if may_grow
+        && request.use_case != IDLE_CONTEXT_USE_CASE
+        && measured_input > 0
+        && context_shortage
+    {
+        if let Some(target) =
+            context_budget::growth_target(context_limit, signed_context, measured_input)
+        {
+            require_runtime_operation_checkpoint(
+                &request.request_id,
+                &request.catalog_binding,
+                &cancel,
+            )?;
+            let mut expanded = model.clone();
+            expanded.context_limit = Some(target);
+            ensure_runtime(
+                app,
+                &expanded,
+                Some(&request.scope_digest),
+                &request.request_id,
+                &request.catalog_binding,
+                &cancel,
+            )?;
+            run_signed_benchmark(
+                &expanded,
+                &request.request_id,
+                &request.catalog_binding,
+                &cancel,
+            )?;
+            {
+                let mut guard = state()
+                    .lock()
+                    .map_err(|_| "Local model manager is unavailable.")?;
+                if !operation_owns_catalog_binding(
+                    &guard,
+                    &request.request_id,
+                    &request.catalog_binding,
+                ) {
+                    return Err("Context growth lost runtime ownership.".into());
+                }
+                if let Some(runtime) = guard.runtime.as_mut() {
+                    runtime.prepared_manifest_hash =
+                        Some(request.catalog_binding.manifest_payload_sha256.clone());
+                }
+            }
+            return stream_completion(app, model, request, cancel, on_event, false);
+        }
+    }
+    let usage = usage?;
     require_runtime_operation_checkpoint(&request.request_id, &request.catalog_binding, &cancel)?;
     if request.use_case == IDLE_CONTEXT_USE_CASE {
         let (status, bytes) = idle_inference::post(
