@@ -1693,6 +1693,9 @@ fn validate_model(model: &ModelRelease) -> Result<(), String> {
             || runtime.min_context_tokens == 0
             || runtime.max_context_tokens < runtime.min_context_tokens
             || model.context_limit.is_none()
+            || model.context_limit.is_some_and(|context| {
+                context < runtime.min_context_tokens || context > runtime.max_context_tokens
+            })
             || model.capacity_policy.min_total_ram_bytes.is_none()
             || model.capacity_policy.min_available_ram_bytes.is_none()
             || model.capacity_policy.min_vram_bytes.is_none()
@@ -5261,6 +5264,23 @@ mod tests {
             "../../../tests/fixtures/local-model-tiers-v2.json"
         ))
         .unwrap();
+        assert!(validate_manifest(&payload).is_ok());
+        payload.models[0].context_limit = Some(
+            payload.models[0]
+                .runtime
+                .as_ref()
+                .unwrap()
+                .max_context_tokens
+                + 1,
+        );
+        assert!(validate_manifest(&payload).is_err());
+        payload.models[0].context_limit = Some(
+            payload.models[0]
+                .runtime
+                .as_ref()
+                .unwrap()
+                .min_context_tokens,
+        );
         assert!(validate_manifest(&payload).is_ok());
         payload.routing.external_requires_explicit_approval = false;
         assert!(validate_manifest(&payload).is_err());
