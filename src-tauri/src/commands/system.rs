@@ -19,7 +19,6 @@ use std::time::{Duration, Instant};
 use sysinfo::{
     Components, ProcessRefreshKind, ProcessesToUpdate, System, MINIMUM_CPU_UPDATE_INTERVAL,
 };
-use tauri::WebviewWindow;
 
 use super::desktop_target::{DesktopActionGuard, DesktopObservation, InputPayload, ObservePayload};
 use super::ensure_main_webview;
@@ -35,7 +34,7 @@ mod system_gpu;
 
 #[tauri::command]
 pub async fn system_diagnostics(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: Guarded<super::system_diagnostics::DiagnosticsPayload>,
 ) -> Result<super::system_diagnostics::DiagnosticsReport, String> {
     ensure_main_webview(&window)?;
@@ -49,7 +48,7 @@ pub async fn system_diagnostics(
 
 #[tauri::command]
 pub async fn desktop_observe(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: ObservePayload,
 ) -> Result<DesktopObservation, String> {
     ensure_main_webview(&window)?;
@@ -107,7 +106,7 @@ fn monitor_info(monitor: &xcap::Monitor) -> Result<MonitorInfo, String> {
 
 /// Native desktop coordinates, including negative origins on secondary displays.
 #[tauri::command]
-pub async fn list_monitors(window: WebviewWindow) -> Result<Vec<MonitorInfo>, String> {
+pub async fn list_monitors(window: crate::commands::CallerWebview) -> Result<Vec<MonitorInfo>, String> {
     ensure_main_webview(&window)?;
     let monitors = xcap::Monitor::all().map_err(|e| format!("Monitor::all failed: {e}"))?;
     if monitors.is_empty() {
@@ -150,7 +149,7 @@ pub struct ScreenCapture {
 /// Capture the primary or explicitly selected monitor as a PNG (base64).
 #[tauri::command]
 pub async fn capture_screen(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: Option<ScreenCapturePayload>,
 ) -> Result<ScreenCapture, String> {
     ensure_main_webview(&window)?;
@@ -190,7 +189,7 @@ pub async fn capture_screen(
 
 /// Read the system clipboard (text).
 #[tauri::command]
-pub async fn read_clipboard(window: WebviewWindow) -> Result<String, String> {
+pub async fn read_clipboard(window: crate::commands::CallerWebview) -> Result<String, String> {
     ensure_main_webview(&window)?;
     let mut cb = arboard::Clipboard::new().map_err(|e| format!("Clipboard init failed: {e}"))?;
     cb.get_text()
@@ -212,7 +211,7 @@ pub struct WindowInfo {
 
 /// List visible windows (title + owning app). Read-only perception.
 #[tauri::command]
-pub async fn list_windows(window: WebviewWindow) -> Result<Vec<WindowInfo>, String> {
+pub async fn list_windows(window: crate::commands::CallerWebview) -> Result<Vec<WindowInfo>, String> {
     ensure_main_webview(&window)?;
     let windows = xcap::Window::all().map_err(|e| format!("Window::all failed: {e}"))?;
     let mut out = Vec::new();
@@ -726,7 +725,7 @@ fn move_pointer(x: i32, y: i32) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn move_mouse(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: InputPayload<MoveMousePayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
@@ -763,7 +762,7 @@ fn validate_mouse_click(payload: &MouseClickPayload) -> Result<Button, String> {
 
 #[tauri::command]
 pub async fn mouse_click(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: InputPayload<MouseClickPayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
@@ -797,7 +796,7 @@ pub struct TypeTextPayload {
 
 #[tauri::command]
 pub async fn type_text(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: InputPayload<TypeTextPayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
@@ -858,7 +857,7 @@ fn parse_key(name: &str) -> Result<Key, String> {
 
 #[tauri::command]
 pub async fn press_key(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: InputPayload<PressKeyPayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
@@ -910,7 +909,7 @@ fn parse_scroll_axis(value: Option<&str>) -> Result<Axis, String> {
 
 #[tauri::command]
 pub async fn scroll(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: InputPayload<ScrollPayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
@@ -965,7 +964,7 @@ fn parse_hotkey_modifiers(values: &[String]) -> Result<Vec<Key>, String> {
 
 #[tauri::command]
 pub async fn hotkey(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: InputPayload<HotkeyPayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
@@ -1020,7 +1019,7 @@ pub struct OpenUrlPayload {
 
 #[tauri::command]
 pub async fn open_url(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: Guarded<OpenUrlPayload>,
 ) -> Result<(), String> {
     // Both trusted local chat surfaces can open a user-clicked HTTP(S) link.
@@ -1042,7 +1041,7 @@ pub async fn open_url(
 
 /// Explicit user navigation from rendered messages; never registered as an agent tool.
 #[tauri::command]
-pub async fn open_user_link(window: WebviewWindow, payload: OpenUrlPayload) -> Result<(), String> {
+pub async fn open_user_link(window: crate::commands::CallerWebview, payload: OpenUrlPayload) -> Result<(), String> {
     ensure_main_webview(&window)?;
     let url = reqwest::Url::parse(payload.url.trim()).map_err(|_| "Invalid link URL.")?;
     if !matches!(url.scheme(), "http" | "https")

@@ -1,6 +1,6 @@
 use keyring::{Entry, Error as KeyringError};
 use serde::Deserialize;
-use tauri::{Manager, WebviewWindow};
+use tauri::{Manager};
 use uuid::Uuid;
 
 use super::ensure_main_webview;
@@ -23,7 +23,7 @@ pub struct DeviceKeyPayload {
 /// Read the Luczor device credential from the current user's OS credential
 /// store (Windows Credential Manager, macOS Keychain, Linux Secret Service).
 #[tauri::command]
-pub async fn device_key_get(window: WebviewWindow) -> Result<Option<String>, String> {
+pub async fn device_key_get(window: crate::commands::CallerWebview) -> Result<Option<String>, String> {
     ensure_main_webview(&window)?;
     let app_identifier = active_app_identifier(&window);
     tauri::async_runtime::spawn_blocking(move || read_device_key(&app_identifier))
@@ -35,7 +35,7 @@ pub async fn device_key_get(window: WebviewWindow) -> Result<Option<String>, Str
 /// accepted, so a compromised frontend cannot turn this into a keychain API.
 #[tauri::command]
 pub async fn device_key_set(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: DeviceKeyPayload,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
@@ -51,7 +51,7 @@ pub async fn device_key_set(
 }
 
 #[tauri::command]
-pub async fn device_key_delete(window: WebviewWindow) -> Result<(), String> {
+pub async fn device_key_delete(window: crate::commands::CallerWebview) -> Result<(), String> {
     ensure_main_webview(&window)?;
     let app_identifier = active_app_identifier(&window);
     tauri::async_runtime::spawn_blocking(move || {
@@ -68,7 +68,7 @@ pub async fn device_key_delete(window: WebviewWindow) -> Result<(), String> {
 /// credential store. The renderer derives an AES-256 key from this seed and
 /// never persists it alongside the encrypted memory file.
 #[tauri::command]
-pub async fn memory_key_get_or_create(window: WebviewWindow) -> Result<String, String> {
+pub async fn memory_key_get_or_create(window: crate::commands::CallerWebview) -> Result<String, String> {
     ensure_main_webview(&window)?;
     let app_identifier = active_app_identifier(&window);
     tauri::async_runtime::spawn_blocking(move || {
@@ -87,7 +87,7 @@ pub async fn memory_key_get_or_create(window: WebviewWindow) -> Result<String, S
     .map_err(|error| format!("OS credential task failed: {error}"))?
 }
 
-fn active_app_identifier(window: &WebviewWindow) -> String {
+fn active_app_identifier(window: &crate::commands::CallerWebview) -> String {
     window.app_handle().config().identifier.clone()
 }
 

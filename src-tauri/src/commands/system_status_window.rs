@@ -1,7 +1,7 @@
 //! Native, movable Systemstatus window. It receives only read-only telemetry commands.
 use super::{ensure_main_webview, ensure_webview_label};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, LogicalSize, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub const SYSTEM_STATUS_LABEL: &str = "luczor-system-status";
 
@@ -35,7 +35,7 @@ impl SystemStatusWindowMode {
     }
 }
 
-fn apply_mode(window: &WebviewWindow, mode: SystemStatusWindowMode) -> Result<(), String> {
+fn apply_mode(window: &tauri::Window, mode: SystemStatusWindowMode) -> Result<(), String> {
     window
         .set_title(mode.title())
         .map_err(|error| error.to_string())?;
@@ -46,7 +46,7 @@ fn apply_mode(window: &WebviewWindow, mode: SystemStatusWindowMode) -> Result<()
 
 pub fn show(app: AppHandle, mode: SystemStatusWindowMode) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(SYSTEM_STATUS_LABEL) {
-        apply_mode(&window, mode)?;
+        apply_mode(&window.as_ref().window(), mode)?;
         window.show().map_err(|error| error.to_string())?;
         window.unminimize().map_err(|error| error.to_string())?;
         return window.set_focus().map_err(|error| error.to_string());
@@ -74,7 +74,7 @@ pub fn show(app: AppHandle, mode: SystemStatusWindowMode) -> Result<(), String> 
 
 #[tauri::command]
 pub async fn system_status_window_open(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     mode: SystemStatusWindowMode,
 ) -> Result<(), String> {
@@ -84,7 +84,7 @@ pub async fn system_status_window_open(
 
 #[tauri::command]
 pub fn system_status_window_set_mode(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     mode: SystemStatusWindowMode,
 ) -> Result<(), String> {
     ensure_webview_label(window.label(), SYSTEM_STATUS_LABEL)?;
@@ -92,7 +92,7 @@ pub fn system_status_window_set_mode(
 }
 
 #[tauri::command]
-pub fn system_status_window_close(window: WebviewWindow) -> Result<(), String> {
+pub fn system_status_window_close(window: crate::commands::CallerWebview) -> Result<(), String> {
     ensure_webview_label(window.label(), SYSTEM_STATUS_LABEL)?;
     window.close().map_err(|error| error.to_string())
 }

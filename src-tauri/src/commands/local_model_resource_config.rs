@@ -256,7 +256,7 @@ fn check_expected(settings: &ResourceSettings, expected: u64) -> Result<(), Stri
 
 #[tauri::command]
 pub fn local_model_get_resource_config(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
 ) -> Result<LocalResourceConfigState, String> {
     ensure_main_webview(&window)?;
@@ -268,7 +268,7 @@ pub fn local_model_get_resource_config(
 }
 #[tauri::command]
 pub async fn local_model_set_resource_config(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     config: LocalResourceConfig,
     expected_revision: u64,
@@ -311,7 +311,7 @@ pub async fn local_model_set_resource_config(
 }
 #[tauri::command]
 pub async fn local_model_apply_resource_config(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     expected_revision: u64,
 ) -> Result<LocalResourceConfigState, String> {
@@ -368,7 +368,7 @@ fn clear_navigation_leases(guard: &mut ManagerState) {
 }
 #[tauri::command]
 pub fn local_model_begin_resource_work(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     lease_id: String,
 ) -> Result<ResourceWork, String> {
@@ -395,7 +395,7 @@ pub fn local_model_begin_resource_work(
 }
 #[tauri::command]
 pub fn local_model_end_resource_work(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     lease_id: String,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;

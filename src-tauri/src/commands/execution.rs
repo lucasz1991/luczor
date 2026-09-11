@@ -5,7 +5,6 @@ use std::ops::Deref;
 use std::sync::{Mutex, OnceLock};
 
 use serde::{de::DeserializeOwned, Deserialize, Deserializer, Serialize};
-use tauri::WebviewWindow;
 
 use super::ensure_main_webview;
 
@@ -116,7 +115,7 @@ pub struct WorkflowCancelPayload {
 
 #[tauri::command]
 pub fn wf_execution_cancel(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: Guarded<WorkflowCancelPayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
@@ -205,7 +204,7 @@ pub struct ExecutionOnly {
 
 #[tauri::command]
 pub async fn execution_gate_update(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: ExecutionPolicy,
 ) -> Result<ExecutionPolicy, String> {
     ensure_main_webview(&window)?;

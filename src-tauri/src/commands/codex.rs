@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Manager, State};
 
 use super::agent_effort::{validate_codex_effort, AgentEffort};
 use super::ensure_main_webview;
@@ -189,7 +189,7 @@ pub struct CodexRuntimeStatus {
 }
 
 #[tauri::command]
-pub async fn codex_runtime_status(window: WebviewWindow) -> Result<CodexRuntimeStatus, String> {
+pub async fn codex_runtime_status(window: crate::commands::CallerWebview) -> Result<CodexRuntimeStatus, String> {
     ensure_main_webview(&window)?;
     Ok(CodexRuntimeStatus {
         available: find_codex().is_some(),
@@ -224,7 +224,7 @@ pub struct CodexDesktopResult {
 #[tauri::command]
 pub async fn codex_desktop_open(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: CodexDesktopPayload,
 ) -> Result<CodexDesktopResult, String> {
     ensure_main_webview(&window)?;
@@ -341,7 +341,7 @@ fn open_desktop_url(_url: &str) -> Result<(), String> {
 #[tauri::command]
 pub async fn codex_job_start(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     state: State<'_, CodexJobs>,
     payload: Guarded<CodexStartPayload>,
 ) -> Result<CodexJobSnapshot, String> {
@@ -463,7 +463,7 @@ pub async fn codex_job_start(
 #[tauri::command]
 pub async fn codex_job_status(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     state: State<'_, CodexJobs>,
     payload: CodexJobPayload,
 ) -> Result<CodexJobSnapshot, String> {
@@ -494,7 +494,7 @@ pub async fn codex_job_status(
 #[tauri::command]
 pub async fn codex_job_cancel(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     state: State<'_, CodexJobs>,
     payload: CodexJobPayload,
 ) -> Result<CodexJobSnapshot, String> {
@@ -535,7 +535,7 @@ pub struct CodexListPayload {
 #[tauri::command]
 pub async fn codex_job_list(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     state: State<'_, CodexJobs>,
     payload: CodexListPayload,
 ) -> Result<Vec<CodexJobSnapshot>, String> {
@@ -588,7 +588,7 @@ pub struct CodexSession {
 #[tauri::command]
 pub async fn codex_session_list(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: CodexSessionsPayload,
 ) -> Result<Vec<CodexSession>, String> {
     ensure_main_webview(&window)?;

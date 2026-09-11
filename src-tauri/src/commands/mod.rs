@@ -2,6 +2,7 @@ pub mod agent;
 pub mod agent_effort;
 pub mod claude;
 pub mod browser;
+pub mod browser_panel;
 pub mod codex;
 mod desktop_target;
 pub mod device_jobs;
@@ -29,7 +30,22 @@ pub mod workflow_watch;
 
 mod process;
 
-use tauri::WebviewWindow;
+/// Command identity must follow the calling webview, even in a split window.
+/// Tauri's WebviewWindow extractor rejects multi-webview windows.
+pub struct CallerWebview { webview: tauri::Webview, window: tauri::Window }
+impl std::ops::Deref for CallerWebview {
+    type Target = tauri::Window;
+    fn deref(&self) -> &Self::Target { &self.window }
+}
+impl CallerWebview {
+    pub fn label(&self) -> &str { self.webview.label() }
+}
+impl<'de> tauri::ipc::CommandArg<'de, tauri::Wry> for CallerWebview {
+    fn from_command(command: tauri::ipc::CommandItem<'de, tauri::Wry>) -> Result<Self, tauri::ipc::InvokeError> {
+        let webview = <tauri::Webview as tauri::ipc::CommandArg<'de, tauri::Wry>>::from_command(command)?;
+        Ok(Self { window: webview.window(), webview })
+    }
+}
 
 pub(crate) const MAIN_WEBVIEW_LABEL: &str = "main";
 pub(crate) const BROWSER_WEBVIEW_LABEL: &str = "luczor-browser";
@@ -42,13 +58,13 @@ pub(crate) fn ensure_webview_label(actual: &str, expected: &str) -> Result<(), S
     }
 }
 
-pub(crate) fn ensure_main_webview(window: &WebviewWindow) -> Result<(), String> {
+pub(crate) fn ensure_main_webview(window: &CallerWebview) -> Result<(), String> {
     ensure_webview_label(window.label(), MAIN_WEBVIEW_LABEL)
 }
 
 /// The detached Systemstatus display has a deliberately narrow, read-only
 /// capability. It may use the two status reads below, never the main runtime.
-pub(crate) fn ensure_main_or_system_status_webview(window: &WebviewWindow) -> Result<(), String> {
+pub(crate) fn ensure_main_or_system_status_webview(window: &CallerWebview) -> Result<(), String> {
     if window.label() == MAIN_WEBVIEW_LABEL || window.label() == system_status_window::SYSTEM_STATUS_LABEL {
         Ok(())
     } else {
@@ -56,7 +72,7 @@ pub(crate) fn ensure_main_or_system_status_webview(window: &WebviewWindow) -> Re
     }
 }
 
-pub(crate) fn ensure_browser_webview(window: &WebviewWindow) -> Result<(), String> {
+pub(crate) fn ensure_browser_webview(window: &CallerWebview) -> Result<(), String> {
     ensure_webview_label(window.label(), BROWSER_WEBVIEW_LABEL)
 }
 
@@ -100,9 +116,12 @@ mod tests {
             serde_json::json!(["browser-report"])
         );
         assert_eq!(
-            capability["windows"],
+            capability["webviews"],
             serde_json::json!([BROWSER_WEBVIEW_LABEL])
         );
+        assert!(capability.get("windows").is_none());
+        assert!(main_capability.get("windows").is_none());
+        assert_eq!(main_capability["webviews"], serde_json::json!([MAIN_WEBVIEW_LABEL]));
         assert!(main_capability["permissions"]
             .as_array()
             .expect("main permissions")

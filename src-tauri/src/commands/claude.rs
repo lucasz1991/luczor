@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, State, WebviewWindow};
+use tauri::{AppHandle, Manager, State};
 
 const MAX_OUTPUT: usize = 200_000;
 const READ_TOOLS: &[&str] = &["Read", "Glob", "Grep"];
@@ -208,7 +208,7 @@ pub(crate) fn metadata_executable(app: &AppHandle) -> Result<PathBuf, String> {
 #[tauri::command]
 pub fn claude_runtime_status(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
 ) -> Result<ClaudeRuntimeStatus, String> {
     super::ensure_main_webview(&window)?;
     let validation = runtime_root(&app).and_then(|root| verify_runtime(&root));
@@ -294,7 +294,7 @@ fn scope(app: &AppHandle, job: &Job) -> Result<(), String> {
 #[tauri::command]
 pub async fn claude_job_start(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     state: State<'_, ClaudeJobs>,
     payload: Guarded<ClaudeStart>,
 ) -> Result<ClaudeSnapshot, String> {
@@ -386,7 +386,7 @@ fn owned(state: &ClaudeJobs, input: &ClaudeJobIdentity) -> Result<Arc<Job>, Stri
 #[tauri::command]
 pub fn claude_job_status(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     state: State<'_, ClaudeJobs>,
     payload: ClaudeJobIdentity,
 ) -> Result<ClaudeSnapshot, String> {
@@ -409,7 +409,7 @@ pub fn claude_job_status(
 }
 #[tauri::command]
 pub fn claude_job_cancel(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     state: State<'_, ClaudeJobs>,
     payload: ClaudeJobIdentity,
 ) -> Result<ClaudeSnapshot, String> {

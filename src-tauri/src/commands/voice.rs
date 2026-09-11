@@ -10,7 +10,7 @@ use std::fs::File;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager};
 
 use super::ensure_main_webview;
 
@@ -83,7 +83,7 @@ pub struct LocalTtsResponse {
 
 #[tauri::command]
 pub async fn voice_runtime_status(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
 ) -> Result<VoiceRuntimeStatus, String> {
     ensure_main_webview(&window)?;
@@ -92,7 +92,7 @@ pub async fn voice_runtime_status(
 
 #[tauri::command]
 pub async fn install_voice_runtime(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: VoiceManifestInstallPayload,
 ) -> Result<VoiceRuntimeStatus, String> {
@@ -194,7 +194,7 @@ fn install_voice_runtime_sync(
 
 #[tauri::command]
 pub async fn local_stt(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: LocalSttPayload,
 ) -> Result<LocalSttResponse, String> {
@@ -246,7 +246,7 @@ pub(super) fn local_stt_sync(
 /// the client can fall back to the `whisper_local` (whisper.cpp) engine.
 #[tauri::command]
 pub async fn local_stt_rs(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: LocalSttPayload,
 ) -> Result<LocalSttResponse, String> {
@@ -349,7 +349,7 @@ fn whisper_rs_stt(app: &AppHandle, payload: LocalSttPayload) -> Result<LocalSttR
 
 #[tauri::command]
 pub async fn local_tts(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: LocalTtsPayload,
 ) -> Result<LocalTtsResponse, String> {

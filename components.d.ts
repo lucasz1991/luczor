@@ -22,6 +22,7 @@ declare module 'vue' {
     ApprovalCard: typeof import('./src/components/ai/ApprovalCard.vue')['default']
     AssistantProfileStatus: typeof import('./src/components/AssistantProfileStatus.vue')['default']
     AudioTriggerSettings: typeof import('./src/components/ai/AudioTriggerSettings.vue')['default']
+    BrowserPanel: typeof import('./src/components/browser/BrowserPanel.vue')['default']
     ChatCommentary: typeof import('./src/components/ai/ChatCommentary.vue')['default']
     ChatComposer: typeof import('./src/components/ai/ChatComposer.vue')['default']
     ChatProjectOverlay: typeof import('./src/components/ChatProjectOverlay.vue')['default']

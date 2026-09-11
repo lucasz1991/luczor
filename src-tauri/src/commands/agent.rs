@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, WebviewWindow};
+use tauri::{AppHandle};
 
 use super::ensure_main_webview;
 use super::execution::{admit, ExecutionLease, Guarded};
@@ -81,7 +81,7 @@ fn validate_project_dir(raw: &str) -> Result<PathBuf, String> {
 
 /// Report which local coding-agent CLIs are installed (PATH-detected).
 #[tauri::command]
-pub async fn agent_cli_detect(window: WebviewWindow) -> Result<Vec<AgentInfo>, String> {
+pub async fn agent_cli_detect(window: crate::commands::CallerWebview) -> Result<Vec<AgentInfo>, String> {
     ensure_main_webview(&window)?;
     Ok(vec![detect_one("claude"), detect_one("codex")])
 }
@@ -111,7 +111,7 @@ pub struct AgentRunResult {
 /// Run a local coding-agent CLI headlessly and return its captured output.
 #[tauri::command]
 pub async fn agent_cli_run(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: AgentRunPayload,
 ) -> Result<AgentRunResult, String> {
     ensure_main_webview(&window)?;
@@ -137,7 +137,7 @@ pub struct BridgePayload {
 /// Write/refresh the shared `LUCZOR.md` bridge file in a project directory.
 #[tauri::command]
 pub async fn agent_write_bridge(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<BridgePayload>,
 ) -> Result<String, String> {

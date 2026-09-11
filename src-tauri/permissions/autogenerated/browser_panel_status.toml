@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-panel-status"
+description = "Enables the browser_panel_status command without any pre-configured scope."
+commands.allow = ["browser_panel_status"]
+
+[[permission]]
+identifier = "deny-browser-panel-status"
+description = "Denies the browser_panel_status command without any pre-configured scope."
+commands.deny = ["browser_panel_status"]

@@ -20,7 +20,7 @@ tauri-build = { version = "2", features = [] }
 sha2 = "0.10"
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon", "image-png"] }
+tauri = { version = "2", features = ["tray-icon", "image-png", "unstable"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-dialog = "2.7.2"
@@ -99,6 +99,7 @@ windows-sys = { version = "0.61.2", features = [
 ] }
 
 [features]
+native-browser-smoke = []
 whisper_rs = ["dep:whisper-rs", "dep:hound"]
 
 [profile.dev]

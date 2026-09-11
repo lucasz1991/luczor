@@ -10,7 +10,6 @@ use reqwest::header::{
 };
 use reqwest::{Method, Url};
 use serde::{Deserialize, Serialize};
-use tauri::WebviewWindow;
 
 use super::ensure_main_webview;
 use super::execution::{admit, Guarded};
@@ -44,7 +43,7 @@ pub struct WorkflowHttpResult {
 
 #[tauri::command]
 pub async fn wf_http_request(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: Guarded<WorkflowHttpPayload>,
 ) -> Result<WorkflowHttpResult, String> {
     ensure_main_webview(&window)?;

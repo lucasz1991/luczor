@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, Webview};
 
 struct Session {
     id: String,
@@ -64,6 +64,10 @@ impl NavigationTracker {
         Ok(self.requested.as_ref().and_then(|request| request.complete))
     }
 }
+pub(crate) fn panel_project_id() -> Option<String> {
+    sessions().lock().ok()?.as_ref().map(|s| s.scope.project_id.clone())
+}
+
 fn sessions() -> &'static Mutex<Option<Arc<Session>>> {
     static SESSION: OnceLock<Mutex<Option<Arc<Session>>>> = OnceLock::new();
     SESSION.get_or_init(Mutex::default)
@@ -280,7 +284,7 @@ fn retire(app: &AppHandle, session: &Session) {
         }
     }
     if close {
-        if let Some(window) = app.get_webview_window(BROWSER_WEBVIEW_LABEL) {
+        if let Some(window) = app.get_webview(BROWSER_WEBVIEW_LABEL) {
             let _ = window.close();
         }
     }
@@ -290,7 +294,7 @@ fn retire(app: &AppHandle, session: &Session) {
 #[tauri::command]
 pub async fn wf_browser_cleanup(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: WorkflowArtifactScope,
 ) -> Result<bool, String> {
     super::ensure_main_webview(&window)?;
@@ -307,7 +311,7 @@ pub async fn wf_browser_cleanup(
     retire(&app, &session);
     tauri::async_runtime::spawn_blocking(move || {
         let deadline = Instant::now() + Duration::from_secs(3);
-        while app.get_webview_window(BROWSER_WEBVIEW_LABEL).is_some() {
+        while app.get_webview(BROWSER_WEBVIEW_LABEL).is_some() {
             if Instant::now() >= deadline {
                 return Err("workflow_browser_cleanup_pending".into());
             }
@@ -322,11 +326,14 @@ pub async fn wf_browser_cleanup(
 #[tauri::command]
 pub async fn wf_browser_action(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: Guarded<WorkflowBrowserAction>,
 ) -> Result<WorkflowBrowserResult, String> {
     super::ensure_main_webview(&window)?;
     validate(&payload.request)?;
+    if capabilities()["available"] != true {
+        return Err("workflow_browser_requires_windows_webview2".into());
+    }
     if payload.execution.workflow_execution_id.is_none() {
         return Err("workflow_execution_identity_required".into());
     }
@@ -343,7 +350,7 @@ pub async fn wf_browser_action(
             .map_err(|_| "workflow_browser_registry_unavailable")?;
         if current.as_ref().is_some_and(|session| {
             !session.busy.load(Ordering::Acquire)
-                && app.get_webview_window(BROWSER_WEBVIEW_LABEL).is_none()
+                && app.get_webview(BROWSER_WEBVIEW_LABEL).is_none()
         }) {
             *current = None;
         }
@@ -363,7 +370,7 @@ pub async fn wf_browser_action(
             if input.action != BrowserOperation::Open || input.session_id.is_some() {
                 return Err("workflow_browser_session_unavailable".into());
             }
-            if app.get_webview_window(BROWSER_WEBVIEW_LABEL).is_some() {
+            if app.get_webview(BROWSER_WEBVIEW_LABEL).is_some() {
                 return Err("workflow_browser_window_already_in_use".into());
             }
             let session = Arc::new(Session {
@@ -404,7 +411,7 @@ async fn run(
     // expectedUrl is the source-page precondition. Check it before navigation or any other mutation.
     if let Some(expected) = &input.expected_url {
         let source = app
-            .get_webview_window(BROWSER_WEBVIEW_LABEL)
+            .get_webview(BROWSER_WEBVIEW_LABEL)
             .ok_or("workflow_browser_window_unavailable")?
             .url()
             .map_err(|_| "workflow_browser_url_unavailable")?;
@@ -424,7 +431,7 @@ async fn run(
     }
     let mut navigation_generation = None;
     if input.action == BrowserOperation::Open
-        && app.get_webview_window(BROWSER_WEBVIEW_LABEL).is_none()
+        && app.get_webview(BROWSER_WEBVIEW_LABEL).is_none()
     {
         let target = input.url.as_deref().map(url).transpose()?.unwrap_or(
             tauri::Url::parse("about:blank").map_err(|_| "workflow_browser_url_invalid")?,
@@ -435,40 +442,21 @@ async fn run(
         check(app, session, gate)?;
         let navigation_app = app.clone();
         let navigation_session = session.clone();
-        let browser = WebviewWindowBuilder::new(
-            app,
+        let builder = tauri::webview::WebviewBuilder::new(
             BROWSER_WEBVIEW_LABEL,
-            WebviewUrl::External(
-                tauri::Url::parse("about:blank").map_err(|_| "workflow_browser_url_invalid")?,
-            ),
-        )
-        .title("Luczor Workflow Browser")
-        .inner_size(1200., 800.)
-        .on_navigation(move |url| {
+            WebviewUrl::External(tauri::Url::parse("about:blank").map_err(|_| "workflow_browser_url_invalid")?),
+        ).on_navigation(move |url| {
             if !host_allowed(url, navigation_session.allowed_hosts.as_deref()) {
-                navigation_session
-                    .policy_violation
-                    .store(true, Ordering::Release);
+                navigation_session.policy_violation.store(true, Ordering::Release);
                 return false;
             }
             check_session(&navigation_app, &navigation_session).is_ok()
-        })
-        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny)
-        .build()
-        .map_err(|_| "workflow_browser_window_failed")?;
-        let session_id = session.id.clone();
-        browser.on_window_event(move |event| {
-            if matches!(event, tauri::WindowEvent::Destroyed) {
-                if let Ok(mut current) = sessions().lock() {
-                    if current
-                        .as_ref()
-                        .is_some_and(|session| session.id == session_id)
-                    {
-                        *current = None;
-                    }
-                }
-            }
-        });
+        }).on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
+        let main = app.get_window("main").ok_or("browser_panel_main_unavailable")?;
+        let browser = main.add_child(builder, tauri::LogicalPosition::new(0.0, 0.0), tauri::LogicalSize::new(1.0, 1.0))
+            .map_err(|e| format!("workflow_browser_create_failed: {e}"))?;
+        browser.hide().map_err(|e| e.to_string())?;
+        super::browser_panel::apply(app, &browser, &session.scope.project_id)?;
         install_request_boundary(&browser, app.clone(), session.clone()).await?;
         check(app, session, gate)?;
         navigation_generation = Some(
@@ -498,7 +486,7 @@ async fn run(
                     .map_err(|_| "workflow_browser_navigation_unavailable")?
                     .begin(target.as_str()),
             );
-            app.get_webview_window(BROWSER_WEBVIEW_LABEL)
+            app.get_webview(BROWSER_WEBVIEW_LABEL)
                 .ok_or("workflow_browser_window_unavailable")?
                 .navigate(target)
                 .map_err(|_| "workflow_browser_navigation_failed")?;
@@ -507,7 +495,7 @@ async fn run(
         }
     }
     let browser = app
-        .get_webview_window(BROWSER_WEBVIEW_LABEL)
+        .get_webview(BROWSER_WEBVIEW_LABEL)
         .ok_or("workflow_browser_window_unavailable")?;
     let current_url = browser
         .url()
@@ -686,7 +674,7 @@ async fn run(
 /// Redirects and subresources are checked at WebView2's request boundary; no page script supplies this policy.
 #[cfg(windows)]
 async fn install_request_boundary(
-    window: &WebviewWindow,
+    window: &Webview,
     app: AppHandle,
     session: Arc<Session>,
 ) -> Result<(), String> {
@@ -775,11 +763,9 @@ async fn install_request_boundary(
                                 .is_some_and(|target| {
                                     host_allowed(&target, callback_session.allowed_hosts.as_deref())
                                 });
-                            if !host_matches {
-                                callback_session
-                                    .policy_violation
-                                    .store(true, Ordering::Release);
-                            }
+                            // Denied subresources receive a blocked response. They must not
+                            // invalidate an otherwise allowed page (e.g. third-party analytics).
+                            // Top-level navigation remains fail-closed in on_navigation.
                             let allowed = host_matches
                                 && check_session(&callback_app, &callback_session).is_ok();
                             if !allowed {
@@ -832,7 +818,7 @@ async fn install_request_boundary(
 }
 #[cfg(not(windows))]
 async fn install_request_boundary(
-    _window: &WebviewWindow,
+    _window: &Webview,
     _app: AppHandle,
     _session: Arc<Session>,
 ) -> Result<(), String> {
@@ -863,7 +849,7 @@ pub(crate) fn capabilities() -> Value {
 
 #[cfg(windows)]
 async fn devtools(
-    window: &WebviewWindow,
+    window: &Webview,
     method: &'static str,
     params: Value,
     app: AppHandle,
@@ -933,7 +919,7 @@ async fn devtools(
 }
 #[cfg(not(windows))]
 async fn devtools(
-    _window: &WebviewWindow,
+    _window: &Webview,
     _method: &'static str,
     _params: Value,
     _app: AppHandle,

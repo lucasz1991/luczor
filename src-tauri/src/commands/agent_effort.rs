@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use std::time::Duration;
-use tauri::WebviewWindow;
 
 #[path = "agent_default_model.rs"]
 mod default_model;
@@ -12,7 +11,7 @@ pub use default_model::{validate_default_binding, DefaultModelRequest, DefaultMo
 #[tauri::command]
 pub async fn agent_default_model_resolve(
     app: tauri::AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: DefaultModelRequest,
 ) -> Result<DefaultModelResolution, String> {
     default_model::resolve_for_window(app, window, payload).await
@@ -183,7 +182,7 @@ fn validate_effort_catalog(
 }
 
 #[tauri::command]
-pub fn codex_model_capabilities(window: WebviewWindow) -> Result<CapabilityCatalog, String> {
+pub fn codex_model_capabilities(window: crate::commands::CallerWebview) -> Result<CapabilityCatalog, String> {
     super::ensure_main_webview(&window)?;
     Ok(codex_catalog())
 }

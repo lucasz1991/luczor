@@ -54,6 +54,8 @@ import SelectionActions from './components/ai/SelectionActions.vue'
 import AiIcon from './components/ai/AiIcon.vue'
 import MiniChatSurface from './components/mini/MiniChatSurface.vue'
 import ToolCenterPanel from './components/tools/ToolCenterPanel.vue'
+import BrowserPanel from './components/browser/BrowserPanel.vue'
+import { browserPanel } from '@/services/browserPanel'
 import { useMiniChatHost } from '@/composables/useMiniChatHost'
 import ThinkingBudgetControl from '@/components/ai/ThinkingBudgetControl.vue'
 import {
@@ -2106,6 +2108,7 @@ useWorkflowWatchers()
     :style="appShellStyle"
     :class="{
       'ai-workspace--collapsed': sidebarCollapsed,
+      'ai-workspace--browser': browserPanel.expanded,
       'ai-workspace--system-mini': showSystemPanel && systemStatusDisplayMode === 'mini',
     }"
   >
@@ -2719,6 +2722,11 @@ useWorkflowWatchers()
         />
       </div>
     </main>
+
+    <BrowserPanel
+      :project-id="activeProjectId"
+      :suspended="showSettings || showAgentHub || showPlanning || showWorkflows || showToolCenter || showSystemPanel"
+    />
 
     <SystemStatusPanel
       :active="showSystemPanel"

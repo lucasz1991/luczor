@@ -145,6 +145,8 @@ const APP_COMMANDS: &[&str] = &[
     "local_model_prepare",
     "local_model_infer",
     "local_model_reasoning_control",
+    "browser_panel_layout",
+    "browser_panel_status",
     "wf_browser_action",
     "wf_browser_cleanup",
     "wf_image_action",

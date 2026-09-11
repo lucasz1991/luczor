@@ -9,7 +9,7 @@ pub fn run() {
     {
         // Register first: the recovery ledger has one process-wide writer.
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_window("main") {
                 let _ = window.show();
                 let _ = window.unminimize();
                 let _ = window.set_focus();
@@ -39,9 +39,7 @@ pub fn run() {
         .setup(|app| {
             #[cfg(debug_assertions)]
             {
-                if let Some(window) = app.get_webview_window("main") {
-                    window.open_devtools();
-                }
+                if let Some(view) = app.get_webview("main") { view.open_devtools(); }
             }
 
             #[cfg(desktop)]
@@ -115,6 +113,8 @@ pub fn run() {
             commands::local_tasks::wf_runtime_capabilities,
             commands::workflow_http::wf_http_request,
             commands::notifications::show_native_notification,
+            commands::browser_panel::browser_panel_layout,
+            commands::browser_panel::browser_panel_status,
             commands::browser::browser_open,
             commands::browser::browser_navigate,
             commands::browser::browser_close,
@@ -213,7 +213,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 app.exit(0);
             }
             "show" => {
-                if let Some(win) = app.get_webview_window("main") {
+                if let Some(win) = app.get_window("main") {
                     let _ = win.show();
                     let _ = win.set_focus();
                 }
@@ -246,7 +246,7 @@ fn setup_global_shortcut(app: &tauri::App) -> Result<(), Box<dyn std::error::Err
         if event.state() != ShortcutState::Pressed {
             return;
         }
-        if let Some(win) = handle.get_webview_window("main") {
+        if let Some(win) = handle.get_window("main") {
             let visible = win.is_visible().unwrap_or(true);
             if !visible {
                 let _ = win.show();

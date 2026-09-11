@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager};
 
 use super::ensure_main_webview;
 use super::execution::{admit, admit_full, Guarded};
@@ -138,7 +138,7 @@ pub struct FileReadResult {
 /// Read a UTF-8 (lossy) file from the confined workflow files root.
 #[tauri::command]
 pub async fn wf_file_read(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<FileReadPayload>,
 ) -> Result<FileReadResult, String> {
@@ -187,7 +187,7 @@ pub struct FileWriteResult {
 /// Atomically write a file into the confined workflow files root.
 #[tauri::command]
 pub async fn wf_file_write(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<FileWritePayload>,
 ) -> Result<FileWriteResult, String> {
@@ -376,7 +376,7 @@ fn runtime_version(exe: &Path, runtime: &str) -> Option<String> {
 
 /// Only --version probes, never user code, package installation, login or model preparation.
 #[tauri::command]
-pub async fn wf_runtime_capabilities(window: WebviewWindow) -> Result<Value, String> {
+pub async fn wf_runtime_capabilities(window: crate::commands::CallerWebview) -> Result<Value, String> {
     ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(|| {
         let runtimes: Vec<_> = ["node", "python"].into_iter().map(|runtime| {
@@ -400,7 +400,7 @@ pub async fn wf_runtime_capabilities(window: WebviewWindow) -> Result<Value, Str
 #[tauri::command]
 pub async fn wf_run_script(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: Guarded<RunScriptPayload>,
 ) -> Result<RunScriptResult, String> {
     ensure_main_webview(&window)?;

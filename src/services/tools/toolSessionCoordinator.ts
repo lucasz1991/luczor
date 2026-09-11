@@ -1,5 +1,6 @@
 import { ref } from 'vue'
-import { executionGate, invokeGuarded, onExecutionInvalidated, type ExecutionTicket } from '@/services/executionGate'
+import { invoke } from '@tauri-apps/api/core'
+import { executionGate, executionPayload, onExecutionInvalidated, type ExecutionTicket } from '@/services/executionGate'
 import { requireProjectWorkspace } from '@/services/projectWorkspace'
 import { captureWorkflowAccess } from '@/services/workflows/access'
 import { cleanupWorkflowBrowser, createWorkflowBrowser } from '@/services/workflows/browser'
@@ -51,9 +52,18 @@ export async function getToolSession(
   allowedHosts: readonly string[] = []
 ): Promise<InternalSession> {
   const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
+  executionGate.assert(ticket, kind !== 'vision')
   const key = sessionKey(ctx.projectId, kind)
   const existing = sessions.get(key)
   if (existing && existing.ticket.sessionId === ticket.sessionId && existing.ticket.generation === ticket.generation) {
+    executionGate.assert(existing.ticket, kind !== 'vision')
+    if (
+      allowedHosts.length &&
+      JSON.stringify([...allowedHosts].sort()) !== JSON.stringify([...existing.meta.allowedHosts].sort())
+    )
+      throw new Error(
+        'Die Browser-Sitzung ist an andere Hosts gebunden. Sitzung zuerst schließen und mit den gewünschten Hosts neu öffnen.'
+      )
     existing.meta = { ...existing.meta, updatedAt: Date.now(), status: 'active' }
     return existing
   }
@@ -70,7 +80,12 @@ export async function getToolSession(
   })
   const invokeTask = async <T>(command: string, payload: Record<string, unknown>, mutating = true): Promise<T> => {
     executionGate.assert(ticket, mutating)
-    return invokeGuarded<T>(command, payload, ticket, mutating)
+    const execution = await executionPayload(ticket, mutating)
+    const result = await invoke<T>(command, {
+      payload: { ...payload, execution: { ...execution, workflowExecutionId: scope.runId } },
+    })
+    executionGate.assert(ticket, mutating)
+    return result
   }
   const meta: ToolSession = Object.freeze({
     id: scope.runId,

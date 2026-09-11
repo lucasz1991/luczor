@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, WebviewWindow};
+use tauri::{AppHandle};
 
 const MAX_FRAME: usize = 1_000_000;
 const MAX_FRAMES: usize = 128;
@@ -74,7 +74,7 @@ fn source(adapter: &str) -> &'static str {
 
 pub async fn resolve_for_window(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: DefaultModelRequest,
 ) -> Result<DefaultModelResolution, String> {
     crate::commands::ensure_main_webview(&window)?;

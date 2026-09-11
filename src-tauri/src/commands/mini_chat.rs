@@ -1,7 +1,7 @@
 use super::{ensure_main_webview, ensure_webview_label};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
-use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl, WebviewWindow};
+use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl};
 
 pub const MINI_LABEL: &str = "luczor-mini";
 const ACTION_EVENT: &str = "luczor://mini-action";
@@ -255,7 +255,7 @@ fn fit_position(position: (f64, f64), size: (f64, f64), area: (f64, f64, f64, f6
     )
 }
 
-fn resize(window: &WebviewWindow, width: f64, height: f64, reset: bool) -> Result<(), String> {
+fn resize(window: &tauri::Window, width: f64, height: f64, reset: bool) -> Result<(), String> {
     let monitor = window
         .current_monitor()
         .map_err(|e| e.to_string())?
@@ -305,7 +305,7 @@ pub async fn show(app: tauri::AppHandle) -> Result<(), String> {
         let size = window.inner_size().map_err(|e| e.to_string())?;
         let scale = window.scale_factor().map_err(|e| e.to_string())?;
         resize(
-            &window,
+            &window.as_ref().window(),
             f64::from(size.width) / scale,
             f64::from(size.height) / scale,
             false,
@@ -330,20 +330,20 @@ pub async fn show(app: tauri::AppHandle) -> Result<(), String> {
     .disable_drag_drop_handler()
     .build()
     .map_err(|e| e.to_string())?;
-    resize(&window, 148.0, 184.0, true)?;
+    resize(&window.as_ref().window(), 148.0, 184.0, true)?;
     window.show().map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-pub async fn mini_chat_open(window: WebviewWindow, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn mini_chat_open(window: crate::commands::CallerWebview, app: tauri::AppHandle) -> Result<(), String> {
     ensure_main_webview(&window)?;
     show(app).await
 }
 
 #[tauri::command]
 pub fn mini_chat_action(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: tauri::AppHandle,
     action: MiniAction,
 ) -> Result<(), String> {
@@ -359,7 +359,7 @@ pub fn mini_chat_action(
 
 #[tauri::command]
 pub fn mini_chat_publish(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: tauri::AppHandle,
     state: State<'_, MiniChatState>,
     snapshot: serde_json::Value,
@@ -379,7 +379,7 @@ pub fn mini_chat_publish(
 
 #[tauri::command]
 pub fn mini_chat_snapshot(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     state: State<'_, MiniChatState>,
 ) -> Result<Option<serde_json::Value>, String> {
     ensure_webview_label(window.label(), MINI_LABEL)?;
@@ -391,14 +391,14 @@ pub fn mini_chat_snapshot(
 }
 
 #[tauri::command]
-pub fn mini_chat_drag(window: WebviewWindow) -> Result<(), String> {
+pub fn mini_chat_drag(window: crate::commands::CallerWebview) -> Result<(), String> {
     ensure_webview_label(window.label(), MINI_LABEL)?;
     window.start_dragging().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn mini_chat_window(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: tauri::AppHandle,
     action: MiniWindowAction,
 ) -> Result<(), String> {
@@ -446,7 +446,7 @@ pub fn mini_chat_window(
         }
         MiniWindowAction::Main => {
             let main = app
-                .get_webview_window("main")
+                .get_window("main")
                 .ok_or("Hauptfenster nicht verfügbar.")?;
             main.show().map_err(|e| e.to_string())?;
             main.unminimize().map_err(|e| e.to_string())?;

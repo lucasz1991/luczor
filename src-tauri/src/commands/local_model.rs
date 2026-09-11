@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::{DiskKind, Disks, System};
 use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 #[cfg(target_os = "linux")]
@@ -790,7 +790,7 @@ pub enum LocalInferenceEvent {
 
 #[tauri::command]
 pub async fn local_model_register_manifest_session(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     session_id: String,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
@@ -808,7 +808,7 @@ pub async fn local_model_register_manifest_session(
 
 #[tauri::command]
 pub async fn local_model_begin_manifest_acceptance(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     session_id: String,
     acceptance_generation: u64,
 ) -> Result<(), String> {
@@ -827,7 +827,7 @@ pub async fn local_model_begin_manifest_acceptance(
 
 #[tauri::command]
 pub async fn local_model_verify_manifest(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     envelope: Value,
     acceptance: ManifestAcceptanceInput,
@@ -929,7 +929,7 @@ fn validate_discovery_binding(
 
 #[tauri::command]
 pub async fn local_model_status(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
 ) -> Result<LocalModelStatus, String> {
     ensure_main_or_system_status_webview(&window)?;
@@ -1047,7 +1047,7 @@ pub(crate) fn managed_runtime_process_id() -> Result<Option<u32>, ()> {
 
 #[tauri::command]
 pub async fn local_model_hardware_snapshot(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
 ) -> Result<HardwareSnapshot, String> {
     ensure_main_webview(&window)?;
@@ -1058,7 +1058,7 @@ pub async fn local_model_hardware_snapshot(
 
 #[tauri::command]
 pub async fn local_model_prepare(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     model_release_id: String,
     catalog_binding: CatalogBindingInput,
@@ -1084,7 +1084,7 @@ pub async fn local_model_prepare(
 
 #[tauri::command]
 pub async fn local_model_infer(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     request: LocalInferenceRequest,
     on_event: Channel<LocalInferenceEvent>,
@@ -1104,7 +1104,7 @@ pub async fn local_model_infer(
 
 #[tauri::command]
 pub async fn local_model_cancel(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     request_id: String,
     catalog_binding: CatalogBindingInput,
 ) -> Result<(), String> {
@@ -1124,7 +1124,7 @@ pub async fn local_model_cancel(
 
 #[tauri::command]
 pub async fn local_model_reasoning_control(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     request_id: String,
     action: String,
     expected_sequence: u64,
@@ -1285,7 +1285,7 @@ fn cancel_active_operation(guard: &mut ManagerState, request_id: &str) -> Option
 
 #[tauri::command]
 pub async fn local_model_stop(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     model_release_id: String,
     catalog_binding: CatalogBindingInput,
 ) -> Result<(), String> {
@@ -1845,7 +1845,7 @@ fn persist_versions_in_connection(
 /// Trim only Luczor's own pageable working set, never the resident model or other apps.
 #[tauri::command]
 pub async fn local_model_recover_memory(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
 ) -> Result<HardwareSnapshot, String> {
     ensure_main_webview(&window)?;

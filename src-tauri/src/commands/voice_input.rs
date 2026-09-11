@@ -1,5 +1,5 @@
 use serde_json::{Map, Value};
-use tauri::{AppHandle, Emitter, WebviewWindow};
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_store::StoreExt;
 
 const SETTINGS_KEYS: &[&str] = &[
@@ -15,7 +15,7 @@ const SETTINGS_KEYS: &[&str] = &[
     "voice_stt_engine",
 ];
 
-fn ensure_voice_window(window: &WebviewWindow) -> Result<(), String> {
+fn ensure_voice_window(window: &crate::commands::CallerWebview) -> Result<(), String> {
     match window.label() {
         "main" | "luczor-mini" => Ok(()),
         _ => Err("Spracheingabe ist nur im Haupt- und Mini-Chat verfügbar.".into()),
@@ -34,7 +34,7 @@ fn allowed(resource: &str, values: &Map<String, Value>) -> bool {
 
 #[tauri::command]
 pub fn voice_input_store(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     resource: String,
     values: Option<Map<String, Value>>,
@@ -66,7 +66,7 @@ pub fn voice_input_store(
 
 #[tauri::command]
 pub fn voice_input_claim(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     owner: String,
 ) -> Result<(), String> {
@@ -80,7 +80,7 @@ pub fn voice_input_claim(
 
 #[tauri::command]
 pub fn voice_input_status(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
 ) -> Result<super::voice::VoiceRuntimeStatus, String> {
     ensure_voice_window(&window)?;
@@ -89,7 +89,7 @@ pub fn voice_input_status(
 
 #[tauri::command]
 pub async fn voice_input_stt(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: super::voice::LocalSttPayload,
 ) -> Result<super::voice::LocalSttResponse, String> {

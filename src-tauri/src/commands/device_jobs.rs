@@ -6,7 +6,6 @@ use rsa::RsaPublicKey;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::WebviewWindow;
 
 use super::ensure_main_webview;
 
@@ -24,7 +23,7 @@ pub struct VerifyDeviceJobPayload {
 
 #[tauri::command]
 pub async fn verify_device_job(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: VerifyDeviceJobPayload,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;

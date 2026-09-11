@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
+use tauri::{AppHandle, Manager, Runtime};
 use tree_sitter::{Language, Node, Parser};
 use uuid::Uuid;
 
@@ -141,7 +141,7 @@ struct GitState {
 
 #[tauri::command]
 pub async fn local_graph_bind(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     principal_id: String,
     project_id: String,
@@ -157,7 +157,7 @@ pub async fn local_graph_bind(
 
 #[tauri::command]
 pub async fn local_graph_index(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     principal_id: String,
     project_id: String,
@@ -170,7 +170,7 @@ pub async fn local_graph_index(
 
 #[tauri::command]
 pub async fn local_graph_status(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     principal_id: String,
     project_id: String,
@@ -183,7 +183,7 @@ pub async fn local_graph_status(
 
 #[tauri::command]
 pub async fn local_graph_search(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     principal_id: String,
     project_id: String,
@@ -200,7 +200,7 @@ pub async fn local_graph_search(
 
 #[tauri::command]
 pub async fn local_graph_read_snippets(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     principal_id: String,
     project_id: String,
@@ -223,7 +223,7 @@ pub async fn local_graph_read_snippets(
 
 #[tauri::command]
 pub async fn local_graph_unbind(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     principal_id: String,
     project_id: String,

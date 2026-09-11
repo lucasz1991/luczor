@@ -3,7 +3,7 @@ use super::execution::{admit, Guarded};
 use super::workflow_artifacts::{self, WorkflowArtifactScope};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::{AppHandle, WebviewWindow};
+use tauri::{AppHandle};
 
 #[derive(Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -30,7 +30,7 @@ pub struct WorkflowImageAction {
 #[tauri::command]
 pub async fn wf_image_action(
     app: AppHandle,
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: Guarded<WorkflowImageAction>,
 ) -> Result<Value, String> {
     super::ensure_main_webview(&window)?;

@@ -11,7 +11,7 @@ use notify::{EventKind, RecursiveMode, Watcher};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager};
 
 use super::ensure_main_webview;
 use super::execution::{admit, Guarded};
@@ -276,7 +276,7 @@ fn event(watcher: &str, root: &Path, changes: Vec<FileChange>) -> WatchEvent {
 
 #[tauri::command]
 pub fn wf_watch_start(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<WatchStart>,
 ) -> Result<(), String> {
@@ -427,7 +427,7 @@ pub fn wf_watch_start(
 }
 
 #[tauri::command]
-pub fn wf_watch_stop(window: WebviewWindow, payload: WatchScope) -> Result<(), String> {
+pub fn wf_watch_stop(window: crate::commands::CallerWebview, payload: WatchScope) -> Result<(), String> {
     ensure_main_webview(&window)?;
     validate_scope(&payload.scope)?;
     let mut handles = WATCHERS
@@ -447,7 +447,7 @@ pub fn wf_watch_stop(window: WebviewWindow, payload: WatchScope) -> Result<(), S
 
 #[tauri::command]
 pub fn wf_watch_drain(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<WatchScope>,
 ) -> Result<Vec<WatchEvent>, String> {
@@ -476,7 +476,7 @@ pub fn wf_watch_drain(
 
 #[tauri::command]
 pub fn wf_watch_ack(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<WatchAck>,
 ) -> Result<(), String> {

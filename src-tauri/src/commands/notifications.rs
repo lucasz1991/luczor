@@ -1,6 +1,6 @@
 use notify_rust::{Notification, NotificationResponse, Urgency};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager};
 
 use super::ensure_main_webview;
 
@@ -32,7 +32,7 @@ struct NativeNotificationAction {
 /// the handle alive until the toast is activated or dismissed.
 #[tauri::command]
 pub fn show_native_notification(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: NativeNotificationPayload,
 ) -> Result<(), String> {
@@ -89,7 +89,7 @@ pub fn show_native_notification(
                 return;
             }
 
-            if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_window("main") {
                 let _ = window.show();
                 let _ = window.set_focus();
             }

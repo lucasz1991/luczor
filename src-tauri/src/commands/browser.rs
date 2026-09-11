@@ -66,7 +66,7 @@ pub struct BrowserAdmissionPayload {
 /// they cannot change mode, create an action, or access main-window commands.
 #[tauri::command]
 pub async fn browser_action_admit(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: BrowserAdmissionPayload,
 ) -> Result<u64, String> {
     ensure_browser_webview(&window)?;
@@ -112,7 +112,7 @@ pub struct BrowserOkResult {
 /// Open (or focus + navigate) the in-app browser window at a URL.
 #[tauri::command]
 pub async fn browser_open(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<BrowserOpenPayload>,
 ) -> Result<BrowserOkResult, String> {
@@ -168,7 +168,7 @@ pub struct BrowserNavigatePayload {
 /// Navigate the existing in-app browser window.
 #[tauri::command]
 pub async fn browser_navigate(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<BrowserNavigatePayload>,
 ) -> Result<BrowserOkResult, String> {
@@ -194,7 +194,7 @@ pub async fn browser_navigate(
 /// Close the in-app browser window.
 #[tauri::command]
 pub async fn browser_close(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: ExecutionOnly,
 ) -> Result<BrowserOkResult, String> {
@@ -246,7 +246,7 @@ pub struct BrowserActionResult {
 /// A click is successful only after the page reports a matching visible target.
 #[tauri::command]
 pub async fn browser_click(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<BrowserClickPayload>,
 ) -> Result<BrowserActionResult, String> {
@@ -325,7 +325,7 @@ pub struct BrowserReadResult {
 /// Read the text of an element (or the page body) from the in-app browser.
 #[tauri::command]
 pub async fn browser_read(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<BrowserReadPayload>,
 ) -> Result<BrowserReadResult, String> {
@@ -474,7 +474,7 @@ pub struct BrowserReportPayload {
 /// IPC target the injected bridge calls to hand read-back text to browser_read.
 #[tauri::command]
 pub async fn browser_report(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     payload: BrowserReportPayload,
 ) -> Result<(), String> {
     ensure_browser_webview(&window)?;

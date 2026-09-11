@@ -15,7 +15,7 @@ use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tauri::{AppHandle, Manager, WebviewWindow};
+use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
 use super::ensure_main_webview;
@@ -306,7 +306,7 @@ pub struct FsDeleteResult {
 
 #[tauri::command]
 pub async fn project_workspace_bind(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: WorkspaceBindPayload,
 ) -> Result<WorkspaceBinding, String> {
@@ -328,7 +328,7 @@ pub async fn project_workspace_bind(
 
 #[tauri::command]
 pub async fn project_workspace_get(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: WorkspaceIdentityPayload,
 ) -> Result<Option<WorkspaceBinding>, String> {
@@ -347,7 +347,7 @@ pub async fn project_workspace_get(
 
 #[tauri::command]
 pub async fn project_workspace_unbind(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: WorkspaceIdentityPayload,
 ) -> Result<WorkspaceUnbindResult, String> {
@@ -371,7 +371,7 @@ pub async fn project_workspace_unbind(
 
 #[tauri::command]
 pub async fn project_fs_list(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<FsListPayload>,
 ) -> Result<FsListResult, String> {
@@ -408,7 +408,7 @@ pub async fn project_fs_list(
 
 #[tauri::command]
 pub async fn project_fs_stat(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<FsStatPayload>,
 ) -> Result<FsStatResult, String> {
@@ -434,7 +434,7 @@ pub async fn project_fs_stat(
 
 #[tauri::command]
 pub async fn project_fs_read(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<FsReadPayload>,
 ) -> Result<FsReadResult, String> {
@@ -466,7 +466,7 @@ pub async fn project_fs_read(
 
 #[tauri::command]
 pub async fn project_fs_search(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<FsSearchPayload>,
 ) -> Result<FsSearchResult, String> {
@@ -506,7 +506,7 @@ pub async fn project_fs_search(
 
 #[tauri::command]
 pub async fn project_fs_write(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<FsWritePayload>,
 ) -> Result<FsWriteResult, String> {
@@ -547,7 +547,7 @@ pub async fn project_fs_write(
 
 #[tauri::command]
 pub async fn project_fs_create_dir(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<FsCreateDirPayload>,
 ) -> Result<FsCreateDirResult, String> {
@@ -578,7 +578,7 @@ pub async fn project_fs_create_dir(
 
 #[tauri::command]
 pub async fn project_fs_move(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<FsMovePayload>,
 ) -> Result<FsMoveResult, String> {
@@ -610,7 +610,7 @@ pub async fn project_fs_move(
 
 #[tauri::command]
 pub async fn project_fs_delete(
-    window: WebviewWindow,
+    window: crate::commands::CallerWebview,
     app: AppHandle,
     payload: Guarded<FsDeletePayload>,
 ) -> Result<FsDeleteResult, String> {
