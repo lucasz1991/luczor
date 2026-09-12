@@ -195,5 +195,7 @@ const blocks = computed(() => {
   }
 }
 :global(html[data-reduce-motion='1']) .ai-stream-caret,
-:global([data-reduce-motion='true']) .ai-stream-caret { animation: none; }
+:global([data-reduce-motion='true']) .ai-stream-caret {
+  animation: none;
+}
 </style>

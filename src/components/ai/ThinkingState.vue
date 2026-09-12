@@ -83,7 +83,9 @@ const durationLabel = computed(() => {
       type="button"
       :aria-expanded="!!open"
       :aria-controls="id"
-      :aria-label="summaryLabel + (steps.length ? ` · ${steps.length} ${steps.length === 1 ? 'Schritt' : 'Schritte'}` : '')"
+      :aria-label="
+        summaryLabel + (steps.length ? ` · ${steps.length} ${steps.length === 1 ? 'Schritt' : 'Schritte'}` : '')
+      "
       @click="manuallyExpanded = !open"
     >
       <span class="ai-thinking__mark" aria-hidden="true">
