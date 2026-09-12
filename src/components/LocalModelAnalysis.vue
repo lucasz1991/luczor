@@ -18,6 +18,13 @@ function clearObservations() {
 const selected = ref<number | null>(null)
 const runs = localModelDiagnostics.state.runs
 const run = computed(() => runs.find(item => item.id === selected.value) ?? runs[0])
+const copiedRunId = ref<number | null>(null)
+async function copyDiagnostic() {
+  if (!run.value) return
+  copiedRunId.value = run.value.id
+  copied.value = false
+  await copy(localModelDiagnosticCopy(run.value))
+}
 const number = (value: number | null | undefined, suffix = '') =>
   value == null ? '—' : `${value.toLocaleString('de-DE', { maximumFractionDigits: 1 })}${suffix}`
 const failureValue = (value: number | string | undefined) =>
@@ -84,8 +91,8 @@ const contextTrend = computed(() => {
       <section v-if="run.state === 'error'" class="analysis-section failure-section" aria-label="Fehlerdiagnose">
         <div class="section-heading">
           <h4>Fehlerdiagnose</h4>
-          <button v-if="canCopy" type="button" @click="copy(localModelDiagnosticCopy(run))">
-            {{ copied ? 'Diagnose kopiert' : 'Diagnose kopieren' }}
+          <button v-if="canCopy" type="button" @click="copyDiagnostic">
+            {{ copied && copiedRunId === run.id ? 'Diagnose kopiert' : 'Diagnose kopieren' }}
           </button>
         </div>
         <p class="failure-message">
@@ -128,7 +135,7 @@ const contextTrend = computed(() => {
         <p>
           Erfasste Runtime-Werte. Fehlende Werte bleiben „nicht ermittelt“; sie werden nicht aus Textlängen geschätzt.
         </p>
-        <p v-if="clipboardError" role="status">{{ clipboardError }}</p>
+        <p v-if="clipboardError && copiedRunId === run.id" role="status">{{ clipboardError }}</p>
       </section>
       <dl class="token-grid">
         <div>

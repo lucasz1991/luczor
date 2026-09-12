@@ -246,6 +246,46 @@ mod tests {
         }
     }
     #[test]
+    fn generation_rejection_preserves_bounded_json_body_for_diagnostics() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let body = br#"{"error":{"code":400,"type":"invalid_request_error","message":"Invalid type for 'enable_thinking'"}}"#;
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            request(&mut socket);
+            // A real HTTP rejection has a JSON body, not SSE. Fragment it to
+            // exercise the asynchronous reader through the native classifier.
+            write!(socket, "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").unwrap();
+            for chunk in body.chunks(13) {
+                write!(socket, "{:x}\r\n", chunk.len()).unwrap();
+                socket.write_all(chunk).unwrap();
+                socket.write_all(b"\r\n").unwrap();
+            }
+            socket.write_all(b"0\r\n\r\n").unwrap();
+        });
+        let (status, response) = Stream::open(
+            port,
+            "fixture-key",
+            b"{}".to_vec(),
+            Arc::new(AtomicBool::new(false)),
+            Arc::new(AtomicBool::new(false)),
+            Deadlines {
+                first: Duration::from_secs(3),
+                ..limits()
+            },
+            4096,
+        )
+        .unwrap();
+        let failure = super::super::llama_http_failure(status, response);
+        let diagnostic = serde_json::to_value(&failure.diagnostic).unwrap();
+        assert_eq!(status, 400);
+        assert_eq!(diagnostic["parameter"], "enable_thinking");
+        assert_eq!(diagnostic["reason"], "parameter_type");
+        assert!(failure.preserves_resident_runtime());
+        assert!(!diagnostic.to_string().contains("Invalid type"));
+        server.join().unwrap();
+    }
+    #[test]
     fn first_progress_timeout_drops_the_real_socket_after_headers() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();

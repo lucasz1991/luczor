@@ -86,9 +86,12 @@ describe('public local inference failure diagnostics', () => {
       expect(decoded.stage).toBe(stage)
       expect(decoded.inputTokens).toBeUndefined()
       expect(describeLocalFailureDiagnostic(decoded)).not.toContain('Tokenbudget')
-      if (stage === 'unknown') expect(describeLocalFailureDiagnostic(decoded)).toContain('nicht gemeldet')
     }
   )
+
+  it('labels an unknown stage as not reported', () => {
+    expect(describeLocalFailureDiagnostic({ ...diagnostic, stage: 'unknown' })).toContain('nicht gemeldet')
+  })
 
   it('recognizes preparation failures and gives an actionable non-secret hint', () => {
     const decoded = readLocalFailureDiagnostic({

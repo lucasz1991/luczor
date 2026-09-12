@@ -1147,6 +1147,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         })
       if (signal.aborted) throw error
       executionGate.assert(execution)
+      if (inferenceGateway.target === 'local_llama_cpp' && error instanceof LocalInferenceError && error.diagnostic) {
+        const usage = tokenCounter.recordLocalFailure(round + 1, error.diagnostic)
+        opts.onUsage?.(assistance?.withUsage(usage) ?? usage)
+      }
       const interruption = unexpectedInferenceInterruption(error)
       if (interruption)
         error = new LocalInferenceError(interruption.message, interruption.code, true, visibleContent.length > 0)

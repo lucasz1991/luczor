@@ -78,6 +78,10 @@ function includesValue<const Values extends readonly string[]>(
   return typeof value === 'string' && values.includes(value)
 }
 
+function isTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
 /** Project native IPC data; raw errors, prompts, endpoints and parameter values never cross this boundary. */
 export function readLocalFailureDiagnostic(value: unknown): LocalFailureDiagnostic | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
@@ -104,10 +108,9 @@ export function readLocalFailureDiagnostic(value: unknown): LocalFailureDiagnost
   ) {
     diagnostic.httpStatus = source.httpStatus
   }
-  for (const field of ['inputTokens', 'contextTokens', 'outputTokens'] as const) {
-    const count = source[field]
-    if (typeof count === 'number' && Number.isSafeInteger(count) && count >= 0) diagnostic[field] = count
-  }
+  if (isTokenCount(source.inputTokens)) diagnostic.inputTokens = source.inputTokens
+  if (isTokenCount(source.contextTokens)) diagnostic.contextTokens = source.contextTokens
+  if (isTokenCount(source.outputTokens)) diagnostic.outputTokens = source.outputTokens
   return diagnostic
 }
 

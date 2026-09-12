@@ -307,6 +307,68 @@ mod tests {
     }
 
     #[test]
+    fn laptop_fast_fit_recounts_the_exact_final_generation_body() {
+        use super::super::reasoning_budget::{runtime_limits, Plan, Session, ThinkingTier};
+        let props = json!({
+            "default_generation_settings": {"n_ctx": 32768},
+            "total_slots": 1,
+            "build_info": "b10809-5266f24da",
+            "chat_template": "<think> ... </think>"
+        });
+        let (context, live) = runtime_limits(&props, 131072);
+        let plan = Plan::new(ThinkingTier::Fast, None, "auto", None, live).unwrap();
+        let mut body = json!({
+            "model": "laptop-fixture", "max_tokens": plan.output_ceiling,
+            "messages": [{"role": "system", "content": "Keep project permissions."},
+                {"role": "user", "content": "Read the current project state."}],
+            "tools": [{"type": "function", "function": {"name": "project_get_state",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": false}}}],
+            "tool_choice": "auto", "stream": true,
+            "stream_options": {"include_usage": true}, "cache_prompt": true,
+            "chat_template_kwargs": {"parse_tool_calls": true}
+        });
+        let original_messages = body["messages"].clone();
+        let original_tools = body["tools"].clone();
+        let mut counted_bodies = Vec::new();
+        let usage = fit_adaptive_context_with_ingress(
+            &mut body,
+            u64::from(context),
+            |candidate| {
+                plan.apply(candidate)?;
+                counted_bodies.push(serde_json::to_vec(candidate).unwrap());
+                // A template may change its token count after output controls
+                // change. Never authorize the second body using the first count.
+                Ok::<u64, String>(if counted_bodies.len() == 1 {
+                    19200
+                } else {
+                    19263
+                })
+            },
+            || "does not fit".to_string(),
+            Some(u64::from(context / 2)),
+        )
+        .unwrap();
+        let mut session = Session::new("laptop-fit", &plan, usage.output_tokens as u32, 7);
+        let progress = session.snapshot();
+        let generation_body = serde_json::to_vec(&body).unwrap();
+        assert_eq!(counted_bodies.len(), 3);
+        assert_ne!(counted_bodies[0], generation_body);
+        assert_ne!(counted_bodies[1], generation_body);
+        assert_eq!(counted_bodies.last().unwrap(), &generation_body);
+        assert_eq!(usage.input_tokens, 19263);
+        assert_eq!(usage.output_tokens, 13441);
+        assert_eq!(usage.input_tokens + usage.output_tokens + 64, 32768);
+        assert_eq!(body["max_tokens"], 13441);
+        assert_eq!(progress.output_limit_tokens, 13441);
+        assert_eq!(progress.soft_target_tokens, 512);
+        assert_eq!(progress.thinking_limit_tokens, 4096);
+        assert_eq!(body["messages"], original_messages);
+        assert_eq!(body["tools"], original_tools);
+        assert_eq!(usage.omitted_messages, 0);
+        assert_eq!(growth_target(context, 131072, usage.input_tokens), None);
+    }
+
+    #[test]
     fn compact_fit_removes_old_rounds_before_reducing_answer_headroom() {
         let mut body = json!({"max_tokens": 2048, "messages": [
             {"role":"system","content":"policy"},

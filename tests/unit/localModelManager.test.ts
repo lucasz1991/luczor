@@ -283,7 +283,7 @@ describe('LocalModelManager runtime safety', () => {
           schemaVersion: 1 as const,
           stage: 'generation' as const,
           httpStatus: status,
-          code: 'runtime_request_rejected',
+          code: 'runtime_request_rejected' as const,
           reason: 'unclassified' as const,
         }
       : undefined

@@ -129,6 +129,108 @@ describe('agent mode and tool reliability', () => {
     expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
   })
 
+  it('publishes counted native failure input to the chat footer even when the first request throws', async () => {
+    const onUsage = vi.fn()
+    mocks.streamChatWithTools.mockRejectedValueOnce(
+      new LocalInferenceError('Der Anfrageparameter wurde abgewiesen.', 'runtime_request_rejected', false, false, {
+        schemaVersion: 1,
+        stage: 'generation',
+        httpStatus: 400,
+        code: 'runtime_request_rejected',
+        reason: 'parameter_value',
+        parameter: 'max_tokens',
+        inputTokens: 19263,
+        contextTokens: 32768,
+        outputTokens: 4096,
+      })
+    )
+    await expect(
+      runAgent({
+        projectId: 'project-2',
+        mode: 'observe',
+        toolAccess: 'none',
+        baseMessages: [{ role: 'user', content: 'Prüfe den Projektzustand.' }],
+        onUsage,
+        inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+      })
+    ).rejects.toMatchObject({ code: 'runtime_request_rejected' })
+    expect(onUsage).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        inputTokens: 19263,
+        outputTokens: 0,
+        totalTokens: 19263,
+        contextTokens: 32768,
+        source: 'mixed',
+        rounds: 1,
+      })
+    )
+  })
+
+  it('corrects only the failed local round and retains completed tool round token usage', async () => {
+    const onUsage = vi.fn()
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce({
+        ...toolCallResult,
+        usage: { inputTokens: 100, outputTokens: 20, totalTokens: 120 },
+      })
+      .mockRejectedValueOnce(
+        new LocalInferenceError(
+          'Der aktuelle Auftrag überschreitet das Kontextfenster.',
+          'runtime_context_exceeded',
+          false,
+          false,
+          {
+            schemaVersion: 1,
+            stage: 'tokenization',
+            httpStatus: 400,
+            code: 'runtime_context_exceeded',
+            reason: 'context_limit',
+            inputTokens: 19263,
+            contextTokens: 32768,
+            outputTokens: 16000,
+          }
+        )
+      )
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'Lies und prüfe das Projekt.' }],
+      maxRounds: 3,
+      onUsage,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(result.interrupted?.code).toBe('runtime_context_exceeded')
+    expect(result.tokenUsage).toMatchObject({
+      inputTokens: 19363,
+      outputTokens: 20,
+      totalTokens: 19383,
+      source: 'mixed',
+      rounds: 2,
+    })
+    expect(onUsage).toHaveBeenLastCalledWith(result.tokenUsage)
+    expect(mocks.execute).toHaveBeenCalledOnce()
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not parse native counts from an error message without a verified diagnostic', async () => {
+    const onUsage = vi.fn()
+    mocks.streamChatWithTools.mockRejectedValueOnce(
+      new LocalInferenceError('Input 19263, output limit 16000', 'runtime_context_exceeded', false, false)
+    )
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      toolAccess: 'none',
+      baseMessages: [{ role: 'user', content: 'Hallo' }],
+      onUsage,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(result.tokenUsage.source).toBe('estimated')
+    expect(result.tokenUsage.inputTokens).not.toBe(19263)
+    expect(result.tokenUsage.outputTokens).toBe(0)
+    expect(onUsage).toHaveBeenLastCalledWith(result.tokenUsage)
+  })
+
   it.each(['', 'Der erste geprüfte Befund liegt vor.'])(
     'retains a first-round control interruption and its public partial text: %s',
     async partial => {

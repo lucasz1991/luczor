@@ -159,6 +159,20 @@ fn parameter(error: &Value, value: &Value, message: &str) -> Option<&'static str
     None
 }
 
+fn generation_grammar_failure(message: &str) -> bool {
+    // b10809 validates these only after /input_tokens, in the completion
+    // schema or sampler initialization. Match upstream messages, not arbitrary
+    // occurrences of "grammar" in a provider's echoed input.
+    if message == "failed to initialize samplers: failed to parse grammar" {
+        return true;
+    }
+    let Some(detail) = message.strip_prefix("field 'grammar_triggers': ") else {
+        return false;
+    };
+    detail == "error: no triggers set for lazy grammar!"
+        || detail.starts_with("grammar trigger word should be marked as preserved token: ")
+}
+
 pub(super) fn classify(status: u16, body: &[u8]) -> LocalInferenceFailure {
     let mut kind = if matches!(status, 401 | 403) {
         LlamaHttpFailureKind::AuthenticationFailed
@@ -210,7 +224,14 @@ pub(super) fn classify(status: u16, body: &[u8]) -> LocalInferenceFailure {
                 LlamaHttpFailureKind::RequestRejected | LlamaHttpFailureKind::ChatTemplateFailed
             )
         {
-            let reason = if error_type == "message_format_error"
+            let grammar_failed = generation_grammar_failure(&lower);
+            if grammar_failed && error.get("param").or_else(|| value.get("param")).is_none() {
+                // Only a fixed public alias; never relay the generated trigger word.
+                diagnostic.parameter = Some("grammar");
+            }
+            let reason = if grammar_failed {
+                Some(Reason::ToolContract)
+            } else if error_type == "message_format_error"
                 || (matches!(
                     diagnostic.parameter,
                     Some("messages" | "messages.role" | "messages.content")
@@ -376,6 +397,80 @@ mod tests {
             assert_eq!(value["reason"], reason);
             assert_eq!(value["code"], code);
         }
+    }
+
+    #[test]
+    fn classifies_b10809_generation_only_grammar_failures_without_private_suffixes() {
+        // /input_tokens does not run eval_llama_cmpl_schema or initialize samplers.
+        // These exact upstream failures can therefore follow successful tokenization.
+        for message in [
+            "Failed to initialize samplers: failed to parse grammar",
+            "Field 'grammar_triggers': Error: no triggers set for lazy grammar!",
+            "Field 'grammar_triggers': Grammar trigger word should be marked as preserved token: PRIVATE_TRIGGER",
+        ] {
+            let context = Context::new();
+            context.stage.set(Stage::Generation);
+            context.input.set(Some(19263));
+            context.context.set(Some(32768));
+            context.output.set(Some(13441));
+            let failure = context.annotate(classify(
+                400,
+                &serde_json::to_vec(&json!({"error":{"message":message,"type":"invalid_request_error"}})).unwrap(),
+            ));
+            let value = serde_json::to_value(&failure.diagnostic).unwrap();
+            assert_eq!(failure.code, "runtime_tool_contract_rejected", "{message}");
+            assert_eq!(value["reason"], "tool_contract");
+            assert_eq!(value["parameter"], "grammar");
+            assert_eq!(value["stage"], "generation");
+            assert_eq!(value["inputTokens"], 19263);
+            assert_eq!(value["contextTokens"], 32768);
+            assert_eq!(value["outputTokens"], 13441);
+            assert!(!value.to_string().contains("PRIVATE_TRIGGER"));
+            assert!(!failure.retryable);
+            assert!(failure.preserves_resident_runtime());
+        }
+    }
+
+    #[test]
+    fn grammar_failure_classification_does_not_override_auth_capacity_or_unrelated_text() {
+        for (status, message, expected) in [
+            (
+                401,
+                "Failed to initialize samplers: failed to parse grammar",
+                "runtime_auth_failed",
+            ),
+            (
+                500,
+                "Failed to initialize samplers: failed to parse grammar",
+                "runtime_server_failed",
+            ),
+            (
+                400,
+                "Failed to initialize samplers: out of memory",
+                "runtime_capacity_exhausted",
+            ),
+            (
+                400,
+                "A user mentioned: Failed to initialize samplers: failed to parse grammar",
+                "runtime_request_rejected",
+            ),
+            (
+                400,
+                "Grammar is present in the private input",
+                "runtime_request_rejected",
+            ),
+        ] {
+            let failure = classify(
+                status,
+                &serde_json::to_vec(&json!({"error":{"message":message}})).unwrap(),
+            );
+            assert_eq!(failure.code, expected, "{status}: {message}");
+            assert_ne!(failure.diagnostic.reason, Reason::ToolContract);
+        }
+        let value = diagnostic(
+            json!({"error":{"param":"private-field","message":"Failed to initialize samplers: failed to parse grammar"}}),
+        );
+        assert!(value.get("parameter").is_none());
     }
 
     #[test]
