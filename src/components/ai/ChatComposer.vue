@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
+import AiIcon from './AiIcon.vue'
 const props = withDefaults(
   defineProps<{ tabs?: { id: string; label: string }[]; title?: string; scrollId?: string; follow?: boolean }>(),
   {
@@ -38,7 +39,8 @@ function measure() {
   if (el) atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 120
 }
 function scrollToBottom() {
-  scroller.value?.scrollTo({ top: scroller.value.scrollHeight, behavior: 'smooth' })
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  scroller.value?.scrollTo({ top: scroller.value.scrollHeight, behavior: reducedMotion ? 'auto' : 'smooth' })
 }
 defineExpose({ scrollToBottom })
 </script>
@@ -60,7 +62,8 @@ defineExpose({ scrollToBottom })
       <div ref="thread" class="ai-thread"><slot /></div>
     </div>
     <button v-if="follow && !atBottom" class="ai-jump ai-button" type="button" @click="scrollToBottom">
-      ↓ Zur neuesten Nachricht
+      <AiIcon name="arrow" :size="14" class="ai-jump__arrow" />
+      Zur neuesten Nachricht
     </button>
     <div v-if="$slots.composer" class="ai-chat__composer"><slot name="composer" /></div>
   </section>
@@ -75,4 +78,14 @@ defineExpose({ scrollToBottom })
   padding-block-start: 72px;
   scroll-padding-block-start: 72px;
 }
+.ai-chat__messages { overscroll-behavior-y: contain; scrollbar-gutter: stable; }
+.ai-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  min-height: 36px;
+  box-shadow: 0 4px 16px #0002;
+}
+.ai-jump__arrow { transform: rotate(90deg); }
 </style>

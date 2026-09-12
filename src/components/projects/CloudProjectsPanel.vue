@@ -36,7 +36,9 @@ const linked = computed(() =>
   current.value?.cloud?.principalId === cloudProjectsState.principalId ? current.value.cloud : undefined
 )
 const status = computed(() => cloudProjectsState.status[props.projectId])
-const disabled = computed(() => working.value || props.busy || cloudProjectsState.busy)
+const disabled = computed(
+  () => working.value || props.busy || cloudProjectsState.busy || !cloudProjectsState.principalId
+)
 const localId = (serverId: number) =>
   state.projects.find(
     project => project.cloud?.projectId === serverId && project.cloud.principalId === cloudProjectsState.principalId
@@ -336,6 +338,8 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .cloud-projects {
+  inset: 0;
+  margin: auto;
   width: min(840px, calc(100vw - 32px));
   max-height: calc(100dvh - 40px);
   padding: 0;

@@ -13,6 +13,7 @@ import { loadAudioTriggers } from '@/services/voice/audioTriggers'
 import ChatComposer from '../ai/ChatComposer.vue'
 import StreamingText from '../ai/StreamingText.vue'
 import ChatCommentary from '../ai/ChatCommentary.vue'
+import ChatAgentRoster from '../ai/ChatAgentRoster.vue'
 import AssistantResponseFooter from '../ai/AssistantResponseFooter.vue'
 import ThinkingState from '../ai/ThinkingState.vue'
 import ThinkingSelector from '../ai/ThinkingSelector.vue'
@@ -622,13 +623,17 @@ onBeforeUnmount(() => {
           class="mini-message"
           :class="`is-${message.role}`"
         >
-          <span class="mini-message-label">{{ message.role === 'user' ? 'Du' : 'Luczor' }}</span>
+          <span class="mini-message-label">{{
+            message.role === 'user' ? 'Du' : snapshot.appearance?.assistantName || 'Luczor'
+          }}</span>
           <small v-if="!isChat && message.contextLabel" class="mini-scope-note">{{ message.contextLabel }}</small>
           <p v-if="message.role === 'user'">{{ message.content }}</p>
           <template v-else>
+            <ChatAgentRoster :activity="message.activity" :loading="message.status === 'running'" />
             <ThinkingState
               v-if="message.activity"
               :active="message.status === 'running'"
+              :status="message.status === 'running' ? message.activity.status : message.status"
               :steps="message.activity.steps"
               :started-at="message.createdAt"
               :duration-ms="
@@ -644,7 +649,7 @@ onBeforeUnmount(() => {
                       : 'Abgeschlossen'
               "
             />
-            <ChatCommentary :entries="message.commentary ?? []" />
+            <ChatCommentary :entries="message.commentary ?? []" :active="message.status === 'running'" />
             <StreamingText
               :content="message.content"
               :streaming="message.status === 'running'"
@@ -853,3 +858,23 @@ onBeforeUnmount(() => {
 </template>
 
 <style src="../../styles/mini-chat.css"></style>
+
+<style scoped>
+.mini-message.is-assistant {
+  padding-block: 2px 8px;
+}
+.mini-message-label {
+  margin-block-end: 10px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.mini-message.is-assistant :deep(.rt) {
+  font-size: 13px;
+  line-height: 1.72;
+}
+.mini-message :deep(.ai-answer__question) {
+  font-size: 13px;
+  line-height: 1.65;
+}
+</style>

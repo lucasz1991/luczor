@@ -19,7 +19,7 @@ function guard(ctx: ToolContext, mutating: boolean) {
     if (!getProject(projectId)?.cloud) throw new Error('Dieses Projekt wurde noch nicht global bereitgestellt.')
   }
   assert()
-  return { projectId, signal: ticket.signal, assert }
+  return { projectId, signal: ctx.signal ? AbortSignal.any([ticket.signal, ctx.signal]) : ticket.signal, assert }
 }
 export const cloudProjectTools: ToolDef[] = [
   {

@@ -25,7 +25,14 @@ export type CloudProjectDocument = {
   updated_at: string
   updated_by_device: string | null
 }
-export type CloudProjectListItem = { id: number; external_id: string; name: string; cloud_revision?: number }
+export type CloudProjectListItem = {
+  id: number
+  external_id: string
+  name: string
+  cloud_revision?: number
+  cloud_enabled?: boolean
+  user_id?: number
+}
 export type CloudProjectFile = {
   path: string
   revision: number
@@ -76,7 +83,21 @@ function serialize<T>(run: () => Promise<T>): Promise<T> {
 }
 async function session(parentSignal?: AbortSignal) {
   const captured = generation
-  const account = await getVerifiedAccountSnapshot()
+  let account: VerifiedAccountSnapshot | null
+  try {
+    account = await getVerifiedAccountSnapshot()
+  } catch {
+    if (captured === generation) {
+      cloudProjectPrincipal.value = ''
+      cloudProjectsState.projects = []
+    }
+    const preview = typeof window !== 'undefined' && !('__TAURI_INTERNALS__' in window)
+    throw new Error(
+      preview
+        ? 'Die Browser-Vorschau hat keine Geräteanmeldung. Öffne Luczor als Desktop-App und verbinde dein Konto unter Einstellungen → Server.'
+        : 'Das Benutzerkonto konnte nicht bestätigt werden. Bitte die Anmeldung und Serververbindung in den Einstellungen prüfen.'
+    )
+  }
   if (!account || captured !== generation) throw new Error('Für globale Projekte bitte am Luczor-Server anmelden.')
   cloudProjectPrincipal.value = account.principalId
   const signal = parentSignal ? AbortSignal.any([currentAbort.signal, parentSignal]) : currentAbort.signal
@@ -405,6 +426,8 @@ export async function listCloudProjects(): Promise<CloudProjectListItem[]> {
     const batch = response.data.data
     if (!Array.isArray(batch)) throw new Error('Die Serverantwort enthält keine globale Projektliste.')
     for (const item of batch) {
+      if (item.cloud_enabled !== true || (item.user_id !== undefined && item.user_id !== current.account.accountId))
+        continue
       if (!Number.isSafeInteger(item.id) || item.id < 1) throw new Error('Ungültige Cloud-Projekt-ID.')
       identifier(item.external_id)
       text(item.name, 255)

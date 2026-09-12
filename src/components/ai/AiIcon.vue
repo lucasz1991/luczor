@@ -22,6 +22,8 @@ const paths: Record<string, string> = {
   shield: 'm12 2 8 3v6c0 5-8 11-8 11S4 16 4 11V5Zm-4 9 3 3 5-5',
   grid: 'M3 3h7v7H3Zm11 0h7v7h-7ZM3 14h7v7H3Zm11 0h7v7h-7Z',
   upload: 'M12 16V4m-5 5 5-5 5 5M4 20h16',
+  'thumb-up': 'M7 10v11H3V10Zm0 1 5-8c3 0 2 5 2 7h5c2 0 2 1 2 2l-2 7c0 1-1 2-2 2H7',
+  'thumb-down': 'M7 14V3H3v11Zm0-1 5 8c3 0 2-5 2-7h5c2 0 2-1 2-2l-2-7c0-1-1-2-2-2H7',
 }
 </script>
 <template>

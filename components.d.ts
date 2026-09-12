@@ -24,6 +24,7 @@ declare module 'vue' {
     AssistantResponseFooter: typeof import('./src/components/ai/AssistantResponseFooter.vue')['default']
     AudioTriggerSettings: typeof import('./src/components/ai/AudioTriggerSettings.vue')['default']
     BrowserPanel: typeof import('./src/components/browser/BrowserPanel.vue')['default']
+    ChatAgentRoster: typeof import('./src/components/ai/ChatAgentRoster.vue')['default']
     ChatCommentary: typeof import('./src/components/ai/ChatCommentary.vue')['default']
     ChatComposer: typeof import('./src/components/ai/ChatComposer.vue')['default']
     ChatProjectOverlay: typeof import('./src/components/ChatProjectOverlay.vue')['default']

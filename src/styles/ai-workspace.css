@@ -140,32 +140,44 @@
   flex-shrink: 0;
 }
 .ai-message {
-  margin: 0 0 34px;
+  margin: 0 0 40px;
   min-width: 0;
 }
-.ai-message header {
+.ai-message > header {
   display: flex;
   align-items: center;
-  gap: 9px;
-  margin-bottom: 15px;
-  min-height: 22px;
+  gap: 8px;
+  margin-bottom: 16px;
+  min-height: 28px;
 }
-.ai-message header strong {
+.ai-message > header strong {
   font-size: 12px;
   font-weight: 600;
 }
-.ai-message time {
+.ai-message > header time {
   font-size: 10px;
   color: var(--ai-faint);
 }
 .ai-message__avatar {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  border: 1px solid var(--ai-line);
+  border-radius: 8px;
   color: var(--ai-muted);
+  background: var(--ai-canvas);
+}
+.ai-message.is-running .ai-message__avatar {
+  color: var(--ai-accent);
+  border-color: color-mix(in srgb, var(--ai-accent) 35%, var(--ai-line));
 }
 .ai-message__model {
   margin-left: auto;
   color: var(--ai-faint);
-  font: 10px var(--font-mono);
+  font: 10px var(--ai-font);
   max-width: 45%;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -180,19 +192,19 @@
   align-items: flex-end;
   padding-top: 4px;
 }
-.ai-message--user header {
+.ai-message--user > header {
   margin-bottom: 7px;
 }
 .ai-message__user-text {
   margin: 0;
   max-width: 88%;
-  padding: 12px 16px;
-  border: 1px solid var(--ai-line);
-  border-radius: 13px 13px 4px 13px;
+  padding: 12px 18px;
+  border: 1px solid color-mix(in srgb, var(--ai-line) 65%, transparent);
+  border-radius: 16px 16px 4px 16px;
   background: var(--ai-surface);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font: 13px/1.75 var(--ai-font);
+  font: 14px/1.75 var(--ai-font);
 }
 .ai-approvals {
   overflow-y: auto;

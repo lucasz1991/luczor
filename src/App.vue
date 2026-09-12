@@ -8,6 +8,7 @@ import { modelUsageSettings, type ChatRouteMode } from '@/services/inference/mod
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import type { SystemStatusDisplayMode } from '@/features/system-status/model'
 import AgentTeamResults from './components/ai/AgentTeamResults.vue'
+import ChatAgentRoster from './components/ai/ChatAgentRoster.vue'
 import ChatCommentary from './components/ai/ChatCommentary.vue'
 import { localAssistantProfilePrompt, refreshAssistantProfile } from '@/services/assistantProfile'
 import PlanPanel from './components/PlanPanel.vue'
@@ -294,6 +295,9 @@ function planFromChecklist() {
 function editSelection(instruction: string, selection: string) {
   setComposerInput(`${instruction}:\n\n${selection}`, 'keyboard')
   void nextTick(() => promptBar.value?.focus())
+}
+function messageRunActive(message: Message) {
+  return message.meta.activity ? message.meta.activity.status === 'running' : !!message.meta.isLoading
 }
 function messageTools(message: Message) {
   const calls = getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, message.projectId) ?? []
@@ -2520,7 +2524,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           <article
             v-if="!isWelcomeMessage(m)"
             class="ai-message"
-            :class="m.role === 'user' ? 'ai-message--user' : 'ai-message--assistant'"
+            :class="[m.role === 'user' ? 'ai-message--user' : 'ai-message--assistant', { 'is-running': messageRunActive(m) }]"
           >
             <header>
               <span v-if="m.role === 'assistant'" class="ai-message__avatar"><AiIcon :size="15" /></span
@@ -2535,10 +2539,12 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
               >
             </header>
             <template v-if="m.role === 'assistant'">
+              <ChatAgentRoster :activity="chatActivities[m.id]" :loading="messageRunActive(m)" />
               <ThinkingState
                 v-if="chatActivities[m.id]"
-                :active="chatActivities[m.id]!.status === 'running'"
-                :label="activityLabel(chatActivities[m.id]!, pendingApprovals.length > 0 && !!m.meta.isLoading)"
+                :active="messageRunActive(m)"
+                :status="chatActivities[m.id]!.status"
+                :label="activityLabel(chatActivities[m.id]!, pendingApprovals.length > 0 && messageRunActive(m))"
                 :steps="chatActivities[m.id]!.steps"
                 :started-at="chatActivities[m.id]!.startedAt"
                 :duration-ms="
@@ -2546,9 +2552,8 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
                     ? chatActivities[m.id]!.finishedAt! - chatActivities[m.id]!.startedAt
                     : undefined
                 "
-                ><ToolChips :tools="messageTools(m)"
-              /></ThinkingState>
-              <ToolChips v-else :tools="messageTools(m)" />
+              />
+              <ToolChips :tools="messageTools(m)" />
               <WorkflowChatCards
                 :workflows="messageWorkflows(m)"
                 :project-id="activeProjectId"
@@ -2558,10 +2563,11 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
                 @discuss="improveWorkflow"
               />
               <SelectionActions :disabled="sending" @action="editSelection" @speak="speakSelectedText">
-                <ChatCommentary :entries="m.meta.commentary ?? []" :message-id="m.id" />
+                <ChatCommentary :entries="m.meta.commentary ?? []" :message-id="m.id" :active="messageRunActive(m)" />
                 <StreamingText
+                  v-if="m.content || m.meta.question || m.meta.bullets?.length || !chatActivities[m.id]"
                   :content="m.content"
-                  :streaming="!!m.meta.isLoading"
+                  :streaming="messageRunActive(m)"
                   :animate="false"
                   :question="m.meta.question"
                   :follow-ups="m.meta.bullets"
@@ -2578,17 +2584,19 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
                       type="button"
                       class="ai-icon-button"
                       aria-label="Antwort als hilfreich bewerten"
+                      title="Hilfreich"
                       @click="rateAssistantMessage(m, 1)"
                     >
-                      ↑</button
+                      <AiIcon name="thumb-up" :size="14" /></button
                     ><button
                       v-if="m.meta.llmRequestId"
                       type="button"
                       class="ai-icon-button"
                       aria-label="Antwort als nicht hilfreich bewerten"
+                      title="Nicht hilfreich"
                       @click="rateAssistantMessage(m, -1)"
                     >
-                      ↓
+                      <AiIcon name="thumb-down" :size="14" />
                     </button></template
                   >
                 </StreamingText>

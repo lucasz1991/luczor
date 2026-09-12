@@ -127,6 +127,13 @@ describe('portable user-owned cloud projects', () => {
     expect(harness.save).toHaveBeenCalledOnce()
   })
 
+  it('shows an actionable account error instead of leaking a native invoke failure', async () => {
+    harness.account.mockRejectedValueOnce(new TypeError("Cannot read properties of undefined (reading 'invoke')"))
+    await expect(publishCloudProject('default')).rejects.toThrow(/Anmeldung|anmeldung/)
+    expect(cloudProjectsState.principalId).toBe('')
+    expect(harness.request).not.toHaveBeenCalled()
+  })
+
   it('publishes later changes against the last applied revision', async () => {
     await publishCloudProject('default')
     harness.state.projects[0]!.summary = 'Fortschritt'

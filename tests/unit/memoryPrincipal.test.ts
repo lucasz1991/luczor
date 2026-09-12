@@ -156,6 +156,42 @@ describe('desktop memory account isolation', () => {
     expect(await memory.recallLocal({ query: 'Navigation', projectId: 'p1' })).toEqual([])
   })
 
+  it('keeps a cloud project memory namespace stable across device-local project ids', async () => {
+    await setServerEnabled(false)
+    const { state } = await import('@/state/store')
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const template = { ...state.projects[0]! }
+    state.projects.push({
+      ...template,
+      id: 'imported-cloud-project',
+      cloud: {
+        principalId: harness.currentSnapshot.principalId,
+        projectId: 8,
+        externalId: 'shared-project',
+        revision: 1,
+        fingerprint: 'a'.repeat(64),
+        syncedAt: 1,
+      },
+    })
+    const memory = new LuczorMemoryService()
+    const saved = await memory.remember({
+      content: 'Navigation ist links angeordnet.',
+      projectId: 'imported-cloud-project',
+      writeIntent: 'explicit',
+    })
+    expect(saved.projectId).toBe('shared-project')
+    expect(
+      (await memory.recallLocal({ query: 'Navigation', projectId: 'imported-cloud-project' })).map(item => item.id)
+    ).toContain(saved.id)
+    expect(
+      (await memory.recallLocal({ query: 'Navigation', projectId: 'shared-project' })).map(item => item.id)
+    ).toContain(saved.id)
+    harness.currentSnapshot = accountSnapshot(2, 'key-b')
+    await expect(memory.recallLocal({ query: '', projectId: 'imported-cloud-project' })).rejects.toThrow(
+      'anderen Benutzer'
+    )
+  })
+
   it('captures bounded intermediate candidates early, throttles bursts and rejects account switches', async () => {
     await setServerEnabled(false)
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')

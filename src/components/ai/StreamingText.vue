@@ -50,7 +50,7 @@ const blocks = computed(() => {
 })
 </script>
 <template>
-  <div class="ai-answer" :aria-busy="displaying || undefined">
+  <div class="ai-answer" :class="{ 'ai-answer--streaming': displaying }" :aria-busy="displaying || undefined">
     <ReadAloudText :playback="playback" :content="speechSource">
       <div class="ai-answer__body">
         <template v-for="(block, index) in blocks" :key="index"
@@ -60,10 +60,14 @@ const blocks = computed(() => {
             :language="block.language"
             :diff="block.language === 'diff'" /><RichMessage v-else :content="block.content"
         /></template>
-        <span v-if="displaying" class="ai-stream-caret" aria-hidden="true" />
+        <span v-if="displaying && shown" class="ai-stream-caret" aria-hidden="true" />
       </div>
       <p v-if="question" class="ai-answer__question">{{ question }}</p>
     </ReadAloudText>
+    <div v-if="displaying" class="ai-answer__stream-status" role="status">
+      <span class="ai-answer__stream-dot" aria-hidden="true" />
+      {{ streaming ? (shown ? 'Antwort wird geschrieben' : 'Antwort wird vorbereitet') : 'Antwort wird eingeblendet' }}
+    </div>
     <button v-if="revealing" type="button" class="ai-icon-button" @click="skip">Sofort anzeigen</button>
     <ul v-if="followUps.length && displaying" class="ai-answer__streamed-bullets">
       <li v-for="(item, index) in followUps" :key="index">{{ item }}</li>
@@ -73,6 +77,7 @@ const blocks = computed(() => {
         class="ai-icon-button"
         type="button"
         :aria-label="copied ? 'Antwort kopiert' : 'Antwort kopieren'"
+        :title="copied ? 'Kopiert' : 'Antwort kopieren'"
         @click="copy(content)"
       >
         <AiIcon :name="copied ? 'check' : 'copy'" /></button
@@ -81,7 +86,7 @@ const blocks = computed(() => {
         type="button"
         aria-label="Antwort vorlesen"
         :disabled="speechDisabled"
-        :title="speechDisabled ? speechDisabledReason : undefined"
+        :title="speechDisabled ? speechDisabledReason : 'Antwort vorlesen'"
         @click="emit('speak')"
       >
         <AiIcon name="sound" /></button
@@ -104,3 +109,65 @@ const blocks = computed(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.ai-answer__body :deep(.rt) {
+  font-size: 14px;
+  line-height: 1.8;
+  letter-spacing: -0.008em;
+}
+.ai-answer__body :deep(.rt > :first-child) { margin-top: 0; }
+.ai-answer__body :deep(.rt > :last-child) { margin-bottom: 0; }
+.ai-answer__body :deep(.rt h2) { font-size: 19px; letter-spacing: -0.025em; }
+.ai-answer__body :deep(.rt h3) { font-size: 16px; letter-spacing: -0.015em; }
+.ai-stream-caret {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--ai-accent);
+  margin: 6px 0 0;
+}
+.ai-answer__stream-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  margin-top: 8px;
+  font: 11px/1.5 var(--ai-font);
+  color: var(--ai-faint);
+}
+.ai-answer__stream-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--ai-accent);
+}
+.ai-answer__actions {
+  flex-wrap: wrap;
+  margin-top: 12px;
+  gap: 3px;
+}
+.ai-answer__actions :deep(button) {
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 7px;
+}
+.ai-follow-ups { gap: 6px; margin-top: 20px; }
+.ai-follow-ups button {
+  width: 100%;
+  justify-content: space-between;
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  line-height: 1.5;
+}
+.ai-follow-ups button:hover:not(:disabled) {
+  border-color: var(--ai-line);
+  background: var(--ai-canvas);
+}
+.ai-follow-ups button svg { flex-shrink: 0; }
+@media (prefers-reduced-motion: reduce) {
+  .ai-stream-caret { animation: none; }
+}
+</style>
