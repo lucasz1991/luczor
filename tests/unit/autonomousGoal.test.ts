@@ -118,7 +118,7 @@ describe('autonomous goal controller', () => {
     const interrupted = context.controller.interrupt('p1').then(() => {
       released = true
     })
-    expect(context.run.mock.calls[0][2].aborted).toBe(true)
+    expect(context.run.mock.calls[0]?.[2].aborted).toBe(true)
     await vi.advanceTimersByTimeAsync(0)
     expect(released).toBe(false)
     const revision = context.current().revision
@@ -141,8 +141,8 @@ describe('autonomous goal controller', () => {
     context.run.mockResolvedValueOnce({ status: 'blocked', summary: 'Manual clarification' })
     context.controller.kick('p1')
     await vi.advanceTimersByTimeAsync(0)
-    expect(context.run.mock.calls[0][1]).toMatchObject({ phase: 'work', lastMessageId: 'previous' })
-    expect(context.persist.mock.calls[0][1].reason).toContain('neu prüfen')
+    expect(context.run.mock.calls[0]?.[1]).toMatchObject({ phase: 'work', lastMessageId: 'previous' })
+    expect(context.persist.mock.calls[0]?.[1].reason).toContain('neu prüfen')
   })
 
   it('never overlaps cycles and waits while a user workload is active', async () => {
@@ -225,7 +225,7 @@ describe('autonomous goal controller', () => {
     context.controller.kick('p2')
     await vi.advanceTimersByTimeAsync(5000)
     expect(context.run).toHaveBeenCalledTimes(1)
-    expect(context.run.mock.calls[0][2].aborted).toBe(true)
+    expect(context.run.mock.calls[0]?.[2].aborted).toBe(true)
     finish({ status: 'completed', summary: 'Obsolete first project', evidence: 'Late evidence' })
     await vi.advanceTimersByTimeAsync(250)
     expect(context.run.mock.calls.map(call => call[0])).toEqual(['p1', 'p2'])

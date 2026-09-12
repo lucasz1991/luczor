@@ -230,7 +230,8 @@ function save(): void {
 .goal-control__panel {
   position: absolute;
   bottom: calc(100% + 8px);
-  inset-inline-end: 0;
+  inset-inline-start: 0;
+  inset-inline-end: auto;
   z-index: 50;
   width: min(380px, calc(100vw - 32px));
   max-height: min(600px, calc(100dvh - 120px));

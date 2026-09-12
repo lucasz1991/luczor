@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 const mocks = vi.hoisted(() => ({
   stream: vi.fn(),
   getTool: vi.fn(),
+  descriptors: vi.fn(),
   resolveRoute: vi.fn(),
   team: vi.fn(),
   approve: vi.fn(),
@@ -13,7 +14,7 @@ const mocks = vi.hoisted(() => ({
   hud: { killSwitch: false },
 }))
 vi.mock('@/services/inference/coordinator', () => ({ resolveInferenceRouteForTurn: mocks.resolveRoute }))
-vi.mock('@/services/tools/registry', () => ({ getTool: mocks.getTool, toOpenAITools: () => [] }))
+vi.mock('@/services/tools/registry', () => ({ getTool: mocks.getTool, toOpenAITools: mocks.descriptors }))
 vi.mock('@/services/agents/chatOrchestration', () => ({ runChatAgentTeam: mocks.team }))
 vi.mock('@/services/approvals', () => ({ awaitApproval: mocks.approve }))
 vi.mock('@/services/executionPolicy', () => ({
@@ -57,11 +58,30 @@ const options = (extra: Partial<RunAgentOptions> = {}): RunAgentOptions => ({
 function offered(request: InferenceRequest): string[] {
   return (request.tools as Array<{ function: { name: string } }>).map(tool => tool.function.name)
 }
+function registerReadTool(result: unknown = { content: 'Actual file text' }) {
+  const execute = vi.fn(async () => result)
+  const tool = {
+    name: 'fs_read',
+    description: 'Read file',
+    category: 'project',
+    mutating: false,
+    requiresApproval: false,
+    effects: ['read'],
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+    execute,
+  }
+  mocks.getTool.mockImplementation(name => (name === 'fs_read' ? tool : undefined))
+  mocks.descriptors.mockReturnValue([
+    { type: 'function', function: { name: tool.name, description: tool.description, parameters: tool.parameters } },
+  ])
+  return execute
+}
 
 describe('goal reports in the real agent loop', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     mocks.hud.killSwitch = false
+    mocks.descriptors.mockReturnValue([])
     mocks.stream.mockResolvedValue(finalResponse())
   })
 
@@ -130,14 +150,101 @@ describe('goal reports in the real agent loop', () => {
   it('reports reviewed completion but still returns an interruption when the final model round fails', async () => {
     const report = vi.fn()
     mocks.stream
+      .mockResolvedValueOnce(toolResponse({}, 'goal_read_result', 'read-answer'))
       .mockResolvedValueOnce(
         toolResponse({ status: 'completed', summary: 'Criteria met', evidence: 'Tests 8/8, revision abc123' })
       )
       .mockRejectedValueOnce(new Error('Final round failed'))
-    const result = await runAgent(options({ goalTracking: { phase: 'review', report } }))
+    const result = await runAgent(
+      options({ goalTracking: { phase: 'review', report, candidateText: 'Public deliverable' } })
+    )
     expect(report).toHaveBeenCalledOnce()
     expect(result.interrupted).toBeDefined()
     expect(result.continuation).toBeDefined()
+  })
+
+  it('rejects completion with fabricated evidence when no actual read occurred', async () => {
+    const report = vi.fn()
+    mocks.stream.mockResolvedValueOnce(
+      toolResponse({ status: 'completed', summary: 'Done', evidence: 'Unverified claim' })
+    )
+    const result = await runAgent(options({ goalTracking: { phase: 'review', report } }))
+    expect(result.toolFailures).toBe(1)
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  it.each([true, false])('only successful directly executed reads count as completion evidence (%s)', async success => {
+    const report = vi.fn()
+    const execute = registerReadTool(success ? { content: 'Verified file' } : { ok: false, error: 'Read failed' })
+    mocks.stream
+      .mockResolvedValueOnce(toolResponse({}, 'fs_read', 'read-file'))
+      .mockResolvedValueOnce(toolResponse({ status: 'completed', summary: 'Checked', evidence: 'File meets criteria' }))
+    const result = await runAgent(options({ goalTracking: { phase: 'review', report }, toolAccess: 'read-only' }))
+    expect(execute).toHaveBeenCalledOnce()
+    expect(report.mock.calls.map(([record]) => record.evidence)).toEqual(success
+      ? ['File meets criteria\nGeprüfte Leseaufrufe dieser Runde: fs_read (read-file)'] : [])
+    expect(report).toHaveBeenCalledTimes(success ? 1 : 0)
+    expect(result.toolFailures).toBe(success ? 0 : 2)
+    expect(result.continuation).toBeUndefined()
+  })
+
+  it('lets a text-only review inspect the captured deliverable before reporting completion', async () => {
+    const report = vi.fn()
+    mocks.stream
+      .mockResolvedValueOnce(toolResponse({}, 'goal_read_result', 'read-answer'))
+      .mockImplementationOnce(async (request: InferenceRequest) => {
+        expect(JSON.stringify(request.messages)).toContain('ACTUAL PUBLIC ANSWER')
+        return toolResponse({
+          status: 'completed',
+          summary: 'Answer checked',
+          evidence: 'The answer meets the text criteria',
+        })
+      })
+    const result = await runAgent(
+      options({
+        goalTracking: { phase: 'review', report, candidateText: 'ACTUAL PUBLIC ANSWER' },
+        toolAccess: 'read-only',
+      })
+    )
+    expect(report).toHaveBeenCalledWith(
+      expect.objectContaining({ evidence: expect.stringContaining('goal_read_result (read-answer)') })
+    )
+    expect(result.ephemeralDataUsed).toBe(true)
+    expect(JSON.stringify(mocks.audit.mock.calls)).not.toContain('ACTUAL PUBLIC ANSWER')
+  })
+
+  it('does not count a child read as the parent independent review observation', async () => {
+    const report = vi.fn()
+    const execute = registerReadTool()
+    mocks.stream
+      .mockResolvedValueOnce(
+        toolResponse(
+          { task: 'Read the document.', role: 'review', target: 'local', tools: ['fs_read'] },
+          'agent_assist',
+          'assist-read'
+        )
+      )
+      .mockResolvedValueOnce(toolResponse({}, 'fs_read', 'child-read'))
+      .mockResolvedValueOnce(finalResponse())
+      .mockResolvedValueOnce(toolResponse({ status: 'completed', summary: 'Done', evidence: 'Child did the reading' }))
+    const result = await runAgent(options({ agentMode: true, goalTracking: { phase: 'review', report } }))
+    expect(execute).toHaveBeenCalledOnce()
+    expect(result.toolFailures).toBe(1)
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  it('does not accept a truncated text read as complete evidence', async () => {
+    const report = vi.fn()
+    mocks.stream
+      .mockResolvedValueOnce(toolResponse({}, 'goal_read_result', 'partial-read'))
+      .mockResolvedValueOnce(
+        toolResponse({ status: 'completed', summary: 'Claims done', evidence: 'Only the start was read' })
+      )
+    const result = await runAgent(
+      options({ goalTracking: { phase: 'review', report, candidateText: 'x'.repeat(16001) } })
+    )
+    expect(result.toolFailures).toBe(1)
+    expect(report).not.toHaveBeenCalled()
   })
 
   it('does not add reporting to a fixed approved external request', async () => {

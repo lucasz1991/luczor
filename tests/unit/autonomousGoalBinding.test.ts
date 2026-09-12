@@ -67,6 +67,34 @@ describe('device-local goal binding', () => {
     expect(run).not.toHaveBeenCalled()
   })
 
+  it('discards a delayed save after the goal revision changed', async () => {
+    const { binding } = setup()
+    let release!: () => void
+    harness.save.mockImplementationOnce(
+      () =>
+        new Promise<void>(resolve => {
+          release = resolve
+        })
+    )
+    const pending = binding.save('Alter Entwurf')
+    await vi.advanceTimersByTimeAsync(0)
+    state.projects[0]!.autonomousGoal = {
+      text: 'Neuer Entwurf',
+      active: false,
+      status: 'idle',
+      revision: 8,
+      iterations: 0,
+      phase: 'work',
+      updatedAt: 8,
+    }
+    state.projects[0]!.goal = 'Neuer Entwurf'
+    release()
+    await pending
+    expect(binding.model.value?.text).toBe('Neuer Entwurf')
+    expect(state.projects[0]?.goal).toBe('Neuer Entwurf')
+    expect(binding.error.value).toContain('erneut speichern')
+  })
+
   it('waits for user input and then runs the explicitly activated goal', async () => {
     const { binding, draft, run } = setup()
     draft.value = 'Meine neue Nachricht'
@@ -89,6 +117,29 @@ describe('device-local goal binding', () => {
     expect(binding.error.value).toContain('Desktop-App')
     expect(binding.model.value?.active).toBe(false)
     expect(run).not.toHaveBeenCalled()
+  })
+
+  it('interrupts active work when the user starts typing and ignores its late completion', async () => {
+    const run = vi.fn().mockImplementation(
+      (_id, _goal, signal: AbortSignal) =>
+        new Promise(resolve => {
+          signal.addEventListener('abort', () => resolve({ status: 'completed', summary: 'Late', evidence: 'Late' }), {
+            once: true,
+          })
+        })
+    )
+    const { binding, draft } = setup(run)
+    await binding.save('Eigenen Auftrag bearbeiten')
+    await binding.toggle(true)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(binding.running.value).toBe(true)
+    draft.value = 'Meine Nachricht hat Vorrang'
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(binding.running.value).toBe(false)
+    expect(binding.model.value).toMatchObject({ active: true, status: 'waiting' })
+    expect(binding.model.value?.evidence).toBeUndefined()
+    expect(run).toHaveBeenCalledTimes(1)
   })
 
   it('deactivates a saved goal on account change instead of inheriting authorization', async () => {

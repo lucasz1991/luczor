@@ -1,9 +1,12 @@
 import { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
 import {
   createGoalReportTool,
+  createGoalReadResultTool,
   goalReportInstruction,
   GOAL_REPORT_MARKER,
   GOAL_REPORT_NAME,
+  GOAL_READ_RESULT_NAME,
+  type GoalReadReceipt,
   type GoalTracking,
 } from '@/services/agents/goalReport'
 import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
@@ -889,23 +892,27 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     })
   }
 
+  const goalReadReceipts: GoalReadReceipt[] = []
   const goalReportTool =
     opts.goalTracking &&
     !resolvedRoute.externalOneShot &&
     !opts.forceAgentTeam &&
     opts.toolAccess !== 'none' &&
     !disabledTools.has(GOAL_REPORT_NAME)
-      ? createGoalReportTool(opts.goalTracking)
+      ? createGoalReportTool(opts.goalTracking, () => goalReadReceipts)
       : undefined
-  if (goalReportTool) {
+  const goalReadResultTool =
+    goalReportTool && !disabledTools.has(GOAL_READ_RESULT_NAME)
+      ? createGoalReadResultTool(opts.goalTracking!)
+      : undefined
+  for (const tool of [goalReportTool, goalReadResultTool]) {
+    if (!tool) continue
     tools.push({
       type: 'function',
-      function: {
-        name: goalReportTool.name,
-        description: goalReportTool.description,
-        parameters: goalReportTool.parameters,
-      },
+      function: { name: tool.name, description: tool.description, parameters: tool.parameters },
     })
+  }
+  if (goalReportTool) {
     messages.unshift({ role: 'system', content: goalReportInstruction(opts.goalTracking!.phase) })
   }
 
@@ -1324,7 +1331,9 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       const selectedTool =
         call.name === GOAL_REPORT_NAME
           ? goalReportTool
-          : (assistance?.tools.find(tool => tool.name === call.name) ?? getTool(call.name))
+          : call.name === GOAL_READ_RESULT_NAME
+            ? goalReadResultTool
+            : (assistance?.tools.find(tool => tool.name === call.name) ?? getTool(call.name))
       const tool =
         ((call.name === 'agent_assist' && call.arguments.target === 'local') ||
           (call.name === 'agent_assist_status' && assistance?.isLocalJob(call.arguments.job_id))) &&
@@ -1844,6 +1853,19 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         })
         executionGate.assert(execution)
         const outcome = normalizeToolOutcome(output)
+        const completeGoalTextRead =
+          call.name !== GOAL_READ_RESULT_NAME ||
+          (!!output && typeof output === 'object' && 'truncated' in output && output.truncated === false)
+        if (
+          opts.goalTracking?.phase === 'review' &&
+          outcome.ok &&
+          !tool.mutating &&
+          completeGoalTextRead &&
+          !(tool.effects ?? ['read']).some(effect => effect !== 'read') &&
+          ![GOAL_REPORT_NAME, 'agent_assist', 'agent_assist_status'].includes(call.name)
+        ) {
+          goalReadReceipts.push(Object.freeze({ tool: call.name, callId: call.id }))
+        }
         if (call.name === 'chat_create' && outcome.ok && guardedConversationCreate) {
           if (conversationCreateOperation) deletePendingCreate(conversationCreateOperation.externalId, 'conversation')
           else pendingTaskCreateVerifications.delete(guardedConversationCreate.key)

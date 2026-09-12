@@ -80,6 +80,8 @@ export function useAutonomousGoal(input: {
   }
   const save = (text: string) =>
     guarded(async () => {
+      if (!isTauri())
+        throw new Error('Ziele werden in der Luczor-Desktop-App gespeichert. Die Browseransicht dient zur Vorschau.')
       text = text.trim()
       if (!text || text.length > 6000) throw new Error('Bitte ein Ziel mit 1 bis 6.000 Zeichen eingeben.')
       const id = input.projectId()
@@ -121,8 +123,8 @@ export function useAutonomousGoal(input: {
       }
       if (await persist(id, next, previous.revision)) controller.kick(id)
     })
-  const interrupt = () => controller.interrupt(input.projectId(), 'Deine Nachricht hat Vorrang.')
-  const stop = () => controller.stop(input.projectId(), 'Von dir pausiert.')
+  const interrupt = () => guarded(() => controller.interrupt(input.projectId(), 'Deine Nachricht hat Vorrang.'))
+  const stop = () => guarded(() => controller.stop(input.projectId(), 'Von dir pausiert.'))
   const identityChanged = () => {
     identityGeneration++
     const activeIds: string[] = []

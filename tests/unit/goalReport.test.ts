@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createGoalReportTool, type GoalReport } from '@/services/agents/goalReport'
+import { createGoalReadResultTool, createGoalReportTool, type GoalReport } from '@/services/agents/goalReport'
 
 describe('root goal reports', () => {
   it('records bounded work candidates without approving a goal or returning private details', async () => {
@@ -56,15 +56,39 @@ describe('root goal reports', () => {
 
   it('records the independent review as a report only', async () => {
     const report = vi.fn<(value: GoalReport) => void>()
-    await createGoalReportTool({ phase: 'review', report }).execute(
+    await createGoalReportTool({ phase: 'review', report }, () => [{ tool: 'fs_read', callId: 'read-1' }]).execute(
       { status: 'completed', summary: 'Abnahmekriterien geprüft', evidence: 'Testausgabe: 8/8; Revision abc123.' },
       { projectId: 'project-1' }
     )
     expect(report).toHaveBeenCalledWith({
       status: 'completed',
       summary: 'Abnahmekriterien geprüft',
-      evidence: 'Testausgabe: 8/8; Revision abc123.',
+      evidence: 'Testausgabe: 8/8; Revision abc123.\nGeprüfte Leseaufrufe dieser Runde: fs_read (read-1)',
     })
+  })
+
+  it('rejects a completion claim with invented evidence but no observation receipt', async () => {
+    const report = vi.fn()
+    await expect(
+      createGoalReportTool({ phase: 'review', report }).execute(
+        { status: 'completed', summary: 'Done', evidence: 'I claim everything passed' },
+        { projectId: 'project-1' }
+      )
+    ).rejects.toThrow('erfolgreich lesen')
+    expect(report).not.toHaveBeenCalled()
+  })
+
+  it('captures the actual public text immutably and bounds the returned data', async () => {
+    const tracking = { phase: 'review' as const, report: vi.fn(), candidateText: 'PUBLIC ANSWER' + 'x'.repeat(16000) }
+    const reader = createGoalReadResultTool(tracking)!
+    tracking.candidateText = 'MUTATED STORE'
+    const result = (await reader.execute({}, { projectId: 'project-1' })) as { content: string; truncated: boolean }
+    expect(reader.dataHandling).toBe('ephemeral')
+    expect(result.content).toHaveLength(16000)
+    expect(result.content).toContain('PUBLIC ANSWER')
+    expect(result.truncated).toBe(true)
+    expect(createGoalReadResultTool({ ...tracking, phase: 'work' })).toBeUndefined()
+    expect(createGoalReadResultTool({ ...tracking, candidateText: '' })).toBeUndefined()
   })
 
   it.each([

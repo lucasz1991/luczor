@@ -1438,8 +1438,18 @@ async function send(
   miniInput?: { text: string; projectId: string },
   goalInput?: { state: GoalRunState; signal: AbortSignal }
 ): Promise<GoalStepResult | undefined> {
-  if (!goalInput && autonomousGoal.running.value) await autonomousGoal.interrupt()
   const pid = activeProjectId.value
+  const submittedText = miniInput?.text ?? input.value
+  if (!goalInput && autonomousGoal.running.value) {
+    const admission = executionGate.capture()
+    await autonomousGoal.interrupt()
+    try {
+      executionGate.assert(admission)
+    } catch {
+      return
+    }
+    if (activeProjectId.value !== pid || (!miniInput && input.value !== submittedText)) return
+  }
   const turnThinking = resume?.checkpoint.thinkingTier
     ? { thinkingTier: resume.checkpoint.thinkingTier, thinkingConfig: resume.checkpoint.thinkingConfig }
     : captureThinking(thinkingTier.value)
@@ -1451,7 +1461,7 @@ async function send(
     modelUsageSettings.value.externalEnabled && !resume ? chatRouteMode.value : 'local'
   const externalFallbackAllowed = turnRouteMode !== 'local'
   const turnTeamPreset = teamPresetForRouteMode(turnRouteMode)
-  const rawText = resume?.checkpoint.objective ?? (miniInput?.text ?? input.value).trim()
+  const rawText = resume?.checkpoint.objective ?? submittedText.trim()
   if (!rawText || conversationBusy.value) return
   if (miniInput && miniInput.projectId !== pid) throw new Error('Der Projektchat wurde inzwischen gewechselt.')
   sendAdmission.value = true
@@ -1739,6 +1749,11 @@ async function send(
         goalTracking: goalInput
           ? {
               phase: goalInput.state.phase,
+              candidateText:
+                goalInput.state.phase === 'review'
+                  ? mutations.getProjectMessages(pid).find(message => message.id === goalInput.state.lastMessageId)
+                      ?.content
+                  : undefined,
               report: report => {
                 goalReport = report
               },
