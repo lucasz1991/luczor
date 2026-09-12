@@ -809,11 +809,11 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               const { prepareExternalSpecialists } = await import('@/services/agents/externalSpecialists')
               const source = opts.externalBaseMessages!
               const indices = task.context_indices ?? source.map((_, index) => index)
-            if (!indices.length || indices.some(index => !source.at(index)))
+              if (!indices.length || indices.some(index => !source.at(index)))
                 throw new Error('Invalid external context selection.')
               const prepared = await prepareExternalSpecialists({
                 projectId,
-              messages: indices.map(index => source.at(index)!),
+                messages: indices.map(index => source.at(index)!),
                 roles: [task.role],
                 preset: task.role === 'planning' ? 'budget' : opts.agentTeamPreset,
                 tools: task.tools,

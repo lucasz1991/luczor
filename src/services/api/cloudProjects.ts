@@ -373,6 +373,27 @@ export async function listCloudProjects(): Promise<CloudProjectListItem[]> {
   throw new Error('Die globale Projektliste überschreitet die zulässige Seitengröße.')
 }
 
+/** Resolve an uncertain acknowledgement by comparing the server's content, never by retrying a blind overwrite. */
+async function writeSnapshot(current: Session, projectId: number, expectedRevision: number, snapshot: CloudProjectSnapshot, expectedHash: string): Promise<CloudProjectDocument> {
+  if (!Number.isSafeInteger(projectId) || projectId < 1) throw new Error('Ungültige Server-Projekt-ID.')
+  const path = `/projects/${projectId}/cloud`
+  let remote: CloudProjectDocument
+  try {
+    remote = document((await request<{ data: CloudProjectDocument }>(current, path, 'PUT', { expected_revision: expectedRevision, snapshot })).data)
+  } catch (error) {
+    current.assertCurrent()
+    const status = (error as { status?: number }).status
+    if (status !== 0 && status !== 409 && !(status && status >= 500)) throw error
+    remote = document((await request<{ data: CloudProjectDocument }>(current, path)).data)
+    const remoteHash = await fingerprint(remote.snapshot)
+    // eslint-disable-next-line security/detect-possible-timing-attacks -- non-secret content equality
+    if (remoteHash !== expectedHash || remote.revision <= expectedRevision) throw error
+  }
+  current.assertCurrent()
+  if (remote.project_id !== projectId || remote.revision <= expectedRevision) throw new Error('Widersprüchliche Server-Projektrevision.')
+  return remote
+}
+
 /** First publication is explicit. Existing projects from other devices are never claimed by matching names. */
 export function publishCloudProject(id: string): Promise<void> {
   return serialize(async () => {
@@ -388,14 +409,7 @@ export function publishCloudProject(id: string): Promise<void> {
       name: local.name,
     })
     current.assertCurrent()
-    const remote = document(
-      (
-        await request<{ data: CloudProjectDocument }>(current, `/projects/${created.data.id}/cloud`, 'PUT', {
-          expected_revision: 0,
-          snapshot,
-        })
-      ).data
-    )
+    const remote = await writeSnapshot(current, created.data.id, 0, snapshot, hash)
     await saveLink(current, local, remote, hash)
   })
 }
@@ -469,14 +483,7 @@ async function synchronizeProject(current: Session, id: string) {
     await applyRemote(current, local, remote, baseline)
     // eslint-disable-next-line security/detect-possible-timing-attacks -- public content equality
   } else if (hash !== local.cloud.fingerprint) {
-    const updated = document(
-      (
-        await request<{ data: CloudProjectDocument }>(current, `/projects/${local.cloud.projectId}/cloud`, 'PUT', {
-          expected_revision: local.cloud.revision,
-          snapshot,
-        })
-      ).data
-    )
+    const updated = await writeSnapshot(current, local.cloud.projectId, local.cloud.revision, snapshot, hash)
     await saveLink(current, local, updated, hash)
   } else setStatus(id, 'synced', `Abgeglichen · Version ${remote.revision}`)
 }

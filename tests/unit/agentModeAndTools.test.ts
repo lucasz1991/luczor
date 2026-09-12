@@ -21,7 +21,9 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/services/agents/chatOrchestration', () => ({ runChatAgentTeam: mocks.runChatAgentTeam }))
-vi.mock('@/services/agents/externalSpecialists', () => ({ prepareExternalSpecialists: mocks.prepareExternalSpecialists }))
+vi.mock('@/services/agents/externalSpecialists', () => ({
+  prepareExternalSpecialists: mocks.prepareExternalSpecialists,
+}))
 vi.mock('@/services/openrouter.service', () => ({
   OpenRouterService: { streamChatWithTools: mocks.streamChatWithTools },
 }))
@@ -209,13 +211,31 @@ describe('agent mode and tool reliability', () => {
     const previous = modelUsageSettings.value
     modelUsageSettings.value = { ...previous, externalEnabled: true }
     let finish!: (value: unknown) => void
-    const pending = new Promise(resolve => { finish = resolve })
+    const pending = new Promise(resolve => {
+      finish = resolve
+    })
     const execute = vi.fn(() => pending)
     mocks.prepareExternalSpecialists.mockResolvedValue({ roles: ['research'], execute })
-    const call = { id: 'assist1', name: 'agent_assist', arguments: { task: 'PRIVATE LOCAL LABEL', role: 'research', target: 'external' } }
-    mocks.streamChatWithTools.mockResolvedValueOnce({ content: '', toolCalls: [call], rawToolCalls: [{ id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } }], finishReason: 'tool_calls' })
+    const call = {
+      id: 'assist1',
+      name: 'agent_assist',
+      arguments: { task: 'PRIVATE LOCAL LABEL', role: 'research', target: 'external' },
+    }
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce({
+        content: '',
+        toolCalls: [call],
+        rawToolCalls: [
+          { id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } },
+        ],
+        finishReason: 'tool_calls',
+      })
       .mockImplementationOnce(async () => {
-        finish({ role: 'research', output: 'Checked result', tokenUsage: { inputTokens: 2, outputTokens: 3, totalTokens: 5, rounds: 1, source: 'reported' } })
+        finish({
+          role: 'research',
+          output: 'Checked result',
+          tokenUsage: { inputTokens: 2, outputTokens: 3, totalTokens: 5, rounds: 1, source: 'reported' },
+        })
         return { content: 'Provisional response', toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
       })
       .mockImplementationOnce(async (request: InferenceRequest) => {
@@ -225,10 +245,20 @@ describe('agent mode and tool reliability', () => {
         return { content: 'Combined final answer', toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
       })
     try {
-      const response = await runAgent({ projectId: 'project-2', baseMessages: [{ role: 'system', content: 'PRIVATE LOCAL CONTEXT' }, { role: 'user', content: 'Inspect options' }],
-        externalBaseMessages: [{ role: 'user', content: 'PUBLIC CONTEXT' }], contextEgress: 'external_allowed', agentTeamPreset: 'free',
-        mode: 'act', agentMode: true, maxRounds: 2,
-        inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools } })
+      const response = await runAgent({
+        projectId: 'project-2',
+        baseMessages: [
+          { role: 'system', content: 'PRIVATE LOCAL CONTEXT' },
+          { role: 'user', content: 'Inspect options' },
+        ],
+        externalBaseMessages: [{ role: 'user', content: 'PUBLIC CONTEXT' }],
+        contextEgress: 'external_allowed',
+        agentTeamPreset: 'free',
+        mode: 'act',
+        agentMode: true,
+        maxRounds: 2,
+        inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+      })
       expect(mocks.prepareExternalSpecialists).toHaveBeenCalledOnce()
       expect(response.finalText).toBe('Combined final answer')
       expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(3)
@@ -236,7 +266,9 @@ describe('agent mode and tool reliability', () => {
       expect(JSON.stringify(mocks.prepareExternalSpecialists.mock.calls)).not.toContain('PRIVATE')
       expect(response.specialistOutcomes).toHaveLength(1)
       expect(response.tokenUsage.totalTokens).toBeGreaterThanOrEqual(5)
-    } finally { modelUsageSettings.value = previous }
+    } finally {
+      modelUsageSettings.value = previous
+    }
   })
 
   it('retains a resumable checkpoint at the limit without starting a team', async () => {
