@@ -87,6 +87,48 @@ const durableTaskCreate = {
 } as const
 
 describe('agent mode and tool reliability', () => {
+  it.each(['balanced', 'ultra'] as const)(
+    'preserves successful tools when %s transport aborts without a stop signal',
+    async thinkingTier => {
+      mocks.streamChatWithTools
+        .mockResolvedValueOnce(toolCallResult)
+        .mockRejectedValueOnce(new DOMException('PRIVATE transport detail', 'AbortError'))
+      const signal = new AbortController().signal
+      const result = await runAgent({
+        projectId: 'project-2',
+        mode: 'act',
+        thinkingTier,
+        signal,
+        baseMessages: [{ role: 'user', content: 'Lies den Projektzustand und analysiere ihn.' }],
+        maxRounds: 3,
+        inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+      })
+      expect(signal.aborted).toBe(false)
+      expect(result.interrupted).toMatchObject({ code: 'runtime_transport_interrupted', round: 2 })
+      expect(result.toolSuccesses).toBe(1)
+      expect(result.continuation).toBeDefined()
+      expect(result.finalText).toContain('Modellverbindung')
+      expect(result.finalText).not.toContain('PRIVATE')
+      expect(mocks.execute).toHaveBeenCalledOnce()
+      expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(2)
+    }
+  )
+
+  it('reports a first-round unsolicited abort as a transport failure', async () => {
+    mocks.streamChatWithTools.mockRejectedValueOnce(new DOMException('opaque network interruption', 'AbortError'))
+    await expect(
+      runAgent({
+        projectId: 'project-2',
+        mode: 'observe',
+        thinkingTier: 'ultra',
+        toolAccess: 'none',
+        baseMessages: [{ role: 'user', content: 'Hallo' }],
+        inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+      })
+    ).rejects.toMatchObject({ name: 'LocalInferenceError', code: 'runtime_transport_interrupted' })
+    expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+  })
+
   it.each(['', 'Der erste geprüfte Befund liegt vor.'])(
     'retains a first-round control interruption and its public partial text: %s',
     async partial => {

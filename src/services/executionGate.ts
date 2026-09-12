@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { LuczorMode } from '@/services/inference/types'
+import { executionAbortReason, type ExecutionAbortCode } from '@/services/inference/interruption'
 
 export type ExecutionControls = { mode: LuczorMode; killSwitch: boolean; scope: string }
 export type ExecutionTicket = Readonly<{ sessionId: string; generation: number; signal: AbortSignal }>
@@ -13,15 +14,20 @@ export class ExecutionGate {
 
   update(controls: ExecutionControls): boolean {
     if (JSON.stringify(controls) === JSON.stringify(this.controls)) return false
-    this.controller.abort()
+    const code = controls.killSwitch
+      ? 'execution_kill_switch'
+      : controls.scope !== this.controls.scope
+        ? 'execution_scope_changed'
+        : 'execution_mode_changed'
+    this.controller.abort(executionAbortReason(code))
     this.controller = new AbortController()
     this.controls = { ...controls }
     this.generation++
     return true
   }
 
-  invalidate(): void {
-    this.controller.abort()
+  invalidate(code: ExecutionAbortCode = 'execution_session_changed'): void {
+    this.controller.abort(executionAbortReason(code))
     this.controller = new AbortController()
     this.generation++
   }
@@ -74,12 +80,12 @@ export function updateExecutionControls(controls: ExecutionControls): void {
   if (changed) syncNativeGate()
 }
 
-export function invalidateExecution(): void {
+export function invalidateExecution(reason?: unknown): void {
   if (!initialized) {
     initialized = true
     syncNativeGate()
   }
-  executionGate.invalidate()
+  executionGate.invalidate(reason === 'execution_workspace_changed' ? reason : 'execution_session_changed')
   invalidationListeners.forEach(listener => listener())
   syncNativeGate()
 }

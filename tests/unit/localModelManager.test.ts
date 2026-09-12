@@ -247,9 +247,49 @@ describe('LocalModelManager runtime safety', () => {
     controller.abort()
 
     await expect(turn).rejects.toMatchObject({ name: 'AbortError' })
-    expect(cancel).toHaveBeenCalledWith('request-abort', catalogBinding)
+    expect(cancel).toHaveBeenCalledExactlyOnceWith('request-abort', catalogBinding)
     expect(manager.getHealth(model)).toMatchObject({ state: 'ready', consecutiveFailures: 0 })
   })
+
+  it.each(['', 'Bereits sichtbare Antwort'])(
+    'classifies an unsignaled transport AbortError and retains partial-output evidence (%s)',
+    async partial => {
+      const model = await release()
+      const controller = new AbortController()
+      const transport: LocalRuntimeTransport = {
+        stream: vi
+          .fn()
+          .mockImplementationOnce(async (_model, request) => {
+            request.onToken?.(partial)
+            throw new DOMException('Private transport diagnostic', 'AbortError')
+          })
+          .mockResolvedValueOnce(successfulResult),
+        cancel: vi.fn(),
+        stop: vi.fn(),
+      }
+      const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
+      const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+      const onToken = vi.fn()
+      await expect(
+        gateway.streamChatWithTools({ messages: [], signal: controller.signal, onToken })
+      ).rejects.toMatchObject({
+        name: 'LocalInferenceError',
+        code: 'runtime_transport_interrupted',
+        retryable: true,
+        partialOutput: !!partial,
+        message: 'Die lokale Modellverbindung wurde unerwartet unterbrochen.',
+      })
+      expect(controller.signal.aborted).toBe(false)
+      expect(transport.cancel).not.toHaveBeenCalled()
+      expect(transport.stop).not.toHaveBeenCalled()
+      expect(onToken).toHaveBeenCalledWith(partial)
+      expect(manager.getHealth(model)).toMatchObject({
+        lastErrorCode: 'runtime_transport_interrupted',
+        consecutiveFailures: 1,
+      })
+      await expect(gateway.streamChatWithTools({ messages: [] })).resolves.toMatchObject({ content: 'OK' })
+    }
+  )
 
   it('queues concurrent local requests instead of failing with runtime_busy', async () => {
     const model = await release()
@@ -281,6 +321,116 @@ describe('LocalModelManager runtime safety', () => {
     finishFirst()
     await expect(Promise.all([first, second])).resolves.toHaveLength(2)
     expect(transport.stream).toHaveBeenCalledTimes(2)
+  })
+
+  it('coalesces cancellation and drains the first native IPC before admitting the next stream', async () => {
+    const model = await release()
+    const events: string[] = []
+    let completeCancellation!: () => void
+    const cancellation = new Promise<void>(resolve => {
+      completeCancellation = resolve
+    })
+    let cancellationCalls = 0
+    let requestSequence = 0
+    const transport: LocalRuntimeTransport = {
+      stream: vi.fn(async (_model, request) => {
+        events.push(`stream:${request.requestId}`)
+        if (request.requestId === 'request-1') {
+          return new Promise<InferenceResult>((_resolve, reject) => {
+            request.signal!.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), {
+              once: true,
+            })
+          })
+        }
+        return successfulResult
+      }),
+      cancel: vi.fn(async () => {
+        cancellationCalls += 1
+        // The old double-dispatch path could await the second (fast) IPC and
+        // release the slot while this first native cancellation was still pending.
+        if (cancellationCalls === 1) await cancellation
+        events.push('cancel:finished')
+      }),
+      stop: vi.fn(),
+    }
+    const manager = new LocalModelManager(
+      transport,
+      () => new Date('2026-08-30T12:30:00Z'),
+      () => `request-${++requestSequence}`
+    )
+    const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+    const controller = new AbortController()
+    const first = gateway.streamChatWithTools({ messages: [], signal: controller.signal }).catch(error => error)
+    controller.abort()
+    const sameCancellation = manager.cancel('request-1', catalogBinding)
+    const second = gateway.streamChatWithTools({ messages: [] })
+    try {
+      await new Promise(resolve => setTimeout(resolve, 0))
+      expect(transport.cancel).toHaveBeenCalledExactlyOnceWith('request-1', catalogBinding)
+      expect(transport.stream).toHaveBeenCalledTimes(1)
+      expect(events).toEqual(['stream:request-1'])
+    } finally {
+      completeCancellation()
+    }
+    await sameCancellation
+    await expect(first).resolves.toMatchObject({ name: 'AbortError' })
+    await expect(second).resolves.toMatchObject({ content: 'OK' })
+    expect(events).toEqual(['stream:request-1', 'cancel:finished', 'stream:request-2'])
+    expect(transport.stop).not.toHaveBeenCalled()
+    expect(manager.getHealth(model).consecutiveFailures).toBe(0)
+  })
+
+  it('does not redispatch stale cancellation after a request has finished', async () => {
+    const model = await release()
+    let sequence = 0
+    const transport: LocalRuntimeTransport = {
+      stream: vi.fn(async () => successfulResult),
+      cancel: vi.fn(),
+      stop: vi.fn(),
+    }
+    const manager = new LocalModelManager(
+      transport,
+      () => new Date('2026-08-30T12:30:00Z'),
+      () => `request-${++sequence}`
+    )
+    const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+    await gateway.streamChatWithTools({ messages: [] })
+    await manager.cancel('request-1', catalogBinding)
+    await gateway.streamChatWithTools({ messages: [] })
+    expect(transport.cancel).not.toHaveBeenCalled()
+    expect(transport.stream).toHaveBeenCalledTimes(2)
+    expect(transport.stop).not.toHaveBeenCalled()
+  })
+
+  it('settles a rejected cancel once without deadlocking the next request', async () => {
+    const model = await release()
+    const controller = new AbortController()
+    const transport: LocalRuntimeTransport = {
+      stream: vi
+        .fn()
+        .mockImplementationOnce(
+          async (_model, request) =>
+            new Promise<InferenceResult>((_resolve, reject) => {
+              request.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), {
+                once: true,
+              })
+            })
+        )
+        .mockResolvedValueOnce(successfulResult),
+      cancel: vi.fn(async () => {
+        throw new Error('Native cancel rejected')
+      }),
+      stop: vi.fn(),
+    }
+    const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
+    const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+    const first = gateway.streamChatWithTools({ messages: [], signal: controller.signal }).catch(error => error)
+    controller.abort()
+    const second = gateway.streamChatWithTools({ messages: [] })
+    await expect(first).resolves.toMatchObject({ name: 'AbortError' })
+    await expect(second).resolves.toMatchObject({ content: 'OK' })
+    expect(transport.cancel).toHaveBeenCalledOnce()
+    expect(transport.stop).not.toHaveBeenCalled()
   })
 
   it('treats a catalog-boundary abort as ownership invalidation instead of model failure', async () => {
@@ -318,6 +468,7 @@ describe('LocalModelManager runtime safety', () => {
     manager.invalidateCatalogBoundary()
 
     await expect(turn).rejects.toMatchObject({ name: 'AbortError' })
+    expect(transport.cancel).toHaveBeenCalledExactlyOnceWith('request-boundary', catalogBinding)
     expect(onToken).toHaveBeenCalledTimes(1)
     expect(onToken).toHaveBeenCalledWith('visible-before-rotation')
     expect(onToken).not.toHaveBeenCalledWith('secret-after-rotation')

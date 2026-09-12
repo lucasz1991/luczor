@@ -232,13 +232,13 @@ mod tests {
         assert_eq!(usage.output_tokens, 22704);
         assert_eq!(usage.omitted_messages, 0);
         assert_eq!(body["messages"], history);
-        assert_eq!(body["reasoning_budget_tokens"], 22704 - 16384 - 64);
+        assert_eq!(body["reasoning_budget_tokens"], 18112);
         assert_eq!(counts, 2);
         assert!(usage.input_tokens + usage.output_tokens + 64 <= usage.context_tokens);
     }
 
     #[test]
-    fn adaptive_fit_reduces_answer_only_when_thinking_no_longer_fits() {
+    fn adaptive_fit_reserves_only_public_answer_when_available_space_is_tiny() {
         let mut body = json!({"max_tokens":81984,"messages":[{"role":"user","content":"current"}],"chat_template_kwargs":{}});
         let plan = super::super::reasoning_budget::Plan::new(
             super::super::reasoning_budget::ThinkingTier::Ultra,
@@ -253,14 +253,57 @@ mod tests {
             32768,
             |candidate| {
                 plan.apply(candidate)?;
-                Ok::<u64, String>(32000)
+                Ok::<u64, String>(32448)
             },
             || "does not fit".to_string(),
         )
         .unwrap();
-        assert_eq!(usage.output_tokens, 704);
+        assert_eq!(usage.output_tokens, 256);
         assert_eq!(body["reasoning_effort"], "none");
         assert_eq!(body["reasoning_budget_tokens"], 0);
+    }
+
+    #[test]
+    fn ultra_with_22207_input_preserves_thinking_and_answer_without_context_growth() {
+        use super::super::reasoning_budget::{Plan, Session, ThinkingTier};
+        for live in [false, true] {
+            let plan = Plan::new(ThinkingTier::Ultra, None, "auto", None, live).unwrap();
+            let mut body = json!({"max_tokens": plan.output_ceiling,
+                "messages":[{"role":"user","content":"Current public request"}],
+                "model":"same-model", "chat_template_kwargs":{}});
+            let original_messages = body["messages"].clone();
+            let usage = fit_adaptive_context(
+                &mut body,
+                32768,
+                |candidate| {
+                    plan.apply(candidate)?;
+                    Ok::<u64, String>(22207)
+                },
+                || "does not fit".to_string(),
+            )
+            .unwrap();
+            let mut session = Session::new("ultra-fit", &plan, usage.output_tokens as u32, 7);
+            let progress = session.snapshot();
+            assert_eq!(usage.output_tokens, 10497);
+            assert_eq!(body["reasoning_budget_tokens"], 8347);
+            assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+            assert_eq!(progress.soft_target_tokens, 8192);
+            assert_eq!(progress.thinking_limit_tokens, 8347);
+            assert_eq!(progress.response_reserve_tokens, 2086);
+            assert_eq!(progress.output_limit_tokens, 10497);
+            assert_eq!(progress.requested_thinking_limit_tokens, 65536);
+            assert_eq!(
+                usage.input_tokens + usage.output_tokens + 64,
+                usage.context_tokens
+            );
+            assert_eq!(usage.omitted_messages, 0);
+            assert_eq!(body["messages"], original_messages);
+            assert_eq!(body["model"], "same-model");
+            assert_eq!(growth_target(32768, 262144, usage.input_tokens), None);
+            let metadata = serde_json::to_string(&progress).unwrap();
+            assert!(!metadata.contains("Current public request"));
+            assert!(!metadata.contains("reasoning_content"));
+        }
     }
 
     #[test]

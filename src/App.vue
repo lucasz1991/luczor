@@ -19,6 +19,14 @@ import AutonomousGoalControl from './components/projects/AutonomousGoalControl.v
 import { useAutonomousGoal } from '@/composables/useAutonomousGoal'
 import type { GoalRunState, GoalStepResult } from '@/services/goals/autonomousGoal'
 import { useCloudProjects } from '@/composables/useCloudProjects'
+import { stopCapturedChatRun } from '@/services/chatRunLifecycle'
+import { createWorkspaceRefresh, watchWorkspaceBinding } from '@/services/workspaceRefresh'
+import {
+  executionAbortReason,
+  interruptionCode,
+  interruptionMessage,
+  unexpectedInferenceInterruption,
+} from '@/services/inference/interruption'
 import { canAccessCloudProject } from '@/services/cloudProjectAccess'
 import AgentHub from './components/agents/AgentHub.vue'
 import PlanningWorkspace from './components/planning/PlanningWorkspace.vue'
@@ -353,6 +361,7 @@ function openSettings(tab: SettingsStartTab = 'server') {
 
 const abortController = ref<AbortController | null>(null)
 let cancelCurrent: null | (() => Promise<void>) = null
+let chatRunGeneration = 0
 
 function openNotificationCenter() {
   openSettings('notifications')
@@ -758,28 +767,36 @@ const projectSummaries = computed<any[]>(() => {
  * Core actions
  * ------------------------------------------------- */
 async function stopGenerating(pauseGoal = true) {
-  if (pauseGoal && autonomousGoal.model.value?.active) await autonomousGoal.stop()
-  finishActiveTurn('canceled')
-  stopVoiceOutput()
-  stopAssistantLoading()
-
-  // Unblock any tool call awaiting user approval (rejects them).
-  rejectAllApprovals()
-
-  try {
-    stopSfx('loading')
-  } catch {}
-
-  if (cancelCurrent) {
-    try {
-      await cancelCurrent()
-    } catch {}
-    cancelCurrent = null
-  }
-
-  abortController.value?.abort()
-  abortController.value = null
-  sending.value = false
+  await stopCapturedChatRun({
+    capture: () => ({
+      generation: chatRunGeneration,
+      controller: abortController.value,
+      cancel: cancelCurrent,
+      turn: activeTurn.value,
+    }),
+    isCurrent: snapshot =>
+      snapshot.generation === chatRunGeneration &&
+      snapshot.controller === abortController.value &&
+      snapshot.cancel === cancelCurrent &&
+      snapshot.turn === activeTurn.value,
+    abortReason: executionAbortReason('user_stop'),
+    pauseGoal: pauseGoal && autonomousGoal.model.value?.active ? () => autonomousGoal.stop() : undefined,
+    finishCurrent: () => {
+      finishActiveTurn('canceled')
+      stopVoiceOutput()
+      stopAssistantLoading()
+      // Only approvals belonging to the captured current turn may be rejected.
+      rejectAllApprovals()
+      try {
+        stopSfx('loading')
+      } catch {}
+    },
+    clearCurrent: () => {
+      cancelCurrent = null
+      abortController.value = null
+      sending.value = false
+    },
+  })
 }
 
 function openProject(id: string) {
@@ -1106,16 +1123,41 @@ const showAudit = ref(false)
 // Context panel (goals + summaries) is collapsed by default for a chat-first UI.
 const showContext = ref(false)
 const activeWorkspace = ref<ProjectWorkspaceBinding | null>(null)
-watch(
-  () => [activeWorkspace.value?.rootPath, activeWorkspace.value?.updatedAt],
+const workspaceRefresh = createWorkspaceRefresh({
+  projectId: () => activeProjectId.value,
+  principal: resolveWorkspacePrincipalId,
+  load: getProjectWorkspace,
+  apply: binding => {
+    activeWorkspace.value = binding
+  },
+  failed: error => {
+    activeWorkspace.value = null
+    workspaceMessage.value = error instanceof Error ? error.message : String(error)
+  },
+})
+watchWorkspaceBinding(
+  () => activeWorkspace.value,
   () => {
     // Chat continuations may contain workspace-scoped mutation history. The
     // principal/project task ledger is separate and remains available.
+    workspaceRefresh.invalidate()
     continuations.value = {}
-    invalidateExecution()
-  },
-  { flush: 'sync' }
+    invalidateExecution('execution_workspace_changed')
+  }
 )
+watch(activeProjectId, () => workspaceRefresh.invalidate(), { flush: 'sync' })
+const invalidateWorkspaceIdentity = () => {
+  workspaceRefresh.invalidate()
+  activeWorkspace.value = null
+}
+const refreshWorkspaceIdentity = () => void refreshActiveWorkspace()
+window.addEventListener('luczor:api-identity-changing', invalidateWorkspaceIdentity)
+window.addEventListener('luczor:api-identity-changed', refreshWorkspaceIdentity)
+onBeforeUnmount(() => {
+  workspaceRefresh.dispose()
+  window.removeEventListener('luczor:api-identity-changing', invalidateWorkspaceIdentity)
+  window.removeEventListener('luczor:api-identity-changed', refreshWorkspaceIdentity)
+})
 const workspaceBusy = ref(false)
 const workspaceMessage = ref('')
 const localGraphStatus = ref<RepositoryGraphStatus>({
@@ -1168,12 +1210,7 @@ async function requireRepositoryPrincipalId(): Promise<string> {
 }
 
 async function refreshActiveWorkspace() {
-  try {
-    activeWorkspace.value = await getProjectWorkspace(activeProjectId.value)
-  } catch (error) {
-    activeWorkspace.value = null
-    workspaceMessage.value = error instanceof Error ? error.message : String(error)
-  }
+  await workspaceRefresh.refresh()
 }
 
 async function refreshMemoryCandidates() {
@@ -1464,6 +1501,7 @@ async function send(
   const rawText = resume?.checkpoint.objective ?? submittedText.trim()
   if (!rawText || conversationBusy.value) return
   if (miniInput && miniInput.projectId !== pid) throw new Error('Der Projektchat wurde inzwischen gewechselt.')
+  const turnGeneration = ++chatRunGeneration
   sendAdmission.value = true
   try {
     const planningCommand = planningCommandObjective(rawText)
@@ -1524,7 +1562,7 @@ async function send(
     void commentarySpeech.enqueueStatus({ scope: speechScope, key: 'context', text: 'Kontext vorbereiten' })
     activeTurn.value = { projectId: pid, messageId: assistant.id }
     abortController.value = abort
-    cancelCurrent = async () => abort.abort()
+    cancelCurrent = async () => abort.abort(executionAbortReason('user_stop'))
     let checkpointMemoryPrincipal = ''
     let latestPublicCheckpoint = ''
 
@@ -1954,19 +1992,25 @@ async function send(
       }
     } catch (e: any) {
       progressiveSpeech.cancel()
-      try {
-        stopSfx('loading')
-      } catch {}
-      stopAssistantLoading()
+      const ownsCurrentTurn = turnGeneration === chatRunGeneration && activeTurn.value?.messageId === assistant.id
+      if (ownsCurrentTurn) {
+        try {
+          stopSfx('loading')
+        } catch {}
+        stopAssistantLoading()
+      }
 
       const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
       const currentContent = safeTrim(current?.content)
 
-      if (e?.name === 'AbortError' || turnExecution.signal.aborted) {
+      if (turnExecution.signal.aborted) {
         finishChatActivity(chatActivities.value[assistant.id]!, 'canceled')
-        setStatus('idle')
+        if (ownsCurrentTurn) setStatus('idle')
+        void recordDebugEvent('warn', 'assistant_request_interrupted', {
+          code: interruptionCode(turnExecution.signal),
+        })
         mutations.patchMessage(pid, assistant.id, {
-          content: currentContent || 'Abgebrochen.',
+          content: currentContent || interruptionMessage(turnExecution.signal),
           meta: { ...(current?.meta ?? {}), isLoading: false } as any,
         })
         if (goalInput) throw new DOMException('Zielbearbeitung unterbrochen.', 'AbortError')
@@ -1974,17 +2018,24 @@ async function send(
       }
 
       finishChatActivity(chatActivities.value[assistant.id]!, 'failed')
-      setStatus('error')
+      if (ownsCurrentTurn) setStatus('error')
+      const transportInterruption = unexpectedInferenceInterruption(e)
+      if (transportInterruption)
+        void recordDebugEvent('warn', 'assistant_request_interrupted', { code: transportInterruption.code })
       mutations.patchMessage(pid, assistant.id, {
-        content: [currentContent, `[Fehler] ${e?.message ?? String(e)}`].filter(Boolean).join('\n\n'),
+        content: [currentContent, `[Fehler] ${transportInterruption?.message ?? e?.message ?? String(e)}`]
+          .filter(Boolean)
+          .join('\n\n'),
         meta: { ...(current?.meta ?? {}), isLoading: false } as any,
       })
       if (goalInput) throw e
     } finally {
       retainMemoryCheckpoint(latestPublicCheckpoint, true)
-      try {
-        stopSfx('loading')
-      } catch {}
+      if (turnGeneration === chatRunGeneration) {
+        try {
+          stopSfx('loading')
+        } catch {}
+      }
 
       if (abortController.value === abort) {
         abortController.value = null
@@ -1995,7 +2046,7 @@ async function send(
       if (activeThinkingBudget.value?.messageId === assistant.id) activeThinkingBudget.value = null
     }
   } finally {
-    sendAdmission.value = false
+    if (turnGeneration === chatRunGeneration) sendAdmission.value = false
   }
 }
 

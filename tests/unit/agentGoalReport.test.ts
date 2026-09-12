@@ -181,8 +181,9 @@ describe('goal reports in the real agent loop', () => {
       .mockResolvedValueOnce(toolResponse({ status: 'completed', summary: 'Checked', evidence: 'File meets criteria' }))
     const result = await runAgent(options({ goalTracking: { phase: 'review', report }, toolAccess: 'read-only' }))
     expect(execute).toHaveBeenCalledOnce()
-    expect(report.mock.calls.map(([record]) => record.evidence)).toEqual(success
-      ? ['File meets criteria\nGeprüfte Leseaufrufe dieser Runde: fs_read (read-file)'] : [])
+    expect(report.mock.calls.map(([record]) => record.evidence)).toEqual(
+      success ? ['File meets criteria\nGeprüfte Leseaufrufe dieser Runde: fs_read (read-file)'] : []
+    )
     expect(report).toHaveBeenCalledTimes(success ? 1 : 0)
     expect(result.toolFailures).toBe(success ? 0 : 2)
     expect(result.continuation).toBeUndefined()

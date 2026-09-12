@@ -95,9 +95,15 @@ function safeNativeRuntimeFailure(error: unknown): string | undefined {
   return SAFE_NATIVE_RUNTIME_FAILURES.some(pattern => pattern.test(message)) ? message : undefined
 }
 
+type ActiveLocalRequest = {
+  controller: AbortController
+  catalogBinding: LocalCatalogBinding
+  cancellation?: Promise<void>
+}
+
 export class LocalModelManager {
   private readonly health = new Map<string, LocalModelHealth>()
-  private readonly active = new Map<string, { controller: AbortController; catalogBinding: LocalCatalogBinding }>()
+  private readonly active = new Map<string, ActiveLocalRequest>()
   private readonly waiters: Array<{
     epoch: number
     signal?: AbortSignal
@@ -144,8 +150,7 @@ export class LocalModelManager {
     localModelDiagnostics.clear()
     this.boundaryEpoch += 1
     for (const [requestId, active] of this.active) {
-      active.controller.abort()
-      void this.transport.cancel(requestId, active.catalogBinding).catch(() => undefined)
+      void this.cancelActive(requestId, active).catch(() => undefined)
     }
     for (const waiter of this.waiters.splice(0)) {
       if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort)
@@ -186,16 +191,24 @@ export class LocalModelManager {
     })
   }
 
-  async cancel(requestId: string, catalogBinding: LocalCatalogBinding): Promise<void> {
+  async cancel(requestId: string, _catalogBinding: LocalCatalogBinding): Promise<void> {
     const active = this.active.get(requestId)
-    active?.controller.abort()
-    await this.transport.cancel(requestId, active?.catalogBinding ?? catalogBinding)
+    // This manager only cancels its live owner. A late UI request must not send
+    // another native cancellation after that request has already drained.
+    if (active) await this.cancelActive(requestId, active)
+  }
+
+  private cancelActive(requestId: string, active: ActiveLocalRequest): Promise<void> {
+    // Save ownership before dispatch/abort: parent abort, catalog rotation,
+    // explicit cancellation and the stream catch share exactly one IPC call.
+    active.cancellation ??= Promise.resolve().then(() => this.transport.cancel(requestId, active.catalogBinding))
+    active.controller.abort()
+    return active.cancellation
   }
 
   async stop(release: LocalModelReleaseManifest, catalogBinding: LocalCatalogBinding): Promise<void> {
     for (const [requestId, active] of this.active) {
-      active.controller.abort()
-      await this.transport.cancel(requestId, active.catalogBinding).catch(() => undefined)
+      await this.cancelActive(requestId, active).catch(() => undefined)
     }
     await this.transport.stop(release.id, catalogBinding)
     this.health.set(release.id, {
@@ -348,16 +361,16 @@ export class LocalModelManager {
     const operationEpoch = this.boundaryEpoch
     const requestId = this.requestIdFactory()
     const controller = new AbortController()
+    const active: ActiveLocalRequest = { controller, catalogBinding }
     const parentAbort = () => {
-      controller.abort()
       // Tauri invoke cannot consume AbortSignal directly. Propagate the abort
       // immediately. Native idle requests drop their HTTP task while retaining
       // residency; ordinary cancellation keeps its existing stop semantics.
-      void this.transport.cancel(requestId, catalogBinding).catch(() => undefined)
+      void this.cancelActive(requestId, active).catch(() => undefined)
     }
     request.signal?.addEventListener('abort', parentAbort, { once: true })
     if (request.signal?.aborted) parentAbort()
-    this.active.set(requestId, { controller, catalogBinding })
+    this.active.set(requestId, active)
     let partialOutput = false
     this.health.set(release.id, {
       ...previous,
@@ -413,7 +426,7 @@ export class LocalModelManager {
         target: 'local_llama_cpp',
       }
     } catch (error) {
-      if (controller.signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) {
+      if (controller.signal.aborted) {
         if (operationEpoch === this.boundaryEpoch) {
           this.health.set(release.id, {
             ...previous,
@@ -422,7 +435,7 @@ export class LocalModelManager {
             updatedAt: nowIso(this.now),
           })
         }
-        await this.transport.cancel(requestId, catalogBinding).catch(() => undefined)
+        await this.cancelActive(requestId, active).catch(() => undefined)
         throw abortError()
       }
 
@@ -447,7 +460,13 @@ export class LocalModelManager {
       const cooldownUntil = entersCooldown
         ? new Date(this.now().getTime() + release.healthPolicy.cooldownMs).toISOString()
         : undefined
-      const code = error instanceof LocalInferenceError ? error.code : 'runtime_failed'
+      const unexpectedAbort = error instanceof DOMException && error.name === 'AbortError'
+      const code =
+        error instanceof LocalInferenceError
+          ? error.code
+          : unexpectedAbort
+            ? 'runtime_transport_interrupted'
+            : 'runtime_failed'
       if (operationEpoch === this.boundaryEpoch) {
         this.health.set(release.id, {
           modelReleaseId: release.id,
@@ -462,7 +481,9 @@ export class LocalModelManager {
         throw new LocalInferenceError(error.message, error.code, error.retryable, partialOutput || error.partialOutput)
       }
       throw new LocalInferenceError(
-        safeNativeRuntimeFailure(error) ?? 'Die lokale Runtime ist fehlgeschlagen.',
+        unexpectedAbort
+          ? 'Die lokale Modellverbindung wurde unerwartet unterbrochen.'
+          : (safeNativeRuntimeFailure(error) ?? 'Die lokale Runtime ist fehlgeschlagen.'),
         code,
         true,
         partialOutput
@@ -470,6 +491,10 @@ export class LocalModelManager {
     } finally {
       request.signal?.removeEventListener('abort', parentAbort)
       this.active.delete(requestId)
+      // The enclosing stream retains the inference slot until cancellation has
+      // settled as well. Neither a new request nor a foreground lease can race
+      // an untracked cancellation from the previous background request.
+      await active.cancellation?.catch(() => undefined)
     }
   }
 

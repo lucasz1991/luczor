@@ -89,6 +89,7 @@ pub(super) struct Plan {
     pub enabled: bool,
     pub live: bool,
     pub output_ceiling: u32,
+    explicit_answer_only: bool,
 }
 impl Plan {
     pub fn new(
@@ -123,10 +124,35 @@ impl Plan {
                 .unwrap_or(desired)
                 .min(desired)
                 .min(MAX_OUTPUT_TOKENS),
+            // A caller deliberately requesting only a short completion (for
+            // example idle maintenance) must not lose it to reasoning.
+            explicit_answer_only: maximum.is_some_and(|tokens| tokens <= profile.answer),
         })
     }
     fn answer(&self, output: u32) -> u32 {
-        self.profile.answer.min(output)
+        let full_profile = self
+            .profile
+            .limit
+            .saturating_add(self.profile.answer)
+            .saturating_add(END_RESERVE);
+        let usable = output.saturating_sub(END_RESERVE);
+        if !self.enabled
+            || self.explicit_answer_only
+            || output >= full_profile
+            || usable < MIN_ANSWER * 2
+        {
+            return self.profile.answer.min(output);
+        }
+        // Context fitting may leave less output space than the selected tier's
+        // answer reserve alone. Preserve the profile's thinking/answer ratio
+        // within that measured space instead of silently disabling thinking.
+        // This only splits an existing allocation; it never enlarges the KV
+        // window. Keep 256 public tokens and the independent ending reserve.
+        let proportional = u64::from(usable) * u64::from(self.profile.answer)
+            / u64::from(self.profile.limit + self.profile.answer);
+        self.profile
+            .answer
+            .min((proportional as u32).max(MIN_ANSWER))
     }
     pub fn apply(&self, body: &mut Value) -> Result<(), String> {
         let output = body["max_tokens"]
@@ -540,12 +566,49 @@ mod tests {
         let p = Plan::new(ThinkingTier::Ultra, None, "auto", None, true).unwrap();
         let mut body = json!({"max_tokens":30000,"model":"same","chat_template_kwargs":{}});
         p.apply(&mut body).unwrap();
-        assert_eq!(body["reasoning_budget_tokens"], 30000 - 16384 - 64);
+        assert_eq!(body["reasoning_budget_tokens"], 23949);
         body["max_tokens"] = json!(1000);
         p.apply(&mut body).unwrap();
-        assert_eq!(body["reasoning_budget_tokens"], 0);
+        assert_eq!(body["reasoning_budget_tokens"], 680);
         assert_eq!(body["model"], "same");
         assert_eq!(body["max_tokens"], 1000);
+    }
+    #[test]
+    fn adaptive_reservations_keep_body_and_public_session_consistent() {
+        for tier in [
+            ThinkingTier::Fast,
+            ThinkingTier::Balanced,
+            ThinkingTier::Thorough,
+            ThinkingTier::Max,
+            ThinkingTier::Ultra,
+        ] {
+            for live in [false, true] {
+                let plan = Plan::new(tier, None, "auto", None, live).unwrap();
+                for available in [256, 512, 576, 1000, 4096, 10497, 22704, 81984] {
+                    let output = available.min(plan.output_ceiling);
+                    let mut body = json!({"max_tokens": output, "chat_template_kwargs": {}});
+                    plan.apply(&mut body).unwrap();
+                    let session = Session::new("fit", &plan, output, 1);
+                    let progress = &session.progress;
+                    let wire_budget = body["reasoning_budget_tokens"].as_u64().unwrap() as u32;
+                    assert!(progress.response_reserve_tokens >= MIN_ANSWER);
+                    assert!(progress.soft_target_tokens <= progress.thinking_limit_tokens);
+                    if wire_budget > 0 {
+                        assert!(
+                            wire_budget + progress.response_reserve_tokens + END_RESERVE <= output
+                        );
+                        assert_eq!(body["chat_template_kwargs"]["enable_thinking"], true);
+                        assert!(progress.thinking_limit_tokens > 0);
+                    } else {
+                        assert_eq!(progress.thinking_limit_tokens, 0);
+                        assert_eq!(body["reasoning_effort"], "none");
+                    }
+                    if !live {
+                        assert_eq!(wire_budget, progress.thinking_limit_tokens);
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn warning_at_eighty_and_growth_at_ninety_are_based_on_reported_tokens() {

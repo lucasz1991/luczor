@@ -40,6 +40,7 @@ import {
 import type { HybridRoutingSettings } from '@/services/inference/hybridRouter'
 import type { InferenceCapability } from '@/services/inference/capabilities'
 import { LocalInferenceError } from '@/services/inference/localModelManager'
+import { unexpectedInferenceInterruption } from '@/services/inference/interruption'
 import type { InferenceGateway, LuczorMode, ToolChoice, WireMessage } from '@/services/inference/types'
 import { getTool, toOpenAITools, type ToolCategory } from '@/services/tools/registry'
 import type { ToolDataHandling, ToolDef } from '@/services/tools/types'
@@ -1144,8 +1145,11 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
           round: round + 1,
         })
-      if (signal.aborted || (error instanceof DOMException && error.name === 'AbortError')) throw error
+      if (signal.aborted) throw error
       executionGate.assert(execution)
+      const interruption = unexpectedInferenceInterruption(error)
+      if (interruption)
+        error = new LocalInferenceError(interruption.message, interruption.code, true, visibleContent.length > 0)
       const resettableLocalInputFailure =
         error instanceof LocalInferenceError &&
         [
