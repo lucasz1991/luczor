@@ -799,6 +799,125 @@ fn validate_entries(entries: &[Entry]) -> Result<(), String> {
     }
     Ok(())
 }
+#[cfg(any(windows, test))]
+fn link_target_parts(target: &str) -> Result<Vec<String>, String> {
+    // Manifest paths use `/` on every platform. Do not resolve targets through
+    // the filesystem: they may escape the workspace or not exist yet.
+    if target.is_empty()
+        || target.starts_with('/')
+        || target.chars().any(|ch| matches!(ch, '\\' | ':' | '\0'))
+    {
+        return Err("mirror_link_type_unrepresentable".into());
+    }
+    let mut parts = target
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    // A trailing slash requires a directory, including when a link expands
+    // to that target. A final `.` retains that check in the manifest walk.
+    if target.ends_with('/') {
+        parts.push(".".into());
+    }
+    Ok(parts)
+}
+
+#[cfg(any(windows, test))]
+fn windows_link_directory(
+    entry: &Entry,
+    mut lookup: impl FnMut(&str) -> Result<Option<Entry>, String>,
+) -> Result<bool, String> {
+    let hint = |entry: &Entry| {
+        entry
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("directoryLink"))
+            .and_then(|value| value.as_bool())
+    };
+    if let Some(directory) = hint(entry) {
+        return Ok(directory);
+    }
+    let parent = entry
+        .path
+        .rsplit_once('/')
+        .map(|(parent, _)| parent)
+        .unwrap_or("");
+    let mut resolved = parent
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let mut pending = std::collections::VecDeque::from(link_target_parts(
+        entry
+            .target
+            .as_deref()
+            .ok_or("mirror_link_manifest_invalid")?,
+    )?);
+    let mut expansions = 0;
+    // Only immutable manifest records are followed. Resolve intermediate
+    // symlinks before `..`; lexical collapse alone changes POSIX semantics.
+    while let Some(part) = pending.pop_front() {
+        match part.as_str() {
+            "." => continue,
+            ".." => {
+                resolved.pop().ok_or("mirror_link_type_unrepresentable")?;
+                continue;
+            }
+            _ => {}
+        }
+        let path = resolved
+            .iter()
+            .chain(std::iter::once(&part))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("/");
+        let found = lookup(&path)?.ok_or("mirror_link_type_unrepresentable")?;
+        match found.kind {
+            EntryType::Directory => resolved.push(part),
+            EntryType::File if pending.is_empty() => return Ok(false),
+            EntryType::File => return Err("mirror_link_type_unrepresentable".into()),
+            EntryType::Symlink => {
+                if pending.is_empty() {
+                    if let Some(directory) = hint(&found) {
+                        return Ok(directory);
+                    }
+                }
+                expansions += 1;
+                if expansions > 64 {
+                    return Err("mirror_link_type_unrepresentable".into());
+                }
+                for part in link_target_parts(
+                    found
+                        .target
+                        .as_deref()
+                        .ok_or("mirror_link_manifest_invalid")?,
+                )?
+                .into_iter()
+                .rev()
+                {
+                    pending.push_front(part);
+                }
+            }
+        }
+    }
+    Ok(true)
+}
+
+#[cfg(any(windows, test))]
+fn snapshot_link_directory(entry: &Entry, db: &rusqlite::Connection) -> Result<bool, String> {
+    use rusqlite::OptionalExtension;
+    windows_link_directory(entry, |path| {
+        let body: Option<String> = db
+            .query_row("SELECT body FROM entries WHERE path=?1", [path], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(|_| "mirror_snapshot_read_failed")?;
+        body.map(|body| serde_json::from_str(&body).map_err(|_| "mirror_manifest_invalid".into()))
+            .transpose()
+    })
+}
+
 fn materialize_files(
     stage: &Path,
     cache: &Path,
@@ -806,6 +925,23 @@ fn materialize_files(
     check: &impl Fn() -> Result<(), String>,
 ) -> Result<(), String> {
     validate_entries(entries)?;
+    #[cfg(windows)]
+    let link_types = {
+        let by_path = entries
+            .iter()
+            .map(|entry| (entry.path.as_str(), entry))
+            .collect::<BTreeMap<_, _>>();
+        entries
+            .iter()
+            .filter(|entry| entry.kind == EntryType::Symlink)
+            .map(|entry| {
+                windows_link_directory(entry, |path| {
+                    Ok(by_path.get(path).map(|entry| (**entry).clone()))
+                })
+                .map(|directory| (entry.path.as_str(), directory))
+            })
+            .collect::<Result<BTreeMap<_, _>, _>>()?
+    };
     let mut sorted = entries.iter().collect::<Vec<_>>();
     sorted.sort_by_key(|entry| entry.path.split('/').count());
     for entry in &sorted {
@@ -847,16 +983,7 @@ fn materialize_files(
                     .map_err(|_| "mirror_symlink_creation_failed")?;
                 #[cfg(windows)]
                 {
-                    let directory = entry
-                        .metadata
-                        .as_ref()
-                        .and_then(|m| m.get("directoryLink"))
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or_else(|| {
-                            entries.iter().any(|candidate| {
-                                candidate.path == target && candidate.kind == EntryType::Directory
-                            })
-                        });
+                    let directory = link_types[entry.path.as_str()];
                     (if directory {
                         std::os::windows::fs::symlink_dir(target, &path)
                     } else {
@@ -1153,6 +1280,9 @@ fn build_snapshot_tree(
         }
         #[cfg(windows)]
         {
+            if entry.kind == EntryType::Symlink {
+                snapshot_link_directory(&entry, db)?;
+            }
             db.execute(
                 "INSERT INTO mirror_case_keys(path) VALUES(?1)",
                 [entry.path.to_lowercase()],
@@ -1168,6 +1298,16 @@ fn build_snapshot_tree(
         let mut entry: Entry =
             serde_json::from_str(&row.map_err(|_| "mirror_snapshot_read_failed")?)
                 .map_err(|_| "mirror_manifest_invalid")?;
+        #[cfg(windows)]
+        if entry.kind == EntryType::Symlink {
+            let directory = snapshot_link_directory(&entry, db)?;
+            entry
+                .metadata
+                .get_or_insert_with(|| serde_json::json!({}))
+                .as_object_mut()
+                .ok_or("mirror_metadata_invalid")?
+                .insert("directoryLink".into(), serde_json::Value::Bool(directory));
+        }
         if entry.kind == EntryType::Directory {
             entry.mode = None;
             entry.mtime_ms = None;
@@ -1516,6 +1656,163 @@ mod tests {
         let p = std::env::temp_dir().join(format!("luczor-mirror-test-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&p).unwrap();
         p
+    }
+    fn manifest_entry(path: &str, kind: EntryType, target: Option<&str>) -> Entry {
+        Entry {
+            path: path.into(),
+            kind,
+            target: target.map(str::to_owned),
+            size: None,
+            sha256: None,
+            chunks: vec![],
+            mode: None,
+            mtime_ms: None,
+            metadata: None,
+        }
+    }
+    #[test]
+    fn paged_linux_links_resolve_against_their_parent_and_manifest_link_chain() {
+        let temp = temp();
+        let db = snapshot_database(&temp, &uuid::Uuid::new_v4().to_string(), true).unwrap();
+        let mut entries = [
+            "node_modules",
+            "node_modules/.bin",
+            "node_modules/.pnpm",
+            "node_modules/.pnpm/pkg",
+            "node_modules/.pnpm/pkg/node_modules",
+            "node_modules/.pnpm/pkg/node_modules/pkg",
+            "node_modules/.pnpm/pkg/node_modules/pkg/bin",
+            "node_modules/.pnpm/pkg/node_modules/sidecar",
+        ]
+        .into_iter()
+        .map(|path| manifest_entry(path, EntryType::Directory, None))
+        .collect::<Vec<_>>();
+        entries.push(manifest_entry(
+            "node_modules/.pnpm/pkg/node_modules/pkg/bin/tool.js",
+            EntryType::File,
+            None,
+        ));
+        entries.push(manifest_entry(
+            "node_modules/sidecar",
+            EntryType::File,
+            None,
+        ));
+        let directory = manifest_entry(
+            "node_modules/pkg",
+            EntryType::Symlink,
+            Some(".pnpm/pkg/node_modules/pkg"),
+        );
+        let binary = manifest_entry(
+            "node_modules/.bin/tool",
+            EntryType::Symlink,
+            Some("../pkg/bin/tool.js"),
+        );
+        let alias = manifest_entry("0-alias", EntryType::Symlink, Some("node_modules/pkg"));
+        let parent = manifest_entry(
+            "node_modules/.bin/parent",
+            EntryType::Symlink,
+            Some("../pkg/../sidecar"),
+        );
+        entries.extend([
+            directory.clone(),
+            binary.clone(),
+            alias.clone(),
+            parent.clone(),
+        ]);
+        entries.extend((0..1001).map(|index| {
+            manifest_entry(&format!("a-padding-{index:04}"), EntryType::Directory, None)
+        }));
+        for entry in entries {
+            db.execute(
+                "INSERT INTO entries(path,body)VALUES(?1,?2)",
+                rusqlite::params![entry.path, serde_json::to_string(&entry).unwrap()],
+            )
+            .unwrap();
+        }
+        let preceding: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM entries WHERE path<'node_modules'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            preceding > 1000,
+            "Target must be outside the first manifest page"
+        );
+        assert!(snapshot_link_directory(&directory, &db).unwrap());
+        assert!(!snapshot_link_directory(&binary, &db).unwrap());
+        assert!(snapshot_link_directory(&alias, &db).unwrap());
+        // Resolve pkg before '..': collapsing it lexically would find the
+        // different file at node_modules/sidecar instead of this directory.
+        assert!(snapshot_link_directory(&parent, &db).unwrap());
+        drop(db);
+        fs::remove_dir_all(temp).unwrap();
+    }
+    #[test]
+    fn untyped_link_cycles_and_unrepresentable_targets_never_guess_file_links() {
+        let entries = [
+            manifest_entry("a", EntryType::Symlink, Some("b")),
+            manifest_entry("b", EntryType::Symlink, Some("a")),
+            manifest_entry("file", EntryType::File, None),
+        ];
+        for target in [
+            "a",
+            "missing",
+            "../outside",
+            "/outside",
+            "C:\\outside",
+            "file/",
+        ] {
+            let link = manifest_entry("link", EntryType::Symlink, Some(target));
+            assert_eq!(
+                windows_link_directory(&link, |path| Ok(entries
+                    .iter()
+                    .find(|entry| entry.path == path)
+                    .cloned()))
+                .unwrap_err(),
+                "mirror_link_type_unrepresentable",
+                "{target}"
+            );
+        }
+        let mut typed = manifest_entry(
+            "link",
+            EntryType::Symlink,
+            Some("C:\\existing-device-target"),
+        );
+        typed.metadata = Some(serde_json::json!({"directoryLink":true}));
+        assert!(
+            windows_link_directory(&typed, |_| panic!("Explicit type needs no target lookup"))
+                .unwrap()
+        );
+    }
+    #[cfg(windows)]
+    #[test]
+    fn unknown_windows_link_type_is_rejected_before_any_stage_file_is_written() {
+        let temp = temp();
+        let db = snapshot_database(&temp, &uuid::Uuid::new_v4().to_string(), true).unwrap();
+        let mut file = manifest_entry("a-file", EntryType::File, None);
+        file.size = Some(0);
+        file.sha256 = Some(hash(b""));
+        for entry in [
+            file,
+            manifest_entry("z-link", EntryType::Symlink, Some("missing")),
+        ] {
+            db.execute(
+                "INSERT INTO entries(path,body)VALUES(?1,?2)",
+                rusqlite::params![entry.path, serde_json::to_string(&entry).unwrap()],
+            )
+            .unwrap();
+        }
+        let stage = temp.join("stage");
+        fs::create_dir(&stage).unwrap();
+        assert_eq!(
+            build_snapshot_tree(&stage, &temp, &db, &|| Ok(())).unwrap_err(),
+            "mirror_link_type_unrepresentable"
+        );
+        assert_eq!(fs::read_dir(&stage).unwrap().count(), 0);
+        drop(db);
+        fs::remove_dir_all(temp).unwrap();
     }
     #[test]
     fn full_scan_keeps_hidden_git_environment_and_binary_with_verified_chunks() {
