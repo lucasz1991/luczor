@@ -11,7 +11,6 @@ const props = withDefaults(
   defineProps<{
     modelValue: string
     thinkingTier?: ThinkingTier
-    agentMode?: boolean
     routeMode?: ChatRouteMode
     externalAllowed?: boolean
     busy?: boolean
@@ -34,7 +33,6 @@ const props = withDefaults(
   }
 )
 const emit = defineEmits<{
-  'update:agentMode': [value: boolean]
   'update:thinkingTier': [value: ThinkingTier]
   'update:routeMode': [value: ChatRouteMode]
   'update:modelValue': [value: string]
@@ -55,14 +53,14 @@ function onRouteMode(event: Event): void {
   const value = (event.target as HTMLSelectElement).value
   if (value === 'local' || value === 'auto' || value === 'external') emit('update:routeMode', value)
 }
+/** The mode picks the route AND the agent team: every turn runs as a team. */
 const routeModeHint = computed(() => {
-  if (props.agentMode) return 'Im Agentenmodus bestimmt das Agententeam die Route pro Rolle.'
   if (!props.externalAllowed) return 'Externe Modelle zuerst unter Einstellungen → Chat & Agenten zulassen.'
   if (props.routeMode === 'external')
-    return 'Überspringt das lokale Modell. Ein externes Modell antwortet erst nach ausdrücklicher Freigabe dieses Nachrichtenpakets.'
+    return 'Orchestrierung und alle Agenten extern, kein lokales Modell. Jedes Nachrichtenpaket wird einzeln freigegeben.'
   if (props.routeMode === 'auto')
-    return 'Lokales Modell zuerst. Ein externes Modell nur nach ausdrücklicher Freigabe dieses Nachrichtenpakets.'
-  return 'Nur das signierte lokale Modell. Kein externer Weg.'
+    return 'Lokale Orchestrierung, Agenten lokal und extern. Externe Pakete gehen erst nach ausdrücklicher Freigabe raus.'
+  return 'Orchestrierung und alle Agenten auf dem signierten lokalen Modell. Kein externer Weg.'
 })
 const field = ref<HTMLTextAreaElement | null>(null)
 const menu = ref(false)
@@ -145,28 +143,16 @@ defineExpose({ focus: () => field.value?.focus() })
             <span class="ai-route-mode__text">Modus</span>
             <select
               class="ai-route-mode__select"
-              :value="agentMode || !externalAllowed ? 'local' : routeMode"
-              :disabled="busy || !externalAllowed || agentMode"
-              aria-label="Modellroute für diesen Chat wählen"
+              :value="externalAllowed ? routeMode : 'local'"
+              :disabled="busy || !externalAllowed"
+              aria-label="Modellroute und Agententeam für diesen Chat wählen"
               @change="onRouteMode($event)"
             >
               <option value="local">Lokal</option>
-              <option value="auto">Auto · lokal zuerst</option>
-              <option value="external">Externes Modell</option>
+              <option value="auto">Lokal + extern</option>
+              <option value="external">Nur extern</option>
             </select>
           </label>
-          <button
-            type="button"
-            class="ai-agent-mode"
-            :class="{ 'is-active': agentMode }"
-            :aria-pressed="!!agentMode"
-            :disabled="busy"
-            aria-label="Agentenmodus"
-            title="Aktiv: Neue Aufträge direkt mit einem Agententeam bearbeiten"
-            @click="emit('update:agentMode', !agentMode)"
-          >
-            <AiIcon name="grid" :size="13" />Agenten
-          </button>
         </div>
       </div>
       <textarea

@@ -210,19 +210,13 @@ const sendAdmission = ref(false)
 const chatRouteMode = ref<ChatRouteMode>(
   modelUsageSettings.value.externalEnabled ? modelUsageSettings.value.chatRouteMode : 'local'
 )
-const agentMode = ref(modelUsageSettings.value.agentsByDefault)
 const chatThinkingChoices = ref(new Map<string, ThinkingTier>())
 const activeThinkingBudget = shallowRef<{
   projectId: string
   messageId: string
   progress: ThinkingBudgetProgress
 } | null>(null)
-const agentTeamPreset = ref<import('@/services/agents/teamPolicy').TeamPresetChoice>(
-  modelUsageSettings.value.teamPreset
-)
 watch(modelUsageSettings, value => {
-  agentMode.value = value.agentsByDefault
-  agentTeamPreset.value = value.externalEnabled ? value.teamPreset : 'local'
   chatRouteMode.value = value.externalEnabled ? value.chatRouteMode : 'local'
 })
 const continuations = shallowRef<Record<string, AgentCheckpoint>>({})
@@ -1407,27 +1401,28 @@ async function rememberExchange(
 /* -------------------------------------------------
  * Send
  * ------------------------------------------------- */
-async function resumeWork(messageId: string, asTeam: boolean) {
+async function resumeWork(messageId: string) {
   const checkpoint = Object.entries(continuations.value).find(([id]) => id === messageId)?.[1]
   if (!checkpoint || conversationBusy.value) return
-  await send(false, { checkpoint, asTeam, messageId })
+  await send(false, { checkpoint, messageId })
 }
 async function send(
   automaticVoice = false,
-  resume?: { checkpoint: AgentCheckpoint; asTeam: boolean; messageId: string },
+  resume?: { checkpoint: AgentCheckpoint; messageId: string },
   miniInput?: { text: string; projectId: string }
 ) {
   const pid = activeProjectId.value
-  const useAgents = resume?.asTeam ?? agentMode.value
   const turnThinking = resume?.checkpoint.thinkingTier
     ? { thinkingTier: resume.checkpoint.thinkingTier, thinkingConfig: resume.checkpoint.thinkingConfig }
     : captureThinking(thinkingTier.value)
-  // Agent teams and resumed checkpoints keep their own local-only contract; the
-  // composer mode applies to ordinary turns. Without the global external switch
-  // every mode collapses to local, mirroring resolveInferenceRouteForTurn.
+  // Every turn runs as an agent team, so the composer mode is the only route control.
+  // A resumed checkpoint keeps its own local-only contract because its saved context was
+  // gathered under one, and without the global external switch every mode collapses to
+  // local, mirroring resolveInferenceRouteForTurn.
   const turnRouteMode: ChatRouteMode =
-    modelUsageSettings.value.externalEnabled && !useAgents && !resume ? chatRouteMode.value : 'local'
+    modelUsageSettings.value.externalEnabled && !resume ? chatRouteMode.value : 'local'
   const externalFallbackAllowed = turnRouteMode !== 'local'
+  const turnTeamPreset = teamPresetForRouteMode(turnRouteMode)
   const rawText = resume?.checkpoint.objective ?? (miniInput?.text ?? input.value).trim()
   if (!rawText || conversationBusy.value) return
   if (miniInput && miniInput.projectId !== pid) throw new Error('Der Projektchat wurde inzwischen gewechselt.')

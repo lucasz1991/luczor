@@ -7,6 +7,19 @@ export const SPECIALIST_LABELS: Record<SpecialistRole, string> = {
   review: 'Prüfung',
 }
 export type TeamPresetChoice = 'server' | 'local' | 'free' | 'budget'
+
+/**
+ * The composer's route mode is the single control for both the route and the team:
+ * `local` keeps every agent on the signed local model, `auto` orchestrates locally and
+ * allows external specialists on top, and `external` uses no local model at all. There is
+ * no separate team picker, so a turn can never mix a local-only route with an external
+ * team or the other way round.
+ */
+export function teamPresetForRouteMode(mode: 'local' | 'auto' | 'external'): TeamPresetChoice {
+  if (mode === 'external') return 'budget'
+  if (mode === 'auto') return 'free'
+  return 'local'
+}
 export function roleValue<T>(record: Record<SpecialistRole, T>, role: SpecialistRole): T {
   // The closed role union is validated at the policy boundary and never contains arbitrary property names.
   // eslint-disable-next-line security/detect-object-injection
