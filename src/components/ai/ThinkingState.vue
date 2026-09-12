@@ -40,8 +40,8 @@ const runStatus = computed<ActivityStatus>(() => {
 const summaryLabel = computed(() => {
   if (runStatus.value === 'failed') return 'Verarbeitung fehlgeschlagen'
   if (runStatus.value === 'canceled') return 'Verarbeitung abgebrochen'
-  if (props.label !== 'Arbeitsschritte') return publicActivityLabel(props.label)
   if (runStatus.value === 'waiting') return 'Wartet auf deine Freigabe'
+  if (props.label !== 'Arbeitsschritte') return publicActivityLabel(props.label)
   if (runStatus.value === 'done') return 'Arbeitsschritte abgeschlossen'
   const current = [...props.steps].reverse().find(step => step.status === 'running' || step.status === 'pending')
   return current ? publicActivityLabel(current.label) : props.label
@@ -83,6 +83,7 @@ const durationLabel = computed(() => {
       type="button"
       :aria-expanded="!!open"
       :aria-controls="id"
+      :aria-label="summaryLabel + (steps.length ? ` · ${steps.length} ${steps.length === 1 ? 'Schritt' : 'Schritte'}` : '')"
       @click="manuallyExpanded = !open"
     >
       <span class="ai-thinking__mark" aria-hidden="true">

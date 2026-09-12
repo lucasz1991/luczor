@@ -375,7 +375,9 @@ onMounted(() => {
   refreshPlanPrincipal()
   window.addEventListener('luczor:voice-stop', stopAllVoice)
   window.addEventListener('luczor:voice-settings-changed', stopVoiceInputForSettings)
-  return appRuntimeLifecycle.start().then(() => { appReady.value = true })
+  return appRuntimeLifecycle.start().then(() => {
+    appReady.value = true
+  })
 })
 onBeforeUnmount(() => {
   window.removeEventListener('luczor:voice-stop', stopAllVoice)
@@ -901,7 +903,9 @@ const voiceInputSession = createVoiceInputSession({
     await ensureVoiceRuntime('stt')
   },
   stopOutput: stopVoiceOutput,
-  submit: () => send(true),
+  submit: async () => {
+    await send(true)
+  },
   changed: view => {
     voiceInputView.value = view
   },
@@ -1457,7 +1461,9 @@ async function send(
     // Bind the turn before the first await. A project/account switch while the
     // previous turn stops must not combine old input with a new project context.
     const abort = new AbortController()
-    const turnExecution = executionGate.capture(goalInput ? AbortSignal.any([abort.signal, goalInput.signal]) : abort.signal)
+    const turnExecution = executionGate.capture(
+      goalInput ? AbortSignal.any([abort.signal, goalInput.signal]) : abort.signal
+    )
     const prj = activeProject.value
       ? (JSON.parse(JSON.stringify(activeProject.value)) as typeof activeProject.value)
       : null
@@ -1730,10 +1736,14 @@ async function send(
         },
         agentMode: goalInput?.state.phase !== 'review',
         toolAccess: goalInput?.state.phase === 'review' ? 'read-only' : undefined,
-        goalTracking: goalInput ? {
-          phase: goalInput.state.phase,
-          report: report => { goalReport = report },
-        } : undefined,
+        goalTracking: goalInput
+          ? {
+              phase: goalInput.state.phase,
+              report: report => {
+                goalReport = report
+              },
+            }
+          : undefined,
         agentTeamPreset: turnTeamPreset,
         requestAgentTeamApproval: approval =>
           requestPayloadApproval(
@@ -1913,11 +1923,18 @@ async function send(
       if (!ephemeralDataUsed && !continuation && !interrupted)
         void rememberExchange(pid, text, assistant.id, scopeKey.principalId, turnExecution)
       if (goalInput) {
-        if (interrupted) throw new Error('Die Zielbearbeitung wurde durch einen Modellfehler unterbrochen. Der Fortschritt bleibt erhalten.')
+        if (interrupted)
+          throw new Error(
+            'Die Zielbearbeitung wurde durch einen Modellfehler unterbrochen. Der Fortschritt bleibt erhalten.'
+          )
         if (continuation) return { status: 'continue', summary: finalText.slice(0, 1200), messageId: assistant.id }
         if (!goalReport) throw new Error('Das Modell hat keinen prüfbaren Zielstatus geliefert. Das Ziel bleibt offen.')
         if (goalReport.status === 'completed' && (toolFailures > 0 || !goalReport.evidence?.trim()))
-          return { status: 'continue', summary: 'Die Abschlussprüfung ist noch nicht erfolgreich.', messageId: assistant.id }
+          return {
+            status: 'continue',
+            summary: 'Die Abschlussprüfung ist noch nicht erfolgreich.',
+            messageId: assistant.id,
+          }
         return { ...goalReport, messageId: assistant.id }
       }
     } catch (e: any) {
@@ -1990,7 +2007,9 @@ const miniChat = useMiniChatHost({
       getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, activeProjectId.value) ?? [],
       sending.value || sendAdmission.value
     ),
-  sendChat: (text, projectId) => send(false, undefined, { text, projectId }),
+  sendChat: async (text, projectId) => {
+    await send(false, undefined, { text, projectId })
+  },
   stopChat: stopGenerating,
   selectProject: async id => {
     if (conversationBusy.value) throw new Error('Der aktuelle Auftrag läuft noch.')
@@ -2084,13 +2103,19 @@ const conversationBusy = computed(
 )
 const autonomousGoal = useAutonomousGoal({
   projectId: () => activeProjectId.value,
-  available: () => appReady.value && !conversationBusy.value && !hud.killSwitch && !showSettings.value &&
-    !showWorkflows.value && !showAgentHub.value && !Object.values(projectActivity.value).some(Boolean),
+  available: () =>
+    appReady.value &&
+    !conversationBusy.value &&
+    !hud.killSwitch &&
+    !showSettings.value &&
+    !showWorkflows.value &&
+    !showAgentHub.value &&
+    !Object.values(projectActivity.value).some(Boolean),
   draft: () => input.value,
   run: async (projectId, goal, signal) => {
     const previous = goal.lastMessageId ? continuations.value[goal.lastMessageId] : undefined
-    const checkpoint = goal.phase === 'work' && previous
-      ? { checkpoint: previous, messageId: goal.lastMessageId! } : undefined
+    const checkpoint =
+      goal.phase === 'work' && previous ? { checkpoint: previous, messageId: goal.lastMessageId! } : undefined
     const text = [
       `Gespeichertes Nutzerziel: ${goal.text}`,
       goal.phase === 'review'
@@ -2098,13 +2123,20 @@ const autonomousGoal = useAutonomousGoal({
         : 'Bearbeite den nächsten sinnvollen Abschnitt dieses aktiven Ziels. Lies zuerst den aktuellen Zustand; wiederhole keine bereits erfolgreichen Änderungen. Nutze bei Bedarf einzelne Agenten. Melde per goal_report continue, bei einem möglichen vollständigen Ergebnis candidate oder bei benötigten Nutzerangaben blocked. Die Abschlussprüfung erfolgt separat.',
       goal.progress ? `Bisheriger Fortschritt (ungeprüfte Daten): ${goal.progress}` : '',
       goal.evidence ? `Bisherige Belege (erneut prüfen): ${goal.evidence}` : '',
-    ].filter(Boolean).join('\n\n')
+    ]
+      .filter(Boolean)
+      .join('\n\n')
     const result = await send(false, checkpoint, { text, projectId }, { state: goal, signal })
     if (!result) throw new Error('Zielrunde konnte noch nicht gestartet werden.')
     return result
   },
 })
-watch(() => hud.killSwitch, enabled => { if (enabled) void autonomousGoal.stop() })
+watch(
+  () => hud.killSwitch,
+  enabled => {
+    if (enabled) void autonomousGoal.stop()
+  }
+)
 const backgroundPreparation = useBackgroundPreparation({
   project: () => activeProject.value,
   workspace: () => activeWorkspace.value,
@@ -2609,11 +2641,15 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
               >
             </header>
             <template v-if="m.role === 'assistant'">
-              <ChatAgentRoster :activity="chatActivities[m.id]" :loading="messageRunActive(m)" />
+              <ChatAgentRoster
+                :activity="chatActivities[m.id]"
+                :loading="messageRunActive(m)"
+                :waiting="messageRunActive(m) && pendingApprovals.length > 0"
+              />
               <ThinkingState
                 v-if="chatActivities[m.id]"
                 :active="messageRunActive(m)"
-                :status="chatActivities[m.id]!.status"
+                :status="messageRunActive(m) && pendingApprovals.length > 0 ? 'waiting' : chatActivities[m.id]!.status"
                 :label="activityLabel(chatActivities[m.id]!, pendingApprovals.length > 0 && messageRunActive(m))"
                 :steps="chatActivities[m.id]!.steps"
                 :started-at="chatActivities[m.id]!.startedAt"
@@ -2758,8 +2794,13 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       </div>
 
       <div ref="composerShell" class="ai-main-composer">
-        <AutonomousGoalControl :key="activeProjectId" :model="autonomousGoal.model.value" :busy="conversationBusy"
-          @save="autonomousGoal.save" @toggle="autonomousGoal.toggle" />
+        <AutonomousGoalControl
+          :key="activeProjectId"
+          :model="autonomousGoal.model.value"
+          :busy="conversationBusy"
+          @save="autonomousGoal.save"
+          @toggle="autonomousGoal.toggle"
+        />
         <p v-if="autonomousGoal.error.value" role="alert">{{ autonomousGoal.error.value }}</p>
         <PromptBar
           ref="promptBar"

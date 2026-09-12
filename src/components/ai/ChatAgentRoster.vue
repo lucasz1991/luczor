@@ -4,8 +4,8 @@ import type { ChatActivity } from '@/services/chatActivity'
 import { presentChatAgents } from '@/services/chatAgentPresentation'
 import AiIcon from './AiIcon.vue'
 
-const props = defineProps<{ activity?: ChatActivity; loading?: boolean }>()
-const agents = computed(() => presentChatAgents(props.activity, props.loading))
+const props = defineProps<{ activity?: ChatActivity; loading?: boolean; waiting?: boolean }>()
+const agents = computed(() => presentChatAgents(props.activity, props.loading, props.waiting))
 </script>
 
 <template>
@@ -27,7 +27,9 @@ const agents = computed(() => presentChatAgents(props.activity, props.loading))
             </span>
           </div>
           <p class="chat-agent__phase" :title="agent.detail">
-            <span v-if="agent.status !== 'running'" class="ai-sr-only">Letzter Schritt: </span>{{ agent.phase }}
+            <span v-if="agent.status !== 'running' && agent.status !== 'waiting'" class="ai-sr-only"
+              >Letzter Schritt: </span
+            >{{ agent.phase }}
           </p>
           <small v-if="agent.model || agent.provider" class="chat-agent__model">{{
             [agent.provider, agent.model].filter(Boolean).join(' · ')
@@ -155,5 +157,9 @@ const agents = computed(() => presentChatAgents(props.activity, props.loading))
   .chat-agent__pulse {
     animation: none;
   }
+}
+:global(html[data-reduce-motion='1'] .chat-agent__pulse),
+:global([data-reduce-motion='true'] .chat-agent__pulse) {
+  animation: none;
 }
 </style>

@@ -64,7 +64,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
   const suspended = new Set<string>()
   let selected: string | undefined
   let pendingTimer: (() => void) | undefined
-  let running: { projectId: string; controller: AbortController } | undefined
+  let running: { projectId: string; controller: AbortController; settled: Promise<void> } | undefined
   let disposed = false
   let driving = false
 
@@ -150,7 +150,11 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
         return
       }
       const controller = new AbortController()
-      running = { projectId, controller }
+      let markSettled!: () => void
+      const settled = new Promise<void>(resolve => {
+        markSettled = resolve
+      })
+      running = { projectId, controller, settled }
       let result: GoalStepResult
       try {
         result = await dependencies.run(projectId, Object.freeze({ ...attempt }), controller.signal)
@@ -180,6 +184,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
         return
       } finally {
         running = undefined
+        markSettled()
       }
       if (controller.signal.aborted || disposed || selected !== projectId || suspended.has(projectId)) {
         if (!disposed) await parkInterrupted(projectId, attempt)
@@ -222,7 +227,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
           ...common,
           status: 'waiting',
           phase: review ? 'review' : 'work',
-          evidence: undefined,
+          evidence: review ? evidence || undefined : undefined,
           reason: review
             ? 'Ergebnis liegt vor und wird vor dem Abschluss geprüft.'
             : result.status === 'completed'
@@ -246,9 +251,20 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
   ): Promise<void> {
     suspended.add(projectId)
     if (selected === projectId) cancelTimer()
-    if (running?.projectId === projectId) running.controller.abort(reason)
+    const active = running?.projectId === projectId ? running : undefined
+    active?.controller.abort(reason)
     const goal = dependencies.read(projectId)
-    if (goal && goal.status !== 'completed') await write(projectId, goal, { status: 'waiting', phase: 'work', reason })
+    try {
+      if (
+        goal &&
+        goal.status !== 'completed' &&
+        (goal.status !== 'waiting' || goal.phase !== 'work' || goal.reason !== reason)
+      )
+        await write(projectId, goal, { status: 'waiting', phase: 'work', reason })
+    } finally {
+      // The chat adapter releases its busy state before the user's request is admitted.
+      await active?.settled
+    }
   }
 
   return {
@@ -264,10 +280,19 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
     async stop(projectId: string, reason = 'Ziel pausiert. Der bisherige Fortschritt bleibt erhalten.'): Promise<void> {
       suspended.add(projectId)
       if (selected === projectId) cancelTimer()
-      if (running?.projectId === projectId) running.controller.abort(reason)
+      const active = running?.projectId === projectId ? running : undefined
+      active?.controller.abort(reason)
       const goal = dependencies.read(projectId)
-      if (goal && goal.status !== 'completed')
-        await write(projectId, goal, { active: false, status: 'waiting', phase: 'work', reason })
+      try {
+        if (
+          goal &&
+          goal.status !== 'completed' &&
+          (goal.active || goal.status !== 'waiting' || goal.phase !== 'work' || goal.reason !== reason)
+        )
+          await write(projectId, goal, { active: false, status: 'waiting', phase: 'work', reason })
+      } finally {
+        await active?.settled
+      }
     },
     dispose(): void {
       disposed = true

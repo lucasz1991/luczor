@@ -105,7 +105,7 @@ function withClass(node: HostNode, value: string): HostNode {
 async function dispatch(node: HostNode, type: string, event: Record<string, unknown> = {}): Promise<void> {
   const handler = node.props.get(`on${type}`)
   if (typeof handler !== 'function') throw new Error(`Missing ${type} handler`)
-  handler({ target: node, stopPropagation: vi.fn(), preventDefault: vi.fn(), ...event })
+  await handler({ target: node, stopPropagation: vi.fn(), preventDefault: vi.fn(), ...event })
   await nextTick()
 }
 
@@ -213,12 +213,11 @@ describe('AutonomousGoalControl', () => {
   })
 
   it('does not activate an unsaved goal or save blank/oversized content', async () => {
-    const { root, save } = mount(undefined)
-    // Explicitly clear the default fixture to represent a project without a goal.
-    const empty = mount({ ...saved, text: '' })
-    await dispatch(withClass(empty.root, 'goal-control__trigger'), 'Click')
-    expect(withClass(empty.root, 'goal-control__switch').props.get('disabled')).toBe(true)
+    const { root, save, props } = mount()
+    props.model = undefined
+    await nextTick()
     await dispatch(withClass(root, 'goal-control__trigger'), 'Click')
+    expect(withClass(root, 'goal-control__switch').props.get('disabled')).toBe(true)
     const editor = find(root, node => node.tag === 'textarea')
     for (const value of ['   ', 'x'.repeat(6001)]) {
       editor.value = value

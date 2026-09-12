@@ -47,7 +47,13 @@ describe('autonomous goal controller', () => {
       })
     context.controller.kick('p1')
     await vi.advanceTimersByTimeAsync(0)
-    expect(context.current()).toMatchObject({ active: true, phase: 'review', status: 'waiting', iterations: 1 })
+    expect(context.current()).toMatchObject({
+      active: true,
+      phase: 'review',
+      status: 'waiting',
+      iterations: 1,
+      evidence: 'Worker claim',
+    })
     await vi.advanceTimersByTimeAsync(250)
     expect(context.run.mock.calls.map(call => call[1].phase)).toEqual(['work', 'review'])
     expect(context.current()).toMatchObject({
@@ -108,10 +114,17 @@ describe('autonomous goal controller', () => {
     )
     context.controller.kick('p1')
     await vi.advanceTimersByTimeAsync(0)
-    await context.controller.interrupt('p1')
+    let released = false
+    const interrupted = context.controller.interrupt('p1').then(() => {
+      released = true
+    })
     expect(context.run.mock.calls[0][2].aborted).toBe(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(released).toBe(false)
     const revision = context.current().revision
     finish({ status: 'completed', summary: 'Late completion', evidence: 'Late evidence' })
+    await interrupted
+    expect(released).toBe(true)
     await vi.advanceTimersByTimeAsync(10000)
     expect(context.current()).toMatchObject({ active: true, status: 'waiting', revision })
     expect(context.current().progress).toBeUndefined()
@@ -152,8 +165,9 @@ describe('autonomous goal controller', () => {
     context.controller.kick('p1')
     await vi.advanceTimersByTimeAsync(10000)
     expect(context.run).toHaveBeenCalledTimes(1)
-    await context.controller.stop('p1')
+    const stopped = context.controller.stop('p1')
     finish({ status: 'continue', summary: 'Late progress' })
+    await stopped
     await vi.advanceTimersByTimeAsync(10000)
     expect(context.current()).toMatchObject({ active: false, status: 'waiting' })
     expect(context.run).toHaveBeenCalledTimes(1)

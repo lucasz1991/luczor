@@ -123,13 +123,19 @@ const blocks = computed(() => {
 .ai-answer__body :deep(.rt > :last-child) {
   margin-bottom: 0;
 }
-.ai-answer__body :deep(.rt h2) {
-  font-size: 19px;
+.ai-answer__body :deep(.rt h3.rt-h) {
+  font-size: 20px;
   letter-spacing: -0.025em;
 }
-.ai-answer__body :deep(.rt h3) {
-  font-size: 16px;
+.ai-answer__body :deep(.rt h4.rt-h) {
+  font-size: 18px;
   letter-spacing: -0.015em;
+}
+.ai-answer__body :deep(.rt h5.rt-h) {
+  font-size: 15px;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: var(--ai-ink);
 }
 .ai-stream-caret {
   width: 5px;
@@ -188,4 +194,6 @@ const blocks = computed(() => {
     animation: none;
   }
 }
+:global(html[data-reduce-motion='1']) .ai-stream-caret,
+:global([data-reduce-motion='true']) .ai-stream-caret { animation: none; }
 </style>

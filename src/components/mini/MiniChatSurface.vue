@@ -629,11 +629,11 @@ onBeforeUnmount(() => {
           <small v-if="!isChat && message.contextLabel" class="mini-scope-note">{{ message.contextLabel }}</small>
           <p v-if="message.role === 'user'">{{ message.content }}</p>
           <template v-else>
-            <ChatAgentRoster :activity="message.activity" :loading="message.status === 'running'" />
+            <ChatAgentRoster :activity="message.activity" :loading="message.status === 'running'" :waiting="message.status === 'running' && !!snapshot.decision" />
             <ThinkingState
               v-if="message.activity"
               :active="message.status === 'running'"
-              :status="message.status === 'running' ? message.activity.status : message.status"
+              :status="message.status === 'running' ? (snapshot.decision ? 'waiting' : message.activity.status) : message.status"
               :steps="message.activity.steps"
               :started-at="message.createdAt"
               :duration-ms="
