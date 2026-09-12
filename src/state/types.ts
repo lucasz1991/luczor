@@ -109,6 +109,8 @@ export type ProjectDefaults = {
 export type Project = {
   id: Id
   name: string
+  /** Device-local execution state. Only the ordinary goal text may sync to other devices. */
+  autonomousGoal?: import('@/services/goals/autonomousGoal').GoalRunState
   /** User-owned server snapshot. Native folder bindings remain device-local. */
   cloud?: {
     principalId: string

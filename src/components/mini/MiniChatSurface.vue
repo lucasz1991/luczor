@@ -651,8 +651,10 @@ onBeforeUnmount(() => {
             />
             <ChatCommentary :entries="message.commentary ?? []" :active="message.status === 'running'" />
             <StreamingText
+              v-if="message.content || message.question || message.choices.length || !message.activity"
               :content="message.content"
               :streaming="message.status === 'running'"
+              :show-stream-status="!message.activity"
               :animate="false"
               :actions="false"
               :question="message.question"

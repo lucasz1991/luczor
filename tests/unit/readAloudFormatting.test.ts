@@ -198,9 +198,9 @@ describe('rich content while speaking', () => {
         actions: false,
       })
     )
-    expect(html).toContain('<p class="ai-answer__question">Welche Datei prüfen?</p>')
+    expect(html).toMatch(/<p class="ai-answer__question"[^>]*>Welche Datei prüfen\?<\/p>/u)
     expect(html).toMatch(
-      /<div class="read-aloud__content"[^>]*>[\s\S]*<p class="ai-answer__question">Welche Datei prüfen\?<\/p><!--\]--><\/div><\/div>/u
+      /<div class="read-aloud__content"[^>]*>[\s\S]*<p class="ai-answer__question"[^>]*>Welche Datei prüfen\?<\/p><!--\]--><\/div><\/div>/u
     )
     expect(html).toContain('Nächster Schritt')
     expect(html.indexOf('ai-follow-ups')).toBeGreaterThan(html.indexOf('ai-answer__question'))

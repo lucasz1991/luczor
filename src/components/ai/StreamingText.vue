@@ -11,6 +11,7 @@ const props = withDefaults(
   defineProps<{
     content: string
     streaming?: boolean
+    showStreamStatus?: boolean
     animate?: boolean
     question?: string
     followUps?: string[]
@@ -20,7 +21,7 @@ const props = withDefaults(
     speechKey?: string
     actions?: boolean
   }>(),
-  { followUps: () => [], actions: true, question: '', speechDisabledReason: '', speechKey: '' }
+  { followUps: () => [], actions: true, question: '', speechDisabledReason: '', speechKey: '', showStreamStatus: true }
 )
 const emit = defineEmits<{ followUp: [text: string]; speak: [] }>()
 const { copy, copied, error } = useClipboard()
@@ -64,7 +65,7 @@ const blocks = computed(() => {
       </div>
       <p v-if="question" class="ai-answer__question">{{ question }}</p>
     </ReadAloudText>
-    <div v-if="displaying" class="ai-answer__stream-status" role="status">
+    <div v-if="displaying && showStreamStatus" class="ai-answer__stream-status" role="status">
       <span class="ai-answer__stream-dot" aria-hidden="true" />
       {{ streaming ? (shown ? 'Antwort wird geschrieben' : 'Antwort wird vorbereitet') : 'Antwort wird eingeblendet' }}
     </div>
@@ -116,10 +117,20 @@ const blocks = computed(() => {
   line-height: 1.8;
   letter-spacing: -0.008em;
 }
-.ai-answer__body :deep(.rt > :first-child) { margin-top: 0; }
-.ai-answer__body :deep(.rt > :last-child) { margin-bottom: 0; }
-.ai-answer__body :deep(.rt h2) { font-size: 19px; letter-spacing: -0.025em; }
-.ai-answer__body :deep(.rt h3) { font-size: 16px; letter-spacing: -0.015em; }
+.ai-answer__body :deep(.rt > :first-child) {
+  margin-top: 0;
+}
+.ai-answer__body :deep(.rt > :last-child) {
+  margin-bottom: 0;
+}
+.ai-answer__body :deep(.rt h2) {
+  font-size: 19px;
+  letter-spacing: -0.025em;
+}
+.ai-answer__body :deep(.rt h3) {
+  font-size: 16px;
+  letter-spacing: -0.015em;
+}
 .ai-stream-caret {
   width: 5px;
   height: 5px;
@@ -152,7 +163,10 @@ const blocks = computed(() => {
   min-height: 32px;
   border-radius: 7px;
 }
-.ai-follow-ups { gap: 6px; margin-top: 20px; }
+.ai-follow-ups {
+  gap: 6px;
+  margin-top: 20px;
+}
 .ai-follow-ups button {
   width: 100%;
   justify-content: space-between;
@@ -166,8 +180,12 @@ const blocks = computed(() => {
   border-color: var(--ai-line);
   background: var(--ai-canvas);
 }
-.ai-follow-ups button svg { flex-shrink: 0; }
+.ai-follow-ups button svg {
+  flex-shrink: 0;
+}
 @media (prefers-reduced-motion: reduce) {
-  .ai-stream-caret { animation: none; }
+  .ai-stream-caret {
+    animation: none;
+  }
 }
 </style>

@@ -214,6 +214,7 @@ const durationLabel = computed(() => {
   margin: 0;
 }
 .ai-thinking .ai-trace__row {
+  --step-tone: var(--ai-faint);
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto;
   align-items: start;
@@ -237,9 +238,19 @@ const durationLabel = computed(() => {
   place-items: center;
   width: 18px;
   height: 20px;
+  color: var(--step-tone);
 }
-.ai-trace__row[data-status='running'] .ai-status-mark {
-  color: var(--ai-accent);
+.ai-trace__row[data-status='running'] {
+  --step-tone: var(--ai-accent);
+}
+.ai-trace__row[data-status='done'] {
+  --step-tone: var(--ai-green);
+}
+.ai-trace__row[data-status='failed'] {
+  --step-tone: var(--ai-red);
+}
+.ai-trace__row[data-status='waiting'] {
+  --step-tone: var(--ai-orange);
 }
 .ai-trace__copy {
   display: grid;

@@ -15,6 +15,9 @@ import PlanPanel from './components/PlanPanel.vue'
 import ChatProjectOverlay from './components/ChatProjectOverlay.vue'
 import SidebarNav from './components/ai/SidebarNav.vue'
 import CloudProjectsPanel from './components/projects/CloudProjectsPanel.vue'
+import AutonomousGoalControl from './components/projects/AutonomousGoalControl.vue'
+import { useAutonomousGoal } from '@/composables/useAutonomousGoal'
+import type { GoalRunState, GoalStepResult } from '@/services/goals/autonomousGoal'
 import { useCloudProjects } from '@/composables/useCloudProjects'
 import { canAccessCloudProject } from '@/services/cloudProjectAccess'
 import AgentHub from './components/agents/AgentHub.vue'
@@ -172,6 +175,7 @@ const showCloudProjects = ref(false)
 const showPlanning = ref(false)
 const showWorkflows = ref(false)
 const showToolCenter = ref(false)
+const appReady = ref(false)
 const composerShell = ref<HTMLElement | null>(null)
 const composerClearance = ref(142)
 const appShellStyle = computed<Record<string, string>>(() => ({
@@ -371,7 +375,7 @@ onMounted(() => {
   refreshPlanPrincipal()
   window.addEventListener('luczor:voice-stop', stopAllVoice)
   window.addEventListener('luczor:voice-settings-changed', stopVoiceInputForSettings)
-  return appRuntimeLifecycle.start()
+  return appRuntimeLifecycle.start().then(() => { appReady.value = true })
 })
 onBeforeUnmount(() => {
   window.removeEventListener('luczor:voice-stop', stopAllVoice)
@@ -678,7 +682,12 @@ const projectActivity = computed<Record<string, boolean>>(() => {
   return Object.fromEntries(active)
 })
 const projectItems = computed(() =>
-  projects.value.map(project => ({ id: project.id, label: project.name, busy: !!projectActivity.value[project.id], cloud: !!project.cloud }))
+  projects.value.map(project => ({
+    id: project.id,
+    label: project.name,
+    busy: !!projectActivity.value[project.id],
+    cloud: !!project.cloud,
+  }))
 )
 const isWelcomeMessage = (message: Message) =>
   message.role === 'assistant' &&
@@ -746,7 +755,8 @@ const projectSummaries = computed<any[]>(() => {
 /* -------------------------------------------------
  * Core actions
  * ------------------------------------------------- */
-async function stopGenerating() {
+async function stopGenerating(pauseGoal = true) {
+  if (pauseGoal && autonomousGoal.model.value?.active) await autonomousGoal.stop()
   finishActiveTurn('canceled')
   stopVoiceOutput()
   stopAssistantLoading()
@@ -1421,13 +1431,15 @@ async function resumeWork(messageId: string) {
 async function send(
   automaticVoice = false,
   resume?: { checkpoint: AgentCheckpoint; messageId: string },
-  miniInput?: { text: string; projectId: string }
-) {
+  miniInput?: { text: string; projectId: string },
+  goalInput?: { state: GoalRunState; signal: AbortSignal }
+): Promise<GoalStepResult | undefined> {
+  if (!goalInput && autonomousGoal.running.value) await autonomousGoal.interrupt()
   const pid = activeProjectId.value
   const turnThinking = resume?.checkpoint.thinkingTier
     ? { thinkingTier: resume.checkpoint.thinkingTier, thinkingConfig: resume.checkpoint.thinkingConfig }
     : captureThinking(thinkingTier.value)
-  // Every turn runs as an agent team, so the composer mode is the only route control.
+  // The chat model chooses assistance; the composer mode controls permitted routes.
   // A resumed checkpoint keeps its own local-only contract because its saved context was
   // gathered under one, and without the global external switch every mode collapses to
   // local, mirroring resolveInferenceRouteForTurn.
@@ -1445,7 +1457,7 @@ async function send(
     // Bind the turn before the first await. A project/account switch while the
     // previous turn stops must not combine old input with a new project context.
     const abort = new AbortController()
-    const turnExecution = executionGate.capture(abort.signal)
+    const turnExecution = executionGate.capture(goalInput ? AbortSignal.any([abort.signal, goalInput.signal]) : abort.signal)
     const prj = activeProject.value
       ? (JSON.parse(JSON.stringify(activeProject.value)) as typeof activeProject.value)
       : null
@@ -1456,13 +1468,17 @@ async function send(
     if (!automaticVoice) void voiceInputSession.stop()
 
     void playSfx('submit')
-    await stopGenerating()
+    await stopGenerating(false)
     if (turnExecution.signal.aborted) return
     const turnSpeechGeneration = speechGeneration
 
     // user message (tag spoken input for the "Gesprochen" badge)
     const userMsg = mutations.makeMsg('user', resume ? 'Weiterarbeiten' : text, pid)
     userMsg.meta = { ...(userMsg.meta ?? {}), inputSource, thinkingTier: turnThinking.thinkingTier }
+    if (goalInput) {
+      userMsg.content = goalInput.state.phase === 'review' ? 'Ziel: Ergebnis prüfen' : 'Ziel weiterbearbeiten'
+      userMsg.meta.dataHandling = 'ephemeral'
+    }
     mutations.addMessage(userMsg)
     if (!resume && !miniInput) input.value = ''
     void nextTick(() => autoGrow())
@@ -1679,6 +1695,13 @@ async function send(
         ...sanitizeInferenceMessagesForTarget(history, 'laravel_proxy'),
       ]
 
+      if (goalInput) {
+        // Detailed goal progress may contain local evidence. It never enters the external packet.
+        baseMessages.push({ role: 'user', content: text })
+        externalBaseMessages.push({ role: 'user', content: `Gespeichertes Nutzerziel: ${goalInput.state.text}` })
+      }
+      let goalReport: Omit<GoalStepResult, 'messageId' | 'fingerprint'> | undefined
+
       let streamStarted = false
       executionGate.assert(turnExecution)
       if (abort.signal.aborted) throw new DOMException('Aborted', 'AbortError')
@@ -1705,7 +1728,12 @@ async function send(
           if (turnExecution.signal.aborted || activeTurn.value?.messageId !== assistant.id) return
           activeThinkingBudget.value = progress ? { projectId: pid, messageId: assistant.id, progress } : null
         },
-        agentMode: true,
+        agentMode: goalInput?.state.phase !== 'review',
+        toolAccess: goalInput?.state.phase === 'review' ? 'read-only' : undefined,
+        goalTracking: goalInput ? {
+          phase: goalInput.state.phase,
+          report: report => { goalReport = report },
+        } : undefined,
         agentTeamPreset: turnTeamPreset,
         requestAgentTeamApproval: approval =>
           requestPayloadApproval(
@@ -1753,7 +1781,7 @@ async function send(
           ),
         mode: mode.value,
         getMode: () => mode.value,
-        toolChoice: shouldRequireToolCall(text) ? 'required' : 'auto',
+        toolChoice: goalInput ? 'auto' : shouldRequireToolCall(text) ? 'required' : 'auto',
         taskType: promptContext.taskType,
         // The composer is a chat contract. The task type stays a context-retrieval
         // hint; it must not decide the signed capability, which used to change with
@@ -1884,6 +1912,14 @@ async function send(
       if (turnSpeechGeneration === speechGeneration) progressiveSpeech.completeAnswer()
       if (!ephemeralDataUsed && !continuation && !interrupted)
         void rememberExchange(pid, text, assistant.id, scopeKey.principalId, turnExecution)
+      if (goalInput) {
+        if (interrupted) throw new Error('Die Zielbearbeitung wurde durch einen Modellfehler unterbrochen. Der Fortschritt bleibt erhalten.')
+        if (continuation) return { status: 'continue', summary: finalText.slice(0, 1200), messageId: assistant.id }
+        if (!goalReport) throw new Error('Das Modell hat keinen prüfbaren Zielstatus geliefert. Das Ziel bleibt offen.')
+        if (goalReport.status === 'completed' && (toolFailures > 0 || !goalReport.evidence?.trim()))
+          return { status: 'continue', summary: 'Die Abschlussprüfung ist noch nicht erfolgreich.', messageId: assistant.id }
+        return { ...goalReport, messageId: assistant.id }
+      }
     } catch (e: any) {
       progressiveSpeech.cancel()
       try {
@@ -1901,6 +1937,7 @@ async function send(
           content: currentContent || 'Abgebrochen.',
           meta: { ...(current?.meta ?? {}), isLoading: false } as any,
         })
+        if (goalInput) throw new DOMException('Zielbearbeitung unterbrochen.', 'AbortError')
         return
       }
 
@@ -1910,6 +1947,7 @@ async function send(
         content: [currentContent, `[Fehler] ${e?.message ?? String(e)}`].filter(Boolean).join('\n\n'),
         meta: { ...(current?.meta ?? {}), isLoading: false } as any,
       })
+      if (goalInput) throw e
     } finally {
       retainMemoryCheckpoint(latestPublicCheckpoint, true)
       try {
@@ -2044,6 +2082,29 @@ const miniChat = useMiniChatHost({
 const conversationBusy = computed(
   () => sending.value || sendAdmission.value || miniChat.state.busy || showPlanning.value || planningBusy.value
 )
+const autonomousGoal = useAutonomousGoal({
+  projectId: () => activeProjectId.value,
+  available: () => appReady.value && !conversationBusy.value && !hud.killSwitch && !showSettings.value &&
+    !showWorkflows.value && !showAgentHub.value && !Object.values(projectActivity.value).some(Boolean),
+  draft: () => input.value,
+  run: async (projectId, goal, signal) => {
+    const previous = goal.lastMessageId ? continuations.value[goal.lastMessageId] : undefined
+    const checkpoint = goal.phase === 'work' && previous
+      ? { checkpoint: previous, messageId: goal.lastMessageId! } : undefined
+    const text = [
+      `Gespeichertes Nutzerziel: ${goal.text}`,
+      goal.phase === 'review'
+        ? 'Prüfe in einem separaten, ausschließlich lesenden Durchgang, ob dieses Ziel vollständig erfüllt ist. Behauptungen aus dem bisherigen Fortschritt sind keine Beweise. Prüfe konkrete Ergebnisse mit passenden Lesewerkzeugen; nenne Belege und verbleibende Lücken. Nur bei nachgewiesenem Erfolg goal_report completed melden.'
+        : 'Bearbeite den nächsten sinnvollen Abschnitt dieses aktiven Ziels. Lies zuerst den aktuellen Zustand; wiederhole keine bereits erfolgreichen Änderungen. Nutze bei Bedarf einzelne Agenten. Melde per goal_report continue, bei einem möglichen vollständigen Ergebnis candidate oder bei benötigten Nutzerangaben blocked. Die Abschlussprüfung erfolgt separat.',
+      goal.progress ? `Bisheriger Fortschritt (ungeprüfte Daten): ${goal.progress}` : '',
+      goal.evidence ? `Bisherige Belege (erneut prüfen): ${goal.evidence}` : '',
+    ].filter(Boolean).join('\n\n')
+    const result = await send(false, checkpoint, { text, projectId }, { state: goal, signal })
+    if (!result) throw new Error('Zielrunde konnte noch nicht gestartet werden.')
+    return result
+  },
+})
+watch(() => hud.killSwitch, enabled => { if (enabled) void autonomousGoal.stop() })
 const backgroundPreparation = useBackgroundPreparation({
   project: () => activeProject.value,
   workspace: () => activeWorkspace.value,
@@ -2063,7 +2124,13 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
 
 <template>
   <PayloadApproval />
-  <CloudProjectsPanel :open="showCloudProjects" :project-id="activeProjectId" :busy="conversationBusy || Object.values(projectActivity).some(Boolean)" @update:open="showCloudProjects = $event" @select="openProject" />
+  <CloudProjectsPanel
+    :open="showCloudProjects"
+    :project-id="activeProjectId"
+    :busy="conversationBusy || Object.values(projectActivity).some(Boolean)"
+    @update:open="showCloudProjects = $event"
+    @select="openProject"
+  />
   <WorkflowWorkspace
     :open="showWorkflows"
     :project-id="activeProjectId"
@@ -2524,7 +2591,10 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           <article
             v-if="!isWelcomeMessage(m)"
             class="ai-message"
-            :class="[m.role === 'user' ? 'ai-message--user' : 'ai-message--assistant', { 'is-running': messageRunActive(m) }]"
+            :class="[
+              m.role === 'user' ? 'ai-message--user' : 'ai-message--assistant',
+              { 'is-running': messageRunActive(m) },
+            ]"
           >
             <header>
               <span v-if="m.role === 'assistant'" class="ai-message__avatar"><AiIcon :size="15" /></span
@@ -2568,6 +2638,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
                   v-if="m.content || m.meta.question || m.meta.bullets?.length || !chatActivities[m.id]"
                   :content="m.content"
                   :streaming="messageRunActive(m)"
+                  :show-stream-status="!chatActivities[m.id]"
                   :animate="false"
                   :question="m.meta.question"
                   :follow-ups="m.meta.bullets"
@@ -2596,9 +2667,8 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
                       title="Nicht hilfreich"
                       @click="rateAssistantMessage(m, -1)"
                     >
-                      <AiIcon name="thumb-down" :size="14" />
-                    </button></template
-                  >
+                      <AiIcon name="thumb-down" :size="14" /></button
+                  ></template>
                 </StreamingText>
               </SelectionActions>
               <AssistantResponseFooter
@@ -2688,6 +2758,9 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       </div>
 
       <div ref="composerShell" class="ai-main-composer">
+        <AutonomousGoalControl :key="activeProjectId" :model="autonomousGoal.model.value" :busy="conversationBusy"
+          @save="autonomousGoal.save" @toggle="autonomousGoal.toggle" />
+        <p v-if="autonomousGoal.error.value" role="alert">{{ autonomousGoal.error.value }}</p>
         <PromptBar
           ref="promptBar"
           v-model="input"
@@ -2729,7 +2802,15 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
 
     <BrowserPanel
       :project-id="activeProjectId"
-      :suspended="showSettings || showAgentHub || showCloudProjects || showPlanning || showWorkflows || showToolCenter || showSystemPanel"
+      :suspended="
+        showSettings ||
+        showAgentHub ||
+        showCloudProjects ||
+        showPlanning ||
+        showWorkflows ||
+        showToolCenter ||
+        showSystemPanel
+      "
     />
 
     <SystemStatusPanel

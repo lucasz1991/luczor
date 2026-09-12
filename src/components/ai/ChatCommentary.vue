@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { ChatCommentary } from '@/state/types'
 import { readAlongState } from '@/services/voice/readAlong'
 import AiIcon from './AiIcon.vue'
@@ -8,17 +8,31 @@ const props = defineProps<{ entries: ChatCommentary[]; messageId?: string; activ
 const latest = computed(() => props.entries.at(-1))
 const earlier = computed(() => props.entries.slice(0, -1))
 // Spoken commentary remains discoverable when playback advances to an earlier entry.
-const readingEarlier = computed(() =>
-  !!props.messageId && earlier.value.some(entry => readAlongState.value?.key === `${props.messageId}:${entry.id}`)
+const readingEarlier = computed(
+  () => !!props.messageId && earlier.value.some(entry => readAlongState.value?.key === `${props.messageId}:${entry.id}`)
 )
+const historyOpen = ref(false)
+watch(
+  readingEarlier,
+  reading => {
+    if (reading) historyOpen.value = true
+  },
+  { immediate: true }
+)
+function retainHistoryChoice(event: Event) {
+  historyOpen.value = (event.target as HTMLDetailsElement).open
+}
 </script>
 
 <template>
   <section v-if="entries.length" class="chat-commentary" aria-label="Öffentliche Fortschrittsmeldungen">
-    <details v-if="earlier.length" class="chat-commentary__history" :open="readingEarlier || undefined">
+    <details v-if="earlier.length" class="chat-commentary__history" :open="historyOpen" @toggle="retainHistoryChoice">
       <summary>
         <AiIcon name="chevron" :size="12" />
-        <span>{{ earlier.length }} {{ earlier.length === 1 ? 'frühere Zwischenmeldung' : 'frühere Zwischenmeldungen' }}</span>
+        <span
+          >{{ earlier.length }}
+          {{ earlier.length === 1 ? 'frühere Zwischenmeldung' : 'frühere Zwischenmeldungen' }}</span
+        >
       </summary>
       <ol>
         <li v-for="entry in earlier" :key="entry.id" class="chat-commentary__entry">
@@ -78,7 +92,9 @@ const readingEarlier = computed(() =>
   border-radius: 50%;
   background: var(--ai-faint);
 }
-.is-active .chat-commentary__dot { background: var(--ai-accent); }
+.is-active .chat-commentary__dot {
+  background: var(--ai-accent);
+}
 .chat-commentary__round {
   color: var(--ai-faint);
   font-size: 10px;
@@ -90,9 +106,15 @@ const readingEarlier = computed(() =>
   font-size: 13px;
   line-height: 1.65;
 }
-.chat-commentary__entry :deep(.rt > :first-child) { margin-top: 0; }
-.chat-commentary__entry :deep(.rt > :last-child) { margin-bottom: 0; }
-.chat-commentary__history { margin-bottom: 12px; }
+.chat-commentary__entry :deep(.rt > :first-child) {
+  margin-top: 0;
+}
+.chat-commentary__entry :deep(.rt > :last-child) {
+  margin-bottom: 0;
+}
+.chat-commentary__history {
+  margin-bottom: 12px;
+}
 .chat-commentary__history summary {
   display: flex;
   align-items: center;
@@ -106,13 +128,19 @@ const readingEarlier = computed(() =>
   list-style: none;
   border-radius: 4px;
 }
-.chat-commentary__history summary::-webkit-details-marker { display: none; }
-.chat-commentary__history summary:hover { color: var(--ai-ink); }
+.chat-commentary__history summary::-webkit-details-marker {
+  display: none;
+}
+.chat-commentary__history summary:hover {
+  color: var(--ai-ink);
+}
 .chat-commentary__history summary:focus-visible {
   outline: 2px solid var(--ai-accent);
   outline-offset: 2px;
 }
-.chat-commentary__history[open] summary > svg { transform: rotate(90deg); }
+.chat-commentary__history[open] summary > svg {
+  transform: rotate(90deg);
+}
 .chat-commentary__history ol {
   list-style: none;
   padding: 8px 0 4px;

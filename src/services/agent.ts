@@ -1,4 +1,11 @@
 import { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
+import {
+  createGoalReportTool,
+  goalReportInstruction,
+  GOAL_REPORT_MARKER,
+  GOAL_REPORT_NAME,
+  type GoalTracking,
+} from '@/services/agents/goalReport'
 import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 import { SPECIALIST_CONTEXT_TOOLS } from '@/services/agents/specialistContextTools'
 import { localResources } from '@/services/inference/resources'
@@ -111,6 +118,8 @@ export type RunAgentOptions = {
   agentMode?: boolean
   /** Explicit workflow graph execution only. Ordinary chat never forces the full team. */
   forceAgentTeam?: boolean
+  /** In-memory root goal reporting; never inherited by delegated agents. */
+  goalTracking?: GoalTracking
   agentTeamPreset?: import('./agents/teamPolicy').TeamPresetChoice
   requestAgentTeamApproval?: (
     summary: import('./agents/externalSpecialists').TeamPacketApproval
@@ -657,7 +666,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   }
   const messages: WireMessage[] = [
     ...(opts.continuation?.messages ?? resolvedRoute.replacementMessages ?? opts.baseMessages),
-  ]
+  ].filter(
+    message =>
+      resolvedRoute.externalOneShot || message.role !== 'system' || !message.content.startsWith(GOAL_REPORT_MARKER)
+  )
   const completedMutations = new Map(opts.continuation?.completedMutations ?? [])
   const pendingSeedsByExternalId = new Map<string, PendingTaskCreateVerification>()
   for (const item of opts.pendingTaskCreateVerifications ?? [])
@@ -836,6 +848,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               ],
               agentMode: false,
               forceAgentTeam: false,
+              goalTracking: undefined,
               continuation: undefined,
               maxRounds: Math.min(maxRounds, 6),
               toolAccess: task.tools.length ? 'read-only' : 'none',
@@ -874,6 +887,26 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       content:
         '[LUCZOR-ASSISTENZ] Du entscheidest selbst: einfache Fragen direkt beantworten, Aufgaben mit vorhandenen Werkzeugen selbst erledigen. Nur wenn ein Teilauftrag einen Nutzen hat, agent_assist gezielt nutzen. Externe Teilaufträge laufen im Hintergrund; währenddessen andere nötige Arbeit erledigen, anschließend Ergebnisse mit agent_assist_status abholen und prüfen. Lokale Teilaufträge nutzen dasselbe Modell nacheinander. Keine feste Planer/Arbeiter/Prüfer-Zeremonie und kein internes Nachdenken veröffentlichen. Nur belegte kurze Fortschrittsmeldungen. Externe Modelle können lokal gesperrten Kontext nicht erhalten.',
     })
+  }
+
+  const goalReportTool =
+    opts.goalTracking &&
+    !resolvedRoute.externalOneShot &&
+    !opts.forceAgentTeam &&
+    opts.toolAccess !== 'none' &&
+    !disabledTools.has(GOAL_REPORT_NAME)
+      ? createGoalReportTool(opts.goalTracking)
+      : undefined
+  if (goalReportTool) {
+    tools.push({
+      type: 'function',
+      function: {
+        name: goalReportTool.name,
+        description: goalReportTool.description,
+        parameters: goalReportTool.parameters,
+      },
+    })
+    messages.unshift({ role: 'system', content: goalReportInstruction(opts.goalTracking!.phase) })
   }
 
   const partialResultAfterInferenceFailure = async (
@@ -1010,7 +1043,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       throw new Error('Der Chat-Agentenmodus benötigt das lokale Modell.')
     const { runChatAgentTeam } = await import('@/services/agents/chatOrchestration')
     return runChatAgentTeam(
-      { ...opts, signal, toolAccess: planningDiscussion ? 'read-only' : opts.toolAccess },
+      { ...opts, goalTracking: undefined, signal, toolAccess: planningDiscussion ? 'read-only' : opts.toolAccess },
       inferenceGateway,
       checkpoint(),
       runAgent
@@ -1288,10 +1321,14 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           })
         throw new DOMException('Aborted', 'AbortError')
       }
-      const selectedTool = assistance?.tools.find(tool => tool.name === call.name) ?? getTool(call.name)
+      const selectedTool =
+        call.name === GOAL_REPORT_NAME
+          ? goalReportTool
+          : (assistance?.tools.find(tool => tool.name === call.name) ?? getTool(call.name))
       const tool =
         ((call.name === 'agent_assist' && call.arguments.target === 'local') ||
-          (call.name === 'agent_assist_status' && assistance?.isLocalJob(call.arguments.job_id))) && selectedTool
+          (call.name === 'agent_assist_status' && assistance?.isLocalJob(call.arguments.job_id))) &&
+        selectedTool
           ? { ...selectedTool, dataHandling: 'ephemeral' as const }
           : selectedTool
       const category = tool?.category ?? 'custom'

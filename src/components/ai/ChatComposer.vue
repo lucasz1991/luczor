@@ -39,7 +39,9 @@ function measure() {
   if (el) atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 120
 }
 function scrollToBottom() {
-  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+  const reducedMotion =
+    window.matchMedia('(prefers-reduced-motion: reduce)').matches ||
+    !!scroller.value?.closest('[data-reduce-motion="1"], [data-reduce-motion="true"]')
   scroller.value?.scrollTo({ top: scroller.value.scrollHeight, behavior: reducedMotion ? 'auto' : 'smooth' })
 }
 defineExpose({ scrollToBottom })
@@ -78,7 +80,10 @@ defineExpose({ scrollToBottom })
   padding-block-start: 72px;
   scroll-padding-block-start: 72px;
 }
-.ai-chat__messages { overscroll-behavior-y: contain; scrollbar-gutter: stable; }
+.ai-chat__messages {
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+}
 .ai-jump {
   display: inline-flex;
   align-items: center;
@@ -87,5 +92,7 @@ defineExpose({ scrollToBottom })
   min-height: 36px;
   box-shadow: 0 4px 16px #0002;
 }
-.ai-jump__arrow { transform: rotate(90deg); }
+.ai-jump__arrow {
+  transform: rotate(90deg);
+}
 </style>

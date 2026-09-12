@@ -41,7 +41,7 @@ describe('AI component rendering contracts', () => {
     expect(html).toContain('aria-busy="true"')
     expect(html).not.toContain('Antwort kopieren')
     expect(html).toContain('Welche Variante')
-    expect(html).toContain('<li>Noch nicht senden</li>')
+    expect(html).toMatch(/<li\b[^>]*>Noch nicht senden<\/li>/)
     expect(html).not.toContain('<button')
   })
 
