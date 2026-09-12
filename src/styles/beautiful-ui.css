@@ -1210,7 +1210,6 @@
   .ai-prompt__controls {
     gap: 4px;
   }
-  .ai-prompt__controls .ai-agent-mode,
   .ai-prompt__controls .ai-route-mode {
     padding-inline: 6px;
   }
@@ -1277,31 +1276,6 @@ html[data-reduce-motion='1'] .ai-shimmer {
   align-items: center;
   gap: 4px;
   flex-shrink: 0;
-}
-.ai-agent-mode {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 6px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: transparent;
-  color: var(--text-muted);
-  font-size: 10px;
-  cursor: pointer;
-}
-.ai-agent-mode.is-active {
-  color: var(--text-primary);
-  border-color: var(--cy, #74c5d9);
-  background: var(--surface-glass);
-}
-.ai-agent-mode:focus-visible {
-  outline: 2px solid var(--cy, #74c5d9);
-  outline-offset: 2px;
-}
-.ai-agent-mode:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 .ai-route-mode {
   display: inline-flex;

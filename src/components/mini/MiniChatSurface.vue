@@ -558,13 +558,6 @@ onBeforeUnmount(() => {
           <AiIcon name="upload" :size="13" /> Datei
           <input type="file" accept=".txt,.md,.json,.csv,.log,.xml,.html,.css,.js,.ts,.vue,.php" @change="attachFile" />
         </label>
-        <button
-          type="button"
-          :aria-pressed="snapshot.agentMode"
-          @click="emit('action', { type: 'agent_mode', sessionId: snapshot.sessionId, enabled: !snapshot.agentMode })"
-        >
-          <AiIcon name="spark" :size="13" /> {{ snapshot.agentMode ? 'Agenten an' : 'Agenten' }}
-        </button>
       </div>
       <div v-if="!isChat" class="mini-workspace-actions">
         <button

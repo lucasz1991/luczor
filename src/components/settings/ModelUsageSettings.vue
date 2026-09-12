@@ -91,26 +91,19 @@ async function refreshCatalog() {
       </p>
       <label class="lz-label" for="model-usage-route">Standardmodus neuer Chats</label>
       <select id="model-usage-route" v-model="draft.chatRouteMode" class="lz-input">
-        <option value="local">Lokal · nur das signierte lokale Modell</option>
-        <option value="auto" :disabled="!draft.externalEnabled">Auto · lokal zuerst, extern nach Freigabe</option>
-        <option value="external" :disabled="!draft.externalEnabled">
-          Externes Modell · lokalen Start überspringen
+        <option value="local">Lokal · Team nur auf dem signierten lokalen Modell</option>
+        <option value="auto" :disabled="!draft.externalEnabled">
+          Lokal + extern · lokale Orchestrierung, externe Spezialisten nach Freigabe
         </option>
+        <option value="external" :disabled="!draft.externalEnabled">Nur extern · kein lokales Modell</option>
       </select>
       <p class="lz-hint">
-        Gilt als Vorauswahl im Eingabefeld; dort ist der Modus pro Chat umstellbar. „Externes Modell" verlangt weiterhin
-        für jede Runde die ausdrückliche Freigabe des Nachrichtenpakets.
+        Gilt als Vorauswahl im Eingabefeld; dort ist der Modus pro Chat umstellbar. Jeder Auftrag läuft als Agententeam,
+        und der Modus bestimmt auch dessen Besetzung: „Lokal" hält Orchestrierung und alle Agenten auf dem lokalen
+        Modell, „Lokal + extern" orchestriert lokal und lässt zusätzlich externe Spezialisten zu, „Nur extern" verwendet
+        kein lokales Modell. Externe Läufe verlangen weiterhin für jede Runde die ausdrückliche Freigabe des
+        Nachrichtenpakets.
       </p>
-      <label class="model-usage-toggle"
-        ><input v-model="draft.agentsByDefault" type="checkbox" /> Neue Chats standardmäßig im Agentenmodus</label
-      >
-      <label class="lz-label" for="model-usage-team">Agententeam</label>
-      <select id="model-usage-team" v-model="draft.teamPreset" class="lz-input">
-        <option value="local">Alle Agenten lokal</option>
-        <option value="server" :disabled="!draft.externalEnabled">Admin-Standard</option>
-        <option value="free" :disabled="!draft.externalEnabled">Lokale Planung + Free-Spezialisten</option>
-        <option value="budget" :disabled="!draft.externalEnabled">Günstige externe Planung + Free-Spezialisten</option>
-      </select>
       <p v-if="!draft.externalEnabled" class="lz-hint">Externe Modelle sind gesperrt. Teams arbeiten lokal.</p>
       <div class="model-usage-actions">
         <button v-if="!managed" type="button" class="lz-btn" :disabled="busy" @click="save">

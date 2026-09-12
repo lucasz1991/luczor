@@ -20,12 +20,10 @@ it('defaults external routing off and rejects invalid stored selections', () => 
     DEFAULT_MODEL_USAGE
   )
 })
-it('persists model and team choices together before publishing them', async () => {
+it('persists model and route choices together before publishing them', async () => {
   const choice = {
     localModelId: 'local-tier-light',
     externalEnabled: true,
-    agentsByDefault: true,
-    teamPreset: 'free' as const,
     chatRouteMode: 'auto' as const,
   }
   await saveModelUsageSettings(choice)

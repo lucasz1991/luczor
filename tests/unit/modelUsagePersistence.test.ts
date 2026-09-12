@@ -25,7 +25,7 @@ it('restores saved device choices after a new webview origin with empty localSto
     disk = pending
   })
   const first = await import('@/services/inference/modelUsageSettings')
-  const choice = { ...first.DEFAULT_MODEL_USAGE, localModelId: 'local-tier-light', agentsByDefault: true }
+  const choice = { ...first.DEFAULT_MODEL_USAGE, localModelId: 'local-tier-light', externalEnabled: true }
   await first.saveModelUsageSettings(choice)
   vi.resetModules()
   const restarted = await import('@/services/inference/modelUsageSettings')
@@ -39,8 +39,6 @@ it('does not replace an existing device selection with stale browser settings', 
   const saved = {
     localModelId: 'local-tier-light',
     externalEnabled: false,
-    agentsByDefault: false,
-    teamPreset: 'local',
     chatRouteMode: 'local',
   }
   native.get.mockResolvedValue(saved)

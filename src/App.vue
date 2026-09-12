@@ -150,6 +150,7 @@ import {
   composeProviderSystemPrompt,
   formatChatTime,
   goalStatusLabel,
+  messageRouteLabel,
   normalizeConversationHistory,
   previewToolArguments,
   safeTrim,
@@ -2522,7 +2523,12 @@ useWorkflowWatchers()
               ><strong>{{ m.role === 'user' ? 'Du' : appearance.assistantName }}</strong
               ><time>{{ formatChatTime(m.ts) }}</time
               ><span v-if="m.meta.inputSource && m.meta.inputSource !== 'keyboard'" class="ai-badge">Gesprochen</span
-              ><span v-if="m.meta.model" class="ai-message__model" :title="m.meta.provider">{{ m.meta.model }}</span>
+              ><span
+                v-if="messageRouteLabel(m.meta)"
+                class="ai-message__model"
+                :title="m.meta.provider || (m.meta.inferenceTarget === 'local_llama_cpp' ? 'Lokales Modell' : '')"
+                >{{ messageRouteLabel(m.meta) }}</span
+              >
             </header>
             <template v-if="m.role === 'assistant'">
               <ThinkingState

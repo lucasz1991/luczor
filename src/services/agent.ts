@@ -888,7 +888,9 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
     }
   }
 
-  if (opts.agentMode) {
+  // A packet-bound external route is a single approved request without tools, so it cannot
+  // carry a multi-round team: those turns run as that approved one-shot instead of failing.
+  if (opts.agentMode && !resolvedRoute.externalOneShot) {
     if (inferenceGateway.target !== 'local_llama_cpp')
       throw new Error('Der Chat-Agentenmodus benötigt das lokale Modell.')
     const { runChatAgentTeam } = await import('@/services/agents/chatOrchestration')

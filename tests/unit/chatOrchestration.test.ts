@@ -702,7 +702,7 @@ it.each(['team_node_interrupted', 'runtime_empty_response'])(
   }
 )
 
-it('uses parallel distinct external roles and passes their proposals only to the local tool worker', async () => {
+it('uses parallel distinct external roles and passes their proposals only to local nodes', async () => {
   modelUsageSettings.value = { ...modelUsageSettings.value, externalEnabled: true }
   const outcomes: Array<{ role: string }> = []
   prepareSpecialists.mockResolvedValue({
@@ -737,8 +737,14 @@ it('uses parallel distinct external roles and passes their proposals only to the
   )
   expect(prepareSpecialists.mock.calls[0]![0].messages).toEqual([{ role: 'user', content: 'PUBLIC' }])
   expect(outcomes.map(value => value.role).sort()).toEqual(['coding', 'research', 'review'])
-  expect(JSON.stringify(calls[1]!.baseMessages)).toContain('PUBLIC-coding')
+  // The worker and the scout start beside the specialists instead of waiting for them, so
+  // the reviewer is the local node that joins every proposal. No external proposal may
+  // reach anything but a local node, and the local secret never leaves the local side.
+  const reviewerCall = calls.at(-1)!
+  expect(JSON.stringify(reviewerCall.baseMessages)).toContain('PUBLIC-coding')
+  expect(JSON.stringify(reviewerCall.baseMessages)).toContain('LOCAL_SECRET')
   expect(calls.every(call => call.inferenceGateway === gateway)).toBe(true)
+  expect(JSON.stringify(calls[1]!.baseMessages)).not.toContain('PUBLIC-coding')
   expect(new Set(rounds).size).toBe(rounds.length)
   expect(response.specialistOutcomes).toHaveLength(3)
 })

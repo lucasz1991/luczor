@@ -38,7 +38,8 @@ async function rate(outcome: SpecialistOutcome, rating: 1 | -1) {
       gewertet.
     </p>
     <section v-for="outcome in outcomes" :key="outcome.requestId ?? outcome.role">
-      <strong>{{ labels[outcome.role] }}</strong> · {{ outcome.model ?? 'Servermodell' }}
+      <!-- Specialists only ever run on the approved external route, so the badge names it. -->
+      <strong>{{ labels[outcome.role] }}</strong> · Router · {{ outcome.model ?? 'Servermodell' }}
       <small v-if="outcome.incomplete">Unvollständig: Ausgabelimit erreicht</small>
       <small
         >{{ (outcome.durationMs / 1000).toFixed(1) }} s ·

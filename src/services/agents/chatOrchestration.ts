@@ -170,12 +170,18 @@ export async function runChatAgentTeam(
     prompt:
       'Bearbeite ausschließlich das separat freigegebene Kontextpaket deiner Rolle. Lokale Vorgängerdaten werden nicht übertragen.',
   }))
+  // Agents are started together instead of in waves: the writing worker, a read-only scout
+  // beside it and every external specialist all begin once the plan exists, and the
+  // reviewer is the join point that sees all of them. They occupy different resources (one
+  // local slot, one proxy per external role), and even two nodes sharing the local slot
+  // overlap their tool work with each other's model time. Capped at the runner's own 8.
+  const maxParallel = Math.min(8, Math.max(2, 2 + externalNodes.length))
   const run = prepareChatAgentTeam(
     {
       id: 'chat-team',
       label: 'Chat-Agententeam',
-      maxParallel: specialists?.preset.max_parallel ?? 1,
-      deadlineMs: chatTeamBudget(limits.agent, externalNodes.length, specialists?.preset.max_parallel ?? 1).deadlineMs,
+      maxParallel,
+      deadlineMs: chatTeamBudget(limits.agent, externalNodes.length, maxParallel).deadlineMs,
       maxPromptCharacters: 512_000,
       nodes: [
         {
@@ -192,13 +198,12 @@ export async function runChatAgentTeam(
         ...externalNodes,
         {
           id: 'worker',
-          timeoutMs: chatTeamBudget(limits.agent, externalNodes.length, specialists?.preset.max_parallel ?? 1)
-            .workerTimeoutMs,
+          timeoutMs: chatTeamBudget(limits.agent, externalNodes.length, maxParallel).workerTimeoutMs,
           label: 'Auftrag bearbeiten',
           role: 'implementer',
           adapterId: 'chat',
           permission: opts.mode === 'observe' || opts.toolAccess ? 'read-only' : 'workspace-write',
-          dependencies: ['planner', ...externalNodes.map(node => node.id)],
+          dependencies: ['planner'],
           maxPromptCharacters: 64_000,
           prompt:
             'Bearbeite den Nutzerauftrag mit den verfügbaren Tools. Nutze den Plan als Vorschlag. Prüfe bereits ausgeführte Aktionen, vermeide doppelte Änderungen und benenne offene Arbeit.',
@@ -209,7 +214,9 @@ export async function runChatAgentTeam(
           role: 'reviewer',
           adapterId: 'chat',
           permission: 'read-only',
-          dependencies: ['worker'],
+          // The join point: the first node that sees the worker's result and every
+          // specialist's suggestion together.
+          dependencies: ['worker', ...externalNodes.map(node => node.id)],
           maxPromptCharacters: 64_000,
           prompt:
             'Prüfe zuerst den gesicherten Arbeitsstand und die Vorgängerergebnisse gegen den Nutzerauftrag. Nutze zusätzliche lesende Tools nur für konkrete Beweislücken oder Widersprüche; starte die Erhebung nicht erneut. Berichte knapp über belegte Ergebnisse, Fehler und offene Arbeit. Trenne eine ausgeführte Analyse von bloßen Vorschlägen. Ein Rundenlimit bedeutet keine abgeschlossene Aufgabe.',

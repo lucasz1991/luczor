@@ -9,8 +9,6 @@ import type { InferenceConnectionResult } from '@/services/inference/coordinator
 const appliedModelUsage = VueRuntime.ref({
   localModelId: null as string | null,
   externalEnabled: false,
-  agentsByDefault: false,
-  teamPreset: 'local',
   chatRouteMode: 'local',
 })
 const saveModels = vi.fn(async (value: typeof appliedModelUsage.value) => {
@@ -116,8 +114,6 @@ beforeEach(() => {
   appliedModelUsage.value = {
     localModelId: null,
     externalEnabled: false,
-    agentsByDefault: false,
-    teamPreset: 'local',
     chatRouteMode: 'local',
   }
   saveModels.mockClear()
@@ -215,8 +211,6 @@ describe('model selection through the shared settings save action', () => {
     const choice = {
       localModelId: 'local-tier-light',
       externalEnabled: true,
-      agentsByDefault: true,
-      teamPreset: 'free',
       chatRouteMode: 'auto',
     }
     first.modelUsageDraft.value = choice

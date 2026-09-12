@@ -117,14 +117,14 @@ describe('settings section contracts', () => {
       modelUsage: {
         localModelId: 'local-tier-light',
         externalEnabled: true,
-        agentsByDefault: true,
-        teamPreset: 'free',
         chatRouteMode: 'auto',
       },
     })
     expect(html).not.toContain('Modellnutzung speichern')
     expect(html).toContain('unten im Einstellungsfenster')
-    expect(html).toMatch(/<option[^>]*value="free"[^>]*selected/)
+    // The route mode is the only team control left; there is no separate team picker.
+    expect(html).toMatch(/<option[^>]*value="auto"[^>]*selected/)
+    expect(html).not.toContain('Agententeam')
     expect(html).toContain('local-tier-light')
     expect(emittedEvents(ChatSettingsSection)).toContain('update:modelUsage')
   })

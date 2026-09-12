@@ -109,7 +109,7 @@ describe('AI component rendering contracts', () => {
           }),
       })
     )
-    expect(html).toContain('aria-label="Modellroute für diesen Chat wählen"')
+    expect(html).toContain('aria-label="Modellroute und Agententeam für diesen Chat wählen"')
     expect(html).toContain('ai-route-mode')
     expect(html).toContain('Externes Modell')
     expect(html).toContain('ai-prompt__heading')
@@ -117,13 +117,26 @@ describe('AI component rendering contracts', () => {
     expect(html).not.toContain('Luczor kann Fehler machen')
   })
 
-  it('pins the route-mode control to local while the agent mode owns the route', async () => {
+  it('offers no agent-mode switch because every turn runs as a team', async () => {
     const html = await renderToString(
       createSSRApp({
-        render: () => h(PromptBar, { modelValue: '', routeMode: 'external', externalAllowed: true, agentMode: true }),
+        render: () => h(PromptBar, { modelValue: '', routeMode: 'auto', externalAllowed: true }),
+      })
+    )
+    expect(html).not.toContain('ai-agent-mode')
+    expect(html).not.toContain('Agentenmodus')
+    // The mode keeps describing the team it picks, and stays usable for every mode.
+    expect(html).toContain('Lokale Orchestrierung, Agenten lokal und extern')
+    expect(html).not.toContain('<select class="ai-route-mode__select" disabled')
+  })
+
+  it('pins the route-mode control to local when external models are switched off', async () => {
+    const html = await renderToString(
+      createSSRApp({
+        render: () => h(PromptBar, { modelValue: '', routeMode: 'external', externalAllowed: false }),
       })
     )
     expect(html).toContain('disabled')
-    expect(html).toContain('Im Agentenmodus bestimmt das Agententeam die Route pro Rolle.')
+    expect(html).toContain('Externe Modelle zuerst unter Einstellungen')
   })
 })

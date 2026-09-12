@@ -1,13 +1,14 @@
 import { shallowRef } from 'vue'
 import { isTauri } from '@tauri-apps/api/core'
 import { Store } from '@tauri-apps/plugin-store'
-import type { TeamPresetChoice } from '@/services/agents/teamPolicy'
 
 /**
- * Explicit per-chat route choice in the composer.
- * - `local`:    only the signed local model; no external route is offered.
- * - `auto`:     local first; an external model only after an explicit per-turn release.
- * - `external`: skip the local cold start and go to the external route, still only
+ * Explicit per-chat route choice in the composer. Every turn runs as an agent team, so this
+ * one control also picks that team (see `teamPresetForRouteMode`):
+ * - `local`:    only the signed local model; orchestration and every agent stay local.
+ * - `auto`:     local orchestration first, external specialists on top, each only after an
+ *               explicit per-turn release.
+ * - `external`: no local model at all; the approved external route answers, still only
  *               after the same explicit per-turn release.
  * `external` and `auto` require `externalEnabled`; otherwise the mode degrades to `local`.
  */
@@ -18,16 +19,12 @@ export const CHAT_ROUTE_MODES: readonly ChatRouteMode[] = ['local', 'auto', 'ext
 export type ModelUsageSettings = {
   localModelId: string | null
   externalEnabled: boolean
-  agentsByDefault: boolean
-  teamPreset: TeamPresetChoice
   chatRouteMode: ChatRouteMode
 }
 const KEY = 'luczor.device.model-usage.v1'
 export const DEFAULT_MODEL_USAGE: ModelUsageSettings = {
   localModelId: null,
   externalEnabled: false,
-  agentsByDefault: false,
-  teamPreset: 'local',
   chatRouteMode: 'local',
 }
 export function parseModelUsage(value: unknown): ModelUsageSettings {
@@ -38,8 +35,6 @@ export function parseModelUsage(value: unknown): ModelUsageSettings {
         ? item.localModelId
         : null,
     externalEnabled: item.externalEnabled === true,
-    agentsByDefault: item.agentsByDefault === true,
-    teamPreset: ['server', 'local', 'free', 'budget'].includes(item.teamPreset ?? '') ? item.teamPreset! : 'local',
     // A stored external choice must never survive switching external models off.
     chatRouteMode:
       item.externalEnabled === true && CHAT_ROUTE_MODES.includes(item.chatRouteMode as ChatRouteMode)

@@ -98,6 +98,21 @@ export function formatChatTime(timestamp: number, seconds = false): string {
   )
 }
 
+/**
+ * Small provenance badge next to an answer: which route produced it and, when known, which
+ * model ran there. `Lokal` is the signed local model, `Router` the approved external route.
+ * An answer without a resolved target (still streaming, or restored from an older session)
+ * yields an empty string so the badge stays hidden rather than claiming a route.
+ */
+export function messageRouteLabel(meta: {
+  model?: string
+  inferenceTarget?: 'local_llama_cpp' | 'laravel_proxy'
+}): string {
+  const route =
+    meta.inferenceTarget === 'laravel_proxy' ? 'Router' : meta.inferenceTarget === 'local_llama_cpp' ? 'Lokal' : ''
+  return [route, safeTrim(meta.model)].filter(Boolean).join(' · ')
+}
+
 export function goalStatusLabel(status: string): string {
   switch (status) {
     case 'done':
