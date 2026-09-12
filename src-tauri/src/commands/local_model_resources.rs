@@ -113,6 +113,9 @@ pub(super) struct RuntimeOptions {
     no_mmap: bool,
     polling: bool,
     http_threads: bool,
+    flash_attn: bool,
+    kv_cache_quant: bool,
+    pub(super) slot_save_path: bool,
 }
 
 impl RuntimeOptions {
@@ -140,6 +143,11 @@ impl RuntimeOptions {
             no_mmap: supported("--no-mmap"),
             polling: help.contains("--poll ") && help.contains("--poll-batch "),
             http_threads: help.contains("--threads-http "),
+            // Quantized KV cache (anything other than f16) requires flash attention in
+            // llama.cpp, so both are gated on --flash-attn advertising support.
+            flash_attn: supported("--flash-attn"),
+            kv_cache_quant: supported("--cache-type-k") && supported("--cache-type-v"),
+            slot_save_path: supported("--slot-save-path"),
         }
     }
 }
@@ -427,6 +435,24 @@ fn plan_resources_for_platform(
     } else {
         reasons.push("runtime_resource_controls_unavailable".into());
     }
+    // Flash attention lowers attention working memory with no measured quality loss and,
+    // on the GPU backends where VRAM is the binding constraint, unlocks quantized KV
+    // cache storage (q8_0 halves KV cache bytes versus f16 for a negligible perplexity
+    // cost). llama.cpp requires flash attention to be active before it will accept a
+    // non-f16 cache type, so the two flags are only ever emitted together.
+    if options.flash_attn {
+        arguments.push("--flash-attn".into());
+        reasons.push("flash_attention_enabled".into());
+        if gpu_selected && options.kv_cache_quant {
+            arguments.extend([
+                "--cache-type-k".into(),
+                "q8_0".into(),
+                "--cache-type-v".into(),
+                "q8_0".into(),
+            ]);
+            reasons.push("kv_cache_q8_quantized".into());
+        }
+    }
     ResourcePlan {
         resource_revision: 0,
         requested_mode: "auto".into(),
@@ -630,6 +656,62 @@ mod tests {
         plan.confirm_started();
         assert!(plan.applied);
         assert!(!serde_json::to_string(&plan).unwrap().contains("arguments"));
+    }
+
+    #[test]
+    fn slot_save_path_capability_requires_advertised_runtime_support() {
+        assert!(!RuntimeOptions::default().slot_save_path);
+        assert!(
+            RuntimeOptions::from_help("--threads N --slot-save-path PATH").slot_save_path
+        );
+    }
+
+    #[test]
+    fn flash_attention_and_kv_quantization_require_advertised_runtime_support() {
+        // No advertised support: neither flag is ever emitted, on any backend.
+        let plan = plan_resources(&hardware(), 32768, 17 * GIB, "cuda", &RuntimeOptions::default());
+        assert!(!plan.arguments.iter().any(|arg| arg == "--flash-attn"));
+        assert!(!plan.arguments.iter().any(|arg| arg == "--cache-type-k"));
+    }
+
+    #[test]
+    fn flash_attention_alone_is_enabled_without_kv_quantization_support() {
+        let options = RuntimeOptions::from_help(
+            "--threads N --threads-batch N --batch-size N --ubatch-size N --flash-attn",
+        );
+        let plan = plan_resources(&hardware(), 32768, 17 * GIB, "cuda", &options);
+        assert!(plan.arguments.iter().any(|arg| arg == "--flash-attn"));
+        assert!(!plan.arguments.iter().any(|arg| arg == "--cache-type-k"));
+        assert!(plan
+            .reason_codes
+            .iter()
+            .any(|reason| reason == "flash_attention_enabled"));
+    }
+
+    #[test]
+    fn kv_cache_is_quantized_to_q8_on_gpu_backends_once_flash_attention_is_available() {
+        let options = RuntimeOptions::from_help(
+            "--threads N --threads-batch N --batch-size N --ubatch-size N --flash-attn --cache-type-k TYPE --cache-type-v TYPE",
+        );
+        let gpu = plan_resources(&hardware(), 32768, 17 * GIB, "cuda", &options);
+        assert!(gpu.arguments.iter().any(|arg| arg == "--flash-attn"));
+        assert!(gpu
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--cache-type-k", "q8_0"]));
+        assert!(gpu
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--cache-type-v", "q8_0"]));
+        assert!(gpu
+            .reason_codes
+            .iter()
+            .any(|reason| reason == "kv_cache_q8_quantized"));
+        // CPU-only inference keeps flash attention's compute-time benefit but skips the
+        // KV quantization step, which targets VRAM pressure specifically.
+        let cpu = plan_resources(&hardware(), 32768, GIB, "cpu", &options);
+        assert!(cpu.arguments.iter().any(|arg| arg == "--flash-attn"));
+        assert!(!cpu.arguments.iter().any(|arg| arg == "--cache-type-k"));
     }
 
     #[test]

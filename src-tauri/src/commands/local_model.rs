@@ -263,6 +263,10 @@ struct ManagedRuntime {
     acceleration: Arc<Mutex<gpu_runtime::RuntimeAcceleration>>,
     resource_plan: resource_runtime::ResourcePlan,
     model_storage: ModelStorage,
+    /// Set only when the runtime binary advertised `--slot-save-path` support and the
+    /// directory was passed at startup. `stop()` uses it to persist this scope's KV cache
+    /// before the process exits; a fresh process for the same scope restores from it.
+    slot_cache_dir: Option<PathBuf>,
     #[cfg(target_os = "linux")]
     _linux_bundle: Arc<linux_protection::Bundle>,
     _runtime_guard: File,
@@ -345,6 +349,18 @@ impl ManagedRuntime {
     }
 
     fn stop(&mut self) {
+        // Bank this scope's KV cache to disk while the process can still answer the save
+        // request, before anything below makes it unreachable or kills it outright.
+        if let (Some(dir), RuntimeScope::Bound(digest)) = (&self.slot_cache_dir, &self.scope) {
+            if self
+                .child
+                .as_mut()
+                .and_then(|child| child.try_wait().ok())
+                .is_some_and(|status| status.is_none())
+            {
+                save_slot_cache(self.port, &self.api_key, dir, digest);
+            }
+        }
         if let Some(mut child) = self.child.take() {
             terminate_process(&mut child);
         }
@@ -2304,8 +2320,8 @@ fn verify_configured_artifacts(
     } else {
         configured_paths(app, model, catalog_binding)?
     };
-    let mut model_guard = open_artifact_guard_cancellable(&model_path, cancel)?;
-    let mut runtime_guard = open_artifact_guard_cancellable(&runtime_path, cancel)?;
+    let (model_guard, model_hash) = verified_artifact_guard(&model_path, cancel)?;
+    let (runtime_guard, runtime_hash) = verified_artifact_guard(&runtime_path, cancel)?;
     if model_guard
         .metadata()
         .map_err(|_| "Configured GGUF file is unavailable.")?
@@ -2314,10 +2330,10 @@ fn verify_configured_artifacts(
     {
         return Err("Configured GGUF size does not match the signed manifest.".into());
     }
-    if sha256_open_file_cancellable(&mut model_guard, cancel)? != artifact.sha256 {
+    if model_hash != artifact.sha256 {
         return Err("Configured GGUF hash does not match the signed manifest.".into());
     }
-    if sha256_open_file_cancellable(&mut runtime_guard, cancel)? != runtime.sha256 {
+    if runtime_hash != runtime.sha256 {
         return Err("Configured llama.cpp runtime hash does not match the signed manifest.".into());
     }
     let support_guards = gpu_runtime::verify_support_files(&runtime_path, runtime, cancel)?;
@@ -3307,6 +3323,21 @@ fn start_runtime_attempt(
     require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)?;
     let api_key_file = key_dir.join(format!("{}.key", Uuid::new_v4()));
     write_private_file(&api_key_file, api_key.as_bytes())?;
+    // Only set up when the runtime binary advertises support: lets a scope's KV cache
+    // survive an idle-timeout kill or a scope switch's process replacement, so resuming
+    // that scope later restores it instead of repaying the full conversation prefill.
+    let slot_cache_dir = if plan.runtime_options.slot_save_path {
+        let dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| error.to_string())?
+            .join("local-model")
+            .join("slot-cache");
+        create_private_directory(&dir)?;
+        Some(dir)
+    } else {
+        None
+    };
     let mut command = Command::new(&artifacts.runtime_path);
     command
         .args([
@@ -3326,8 +3357,11 @@ fn start_runtime_attempt(
             "1",
             "--ctx-size",
             &context.to_string(),
-            "--no-cache-prompt",
-        ])
+        ]);
+    if let Some(dir) = &slot_cache_dir {
+        command.args(["--slot-save-path", dir.to_string_lossy().as_ref()]);
+    }
+    command
         .args(&plan.arguments)
         .args(resource_plan.arguments())
         .env_clear()
@@ -3370,6 +3404,7 @@ fn start_runtime_attempt(
         acceleration,
         resource_plan,
         model_storage: model_storage.clone(),
+        slot_cache_dir: slot_cache_dir.clone(),
         #[cfg(target_os = "linux")]
         _linux_bundle: artifacts.linux_bundle.clone(),
         _runtime_guard: runtime_guard,
@@ -3411,6 +3446,9 @@ fn start_runtime_attempt(
         return Err("runtime_gpu_required_no_offload".into());
     }
     runtime.resource_plan.confirm_started();
+    if let (Some(dir), Some(digest)) = (&slot_cache_dir, scope_digest) {
+        restore_slot_cache(&runtime, dir, digest);
+    }
     Ok(runtime)
 }
 
@@ -3465,6 +3503,99 @@ fn await_health(
         std::thread::sleep(Duration::from_millis(200));
     }
     Err("llama.cpp health check timed out.".into())
+}
+
+/// Bounds the on-disk slot cache to the most recently used scopes, so switching between
+/// many chats/projects over time cannot grow this directory without limit. Each scope gets
+/// its own file, so there is nothing to erase specifically "on scope change" beyond normal
+/// least-recently-used eviction: a different scope simply never matches another scope's
+/// filename, so cross-scope reuse never happens regardless of what this directory holds.
+const MAX_CACHED_SLOT_SCOPES: usize = 5;
+
+fn slot_cache_path(dir: &Path, scope_digest: &str) -> PathBuf {
+    dir.join(format!("{scope_digest}.slot"))
+}
+
+fn prune_slot_cache_dir(dir: &Path) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut files: Vec<(PathBuf, SystemTime)> = entries
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "slot"))
+        .filter_map(|entry| {
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((entry.path(), modified))
+        })
+        .collect();
+    if files.len() <= MAX_CACHED_SLOT_SCOPES {
+        return;
+    }
+    files.sort_by_key(|(_, modified)| *modified);
+    for (path, _) in files.iter().take(files.len() - MAX_CACHED_SLOT_SCOPES) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+/// Best-effort: asks the still-running llama.cpp process to persist its single slot's KV
+/// cache to disk under this scope's digest, so a later cold start for the SAME scope (see
+/// `restore_slot_cache`) can skip reprocessing the conversation transcript from scratch.
+/// Never surfaces an error: a failed save only costs the next cold start its speedup, it
+/// never affects correctness, and it must never block or fail the teardown it runs inside.
+fn save_slot_cache(port: u16, api_key: &str, dir: &Path, scope_digest: &str) {
+    let Ok(client) = local_http_client(Duration::from_secs(2), Duration::from_secs(10)) else {
+        return;
+    };
+    let filename = slot_cache_path(dir, scope_digest)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned());
+    let Some(filename) = filename else {
+        return;
+    };
+    let Ok(encoded) = serde_json::to_vec(&json!({ "filename": filename })) else {
+        return;
+    };
+    let _ = local_network::send(
+        client
+            .post(format!("http://127.0.0.1:{port}/slots/0?action=save"))
+            .bearer_auth(api_key)
+            .header("Content-Type", "application/json")
+            .body(encoded),
+    );
+    prune_slot_cache_dir(dir);
+}
+
+/// Best-effort restore of a scope's previously saved slot cache into a freshly started
+/// process's slot, so the first turn in a resumed scope does not repay the full prefill
+/// cost that `save_slot_cache` already banked. A missing or unusable save file is the
+/// normal case for a scope's first ever turn and is silently ignored; llama.cpp still
+/// verifies the restored cache against the actual prompt tokens it next receives, so a
+/// stale or corrupt save can only fall back to full reprocessing, never produce a wrong
+/// completion.
+fn restore_slot_cache(runtime: &ManagedRuntime, dir: &Path, scope_digest: &str) {
+    let path = slot_cache_path(dir, scope_digest);
+    if !path.is_file() {
+        return;
+    }
+    let Some(filename) = path.file_name().map(|name| name.to_string_lossy().into_owned()) else {
+        return;
+    };
+    let Ok(client) = local_http_client(Duration::from_secs(2), Duration::from_secs(10)) else {
+        return;
+    };
+    let Ok(encoded) = serde_json::to_vec(&json!({ "filename": filename })) else {
+        return;
+    };
+    let _ = local_network::send(
+        client
+            .post(format!(
+                "http://127.0.0.1:{}/slots/0?action=restore",
+                runtime.port
+            ))
+            .bearer_auth(&runtime.api_key)
+            .header("Content-Type", "application/json")
+            .body(encoded),
+    );
 }
 
 fn llama_http_failure(status: u16, response: impl Read) -> LocalInferenceFailure {
@@ -3674,8 +3805,17 @@ fn stream_completion(
         "stream": true,
         "stream_options": { "include_usage": true },
         "max_tokens": plan.output_ceiling,
-        // Keep model weights resident while each request supplies its entire conversation.
-        "cache_prompt": false,
+        // Each request supplies its entire conversation transcript, so an in-scope
+        // follow-up turn is normally an exact-prefix superset of the previous one: letting
+        // llama.cpp reuse that slot's existing KV cache for the shared prefix (instead of
+        // forcing a full reprocess every turn) is what makes the multi-second-per-turn
+        // prefill cost scale with only the new tail, not the whole transcript again. This
+        // is a pure performance path: cache reuse is keyed on an exact token-prefix match,
+        // so a shorter or different prefix (an edited turn, a resized context) can only
+        // fall back to recomputing more, never change the completion itself. Scope binding
+        // (see `RuntimeScope`) already guarantees this slot only ever serves one scope at a
+        // time, so there is no cross-conversation leakage risk in reusing it.
+        "cache_prompt": true,
         "chat_template_kwargs": {
             "parse_tool_calls": true
         }
@@ -4357,6 +4497,106 @@ fn open_artifact_guard_cancellable(path: &Path, cancel: &AtomicBool) -> Result<F
     }
 }
 
+// `std::fs::MetadataExt::{volume_serial_number, file_index}` on Windows remains gated
+// behind the unstable `windows_by_handle` feature, so identity is read directly off the
+// open handle via the already-vendored `windows_sys` crate instead.
+#[cfg(windows)]
+fn platform_identity(file: &File) -> (u64, u64) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION,
+    };
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let handle = file.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+    let ok = unsafe { GetFileInformationByHandle(handle, &mut info) };
+    if ok == 0 {
+        return (0, 0);
+    }
+    (
+        u64::from(info.dwVolumeSerialNumber),
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+    )
+}
+
+#[cfg(unix)]
+fn platform_identity(file: &File) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+        .unwrap_or((0, 0))
+}
+
+/// A verified artifact's sha256 plus a permanently-retained clone of the guard handle
+/// that proved it. As long as that sentinel clone stays open, the artifact cannot have
+/// changed underneath it: on Windows the guard denies write/delete access to every other
+/// handle for as long as any clone of it remains open, and on Linux the guard is an
+/// immutable sealed memfd snapshot whose content can never change after creation. A cache
+/// hit therefore needs no re-read of the (potentially tens-of-GiB) artifact bytes, only a
+/// cheap metadata comparison against the fingerprint recorded when the hash was computed.
+struct CachedArtifact {
+    guard: File,
+    len: u64,
+    modified: SystemTime,
+    identity: (u64, u64),
+    sha256: String,
+}
+
+impl CachedArtifact {
+    fn matches(&self, file: &File) -> bool {
+        let Ok(metadata) = file.metadata() else {
+            return false;
+        };
+        let Ok(modified) = metadata.modified() else {
+            return false;
+        };
+        self.len == metadata.len() && self.modified == modified && self.identity == platform_identity(file)
+    }
+}
+
+fn artifact_verification_cache() -> &'static Mutex<HashMap<PathBuf, CachedArtifact>> {
+    static CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedArtifact>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Returns an open, already-verified guard for `path` plus its sha256, skipping the full
+/// artifact read whenever a live process-cache entry for this exact path is still backed
+/// by an open sentinel handle with unchanged metadata (see [`CachedArtifact`]). This turns
+/// every cold start after the first, within one running process, from a full read of a
+/// multi-gigabyte artifact into a metadata comparison. Any failure along the cache path
+/// (lock, clone, or metadata) is treated as a cache miss and falls back to the original
+/// full verification, so correctness never depends on the cache succeeding.
+fn verified_artifact_guard(path: &Path, cancel: &AtomicBool) -> Result<(File, String), String> {
+    if let Ok(cache) = artifact_verification_cache().lock() {
+        if let Some(cached) = cache.get(path) {
+            if let Ok(clone) = cached.guard.try_clone() {
+                if cached.matches(&clone) {
+                    return Ok((clone, cached.sha256.clone()));
+                }
+            }
+        }
+    }
+    let mut guard = open_artifact_guard_cancellable(path, cancel)?;
+    let metadata = guard.metadata().map_err(|error| error.to_string())?;
+    let modified = metadata.modified().map_err(|error| error.to_string())?;
+    let identity = platform_identity(&guard);
+    let hash = sha256_open_file_cancellable(&mut guard, cancel)?;
+    if let Ok(sentinel) = guard.try_clone() {
+        if let Ok(mut cache) = artifact_verification_cache().lock() {
+            cache.insert(
+                path.to_path_buf(),
+                CachedArtifact {
+                    guard: sentinel,
+                    len: metadata.len(),
+                    modified,
+                    identity,
+                    sha256: hash.clone(),
+                },
+            );
+        }
+    }
+    Ok((guard, hash))
+}
+
 fn sha256_bytes(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -4802,14 +5042,15 @@ mod tests {
     };
     #[cfg(windows)]
     use super::{
-        attach_process_lifetime_guard, configured_paths_from_sources, open_artifact_guard,
-        read_runtime_path_config, sha256_open_file_cancellable, storage_mount_match_len,
-        ManagedRuntime, RuntimeScope, MAX_RUNTIME_PATH_CONFIG_BYTES,
+        artifact_verification_cache, attach_process_lifetime_guard, configured_paths_from_sources,
+        open_artifact_guard, read_runtime_path_config, sha256_bytes, sha256_open_file_cancellable,
+        storage_mount_match_len, verified_artifact_guard, ManagedRuntime, RuntimeScope,
+        MAX_RUNTIME_PATH_CONFIG_BYTES,
     };
     use base64::Engine;
     use serde_json::json;
     #[cfg(windows)]
-    use std::fs::{self, OpenOptions};
+    use std::fs::{self, File, OpenOptions};
     use std::io::Cursor;
     use std::net::TcpListener;
     #[cfg(windows)]
@@ -4931,6 +5172,7 @@ mod tests {
                 total_bytes: None,
                 reason_code: None,
             },
+            slot_cache_dir: None,
             _support_guards: Vec::new(),
             _runtime_guard: open_artifact_guard(&fixture.runtime).unwrap(),
             _model_guard: open_artifact_guard(&fixture.model_directory.join("model-a.gguf"))
@@ -5594,6 +5836,83 @@ mod tests {
         assert!(fs::remove_file(&path).is_err());
         drop(guard);
         fs::remove_file(&path).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verified_artifact_guard_returns_the_true_sha256_of_the_file_content() {
+        let path =
+            std::env::temp_dir().join(format!("luczor-cache-hash-{}.bin", uuid::Uuid::new_v4()));
+        let content = b"the quick brown fox jumps over the lazy dog";
+        fs::write(&path, content).unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let (_guard, hash) = verified_artifact_guard(&path, &cancel).unwrap();
+        assert_eq!(hash, sha256_bytes(content));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verified_artifact_guard_populates_and_reuses_the_process_cache() {
+        let path =
+            std::env::temp_dir().join(format!("luczor-cache-pop-{}.bin", uuid::Uuid::new_v4()));
+        fs::write(&path, b"cache me across cold starts").unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        assert!(!artifact_verification_cache()
+            .lock()
+            .unwrap()
+            .contains_key(&path));
+        let (_first, hash) = verified_artifact_guard(&path, &cancel).unwrap();
+        assert!(artifact_verification_cache()
+            .lock()
+            .unwrap()
+            .contains_key(&path));
+        // A second call for the same still-unchanged path must be served from the cache
+        // and report the identical hash without needing to touch the artifact bytes again.
+        let (_second, hash_again) = verified_artifact_guard(&path, &cancel).unwrap();
+        assert_eq!(hash, hash_again);
+        assert_eq!(
+            artifact_verification_cache()
+                .lock()
+                .unwrap()
+                .get(&path)
+                .unwrap()
+                .sha256,
+            hash
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verified_artifact_guard_keeps_the_file_write_protected_across_repeated_cold_starts() {
+        let path =
+            std::env::temp_dir().join(format!("luczor-cache-guard-{}.bin", uuid::Uuid::new_v4()));
+        fs::write(&path, b"protected across cold starts").unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let (guard1, _) = verified_artifact_guard(&path, &cancel).unwrap();
+        let (guard2, _) = verified_artifact_guard(&path, &cancel).unwrap();
+        // The cache's own sentinel clone is what actually keeps this guarantee alive, so
+        // dropping every call-site guard must not lift the protection.
+        drop(guard1);
+        drop(guard2);
+        assert!(OpenOptions::new().write(true).open(&path).is_err());
+        assert!(fs::remove_file(&path).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cached_artifact_fingerprint_rejects_a_different_files_metadata() {
+        let path_a =
+            std::env::temp_dir().join(format!("luczor-cache-fp-a-{}.bin", uuid::Uuid::new_v4()));
+        let path_b =
+            std::env::temp_dir().join(format!("luczor-cache-fp-b-{}.bin", uuid::Uuid::new_v4()));
+        fs::write(&path_a, b"aaaa").unwrap();
+        fs::write(&path_b, b"bbbbbbbb").unwrap();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        verified_artifact_guard(&path_a, &cancel).unwrap();
+        let cache = artifact_verification_cache().lock().unwrap();
+        let cached_a = cache.get(&path_a).unwrap();
+        let file_b = File::open(&path_b).unwrap();
+        assert!(!cached_a.matches(&file_b));
     }
 
     #[test]
