@@ -5,6 +5,9 @@ import type { ToolDef } from './types'
 
 const ALLOWED_ARGUMENTS = new Set(['query', 'scope', 'limit'])
 const MAX_RESULT_CHARS = 7_000
+// b10809 rejects exactly 2000 grammar repetitions; keep schema and execution aligned.
+// https://github.com/ggml-org/llama.cpp/blob/5266f24da/src/llama-grammar.cpp
+const MAX_QUERY_CHARS = 1999
 
 function compactText(value: string, maximum: number): string {
   const safe = redactAbsoluteFilesystemPaths(redactProviderSecrets(value)).trim()
@@ -30,7 +33,7 @@ export const memoryTools: ToolDef[] = [
         query: {
           type: 'string',
           minLength: 1,
-          maxLength: 2000,
+          maxLength: MAX_QUERY_CHARS,
           description: 'Meaningful words or technical identifiers to recall.',
         },
         scope: {
@@ -54,11 +57,11 @@ export const memoryTools: ToolDef[] = [
       if (
         typeof args.query !== 'string' ||
         !args.query.trim() ||
-        args.query.length > 2000 ||
+        args.query.length > MAX_QUERY_CHARS ||
         !/[\p{L}\p{N}]/u.test(args.query) ||
         /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/u.test(args.query)
       ) {
-        throw new Error('query must contain meaningful text between 1 and 2000 characters.')
+        throw new Error(`query must contain meaningful text between 1 and ${MAX_QUERY_CHARS} characters.`)
       }
       const scope = args.scope === undefined ? 'project' : args.scope
       if (scope !== 'project' && scope !== 'user') throw new Error('scope must be project or user.')

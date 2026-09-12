@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({ recall: vi.fn(), analyze: vi.fn(), remember: v
 vi.mock('@/services/memory/luczorMemory', () => ({ luczorMemory: mocks }))
 
 import { memoryTools } from '@/services/tools/memory'
+import { validateToolArguments } from '@/services/tools/validateArguments'
 
 const tool = memoryTools[0]!
 const CONTEXT = { projectId: 'project-1' }
@@ -86,6 +87,26 @@ describe('provider-safe explicit memory recall tool', () => {
   it('retrieves user preferences without leaking or attaching the current project partition', async () => {
     await tool.execute({ query: 'Sprache', scope: 'user', limit: 20 }, CONTEXT)
     expect(mocks.recall).toHaveBeenCalledExactlyOnceWith({ query: 'Sprache', scope: 'user', limit: 20 })
+  })
+
+  it('accepts the grammar-compatible search boundary in both schema and execution', async () => {
+    const args = { query: 'a'.repeat(1999) }
+    expect(tool.parameters).toMatchObject({ properties: { query: { minLength: 1, maxLength: 1999 } } })
+    expect(() => validateToolArguments(tool.parameters, args)).not.toThrow()
+    await tool.execute(args, CONTEXT)
+    expect(mocks.recall).toHaveBeenCalledExactlyOnceWith({
+      ...args,
+      scope: 'project',
+      projectId: 'project-1',
+      limit: 6,
+    })
+  })
+
+  it('rejects the b10809 grammar boundary before schema dispatch or memory I/O', async () => {
+    const args = { query: 'a'.repeat(2000) }
+    expect(() => validateToolArguments(tool.parameters, args)).toThrow('Textlänge')
+    await expect(tool.execute(args, CONTEXT)).rejects.toThrow('between 1 and 1999 characters')
+    expect(mocks.recall).not.toHaveBeenCalled()
   })
 
   it.each([

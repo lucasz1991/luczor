@@ -190,8 +190,8 @@ const TOOL_CONTRACT = [
 ] as const
 
 // Reviewed addition: scoped cloud project text files with optimistic write revisions.
-const TOOL_SCHEMA_SHA256 = '37d2816f92913d2415f4bc64d5636939588392c813c75b9e6c1b2705afa34abb'
-const CORE_TOOL_SCHEMA_SHA256 = '2868f4ffa5234eb13603df84d22408d2c69446b55b7c09b2cdcb09cdd301758c'
+const TOOL_SCHEMA_SHA256 = 'ba97369438de5a801a574e802adb5a640bf75b7ffcfae0d03d56dcc4bde2c70c'
+const CORE_TOOL_SCHEMA_SHA256 = '2de4accc526c340402fef34d0882d4012c173d21d9e25f70d95c5860d54d80f5'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {
@@ -332,6 +332,30 @@ describe('tool registry contract', () => {
       expect(Object.keys(parameters.properties ?? {})).not.toHaveLength(0)
     }
     expect(getTool('local_model_status')!.parameters).toMatchObject({ properties: {}, additionalProperties: false })
+  })
+
+  it('avoids the b10809 grammar repetition boundary across the offered tool schemas', () => {
+    const incompatible: string[] = []
+    function inspect(value: unknown, path: string): void {
+      if (!value || typeof value !== 'object') return
+      if (Array.isArray(value)) {
+        value.forEach((item, index) => inspect(item, `${path}[${index}]`))
+        return
+      }
+      const schema = value as Record<string, unknown>
+      // String bounds repeat chars directly; array bounds repeat the remaining
+      // separator/item pairs after the first item. Numeric maxima are unrelated.
+      if (schema.type === 'string' && (schema.maxLength === 2000 || Number(schema.minLength ?? 0) >= 2000))
+        incompatible.push(path)
+      if (schema.type === 'array' && (schema.maxItems === 2001 || Number(schema.minItems ?? 0) >= 2001))
+        incompatible.push(path)
+      for (const [key, child] of Object.entries(schema)) inspect(child, `${path}.${key}`)
+    }
+    for (const tool of toOpenAITools()) inspect(tool.function.parameters, tool.function.name)
+    expect(incompatible).toEqual([])
+    expect(getTool('os_read_clipboard')!.parameters).toMatchObject({
+      properties: { max_chars: { type: 'integer', maximum: 2000 } },
+    })
   })
 
   it('keeps the original project/desktop tools unchanged while adding six guarded workspace tools', () => {
