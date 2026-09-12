@@ -131,6 +131,15 @@ export function useAutonomousGoal(input: {
     })
   const interrupt = () => guarded(() => controller.interrupt(input.projectId(), 'Deine Nachricht hat Vorrang.'))
   const stop = () => guarded(() => controller.stop(input.projectId(), 'Von dir pausiert.'))
+  const pauseAll = async () => {
+    stopSchedulingWatch()
+    stopTextWatch()
+    await Promise.all(
+      state.projects
+        .filter(project => project.autonomousGoal?.active)
+        .map(project => controller.stop(project.id, 'App wird beendet. Ziel bei Bedarf erneut aktivieren.'))
+    )
+  }
   const identityChanged = () => {
     identityGeneration++
     const activeIds: string[] = []
@@ -185,5 +194,5 @@ export function useAutonomousGoal(input: {
     controller.dispose()
     window.removeEventListener('luczor:api-identity-changing', identityChanged)
   })
-  return { model, error, running, save, toggle, interrupt, stop }
+  return { model, error, running, save, toggle, interrupt, stop, pauseAll }
 }

@@ -31,9 +31,13 @@ export type CoordinatedExecutor = (
 let channelGeneration = 0
 const ownExecutions = new Map<string, AbortController>()
 let stopCurrent: (() => void) | null = null
+let drainCurrent: (() => Promise<void>) | null = null
 
 export function stopCoordinationChannel(): void {
   stopCurrent?.()
+}
+export async function drainCoordinationChannel(): Promise<void> {
+  await drainCurrent?.()
 }
 
 /** The native timer remains active while the ordinary main webview is hidden in the tray. */
@@ -45,6 +49,7 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
   let checking = false
   let retryAt = 0
   let identity: VerifiedAccountSnapshot | null = null
+  const activeTasks = new Set<Promise<void>>()
   const current = () => generation === channelGeneration && !controller.signal.aborted
   const assert = () => {
     if (!current()) throw new Error('Die Geräteverbindung wurde geändert.')
@@ -67,9 +72,24 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
       jobs: [],
       activeJobs: [],
     })
-    if (stopCurrent === stop) stopCurrent = null
+    if (stopCurrent === stop) {
+      stopCurrent = null
+      drainCurrent = null
+    }
   }
   stopCurrent = stop
+  drainCurrent = async () => {
+    const account = identity
+    const waiting = [...activeTasks]
+    stop()
+    const release = account ? coordinationApi(account.config, AbortSignal.timeout(2000)).heartbeat(false, false).catch(() => {}) : Promise.resolve()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    await Promise.race([
+      Promise.allSettled([release, ...waiting]),
+      new Promise(resolve => { timer = setTimeout(resolve, 4000) }),
+    ])
+    if (timer) clearTimeout(timer)
+  }
   window.addEventListener('luczor:api-identity-changing', stop)
   deviceCluster.running = true
 
@@ -119,16 +139,6 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
         job.target_device_id !== account.config.clientId
       )
         throw new Error('Der signierte Auftrag gehört nicht zu diesem Konto und Gerät.')
-      await invoke('verify_device_job', {
-        payload: {
-          ...job,
-          expected_user_id: account.accountId,
-          expected_target_device_id: account.config.clientId,
-          expected_master_epoch: job.master_epoch,
-          require_claimed: false,
-        },
-      })
-      assert()
       journal = await read()
       assert()
       if (journal && journal.payloadHash !== job.payload_hash)
@@ -147,6 +157,7 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
       }
       if (journal?.state === 'cancelled' && checkpoint?.attemptId) {
         await api.cancelAck(job.id, checkpoint.attemptId, checkpoint.masterEpoch ?? job.master_epoch)
+        await save('acknowledged')
         return
       }
       if (!journal && (job.attempt_id || job.status !== 'queued')) {
@@ -167,8 +178,19 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
         // Do not reuse a sequence that may already have been acknowledged before the crash.
         return
       }
+      await invoke('verify_device_job', {
+        payload: {
+          ...job,
+          expected_user_id: account.accountId,
+          expected_target_device_id: account.config.clientId,
+          expected_master_epoch: job.master_epoch,
+          require_claimed: false,
+        },
+      })
+      assert()
       const attemptId = checkpoint?.attemptId ?? crypto.randomUUID()
-      if (!journal) await save('queued', { checkpoint: { attemptId, masterEpoch: job.master_epoch } })
+      if (!journal || checkpoint?.masterEpoch !== job.master_epoch)
+        await save('queued', { checkpoint: { attemptId, masterEpoch: job.master_epoch } })
       job = (await api.claim(job.id, attemptId, job.master_epoch)).data
       assert()
       await invoke('verify_device_job', {
@@ -212,8 +234,14 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
         let latest = (await api.job(job.id)).data
         while (latest.reconciliation_required && Date.now() - lastRenewal < 40000) {
           await new Promise<void>((resolve, reject) => {
-            const abort = () => { clearTimeout(timer); reject(ticket.signal.reason) }
-            const timer = setTimeout(() => { ticket.signal.removeEventListener('abort', abort); resolve() }, 1000)
+            const abort = () => {
+              clearTimeout(timer)
+              reject(ticket.signal.reason)
+            }
+            const timer = setTimeout(() => {
+              ticket.signal.removeEventListener('abort', abort)
+              resolve()
+            }, 1000)
             ticket.signal.addEventListener('abort', abort, { once: true })
             if (ticket.signal.aborted) abort()
           })
@@ -278,6 +306,7 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
           }
           await save('cancelled')
           await api.cancelAck(job.id, attemptId, job.master_epoch)
+          await save('acknowledged')
           return
         }
         completion = {
@@ -302,6 +331,10 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
       if (ownExecutions.get(incoming.id) === cancel) ownExecutions.delete(incoming.id)
       if (current()) deviceCluster.activeJobs = [...ownExecutions.keys()]
     }
+  }
+  const launch = (job: CoordinatedJob, account: VerifiedAccountSnapshot) => {
+    const task = run(job, account).finally(() => activeTasks.delete(task))
+    activeTasks.add(task)
   }
   const tick = async () => {
     if (!current() || checking || Date.now() < retryAt) return
@@ -336,10 +369,20 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
       deviceCluster.error = ''
       const pending = await api.pending()
       assert()
-      for (const job of pending.data) void run(job, identity)
+      for (const job of pending.data) launch(job, identity)
       const list = await api.jobs()
       assert()
       deviceCluster.jobs = list.data
+      const undelivered = await invoke<Array<{ runId: string; jobId?: string }>>('device_run_journal_list', {
+        payload: { ownerPrincipalId: identity.principalId, kind: 'device', states: ['completed', 'cancelled'], transportJobsOnly: true, limit: 100 },
+      })
+      assert()
+      for (const record of undelivered) {
+        if (!record.jobId || record.runId !== record.jobId) continue
+        const job = list.data.find(job => job.id === record.jobId) ?? (await api.job(record.jobId)).data
+        assert()
+        launch(job, identity)
+      }
       if (heartbeat.data.leader_device_id === identity.config.clientId) {
         for (const job of list.data) {
           if (job.reconciliation_required && job.attempt_id && job.status === 'running') {

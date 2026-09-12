@@ -169,6 +169,7 @@ pub struct Workcopy {
 #[serde(rename_all = "camelCase")]
 pub struct Applied {
     manifest_hash: String,
+    source_manifest_hash: String,
     backup_path: String,
 }
 
@@ -182,6 +183,65 @@ struct RecoveryRecord {
     manifest_hash: String,
     #[serde(default)]
     previous_manifest_hash: Option<String>,
+    #[serde(default)]
+    snapshot_id: Option<String>,
+}
+
+fn applied_metadata(cache: &Path) -> Result<Option<rusqlite::Connection>, String> {
+    let marker = cache.join("applied-metadata.json");
+    if !marker.exists() {
+        return Ok(None);
+    }
+    let id: String = read_private_json(&marker)?;
+    Ok(Some(snapshot_database(cache, &id, false)?))
+}
+fn persist_applied_metadata(cache: &Path, id: &str) -> Result<(), String> {
+    snapshot_database(cache, id, false)?;
+    let path = cache.join("applied-metadata.json");
+    if fs::symlink_metadata(&path).is_ok_and(|m| is_link(&m)) {
+        return Err("mirror_metadata_link_rejected".into());
+    }
+    let temp = cache.join(format!("metadata-{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temp)
+        .map_err(|_| "mirror_metadata_persist_failed")?;
+    file.write_all(&serde_json::to_vec(id).map_err(|_| "mirror_metadata_invalid")?)
+        .and_then(|_| file.sync_all())
+        .map_err(|_| "mirror_metadata_persist_failed")?;
+    drop(file);
+    fs::rename(temp, path).map_err(|_| "mirror_metadata_persist_failed".into())
+}
+fn retain_foreign_metadata(
+    entry: &mut Entry,
+    db: Option<&rusqlite::Connection>,
+) -> Result<(), String> {
+    use rusqlite::OptionalExtension;
+    let Some(db) = db else { return Ok(()) };
+    let previous: Option<String> = db
+        .query_row(
+            "SELECT body FROM entries WHERE path=?1",
+            [&entry.path],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| "mirror_metadata_read_failed")?;
+    let Some(previous) = previous else {
+        return Ok(());
+    };
+    let previous: Entry = serde_json::from_str(&previous).map_err(|_| "mirror_metadata_invalid")?;
+    if entry.kind == previous.kind {
+        // A platform incapable of representing a field must not erase it on
+        // the next upload. Content/mtime/size always come from the actual file.
+        if entry.mode.is_none() {
+            entry.mode = previous.mode;
+        }
+        if entry.metadata.is_none() && entry.target == previous.target {
+            entry.metadata = previous.metadata;
+        }
+    }
+    Ok(())
 }
 
 fn recover_transaction(
@@ -233,7 +293,22 @@ fn recover_transaction(
             fs::rename(&record.backup, root).map_err(|_| "mirror_recovery_restore_failed")?;
             "original_restored"
         }
-        (true, false, true) if fingerprint_root(root, cache, check)? == record.manifest_hash => {
+        (true, false, true)
+            if fingerprint_root_with_metadata(
+                root,
+                cache,
+                record
+                    .snapshot_id
+                    .as_ref()
+                    .map(|id| snapshot_database(cache, id, false))
+                    .transpose()?
+                    .as_ref(),
+                check,
+            )? == record.manifest_hash =>
+        {
+            if let Some(id) = &record.snapshot_id {
+                persist_applied_metadata(cache, id)?;
+            }
             "commit_recovered"
         }
         (true, true, false)
@@ -838,10 +913,12 @@ pub async fn project_mirror_scan(
         let cache = cache(&app, scope)?;
         let snapshot_id = uuid::Uuid::new_v4().to_string();
         let mut db = snapshot_database(&cache, &snapshot_id, true)?;
+        let previous_metadata = applied_metadata(&cache)?;
         let transaction = db
             .transaction()
             .map_err(|_| "mirror_snapshot_write_failed")?;
-        walk_root(&root, Some(&cache), &|| lease.check(), |entry| {
+        walk_root(&root, Some(&cache), &|| lease.check(), |mut entry| {
+            retain_foreign_metadata(&mut entry, previous_metadata.as_ref())?;
             transaction
                 .execute(
                     "INSERT INTO entries(path,body) VALUES(?1,?2)",
@@ -994,15 +1071,17 @@ pub async fn project_mirror_materialize(
         if !valid_hash(&request.expected_local_manifest_hash){return Err("mirror_hash_invalid".into());}
         let scope=MirrorScope{principal_id:request.principal_id,project_id:request.project_id};let (root,revision)=agent_workspace_snapshot(&app,&scope.principal_id,&scope.project_id)?;
         let _workspace=acquire_workspace_lease(&root,true)?;let cache=cache(&app,&scope)?;
-        if manifest_hash(&scan_root(&root,None,&||lease.check())?)?!=request.expected_local_manifest_hash{return Err("mirror_local_revision_conflict".into());}
+        if fingerprint_root(&root,&cache,&||lease.check())?!=request.expected_local_manifest_hash{return Err("mirror_local_revision_conflict".into());}
         let parent=root.parent().filter(|_|root.file_name().is_some()).ok_or("mirror_root_swap_unsupported")?;
         let transaction_id=uuid::Uuid::new_v4().to_string();let stage=parent.join(format!(".luczor-stage-{transaction_id}"));let backup=parent.join(format!(".luczor-backup-{transaction_id}"));
         fs::create_dir(&stage).map_err(|_|"mirror_stage_unavailable")?;
         materialize_files(&stage,&cache,&request.entries,&||lease.check())?;
         lease.check()?;
-        if agent_workspace_snapshot(&app,&scope.principal_id,&scope.project_id)?!=(root.clone(),revision)||manifest_hash(&scan_root(&root,None,&||lease.check())?)?!=request.expected_local_manifest_hash{return Err("mirror_local_revision_conflict".into());}
-        let digest=manifest_hash(&request.entries)?;
-        let recovery=serde_json::json!({"schemaVersion":1,"root":root,"stage":stage,"backup":backup,"manifestHash":digest,"previousManifestHash":request.expected_local_manifest_hash});
+        if agent_workspace_snapshot(&app,&scope.principal_id,&scope.project_id)?!=(root.clone(),revision)||fingerprint_root(&root,&cache,&||lease.check())?!=request.expected_local_manifest_hash{return Err("mirror_local_revision_conflict".into());}
+        let metadata=snapshot_database(&cache,&transaction_id,true)?;
+        for entry in &request.entries {metadata.execute("INSERT INTO entries(path,body)VALUES(?1,?2)",rusqlite::params![entry.path,serde_json::to_string(entry).map_err(|_|"mirror_manifest_invalid")?]).map_err(|_|"mirror_metadata_persist_failed")?;}
+        let digest=fingerprint_root_with_metadata(&stage,&cache,Some(&metadata),&||lease.check())?;
+        let recovery=serde_json::json!({"schemaVersion":1,"root":root,"stage":stage,"backup":backup,"manifestHash":digest,"previousManifestHash":request.expected_local_manifest_hash,"snapshotId":transaction_id});
         let recovery_path=cache.join(format!("transaction-{transaction_id}.json"));
         let mut marker=OpenOptions::new().create_new(true).write(true).open(&recovery_path).map_err(|_|"mirror_recovery_journal_failed")?;
         marker.write_all(serde_json::to_string(&recovery).map_err(|_|"mirror_manifest_invalid")?.as_bytes()).and_then(|_|marker.sync_all()).map_err(|_|"mirror_recovery_journal_failed")?;drop(marker);
@@ -1012,8 +1091,10 @@ pub async fn project_mirror_materialize(
             return Err("mirror_commit_failed_original_restored".into());
         }
         // Backups are retained, never recursively deleted by a sync operation.
+        persist_applied_metadata(&cache,&transaction_id)?;
+        super::execution::revoke_project_scopes(&scope.project_id)?;
         fs::remove_file(recovery_path).map_err(|_|"mirror_committed_recovery_marker_retained")?;
-        Ok(Applied{manifest_hash:digest,backup_path:backup.to_string_lossy().into_owned()})
+        Ok(Applied{manifest_hash:digest,source_manifest_hash:manifest_hash(&request.entries)?,backup_path:backup.to_string_lossy().into_owned()})
     }).await.map_err(|_|"mirror_worker_failed")?
 }
 
@@ -1110,12 +1191,22 @@ fn fingerprint_root(
     cache: &Path,
     check: &impl Fn() -> Result<(), String>,
 ) -> Result<String, String> {
+    let metadata = applied_metadata(cache)?;
+    fingerprint_root_with_metadata(root, cache, metadata.as_ref(), check)
+}
+fn fingerprint_root_with_metadata(
+    root: &Path,
+    cache: &Path,
+    metadata: Option<&rusqlite::Connection>,
+    check: &impl Fn() -> Result<(), String>,
+) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let mut db = snapshot_database(cache, &id, true)?;
     let transaction = db
         .transaction()
         .map_err(|_| "mirror_snapshot_write_failed")?;
-    walk_root(root, None, check, |entry| {
+    walk_root(root, None, check, |mut entry| {
+        retain_foreign_metadata(&mut entry, metadata)?;
         transaction
             .execute(
                 "INSERT INTO entries(path,body)VALUES(?1,?2)",
@@ -1214,15 +1305,18 @@ pub async fn project_mirror_stage_commit(
     tauri::async_runtime::spawn_blocking(move||{
     let request=payload.request;let scope=MirrorScope{principal_id:request.principal_id,project_id:request.project_id};let cache=cache(&app,&scope)?;let metadata=stage_metadata(&cache,&request.stage_id)?;let(root,revision)=agent_workspace_snapshot(&app,&scope.principal_id,&scope.project_id)?;
     if metadata.principal_id!=scope.principal_id||metadata.project_id!=scope.project_id||metadata.root!=root||metadata.workspace_revision!=revision{return Err("mirror_workspace_changed".into());}
-    let _workspace=acquire_workspace_lease(&root,true)?;let db=snapshot_database(&cache,&request.stage_id,false)?;let hash=snapshot_digest(&db)?.0;
+    let _workspace=acquire_workspace_lease(&root,true)?;let db=snapshot_database(&cache,&request.stage_id,false)?;let _source_hash=snapshot_digest(&db)?.0;
     if fingerprint_root(&root,&cache,&||lease.check())?!=metadata.expected_local_manifest_hash{return Err("mirror_local_revision_conflict".into());}
     let parent=root.parent().filter(|_|root.file_name().is_some()).ok_or("mirror_root_swap_unsupported")?;let stage=parent.join(format!(".luczor-stage-{}",request.stage_id));let backup=parent.join(format!(".luczor-backup-{}",request.stage_id));
     fs::create_dir(&stage).map_err(|_|"mirror_stage_exists_or_unavailable")?;build_snapshot_tree(&stage,&cache,&db,&||lease.check())?;
+    // The local cursor fingerprints the materialized platform metadata, not the foreign OS manifest.
+    let hash=fingerprint_root_with_metadata(&stage,&cache,Some(&db),&||lease.check())?;
     if agent_workspace_snapshot(&app,&scope.principal_id,&scope.project_id)?!=(root.clone(),revision)||fingerprint_root(&root,&cache,&||lease.check())?!=metadata.expected_local_manifest_hash{return Err("mirror_local_revision_conflict".into());}lease.check()?;
-    let marker=cache.join(format!("transaction-{}.json",request.stage_id));let mut file=OpenOptions::new().create_new(true).write(true).open(&marker).map_err(|_|"mirror_recovery_journal_failed")?;file.write_all(&serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"root":root,"stage":stage,"backup":backup,"manifestHash":hash,"previousManifestHash":metadata.expected_local_manifest_hash})).map_err(|_|"mirror_manifest_invalid")?).and_then(|_|file.sync_all()).map_err(|_|"mirror_recovery_journal_failed")?;drop(file);
+    let marker=cache.join(format!("transaction-{}.json",request.stage_id));let mut file=OpenOptions::new().create_new(true).write(true).open(&marker).map_err(|_|"mirror_recovery_journal_failed")?;file.write_all(&serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"root":root,"stage":stage,"backup":backup,"manifestHash":hash,"previousManifestHash":metadata.expected_local_manifest_hash,"snapshotId":request.stage_id})).map_err(|_|"mirror_manifest_invalid")?).and_then(|_|file.sync_all()).map_err(|_|"mirror_recovery_journal_failed")?;drop(file);
     fs::rename(&root,&backup).map_err(|_|"mirror_workspace_in_use")?;if fs::rename(&stage,&root).is_err(){if fs::rename(&backup,&root).is_err(){return Err("mirror_recovery_required".into());}return Err("mirror_commit_failed_original_restored".into());}
+    persist_applied_metadata(&cache,&request.stage_id)?;
     super::execution::revoke_project_scopes(&scope.project_id)?;
-    fs::remove_file(marker).map_err(|_|"mirror_committed_recovery_marker_retained")?;Ok(Applied{manifest_hash:hash,backup_path:backup.to_string_lossy().into_owned()})
+    fs::remove_file(marker).map_err(|_|"mirror_committed_recovery_marker_retained")?;Ok(Applied{manifest_hash:hash,source_manifest_hash:_source_hash,backup_path:backup.to_string_lossy().into_owned()})
 }).await.map_err(|_|"mirror_worker_failed")?
 }
 #[tauri::command]
@@ -1505,6 +1599,40 @@ mod tests {
         build_snapshot_tree(&stage, &cache, &db, &|| Ok(())).unwrap();
         assert_eq!(fs::read(stage.join("nested/deep/empty")).unwrap(), b"");
         assert_eq!(fs::read(stage.join(".env")).unwrap(), b"synthetic=1");
+        drop(db);
+        fs::remove_dir_all(temp).unwrap();
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_roundtrip_retains_unix_permissions_without_false_dirty_hash() {
+        let temp = temp();
+        let root = temp.join("root");
+        let cache = temp.join("cache");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir_all(cache.join("chunks")).unwrap();
+        fs::write(root.join("script.sh"), b"echo test").unwrap();
+        let mut entries = scan_root(&root, Some(&cache), &|| Ok(())).unwrap();
+        entries[0].mode = Some(0o755);
+        let id = uuid::Uuid::new_v4().to_string();
+        let db = snapshot_database(&cache, &id, true).unwrap();
+        db.execute(
+            "INSERT INTO entries(path,body)VALUES(?1,?2)",
+            rusqlite::params![entries[0].path, serde_json::to_string(&entries[0]).unwrap()],
+        )
+        .unwrap();
+        let expected =
+            fingerprint_root_with_metadata(&root, &cache, Some(&db), &|| Ok(())).unwrap();
+        assert_eq!(expected, manifest_hash(&entries).unwrap());
+        persist_applied_metadata(&cache, &id).unwrap();
+        assert_eq!(
+            fingerprint_root(&root, &cache, &|| Ok(())).unwrap(),
+            expected
+        );
+        fs::write(root.join("script.sh"), b"echo changed").unwrap();
+        let mut changed = scan_root(&root, None, &|| Ok(())).unwrap();
+        retain_foreign_metadata(&mut changed[0], Some(&db)).unwrap();
+        assert_eq!(changed[0].mode, Some(0o755));
+        assert_ne!(changed[0].sha256, entries[0].sha256);
         drop(db);
         fs::remove_dir_all(temp).unwrap();
     }

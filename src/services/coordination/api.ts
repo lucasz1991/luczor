@@ -17,7 +17,9 @@ export type CoordinationState = {
     name?: string
     platform?: string
     available?: boolean
-    model_tier?: number
+    model_tier?: number | null
+    active_model_id?: string | null
+    model_tier_source?: 'explicit' | 'published_model' | null
   }>
 }
 export type CoordinatedJob = DeviceJob & {
@@ -39,12 +41,23 @@ export function coordinationApi(config: LuczorApiConfigSnapshot, signal?: AbortS
   const get = <T>(path: string, query?: Record<string, string>) => requestWithConfig<T>(path, { query, signal }, config)
   const post = <T>(path: string, body: unknown) => requestWithConfig<T>(path, { method: 'POST', body, signal }, config)
   const path = (id: string) => `/coordination/jobs/${encodeURIComponent(id)}`
+  const pages = async (path: string): Promise<{ data: CoordinatedJob[] }> => {
+    const data: CoordinatedJob[] = []
+    let after = 0
+    while (true) {
+      const page = await get<{ data: CoordinatedJob[]; next_cursor: number }>(path, { limit: '100', after: String(after) })
+      data.push(...page.data)
+      if (page.data.length < 100) return { data }
+      if (!Number.isSafeInteger(page.next_cursor) || page.next_cursor <= after) throw new Error('Die Auftragsliste konnte nicht vollständig abgerufen werden.')
+      after = page.next_cursor
+    }
+  }
   return {
     state: () => get<{ data: CoordinationState }>('/coordination'),
     heartbeat: (
       busy: boolean,
       available = true,
-      metadata: { platform?: string; model_tier?: number; preferred?: boolean } = {}
+      metadata: { platform?: string; model_tier?: number; preferred?: boolean; active_model_id?: string | null } = {}
     ) =>
       post<{ data: CoordinationState }>('/coordination/heartbeat', {
         client_id: config.clientId,
@@ -52,8 +65,8 @@ export function coordinationApi(config: LuczorApiConfigSnapshot, signal?: AbortS
         busy,
         ...metadata,
       }),
-    pending: () => get<{ data: CoordinatedJob[] }>('/coordination/jobs/pending'),
-    jobs: () => get<{ data: CoordinatedJob[] }>('/coordination/jobs', { limit: '100' }),
+    pending: () => pages('/coordination/jobs/pending'),
+    jobs: () => pages('/coordination/jobs'),
     job: (id: string) => get<{ data: CoordinatedJob }>(path(id)),
     dispatch: (body: Record<string, unknown>) => post<{ data: CoordinatedJob }>('/coordination/jobs', body),
     claim: (id: string, attemptId: string, epoch: number) =>

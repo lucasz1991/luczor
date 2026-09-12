@@ -389,7 +389,9 @@ pub(super) mod linux {
             .ok_or("desktop_accessibility_node_not_observed")?;
         let bus = bus()?;
         let current = inspect(&bus, observed.object.clone())?;
-        if !current.enabled { return Err("desktop_accessibility_target_disabled".into()); }
+        if !current.enabled {
+            return Err("desktop_accessibility_target_disabled".into());
+        }
         if observed.process_started != current.process_started
             || observed.public.application_pid != current.public.application_pid
             || observed.public.name != current.public.name
@@ -424,68 +426,153 @@ pub(super) mod linux {
         result.map_err(|_| "desktop_accessibility_action_failed_outcome_unknown".into())
     }
     static WINDOWS: OnceLock<Mutex<BTreeMap<u64, (Object, Instant)>>> = OnceLock::new();
-    fn window(bus: &Connection, object: &Object, id: u64) -> Result<crate::commands::desktop_target::WindowTarget,String> {
-        let accessible=proxy(bus,object,"org.a11y.atspi.Accessible")?;
-        let states:Vec<u32>=accessible.call("GetState",&()).map_err(|_|"desktop_wayland_window_unavailable")?;
-        if !has_state(&states,1) || !has_state(&states,25) || !has_state(&states,30) || has_state(&states,6) || has_state(&states,27) {
+    fn window(
+        bus: &Connection,
+        object: &Object,
+        id: u64,
+    ) -> Result<crate::commands::desktop_target::WindowTarget, String> {
+        let accessible = proxy(bus, object, "org.a11y.atspi.Accessible")?;
+        let states: Vec<u32> = accessible
+            .call("GetState", &())
+            .map_err(|_| "desktop_wayland_window_unavailable")?;
+        if !has_state(&states, 1)
+            || !has_state(&states, 25)
+            || !has_state(&states, 30)
+            || has_state(&states, 6)
+            || has_state(&states, 27)
+        {
             return Err("desktop_wayland_target_not_active".into());
         }
-        let component=proxy(bus,object,"org.a11y.atspi.Component")?;
-        let (x,y,width,height):(i32,i32,i32,i32)=component.call("GetExtents",&(0_u32,)).map_err(|_|"desktop_wayland_geometry_unavailable")?;
-        if width<=0 || height<=0 || x.unsigned_abs()>100000 || y.unsigned_abs()>100000 {return Err("desktop_wayland_geometry_unavailable".into());}
-        let (pid,start)=process(bus,&object.0)?;
-        let target=crate::commands::desktop_target::WindowTarget{window_id:id,process_id:pid,process_started:start,x,y,width:width as u32,height:height as u32,focused:true};
+        let component = proxy(bus, object, "org.a11y.atspi.Component")?;
+        let (x, y, width, height): (i32, i32, i32, i32) =
+            component
+                .call("GetExtents", &(0_u32,))
+                .map_err(|_| "desktop_wayland_geometry_unavailable")?;
+        if width <= 0 || height <= 0 || x.unsigned_abs() > 100000 || y.unsigned_abs() > 100000 {
+            return Err("desktop_wayland_geometry_unavailable".into());
+        }
+        let (pid, start) = process(bus, &object.0)?;
+        let target = crate::commands::desktop_target::WindowTarget {
+            window_id: id,
+            process_id: pid,
+            process_started: start,
+            x,
+            y,
+            width: width as u32,
+            height: height as u32,
+            focused: true,
+        };
         super::portal::verify_mapping(&target)?;
         Ok(target)
     }
-    pub(crate) fn wayland_target(requested: Option<u64>) -> Result<crate::commands::desktop_target::WindowTarget,String> {
-        let bus=bus()?;
-        if let Some(id)=requested {
-            let object=WINDOWS.get_or_init(Mutex::default).lock().map_err(|_|"desktop_wayland_busy")?
-                .get(&id).filter(|(_,time)|time.elapsed()<Duration::from_secs(60)).map(|(object,_)|object.clone()).ok_or("desktop_wayland_observation_expired")?;
-            return window(&bus,&object,id);
+    pub(crate) fn wayland_target(
+        requested: Option<u64>,
+    ) -> Result<crate::commands::desktop_target::WindowTarget, String> {
+        let bus = bus()?;
+        if let Some(id) = requested {
+            let object = WINDOWS
+                .get_or_init(Mutex::default)
+                .lock()
+                .map_err(|_| "desktop_wayland_busy")?
+                .get(&id)
+                .filter(|(_, time)| time.elapsed() < Duration::from_secs(60))
+                .map(|(object, _)| object.clone())
+                .ok_or("desktop_wayland_observation_expired")?;
+            return window(&bus, &object, id);
         }
-        let deadline=Instant::now()+Duration::from_secs(8);
-        let root=("org.a11y.atspi.Registry".into(),OwnedObjectPath::try_from("/org/a11y/atspi/accessible/root").map_err(|_|"desktop_accessibility_unavailable")?);
-        let apps:Vec<Object>=proxy(&bus,&root,"org.a11y.atspi.Accessible")?.call("GetChildren",&()).map_err(|_|"desktop_accessibility_registry_unavailable")?;
-        let mut candidates=Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let root = (
+            "org.a11y.atspi.Registry".into(),
+            OwnedObjectPath::try_from("/org/a11y/atspi/accessible/root")
+                .map_err(|_| "desktop_accessibility_unavailable")?,
+        );
+        let apps: Vec<Object> = proxy(&bus, &root, "org.a11y.atspi.Accessible")?
+            .call("GetChildren", &())
+            .map_err(|_| "desktop_accessibility_registry_unavailable")?;
+        let mut candidates = Vec::new();
         for app in apps.into_iter().take(100) {
-            if Instant::now()>=deadline { return Err("desktop_wayland_observation_timeout".into()); }
-            let accessible=proxy(&bus,&app,"org.a11y.atspi.Accessible")?;
-            let count:i32=accessible.get_property("ChildCount").unwrap_or(0);
-            for index in 0..count.clamp(0,50) {
-                if Instant::now()>=deadline {return Err("desktop_wayland_observation_timeout".into());}
-                let Ok(object)=accessible.call::<_,_,Object>("GetChildAtIndex",&(index,)) else {continue};
-                if object.0!=app.0 {continue;}
+            if Instant::now() >= deadline {
+                return Err("desktop_wayland_observation_timeout".into());
+            }
+            let accessible = proxy(&bus, &app, "org.a11y.atspi.Accessible")?;
+            let count: i32 = accessible.get_property("ChildCount").unwrap_or(0);
+            for index in 0..count.clamp(0, 50) {
+                if Instant::now() >= deadline {
+                    return Err("desktop_wayland_observation_timeout".into());
+                }
+                let Ok(object) = accessible.call::<_, _, Object>("GetChildAtIndex", &(index,))
+                else {
+                    continue;
+                };
+                if object.0 != app.0 {
+                    continue;
+                }
                 // IDs are opaque safe integers, never exposed DBus service/path handles.
-                use sha2::{Digest,Sha256};
-                let digest=Sha256::digest(format!("{}:{}",object.0,object.1));
-                let id=u64::from_be_bytes(digest[..8].try_into().map_err(|_|"desktop_wayland_identity_invalid")?) & 0x001f_ffff_ffff_ffff;
-                if let Ok(target)=window(&bus,&object,id) {candidates.push((target,object));}
+                use sha2::{Digest, Sha256};
+                let digest = Sha256::digest(format!("{}:{}", object.0, object.1));
+                let id = u64::from_be_bytes(
+                    digest[..8]
+                        .try_into()
+                        .map_err(|_| "desktop_wayland_identity_invalid")?,
+                ) & 0x001f_ffff_ffff_ffff;
+                if let Ok(target) = window(&bus, &object, id) {
+                    candidates.push((target, object));
+                }
             }
         }
-        if candidates.len()!=1 {return Err("desktop_wayland_active_window_not_unique_or_unmapped".into());}
-        let (target,object)=candidates.pop().ok_or("desktop_wayland_window_unavailable")?;
-        let mut windows=WINDOWS.get_or_init(Mutex::default).lock().map_err(|_|"desktop_wayland_busy")?;
-        windows.retain(|_,(_,time)|time.elapsed()<Duration::from_secs(60));
-        if windows.len()>=128 {return Err("desktop_wayland_observation_capacity".into());}
-        if windows.get(&target.window_id).is_some_and(|(previous,_)|*previous!=object) {return Err("desktop_wayland_identity_collision".into());}
-        windows.insert(target.window_id,(object,Instant::now()));Ok(target)
+        if candidates.len() != 1 {
+            return Err("desktop_wayland_active_window_not_unique_or_unmapped".into());
+        }
+        let (target, object) = candidates
+            .pop()
+            .ok_or("desktop_wayland_window_unavailable")?;
+        let mut windows = WINDOWS
+            .get_or_init(Mutex::default)
+            .lock()
+            .map_err(|_| "desktop_wayland_busy")?;
+        windows.retain(|_, (_, time)| time.elapsed() < Duration::from_secs(60));
+        if windows.len() >= 128 {
+            return Err("desktop_wayland_observation_capacity".into());
+        }
+        if windows
+            .get(&target.window_id)
+            .is_some_and(|(previous, _)| *previous != object)
+        {
+            return Err("desktop_wayland_identity_collision".into());
+        }
+        windows.insert(target.window_id, (object, Instant::now()));
+        Ok(target)
     }
-    pub(crate) fn wayland_point(id:u64,x:i32,y:i32)->Result<(),String>{
-        let target=wayland_target(Some(id))?;
-        if i64::from(x)<i64::from(target.x)||i64::from(y)<i64::from(target.y)||i64::from(x)>=i64::from(target.x)+i64::from(target.width)||i64::from(y)>=i64::from(target.y)+i64::from(target.height){return Err("desktop_wayland_point_outside_target".into());}
-        let object=WINDOWS.get_or_init(Mutex::default).lock().map_err(|_|"desktop_wayland_busy")?.get(&id).map(|(object,_)|object.clone()).ok_or("desktop_wayland_observation_expired")?;
-        let bus=bus()?;
-        let hit:Object=proxy(&bus,&object,"org.a11y.atspi.Component")?.call("GetAccessibleAtPoint",&(x,y,0_u32)).map_err(|_|"desktop_wayland_point_unverified")?;
-        if hit.0!=object.0 || hit.1.as_str()=="/org/a11y/atspi/null" {return Err("desktop_wayland_point_unverified".into());}
+    pub(crate) fn wayland_point(id: u64, x: i32, y: i32) -> Result<(), String> {
+        let target = wayland_target(Some(id))?;
+        if i64::from(x) < i64::from(target.x)
+            || i64::from(y) < i64::from(target.y)
+            || i64::from(x) >= i64::from(target.x) + i64::from(target.width)
+            || i64::from(y) >= i64::from(target.y) + i64::from(target.height)
+        {
+            return Err("desktop_wayland_point_outside_target".into());
+        }
+        let object = WINDOWS
+            .get_or_init(Mutex::default)
+            .lock()
+            .map_err(|_| "desktop_wayland_busy")?
+            .get(&id)
+            .map(|(object, _)| object.clone())
+            .ok_or("desktop_wayland_observation_expired")?;
+        let bus = bus()?;
+        let hit: Object = proxy(&bus, &object, "org.a11y.atspi.Component")?
+            .call("GetAccessibleAtPoint", &(x, y, 0_u32))
+            .map_err(|_| "desktop_wayland_point_unverified")?;
+        if hit.0 != object.0 || hit.1.as_str() == "/org/a11y/atspi/null" {
+            return Err("desktop_wayland_point_unverified".into());
+        }
         Ok(())
     }
     pub(super) fn status() -> Result<serde_json::Value, String> {
         let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some()
             || std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v == "wayland");
         Ok(
-            serde_json::json!({"backend":if wayland{"wayland"}else{"x11"},"semanticInput":bus().is_ok(),"windowInput":!wayland,"portal":portal::status(),"pointerReason":if wayland{Some("target_mapping_unavailable")}else{None}}),
+            serde_json::json!({"backend":if wayland{"wayland"}else{"x11"},"semanticInput":bus().is_ok(),"windowInput":!wayland||portal::pointer_ready(),"portal":portal::status(),"pointerReason":if wayland&&!portal::pointer_ready(){Some("target_mapping_unavailable")}else{None}}),
         )
     }
 

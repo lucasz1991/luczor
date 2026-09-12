@@ -1,55 +1,70 @@
 pub mod agent;
 pub mod agent_effort;
-pub mod claude;
 pub mod browser;
 pub mod browser_panel;
+pub mod claude;
 pub mod codex;
-mod desktop_target;
 pub mod desktop_accessibility;
 #[cfg(target_os = "linux")]
 mod desktop_linux;
+#[cfg(target_os = "linux")]
+mod desktop_pipewire;
+mod desktop_target;
 pub mod device_jobs;
-pub mod device_run_journal;
-pub mod lan_peer;
 pub mod device_key;
+pub mod device_run_journal;
 pub mod execution;
+pub mod lan_peer;
 pub mod local_model;
 pub mod local_tasks;
-mod script_environment;
 pub mod mini_chat;
 pub mod notifications;
-pub mod project_workspace;
 pub mod project_mirror;
+pub mod project_workspace;
 pub mod repository_graph;
+mod script_environment;
 pub mod system;
+mod system_diagnostics;
 pub mod system_status_controller;
 mod system_status_model;
 pub mod system_status_window;
-mod system_diagnostics;
 pub mod voice;
 pub mod voice_input;
-pub mod workflow_http;
-pub mod workflow_browser;
-pub mod workflow_image;
 pub mod workflow_artifacts;
+pub mod workflow_browser;
+pub mod workflow_http;
+pub mod workflow_image;
 pub mod workflow_watch;
 
 mod process;
 
 /// Command identity must follow the calling webview, even in a split window.
 /// Tauri's WebviewWindow extractor rejects multi-webview windows.
-pub struct CallerWebview { webview: tauri::Webview, window: tauri::Window }
+pub struct CallerWebview {
+    webview: tauri::Webview,
+    window: tauri::Window,
+}
 impl std::ops::Deref for CallerWebview {
     type Target = tauri::Window;
-    fn deref(&self) -> &Self::Target { &self.window }
+    fn deref(&self) -> &Self::Target {
+        &self.window
+    }
 }
 impl CallerWebview {
-    pub fn label(&self) -> &str { self.webview.label() }
+    pub fn label(&self) -> &str {
+        self.webview.label()
+    }
 }
 impl<'de> tauri::ipc::CommandArg<'de, tauri::Wry> for CallerWebview {
-    fn from_command(command: tauri::ipc::CommandItem<'de, tauri::Wry>) -> Result<Self, tauri::ipc::InvokeError> {
-        let webview = <tauri::Webview as tauri::ipc::CommandArg<'de, tauri::Wry>>::from_command(command)?;
-        Ok(Self { window: webview.window(), webview })
+    fn from_command(
+        command: tauri::ipc::CommandItem<'de, tauri::Wry>,
+    ) -> Result<Self, tauri::ipc::InvokeError> {
+        let webview =
+            <tauri::Webview as tauri::ipc::CommandArg<'de, tauri::Wry>>::from_command(command)?;
+        Ok(Self {
+            window: webview.window(),
+            webview,
+        })
     }
 }
 
@@ -71,7 +86,9 @@ pub(crate) fn ensure_main_webview(window: &CallerWebview) -> Result<(), String> 
 /// The detached Systemstatus display has a deliberately narrow, read-only
 /// capability. It may use the two status reads below, never the main runtime.
 pub(crate) fn ensure_main_or_system_status_webview(window: &CallerWebview) -> Result<(), String> {
-    if window.label() == MAIN_WEBVIEW_LABEL || window.label() == system_status_window::SYSTEM_STATUS_LABEL {
+    if window.label() == MAIN_WEBVIEW_LABEL
+        || window.label() == system_status_window::SYSTEM_STATUS_LABEL
+    {
         Ok(())
     } else {
         Err("This command is not available to the calling webview.".into())
@@ -103,8 +120,16 @@ mod tests {
             system_status_window::SYSTEM_STATUS_LABEL
         )
         .is_ok());
-        assert!(ensure_webview_label(system_status_window::SYSTEM_STATUS_LABEL, MAIN_WEBVIEW_LABEL).is_err());
-        assert!(ensure_webview_label(system_status_window::SYSTEM_STATUS_LABEL, BROWSER_WEBVIEW_LABEL).is_err());
+        assert!(ensure_webview_label(
+            system_status_window::SYSTEM_STATUS_LABEL,
+            MAIN_WEBVIEW_LABEL
+        )
+        .is_err());
+        assert!(ensure_webview_label(
+            system_status_window::SYSTEM_STATUS_LABEL,
+            BROWSER_WEBVIEW_LABEL
+        )
+        .is_err());
     }
 
     #[test]
@@ -127,7 +152,10 @@ mod tests {
         );
         assert!(capability.get("windows").is_none());
         assert!(main_capability.get("windows").is_none());
-        assert_eq!(main_capability["webviews"], serde_json::json!([MAIN_WEBVIEW_LABEL]));
+        assert_eq!(
+            main_capability["webviews"],
+            serde_json::json!([MAIN_WEBVIEW_LABEL])
+        );
         assert!(main_capability["permissions"]
             .as_array()
             .expect("main permissions")

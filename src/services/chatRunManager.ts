@@ -1,5 +1,7 @@
 import { shallowRef } from 'vue'
 import { invoke, isTauri } from '@tauri-apps/api/core'
+import type { AppState } from '@/state/types'
+import { finishChatActivity } from '@/services/chatActivity'
 
 export type ChatRunState =
   'queued' | 'running' | 'waiting_resource' | 'waiting_approval' | 'interrupted' | 'completed' | 'failed' | 'cancelled'
@@ -22,6 +24,29 @@ export type ChatRunJournal = {
 }
 const liveStates = new Set<ChatRunState>(['queued', 'running', 'waiting_resource', 'waiting_approval'])
 export const chatRunIsLive = (run: ChatRunRecord): boolean => liveStates.has(run.state)
+
+/** UI recovery cannot re-approve an old call or keep a dead process spinning. */
+export function reconcileRecoveredChatRuns(state: AppState, records: readonly ChatRunRecord[]): number {
+  const interrupted = new Set(records.filter(run => run.state === 'interrupted').map(run => run.runId))
+  let changed = 0
+  for (const bucket of Object.values(state.pending?.toolCallsByProject ?? {})) {
+    for (const call of bucket ?? []) {
+      if (call.runId && interrupted.has(call.runId) && ['proposed', 'approved', 'executing'].includes(call.status)) {
+        call.status = 'canceled'
+        changed++
+      }
+    }
+  }
+  for (const message of state.messages) {
+    if (!message.meta.runId || !interrupted.has(message.meta.runId)) continue
+    if (message.meta.isLoading || message.meta.activity?.status === 'running') {
+      message.meta.isLoading = false
+      if (message.meta.activity) finishChatActivity(message.meta.activity, 'canceled')
+      changed++
+    }
+  }
+  return changed
+}
 
 /** The preview never claims disk durability; native runs must commit before effects. */
 export function createChatRunJournal(native = isTauri()): ChatRunJournal {
@@ -75,7 +100,9 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
   const admissions = new Map<string, string>()
   const executing = new Set<string>()
   const publish = (record: ChatRunRecord) => {
-    records.value = [...records.value.filter(item => item.runId !== record.runId), { ...record }]
+    records.value = [...records.value.filter(item => item.runId !== record.runId), { ...record }].sort(
+      (left, right) => left.createdAt - right.createdAt
+    )
   }
   const update = (job: OwnedRun, patch: Partial<Pick<ChatRunRecord, 'state' | 'checkpoint'>>) => {
     const operation = job.writes.then(async () => {

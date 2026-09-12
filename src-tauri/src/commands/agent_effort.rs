@@ -182,7 +182,9 @@ fn validate_effort_catalog(
 }
 
 #[tauri::command]
-pub fn codex_model_capabilities(window: crate::commands::CallerWebview) -> Result<CapabilityCatalog, String> {
+pub fn codex_model_capabilities(
+    window: crate::commands::CallerWebview,
+) -> Result<CapabilityCatalog, String> {
     super::ensure_main_webview(&window)?;
     Ok(codex_catalog())
 }

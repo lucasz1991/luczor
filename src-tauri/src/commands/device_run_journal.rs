@@ -92,6 +92,8 @@ pub struct JournalList {
     limit: Option<u32>,
     #[serde(default)]
     states: Vec<RunState>,
+    #[serde(default)]
+    transport_jobs_only: bool,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -258,7 +260,10 @@ fn transition(connection: &mut Connection, input: JournalTransition) -> Result<S
             RunState::Completed | RunState::Acknowledged | RunState::Failed | RunState::Cancelled
         ) && previous.record.state != input.record.state
             && !(previous.record.kind == RunKind::Device
-                && previous.record.state == RunState::Completed
+                && matches!(
+                    previous.record.state,
+                    RunState::Completed | RunState::Cancelled
+                )
                 && input.record.state == RunState::Acknowledged)
         {
             return Err("journal_terminal_state".into());
@@ -273,7 +278,7 @@ fn transition(connection: &mut Connection, input: JournalTransition) -> Result<S
         }
         if matches!(
             previous.record.state,
-            RunState::Completed | RunState::Acknowledged
+            RunState::Completed | RunState::Acknowledged | RunState::Cancelled
         ) && previous.record.result != input.record.result
         {
             return Err("journal_result_immutable".into());
@@ -355,10 +360,10 @@ pub async fn device_run_journal_list(
     tauri::async_runtime::spawn_blocking(move || {
         let connection = connection(&app)?;
         let mut statement = connection.prepare("SELECT record FROM run_journal WHERE owner=?1 AND (?2 IS NULL OR kind=?2)
-            AND (?3='[]' OR state IN (SELECT value FROM json_each(?3))) ORDER BY updated_at DESC,run_id LIMIT ?4")
+            AND (?3='[]' OR state IN (SELECT value FROM json_each(?3))) AND (?5=0 OR json_extract(record,'$.jobId') IS NOT NULL) ORDER BY updated_at DESC,run_id LIMIT ?4")
             .map_err(|_| "journal_read_failed")?;
         let states = serde_json::to_string(&payload.states).map_err(|_| "journal_query_invalid")?;
-        let rows = statement.query_map(params![payload.owner_principal_id, payload.kind.as_ref().map(kind_text), states, payload.limit.unwrap_or(100)],
+        let rows = statement.query_map(params![payload.owner_principal_id, payload.kind.as_ref().map(kind_text), states, payload.limit.unwrap_or(100), payload.transport_jobs_only],
             |row| row.get::<_, String>(0)).map_err(|_| "journal_read_failed")?;
         rows.map(|value| serde_json::from_str(&value.map_err(|_| "journal_read_failed")?).map_err(|_| "journal_record_invalid".into())).collect()
     }).await.map_err(|_| "journal_worker_failed")?
@@ -440,6 +445,27 @@ mod tests {
         done.state = RunState::Running;
         assert_eq!(
             put(&mut connection, done, 2).unwrap_err(),
+            "journal_terminal_state"
+        );
+    }
+    #[test]
+    fn cancelled_device_acknowledgement_is_durable_without_reopening_effects() {
+        let mut connection = open(Path::new(":memory:")).unwrap();
+        let mut record = record("alice");
+        record.kind = RunKind::Device;
+        record.state = RunState::Cancelled;
+        let original = put(&mut connection, record, 0).unwrap();
+        let mut ack = original.record.clone();
+        ack.state = RunState::Acknowledged;
+        let saved = put(&mut connection, ack, 1).unwrap();
+        assert_eq!(
+            read(&connection, "alice", "run").unwrap(),
+            Some(saved.clone())
+        );
+        let mut retry = saved.record;
+        retry.state = RunState::Started;
+        assert_eq!(
+            put(&mut connection, retry, 2).unwrap_err(),
             "journal_terminal_state"
         );
     }

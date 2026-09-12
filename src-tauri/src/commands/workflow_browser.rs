@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager, WebviewUrl, Webview};
+use tauri::{AppHandle, Manager, Webview, WebviewUrl};
 
 struct Session {
     id: String,
@@ -65,7 +65,11 @@ impl NavigationTracker {
     }
 }
 pub(crate) fn panel_project_id() -> Option<String> {
-    sessions().lock().ok()?.as_ref().map(|s| s.scope.project_id.clone())
+    sessions()
+        .lock()
+        .ok()?
+        .as_ref()
+        .map(|s| s.scope.project_id.clone())
 }
 
 fn sessions() -> &'static Mutex<Option<Arc<Session>>> {
@@ -430,9 +434,7 @@ async fn run(
         });
     }
     let mut navigation_generation = None;
-    if input.action == BrowserOperation::Open
-        && app.get_webview(BROWSER_WEBVIEW_LABEL).is_none()
-    {
+    if input.action == BrowserOperation::Open && app.get_webview(BROWSER_WEBVIEW_LABEL).is_none() {
         let target = input.url.as_deref().map(url).transpose()?.unwrap_or(
             tauri::Url::parse("about:blank").map_err(|_| "workflow_browser_url_invalid")?,
         );
@@ -444,16 +446,29 @@ async fn run(
         let navigation_session = session.clone();
         let builder = tauri::webview::WebviewBuilder::new(
             BROWSER_WEBVIEW_LABEL,
-            WebviewUrl::External(tauri::Url::parse("about:blank").map_err(|_| "workflow_browser_url_invalid")?),
-        ).on_navigation(move |url| {
+            WebviewUrl::External(
+                tauri::Url::parse("about:blank").map_err(|_| "workflow_browser_url_invalid")?,
+            ),
+        )
+        .on_navigation(move |url| {
             if !host_allowed(url, navigation_session.allowed_hosts.as_deref()) {
-                navigation_session.policy_violation.store(true, Ordering::Release);
+                navigation_session
+                    .policy_violation
+                    .store(true, Ordering::Release);
                 return false;
             }
             check_session(&navigation_app, &navigation_session).is_ok()
-        }).on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
-        let main = app.get_window("main").ok_or("browser_panel_main_unavailable")?;
-        let browser = main.add_child(builder, tauri::LogicalPosition::new(0.0, 0.0), tauri::LogicalSize::new(1.0, 1.0))
+        })
+        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
+        let main = app
+            .get_window("main")
+            .ok_or("browser_panel_main_unavailable")?;
+        let browser = main
+            .add_child(
+                builder,
+                tauri::LogicalPosition::new(0.0, 0.0),
+                tauri::LogicalSize::new(1.0, 1.0),
+            )
             .map_err(|e| format!("workflow_browser_create_failed: {e}"))?;
         browser.hide().map_err(|e| e.to_string())?;
         super::browser_panel::apply(app, &browser, &session.scope.project_id)?;

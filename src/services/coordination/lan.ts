@@ -76,6 +76,14 @@ async function configureLan(account: VerifiedAccountSnapshot, signal: AbortSigna
   lanState.active = status.active
   lanState.peers = status.peers.filter(id => id !== account.config.clientId)
   lanState.error = ''
+  const archive = await (resultDisk ??= Store.load('luczor.lan-results.json'))
+  const saved = await archive.entries<Envelope>()
+  signal.throwIfAborted()
+  if (owner !== account) return
+  lanState.received = saved
+    .filter(([key, value]) => key.startsWith(`${account.principalId}:`) && value.kind === 'result' && value.toDeviceId === account.config.clientId)
+    .slice(-100)
+    .map(([, value]) => ({ id: value.id, from: value.fromDeviceId, kind: value.kind, payload: value.payload }))
   let draining = false
   const drain = async () => {
     if (draining || signal.aborted || owner !== account) return

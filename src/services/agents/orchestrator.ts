@@ -282,6 +282,22 @@ export class AgentOrchestrator {
     this.listeners.clear()
   }
 
+  /** Stop admission and wait for native adapters to release every owned worker. */
+  async shutdown(): Promise<void> {
+    this.disposed = true
+    for (const job of this.jobs.values()) this.cancel(job.metadata.id)
+    if (![...this.jobs.values()].some(job => job.executing)) return
+    await new Promise<void>(resolve => {
+      const inspect = () => {
+        if ([...this.jobs.values()].some(job => job.executing)) return
+        unsubscribe()
+        resolve()
+      }
+      const unsubscribe = this.subscribe(inspect)
+      inspect()
+    })
+  }
+
   private sameProject(left: AgentProjectSnapshot, right: AgentProjectSnapshot): boolean {
     return left.principalId === right.principalId && left.projectId === right.projectId
   }

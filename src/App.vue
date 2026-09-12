@@ -18,8 +18,10 @@ import AutonomousGoalControl from './components/projects/AutonomousGoalControl.v
 import { useAutonomousGoal } from '@/composables/useAutonomousGoal'
 import type { GoalRunState, GoalStepResult } from '@/services/goals/autonomousGoal'
 import { useCloudProjects } from '@/composables/useCloudProjects'
-import { chatRuns, chatRunIsLive, type ChatRunHandle } from '@/services/chatRunManager'
+import { chatRuns, chatRunIsLive, reconcileRecoveredChatRuns, type ChatRunHandle } from '@/services/chatRunManager'
 import { createChatEffectJournal } from '@/services/chatEffectJournal'
+import { createGracefulQuit, listenForGracefulQuit } from '@/services/gracefulQuit'
+import { drainCoordinationChannel } from '@/services/coordination/channel'
 import { createWorkspaceRefresh } from '@/services/workspaceRefresh'
 import {
   executionAbortReason,
@@ -40,7 +42,7 @@ import {
   planningCommandObjective,
   planningDiscussionMessage,
 } from '@/services/planningEntry'
-import { configureAgentHub } from '@/services/agents/hub'
+import { agentHub, configureAgentHub } from '@/services/agents/hub'
 import { teamPresetForRouteMode } from '@/services/agents/teamPolicy'
 import {
   executionGate,
@@ -192,6 +194,7 @@ const showPlanning = ref(false)
 const showWorkflows = ref(false)
 const showToolCenter = ref(false)
 const appReady = ref(false)
+const appQuitting = ref(false)
 const composerShell = ref<HTMLElement | null>(null)
 const composerClearance = ref(142)
 const appShellStyle = computed<Record<string, string>>(() => ({
@@ -199,6 +202,9 @@ const appShellStyle = computed<Record<string, string>>(() => ({
 }))
 let composerResizeObserver: ResizeObserver | undefined
 onMounted(() => {
+  void listenForGracefulQuit(gracefulQuit).then(unlisten => {
+    stopQuitListener = unlisten
+  })
   composerResizeObserver = new ResizeObserver(entries => {
     const height =
       entries[0]?.borderBoxSize?.[0]?.blockSize ?? composerShell.value?.getBoundingClientRect().height ?? 134
@@ -220,6 +226,7 @@ const refreshPlanPrincipal = () => {
 window.addEventListener('luczor:api-identity-changing', planPrincipalBinding.invalidate)
 window.addEventListener('luczor:api-identity-changed', refreshPlanPrincipal)
 onBeforeUnmount(() => {
+  stopQuitListener?.()
   window.removeEventListener('luczor:api-identity-changing', planPrincipalBinding.invalidate)
   window.removeEventListener('luczor:api-identity-changed', refreshPlanPrincipal)
   planPrincipalBinding.dispose()
@@ -422,7 +429,10 @@ onMounted(() => {
   return appRuntimeLifecycle.start().then(() => {
     appReady.value = true
     void resolveWorkspacePrincipalId()
-      .then(principalId => chatRuns.recover(principalId))
+      .then(async principalId => {
+        await chatRuns.recover(principalId)
+        if (reconcileRecoveredChatRuns(state, chatRuns.records.value)) await saveAppStateStrict(state)
+      })
       .catch(error => console.warn('[runs] Recovery journal unavailable:', error))
   })
 })
@@ -1556,6 +1566,7 @@ async function send(
   miniInput?: { text: string; projectId: string },
   goalInput?: { state: GoalRunState; signal: AbortSignal }
 ): Promise<GoalStepResult | undefined> {
+  if (appQuitting.value) return
   const pid = miniInput?.projectId ?? activeProjectId.value
   const conversationId = mutations.getActiveConversationId(pid)
   const submittedText = miniInput?.text ?? input.value
@@ -2331,7 +2342,7 @@ const miniChat = useMiniChatHost({
 })
 // Voice and both composers must share admission and mute state, including hotkeys.
 const conversationBusy = computed(
-  () => sending.value || sendAdmission.value || showPlanning.value || planningBusy.value
+  () => appQuitting.value || sending.value || sendAdmission.value || showPlanning.value || planningBusy.value
 )
 const autonomousGoal = useAutonomousGoal({
   projectId: () => activeProjectId.value,
@@ -2383,6 +2394,28 @@ useIdleOptimization({
 })
 watch(conversationBusy, busy => voiceInputSession.setMuted(busy || voiceMuteDepth > 0), { flush: 'sync' })
 const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
+let stopQuitListener: (() => void) | undefined
+let coordinationQuitDrain: Promise<void> = Promise.resolve()
+const gracefulQuit = createGracefulQuit({
+  begin: () => {
+    appQuitting.value = true
+    coordinationQuitDrain = drainCoordinationChannel()
+    appRuntimeLifecycle.stop()
+    hud.killSwitch = true
+    stopAllVoice()
+    planningHub.interruptActive()
+  },
+  drain: async () => {
+    await Promise.all([
+      coordinationQuitDrain,
+      chatRuns.stopAll(executionAbortReason('execution_session_changed')),
+      autonomousGoal.pauseAll(),
+      agentHub.shutdown(),
+    ])
+  },
+  save: () => saveAppStateStrict(state),
+  failed: error => console.warn('[runs] Shutdown could not finish before native fallback:', error),
+})
 useWorkflowWatchers()
 useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.value).some(Boolean))
 </script>

@@ -1,5 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-type TestMessage = { id: string; projectId: string; conversationId: string; role: string; content: string; createdAt: number; visibility?: string }
+type TestMessage = {
+  id: string
+  projectId: string
+  conversationId: string
+  role: string
+  content: string
+  createdAt: number
+  visibility?: string
+}
 const mock = vi.hoisted(() => ({
   request: vi.fn(),
   save: vi.fn(),

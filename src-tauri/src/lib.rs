@@ -40,7 +40,9 @@ pub fn run() {
             commands::device_jobs::initialize_trust(app.handle());
             #[cfg(debug_assertions)]
             {
-                if let Some(view) = app.get_webview("main") { view.open_devtools(); }
+                if let Some(view) = app.get_webview("main") {
+                    view.open_devtools();
+                }
             }
 
             #[cfg(desktop)]
@@ -53,6 +55,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            app_quit_commit,
             commands::execution::execution_gate_update,
             commands::execution::execution_scope_register,
             commands::execution::execution_scope_revoke,
@@ -244,9 +247,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
             "quit" => {
-                WORKER_TICK_STOP.store(true, std::sync::atomic::Ordering::Release);
-            commands::local_model::shutdown_all();
-                app.exit(0);
+                request_app_quit(app.clone());
             }
             "show" => {
                 if let Some(win) = app.get_window("main") {
@@ -305,6 +306,62 @@ fn setup_global_shortcut(app: &tauri::App) -> Result<(), Box<dyn std::error::Err
 
 // Native timing is independent of background WebView timer throttling.
 static WORKER_TICK_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static QUIT_REQUEST: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
+    std::sync::OnceLock::new();
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct QuitCommit {
+    request_id: String,
+}
+#[tauri::command]
+fn app_quit_commit(
+    app: tauri::AppHandle,
+    window: commands::CallerWebview,
+    payload: QuitCommit,
+) -> Result<(), String> {
+    commands::ensure_main_webview(&window)?;
+    finish_app_quit(&app, &payload.request_id)
+}
+fn finish_app_quit(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
+    let mut pending = QUIT_REQUEST
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| "app_quit_unavailable")?;
+    if pending.as_deref() != Some(id) {
+        return Err("app_quit_request_changed".into());
+    }
+    *pending = None;
+    drop(pending);
+    WORKER_TICK_STOP.store(true, std::sync::atomic::Ordering::Release);
+    app.state::<commands::codex::CodexJobs>().cancel_all();
+    app.state::<commands::claude::ClaudeJobs>().cancel_all();
+    commands::local_model::shutdown_all();
+    app.exit(0);
+    Ok(())
+}
+fn request_app_quit(app: tauri::AppHandle) {
+    use tauri::Emitter;
+    let Ok(mut pending) = QUIT_REQUEST.get_or_init(Default::default).lock() else {
+        return;
+    };
+    if pending.is_some() {
+        return;
+    }
+    let id = uuid::Uuid::new_v4().to_string();
+    *pending = Some(id.clone());
+    drop(pending);
+    // Every journal transition is already FULL-synchronous. This bounded grace
+    // period lets the renderer release authority and persist public checkpoints.
+    let _ = app.emit_to(
+        "main",
+        "luczor://app-quit-request",
+        serde_json::json!({"requestId":id}),
+    );
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        let _ = finish_app_quit(&app, &id);
+    });
+}
 fn setup_worker_tick(app: tauri::AppHandle) {
     use tauri::Emitter;
     std::thread::spawn(move || {

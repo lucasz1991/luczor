@@ -384,6 +384,22 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{ensure_allowed_tool_profile, ensure_not_expired, parse_rfc3339_millis};
+    #[test]
+    fn coordinated_signature_binds_exact_backend_field_order_owner_target_and_claim() {
+        let value = serde_json::json!({"id":"00000000-0000-4000-8000-000000000001","protocol_version":2,"user_id":7,"source_device_id":"windows","target_device_id":"linux","project_id":"project","conversation_id":"chat","master_epoch":4,"attempt_id":"00000000-0000-4000-8000-000000000002","tool_profile":"desktop.observe","payload":{},"payload_hash":"abc","signature":"","expires_at":null,"expected_user_id":7,"expected_target_device_id":"linux","expected_master_epoch":4,"require_claimed":true,"authority_epoch":5,"reconciliation_required":true});
+        let mut input: super::VerifyDeviceJobPayload = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            String::from_utf8(super::signed_envelope(&input).unwrap()).unwrap(),
+            r#"{"protocol_version":2,"id":"00000000-0000-4000-8000-000000000001","user_id":7,"source_device_id":"windows","target_device_id":"linux","project_id":"project","conversation_id":"chat","master_epoch":4,"attempt_id":"00000000-0000-4000-8000-000000000002","tool_profile":"desktop.observe","payload_hash":"abc","expires_at":null}"#
+        );
+        input.expected_target_device_id = Some("other".into());
+        assert!(super::signed_envelope(&input).is_err());
+        input.expected_target_device_id = Some("linux".into());
+        input.attempt_id = None;
+        assert!(super::signed_envelope(&input).is_err());
+        input.require_claimed = false;
+        assert!(super::signed_envelope(&input).is_ok());
+    }
 
     #[test]
     fn rfc3339_expiry_supports_zulu_fraction_and_offsets() {

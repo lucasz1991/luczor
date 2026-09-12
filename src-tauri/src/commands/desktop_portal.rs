@@ -23,7 +23,12 @@ struct Session {
     devices: u32,
 }
 #[derive(Clone)]
-struct Stream { node:u32, serial:Option<u64>, position:Option<(i32,i32)>, size:Option<(i32,i32)> }
+struct Stream {
+    node: u32,
+    serial: Option<u64>,
+    position: Option<(i32, i32)>,
+    size: Option<(i32, i32)>,
+}
 static SESSION: OnceLock<Mutex<Option<Session>>> = OnceLock::new();
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 type Values = HashMap<String, OwnedValue>;
@@ -150,14 +155,27 @@ fn establish(connection: Connection, execution: ExecutionPermit) -> Result<Sessi
     let streams = if let Some(streams) = response.remove("streams") {
         Vec::<(u32, HashMap<String, OwnedValue>)>::try_from(streams)
             .map_err(|_| "desktop_portal_streams_invalid")?
-            .into_iter().map(|(node,mut fields)|Stream{node,
-                serial:fields.remove("pipewire-serial").and_then(|v|u64::try_from(v).ok()),
-                position:fields.remove("position").and_then(|v|<(i32,i32)>::try_from(v).ok()),
-                size:fields.remove("size").and_then(|v|<(i32,i32)>::try_from(v).ok())}).collect()
+            .into_iter()
+            .map(|(node, mut fields)| Stream {
+                node,
+                serial: fields
+                    .remove("pipewire-serial")
+                    .and_then(|v| u64::try_from(v).ok()),
+                position: fields
+                    .remove("position")
+                    .and_then(|v| <(i32, i32)>::try_from(v).ok()),
+                size: fields
+                    .remove("size")
+                    .and_then(|v| <(i32, i32)>::try_from(v).ok()),
+            })
+            .collect()
     } else {
         vec![]
     };
-    let devices=response.remove("devices").and_then(|v|u32::try_from(v).ok()).unwrap_or(0);
+    let devices = response
+        .remove("devices")
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
     gate.check()?;
     Ok(Session {
         connection,
@@ -187,7 +205,11 @@ pub(super) fn setup(execution: ExecutionPermit) -> Result<serde_json::Value, Str
         }
     };
     let streams = session.streams.len();
-    let pointer = session.devices & 2 != 0 && session.streams.iter().any(|stream| stream.position.is_some() && stream.size.is_some());
+    let pointer = session.devices & 2 != 0
+        && session
+            .streams
+            .iter()
+            .any(|stream| stream.position.is_some() && stream.size.is_some());
     let mut slot = SESSION
         .get_or_init(Mutex::default)
         .lock()
@@ -233,70 +255,324 @@ pub(super) fn status() -> &'static str {
     }
 }
 
-fn mapped<'a>(session:&'a Session,target:&crate::commands::desktop_target::WindowTarget)->Result<&'a Stream,String>{
-    admit(&session.execution,false)?.check()?;
-    let mut matches=session.streams.iter().filter(|stream| {
-        let (Some((x,y)),Some((width,height)))=(stream.position,stream.size) else{return false};
-        width>0 && height>0 && i64::from(target.x)>=i64::from(x) && i64::from(target.y)>=i64::from(y)
-            && i64::from(target.x)+i64::from(target.width)<=i64::from(x)+i64::from(width)
-            && i64::from(target.y)+i64::from(target.height)<=i64::from(y)+i64::from(height)
+fn mapped<'a>(
+    session: &'a Session,
+    target: &crate::commands::desktop_target::WindowTarget,
+) -> Result<&'a Stream, String> {
+    admit(&session.execution, false)?.check()?;
+    let mut matches = session.streams.iter().filter(|stream| {
+        let (Some((x, y)), Some((width, height))) = (stream.position, stream.size) else {
+            return false;
+        };
+        width > 0
+            && height > 0
+            && i64::from(target.x) >= i64::from(x)
+            && i64::from(target.y) >= i64::from(y)
+            && i64::from(target.x) + i64::from(target.width) <= i64::from(x) + i64::from(width)
+            && i64::from(target.y) + i64::from(target.height) <= i64::from(y) + i64::from(height)
     });
-    let stream=matches.next().ok_or("desktop_wayland_target_mapping_unavailable")?;
-    if matches.next().is_some(){return Err("desktop_wayland_target_mapping_ambiguous".into());}
+    let stream = matches
+        .next()
+        .ok_or("desktop_wayland_target_mapping_unavailable")?;
+    if matches.next().is_some() {
+        return Err("desktop_wayland_target_mapping_ambiguous".into());
+    }
     Ok(stream)
 }
-pub(crate) fn verify_mapping(target:&crate::commands::desktop_target::WindowTarget)->Result<(),String>{
-    let lock=SESSION.get_or_init(Mutex::default).lock().map_err(|_|"desktop_portal_busy")?;
-    mapped(lock.as_ref().ok_or("desktop_portal_consent_required")?,target)?;Ok(())
+pub(crate) fn verify_mapping(
+    target: &crate::commands::desktop_target::WindowTarget,
+) -> Result<(), String> {
+    let lock = SESSION
+        .get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| "desktop_portal_busy")?;
+    mapped(
+        lock.as_ref().ok_or("desktop_portal_consent_required")?,
+        target,
+    )?;
+    Ok(())
 }
-fn with_input<T>(guard:&crate::commands::desktop_target::DesktopActionGuard,devices:u32,perform:impl FnOnce(&Proxy<'_>,&Session,&Stream)->Result<T,String>)->Result<T,String>{
+fn with_input<T>(
+    guard: &crate::commands::desktop_target::DesktopActionGuard,
+    devices: u32,
+    perform: impl FnOnce(&Proxy<'_>, &Session, &Stream) -> Result<T, String>,
+) -> Result<T, String> {
     guard.check()?;
-    let lock=SESSION.get_or_init(Mutex::default).lock().map_err(|_|"desktop_portal_busy")?;
-    let session=lock.as_ref().ok_or("desktop_portal_consent_required")?;
-    if session.devices & devices != devices {return Err("desktop_portal_input_not_granted".into());}
-    if session.execution.session_id!=guard.permit().session_id || session.execution.generation!=guard.permit().generation {
+    let lock = SESSION
+        .get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| "desktop_portal_busy")?;
+    let session = lock.as_ref().ok_or("desktop_portal_consent_required")?;
+    if session.devices & devices != devices {
+        return Err("desktop_portal_input_not_granted".into());
+    }
+    if session.execution.session_id != guard.permit().session_id
+        || session.execution.generation != guard.permit().generation
+    {
         return Err("desktop_portal_execution_changed".into());
     }
-    let stream=mapped(session,guard.target())?;
-    let proxy=Proxy::new(&session.connection,PORTAL,PATH,"org.freedesktop.portal.RemoteDesktop").map_err(|_|"desktop_portal_unavailable")?;
-    perform(&proxy,session,stream)
+    let stream = mapped(session, guard.target())?;
+    let proxy = Proxy::new(
+        &session.connection,
+        PORTAL,
+        PATH,
+        "org.freedesktop.portal.RemoteDesktop",
+    )
+    .map_err(|_| "desktop_portal_unavailable")?;
+    perform(&proxy, session, stream)
 }
-pub(crate) fn move_to(guard:&crate::commands::desktop_target::DesktopActionGuard,x:i32,y:i32)->Result<(),String>{
-    guard.point(x,y)?;
-    with_input(guard,2,|proxy,session,stream|{
-        let (left,top)=stream.position.ok_or("desktop_wayland_mapping_unavailable")?;
-        proxy.call::<_,_,()>("NotifyPointerMotionAbsolute",&(&session.path,HashMap::<String,Value>::new(),stream.node,f64::from(x-left),f64::from(y-top)))
-            .map_err(|_|"desktop_portal_motion_failed_outcome_unknown".into())
+pub(crate) fn move_to(
+    guard: &crate::commands::desktop_target::DesktopActionGuard,
+    x: i32,
+    y: i32,
+) -> Result<(), String> {
+    guard.point(x, y)?;
+    with_input(guard, 2, |proxy, session, stream| {
+        let (left, top) = stream
+            .position
+            .ok_or("desktop_wayland_mapping_unavailable")?;
+        proxy
+            .call::<_, _, ()>(
+                "NotifyPointerMotionAbsolute",
+                &(
+                    &session.path,
+                    HashMap::<String, Value>::new(),
+                    stream.node,
+                    f64::from(x - left),
+                    f64::from(y - top),
+                ),
+            )
+            .map_err(|_| "desktop_portal_motion_failed_outcome_unknown".into())
     })
 }
-pub(crate) fn click(guard:&crate::commands::desktop_target::DesktopActionGuard,x:i32,y:i32,button:enigo::Button,double:bool)->Result<(),String>{
-    let code=match button{enigo::Button::Left=>272_i32,enigo::Button::Right=>273,enigo::Button::Middle=>274,_=>return Err("desktop_portal_button_invalid".into())};
-    move_to(guard,x,y)?;
-    for _ in 0..if double{2}else{1} {
-        guard.point(x,y)?;
-        with_input(guard,2,|proxy,session,_|{
-            let pressed=proxy.call::<_,_,()>("NotifyPointerButton",&(&session.path,HashMap::<String,Value>::new(),code,1_u32));
-            let released=proxy.call::<_,_,()>("NotifyPointerButton",&(&session.path,HashMap::<String,Value>::new(),code,0_u32));
-            pressed.and(released).map_err(|_|"desktop_portal_click_failed_outcome_unknown".into())
+pub(crate) fn click(
+    guard: &crate::commands::desktop_target::DesktopActionGuard,
+    x: i32,
+    y: i32,
+    button: enigo::Button,
+    double: bool,
+) -> Result<(), String> {
+    let code = match button {
+        enigo::Button::Left => 272_i32,
+        enigo::Button::Right => 273,
+        enigo::Button::Middle => 274,
+        _ => return Err("desktop_portal_button_invalid".into()),
+    };
+    move_to(guard, x, y)?;
+    for _ in 0..if double { 2 } else { 1 } {
+        guard.point(x, y)?;
+        with_input(guard, 2, |proxy, session, _| {
+            let pressed = proxy.call::<_, _, ()>(
+                "NotifyPointerButton",
+                &(&session.path, HashMap::<String, Value>::new(), code, 1_u32),
+            );
+            let released = proxy.call::<_, _, ()>(
+                "NotifyPointerButton",
+                &(&session.path, HashMap::<String, Value>::new(), code, 0_u32),
+            );
+            pressed
+                .and(released)
+                .map_err(|_| "desktop_portal_click_failed_outcome_unknown".into())
         })?;
-    }Ok(())
+    }
+    Ok(())
 }
-fn keysym(key:enigo::Key)->Result<i32,String>{use enigo::Key;Ok(match key{
-    Key::Return=>0xff0d,Key::Tab=>0xff09,Key::Escape=>0xff1b,Key::Space=>32,Key::Backspace=>0xff08,Key::Delete=>0xffff,
-    Key::UpArrow=>0xff52,Key::DownArrow=>0xff54,Key::LeftArrow=>0xff51,Key::RightArrow=>0xff53,Key::Home=>0xff50,Key::End=>0xff57,
-    Key::Control=>0xffe3,Key::Alt=>0xffe9,Key::Shift=>0xffe1,Key::Meta=>0xffeb,
-    Key::Unicode(c)=>{let value=c as u32;if value<0x100 {value as i32}else{(value|0x01000000) as i32}},_=>return Err("desktop_portal_key_unsupported".into())})}
-pub(crate) fn press(guard:&crate::commands::desktop_target::DesktopActionGuard,key:enigo::Key,modifiers:&[enigo::Key])->Result<(),String>{
-    let key=keysym(key)?;let modifiers=modifiers.iter().map(|key|keysym(*key)).collect::<Result<Vec<_>,_>>()?;
-    with_input(guard,1,|proxy,session,_|{
-        let emit=|key:i32,state:u32|proxy.call::<_,_,()>("NotifyKeyboardKeysym",&(&session.path,HashMap::<String,Value>::new(),key,state));
-        let mut pressed=Vec::new();let result=(||{for modifier in modifiers{emit(modifier,1)?;pressed.push(modifier);}emit(key,1)?;emit(key,0)})();
-        // Release keys even after a transport error; never leave modifiers held.
-        let _=emit(key,0);let mut release_error=false;for modifier in pressed.into_iter().rev(){release_error|=emit(modifier,0).is_err();}
-        if result.is_err()||release_error {Err("desktop_portal_key_failed_outcome_unknown".into())}else{Ok(())}
+fn keysym(key: enigo::Key) -> Result<i32, String> {
+    use enigo::Key;
+    Ok(match key {
+        Key::Return => 0xff0d,
+        Key::Tab => 0xff09,
+        Key::Escape => 0xff1b,
+        Key::Space => 32,
+        Key::Backspace => 0xff08,
+        Key::Delete => 0xffff,
+        Key::UpArrow => 0xff52,
+        Key::DownArrow => 0xff54,
+        Key::LeftArrow => 0xff51,
+        Key::RightArrow => 0xff53,
+        Key::Home => 0xff50,
+        Key::End => 0xff57,
+        Key::Control => 0xffe3,
+        Key::Alt => 0xffe9,
+        Key::Shift => 0xffe1,
+        Key::Meta => 0xffeb,
+        Key::Unicode(c) => {
+            let value = c as u32;
+            if value < 0x100 {
+                value as i32
+            } else {
+                (value | 0x01000000) as i32
+            }
+        }
+        _ => return Err("desktop_portal_key_unsupported".into()),
     })
 }
-pub(crate) fn scroll(guard:&crate::commands::desktop_target::DesktopActionGuard,amount:i32,axis:enigo::Axis)->Result<(),String>{
-    let target=guard.target();let x=target.x+(target.width/2) as i32;let y=target.y+(target.height/2) as i32;move_to(guard,x,y)?;
-    with_input(guard,2,|proxy,session,_|proxy.call::<_,_,()>("NotifyPointerAxisDiscrete",&(&session.path,HashMap::<String,Value>::new(),if axis==enigo::Axis::Horizontal{1_u32}else{0},amount)).map_err(|_|"desktop_portal_scroll_failed_outcome_unknown".into()))
+pub(crate) fn press(
+    guard: &crate::commands::desktop_target::DesktopActionGuard,
+    key: enigo::Key,
+    modifiers: &[enigo::Key],
+) -> Result<(), String> {
+    let key = keysym(key)?;
+    let modifiers = modifiers
+        .iter()
+        .map(|key| keysym(*key))
+        .collect::<Result<Vec<_>, _>>()?;
+    with_input(guard, 1, |proxy, session, _| {
+        let emit = |key: i32, state: u32| {
+            proxy.call::<_, _, ()>(
+                "NotifyKeyboardKeysym",
+                &(&session.path, HashMap::<String, Value>::new(), key, state),
+            )
+        };
+        let mut pressed = Vec::new();
+        let result = (|| {
+            for modifier in modifiers {
+                emit(modifier, 1)?;
+                pressed.push(modifier);
+            }
+            emit(key, 1)?;
+            emit(key, 0)
+        })();
+        // Release keys even after a transport error; never leave modifiers held.
+        let _ = emit(key, 0);
+        let mut release_error = false;
+        for modifier in pressed.into_iter().rev() {
+            release_error |= emit(modifier, 0).is_err();
+        }
+        if result.is_err() || release_error {
+            Err("desktop_portal_key_failed_outcome_unknown".into())
+        } else {
+            Ok(())
+        }
+    })
+}
+pub(crate) fn scroll(
+    guard: &crate::commands::desktop_target::DesktopActionGuard,
+    amount: i32,
+    axis: enigo::Axis,
+) -> Result<(), String> {
+    let target = guard.target();
+    let x = target.x + (target.width / 2) as i32;
+    let y = target.y + (target.height / 2) as i32;
+    move_to(guard, x, y)?;
+    with_input(guard, 2, |proxy, session, _| {
+        proxy
+            .call::<_, _, ()>(
+                "NotifyPointerAxisDiscrete",
+                &(
+                    &session.path,
+                    HashMap::<String, Value>::new(),
+                    if axis == enigo::Axis::Horizontal {
+                        1_u32
+                    } else {
+                        0
+                    },
+                    amount,
+                ),
+            )
+            .map_err(|_| "desktop_portal_scroll_failed_outcome_unknown".into())
+    })
+}
+
+pub(crate) fn pointer_ready() -> bool {
+    SESSION
+        .get_or_init(Mutex::default)
+        .lock()
+        .ok()
+        .is_some_and(|value| {
+            value.as_ref().is_some_and(|session| {
+                admit(&session.execution, false).is_ok()
+                    && session.devices & 2 != 0
+                    && session
+                        .streams
+                        .iter()
+                        .any(|stream| stream.position.is_some() && stream.size.is_some())
+            })
+        })
+}
+pub(crate) fn capture(
+    requested: Option<u32>,
+) -> Result<crate::commands::system::ScreenCapture, String> {
+    let (connection, path, execution, stream, generation) = {
+        let lock = SESSION
+            .get_or_init(Mutex::default)
+            .lock()
+            .map_err(|_| "desktop_portal_busy")?;
+        let session = lock.as_ref().ok_or("desktop_portal_consent_required")?;
+        admit(&session.execution, false)?.check()?;
+        let stream = match requested {
+            Some(id) => session.streams.iter().find(|s| s.node == id),
+            None => session.streams.first(),
+        }
+        .cloned()
+        .ok_or("desktop_portal_stream_unavailable")?;
+        (
+            session.connection.clone(),
+            session.path.clone(),
+            session.execution.clone(),
+            stream,
+            GENERATION.load(Ordering::Acquire),
+        )
+    };
+    let proxy = Proxy::new(
+        &connection,
+        PORTAL,
+        PATH,
+        "org.freedesktop.portal.ScreenCast",
+    )
+    .map_err(|_| "desktop_portal_unavailable")?;
+    let fd: zbus::zvariant::OwnedFd = proxy
+        .call(
+            "OpenPipeWireRemote",
+            &(&path, HashMap::<String, Value>::new()),
+        )
+        .map_err(|_| "desktop_portal_pipewire_unavailable")?;
+    let bytes = crate::commands::desktop_pipewire::capture(fd.into(), stream.node, stream.serial)?;
+    admit(&execution, false)?.check()?;
+    if GENERATION.load(Ordering::Acquire) != generation {
+        return Err("desktop_portal_capture_session_changed".into());
+    }
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(&bytes), image::ImageFormat::Png);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(16384);
+    limits.max_image_height = Some(16384);
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let image = reader
+        .decode()
+        .map_err(|_| "desktop_portal_image_invalid")?;
+    let (width, height) = (image.width(), image.height());
+    let (x, y) = stream.position.unwrap_or((0, 0));
+    let (logical_width, logical_height) = stream.size.unwrap_or((width as i32, height as i32));
+    if logical_width <= 0 || logical_height <= 0 {
+        return Err("desktop_portal_stream_geometry_invalid".into());
+    }
+    use base64::Engine;
+    Ok(crate::commands::system::ScreenCapture {
+        base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+        mime: "image/png".into(),
+        width,
+        height,
+        monitor: crate::commands::system::MonitorInfo {
+            id: stream.node,
+            name: "Wayland Portal".into(),
+            x,
+            y,
+            width: logical_width as u32,
+            height: logical_height as u32,
+            scale_factor: width as f32 / logical_width as f32,
+            primary: true,
+        },
+    })
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn keysyms_preserve_unicode_and_supported_modifiers() {
+        assert_eq!(keysym(enigo::Key::Unicode('\u{df}')).unwrap(), 0xdf);
+        assert_eq!(keysym(enigo::Key::Unicode('\u{4f60}')).unwrap(), 0x01004f60);
+        assert_eq!(keysym(enigo::Key::Control).unwrap(), 0xffe3);
+    }
 }

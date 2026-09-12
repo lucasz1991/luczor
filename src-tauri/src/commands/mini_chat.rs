@@ -136,11 +136,20 @@ pub enum MiniMode {
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum MiniThinkingTier { Fast, Balanced, Thorough, Max, Ultra }
+pub enum MiniThinkingTier {
+    Fast,
+    Balanced,
+    Thorough,
+    Max,
+    Ultra,
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub enum MiniThinkingControl { More, Answer }
+pub enum MiniThinkingControl {
+    More,
+    Answer,
+}
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -209,10 +218,18 @@ fn validate_action(action: &MiniAction) -> Result<(), String> {
         | MiniAction::WorkspaceOpen { session_id, .. } => validate_identifier(session_id)?,
         _ => {}
     }
-    if let MiniAction::SelectProject { project_id, .. } | MiniAction::SelectConversation { project_id, .. } | MiniAction::NewConversation { project_id, .. } = action {
+    if let MiniAction::SelectProject { project_id, .. }
+    | MiniAction::SelectConversation { project_id, .. }
+    | MiniAction::NewConversation { project_id, .. } = action
+    {
         validate_identifier(project_id)?;
     }
-    if let MiniAction::SelectConversation { conversation_id, .. } = action { validate_identifier(conversation_id)?; }
+    if let MiniAction::SelectConversation {
+        conversation_id, ..
+    } = action
+    {
+        validate_identifier(conversation_id)?;
+    }
     if let MiniAction::ThinkingControl {
         request_id,
         control_id,
@@ -353,7 +370,10 @@ pub async fn show(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn mini_chat_open(window: crate::commands::CallerWebview, app: tauri::AppHandle) -> Result<(), String> {
+pub async fn mini_chat_open(
+    window: crate::commands::CallerWebview,
+    app: tauri::AppHandle,
+) -> Result<(), String> {
     ensure_main_webview(&window)?;
     show(app).await
 }

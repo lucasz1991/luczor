@@ -427,7 +427,10 @@ pub fn wf_watch_start(
 }
 
 #[tauri::command]
-pub fn wf_watch_stop(window: crate::commands::CallerWebview, payload: WatchScope) -> Result<(), String> {
+pub fn wf_watch_stop(
+    window: crate::commands::CallerWebview,
+    payload: WatchScope,
+) -> Result<(), String> {
     ensure_main_webview(&window)?;
     validate_scope(&payload.scope)?;
     let mut handles = WATCHERS

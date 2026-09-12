@@ -66,6 +66,23 @@ function harness(options: Partial<AgentOrchestratorOptions> = {}) {
 afterEach(() => vi.useRealTimers())
 
 describe('project agent orchestrator', () => {
+  it('does not finish graceful shutdown until the native adapter acknowledges cancellation', async () => {
+    const { orchestrator, enqueue, runs } = harness()
+    const job = enqueue()
+    orchestrator.approve(job.id)
+    await flush()
+    let stopped = false
+    const shutdown = orchestrator.shutdown().then(() => {
+      stopped = true
+    })
+    expect(runs[0]!.request.signal.aborted).toBe(true)
+    expect(() => enqueue()).toThrow('geschlossen')
+    await flush()
+    expect(stopped).toBe(false)
+    runs[0]!.result.resolve({ output: 'Cancelled' })
+    await shutdown
+    expect(orchestrator.isSettled(job.id)).toBe(true)
+  })
   it('freezes workcopy scope privately and still validates the canonical workspace on both sides of execution', async () => {
     const { orchestrator, enqueue, runs, metadata, validateScope } = harness()
     const workflowScope = {

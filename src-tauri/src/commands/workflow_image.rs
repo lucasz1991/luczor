@@ -3,7 +3,7 @@ use super::execution::{admit, Guarded};
 use super::workflow_artifacts::{self, WorkflowArtifactScope};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tauri::{AppHandle};
+use tauri::AppHandle;
 
 #[derive(Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -376,7 +376,10 @@ mod tests {
         let capabilities = ocr_capabilities().expect("OCR capabilities");
         assert_eq!(capabilities["ocrAvailable"], true);
         let result = recognize(&bytes, None, 1000, &|| Ok(())).expect("native OCR");
-        let text = result["text"].as_str().expect("public OCR text").to_uppercase();
+        let text = result["text"]
+            .as_str()
+            .expect("public OCR text")
+            .to_uppercase();
         assert!(text.contains("LUCZOR"), "Synthetic marker not recognized");
         let bounded = recognize(&bytes, None, 3, &|| Ok(())).expect("bounded OCR");
         assert_eq!(bounded["text"].as_str().unwrap().chars().count(), 3);
@@ -414,13 +417,21 @@ mod tests {
         let bytes = png([1, 2, 3, 255]);
         let mut artifact = workflow_artifacts::WorkflowArtifact {
             artifact_id: uuid::Uuid::new_v4().to_string(),
-            mime: "image/png".into(), bytes: bytes.len() as u64,
+            mime: "image/png".into(),
+            bytes: bytes.len() as u64,
             sha256: format!("{:x}", Sha256::digest(&bytes)),
-            name: "private-name.png".into(), width: Some(1), height: Some(1),
+            name: "private-name.png".into(),
+            width: Some(1),
+            height: Some(1),
         };
         let result = prepare_vision(&artifact, &bytes, &|| Ok(())).unwrap();
         assert_eq!(result["artifact"]["sha256"], artifact.sha256);
-        assert_eq!(base64::engine::general_purpose::STANDARD.decode(result["base64"].as_str().unwrap()).unwrap(), bytes);
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(result["base64"].as_str().unwrap())
+                .unwrap(),
+            bytes
+        );
         assert!(result["artifact"].get("name").is_none());
         assert!(prepare_vision(&artifact, &bytes, &|| Err("revoked".into())).is_err());
         artifact.width = Some(2);

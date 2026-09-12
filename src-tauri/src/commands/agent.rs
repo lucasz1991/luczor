@@ -13,7 +13,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle};
+use tauri::AppHandle;
 
 use super::ensure_main_webview;
 use super::execution::{admit, ExecutionLease, Guarded};
@@ -81,7 +81,9 @@ fn validate_project_dir(raw: &str) -> Result<PathBuf, String> {
 
 /// Report which local coding-agent CLIs are installed (PATH-detected).
 #[tauri::command]
-pub async fn agent_cli_detect(window: crate::commands::CallerWebview) -> Result<Vec<AgentInfo>, String> {
+pub async fn agent_cli_detect(
+    window: crate::commands::CallerWebview,
+) -> Result<Vec<AgentInfo>, String> {
     ensure_main_webview(&window)?;
     Ok(vec![detect_one("claude"), detect_one("codex")])
 }

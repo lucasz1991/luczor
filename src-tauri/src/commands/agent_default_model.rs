@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle};
+use tauri::AppHandle;
 
 const MAX_FRAME: usize = 1_000_000;
 const MAX_FRAMES: usize = 128;

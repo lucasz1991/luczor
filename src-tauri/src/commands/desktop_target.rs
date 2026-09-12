@@ -9,8 +9,12 @@ use super::execution::{admit, ExecutionLease, ExecutionPermit};
 const VALID_FOR: Duration = Duration::from_secs(30);
 static OBSERVATIONS: OnceLock<Mutex<HashMap<String, Observation>>> = OnceLock::new();
 static INPUT: Mutex<()> = Mutex::new(());
-#[cfg(target_os="linux")]
-pub(super) fn lock_input()->Result<MutexGuard<'static,()>,String>{INPUT.try_lock().map_err(|_|"Another desktop action is running.".into())}
+#[cfg(target_os = "linux")]
+pub(super) fn lock_input() -> Result<MutexGuard<'static, ()>, String> {
+    INPUT
+        .try_lock()
+        .map_err(|_| "Another desktop action is running.".into())
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -97,10 +101,14 @@ pub struct DesktopActionGuard {
 }
 
 impl DesktopActionGuard {
-    #[cfg(target_os="linux")]
-    pub(super) fn target(&self)->&WindowTarget {&self.observation.visible.target}
-    #[cfg(target_os="linux")]
-    pub(super) fn permit(&self)->&ExecutionPermit {&self.observation.execution}
+    #[cfg(target_os = "linux")]
+    pub(super) fn target(&self) -> &WindowTarget {
+        &self.observation.visible.target
+    }
+    #[cfg(target_os = "linux")]
+    pub(super) fn permit(&self) -> &ExecutionPermit {
+        &self.observation.execution
+    }
     pub fn acquire(permit: &ExecutionPermit, id: &str) -> Result<Self, String> {
         let input = INPUT
             .try_lock()
@@ -257,11 +265,17 @@ fn pointer_position() -> Result<(i32, i32), String> {
     Ok((point.x, point.y))
 }
 #[cfg(target_os = "linux")]
-fn read_target(requested: Option<u64>) -> Result<WindowTarget, String> { super::desktop_linux::read_target(requested) }
+fn read_target(requested: Option<u64>) -> Result<WindowTarget, String> {
+    super::desktop_linux::read_target(requested)
+}
 #[cfg(target_os = "linux")]
-fn point_targets_window(window: u64, x: i32, y: i32) -> Result<(), String> { super::desktop_linux::point_targets_window(window,x,y) }
+fn point_targets_window(window: u64, x: i32, y: i32) -> Result<(), String> {
+    super::desktop_linux::point_targets_window(window, x, y)
+}
 #[cfg(target_os = "linux")]
-fn pointer_position() -> Result<(i32, i32), String> { super::desktop_linux::pointer_position() }
+fn pointer_position() -> Result<(i32, i32), String> {
+    super::desktop_linux::pointer_position()
+}
 #[cfg(not(any(windows, target_os = "linux")))]
 fn read_target(_: Option<u64>) -> Result<WindowTarget, String> {
     Err("Bound desktop input is currently supported on Windows only.".into())

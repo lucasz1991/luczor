@@ -11,7 +11,7 @@ import { pauseProjectMirror, projectMirrorState, syncProjectMirror } from '@/ser
 import { binaryRequest } from '@/services/coordination/binaryTransport'
 import { lanState } from '@/services/coordination/lan'
 import { coordinationMetadata, setCoordinationRank } from '@/services/coordination/preferences'
-import { invoke } from '@tauri-apps/api/core'
+import { invoke, isTauri } from '@tauri-apps/api/core'
 import { executionGate, invokeGuarded } from '@/services/executionGate'
 import { hasActiveChatRuns } from '@/services/chatRunManager'
 import { createWorkflowApi } from '@/services/workflows/api'
@@ -20,6 +20,7 @@ import type { WorkflowTestCase, WorkflowTestEvidence } from '@/services/workflow
 
 const props = defineProps<{ open: boolean; projectId?: string }>()
 const emit = defineEmits<{ close: [] }>()
+const nativeAvailable = isTauri()
 const dialog = ref<HTMLDialogElement>()
 const tab = ref<'devices' | 'files' | 'workflows' | 'tests'>('devices')
 const error = ref(''),
@@ -39,7 +40,7 @@ const matrices = ref<
 const stepTargets = ref<Record<string, string>>({})
 const screenshot = ref('')
 const ownDevice = ref(''),
-  deviceRank = ref(1)
+  deviceRank = ref(0)
 const nativeControl = ref<{
   backend: string
   semanticInput: boolean
@@ -106,17 +107,25 @@ async function perform(action: () => Promise<void>) {
   }
 }
 async function account() {
+  if (!nativeAvailable)
+    throw new Error(
+      'Öffne den Geräteverbund in der Luczor-Desktop-App. Diese Browseransicht zeigt die Oberfläche ohne Geräteverbindung.'
+    )
   const value = await getVerifiedAccountSnapshot()
   if (!value) throw new Error('Bitte unter Einstellungen → Server anmelden.')
   return value
 }
 async function refresh() {
+  if (!nativeAvailable) {
+    notice.value = 'Browser-Vorschau: Geräteverbindung und Ordnerabgleich stehen in der Luczor-Desktop-App bereit.'
+    return
+  }
   const owner = await account(),
     api = coordinationApi(owner.config, controller.signal)
   deviceCluster.coordinator = (await api.state()).data
   deviceCluster.jobs = (await api.jobs()).data
   ownDevice.value = owner.config.clientId
-  deviceRank.value = (await coordinationMetadata(owner)).model_tier ?? 1
+  deviceRank.value = (await coordinationMetadata(owner)).model_tier ?? 0
   nativeControl.value = await invoke<NonNullable<typeof nativeControl.value>>('desktop_adapter_status').catch(
     () => null
   )
@@ -288,7 +297,13 @@ async function startWorkflow(matrix: boolean) {
         <div class="cluster__summary">
           <AiIcon name="network" :size="22" />
           <div>
-            <strong>{{ lanState.active ? 'Direkte LAN-Verbindung bereit' : 'LAN-Verbindung wird vorbereitet' }}</strong>
+            <strong>{{
+              lanState.active
+                ? 'Direkte LAN-Verbindung bereit'
+                : nativeAvailable
+                  ? 'LAN-Verbindung wird vorbereitet'
+                  : 'LAN-Verbindung in der Desktop-App'
+            }}</strong>
             <p>
               {{ lanState.peers.length }} bestätigte Geräte · {{ (lanState.transferred / 1048576).toFixed(1) }} MiB
               direkt übertragen
@@ -337,6 +352,7 @@ async function startWorkflow(matrix: boolean) {
           </button>
           <label
             >Leistungsrang für Übernahme<select v-model.number="deviceRank" @change="perform(configureRank)">
+              <option :value="0">Automatisch anhand des aktiven Modells</option>
               <option v-for="rank in 5" :key="rank" :value="rank">
                 {{ rank }} ·
                 {{ rank === 5 ? 'höchste Priorität' : rank === 1 ? 'niedrigste Priorität' : 'mittlere Priorität' }}
@@ -534,6 +550,8 @@ async function startWorkflow(matrix: boolean) {
 
 <style scoped>
 .cluster {
+  margin: auto;
+  inset: 0;
   color: var(--ai-text, #e8ebef);
   background: var(--ai-panel, #191d22);
   border: 1px solid var(--ai-border, #373c46);

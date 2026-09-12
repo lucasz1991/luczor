@@ -6,7 +6,8 @@ use x11rb::{
     rust_connection::RustConnection,
 };
 pub(super) fn is_wayland() -> bool {
-    std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v == "wayland")
+    std::env::var_os("WAYLAND_DISPLAY").is_some()
+        || std::env::var("XDG_SESSION_TYPE").is_ok_and(|v| v == "wayland")
 }
 
 fn connect() -> Result<(RustConnection, u32), String> {
@@ -93,7 +94,9 @@ fn geometry(
     ))
 }
 pub(super) fn read_target(requested: Option<u64>) -> Result<WindowTarget, String> {
-    if is_wayland() { return super::desktop_accessibility::linux::wayland_target(requested); }
+    if is_wayland() {
+        return super::desktop_accessibility::linux::wayland_target(requested);
+    }
     let (connection, root) = connect()?;
     let active = property(&connection, root, "_NET_ACTIVE_WINDOW", AtomEnum::WINDOW)?
         .first()
@@ -126,7 +129,9 @@ pub(super) fn read_target(requested: Option<u64>) -> Result<WindowTarget, String
     })
 }
 pub(super) fn point_targets_window(target: u64, x: i32, y: i32) -> Result<(), String> {
-    if is_wayland() { return super::desktop_accessibility::linux::wayland_point(target,x,y); }
+    if is_wayland() {
+        return super::desktop_accessibility::linux::wayland_point(target, x, y);
+    }
     let (connection, root) = connect()?;
     let stacking = property(
         &connection,

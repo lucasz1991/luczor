@@ -43,7 +43,7 @@ describe('managed workflow agent bridge', () => {
       expectedWorkspaceUpdatedAt: 1,
     }
     await runWorkflowAgent('codex', 'Exact signed prompt', 'E:/workcopies/run', undefined, 'active', { workflowScope })
-    expect(mocks.prepare).toHaveBeenCalledWith(
+    expect(mocks.prepare).toHaveBeenCalledExactlyOnceWith(
       expect.objectContaining({
         workflowScope,
         expectedProject: expect.objectContaining({ rootPath: 'E:\\Project' }),
@@ -59,7 +59,6 @@ describe('managed workflow agent bridge', () => {
     await expect(runWorkflowAgent('codex', 'Task', 'E:/other', undefined, 'active', { workflowScope })).rejects.toThrow(
       'Projekt'
     )
-    expect(mocks.prepare).toHaveBeenCalledOnce()
   })
   it('keeps the signed reviewed prompt exact and dispatches it through a managed workspace-write job', async () => {
     await expect(runWorkflowAgent('codex', 'Exact signed prompt', 'e:/project')).resolves.toEqual({

@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createChatRunJournal, createChatRunManager, type ChatRunJournal } from '@/services/chatRunManager'
+import {
+  createChatRunJournal,
+  createChatRunManager,
+  reconcileRecoveredChatRuns,
+  type ChatRunJournal,
+} from '@/services/chatRunManager'
+import { DEFAULT_STATE } from '@/state/defaults'
+import { createChatActivity } from '@/services/chatActivity'
 
 function deferred() {
   let resolve!: () => void
@@ -131,6 +138,42 @@ describe('persistent chat run owner', () => {
       checkpoint: { messageId: 'partial-answer' },
     })
     expect(manager.hasLive()).toBe(false)
+    const state = structuredClone(DEFAULT_STATE)
+    state.pending.toolCallsByProject.project = [
+      {
+        id: 'old-approval',
+        projectId: 'project',
+        runId: 'previous',
+        conversationId: 'one',
+        name: 'fs_write',
+        args: {},
+        status: 'executing',
+        requiresApproval: true,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ]
+    state.messages = [
+      {
+        id: 'partial-answer',
+        projectId: 'project',
+        conversationId: 'one',
+        role: 'assistant',
+        content: 'Preserved partial answer',
+        ts: 1,
+        createdAt: 1,
+        parsed: null,
+        visibility: 'visible',
+        meta: { runId: 'previous', isLoading: true, activity: createChatActivity(1) },
+      },
+    ]
+    expect(reconcileRecoveredChatRuns(state, manager.records.value)).toBe(2)
+    expect(state.pending.toolCallsByProject.project[0]?.status).toBe('canceled')
+    expect(state.messages[0]).toMatchObject({
+      content: 'Preserved partial answer',
+      meta: { isLoading: false, activity: { status: 'canceled' } },
+    })
+    expect(reconcileRecoveredChatRuns(state, manager.records.value)).toBe(0)
     await manager.recover('someone-else')
     expect(manager.records.value).toHaveLength(1)
   })

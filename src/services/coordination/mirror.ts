@@ -293,7 +293,7 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
       upload.draftId = draft.manifest_id ?? undefined
       await disk.set(uploadKey, upload)
       await disk.save()
-      if (draft.status === 'published') {
+      if (draft.status === 'published' || draft.status === 'accepted') {
         const currentHead = await request<Head>()
         await save({ revision: Math.max(0, currentHead.revision - 1), localHash: snapshot.manifestHash })
         await disk.delete(uploadKey)
@@ -334,6 +334,8 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
       }
       if (master) {
         const latest = await request<Head>()
+        if (latest.revision !== upload.baseRevision && draft.status === 'draft')
+          await request(`/manifests/${draft.manifest_id}/propose`, 'POST', {})
         const lease = await request<{ lease_id: string }>('/lease', 'POST', {
           master_epoch: cluster.epoch,
           expected_revision: latest.revision,

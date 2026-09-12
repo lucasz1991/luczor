@@ -191,7 +191,13 @@ pub async fn wf_scoped_file_write(
     ensure_main_webview(&window)?;
     let gate = admit(&payload.execution, true)?;
     tauri::async_runtime::spawn_blocking(move||{use std::io::Write;let request=payload.request;let content=request.content.ok_or("workflow_file_content_missing")?;if content.len()>MAX_FILE_BYTES{return Err("workflow_file_size_exceeded".into());}request.scope.check(&app)?;let root=PathBuf::from(&request.scope.expected_root_path);let _workspace=super::codex::acquire_workspace_lease(&root,true)?;let path=safe_path(&root,&request.path,true)?;
-        if let Some(expected)=request.expected_sha256{let previous=std::fs::read(&path).map_err(|_|"workflow_file_revision_conflict")?;if format!("{:x}",Sha256::digest(previous))!=expected{return Err("workflow_file_revision_conflict".into());}}
+        if let Some(expected)=request.expected_sha256 {
+            use std::io::Read;
+            let mut previous=std::fs::File::open(&path).map_err(|_|"workflow_file_revision_conflict")?;
+            let mut digest=Sha256::new();let mut buffer=[0_u8;65536];
+            loop { gate.check()?; let count=previous.read(&mut buffer).map_err(|_|"workflow_file_revision_conflict")?;if count==0 {break;}digest.update(&buffer[..count]); }
+            if format!("{:x}",digest.finalize())!=expected {return Err("workflow_file_revision_conflict".into());}
+        }
         let temp=path.parent().ok_or("workflow_file_path_invalid")?.join(format!(".luczor-write-{}",uuid::Uuid::new_v4()));let mut file=std::fs::OpenOptions::new().create_new(true).write(true).open(&temp).map_err(|_|"workflow_file_write_failed")?;file.write_all(content.as_bytes()).and_then(|_|file.sync_all()).map_err(|_|"workflow_file_write_failed")?;drop(file);gate.check()?;request.scope.check(&app)?;let checked=safe_path(&root,&request.path,false)?;if checked!=path{return Err("workflow_file_path_changed".into());}std::fs::rename(&temp,&path).map_err(|_|"workflow_file_commit_failed")?;Ok(serde_json::json!({"path":request.path,"bytes":content.len(),"sha256":format!("{:x}",Sha256::digest(content.as_bytes()))}))
     }).await.map_err(|_|"workflow_file_worker_failed")?
 }
