@@ -6,6 +6,8 @@ import { executionGate } from '@/services/executionGate'
 import type { ToolContext } from '@/services/tools/types'
 import type { WorkflowApi } from './api'
 import type { Workflow, WorkflowRevision, WorkflowRun, WorkflowTask, WorkflowTrigger } from './types'
+import type { WorkflowDefinition } from './types'
+import { validateWorkflowDeviceTargets } from './deviceTarget'
 
 type Connection = { api: WorkflowApi; deviceId: string; rootPath: string; baseUrl: string }
 export type WorkflowControllerDependencies = {
@@ -180,6 +182,8 @@ export class WorkflowController {
   }
   async action(name: string, args: Record<string, unknown>): Promise<Record<string, unknown> | undefined> {
     return this.guarded(async generation => {
+      if (['workflow_create', 'workflow_update', 'workflow_validate'].includes(name) && args.definition !== undefined)
+        validateWorkflowDeviceTargets(args.definition as WorkflowDefinition, this.view.catalog)
       const output = await this.deps.perform(name, args, {
         projectId: this.view.projectId,
         signal: this.abort.signal,

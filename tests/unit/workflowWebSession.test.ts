@@ -24,6 +24,40 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('session-bound web workflow run controls', () => {
+  it('roundtrips persistent device targets through versioned save and rejects invalid selectors before PUT', async () => {
+    const definition = {
+      steps: [
+        {
+          key: 'read',
+          type: 'browser.read',
+          payload: {},
+          device_target: { kind: 'capability', task_type: 'browser.read', task_version: 1 },
+        },
+      ],
+    }
+    const editorState = {
+      ...state,
+      catalog: [{ key: 'browser.read', runner: 'client' }],
+      urls: { ...state.urls, save: '/dashboard/workflows/7' },
+    }
+    fetchMock.mockImplementation(async (_path, options) =>
+      json(options.method === 'PUT' ? { version: 2, definition } : editorState)
+    )
+    const session = createWorkflowWebSession('/dashboard/workflows/7/editor-state')
+    await session.refresh()
+    await expect(
+      session.mutate('save', { expected_version: 1, definition_json: JSON.stringify(definition) })
+    ).resolves.toMatchObject({ version: 2, definition })
+    const [, options] = fetchMock.mock.calls.find(([, options]) => options.method === 'PUT')!
+    expect(JSON.parse(options.body)).toMatchObject({ expected_version: 1, definition_json: JSON.stringify(definition) })
+    fetchMock.mockClear()
+    definition.steps[0]!.device_target.task_version = 2
+    await expect(
+      session.mutate('save', { expected_version: 2, definition_json: JSON.stringify(definition) })
+    ).rejects.toThrow('Version 1')
+    expect(fetchMock).not.toHaveBeenCalled()
+    session.dispose()
+  })
   it('sends same-origin CSRF with an operation identity and never fabricates device authority', async () => {
     fetchMock.mockImplementation(async (_path, options) =>
       options.method === 'POST'

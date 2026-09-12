@@ -81,7 +81,12 @@ async function configureLan(account: VerifiedAccountSnapshot, signal: AbortSigna
   signal.throwIfAborted()
   if (owner !== account) return
   lanState.received = saved
-    .filter(([key, value]) => key.startsWith(`${account.principalId}:`) && value.kind === 'result' && value.toDeviceId === account.config.clientId)
+    .filter(
+      ([key, value]) =>
+        key.startsWith(`${account.principalId}:`) &&
+        value.kind === 'result' &&
+        value.toDeviceId === account.config.clientId
+    )
     .slice(-100)
     .map(([, value]) => ({ id: value.id, from: value.fromDeviceId, kind: value.kind, payload: value.payload }))
   let draining = false

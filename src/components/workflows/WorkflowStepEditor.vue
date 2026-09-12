@@ -7,6 +7,7 @@ import { WORKFLOW_SCRIPT_TEMPLATES } from '@/services/workflows/scriptTemplates'
 import { workflowBindingSource } from '@/services/workflows/bindings'
 import { connectWorkflowData } from '@/services/workflows/graph'
 import { validateWorkflowScriptEnvironment } from '@/services/workflows/scriptEnvironment'
+import WorkflowDeviceTargetEditor from './WorkflowDeviceTargetEditor.vue'
 const props = defineProps<{
   step: WorkflowStepDefinition
   steps: WorkflowStepDefinition[]
@@ -115,7 +116,10 @@ function applyEnvironment() {
   }
 }
 function update(values: Partial<WorkflowStepDefinition>) {
-  emit('update:step', { ...props.step, ...values })
+  const next = { ...props.step, ...values }
+  if (values.type && props.catalog.find(item => item.key === values.type)?.runner !== 'client')
+    delete next.device_target
+  emit('update:step', next)
 }
 function payload(key: string, value: unknown) {
   update({ payload: { ...props.step.payload, [key]: value } })
@@ -233,6 +237,13 @@ function applyPayload() {
       {{ task?.runner === 'client' ? 'Auf dem zugeordneten Gerät' : 'Auf dem Server'
       }}<span v-if="task?.requires_approval"> · Freigabe erforderlich</span>
     </p>
+    <WorkflowDeviceTargetEditor
+      v-if="task?.runner === 'client'"
+      :model-value="step.device_target"
+      :catalog="catalog"
+      :disabled="disabled"
+      @update:model-value="update({ device_target: $event })"
+    />
     <div v-if="['node.run', 'python.run'].includes(step.type)" class="wf-muted">
       <p>Windows · Benutzerrechte · JSON-Eingabe über Standardeingabe, JSON-Ergebnis über Standardausgabe.</p>
       <button type="button" @click="applyScriptTemplate">JSON-Vorlage v1 übernehmen</button>

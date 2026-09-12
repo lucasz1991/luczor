@@ -89,6 +89,7 @@ declare module 'vue' {
     VoiceSettingsSection: typeof import('./src/components/settings/VoiceSettingsSection.vue')['default']
     WorkflowBudgetSettings: typeof import('./src/components/workflows/WorkflowBudgetSettings.vue')['default']
     WorkflowChatCards: typeof import('./src/components/workflows/WorkflowChatCards.vue')['default']
+    WorkflowDeviceTargetEditor: typeof import('./src/components/workflows/WorkflowDeviceTargetEditor.vue')['default']
     WorkflowEditorIsland: typeof import('./src/components/workflows/WorkflowEditorIsland.vue')['default']
     WorkflowGraphEditor: typeof import('./src/components/workflows/WorkflowGraphEditor.vue')['default']
     WorkflowRunBudget: typeof import('./src/components/workflows/WorkflowRunBudget.vue')['default']

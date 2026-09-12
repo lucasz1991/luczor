@@ -50,6 +50,42 @@ function fixture() {
 }
 beforeEach(() => executionGate.update({ mode: 'act', killSwitch: false, scope: crypto.randomUUID() }))
 describe('shared workflow view state', () => {
+  it('preserves persistent step targets and revision checks while leaving a captured run definition untouched', async () => {
+    const testCase = fixture()
+    await testCase.controller.load('p', 1)
+    testCase.controller.view.catalog = [
+      {
+        key: 'browser.read',
+        label: 'Browser',
+        runner: 'client',
+        kind: 'task',
+        mutating: false,
+        requires_approval: false,
+        allowed_in_definition: true,
+        params: {},
+      },
+    ]
+    const frozen = structuredClone(workflow().definition)
+    const definition = {
+      steps: [
+        { key: 'a', type: 'browser.read', payload: {}, device_target: { kind: 'specific', device_id: 'laptop' } },
+      ],
+    }
+    await testCase.controller.action('workflow_update', { workflow_id: 1, expected_version: 2, definition })
+    expect(testCase.perform).toHaveBeenCalledWith(
+      'workflow_update',
+      expect.objectContaining({ expected_version: 2, definition }),
+      expect.anything()
+    )
+    expect(frozen).toEqual(workflow().definition)
+    testCase.perform.mockClear()
+    definition.steps[0]!.device_target.device_id = ''
+    expect(
+      await testCase.controller.action('workflow_update', { workflow_id: 1, expected_version: 2, definition })
+    ).toBeUndefined()
+    expect(testCase.perform).not.toHaveBeenCalled()
+    expect(testCase.controller.view.error).toContain('Geräte-ID')
+  })
   it('rebinds API requests after changing from observe to act', async () => {
     const testCase = fixture()
     executionGate.update({ mode: 'observe', killSwitch: false, scope: 'p' })

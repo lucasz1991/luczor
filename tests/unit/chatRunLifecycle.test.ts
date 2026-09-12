@@ -43,6 +43,68 @@ function fixture(controller: AbortController | null = new AbortController()) {
 }
 
 describe('captured chat cancellation', () => {
+  it('keeps automatic and manual admission closed until journal recovery and its public-state save finish', async () => {
+    const app = readFileSync('src/App.vue', 'utf8')
+    const start = app.indexOf('appRuntimeLifecycle.start().then(')
+    const source = app.slice(start, app.indexOf('\n})\nonBeforeUnmount', start))
+    const recovery = deferred(),
+      saved = deferred()
+    const context = {
+      appRuntimeLifecycle: { start: async () => undefined },
+      resolveWorkspacePrincipalId: async () => 'person',
+      chatRuns: { recover: () => recovery.promise, records: { value: [] } },
+      reconcileRecoveredChatRuns: vi.fn(() => 1),
+      saveAppStateStrict: vi.fn(() => saved.promise),
+      state: {},
+      appReady: { value: false },
+      appInitialized: { value: false },
+      appQuitting: { value: false },
+      appUnmounted: false,
+      console: { warn: vi.fn() },
+    }
+    const result = runInNewContext(source, context) as Promise<void>
+    await Promise.resolve()
+    expect(context.appReady.value).toBe(false)
+    expect(context.appInitialized.value).toBe(false)
+    recovery.resolve()
+    await vi.waitFor(() => expect(context.saveAppStateStrict).toHaveBeenCalledOnce())
+    expect(context.appReady.value).toBe(false)
+    expect(context.appInitialized.value).toBe(false)
+    saved.resolve()
+    await result
+    expect(context.appReady.value).toBe(true)
+    expect(context.appInitialized.value).toBe(true)
+  })
+
+  it('keeps automatic goals disabled when journal recovery is unavailable', async () => {
+    const app = readFileSync('src/App.vue', 'utf8')
+    const start = app.indexOf('appRuntimeLifecycle.start().then(')
+    const source = app.slice(start, app.indexOf('\n})\nonBeforeUnmount', start))
+    const context = {
+      appRuntimeLifecycle: { start: async () => undefined },
+      resolveWorkspacePrincipalId: async () => 'person',
+      chatRuns: {
+        recover: async () => {
+          throw new Error('journal unavailable')
+        },
+        records: { value: [] },
+      },
+      reconcileRecoveredChatRuns: vi.fn(() => 1),
+      saveAppStateStrict: vi.fn(),
+      state: {},
+      appReady: { value: false },
+      appInitialized: { value: false },
+      appQuitting: { value: false },
+      appUnmounted: false,
+      console: { warn: vi.fn() },
+    }
+    await runInNewContext(source, context)
+    expect(context.appReady.value).toBe(false)
+    expect(context.appInitialized.value).toBe(true)
+    expect(context.reconcileRecoveredChatRuns).not.toHaveBeenCalled()
+    expect(context.console.warn).toHaveBeenCalledOnce()
+  })
+
   it('the App stop handler captures run IDs before awaiting goal teardown and leaves a newly selected run alive', async () => {
     const app = readFileSync('src/App.vue', 'utf8')
     const start = app.indexOf('async function stopGenerating(')

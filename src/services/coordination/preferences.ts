@@ -18,7 +18,8 @@ export async function coordinationMetadata(account: VerifiedAccountSnapshot) {
   }
 }
 export async function setCoordinationRank(account: VerifiedAccountSnapshot, rank: number) {
-  if (!Number.isInteger(rank) || rank < 0 || rank > 5) throw new Error('Bitte Automatisch oder eine Leistungsstufe von 1 bis 5 wählen.')
+  if (!Number.isInteger(rank) || rank < 0 || rank > 5)
+    throw new Error('Bitte Automatisch oder eine Leistungsstufe von 1 bis 5 wählen.')
   const store = await (disk ??= Store.load('luczor.device-coordination.json'))
   const key = `${account.principalId}:${account.config.clientId}:rank`
   if (rank === 0) await store.delete(key)

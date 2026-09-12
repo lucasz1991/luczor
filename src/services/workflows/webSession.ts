@@ -1,5 +1,6 @@
 import { WorkflowOperations, WorkflowOperationUncertain } from './operations'
-import type { Workflow, WorkflowRun, WorkflowTask, WorkflowTrigger } from './types'
+import type { Workflow, WorkflowDefinition, WorkflowRun, WorkflowTask, WorkflowTrigger } from './types'
+import { validateWorkflowDeviceTargets } from './deviceTarget'
 
 export type EditorRecord = { id: number; name?: string; status?: string; mode?: string; [key: string]: unknown }
 export type WorkflowEditorState = {
@@ -73,6 +74,10 @@ export function createWorkflowWebSession(stateUrl: string) {
   async function mutate<T>(kind: keyof WorkflowEditorState['urls'], body: Record<string, unknown>) {
     if (!state) throw new Error('Workflow zuerst laden.')
     const current = state
+    if (kind === 'save') {
+      if (typeof body.definition_json !== 'string') throw new Error('Die Workflow-Definition fehlt.')
+      validateWorkflowDeviceTargets(JSON.parse(body.definition_json) as WorkflowDefinition, current.catalog)
+    }
     const path = Reflect.get(current.urls, kind) as string
     if (typeof path !== 'string') throw new Error('Diese Workflow-Funktion benötigt eine aktualisierte Serverversion.')
     return operations.run<T>({

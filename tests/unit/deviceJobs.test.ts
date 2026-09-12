@@ -64,6 +64,17 @@ vi.mock('@/services/api/luczorApi', () => ({
 }))
 vi.mock('@/services/agents', () => ({ runAgentCli: vi.fn() }))
 vi.mock('@/services/agents/workflowAgent', () => ({ runWorkflowAgent: vi.fn() }))
+// These suites exercise their own native and account lifecycles; the legacy
+// transport fixture must not start them during module loading/fake timers.
+vi.mock('@/services/workflows/execution', () => ({ isDurableWorkflowJob: () => false, runWorkflowDeviceJob: vi.fn() }))
+vi.mock('@/services/workflows/runResources', () => ({
+  sweepWorkflowResources: vi.fn(),
+  releaseWorkflowAccountResources: vi.fn(),
+}))
+vi.mock('@/services/workflows/capabilities', () => ({ reportWorkflowCapabilitiesIfDue: vi.fn() }))
+vi.mock('@/services/coordination/channel', () => ({ startCoordinationChannel: async () => () => {} }))
+vi.mock('@/services/coordination/executor', () => ({ executeCoordinatedJob: vi.fn() }))
+vi.mock('@/services/coordination/mirror', () => ({ startProjectMirrorChannel: async () => () => {} }))
 vi.mock('@/services/notifications', () => ({
   catchUpPushNotifications: notifications.catchUp,
   handleRealtimeNotification: notifications.handleRealtime,

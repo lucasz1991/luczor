@@ -194,7 +194,9 @@ const showPlanning = ref(false)
 const showWorkflows = ref(false)
 const showToolCenter = ref(false)
 const appReady = ref(false)
+const appInitialized = ref(false)
 const appQuitting = ref(false)
+let appUnmounted = false
 const composerShell = ref<HTMLElement | null>(null)
 const composerClearance = ref(142)
 const appShellStyle = computed<Record<string, string>>(() => ({
@@ -203,7 +205,8 @@ const appShellStyle = computed<Record<string, string>>(() => ({
 let composerResizeObserver: ResizeObserver | undefined
 onMounted(() => {
   void listenForGracefulQuit(gracefulQuit).then(unlisten => {
-    stopQuitListener = unlisten
+    if (appUnmounted) unlisten()
+    else stopQuitListener = unlisten
   })
   composerResizeObserver = new ResizeObserver(entries => {
     const height =
@@ -226,6 +229,7 @@ const refreshPlanPrincipal = () => {
 window.addEventListener('luczor:api-identity-changing', planPrincipalBinding.invalidate)
 window.addEventListener('luczor:api-identity-changed', refreshPlanPrincipal)
 onBeforeUnmount(() => {
+  appUnmounted = true
   stopQuitListener?.()
   window.removeEventListener('luczor:api-identity-changing', planPrincipalBinding.invalidate)
   window.removeEventListener('luczor:api-identity-changed', refreshPlanPrincipal)
@@ -426,14 +430,17 @@ onMounted(() => {
   refreshPlanPrincipal()
   window.addEventListener('luczor:voice-stop', stopAllVoice)
   window.addEventListener('luczor:voice-settings-changed', stopVoiceInputForSettings)
-  return appRuntimeLifecycle.start().then(() => {
-    appReady.value = true
-    void resolveWorkspacePrincipalId()
-      .then(async principalId => {
-        await chatRuns.recover(principalId)
-        if (reconcileRecoveredChatRuns(state, chatRuns.records.value)) await saveAppStateStrict(state)
-      })
-      .catch(error => console.warn('[runs] Recovery journal unavailable:', error))
+  return appRuntimeLifecycle.start().then(async () => {
+    try {
+      const principalId = await resolveWorkspacePrincipalId()
+      await chatRuns.recover(principalId)
+      if (reconcileRecoveredChatRuns(state, chatRuns.records.value)) await saveAppStateStrict(state)
+      if (!appUnmounted && !appQuitting.value) appReady.value = true
+    } catch (error) {
+      console.warn('[runs] Recovery journal unavailable:', error)
+    } finally {
+      if (!appUnmounted && !appQuitting.value) appInitialized.value = true
+    }
   })
 })
 onBeforeUnmount(() => {
@@ -1566,7 +1573,7 @@ async function send(
   miniInput?: { text: string; projectId: string },
   goalInput?: { state: GoalRunState; signal: AbortSignal }
 ): Promise<GoalStepResult | undefined> {
-  if (appQuitting.value) return
+  if (!appInitialized.value || appQuitting.value) return
   const pid = miniInput?.projectId ?? activeProjectId.value
   const conversationId = mutations.getActiveConversationId(pid)
   const submittedText = miniInput?.text ?? input.value
@@ -2342,7 +2349,13 @@ const miniChat = useMiniChatHost({
 })
 // Voice and both composers must share admission and mute state, including hotkeys.
 const conversationBusy = computed(
-  () => appQuitting.value || sending.value || sendAdmission.value || showPlanning.value || planningBusy.value
+  () =>
+    !appInitialized.value ||
+    appQuitting.value ||
+    sending.value ||
+    sendAdmission.value ||
+    showPlanning.value ||
+    planningBusy.value
 )
 const autonomousGoal = useAutonomousGoal({
   projectId: () => activeProjectId.value,

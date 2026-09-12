@@ -17,10 +17,14 @@ import { hasActiveChatRuns } from '@/services/chatRunManager'
 import { createWorkflowApi } from '@/services/workflows/api'
 import type { Workflow } from '@/services/workflows/types'
 import type { WorkflowTestCase, WorkflowTestEvidence } from '@/services/workflows/workflowTests'
+import { buildCoordinationDiagnostic } from '@/services/coordination/diagnostics'
+import { useClipboard } from '@/composables/useClipboard'
 
 const props = defineProps<{ open: boolean; projectId?: string }>()
 const emit = defineEmits<{ close: [] }>()
 const nativeAvailable = isTauri()
+const clipboard = useClipboard()
+const diagnosticText = ref('')
 const dialog = ref<HTMLDialogElement>()
 const tab = ref<'devices' | 'files' | 'workflows' | 'tests'>('devices')
 const error = ref(''),
@@ -104,6 +108,60 @@ async function perform(action: () => Promise<void>) {
     if (captured === generation) error.value = cause instanceof Error ? cause.message : String(cause)
   } finally {
     if (captured === generation) pending.value = false
+  }
+}
+async function exportDiagnostic(download = false) {
+  const checks = new Map<string, 'ok' | 'unavailable' | 'not_requested'>()
+  const read = async (name: string, args?: Record<string, unknown>) => {
+    if (!nativeAvailable) {
+      checks.set(name, 'not_requested')
+      return null
+    }
+    try {
+      const value = await invoke(name, args)
+      checks.set(name, 'ok')
+      return value
+    } catch {
+      checks.set(name, 'unavailable')
+      return null
+    }
+  }
+  const owner = nativeAvailable ? await getVerifiedAccountSnapshot().catch(() => null) : null
+  const [build, desktop, model, journals] = await Promise.all([
+    read('wf_runtime_capabilities'),
+    read('desktop_adapter_status'),
+    read('local_model_status'),
+    owner
+      ? read('device_run_journal_list', { payload: { ownerPrincipalId: owner.principalId, limit: 200 } })
+      : Promise.resolve(null),
+  ])
+  diagnosticText.value = JSON.stringify(
+    buildCoordinationDiagnostic({
+      native: nativeAvailable,
+      clientId: owner?.config.clientId,
+      build,
+      desktop,
+      model,
+      journals,
+      cluster: deviceCluster,
+      lan: lanState,
+      mirrors: projectMirrorState,
+      checks: Object.fromEntries(checks),
+    }),
+    null,
+    2
+  )
+  if (download) {
+    const url = URL.createObjectURL(new Blob([diagnosticText.value], { type: 'application/json' }))
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `luczor-geraetediagnose-${new Date().toISOString().replace(/[:.]/g, '-')}.json`
+    link.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+    notice.value = 'Diagnose als JSON bereitgestellt.'
+  } else {
+    await clipboard.copy(diagnosticText.value)
+    notice.value = clipboard.error.value || 'Gerätediagnose kopiert. Du kannst sie zur Auswertung im Chat einfügen.'
   }
 }
 async function account() {
@@ -292,7 +350,25 @@ async function startWorkflow(matrix: boolean) {
         <button type="button" :disabled="pending" @click="perform(refresh)">
           <AiIcon name="refresh" /> Aktualisieren
         </button>
+        <button type="button" :disabled="pending" @click="perform(() => exportDiagnostic())">Diagnose kopieren</button>
       </div>
+      <details class="cluster__details">
+        <summary>Diagnose für den Gerätetest</summary>
+        <p>
+          Enthält Versionen, Modellressourcen, Auftragszustände und Verbindungsdaten. Chattexte, Dateiinhalte und
+          Zugangsdaten werden ausgelassen.
+        </p>
+        <button type="button" :disabled="pending" @click="perform(() => exportDiagnostic(true))">
+          JSON herunterladen
+        </button>
+        <textarea
+          v-if="diagnosticText"
+          :value="diagnosticText"
+          readonly
+          rows="7"
+          aria-label="Gerätediagnose zum Kopieren"
+        />
+      </details>
       <section v-if="tab === 'devices'">
         <div class="cluster__summary">
           <AiIcon name="network" :size="22" />

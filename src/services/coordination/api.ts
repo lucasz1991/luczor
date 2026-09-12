@@ -45,10 +45,14 @@ export function coordinationApi(config: LuczorApiConfigSnapshot, signal?: AbortS
     const data: CoordinatedJob[] = []
     let after = 0
     while (true) {
-      const page = await get<{ data: CoordinatedJob[]; next_cursor: number }>(path, { limit: '100', after: String(after) })
+      const page = await get<{ data: CoordinatedJob[]; next_cursor: number }>(path, {
+        limit: '100',
+        after: String(after),
+      })
       data.push(...page.data)
       if (page.data.length < 100) return { data }
-      if (!Number.isSafeInteger(page.next_cursor) || page.next_cursor <= after) throw new Error('Die Auftragsliste konnte nicht vollständig abgerufen werden.')
+      if (!Number.isSafeInteger(page.next_cursor) || page.next_cursor <= after)
+        throw new Error('Die Auftragsliste konnte nicht vollständig abgerufen werden.')
       after = page.next_cursor
     }
   }

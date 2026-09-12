@@ -1,5 +1,9 @@
 /** Shared desktop contracts for the existing Laravel workflow API. */
 export type WorkflowRoute = { type: 'step' | 'end' | 'fail'; step_key?: string; max_iterations?: number }
+export type WorkflowDeviceTarget =
+  | { kind: 'current' | 'coordinator' }
+  | { kind: 'specific'; device_id: string }
+  | { kind: 'capability'; task_type?: string; task_version?: 1 }
 export type WorkflowStepDefinition = {
   version?: number
   key: string
@@ -9,6 +13,8 @@ export type WorkflowStepDefinition = {
   routes?: Record<string, WorkflowRoute>
   requires_approval?: boolean
   max_attempts?: number
+  /** Omission preserves the existing start-device routing. Saved with the definition revision. */
+  device_target?: WorkflowDeviceTarget
 }
 export type WorkflowDefinition = {
   schema_version?: 1 | 2

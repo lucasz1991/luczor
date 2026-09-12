@@ -82,11 +82,17 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
     const account = identity
     const waiting = [...activeTasks]
     stop()
-    const release = account ? coordinationApi(account.config, AbortSignal.timeout(2000)).heartbeat(false, false).catch(() => {}) : Promise.resolve()
+    const release = account
+      ? coordinationApi(account.config, AbortSignal.timeout(2000))
+          .heartbeat(false, false)
+          .catch(() => {})
+      : Promise.resolve()
     let timer: ReturnType<typeof setTimeout> | undefined
     await Promise.race([
       Promise.allSettled([release, ...waiting]),
-      new Promise(resolve => { timer = setTimeout(resolve, 4000) }),
+      new Promise(resolve => {
+        timer = setTimeout(resolve, 4000)
+      }),
     ])
     if (timer) clearTimeout(timer)
   }
@@ -374,7 +380,13 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
       assert()
       deviceCluster.jobs = list.data
       const undelivered = await invoke<Array<{ runId: string; jobId?: string }>>('device_run_journal_list', {
-        payload: { ownerPrincipalId: identity.principalId, kind: 'device', states: ['completed', 'cancelled'], transportJobsOnly: true, limit: 100 },
+        payload: {
+          ownerPrincipalId: identity.principalId,
+          kind: 'device',
+          states: ['completed', 'cancelled'],
+          transportJobsOnly: true,
+          limit: 100,
+        },
       })
       assert()
       for (const record of undelivered) {
