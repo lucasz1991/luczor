@@ -441,7 +441,7 @@ fn plan_resources_for_platform(
     // cost). llama.cpp requires flash attention to be active before it will accept a
     // non-f16 cache type, so the two flags are only ever emitted together.
     if options.flash_attn {
-        arguments.push("--flash-attn".into());
+        arguments.extend(["--flash-attn".into(), "on".into()]);
         reasons.push("flash_attention_enabled".into());
         if gpu_selected && options.kv_cache_quant {
             arguments.extend([
@@ -694,7 +694,7 @@ mod tests {
             "--threads N --threads-batch N --batch-size N --ubatch-size N --flash-attn --cache-type-k TYPE --cache-type-v TYPE",
         );
         let gpu = plan_resources(&hardware(), 32768, 17 * GIB, "cuda", &options);
-        assert!(gpu.arguments.iter().any(|arg| arg == "--flash-attn"));
+        assert!(gpu.arguments.windows(2).any(|pair| pair == ["--flash-attn", "on"]));
         assert!(gpu
             .arguments
             .windows(2)

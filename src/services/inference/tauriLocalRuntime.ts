@@ -1,5 +1,5 @@
 import { localModelDiagnostics, type RuntimeDiagnostics } from './localModelDiagnostics'
-import { Channel, invoke } from '@tauri-apps/api/core'
+import { Channel, invoke, isTauri } from '@tauri-apps/api/core'
 import type { HardwareSnapshot } from '@/services/inference/capacity'
 import { LocalInferenceError } from '@/services/inference/localModelManager'
 import type {
@@ -23,8 +23,8 @@ type NativeInferenceEvent =
   | { type: 'delta'; requestId: string; content: string }
   | { type: 'error'; requestId: string; code: string; retryable: boolean }
   | (ThinkingBudgetProgress & { type: 'budget' })
-
 type ActiveBudget = { request: LocalRuntimeRequest; latest: ThinkingBudgetProgress | null }
+
 const activeBudgets = new Map<string, ActiveBudget>()
 function publishBudget(active: ActiveBudget, value: unknown) {
   const progress = readThinkingProgress(value)
@@ -205,12 +205,18 @@ export const tauriManifestVerifier: NativeManifestVerifier = {
 }
 
 export async function getNativeLocalModelStatus(): Promise<NativeLocalModelStatus> {
+  if (!isTauri()) {
+    throw new Error('Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.')
+  }
   return invoke<NativeLocalModelStatus>('local_model_status')
 }
 
 export { getLocalResourceHardware as getNativeHardwareSnapshot } from './resources'
 
 export async function recoverNativeModelMemory(): Promise<HardwareSnapshot> {
+  if (!isTauri()) {
+    throw new Error('Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.')
+  }
   return invoke<HardwareSnapshot>('local_model_recover_memory')
 }
 
@@ -218,6 +224,9 @@ export async function prepareNativeLocalModel(
   modelReleaseId: string,
   catalogBinding: LocalCatalogBinding
 ): Promise<LocalReadinessEvidence> {
+  if (!isTauri()) {
+    throw new Error('Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.')
+  }
   const resourceRevision = (await localResources.get()).appliedRevision
   return invoke<LocalReadinessEvidence>('local_model_prepare', { modelReleaseId, catalogBinding, resourceRevision })
 }
@@ -229,8 +238,9 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
     catalogBinding: LocalCatalogBinding,
     resourceRevision = 0
   ): Promise<LocalReadinessEvidence> {
-    // Lease renewal within an agent turn may inspect the resident process only.
-    // Cold starts/benchmarks remain in the coordinator's explicit prepare phase.
+    if (!isTauri()) {
+      throw new Error('Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.')
+    }
     return invoke<LocalReadinessEvidence>('local_model_prepare', {
       modelReleaseId,
       catalogBinding,
@@ -240,6 +250,9 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
   }
 
   async stream(_release: LocalModelReleaseManifest, request: LocalRuntimeRequest): Promise<InferenceResult> {
+    if (!isTauri()) {
+      throw new Error('Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.')
+    }
     const observation = localModelDiagnostics.begin(request.modelReleaseId, request.messages)
     const channel = new Channel<NativeInferenceEvent>()
     let accumulated = ''
@@ -373,10 +386,16 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
   }
 
   cancel(requestId: string, catalogBinding: LocalCatalogBinding): Promise<void> {
+    if (!isTauri()) {
+      return Promise.resolve()
+    }
     return invoke('local_model_cancel', { requestId, catalogBinding })
   }
 
   stop(modelReleaseId: string, catalogBinding: LocalCatalogBinding): Promise<void> {
+    if (!isTauri()) {
+      return Promise.resolve()
+    }
     return invoke('local_model_stop', { modelReleaseId, catalogBinding })
   }
 }

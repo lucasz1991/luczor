@@ -7,6 +7,7 @@ const tauri = vi.hoisted(() => ({ invoke: vi.fn() }))
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: tauri.invoke,
+  isTauri: () => true,
   Channel: class<T> {
     onmessage?: (message: T) => void
   },
