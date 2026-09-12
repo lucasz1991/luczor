@@ -96,6 +96,25 @@ describe('project-bound filesystem tools', () => {
       expect(tool(name).scope).toBe('project')
     }
   })
+  it('sends registered workflow scope for file operations and rejects a rebound source before IPC', async () => {
+    const workflowScope = {
+      principalId: 'account:v2:abc',
+      projectId: 'project-1',
+      runId: '11111111-1111-4111-8111-111111111111',
+      expectedRootPath: 'E:/frozen-copy',
+      expectedWorkspaceUpdatedAt: 42,
+    }
+    await tool('fs_write').execute({ path: 'result.txt', content: 'Build result' }, { ...CONTEXT, workflowScope })
+    expect(mocks.invoke).toHaveBeenCalledWith('project_fs_write', {
+      payload: expect.objectContaining({ expectedRootPath: 'E:/frozen-copy', workflowScope, path: 'result.txt' }),
+    })
+    mocks.invoke.mockClear()
+    mocks.getProjectWorkspace.mockResolvedValueOnce({ rootPath: 'E:/new-source', updatedAt: 43, status: 'ready' })
+    await expect(
+      tool('fs_read').execute({ path: 'result.txt' }, { ...CONTEXT, inferenceTarget: 'local', workflowScope })
+    ).rejects.toThrow('Projektfreigabe')
+    expect(mocks.invoke).not.toHaveBeenCalled()
+  })
 
   it('normalizes harmless paths and rejects absolute paths and traversal before native IPC', () => {
     expect(workspaceRelativePath('src\\services/./memory.ts')).toBe('src/services/memory.ts')

@@ -208,7 +208,7 @@ describe('autonomous goal controller', () => {
     expect(() => createGoalRunState('x'.repeat(20001), true)).toThrow('nichts gekürzt')
   })
 
-  it('does not overlap projects and rejects a stopped project result before another can run', async () => {
+  it('keeps the captured goal section alive during navigation before scheduling the next project', async () => {
     const context = fixture()
     context.states.set('p2', createGoalRunState('Second project goal', true))
     let finish!: (result: GoalStepResult) => void
@@ -225,11 +225,16 @@ describe('autonomous goal controller', () => {
     context.controller.kick('p2')
     await vi.advanceTimersByTimeAsync(5000)
     expect(context.run).toHaveBeenCalledTimes(1)
-    expect(context.run.mock.calls[0]?.[2].aborted).toBe(true)
-    finish({ status: 'completed', summary: 'Obsolete first project', evidence: 'Late evidence' })
+    expect(context.run.mock.calls[0]?.[2].aborted).toBe(false)
+    finish({ status: 'candidate', summary: 'First project result retained', evidence: 'Evidence to review' })
     await vi.advanceTimersByTimeAsync(250)
     expect(context.run.mock.calls.map(call => call[0])).toEqual(['p1', 'p2'])
-    expect(context.states.get('p1')).toMatchObject({ active: true, status: 'waiting' })
+    expect(context.states.get('p1')).toMatchObject({
+      active: true,
+      status: 'waiting',
+      phase: 'review',
+      progress: 'First project result retained',
+    })
     expect(context.states.get('p2')).toMatchObject({ active: false, status: 'blocked' })
   })
 })

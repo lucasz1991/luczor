@@ -75,6 +75,8 @@ export async function startDeviceJobChannel(): Promise<() => void> {
   let active = true
   const controller = new AbortController()
   let cleanupStartedResources: (() => void) | null = null
+  let stopCoordination: (() => void) | undefined
+  let stopMirror: (() => void) | undefined
   let pusher: Pusher | null = null
   let channelName: string | null = null
 
@@ -87,6 +89,8 @@ export async function startDeviceJobChannel(): Promise<() => void> {
     if (config) void releaseWorkflowAccountResources(config)
     if (wasCurrent) sessionCounter++
     cleanupStartedResources?.()
+    stopCoordination?.()
+    stopMirror?.()
     if (pusher) {
       pusher.connection.unbind_all()
       if (channelName) pusher.unsubscribe(channelName)
@@ -126,6 +130,26 @@ export async function startDeviceJobChannel(): Promise<() => void> {
     isCurrent,
     signal: controller.signal,
     config,
+  }
+  if ('__TAURI_INTERNALS__' in window) {
+    void Promise.all([
+      import('@/services/coordination/channel'),
+      import('@/services/coordination/executor'),
+      import('@/services/coordination/mirror'),
+    ])
+      .then(async ([channel, executor, mirror]) => {
+        if (!isCurrent()) return
+        stopCoordination = await channel.startCoordinationChannel(executor.executeCoordinatedJob)
+        if (!isCurrent()) {
+          stopCoordination()
+          return
+        }
+        stopMirror = await mirror.startProjectMirrorChannel(controller.signal)
+        if (!isCurrent()) stopMirror()
+      })
+      .catch(error => {
+        if (isCurrent()) console.warn('[device-coordination] channel unavailable', errorMessage(error))
+      })
   }
   let realtimeRetryTimer: number | null = null
   let realtimeAttempt = 0
@@ -441,7 +465,7 @@ async function processJob(clientId: string, incoming: DeviceJob, session: Channe
     await LuczorApi.startDeviceJob(job.id, clientId, session.config, ticket.signal)
     assertCurrent()
     try {
-      const result = await executeProfile(job, ticket, assertCurrent, session.config)
+      const result = await executeDeviceProfile(job, ticket, assertCurrent, session.config)
       assertCurrent()
       const success = result.ok !== false
       await LuczorApi.completeDeviceJob(
@@ -477,7 +501,7 @@ function errorMessage(error: unknown): string {
   return 'Unbekannter Gerätekanal-Fehler'
 }
 
-async function executeProfile(
+export async function executeDeviceProfile(
   job: DeviceJob,
   ticket: ExecutionTicket,
   assertCurrent: () => void,

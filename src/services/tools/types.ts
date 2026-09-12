@@ -16,6 +16,7 @@ export type ToolSessionKind = 'browser' | 'vision' | 'terminal' | 'model'
 export type WorkspaceScope = { principalId: string; projectIds: readonly string[] }
 
 export type ToolContext = {
+  workflowScope?: import('@/services/workflows/browser').WorkflowArtifactScope
   projectId: string
   signal?: AbortSignal
   execution?: import('@/services/executionGate').ExecutionTicket

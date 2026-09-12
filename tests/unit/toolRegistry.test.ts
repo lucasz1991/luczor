@@ -111,6 +111,10 @@ const TOOL_CONTRACT = [
   { name: 'project_cloud_list_files', category: 'project', mutating: false, requiresApproval: false },
   { name: 'project_cloud_read_file', category: 'project', mutating: false, requiresApproval: false },
   { name: 'project_cloud_write_file', category: 'project', mutating: true, requiresApproval: true },
+  { name: 'device_list', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'device_dispatch', category: 'app', mutating: true, requiresApproval: false },
+  { name: 'device_job_status', category: 'app', mutating: false, requiresApproval: false },
+  { name: 'device_job_stop', category: 'app', mutating: true, requiresApproval: false },
   { name: 'workspace_get', category: 'project', mutating: false, requiresApproval: true },
   { name: 'fs_list', category: 'app', mutating: false, requiresApproval: true },
   { name: 'fs_stat', category: 'app', mutating: false, requiresApproval: true },
@@ -190,7 +194,7 @@ const TOOL_CONTRACT = [
 ] as const
 
 // Reviewed addition: scoped cloud project text files with optimistic write revisions.
-const TOOL_SCHEMA_SHA256 = 'ba97369438de5a801a574e802adb5a640bf75b7ffcfae0d03d56dcc4bde2c70c'
+const TOOL_SCHEMA_SHA256 = '9c002fda6b91f006cee98d26b15017ffabf5fea9d1cfda62a4e1a23d4775105c'
 const CORE_TOOL_SCHEMA_SHA256 = '2de4accc526c340402fef34d0882d4012c173d21d9e25f70d95c5860d54d80f5'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
@@ -326,7 +330,7 @@ describe('tool registry contract', () => {
 
     expect(fingerprint).toBe(TOOL_SCHEMA_SHA256)
     for (const tool of toOpenAITools().filter(
-      item => !['local_model_status', 'model_capabilities'].includes(item.function.name)
+      item => !['local_model_status', 'model_capabilities', 'device_list'].includes(item.function.name)
     )) {
       const parameters = tool.function.parameters as { properties?: Record<string, unknown> }
       expect(Object.keys(parameters.properties ?? {})).not.toHaveLength(0)
@@ -363,6 +367,7 @@ describe('tool registry contract', () => {
       tool =>
         !getTool(tool.function.name)?.workspaceOnly &&
         tool.function.name !== 'local_model_status' &&
+        !tool.function.name.startsWith('device_') &&
         !tool.function.name.startsWith('workflow_')
     )
     expect(createHash('sha256').update(JSON.stringify(coreTools)).digest('hex')).toBe(CORE_TOOL_SCHEMA_SHA256)

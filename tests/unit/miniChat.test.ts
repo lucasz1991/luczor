@@ -146,12 +146,12 @@ describe('temporary mini chat session', () => {
     expect(controller.state.project?.id).toBe('project-b')
     expect(controller.state.messages).toEqual([])
   })
-  it('does not start a competing inference while the project chat is running', async () => {
+  it('lets the resource owner schedule workspace inference while the project chat is running', async () => {
     const { controller, context, send, run } = setup()
     context.mainBusy = true
     await send()
-    expect(run).not.toHaveBeenCalled()
-    expect(controller.state.notice).toContain('große Chat')
+    expect(run).toHaveBeenCalledOnce()
+    expect(controller.state.notice).toBe('')
   })
   it('validates input and ignores stale session commands', async () => {
     const { controller, send, run } = setup()

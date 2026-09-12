@@ -7,8 +7,37 @@ import ThinkingState from '@/components/ai/ThinkingState.vue'
 import RecordsTable from '@/components/ai/RecordsTable.vue'
 import AgentScreen from '@/components/ai/AgentScreen.vue'
 import PromptBar from '@/components/ai/PromptBar.vue'
+import SidebarNav from '@/components/ai/SidebarNav.vue'
 
 describe('AI component rendering contracts', () => {
+  it('renders independent project chats, selection and background state without unsafe titles', async () => {
+    const html = await renderToString(
+      createSSRApp({
+        render: () =>
+          h(SidebarNav, {
+            activeId: 'project',
+            activeChatId: 'second',
+            items: [
+              {
+                id: 'project',
+                label: 'My project',
+                busy: true,
+                chats: [
+                  { id: 'first', label: 'Background work', busy: true, status: 'waiting_approval' },
+                  { id: 'second', label: '<script>title</script>' },
+                ],
+              },
+            ],
+          }),
+      })
+    )
+    expect(html).toContain('Chats in My project')
+    expect(html).toContain('Freigabe nötig')
+    expect(html).toContain('Neuer Chat im Projekt')
+    expect(html).toContain('&lt;script&gt;title&lt;/script&gt;')
+    expect(html).not.toContain('<script>title</script>')
+    expect(html).toMatch(/class="[^"]*is-current[^"]*" aria-current="page"/)
+  })
   it('renders structured code without allowing model HTML to execute', async () => {
     const html = await renderToString(
       createSSRApp({

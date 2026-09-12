@@ -91,7 +91,7 @@ fn active_app_identifier(window: &crate::commands::CallerWebview) -> String {
     window.app_handle().config().identifier.clone()
 }
 
-fn read_device_key(app_identifier: &str) -> Result<Option<String>, String> {
+pub(super) fn read_device_key(app_identifier: &str) -> Result<Option<String>, String> {
     match entry(app_identifier)?.get_password() {
         Ok(value) => {
             validate_device_key(&value)?;

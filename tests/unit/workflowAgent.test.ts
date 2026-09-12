@@ -34,6 +34,33 @@ beforeEach(() => {
 })
 
 describe('managed workflow agent bridge', () => {
+  it('accepts the frozen workcopy while preserving the canonical project snapshot', async () => {
+    const workflowScope = {
+      principalId: 'principal',
+      projectId: 'active',
+      runId: '11111111-1111-4111-8111-111111111111',
+      expectedRootPath: 'E:/workcopies/run',
+      expectedWorkspaceUpdatedAt: 1,
+    }
+    await runWorkflowAgent('codex', 'Exact signed prompt', 'E:/workcopies/run', undefined, 'active', { workflowScope })
+    expect(mocks.prepare).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflowScope,
+        expectedProject: expect.objectContaining({ rootPath: 'E:\\Project' }),
+        promptAssembly: 'exact-reviewed',
+      })
+    )
+    expect(Object.isFrozen(mocks.prepare.mock.calls[0]![0].workflowScope)).toBe(true)
+    await expect(
+      runWorkflowAgent('codex', 'Task', 'E:/workcopies/run', undefined, 'active', {
+        workflowScope: { ...workflowScope, projectId: 'other' },
+      })
+    ).rejects.toThrow('Projektfreigabe')
+    await expect(runWorkflowAgent('codex', 'Task', 'E:/other', undefined, 'active', { workflowScope })).rejects.toThrow(
+      'Projekt'
+    )
+    expect(mocks.prepare).toHaveBeenCalledOnce()
+  })
   it('keeps the signed reviewed prompt exact and dispatches it through a managed workspace-write job', async () => {
     await expect(runWorkflowAgent('codex', 'Exact signed prompt', 'e:/project')).resolves.toEqual({
       ok: true,

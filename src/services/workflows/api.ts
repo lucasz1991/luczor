@@ -18,7 +18,9 @@ export function createWorkflowApi(config: LuczorApiConfigSnapshot, signal?: Abor
   return {
     catalog: () => request<WorkflowEnvelope<WorkflowTask[]>>('/workflows/task-catalog'),
     list: (projectId: string) =>
-      request<WorkflowEnvelope<Workflow[]>>('/workflows', { query: { project_id: projectExternalIdForServer(projectId)! } }),
+      request<WorkflowEnvelope<Workflow[]>>('/workflows', {
+        query: { project_id: projectExternalIdForServer(projectId)! },
+      }),
     get: (id: number) => request<WorkflowEnvelope<Workflow>>(`/workflows/${id}`),
     revision: (id: number, version: number) =>
       request<WorkflowEnvelope<WorkflowRevision>>(`/workflows/${id}/revisions/${version}`),
@@ -27,9 +29,16 @@ export function createWorkflowApi(config: LuczorApiConfigSnapshot, signal?: Abor
         method: 'POST',
         body: { definition, project_id: projectExternalIdForServer(projectId), workflow_definition_id: workflowId },
       }),
-    create: (body: WorkflowWrite) => request<WorkflowEnvelope<Workflow>>('/workflows', { method: 'POST', body: { ...body, project_id: projectExternalIdForServer(body.project_id) } }),
+    create: (body: WorkflowWrite) =>
+      request<WorkflowEnvelope<Workflow>>('/workflows', {
+        method: 'POST',
+        body: { ...body, project_id: projectExternalIdForServer(body.project_id) },
+      }),
     update: (id: number, body: WorkflowWrite) =>
-      request<WorkflowEnvelope<Workflow>>(`/workflows/${id}`, { method: 'PATCH', body: { ...body, project_id: projectExternalIdForServer(body.project_id) } }),
+      request<WorkflowEnvelope<Workflow>>(`/workflows/${id}`, {
+        method: 'PATCH',
+        body: { ...body, project_id: projectExternalIdForServer(body.project_id) },
+      }),
     operation: (id: string) =>
       request<WorkflowEnvelope<{ operation_id: string; status: string; response?: unknown }>>(
         `/workflow-operations/${encodeURIComponent(id)}`

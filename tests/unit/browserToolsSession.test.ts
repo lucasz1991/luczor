@@ -9,7 +9,7 @@ vi.mock('@/services/projectWorkspace', () => ({
 }))
 import { browserTools } from '@/services/tools/browser'
 import { clearToolSessions, getToolSession } from '@/services/tools/toolSessionCoordinator'
-import { updateExecutionControls } from '@/services/executionGate'
+import { executionGate, updateExecutionControls } from '@/services/executionGate'
 import { browserPanel } from '@/services/browserPanel'
 const context = { projectId: 'project' }
 const execute = (name: string, args: Record<string, unknown>) =>
@@ -33,6 +33,19 @@ beforeEach(() => {
 })
 
 describe('chat browser native session', () => {
+  it('never reuses another run’s execution permit inside the same project', async () => {
+    const firstController = new AbortController()
+    const firstTicket = executionGate.capture(firstController.signal, { projectId: 'project', runId: 'first-run' })
+    const secondTicket = executionGate.capture(undefined, { projectId: 'project', runId: 'second-run' })
+    const first = await getToolSession({ ...context, execution: firstTicket }, 'terminal')
+    const second = await getToolSession({ ...context, execution: secondTicket }, 'terminal')
+    expect(first.meta.id).not.toBe(second.meta.id)
+    expect((await getToolSession({ ...context, execution: secondTicket }, 'terminal')).meta.id).toBe(second.meta.id)
+    firstController.abort()
+    await expect(first.invokeTask('wf_run_script', {})).rejects.toThrow('Ausführung verworfen')
+    await expect(second.invokeTask('wf_run_script', {})).resolves.toBe(true)
+    expect(secondTicket.signal.aborted).toBe(false)
+  })
   it('sends a stable execution identity matching its artifact run for open and navigation', async () => {
     await execute('browser_open', { url: 'https://example.test/first', allowed_hosts: ['example.test'] })
     await execute('browser_navigate', { url: 'https://example.test/second' })

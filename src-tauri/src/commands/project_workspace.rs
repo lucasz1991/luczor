@@ -112,6 +112,8 @@ pub struct WorkspaceUnbindResult {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsListPayload {
+    #[serde(default)]
+    workflow_scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
     principal_id: String,
     project_id: String,
     expected_root_path: String,
@@ -125,6 +127,8 @@ pub struct FsListPayload {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsStatPayload {
+    #[serde(default)]
+    workflow_scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
     principal_id: String,
     project_id: String,
     expected_root_path: String,
@@ -135,6 +139,8 @@ pub struct FsStatPayload {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsReadPayload {
+    #[serde(default)]
+    workflow_scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
     principal_id: String,
     project_id: String,
     expected_root_path: String,
@@ -148,6 +154,8 @@ pub struct FsReadPayload {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsSearchPayload {
+    #[serde(default)]
+    workflow_scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
     principal_id: String,
     project_id: String,
     expected_root_path: String,
@@ -164,6 +172,8 @@ pub struct FsSearchPayload {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsWritePayload {
+    #[serde(default)]
+    workflow_scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
     principal_id: String,
     project_id: String,
     expected_root_path: String,
@@ -178,6 +188,8 @@ pub struct FsWritePayload {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsCreateDirPayload {
+    #[serde(default)]
+    workflow_scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
     principal_id: String,
     project_id: String,
     expected_root_path: String,
@@ -189,6 +201,8 @@ pub struct FsCreateDirPayload {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsMovePayload {
+    #[serde(default)]
+    workflow_scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
     principal_id: String,
     project_id: String,
     expected_root_path: String,
@@ -201,6 +215,8 @@ pub struct FsMovePayload {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FsDeletePayload {
+    #[serde(default)]
+    workflow_scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
     principal_id: String,
     project_id: String,
     expected_root_path: String,
@@ -314,13 +330,19 @@ pub async fn project_workspace_bind(
     tauri::async_runtime::spawn_blocking(move || {
         let _workspace = mutation_guard()?;
         let mut connection = open_database(&app)?;
-        bind_workspace(
+        let previous = get_workspace(&connection, &payload.principal_id, &payload.project_id)?;
+        let bound = bind_workspace(
             &mut connection,
             &payload.principal_id,
             &payload.project_id,
             Path::new(&payload.root_path),
-        )
-        .map(|bound| WorkspaceBinding::from_bound(&bound))
+        )?;
+        if previous.is_none_or(|previous| {
+            previous.root_path != bound.root_path || previous.updated_at != bound.updated_at
+        }) {
+            super::execution::revoke_project_scopes(&payload.project_id)?;
+        }
+        Ok(WorkspaceBinding::from_bound(&bound))
     })
     .await
     .map_err(|error| format!("Workspace bind task failed: {error}"))?
@@ -363,6 +385,7 @@ pub async fn project_workspace_unbind(
             )
             .map_err(db_error)?
             > 0;
+        if removed{super::execution::revoke_project_scopes(&payload.project_id)?;}
         Ok(WorkspaceUnbindResult { removed })
     })
     .await
@@ -379,12 +402,13 @@ pub async fn project_fs_list(
     let gate = admit(&payload.execution, false)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace(
+        with_scoped_workspace(
             &app,
             &payload.principal_id,
             &payload.project_id,
             &payload.expected_root_path,
             payload.expected_workspace_updated_at,
+            payload.workflow_scope.as_ref(),
             |root| {
                 gate.check()?;
                 list_directory(
@@ -416,12 +440,13 @@ pub async fn project_fs_stat(
     let gate = admit(&payload.execution, false)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace(
+        with_scoped_workspace(
             &app,
             &payload.principal_id,
             &payload.project_id,
             &payload.expected_root_path,
             payload.expected_workspace_updated_at,
+            payload.workflow_scope.as_ref(),
             |root| {
                 gate.check()?;
                 stat_path(root, &payload.path)
@@ -442,12 +467,13 @@ pub async fn project_fs_read(
     let gate = admit(&payload.execution, false)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace(
+        with_scoped_workspace(
             &app,
             &payload.principal_id,
             &payload.project_id,
             &payload.expected_root_path,
             payload.expected_workspace_updated_at,
+            payload.workflow_scope.as_ref(),
             |root| {
                 gate.check()?;
                 read_text(
@@ -474,12 +500,13 @@ pub async fn project_fs_search(
     let gate = admit(&payload.execution, false)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace(
+        with_scoped_workspace(
             &app,
             &payload.principal_id,
             &payload.project_id,
             &payload.expected_root_path,
             payload.expected_workspace_updated_at,
+            payload.workflow_scope.as_ref(),
             |root| {
                 gate.check()?;
                 search_text(
@@ -514,12 +541,13 @@ pub async fn project_fs_write(
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace_mutation(
+        with_scoped_workspace_mutation(
             &app,
             &payload.principal_id,
             &payload.project_id,
             &payload.expected_root_path,
             payload.expected_workspace_updated_at,
+            payload.workflow_scope.as_ref(),
             &gate,
             |root, gate| {
                 let result = write_text_locked(
@@ -555,12 +583,13 @@ pub async fn project_fs_create_dir(
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace_mutation(
+        with_scoped_workspace_mutation(
             &app,
             &payload.principal_id,
             &payload.project_id,
             &payload.expected_root_path,
             payload.expected_workspace_updated_at,
+            payload.workflow_scope.as_ref(),
             &gate,
             |root, gate| {
                 create_directory_locked(
@@ -586,12 +615,13 @@ pub async fn project_fs_move(
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace_mutation(
+        with_scoped_workspace_mutation(
             &app,
             &payload.principal_id,
             &payload.project_id,
             &payload.expected_root_path,
             payload.expected_workspace_updated_at,
+            payload.workflow_scope.as_ref(),
             &gate,
             |root, gate| {
                 move_path_locked(
@@ -618,12 +648,13 @@ pub async fn project_fs_delete(
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
-        with_workspace_mutation(
+        with_scoped_workspace_mutation(
             &app,
             &payload.principal_id,
             &payload.project_id,
             &payload.expected_root_path,
             payload.expected_workspace_updated_at,
+            payload.workflow_scope.as_ref(),
             &gate,
             |root, gate| {
                 delete_path_locked(
@@ -652,6 +683,20 @@ pub(crate) fn agent_workspace_snapshot(
     Ok((validate_bound_root(&bound.root_path)?, bound.updated_at))
 }
 
+/// Recovery must be able to verify the recorded binding even between the two
+/// directory renames, when its root is temporarily absent. This is not an
+/// execution root: normal callers must continue using agent_workspace_snapshot.
+pub(super) fn recovery_workspace_identity(
+    app: &AppHandle,
+    principal_id: &str,
+    project_id: &str,
+) -> Result<(PathBuf, i64), String> {
+    let connection = open_database(app)?;
+    let bound = get_workspace(&connection, principal_id, project_id)?
+        .ok_or("mirror_workspace_not_bound")?;
+    Ok((bound.root_path, bound.updated_at))
+}
+
 fn with_workspace<T>(
     app: &AppHandle,
     principal_id: &str,
@@ -666,6 +711,60 @@ fn with_workspace<T>(
     validate_expected_workspace(&bound, expected_root_path, expected_workspace_updated_at)?;
     let root = validate_bound_root(&bound.root_path)?;
     operation(&root)
+}
+
+fn with_scoped_workspace<T>(
+    app: &AppHandle,
+    principal_id: &str,
+    project_id: &str,
+    expected_root_path: &str,
+    expected_workspace_updated_at: i64,
+    scope: Option<&super::workflow_artifacts::WorkflowArtifactScope>,
+    operation: impl FnOnce(&Path) -> Result<T, String>,
+) -> Result<T, String> {
+    if let Some(scope) = scope {
+        let (root, revision) = scope.agent_root(app, principal_id, project_id)?;
+        if root != Path::new(expected_root_path) || revision != expected_workspace_updated_at {
+            return Err("workflow_artifact_scope_changed".into());
+        }
+        let result = operation(&root)?;
+        scope.check(app)?;
+        Ok(result)
+    } else {
+        with_workspace(
+            app,
+            principal_id,
+            project_id,
+            expected_root_path,
+            expected_workspace_updated_at,
+            operation,
+        )
+    }
+}
+fn with_scoped_workspace_mutation<T>(
+    app: &AppHandle,
+    principal_id: &str,
+    project_id: &str,
+    expected_root_path: &str,
+    expected_workspace_updated_at: i64,
+    scope: Option<&super::workflow_artifacts::WorkflowArtifactScope>,
+    gate: &ExecutionLease,
+    operation: impl FnOnce(&Path, &ExecutionLease) -> Result<T, String>,
+) -> Result<T, String> {
+    let _workspace = mutation_guard()?;
+    with_scoped_workspace(
+        app,
+        principal_id,
+        project_id,
+        expected_root_path,
+        expected_workspace_updated_at,
+        scope,
+        |root| {
+            let _exclusive = super::codex::acquire_workspace_lease(root, true)?;
+            gate.check()?;
+            operation(root, gate)
+        },
+    )
 }
 
 fn validate_expected_workspace(
@@ -768,6 +867,11 @@ fn bind_workspace(
         .map_err(db_error)?;
     if root_owner.is_some() {
         return Err("Workspace root is already bound to another project.".into());
+    }
+    if let Some(bound) = get_workspace(connection, principal_id, project_id)? {
+        if bound.root_path == root {
+            return Ok(bound);
+        }
     }
     let existing: Option<(String, i64)> = connection
         .query_row(
@@ -2099,6 +2203,14 @@ mod tests {
             bind_workspace(&mut connection, "user:1", "project-b", &root_b).expect("bind b");
         assert_ne!(bound_a.project_id, bound_b.project_id);
         assert!(bind_workspace(&mut connection, "user:1", "project-a", &root_a).is_ok());
+        connection.execute("UPDATE project_workspace_bindings SET updated_at=42 WHERE principal_id='user:1' AND project_id='project-a'",[]).unwrap();
+        assert_eq!(
+            bind_workspace(&mut connection, "user:1", "project-a", &root_a)
+                .unwrap()
+                .updated_at,
+            42,
+            "Reopening the same workspace must retain the active execution binding"
+        );
         assert_eq!(
             get_workspace(&connection, "user:1", "project-a")
                 .expect("get a")

@@ -512,15 +512,38 @@ onBeforeUnmount(() => {
       </div>
       <div class="mini-chat-picker">
         <label for="mini-project">{{ isChat ? 'Chat im Projekt' : 'Arbeitsprojekt für Dateien & Desktop' }}</label>
-        <select
-          id="mini-project"
-          :value="snapshot.project?.id ?? ''"
-          :disabled="snapshot.busy || snapshot.mainBusy"
-          @change="selectProject"
-        >
+        <select id="mini-project" :value="snapshot.project?.id ?? ''" @change="selectProject">
           <option v-if="!snapshot.project" value="" disabled>Projekt auswählen</option>
           <option v-for="project in snapshot.projects" :key="project.id" :value="project.id">{{ project.name }}</option>
         </select>
+      </div>
+      <div v-if="isChat && snapshot.project && snapshot.conversations?.length" class="mini-chat-picker">
+        <label for="mini-conversation">Unterhaltung</label>
+        <select
+          id="mini-conversation"
+          :value="snapshot.conversationId"
+          @change="
+            emit('action', {
+              type: 'select_conversation',
+              sessionId: snapshot.sessionId,
+              projectId: snapshot.project.id,
+              conversationId: ($event.target as HTMLSelectElement).value,
+            })
+          "
+        >
+          <option v-for="chat in snapshot.conversations" :key="chat.id" :value="chat.id">
+            {{ chat.busy ? 'Läuft · ' : '' }}{{ chat.title }}
+          </option>
+        </select>
+        <button
+          type="button"
+          class="ai-button"
+          @click="
+            emit('action', { type: 'new_conversation', sessionId: snapshot.sessionId, projectId: snapshot.project.id })
+          "
+        >
+          Neuer Chat
+        </button>
       </div>
       <div class="mini-context">
         <span>{{

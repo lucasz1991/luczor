@@ -53,7 +53,9 @@ import { getApiConfigSnapshot } from '@/services/api/luczorApi'
 import type { AgentProgress } from '@/services/chatActivity'
 import type { ToolCallStatus } from '@/state/types'
 import { executionGate, type ExecutionTicket } from '@/services/executionGate'
-import { withRunResources } from '@/services/runs/sharedResourceCoordinator'
+import { ChatEffectJournalError, type ChatEffectJournal } from '@/services/chatEffectJournal'
+import { withRunResources } from '@/services/runs/resourceCoordinator'
+import { freezeAgentWorkflowScope, WORKFLOW_WORKCOPY_TOOLS } from '@/services/agents/workflowScope'
 import { validateToolArguments } from '@/services/tools/validateArguments'
 import { INVALID_TOOL_ARGUMENTS, prepareToolCallHistory } from '@/services/inference/toolCallHistory'
 import { loadToolLimits, validToolRounds } from '@/services/toolLimits'
@@ -93,6 +95,11 @@ function pulseForCategory(category: ToolCategory) {
 }
 
 export type RunAgentOptions = {
+  /** Optional remote-authority guard; normal device-local chats perform no extra requests. */
+  beforeToolExecution?: () => Promise<void>
+  workflowScope?: import('@/services/workflows/browser').WorkflowArtifactScope
+  effectJournal?: ChatEffectJournal
+  onRunWaiting?: (waiting: 'resource' | 'approval' | null) => Promise<void>
   execution?: ExecutionTicket
   conversationId?: string
   runId?: string
@@ -541,18 +548,43 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
   }
 }
 
+class ToolExecutionAuthorityError extends Error {
+  constructor(cause: unknown) {
+    super('Die Auftragsfreigabe ist nicht mehr bestätigt. Es wurden keine weiteren Werkzeuge gestartet.', { cause })
+    this.name = 'ToolExecutionAuthorityError'
+  }
+}
+
 async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() => void>): Promise<RunAgentResult> {
   if (opts.continuation?.toolAccess) {
     opts = { ...opts, toolAccess: opts.toolAccess === 'none' ? 'none' : opts.continuation.toolAccess }
   }
   const { projectId, mode } = opts
+  if (opts.workflowScope) {
+    opts = {
+      ...opts,
+      workflowScope: freezeAgentWorkflowScope(opts.workflowScope, {
+        principalId: opts.principalScopeId ?? opts.workflowScope.principalId,
+        projectId,
+        projectName: '',
+        workspaceUpdatedAt: opts.workflowScope.expectedWorkspaceUpdatedAt,
+      }),
+    }
+  }
+  const toolInvocationId = opts.runId ? crypto.randomUUID() : null
   const maxRounds = opts.maxRounds ?? (await loadToolLimits()).chat
   if (!validToolRounds(maxRounds)) throw new Error('Tool-Runden müssen zwischen 1 und 64 liegen.')
-  const execution = opts.execution ?? executionGate.capture(opts.signal)
+  const inheritedExecution = opts.execution ?? executionGate.capture(opts.signal)
+  const execution =
+    opts.signal && opts.signal !== inheritedExecution.signal
+      ? Object.freeze({ ...inheritedExecution, signal: AbortSignal.any([inheritedExecution.signal, opts.signal]) })
+      : inheritedExecution
   executionGate.assert(execution)
-  const signal = opts.interruptionSignal
-    ? AbortSignal.any([execution.signal, opts.interruptionSignal])
-    : execution.signal
+  const signal = AbortSignal.any([
+    execution.signal,
+    ...(opts.signal ? [opts.signal] : []),
+    ...(opts.interruptionSignal ? [opts.interruptionSignal] : []),
+  ])
   const internallyInterrupted = () => !!opts.interruptionSignal?.aborted && !execution.signal.aborted
   if (
     opts.continuation &&
@@ -582,7 +614,11 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     opts.toolSession ? opts.toolSession.update(id, status) : mutations.updateToolCallStatus(projectId, id, status)
   const recordOutcome: typeof recordPersistentOutcome = (...args) => {
     if (opts.toolSession) opts.toolSession.update(args[1], args[3])
-    else recordPersistentOutcome(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], { conversationId: opts.conversationId, runId: opts.runId })
+    else
+      recordPersistentOutcome(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], {
+        conversationId: opts.conversationId,
+        runId: opts.runId,
+      })
   }
   opts.onProgress?.({ phase: 'routing' })
   const currentMode = () => opts.getMode?.() ?? mode
@@ -596,6 +632,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   const allTools = toOpenAITools().filter(
     description =>
       !disabledTools.has(description.function.name) &&
+      (!opts.workflowScope || WORKFLOW_WORKCOPY_TOOLS.has(description.function.name)) &&
       (!getTool(description.function.name)?.workspaceOnly || !!opts.workspaceScope) &&
       opts.toolAccess !== 'none' &&
       (opts.toolAccess !== 'read-only' || getTool(description.function.name)?.mutating === false) &&
@@ -1324,6 +1361,18 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
 
     // Invalid model-generated JSON must be rejected for execution, but must not
     // poison every later request when llama.cpp renders the tool-call history.
+    // Provider IDs (often "call_0") are only unique inside one response.
+    // Rewrite both halves of the wire contract before creating approval/store IDs.
+    if (toolInvocationId) {
+      const ids = new Map<string, string>()
+      for (const call of [...res.rawToolCalls, ...res.toolCalls])
+        if (!ids.has(call.id)) ids.set(call.id, `${toolInvocationId}_${round}_${ids.size}`)
+      res = {
+        ...res,
+        rawToolCalls: res.rawToolCalls.map(call => ({ ...call, id: ids.get(call.id)! })),
+        toolCalls: res.toolCalls.map(call => ({ ...call, id: ids.get(call.id)! })),
+      }
+    }
     const history = prepareToolCallHistory(res.rawToolCalls)
     messages.push({
       role: 'assistant',
@@ -1400,6 +1449,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
 
       if (
         (tool.workspaceOnly && (!opts.workspaceScope || inferenceGateway.target !== 'local_llama_cpp')) ||
+        (opts.workflowScope && !WORKFLOW_WORKCOPY_TOOLS.has(call.name)) ||
         opts.toolAccess === 'none' ||
         (opts.toolAccess === 'read-only' && tool.mutating)
       ) {
@@ -1757,9 +1807,11 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       })
       if (requiresApproval && approvalMode !== 'unrestricted' && !autoExecute) {
         updateToolStatus(call.id, 'proposed')
+        await opts.onRunWaiting?.('approval')
         const approved = await (opts.toolSession
           ? opts.toolSession.approve(call.id, signal)
           : awaitApproval(call.id, signal))
+        if (!signal.aborted) await opts.onRunWaiting?.(null)
 
         if (signal?.aborted) {
           const outcome: Outcome = { ok: false, error: 'Abgebrochen.' }
@@ -1863,14 +1915,46 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       }
       try {
         executionGate.assert(execution)
-        const resourceKeys = tool.mutating ? [`workspace:${projectId}`, ...(tool.category === 'os' ? ['desktop'] : [])] : []
-        const output = await withRunResources(resourceKeys, signal, () => tool.execute(executionArguments, {
-          projectId,
-          signal,
-          execution,
-          inferenceTarget: 'local',
-          workspaceScope: opts.workspaceScope,
-        }))
+        const resourceKeys = tool.mutating
+          ? [
+              `workspace:${projectId}`,
+              ...(tool.category === 'os' || call.name.startsWith('browser_') ? ['desktop'] : []),
+              ...(call.name === 'project_terminal_run' ? ['script'] : []),
+            ]
+          : []
+        if (resourceKeys.length) await opts.onRunWaiting?.('resource')
+        const output = await withRunResources(resourceKeys, signal, async () => {
+          if (resourceKeys.length) await opts.onRunWaiting?.(null)
+          executionGate.assert(execution)
+          try {
+            await opts.beforeToolExecution?.()
+          } catch (cause) {
+            throw new ToolExecutionAuthorityError(cause)
+          }
+          executionGate.assert(execution)
+          signal.throwIfAborted()
+          const receipt = tool.mutating
+            ? await opts.effectJournal?.before({ ...call, arguments: executionArguments })
+            : undefined
+          try {
+            executionGate.assert(execution)
+            signal.throwIfAborted()
+            const result = await tool.execute(executionArguments, {
+              projectId,
+              signal,
+              execution,
+              inferenceTarget: 'local',
+              workspaceScope: opts.workspaceScope,
+              workflowScope: opts.workflowScope,
+              toolSessionId: opts.runId,
+            })
+            await receipt?.finish(normalizeToolOutcome(result).ok)
+            return result
+          } catch (error) {
+            if (!(error instanceof ChatEffectJournalError)) await receipt?.finish(false)
+            throw error
+          }
+        })
         executionGate.assert(execution)
         const outcome = normalizeToolOutcome(output)
         const completeGoalTextRead =
@@ -2049,6 +2133,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         )
         messages.push(outcomeMessage(call.id, call.name, outcome))
       } catch (e: any) {
+        if (e instanceof ChatEffectJournalError || e instanceof ToolExecutionAuthorityError) throw e
         if (execution.signal.aborted) throw new DOMException('Aborted', 'AbortError')
         const outcome: Outcome = { ok: false, error: e?.message ?? String(e) }
         toolFailures++

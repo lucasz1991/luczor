@@ -35,6 +35,7 @@ declare module 'vue' {
     CloudProjectsPanel: typeof import('./src/components/projects/CloudProjectsPanel.vue')['default']
     CodeBlock: typeof import('./src/components/ai/CodeBlock.vue')['default']
     ContextCards: typeof import('./src/components/ai/ContextCards.vue')['default']
+    DeviceClusterPanel: typeof import('./src/components/DeviceClusterPanel.vue')['default']
     DiffTable: typeof import('./src/components/ai/DiffTable.vue')['default']
     ExecutionSettingsSection: typeof import('./src/components/settings/ExecutionSettingsSection.vue')['default']
     FilterTable: typeof import('./src/components/ai/FilterTable.vue')['default']

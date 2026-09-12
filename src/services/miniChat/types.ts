@@ -47,6 +47,8 @@ export type MiniSnapshot = {
   } | null
   view: MiniView
   projects: MiniProject[]
+  conversations?: Array<{ id: string; title: string; busy: boolean }>
+  conversationId?: string
   appearance?: { accent: string; assistantName: string }
   sessionId: string
   revision: number
@@ -71,6 +73,8 @@ export type MiniAction =
   | { type: 'ready' }
   | { type: 'view'; sessionId: string; view: MiniView }
   | { type: 'select_project'; sessionId: string; projectId: string }
+  | { type: 'select_conversation'; sessionId: string; projectId: string; conversationId: string }
+  | { type: 'new_conversation'; sessionId: string; projectId: string }
   | { type: 'workspace_open'; sessionId: string; panel: MiniPanel }
   | { type: 'workflow_open' | 'workflow_improve'; sessionId: string; messageId: string; workflowId: number }
   | {

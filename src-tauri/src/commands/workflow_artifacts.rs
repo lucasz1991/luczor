@@ -10,7 +10,7 @@ use tauri::{AppHandle, Manager};
 pub const MAX_ARTIFACT_BYTES: usize = 8 * 1024 * 1024;
 const MAX_RUN_BYTES: u64 = 64 * 1024 * 1024;
 
-#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WorkflowArtifactScope {
     pub principal_id: String,
@@ -20,13 +20,37 @@ pub struct WorkflowArtifactScope {
     pub run_id: String,
 }
 impl WorkflowArtifactScope {
+    pub(super) fn agent_root(
+        &self,
+        app: &AppHandle,
+        principal: &str,
+        project: &str,
+    ) -> Result<(PathBuf, i64), String> {
+        if self.principal_id != principal || self.project_id != project {
+            return Err("workflow_agent_owner_mismatch".into());
+        }
+        self.check(app)?;
+        Ok((
+            PathBuf::from(&self.expected_root_path),
+            self.expected_workspace_updated_at,
+        ))
+    }
     pub fn check(&self, app: &AppHandle) -> Result<(), String> {
         validate_scope(self)?;
-        let (root, revision) = super::project_workspace::agent_workspace_snapshot(
+        let (root, revision) = if let Some(workcopy) = super::project_mirror::run_workspace(
             app,
             &self.principal_id,
             &self.project_id,
-        )?;
+            &self.run_id,
+        )? {
+            workcopy
+        } else {
+            super::project_workspace::agent_workspace_snapshot(
+                app,
+                &self.principal_id,
+                &self.project_id,
+            )?
+        };
         if root != Path::new(&self.expected_root_path)
             || revision != self.expected_workspace_updated_at
         {

@@ -45,6 +45,7 @@ impl Drop for ClaudeJobs {
     }
 }
 struct Job {
+    workflow_scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
     principal: String,
     project: String,
     root: PathBuf,
@@ -73,6 +74,8 @@ pub struct ClaudeSnapshot {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ClaudeStart {
+    #[serde(default)]
+    workflow_scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
     principal_id: String,
     project_id: String,
     expected_root_path: String,
@@ -284,7 +287,10 @@ fn scope(app: &AppHandle, job: &Job) -> Result<(), String> {
     if job.cancel.load(Ordering::Acquire) {
         return Err("Claude job cancelled.".into());
     }
-    let (root, revision) = agent_workspace_snapshot(app, &job.principal, &job.project)?;
+    let (root, revision) = match &job.workflow_scope {
+        Some(scope) => scope.agent_root(app, &job.principal, &job.project)?,
+        None => agent_workspace_snapshot(app, &job.principal, &job.project)?,
+    };
     if root != job.root || revision != job.revision {
         return Err("Claude project binding changed.".into());
     }
@@ -303,7 +309,10 @@ pub async fn claude_job_start(
     let writing = payload.permission == "workspace-write";
     let execution = admit(&payload.execution, writing)?;
     let input = payload.request;
-    let (root, revision) = agent_workspace_snapshot(&app, &input.principal_id, &input.project_id)?;
+    let (root, revision) = match &input.workflow_scope {
+        Some(scope) => scope.agent_root(&app, &input.principal_id, &input.project_id)?,
+        None => agent_workspace_snapshot(&app, &input.principal_id, &input.project_id)?,
+    };
     if root != Path::new(&input.expected_root_path)
         || revision != input.expected_workspace_updated_at
     {
@@ -339,6 +348,7 @@ pub async fn claude_job_start(
         tool_calls: 0,
     };
     let job = Arc::new(Job {
+        workflow_scope: input.workflow_scope.clone(),
         principal: input.principal_id.clone(),
         project: input.project_id.clone(),
         root,
@@ -450,14 +460,19 @@ fn run_worker(
     input: &ClaudeStart,
 ) -> Result<(), String> {
     scope(app, job)?;
+    let (config_root, config_revision) = if job.workflow_scope.is_some() {
+        agent_workspace_snapshot(app, &job.principal, &job.project)?
+    } else {
+        (job.root.clone(), job.revision)
+    };
     super::agent_effort::validate_default_binding(
         app,
         &super::agent_effort::DefaultModelRequest {
             adapter_id: "claude".into(),
             principal_id: job.principal.clone(),
             project_id: job.project.clone(),
-            expected_root_path: job.root.to_string_lossy().into_owned(),
-            expected_workspace_updated_at: job.revision,
+            expected_root_path: config_root.to_string_lossy().into_owned(),
+            expected_workspace_updated_at: config_revision,
         },
         input.model.as_deref(),
         input.default_model_revision.as_deref(),

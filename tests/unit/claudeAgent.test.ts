@@ -56,6 +56,23 @@ function deferred<T>() {
 }
 
 describe('managed Claude adapter', () => {
+  it('sends a run-bound workcopy to native validation instead of overwriting the canonical binding', async () => {
+    const fixture = harness()
+    fixture.invoke.mockResolvedValueOnce(snapshot('completed', 'Done'))
+    const original = request()
+    const workflowScope = {
+      principalId: original.project.principalId,
+      projectId: original.project.projectId,
+      runId: '11111111-1111-4111-8111-111111111111',
+      expectedRootPath: 'E:/workcopy',
+      expectedWorkspaceUpdatedAt: original.project.workspaceUpdatedAt!,
+    }
+    await createClaudeAgentAdapter(fixture.dependencies).run({ ...original, workflowScope })
+    expect(fixture.invoke).toHaveBeenCalledWith('claude_job_start', {
+      payload: expect.objectContaining({ expectedRootPath: 'E:/workcopy', workflowScope }),
+    })
+    expect(original.project.rootPath).toBe('E:\\project')
+  })
   it('keeps reviewed scope and budgets and confirms effort only from measured hook metadata', async () => {
     const fixture = harness()
     fixture.invoke

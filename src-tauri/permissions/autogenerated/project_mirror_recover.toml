@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-mirror-recover"
+description = "Enables the project_mirror_recover command without any pre-configured scope."
+commands.allow = ["project_mirror_recover"]
+
+[[permission]]
+identifier = "deny-project-mirror-recover"
+description = "Denies the project_mirror_recover command without any pre-configured scope."
+commands.deny = ["project_mirror_recover"]

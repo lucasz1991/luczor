@@ -10,10 +10,12 @@ import type {
   AgentRole,
 } from './types'
 import { validateAgentExecutionOptions } from './effort'
+import { freezeAgentWorkflowScope } from './workflowScope'
 
 type InternalJob = {
   metadata: AgentJobMetadata
   project: AgentProjectSnapshot
+  workflowScope?: AgentJobInput['workflowScope']
   prompt: string
   resumeThreadId?: string
   output: string
@@ -122,6 +124,9 @@ export class AgentOrchestrator {
       throw new Error(`Der Auftrag muss zwischen 1 und ${this.maxPromptCharacters} Zeichen enthalten.`)
     }
     const project = snapshotProject(input.project)
+    const workflowScope = freezeAgentWorkflowScope(input.workflowScope, project)
+    if (workflowScope && (!['codex', 'claude'].includes(input.adapterId) || input.externalThreadId))
+      throw new Error('Workflow-Arbeitskopien dürfen keine fremde Agentensitzung übernehmen.')
     if (input.permission === 'workspace-write' && !project.rootPath) {
       throw new Error('Für Schreibzugriff muss dem Projekt ein lokaler Ordner zugeordnet sein.')
     }
@@ -152,6 +157,7 @@ export class AgentOrchestrator {
       throw new Error('Es konnte keine eindeutige Agenten-ID erstellt werden.')
     const job: InternalJob = {
       project,
+      workflowScope,
       prompt: input.prompt,
       resumeThreadId: input.externalThreadId,
       output: '',
@@ -394,6 +400,7 @@ export class AgentOrchestrator {
           effort: job.metadata.effort,
           effortSelection: job.metadata.effortSelection,
           executionProfile: job.metadata.executionProfile,
+          workflowScope: job.workflowScope,
           maxTurns: job.metadata.maxTurns,
           maxBudgetUsd: job.metadata.maxBudgetUsd,
           externalThreadId: job.resumeThreadId,

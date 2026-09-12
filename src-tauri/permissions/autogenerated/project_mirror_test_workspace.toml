@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-mirror-test-workspace"
+description = "Enables the project_mirror_test_workspace command without any pre-configured scope."
+commands.allow = ["project_mirror_test_workspace"]
+
+[[permission]]
+identifier = "deny-project-mirror-test-workspace"
+description = "Denies the project_mirror_test_workspace command without any pre-configured scope."
+commands.deny = ["project_mirror_test_workspace"]

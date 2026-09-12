@@ -71,7 +71,12 @@ function ensurePendingBucket(projectId: AppTypes.Id): AppTypes.PendingToolCall[]
 /* =========================================================
  * Message factories
  * ========================================================= */
-function makeMsg(role: AppTypes.ChatRole, content: string, projectId?: AppTypes.Id, conversationId?: AppTypes.Id): AppTypes.Message {
+function makeMsg(
+  role: AppTypes.ChatRole,
+  content: string,
+  projectId?: AppTypes.Id,
+  conversationId?: AppTypes.Id
+): AppTypes.Message {
   const timestamp = now()
   return {
     id: uid(),
@@ -277,7 +282,9 @@ export const mutations = {
   },
 
   setActiveConversation(projectId: AppTypes.Id, conversationId: AppTypes.Id) {
-    const chat = state.conversations?.find(item => item.id === conversationId && item.projectId === projectId && !item.archivedAt)
+    const chat = state.conversations?.find(
+      item => item.id === conversationId && item.projectId === projectId && !item.archivedAt
+    )
     if (!chat) throw new Error('Chat nicht verfügbar.')
     this.setActiveProject(projectId)
     state.global.ui!.lastConversationByProject ??= {}
@@ -287,7 +294,14 @@ export const mutations = {
   createConversation(projectId: AppTypes.Id, title = 'Neuer Chat'): AppTypes.Conversation {
     this.getActiveConversationId(projectId)
     const timestamp = now()
-    const chat: AppTypes.Conversation = { id: uid(), projectId, title: title.trim().slice(0, 160) || 'Neuer Chat', createdAt: timestamp, updatedAt: timestamp, archivedAt: null }
+    const chat: AppTypes.Conversation = {
+      id: uid(),
+      projectId,
+      title: title.trim().slice(0, 160) || 'Neuer Chat',
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      archivedAt: null,
+    }
     state.conversations!.push(chat)
     this.setActiveConversation(projectId, chat.id)
     return chat
@@ -300,8 +314,14 @@ export const mutations = {
     chat.updatedAt = now()
   },
 
-  getConversationMessages(projectId: AppTypes.Id, conversationId: AppTypes.Id, opts?: { includeHidden?: boolean }): AppTypes.Message[] {
-    return this.getProjectMessages(projectId, opts).filter(message => message.conversationId === conversationId || message.meta.conversationId === conversationId)
+  getConversationMessages(
+    projectId: AppTypes.Id,
+    conversationId: AppTypes.Id,
+    opts?: { includeHidden?: boolean }
+  ): AppTypes.Message[] {
+    return this.getProjectMessages(projectId, opts).filter(
+      message => message.conversationId === conversationId || message.meta.conversationId === conversationId
+    )
   },
 
   addMessage(msg: AppTypes.Message) {
@@ -330,6 +350,7 @@ export const mutations = {
       ...patch,
       id: current.id,
       projectId: current.projectId,
+      conversationId: current.conversationId,
       role: (patch.role ?? current.role) as AppTypes.ChatRole,
       content: patch.content ?? current.content,
       ts: patch.ts ?? current.ts,

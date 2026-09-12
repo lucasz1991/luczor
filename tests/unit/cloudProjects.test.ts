@@ -301,14 +301,14 @@ describe('portable user-owned cloud projects', () => {
     expect(() => projectExternalIdForServer('default')).toThrow('anderen Benutzer')
   })
 
-  it('never synchronizes between tool rounds or during another active workload', async () => {
+  it('allows cloud synchronization while an unrelated workload is active', async () => {
     const dispose = configureCloudProjectWorkload(() => true)
     try {
-      await expect(publishCloudProject('default')).rejects.toThrow('Auftrag läuft')
+      await expect(publishCloudProject('default')).resolves.toBeUndefined()
     } finally {
       dispose()
     }
-    expect(harness.request).not.toHaveBeenCalled()
+    expect(harness.request).toHaveBeenCalled()
   })
 
   it('does not report a durable link after local persistence failed', async () => {

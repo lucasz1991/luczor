@@ -66,6 +66,30 @@ function harness(options: Partial<AgentOrchestratorOptions> = {}) {
 afterEach(() => vi.useRealTimers())
 
 describe('project agent orchestrator', () => {
+  it('freezes workcopy scope privately and still validates the canonical workspace on both sides of execution', async () => {
+    const { orchestrator, enqueue, runs, metadata, validateScope } = harness()
+    const workflowScope = {
+      principalId: PROJECT.principalId,
+      projectId: PROJECT.projectId,
+      runId: '11111111-1111-4111-8111-111111111111',
+      expectedRootPath: 'E:/private-workcopy',
+      expectedWorkspaceUpdatedAt: PROJECT.workspaceUpdatedAt!,
+    }
+    const job = enqueue({ workflowScope })
+    workflowScope.expectedRootPath = 'E:/mutated-after-enqueue'
+    orchestrator.approve(job.id)
+    await flush()
+    expect(runs[0]!.request.workflowScope?.expectedRootPath).toBe('E:/private-workcopy')
+    expect(Object.isFrozen(runs[0]!.request.workflowScope)).toBe(true)
+    expect(runs[0]!.request.project.rootPath).toBe(PROJECT.rootPath)
+    runs[0]!.result.resolve({ output: 'Reviewed' })
+    await flush()
+    expect(validateScope).toHaveBeenCalledTimes(2)
+    expect(validateScope).toHaveBeenLastCalledWith(PROJECT, 'read-only')
+    expect(JSON.stringify(metadata)).not.toContain('private-workcopy')
+    expect(JSON.stringify(orchestrator.getJob(job.id))).not.toContain('private-workcopy')
+    expect(() => enqueue({ workflowScope, externalThreadId: 'old-thread' })).toThrow('Agentensitzung')
+  })
   it('retains only allowlisted actual worker metadata across the job lifecycle', async () => {
     const { orchestrator, enqueue, runs } = harness()
     const job = enqueue({ model: 'requested-model' })

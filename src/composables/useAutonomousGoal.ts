@@ -8,12 +8,18 @@ import { createAutonomousGoalController, type GoalRunState, type GoalStepResult 
 /** Scheduling is device-local; sharing the project never activates another device. */
 export function useAutonomousGoal(input: {
   projectId: () => string
+  conversationId?: () => string
   available: () => boolean
   draft: () => string
   run: (projectId: string, goal: GoalRunState, signal: AbortSignal) => Promise<GoalStepResult>
 }) {
   const error = ref('')
-  const running = ref(false)
+  const runningScope = ref<{ projectId: string; conversationId?: string } | null>(null)
+  const running = computed(
+    () =>
+      runningScope.value?.projectId === input.projectId() &&
+      runningScope.value?.conversationId === input.conversationId?.()
+  )
   const current = (id: string) => state.projects.find(project => project.id === id && canAccessCloudProject(project))
   const model = computed(() => current(input.projectId())?.autonomousGoal)
   let identityGeneration = 0
@@ -58,11 +64,11 @@ export function useAutonomousGoal(input: {
       !current(id)?.archivedAt &&
       current(id)?.goal === current(id)?.autonomousGoal?.text,
     run: async (id, goal, signal) => {
-      running.value = true
+      runningScope.value = { projectId: id, conversationId: input.conversationId?.() }
       try {
         return await input.run(id, goal, signal)
       } finally {
-        running.value = false
+        runningScope.value = null
       }
     },
     onPersistenceError: (_id, cause) => {
@@ -148,7 +154,14 @@ export function useAutonomousGoal(input: {
   }
   window.addEventListener('luczor:api-identity-changing', identityChanged)
   const stopSchedulingWatch = watch(
-    () => [input.projectId(), input.available(), input.draft(), model.value?.active, model.value?.revision],
+    () => [
+      input.projectId(),
+      input.conversationId?.(),
+      input.available(),
+      input.draft(),
+      model.value?.active,
+      model.value?.revision,
+    ],
     () => {
       if (input.draft().trim() && running.value) void guarded(interrupt)
       else controller.kick(input.projectId())

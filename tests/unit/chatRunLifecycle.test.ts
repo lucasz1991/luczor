@@ -43,49 +43,35 @@ function fixture(controller: AbortController | null = new AbortController()) {
 }
 
 describe('captured chat cancellation', () => {
-  it.each([true, false])(
-    'keeps a newer answer and its UI alive through the actual App stop function (controller: %s)',
-    async initialController => {
-      const app = readFileSync('src/App.vue', 'utf8')
-      const start = app.indexOf('async function stopGenerating(')
-      const source = app.slice(start, app.indexOf('\nfunction openProject(', start))
-      const goal = deferred()
-      const old = initialController ? new AbortController() : null
-      const context = {
-        stopCapturedChatRun,
-        executionAbortReason,
-        chatRunGeneration: 1,
-        autonomousGoal: { model: { value: { active: true } }, stop: () => goal.promise },
-        abortController: { value: old },
-        cancelCurrent: old ? async () => old.abort() : null,
-        activeTurn: { value: old ? { messageId: 'old', projectId: 'p1' } : null },
-        sending: { value: !!old },
-        finishActiveTurn: vi.fn(),
-        stopVoiceOutput: vi.fn(),
-        stopAssistantLoading: vi.fn(),
-        rejectAllApprovals: vi.fn(),
-        stopSfx: vi.fn(),
-      }
-      const stop = runInNewContext(`${source}\nstopGenerating`, context) as () => Promise<void>
-      const pending = stop()
-      const next = new AbortController()
-      const nextCancel = async () => next.abort()
-      context.chatRunGeneration++
-      context.abortController.value = next
-      context.cancelCurrent = nextCancel
-      context.activeTurn.value = { messageId: 'new', projectId: 'p1' }
-      context.sending.value = true
-      goal.resolve()
-      await pending
-      expect(next.signal.aborted).toBe(false)
-      expect(context.abortController.value).toBe(next)
-      expect(context.cancelCurrent).toBe(nextCancel)
-      expect(context.sending.value).toBe(true)
-      expect(context.finishActiveTurn).toHaveBeenCalledTimes(1)
-      expect(context.stopAssistantLoading).toHaveBeenCalledTimes(1)
-      expect(old?.signal.aborted).toBe(initialController ? true : undefined)
+  it('the App stop handler captures run IDs before awaiting goal teardown and leaves a newly selected run alive', async () => {
+    const app = readFileSync('src/App.vue', 'utf8')
+    const start = app.indexOf('async function stopGenerating(')
+    const source = app.slice(start, app.indexOf('\nfunction openProject(', start))
+    const goal = deferred()
+    const records = [{ runId: 'old', conversationId: 'one', projectId: 'project', state: 'running' }]
+    const activeConversationId = { value: 'one' }
+    const stop = vi.fn(async () => undefined)
+    const context = {
+      chatRuns: { records: { value: records }, stop },
+      chatRunIsLive: (run: { state: string }) => run.state === 'running',
+      activeConversationId,
+      state: { pending: { toolCallsByProject: {} } },
+      getSafeRecordValue: () => [],
+      resolveApproval: vi.fn(),
+      executionAbortReason,
+      autonomousGoal: { running: { value: true }, stop: () => goal.promise },
+      stopVoiceOutput: vi.fn(),
     }
-  )
+    const stopGenerating = runInNewContext(`${source}\nstopGenerating`, context) as () => Promise<void>
+    const pending = stopGenerating()
+    expect(stop).toHaveBeenCalledExactlyOnceWith('old', expect.anything())
+    records.push({ runId: 'new', conversationId: 'two', projectId: 'project', state: 'running' })
+    activeConversationId.value = 'two'
+    goal.resolve()
+    await pending
+    expect(stop).toHaveBeenCalledOnce()
+    expect(context.stopVoiceOutput).toHaveBeenCalledOnce()
+  })
 
   it('aborts the captured answer immediately and never cancels a new answer after goal teardown', async () => {
     const context = fixture()

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-accessibility-action"
+description = "Enables the desktop_accessibility_action command without any pre-configured scope."
+commands.allow = ["desktop_accessibility_action"]
+
+[[permission]]
+identifier = "deny-desktop-accessibility-action"
+description = "Denies the desktop_accessibility_action command without any pre-configured scope."
+commands.deny = ["desktop_accessibility_action"]

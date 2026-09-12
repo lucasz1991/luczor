@@ -74,6 +74,52 @@ function fixture(overrides: Partial<RunAgentResult> = {}) {
 afterEach(() => vi.useRealTimers())
 
 describe('workflow agent adapter', () => {
+  it.each([false, true])('binds the frozen workcopy for a mirrored local/team step (team=%s)', async team => {
+    const { deps, context } = fixture()
+    const workflowScope = {
+      principalId: 'principal',
+      projectId: 'project',
+      runId: '11111111-1111-4111-8111-111111111111',
+      expectedRootPath: 'C:/frozen-workcopy',
+      expectedWorkspaceUpdatedAt: 1,
+    }
+    await runWorkflowAgentFlow(
+      team,
+      { instruction: 'Build files', agent_selection: 'override', agent: 'local' },
+      { ...context, workflowScope },
+      deps
+    )
+    expect(deps.run).toHaveBeenCalledWith(
+      expect.objectContaining({ workflowScope, execution: expect.objectContaining({ sessionId: 'session' }) })
+    )
+    expect(deps.managed).not.toHaveBeenCalled()
+  })
+  it('passes a frozen workflow directory only to the managed run while retaining source scope checks', async () => {
+    const { deps, context } = fixture()
+    const workflowScope = {
+      principalId: 'principal',
+      projectId: 'project',
+      runId: '11111111-1111-4111-8111-111111111111',
+      expectedRootPath: 'C:/frozen-workcopy',
+      expectedWorkspaceUpdatedAt: 1,
+    }
+    const result = await runWorkflowAgentFlow(
+      false,
+      { instruction: 'Build files', agent_selection: 'override', agent: 'codex' },
+      { ...context, workflowScope },
+      deps
+    )
+    expect(result.ok).toBe(true)
+    expect(deps.managed).toHaveBeenCalledWith(
+      'codex',
+      expect.any(String),
+      'C:/frozen-workcopy',
+      expect.anything(),
+      'project',
+      expect.objectContaining({ workflowScope })
+    )
+    expect(deps.run).not.toHaveBeenCalled()
+  })
   it('uses the local scoped agent and preserves measured model/usage and inherited thinking', async () => {
     const { deps, context } = fixture()
     const result = await runWorkflowAgentFlow(

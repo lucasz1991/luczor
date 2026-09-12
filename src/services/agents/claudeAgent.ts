@@ -98,8 +98,9 @@ export function createClaudeAgentAdapter(api: ClaudeAgentDependencies = dependen
       let snapshot = await api.invoke<ClaudeJobSnapshot>('claude_job_start', {
         payload: {
           ...scope,
-          expectedRootPath: request.project.rootPath,
+          expectedRootPath: request.workflowScope?.expectedRootPath ?? request.project.rootPath,
           expectedWorkspaceUpdatedAt: request.project.workspaceUpdatedAt,
+          workflowScope: request.workflowScope,
           prompt: request.prompt,
           model: request.model,
           effort: selection.requestedEffort,

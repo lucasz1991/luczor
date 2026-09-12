@@ -1,4 +1,5 @@
 import type { ThinkingTier } from '@/services/inference/thinking'
+import type { WorkflowArtifactScope } from '@/services/workflows/browser'
 
 export type AgentEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'
 export type AgentEffortSelection = Readonly<{
@@ -48,6 +49,8 @@ export type AgentProjectSnapshot = Readonly<{
 
 export type AgentJobInput = Readonly<
   AgentExecutionOptions & {
+    /** Private registered workflow workcopy; never part of shared job metadata. */
+    workflowScope?: WorkflowArtifactScope
     project: AgentProjectSnapshot
     adapterId: string
     prompt: string
@@ -88,6 +91,7 @@ export type AgentJob = Readonly<AgentJobMetadata & { project: AgentProjectSnapsh
 
 export type AgentRunRequest = Readonly<
   AgentExecutionOptions & {
+    workflowScope?: WorkflowArtifactScope
     jobId: string
     project: AgentProjectSnapshot
     prompt: string

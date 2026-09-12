@@ -63,6 +63,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
     })
   const suspended = new Set<string>()
   let selected: string | undefined
+  let nextSelection: string | undefined
   let pendingTimer: (() => void) | undefined
   let running: { projectId: string; controller: AbortController; settled: Promise<void> } | undefined
   let disposed = false
@@ -241,6 +242,10 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
       dependencies.onPersistenceError?.(projectId, error)
     } finally {
       driving = false
+      if (nextSelection) {
+        selected = nextSelection
+        nextSelection = undefined
+      }
       arrange(delay)
     }
   }
@@ -271,7 +276,12 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
     /** Call after user work finishes or explicitly (re)activating a goal. */
     kick(projectId: string): void {
       if (disposed) return
-      if (selected !== projectId && running) running.controller.abort('Anderes Projekt ausgewählt.')
+      if (driving && selected !== projectId) {
+        nextSelection = projectId
+        suspended.delete(projectId)
+        return
+      }
+      nextSelection = undefined
       selected = projectId
       suspended.delete(projectId)
       if (!driving) arrange(0)
@@ -299,6 +309,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
       cancelTimer()
       running?.controller.abort('Zielsteuerung beendet.')
       selected = undefined
+      nextSelection = undefined
     },
   }
 }

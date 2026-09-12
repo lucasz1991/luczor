@@ -46,6 +46,8 @@ export type WorkflowTaskBundle = {
     grant?: unknown
     thinking_tier?: ThinkingTier
     test_mode?: 'real'
+    mirror_manifest_id?: string | null
+    mirror_revision?: number | null
     test_run?: string
     test_binding?: Record<string, unknown>
   }

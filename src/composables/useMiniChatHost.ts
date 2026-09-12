@@ -1,3 +1,5 @@
+import { chatRuns } from '@/services/chatRunManager'
+import { createChatEffectJournal } from '@/services/chatEffectJournal'
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { listen, type UnlistenFn } from '@tauri-apps/api/event'
@@ -38,55 +40,83 @@ export function useMiniChatHost(deps: Dependencies) {
     preamble: (mode, name) =>
       `${buildSystemPreamble(mode, name)}\nDu bist im übergeordneten Luczor-Workspace. Nutze workspace_overview für die Übersicht und workspace_* für ausdrücklich adressierte Projekte, Projektchats und verwaltete Agentenaufträge. Für workflow_* muss project_id immer ausdrücklich das vom Nutzer bestimmte verfügbare Zielprojekt benennen; frage bei unklarem Zielprojekt nach. Ein Workflow-Erstellungs- oder Verbesserungsauftrag startet keinen Lauf und aktiviert keinen Auslöser. Dateien und Desktopaktionen bleiben an das Arbeitsprojekt dieser Runde gebunden. Projektwechsel erfolgen zwischen Aufträgen. Codeaufträge werden vorbereitet und vom Nutzer im Agentenfenster geprüft und gestartet. Behaupte keine Ausführung oder Ergebnisse ohne Werkzeugnachweis.`,
     run: async options => {
-      const ticket = executionGate.capture(options.signal)
+      const ticket = options.execution ?? executionGate.capture(options.signal)
+      const expectedLocalModelId = modelUsageSettings.value.localModelId
       const projectIds = deps.projects().map(project => project.id)
       try {
         const principalId = await resolveWorkspacePrincipalId()
         const account = await getVerifiedAccountSnapshot()
         executionGate.assert(ticket)
-        const profile = await refreshAssistantProfile()
-        executionGate.assert(ticket)
-        if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-        const prompt = localAssistantProfilePrompt(profile)
-        const principalScopeId = JSON.stringify([
-          account?.serverInstance ?? 'device-local',
-          account?.principalId ?? principalId,
-        ])
-        let taskCreateRecoveryReady = true
-        const pendingTaskCreateVerifications = await loadPendingTaskCreates(principalScopeId, options.projectId).catch(
-          () => {
-            taskCreateRecoveryReady = false
-            return []
-          }
-        )
-        executionGate.assert(ticket)
-        return await runAgent({
-          ...options,
-          agentMode: deps.agentMode(),
-          agentTeamPreset: 'local',
-          workspaceScope: Object.freeze({ principalId, projectIds: Object.freeze(projectIds) }),
-          principalScopeId,
-          workspaceBindingId: deps.context().workspaceBindingId ?? '',
-          pendingTaskCreateVerifications,
-          taskCreateRecoveryReady,
-          contextEgress: 'local_only',
-          routingSettings: { preference: 'local_only', localModelId: modelUsageSettings.value.localModelId },
-          externalBaseMessages: undefined,
-          requestExternalApproval: undefined,
-          onCheckpoint: async checkpoint => {
-            if (ticket.signal.aborted || checkpoint.principalScopeId !== principalScopeId) return
-            await options.onCheckpoint?.(checkpoint)
-            if (ticket.signal.aborted) return
-            await replacePendingTaskCreates(
-              principalScopeId,
-              options.projectId,
-              checkpoint.pendingTaskCreateVerifications ?? []
-            )
+        return await chatRuns.submit(
+          {
+            principalId,
+            projectId: options.projectId,
+            conversationId: options.conversationId ?? `workspace:${options.runId ?? crypto.randomUUID()}`,
+            runId: options.runId,
           },
-          baseMessages: options.baseMessages.map(message =>
-            message.role === 'system' && prompt ? { ...message, content: `${message.content}\n\n${prompt}` } : message
-          ),
-        })
+          async handle => {
+            const runExecution = { ...ticket, signal: AbortSignal.any([ticket.signal, handle.signal]) }
+            executionGate.assert(runExecution)
+            if (modelUsageSettings.value.localModelId !== expectedLocalModelId)
+              throw new Error('Modellauswahl geändert. Bitte den Auftrag erneut starten.')
+            const profile = await refreshAssistantProfile()
+            executionGate.assert(ticket)
+            if (options.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
+            const prompt = localAssistantProfilePrompt(profile)
+            const principalScopeId = JSON.stringify([
+              account?.serverInstance ?? 'device-local',
+              account?.principalId ?? principalId,
+            ])
+            let taskCreateRecoveryReady = true
+            const pendingTaskCreateVerifications = await loadPendingTaskCreates(
+              principalScopeId,
+              options.projectId
+            ).catch(() => {
+              taskCreateRecoveryReady = false
+              return []
+            })
+            executionGate.assert(ticket)
+            return await runAgent({
+              ...options,
+              effectJournal: createChatEffectJournal({
+                principalId,
+                projectId: options.projectId,
+                conversationId: options.conversationId ?? `workspace:${handle.runId}`,
+                runId: handle.runId,
+              }),
+              execution: runExecution,
+              signal: runExecution.signal,
+              onRunWaiting: waiting => handle.setWaiting(waiting),
+              agentMode: deps.agentMode(),
+              agentTeamPreset: 'local',
+              workspaceScope: Object.freeze({ principalId, projectIds: Object.freeze(projectIds) }),
+              principalScopeId,
+              workspaceBindingId: options.workspaceBindingId ?? '',
+              pendingTaskCreateVerifications,
+              taskCreateRecoveryReady,
+              contextEgress: 'local_only',
+              routingSettings: { preference: 'local_only', localModelId: expectedLocalModelId },
+              externalBaseMessages: undefined,
+              requestExternalApproval: undefined,
+              onCheckpoint: async checkpoint => {
+                if (ticket.signal.aborted || checkpoint.principalScopeId !== principalScopeId) return
+                await options.onCheckpoint?.(checkpoint)
+                if (ticket.signal.aborted) return
+                await replacePendingTaskCreates(
+                  principalScopeId,
+                  options.projectId,
+                  checkpoint.pendingTaskCreateVerifications ?? []
+                )
+              },
+              baseMessages: options.baseMessages.map(message =>
+                message.role === 'system' && prompt
+                  ? { ...message, content: `${message.content}\n\n${prompt}` }
+                  : message
+              ),
+            })
+          },
+          ticket.signal
+        )
       } finally {
         if (!deps.context().mainBusy && ['thinking', 'executing'].includes(deps.telemetry().status)) setStatus('idle')
       }
@@ -141,7 +171,6 @@ export function useMiniChatHost(deps: Dependencies) {
     { deep: true }
   )
   onMounted(async () => {
-    window.addEventListener('luczor:voice-stop', bridge.reset)
     window.addEventListener('luczor:api-identity-changing', bridge.reset)
     if (!isTauri()) return
     try {
@@ -165,7 +194,6 @@ export function useMiniChatHost(deps: Dependencies) {
     publish()
     disposed = true
     unlisten?.()
-    window.removeEventListener('luczor:voice-stop', bridge.reset)
     window.removeEventListener('luczor:api-identity-changing', bridge.reset)
     clearTimeout(timer)
   })

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-execution-scope-register"
+description = "Enables the execution_scope_register command without any pre-configured scope."
+commands.allow = ["execution_scope_register"]
+
+[[permission]]
+identifier = "deny-execution-scope-register"
+description = "Denies the execution_scope_register command without any pre-configured scope."
+commands.deny = ["execution_scope_register"]

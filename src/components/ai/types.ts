@@ -20,6 +20,7 @@ export type SearchItem = {
   icon?: string
   busy?: boolean
   cloud?: boolean
+  chats?: Array<{ id: string; label: string; busy?: boolean; status?: string }>
 }
 export type TableColumn = { key: string; label: string }
 export type TableRecord = { id: string; [key: string]: string | number }

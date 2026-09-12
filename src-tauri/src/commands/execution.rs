@@ -45,12 +45,26 @@ impl ExecutionScope {
         fn valid(value: &str) -> bool {
             !value.trim().is_empty() && value.len() <= 300 && !value.chars().any(char::is_control)
         }
-        if !valid(&self.project_id) || [&self.conversation_id, &self.run_id, &self.workspace_binding_id]
-            .into_iter().flatten().any(|value| !valid(value)) {
+        if !valid(&self.project_id)
+            || [
+                &self.conversation_id,
+                &self.run_id,
+                &self.workspace_binding_id,
+            ]
+            .into_iter()
+            .flatten()
+            .any(|value| !valid(value))
+        {
             return Err("execution_scope_invalid".into());
         }
-        Ok(self.run_id.as_ref().map(|id| format!("run:{id}")).unwrap_or_else(||
-            format!("project:{}:conversation:{}", self.project_id, self.conversation_id.as_deref().unwrap_or(""))))
+        Ok(self
+            .run_id
+            .as_ref()
+            .map(|id| format!("run:{id}"))
+            .unwrap_or_else(|| {
+                serde_json::to_string(&(&self.project_id, &self.conversation_id))
+                    .expect("string tuple serializes")
+            }))
     }
 }
 
@@ -62,7 +76,11 @@ pub struct ScopeRegistration {
     scope_generation: u64,
     scope: ExecutionScope,
 }
-struct RegisteredScope { scope: ExecutionScope, generation: u64, revoked: bool }
+struct RegisteredScope {
+    scope: ExecutionScope,
+    generation: u64,
+    revoked: bool,
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -132,13 +150,19 @@ impl GateState {
             return Err("Not-Aus is active; native execution is blocked.".into());
         }
         match (&permit.scope, permit.scope_generation) {
-            (None, None) => {},
+            (None, None) => {}
             (Some(scope), Some(generation)) => {
-                let registered = self.scopes.get(&scope.key()?).ok_or("execution_scope_not_registered")?;
-                if registered.revoked || registered.generation != generation || registered.scope != *scope {
+                let registered = self
+                    .scopes
+                    .get(&scope.key()?)
+                    .ok_or("execution_scope_not_registered")?;
+                if registered.revoked
+                    || registered.generation != generation
+                    || registered.scope != *scope
+                {
                     return Err("execution_scope_revoked_or_changed".into());
                 }
-            },
+            }
             _ => return Err("execution_scope_invalid".into()),
         }
         if let Some(id) = &permit.workflow_execution_id {
@@ -158,10 +182,17 @@ impl GateState {
     }
 
     fn register_scope(&mut self, input: ScopeRegistration, revoke: bool) -> Result<(), String> {
-        self.check(&ExecutionPermit {
-            session_id: input.session_id, generation: input.generation,
-            workflow_execution_id: None, scope: None, scope_generation: None,
-        }, false, false)?;
+        self.check(
+            &ExecutionPermit {
+                session_id: input.session_id,
+                generation: input.generation,
+                workflow_execution_id: None,
+                scope: None,
+                scope_generation: None,
+            },
+            false,
+            false,
+        )?;
         if input.scope_generation == 0 || input.scope_generation > 9_007_199_254_740_991 {
             return Err("execution_scope_invalid".into());
         }
@@ -171,7 +202,9 @@ impl GateState {
                 return Err("execution_scope_identity_changed".into());
             }
             if revoke {
-                if previous.generation != input.scope_generation { return Err("execution_scope_generation_mismatch".into()); }
+                if previous.generation != input.scope_generation {
+                    return Err("execution_scope_generation_mismatch".into());
+                }
                 previous.revoked = true;
             } else {
                 if previous.revoked && input.scope_generation == previous.generation {
@@ -181,24 +214,43 @@ impl GateState {
                 previous.revoked = false;
             }
         } else {
-            if self.scopes.len() >= 8192 { return Err("execution_scope_capacity".into()); }
-            self.scopes.insert(key, RegisteredScope {
-                scope: input.scope, generation: input.scope_generation, revoked: revoke,
-            });
+            if self.scopes.len() >= 8192 {
+                return Err("execution_scope_capacity".into());
+            }
+            self.scopes.insert(
+                key,
+                RegisteredScope {
+                    scope: input.scope,
+                    generation: input.scope_generation,
+                    revoked: revoke,
+                },
+            );
         }
         Ok(())
     }
 }
 
 #[tauri::command]
-pub fn execution_scope_register(window: crate::commands::CallerWebview, payload: ScopeRegistration) -> Result<(), String> {
+pub fn execution_scope_register(
+    window: crate::commands::CallerWebview,
+    payload: ScopeRegistration,
+) -> Result<(), String> {
     ensure_main_webview(&window)?;
-    GATE.get_or_init(Mutex::default).lock().map_err(|_| "Execution gate unavailable.")?.register_scope(payload, false)
+    GATE.get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| "Execution gate unavailable.")?
+        .register_scope(payload, false)
 }
 #[tauri::command]
-pub fn execution_scope_revoke(window: crate::commands::CallerWebview, payload: ScopeRegistration) -> Result<(), String> {
+pub fn execution_scope_revoke(
+    window: crate::commands::CallerWebview,
+    payload: ScopeRegistration,
+) -> Result<(), String> {
     ensure_main_webview(&window)?;
-    GATE.get_or_init(Mutex::default).lock().map_err(|_| "Execution gate unavailable.")?.register_scope(payload, true)
+    GATE.get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| "Execution gate unavailable.")?
+        .register_scope(payload, true)
 }
 
 #[derive(Deserialize)]
@@ -230,6 +282,21 @@ pub fn wf_execution_cancel(
 }
 
 static GATE: OnceLock<Mutex<GateState>> = OnceLock::new();
+
+pub(crate) fn revoke_project_scopes(project_id: &str) -> Result<(), String> {
+    let mut state = GATE
+        .get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| "Execution gate unavailable.")?;
+    for registered in state
+        .scopes
+        .values_mut()
+        .filter(|registered| registered.scope.project_id == project_id)
+    {
+        registered.revoked = true;
+    }
+    Ok(())
+}
 
 #[derive(Clone)]
 pub(crate) struct ExecutionLease {
@@ -311,6 +378,45 @@ pub async fn execution_gate_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn revoking_one_registered_run_preserves_other_runs_and_forbids_identity_rebinding() {
+        let session = uuid::Uuid::new_v4().to_string();
+        let mut gate = GateState::default();
+        gate.update(policy(&session, 1, ExecutionMode::Act, false))
+            .unwrap();
+        let registration = |run: &str| ScopeRegistration {
+            session_id: session.clone(),
+            generation: 1,
+            scope_generation: 1,
+            scope: ExecutionScope {
+                project_id: "project".into(),
+                conversation_id: Some(run.into()),
+                run_id: Some(run.into()),
+                workspace_binding_id: Some("binding-1".into()),
+            },
+        };
+        gate.register_scope(registration("a"), false).unwrap();
+        gate.register_scope(registration("b"), false).unwrap();
+        let permit = |run: &str| ExecutionPermit {
+            session_id: session.clone(),
+            generation: 1,
+            workflow_execution_id: None,
+            scope: Some(registration(run).scope),
+            scope_generation: Some(1),
+        };
+        assert!(gate.check(&permit("a"), true, false).is_ok());
+        gate.register_scope(registration("a"), true).unwrap();
+        assert!(gate.check(&permit("a"), true, false).is_err());
+        assert!(gate.check(&permit("b"), true, false).is_ok());
+        assert!(gate.register_scope(registration("a"), false).is_err());
+        let mut changed = registration("b");
+        changed.scope.project_id = "other".into();
+        changed.scope_generation = 2;
+        assert!(gate.register_scope(changed, false).is_err());
+        gate.update(policy(&session, 2, ExecutionMode::Act, false))
+            .unwrap();
+        assert!(gate.scopes.is_empty());
+    }
     fn policy(
         session: &str,
         generation: u64,
@@ -354,7 +460,8 @@ mod tests {
             session_id: session.clone(),
             generation: 1,
             workflow_execution_id: None,
-        scope: None, scope_generation: None,
+            scope: None,
+            scope_generation: None,
         };
         let lease = admit(&permit, true).unwrap();
         let worker = std::thread::spawn(move || {
@@ -386,7 +493,8 @@ mod tests {
             session_id: session.clone(),
             generation: 1,
             workflow_execution_id: None,
-        scope: None, scope_generation: None,
+            scope: None,
+            scope_generation: None,
         };
         let mut gate = GateState::default();
         assert!(gate.check(&permit, false, false).is_err());
@@ -424,7 +532,8 @@ mod tests {
                     session_id: next,
                     generation: 1,
                     workflow_execution_id: None,
-                scope: None, scope_generation: None,
+                    scope: None,
+                    scope_generation: None,
                 },
                 false,
                 false
@@ -441,7 +550,8 @@ mod tests {
             session_id: session.clone(),
             generation: 1,
             workflow_execution_id: None,
-        scope: None, scope_generation: None,
+            scope: None,
+            scope_generation: None,
         };
         assert!(gate.check(&permit, true, true).is_err());
         gate.update(policy(&session, 2, ExecutionMode::Unrestricted, false))
@@ -470,7 +580,8 @@ mod tests {
             session_id: session,
             generation: 1,
             workflow_execution_id: Some(cancelled),
-            scope: None, scope_generation: None,
+            scope: None,
+            scope_generation: None,
         };
         assert!(gate.check(&permit, true, false).is_err());
         let other = ExecutionPermit {

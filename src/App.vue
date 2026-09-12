@@ -4,6 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import { loadPendingTaskCreates, replacePendingTaskCreates } from '@/services/agents/taskCreateRecoveryLedger'
 import Settings from './components/Settings.vue'
+import DeviceClusterPanel from './components/DeviceClusterPanel.vue'
 import { modelUsageSettings, type ChatRouteMode } from '@/services/inference/modelUsageSettings'
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import type { SystemStatusDisplayMode } from '@/features/system-status/model'
@@ -18,6 +19,7 @@ import { useAutonomousGoal } from '@/composables/useAutonomousGoal'
 import type { GoalRunState, GoalStepResult } from '@/services/goals/autonomousGoal'
 import { useCloudProjects } from '@/composables/useCloudProjects'
 import { chatRuns, chatRunIsLive, type ChatRunHandle } from '@/services/chatRunManager'
+import { createChatEffectJournal } from '@/services/chatEffectJournal'
 import { createWorkspaceRefresh } from '@/services/workspaceRefresh'
 import {
   executionAbortReason,
@@ -93,9 +95,15 @@ import {
 import { presentLocalToolResult } from '@/services/toolProgressPresentation'
 import type { Message } from '@/state/types'
 import { type LuczorMode, type WireMessage } from './services/openrouter.service'
-import { runAgent, buildSystemPreamble, shouldRequireToolCall, type AgentRunEvaluation } from '@/services/agent'
+import {
+  runAgent,
+  buildSystemPreamble,
+  shouldRequireToolCall,
+  type AgentRunEvaluation,
+  type RunAgentOptions,
+} from '@/services/agent'
 import { presentEnvelopeStream } from '@/services/envelope'
-import { resolveApproval, rejectAllApprovals, hasPendingApproval } from '@/services/approvals'
+import { resolveApproval, hasPendingApproval } from '@/services/approvals'
 import { Store } from '@tauri-apps/plugin-store'
 import { VoiceEngine } from '@/services/voice/voiceEngine'
 import { ensureVoiceRuntime, getVoiceConfig, handsFreeFromVoice, localStt } from '@/services/voice/localVoice'
@@ -174,6 +182,7 @@ import {
  * ------------------------------------------------- */
 type SettingsStartTab = 'server' | 'notifications' | 'execution' | 'chat'
 const showSettings = ref(false)
+const showDeviceCluster = ref(false)
 const settingsStartTab = ref<SettingsStartTab>('server')
 const showSystemPanel = ref(false)
 const systemStatusDisplayMode = ref<SystemStatusDisplayMode>('tabs')
@@ -237,7 +246,7 @@ type RunThinkingBudget = {
 const thinkingBudgets = shallowRef<Record<string, RunThinkingBudget>>({})
 const activeThinkingBudget = computed(() => {
   const messageId = activeTurn.value?.messageId
-  return messageId ? thinkingBudgets.value[messageId] ?? null : null
+  return messageId ? (getSafeRecordValue(thinkingBudgets.value, messageId) ?? null) : null
 })
 watch(modelUsageSettings, value => {
   chatRouteMode.value = value.externalEnabled ? value.chatRouteMode : 'local'
@@ -262,8 +271,12 @@ const chatActivities = computed<Record<string, ChatActivity>>(() =>
   )
 )
 const activeTurn = computed(() => {
-  const run = chatRuns.records.value.find(item => item.conversationId === activeConversationId.value && chatRunIsLive(item) && item.checkpoint?.messageId)
-  return run?.checkpoint?.messageId ? { projectId: run.projectId, messageId: run.checkpoint.messageId, runId: run.runId } : null
+  const run = chatRuns.records.value.find(
+    item => item.conversationId === activeConversationId.value && chatRunIsLive(item) && item.checkpoint?.messageId
+  )
+  return run?.checkpoint?.messageId
+    ? { projectId: run.projectId, messageId: run.checkpoint.messageId, runId: run.runId }
+    : null
 })
 const promptCommands = [
   { id: 'summarize', label: '/zusammenfassen', description: 'Den bisherigen Chat zusammenfassen', icon: 'spark' },
@@ -329,14 +342,26 @@ function messageTools(message: Message) {
   const calls = getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, message.projectId) ?? []
   const nextUser = messages.value.find(item => item.role === 'user' && item.ts > message.ts)
   return calls
-    .filter(call => call.createdAt >= message.ts && (!nextUser || call.createdAt < nextUser.ts))
+    .filter(call =>
+      message.meta.runId
+        ? call.runId === message.meta.runId
+        : call.conversationId === message.conversationId &&
+          call.createdAt >= message.ts &&
+          (!nextUser || call.createdAt < nextUser.ts)
+    )
     .map(presentLocalToolResult)
 }
 function messageWorkflows(message: Message) {
   const calls = getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, message.projectId) ?? []
   const nextUser = messages.value.find(item => item.role === 'user' && item.ts > message.ts)
   return workflowReferences(
-    calls.filter(call => call.createdAt >= message.ts && (!nextUser || call.createdAt < nextUser.ts))
+    calls.filter(call =>
+      message.meta.runId
+        ? call.runId === message.meta.runId
+        : call.conversationId === message.conversationId &&
+          call.createdAt >= message.ts &&
+          (!nextUser || call.createdAt < nextUser.ts)
+    )
   )
 }
 function openWorkflows(reference?: WorkflowChatReference) {
@@ -355,13 +380,6 @@ function improveWorkflow(reference: WorkflowChatReference) {
     `Verbessere mit mir Workflow „${reference.name}“ (ID ${reference.id}). Lies zuerst die aktuelle Definition${reference.runId ? ` und den Lauf ${reference.runId}` : ' und relevante letzte Läufe'}. Begründe die Änderungen anhand meines Ziels und vorhandener Ergebnisse. Starte erst auf meinen Auftrag.`
   )
 }
-function finishActiveTurn(status: 'done' | 'failed' | 'canceled') {
-  const turn = activeTurn.value
-  if (!turn) return
-  const activity = chatActivities.value[turn.messageId]
-  if (activity) finishChatActivity(activity, status)
-  mutations.patchMessage(turn.projectId, turn.messageId, { meta: { isLoading: false } })
-}
 const mode = ref<LuczorMode>('observe')
 const allowUnrestricted = ref(false)
 const stopAgentHub = configureAgentHub(() => mode.value)
@@ -375,7 +393,10 @@ function openSettings(tab: SettingsStartTab = 'server') {
 
 const stopAccountRuns = () => void chatRuns.stopAll(executionAbortReason('execution_session_changed'))
 window.addEventListener('luczor:api-identity-changing', stopAccountRuns)
-onBeforeUnmount(() => { window.removeEventListener('luczor:api-identity-changing', stopAccountRuns); stopAccountRuns() })
+onBeforeUnmount(() => {
+  window.removeEventListener('luczor:api-identity-changing', stopAccountRuns)
+  stopAccountRuns()
+})
 
 function openNotificationCenter() {
   openSettings('notifications')
@@ -400,6 +421,9 @@ onMounted(() => {
   window.addEventListener('luczor:voice-settings-changed', stopVoiceInputForSettings)
   return appRuntimeLifecycle.start().then(() => {
     appReady.value = true
+    void resolveWorkspacePrincipalId()
+      .then(principalId => chatRuns.recover(principalId))
+      .catch(error => console.warn('[runs] Recovery journal unavailable:', error))
   })
 })
 onBeforeUnmount(() => {
@@ -635,12 +659,31 @@ const activeProjectId = computed<string>({
 const activeProject = computed(() => projects.value.find(p => p.id === activeProjectId.value))
 const activeConversationId = computed(() => mutations.getActiveConversationId(activeProjectId.value))
 const activeConversation = computed(() => state.conversations?.find(chat => chat.id === activeConversationId.value))
-watch(activeConversationId, (next, previous) => {
-  const old = state.conversations?.find(chat => chat.id === previous)
-  if (old) old.draft = input.value
-  writeComposerInput(state.conversations?.find(chat => chat.id === next)?.draft ?? '', 'keyboard')
-  stopVoiceOutput()
-}, { flush: 'sync' })
+const interruptedRun = computed(() => {
+  const latest = [...chatRuns.records.value].reverse().find(run => run.conversationId === activeConversationId.value)
+  return latest?.state === 'interrupted' ? latest : undefined
+})
+const recoveryReviewDraft = ref<{ conversationId: string; text: string } | null>(null)
+function prepareInterruptedReview() {
+  const run = interruptedRun.value
+  if (!run || sending.value) return
+  const message = messages.value.find(item => item.role === 'user' && item.meta.runId === run.runId)
+  setComposerInput(
+    `Prüfe zuerst ausschließlich lesend den aktuellen Zustand des unterbrochenen Auftrags. Wiederhole keine Schreibaktionen. Berichte, was bereits nachweisbar erledigt ist und was noch fehlt.\n\nUrsprünglicher Auftrag:\n${message?.content.slice(0, 6000) ?? 'Den bisherigen Chat anhand der vorhandenen Ergebnisse prüfen.'}`,
+    'keyboard'
+  )
+  recoveryReviewDraft.value = { conversationId: activeConversationId.value, text: input.value }
+}
+watch(
+  activeConversationId,
+  (next, previous) => {
+    const old = state.conversations?.find(chat => chat.id === previous)
+    if (old) old.draft = input.value
+    writeComposerInput(state.conversations?.find(chat => chat.id === next)?.draft ?? '', 'keyboard')
+    stopVoiceOutput()
+  },
+  { flush: 'sync' }
+)
 watch(activeProjectId, resetProjectRouting, { flush: 'sync' })
 const activePlanningSession = computed(() => {
   void planningRevision.value
@@ -708,6 +751,7 @@ const projectActivity = computed<Record<string, boolean>>(() => {
   for (const [projectId, calls] of Object.entries(state.pending?.toolCallsByProject ?? {})) {
     if (calls?.some(call => ['approved', 'executing'].includes(call.status))) active.set(projectId, true)
   }
+  for (const run of chatRuns.records.value) if (chatRunIsLive(run)) active.set(run.projectId, true)
   if (planningBusy.value) active.set(activeProjectId.value, true)
   return Object.fromEntries(active)
 })
@@ -717,6 +761,14 @@ const projectItems = computed(() =>
     label: project.name,
     busy: !!projectActivity.value[project.id],
     cloud: !!project.cloud,
+    chats: (state.conversations ?? [])
+      .filter(chat => chat.projectId === project.id && !chat.archivedAt)
+      .map(chat => ({
+        id: chat.id,
+        label: chat.title,
+        busy: chatRuns.hasLive(chat.id),
+        status: [...chatRuns.records.value].reverse().find(run => run.conversationId === chat.id)?.state,
+      })),
   }))
 )
 const isWelcomeMessage = (message: Message) =>
@@ -786,14 +838,17 @@ const projectSummaries = computed<any[]>(() => {
  * Core actions
  * ------------------------------------------------- */
 async function stopGenerating(pauseGoal = true) {
-  const selected = chatRuns.records.value.filter(run => run.conversationId === activeConversationId.value && chatRunIsLive(run))
-  if (pauseGoal && autonomousGoal.model.value?.active) await autonomousGoal.stop()
-  for (const run of selected) {
+  const selected = chatRuns.records.value.filter(
+    run => run.conversationId === activeConversationId.value && chatRunIsLive(run)
+  )
+  const stopping = selected.map(run => {
     const calls = getSafeRecordValue(state.pending.toolCallsByProject, run.projectId) ?? []
     for (const call of calls.filter(item => item.runId === run.runId)) resolveApproval(call.id, false)
-    await chatRuns.stop(run.runId, executionAbortReason('user_stop'))
-  }
+    return chatRuns.stop(run.runId, executionAbortReason('user_stop'))
+  })
   stopVoiceOutput()
+  if (pauseGoal && autonomousGoal.running.value) await autonomousGoal.stop()
+  await Promise.all(stopping)
 }
 
 function openProject(id: string) {
@@ -1033,7 +1088,11 @@ function testSelectedVoice(text: string, signal?: AbortSignal, voiceId?: string)
 const pendingApprovals = computed(() => {
   const pid = activeProjectId.value
   const bucket = getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, pid) ?? []
-  return mode.value === 'unrestricted' ? [] : bucket.filter(c => c.conversationId === activeConversationId.value && c.status === 'proposed' && c.requiresApproval)
+  return mode.value === 'unrestricted'
+    ? []
+    : bucket.filter(
+        c => c.conversationId === activeConversationId.value && c.status === 'proposed' && c.requiresApproval
+      )
 })
 
 function approveTool(id: string) {
@@ -1137,15 +1196,19 @@ const workspaceRefresh = createWorkspaceRefresh({
   },
 })
 const knownWorkspaceBindings = new Map<string, string>()
-watch(() => activeWorkspace.value, binding => {
-  if (!binding) return
-  const identity = JSON.stringify([binding.rootPath, binding.gitRootPath, binding.status, binding.updatedAt])
-  const previous = knownWorkspaceBindings.get(binding.projectId)
-  if (previous !== undefined && previous !== identity) {
-    invalidateExecutionScope({ projectId: binding.projectId }, 'execution_workspace_changed')
-  }
-  knownWorkspaceBindings.set(binding.projectId, identity)
-}, { flush: 'sync' })
+watch(
+  () => activeWorkspace.value,
+  binding => {
+    if (!binding) return
+    const identity = JSON.stringify([binding.rootPath, binding.gitRootPath, binding.status, binding.updatedAt])
+    const previous = knownWorkspaceBindings.get(binding.projectId)
+    if (previous !== undefined && previous !== identity) {
+      invalidateExecutionScope({ projectId: binding.projectId }, 'execution_workspace_changed')
+    }
+    knownWorkspaceBindings.set(binding.projectId, identity)
+  },
+  { flush: 'sync' }
+)
 
 watch(activeProjectId, () => workspaceRefresh.invalidate(), { flush: 'sync' })
 const invalidateWorkspaceIdentity = () => {
@@ -1471,584 +1534,672 @@ async function resumeWork(messageId: string) {
   if (!checkpoint || conversationBusy.value) return
   await send(false, { checkpoint, messageId })
 }
+type CapturedChatTurn = {
+  readOnlyReview: boolean
+  pid: string
+  conversationId: string
+  principalId: string
+  userMessageId: string
+  text: string
+  prj: typeof activeProject.value
+  workspace: ProjectWorkspaceBinding | null
+  mode: LuczorMode
+  execution: ExecutionTicket
+  thinking: Pick<RunAgentOptions, 'thinkingTier' | 'thinkingConfig'>
+  routeMode: ChatRouteMode
+  expectedLocalModelId: string | null
+  inputSource: ComposerInputSource
+}
 async function send(
   automaticVoice = false,
   resume?: { checkpoint: AgentCheckpoint; messageId: string },
   miniInput?: { text: string; projectId: string },
   goalInput?: { state: GoalRunState; signal: AbortSignal }
 ): Promise<GoalStepResult | undefined> {
-  const pid = activeProjectId.value
+  const pid = miniInput?.projectId ?? activeProjectId.value
+  const conversationId = mutations.getActiveConversationId(pid)
   const submittedText = miniInput?.text ?? input.value
-  if (!goalInput && autonomousGoal.running.value) {
-    const admission = executionGate.capture()
-    await autonomousGoal.interrupt()
-    try {
-      executionGate.assert(admission)
-    } catch {
-      return
-    }
-    if (activeProjectId.value !== pid || (!miniInput && input.value !== submittedText)) return
-  }
-  const turnThinking = resume?.checkpoint.thinkingTier
-    ? { thinkingTier: resume.checkpoint.thinkingTier, thinkingConfig: resume.checkpoint.thinkingConfig }
-    : captureThinking(thinkingTier.value)
-  // The chat model chooses assistance; the composer mode controls permitted routes.
-  // A resumed checkpoint keeps its own local-only contract because its saved context was
-  // gathered under one, and without the global external switch every mode collapses to
-  // local, mirroring resolveInferenceRouteForTurn.
-  const turnRouteMode: ChatRouteMode =
-    modelUsageSettings.value.externalEnabled && !resume ? chatRouteMode.value : 'local'
-  const externalFallbackAllowed = turnRouteMode !== 'local'
-  const turnTeamPreset = teamPresetForRouteMode(turnRouteMode)
   const rawText = resume?.checkpoint.objective ?? submittedText.trim()
-  if (!rawText || conversationBusy.value) return
-  if (miniInput && miniInput.projectId !== pid) throw new Error('Der Projektchat wurde inzwischen gewechselt.')
-  const turnGeneration = ++chatRunGeneration
-  sendAdmission.value = true
+  if (!rawText || admittingConversations.value.has(conversationId)) return
+  const command = planningCommandObjective(rawText)
+  const text = command === null ? rawText : planningDiscussionMessage(command)
+  const runId = crypto.randomUUID()
+  const workspace = activeWorkspace.value?.projectId === pid ? { ...activeWorkspace.value } : null
+  const execution = executionGate.capture(goalInput?.signal, {
+    projectId: pid,
+    conversationId,
+    runId,
+    workspaceBindingId: JSON.stringify([workspace?.rootPath ?? '', workspace?.updatedAt ?? '']),
+  })
+  const prj = projects.value.find(project => project.id === pid)
+  const captured: CapturedChatTurn = {
+    readOnlyReview:
+      recoveryReviewDraft.value?.conversationId === conversationId && recoveryReviewDraft.value?.text === text,
+    pid,
+    conversationId,
+    principalId: '',
+    userMessageId: '',
+    text,
+    prj: prj ? JSON.parse(JSON.stringify(prj)) : undefined,
+    workspace,
+    execution,
+    mode: mode.value,
+    thinking: resume?.checkpoint.thinkingTier
+      ? { thinkingTier: resume.checkpoint.thinkingTier, thinkingConfig: resume.checkpoint.thinkingConfig }
+      : captureThinking(thinkingTier.value),
+    routeMode: modelUsageSettings.value.externalEnabled && !resume ? chatRouteMode.value : 'local',
+    expectedLocalModelId: modelUsageSettings.value.localModelId,
+    inputSource: miniInput ? 'keyboard' : consumeInputSource(),
+  }
+  admittingConversations.value = new Set([...admittingConversations.value, conversationId])
+  let responseStarted = false
   try {
-    const planningCommand = planningCommandObjective(rawText)
-    const text = planningCommand === null ? rawText : planningDiscussionMessage(planningCommand)
-    // Bind the turn before the first await. A project/account switch while the
-    // previous turn stops must not combine old input with a new project context.
-    const abort = new AbortController()
-    const turnExecution = executionGate.capture(
-      goalInput ? AbortSignal.any([abort.signal, goalInput.signal]) : abort.signal
-    )
-    const prj = activeProject.value
-      ? (JSON.parse(JSON.stringify(activeProject.value)) as typeof activeProject.value)
-      : null
-    const workspace = activeWorkspace.value ? { ...activeWorkspace.value } : null
-    const taskType = inferTaskType(text)
-    // Capture + reset how this turn was produced (spoken vs typed).
-    const inputSource = miniInput ? 'keyboard' : consumeInputSource()
+    if (!goalInput && autonomousGoal.running.value) await autonomousGoal.interrupt()
+    executionGate.assert(execution)
+    captured.principalId = await resolveWorkspacePrincipalId()
+    executionGate.assert(execution)
     if (!automaticVoice) void voiceInputSession.stop()
-
-    void playSfx('submit')
-    await stopGenerating(false)
-    if (turnExecution.signal.aborted) return
-    const turnSpeechGeneration = speechGeneration
-
-    // user message (tag spoken input for the "Gesprochen" badge)
-    const userMsg = mutations.makeMsg('user', resume ? 'Weiterarbeiten' : text, pid)
-    userMsg.meta = { ...(userMsg.meta ?? {}), inputSource, thinkingTier: turnThinking.thinkingTier }
+    const userMsg = mutations.makeMsg('user', resume ? 'Weiterarbeiten' : text, pid, conversationId)
+    userMsg.meta = {
+      ...userMsg.meta,
+      runId,
+      conversationId,
+      inputSource: captured.inputSource,
+      thinkingTier: captured.thinking.thinkingTier,
+    }
     if (goalInput) {
       userMsg.content = goalInput.state.phase === 'review' ? 'Ziel: Ergebnis prüfen' : 'Ziel weiterbearbeiten'
       userMsg.meta.dataHandling = 'ephemeral'
     }
+    captured.userMessageId = userMsg.id
     mutations.addMessage(userMsg)
-    if (!resume && !miniInput) input.value = ''
-    void nextTick(() => autoGrow())
-    sending.value = true
-
-    // assistant placeholder
-    const assistant = mutations.makeMsg('assistant', '', pid)
-    assistant.raw = ''
-    assistant.parsed = null
-    // A live answer has no final retention classification yet.
-    assistant.meta = {
-      ...assistant.meta,
-      serverSpeechAllowed: false,
-      dataHandling: 'ephemeral',
-      activity: createChatActivity(assistant.ts),
-      commentary: [],
+    // Keep the submitted request on disk before the journal can admit any effects.
+    await saveAppStateStrict(state)
+    executionGate.assert(execution)
+    if (!resume && !miniInput && activeConversationId.value === conversationId && input.value === submittedText)
+      input.value = ''
+    const chat = state.conversations?.find(item => item.id === conversationId)
+    if (chat) {
+      chat.draft = ''
+      chat.updatedAt = Date.now()
+      if (chat.title === 'Neuer Chat') chat.title = text.slice(0, 80)
     }
-    mutations.addMessage(assistant)
-    const speechScope = `${pid}:${assistant.id}:${turnSpeechGeneration}`
-    activeSpeechScope = { id: speechScope, projectId: pid, generation: turnSpeechGeneration }
-    const progressiveSpeech = createProgressiveCommentary({
-      scope: speechScope,
-      answerKey: `${assistant.id}:answer`,
-      queue: commentarySpeech,
-      readMessage: () => mutations.getProjectMessages(pid).find(message => message.id === assistant.id),
-    })
+    void nextTick(autoGrow)
+    void playSfx('submit')
+    const result = chatRuns.submit(
+      { principalId: captured.principalId, projectId: pid, conversationId, runId },
+      async handle => {
+        responseStarted = true
+        return executeChatTurn(captured, handle, resume, goalInput)
+      },
+      execution.signal
+    )
+    // A second message may be queued for this conversation; it cannot execute concurrently.
+    admittingConversations.value = new Set([...admittingConversations.value].filter(id => id !== conversationId))
+    return await result
+  } catch (error) {
+    if (!responseStarted && !execution.signal.aborted) {
+      const failure = mutations.makeMsg(
+        'assistant',
+        'Der Auftrag konnte nicht sicher gespeichert oder gestartet werden. Deine Nachricht bleibt erhalten. ' +
+          (error instanceof Error ? error.message : 'Bitte erneut versuchen.'),
+        pid,
+        conversationId
+      )
+      failure.meta = { ...failure.meta, runId, conversationId, dataHandling: 'ephemeral' }
+      mutations.addMessage(failure)
+    }
+    if (goalInput) throw error
+  } finally {
+    admittingConversations.value = new Set([...admittingConversations.value].filter(id => id !== conversationId))
+  }
+}
+async function executeChatTurn(
+  captured: CapturedChatTurn,
+  handle: ChatRunHandle,
+  resume?: { checkpoint: AgentCheckpoint; messageId: string },
+  goalInput?: { state: GoalRunState; signal: AbortSignal }
+): Promise<GoalStepResult | undefined> {
+  const { pid, conversationId, text, prj, workspace, inputSource } = captured
+  const turnExecution = { ...captured.execution, signal: AbortSignal.any([captured.execution.signal, handle.signal]) }
+  const turnThinking = captured.thinking
+  const turnRouteMode = captured.routeMode
+  const externalFallbackAllowed = turnRouteMode !== 'local'
+  const turnTeamPreset = teamPresetForRouteMode(turnRouteMode)
+  const taskType = inferTaskType(text)
+  const turnSpeechGeneration = speechGeneration
+  const isVisible = () => activeConversationId.value === conversationId
+  const assistant = mutations.makeMsg('assistant', '', pid, conversationId)
+  assistant.raw = ''
+  assistant.parsed = null
+  assistant.meta = {
+    ...assistant.meta,
+    runId: handle.runId,
+    conversationId,
+    serverSpeechAllowed: false,
+    dataHandling: 'ephemeral',
+    activity: createChatActivity(assistant.ts),
+    commentary: [],
+  }
+  mutations.addMessage(assistant)
+  const speechScope = `${pid}:${assistant.id}:${turnSpeechGeneration}`
+  if (isVisible()) activeSpeechScope = { id: speechScope, projectId: pid, generation: turnSpeechGeneration }
+  const progressiveSpeech = createProgressiveCommentary({
+    scope: speechScope,
+    answerKey: `${assistant.id}:answer`,
+    queue: commentarySpeech,
+    readMessage: () => mutations.getProjectMessages(pid).find(message => message.id === assistant.id),
+  })
+  if (isVisible())
     void commentarySpeech.enqueueStatus({ scope: speechScope, key: 'context', text: 'Kontext vorbereiten' })
-    activeTurn.value = { projectId: pid, messageId: assistant.id }
-    abortController.value = abort
-    cancelCurrent = async () => abort.abort(executionAbortReason('user_stop'))
-    let checkpointMemoryPrincipal = ''
-    let latestPublicCheckpoint = ''
+  let checkpointMemoryPrincipal = ''
+  let latestPublicCheckpoint = ''
 
-    const retainMemoryCheckpoint = (content: string, final = false) => {
-      if (!checkpointMemoryPrincipal || !content.trim()) return
-      void luczorMemory
-        .captureCheckpoint({
-          content,
-          scope: 'project',
-          projectId: pid,
-          sessionId: assistant.id,
-          expectedPrincipalId: checkpointMemoryPrincipal,
-          final,
-        })
-        .catch(() => {
-          // Memory is best-effort; never replace a chat result with a checkpoint error.
-        })
+  const retainMemoryCheckpoint = (content: string, final = false) => {
+    if (!checkpointMemoryPrincipal || !content.trim()) return
+    void luczorMemory
+      .captureCheckpoint({
+        content,
+        scope: 'project',
+        projectId: pid,
+        sessionId: assistant.id,
+        expectedPrincipalId: checkpointMemoryPrincipal,
+        final,
+      })
+      .catch(() => {
+        // Memory is best-effort; never replace a chat result with a checkpoint error.
+      })
+  }
+
+  try {
+    await saveAppStateStrict(state)
+    await handle.setMessage(assistant.id)
+    if (isVisible()) await forceScroll('auto')
+    await nextTick()
+    executionGate.assert(turnExecution)
+    startAssistantLoading(pid, assistant.id)
+    if (captured.routeMode !== 'external' && modelUsageSettings.value.localModelId !== captured.expectedLocalModelId) {
+      await handle.interrupt(
+        'Die Modellauswahl hat sich während der Warteschlange geändert. Auftrag ausdrücklich mit der gewünschten Auswahl fortsetzen.'
+      )
+      throw new Error(
+        'Die Modellauswahl wurde seit dem Einreihen geändert. Nachricht bleibt erhalten; bitte mit der gewünschten Auswahl erneut starten.'
+      )
     }
+    // Build the wire history: system preamble + visible user/assistant text.
+    const fullHistory: WireMessage[] = mutations
+      .getConversationMessages(pid, conversationId)
+      .slice(
+        0,
+        mutations
+          .getConversationMessages(pid, conversationId)
+          .findIndex(message => message.id === captured.userMessageId) + 1
+      )
+      .filter(m => m.role === 'user' || m.role === 'assistant')
+      .filter(message => message.meta?.dataHandling !== 'ephemeral')
+      .filter(m => safeTrim(m.content).length > 0)
+      .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+    const settingsStore = await Store.load('luczor.settings.json')
+    const historyBudget = clampNumber(
+      (await settingsStore.get<number>('client_history_token_budget')) ?? 2400,
+      400,
+      12000
+    )
+    // The laptop profile has an 8k context window. Reduce history and
+    // retrieved project context before native tokenization, rather than
+    // relying on the runtime to recover after a complete prompt is built.
+    const compactLocalProfile = captured.expectedLocalModelId === 'local-tier-light'
+    const localHistory = normalizeConversationHistory(
+      compactLocalProfile
+        ? compactHistory(normalizeConversationHistory(fullHistory), Math.min(historyBudget, 900))
+        : fullHistory
+    )
+    const experimentalFlashNext = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
+    const history = normalizeConversationHistory(
+      compactHistory(normalizeConversationHistory(fullHistory), historyBudget)
+    )
+
+    const contextFragments: PromptFragment[] = []
+    const recentToolContext = buildRecentToolOutcomeContext(
+      mutations.getConversationMessages(pid, conversationId, { includeHidden: true })
+    )
+    if (recentToolContext) {
+      contextFragments.push({
+        id: 'recent-tool-outcomes',
+        source: 'tool',
+        trust: 'untrusted_data',
+        scope: 'session',
+        egress: 'allowed',
+        priority: 60,
+        content: recentToolContext,
+      })
+    }
+
+    // Keep the active plan in front of the model across turns.
+    const detailedPlan = planningHub.get(pid)
+    const planContext = detailedPlan?.plan
+      ? JSON.stringify({ revision: detailedPlan.revision, status: detailedPlan.status, plan: detailedPlan.plan })
+      : buildPlanContext(pid)
+    if (planContext) {
+      contextFragments.push({
+        id: 'active-plan',
+        source: 'project',
+        trust: 'untrusted_data',
+        scope: 'project',
+        egress: detailedPlan?.plan ? 'local_only' : 'allowed',
+        priority: 80,
+        content: planContext,
+      })
+    }
+
+    // Build one deterministic, bounded and redacted provider context. Absolute
+    // workspace paths remain local; providers only ever receive @project.
+    let promptContext: PromptContextDetails = { text: '', taskType }
+    const memoryPrefs = await getMemoryPrefs().catch(() => ({ inject: true, injectCount: 5 }))
+    try {
+      if (prj) {
+        const startContext = await backgroundPreparation.projectContext(prj, workspace, memoryPrefs, turnExecution)
+        contextFragments.push(...startContext.sourceFragments)
+      }
+    } catch (error) {
+      console.warn('[prompt] start context skipped:', error)
+    }
+
+    // Add query-specific Memory/Repository retrieval. Repository snippets enter
+    // only after a fresh per-turn approval when the local policy requires it.
+    try {
+      if (memoryPrefs.inject) {
+        promptContext = await buildLocalPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType)
+        if (promptContext.text) {
+          contextFragments.push({
+            id: 'query-context',
+            source: 'repository',
+            trust: 'untrusted_data',
+            scope: 'project',
+            egress: 'local_only',
+            priority: 75,
+            content: promptContext.text,
+          })
+        }
+      }
+    } catch (e) {
+      console.warn('[memory] context injection skipped:', e)
+    }
+
+    const accountScope = await getVerifiedAccountSnapshot()
+    executionGate.assert(turnExecution)
+    if ((accountScope?.principalId ?? (await resolveWorkspacePrincipalId())) !== captured.principalId)
+      throw new Error('Das Benutzerkonto des Auftrags hat sich geändert.')
+    const scopeKey: ContextScopeKey = {
+      principalId: accountScope?.principalId ?? (await resolveWorkspacePrincipalId()),
+      serverInstance: accountScope?.serverInstance ?? 'device-local',
+      projectId: pid,
+      workspaceBindingId: JSON.stringify([workspace?.rootPath ?? '', workspace?.updatedAt ?? '']),
+      sessionId: assistant.id,
+      taskType,
+    }
+    const principalScopeId = JSON.stringify([scopeKey.serverInstance, scopeKey.principalId])
+    checkpointMemoryPrincipal = scopeKey.principalId
+    let taskCreateRecoveryReady = true
+    const pendingTaskCreateVerifications = await loadPendingTaskCreates(principalScopeId, pid).catch(error => {
+      taskCreateRecoveryReady = false
+      console.warn('[task-create] recovery ledger unavailable:', error)
+      return []
+    })
+    executionGate.assert(turnExecution)
+    if (workspace?.rootPath)
+      contextFragments.push({
+        id: 'local-workspace-path',
+        source: 'project',
+        trust: 'policy',
+        scope: 'workspace',
+        egress: 'local_only',
+        priority: 100,
+        content: `Lokaler Projektordner: ${workspace.rootPath}`,
+      })
+    const packages = await buildTargetContextPackages({
+      scopeKey,
+      fragments: contextFragments.map(fragment => ({
+        ...fragment,
+        scope: scopeKey,
+        lifecycle: 'active',
+        sensitivity: 'normal',
+        audiences: ['local_model', 'external_provider'],
+        contentHash: '',
+      })),
+      budget: compactLocalProfile
+        ? { maxChars: 2_400, maxFragments: 6, maxFragmentChars: 500 }
+        : { maxChars: 9_000, maxFragments: 20, maxFragmentChars: 1_800 },
+    })
+    const assistantProfile = await refreshAssistantProfile()
+    executionGate.assert(turnExecution)
+    const localProfilePrompt = localAssistantProfilePrompt(assistantProfile)
+    const baseMessages: WireMessage[] = [
+      {
+        role: 'system',
+        content: composeProviderSystemPrompt(
+          buildSystemPreamble(captured.mode, prj?.name ?? pid, appearance.assistantName),
+          [localProfilePrompt, packages.local.text].filter(Boolean).join('\n\n')
+        ),
+      },
+      ...sanitizeInferenceMessagesForTarget(localConversationHistory(localHistory), 'local_llama_cpp'),
+    ]
+    const externalBaseMessages: WireMessage[] = [
+      {
+        role: 'system',
+        content: composeProviderSystemPrompt(
+          buildSystemPreamble(captured.mode, prj?.name ?? pid, appearance.assistantName),
+          packages.external.text
+        ),
+      },
+      ...sanitizeInferenceMessagesForTarget(history, 'laravel_proxy'),
+    ]
+
+    if (goalInput) {
+      // Detailed goal progress may contain local evidence. It never enters the external packet.
+      baseMessages.push({ role: 'user', content: text })
+      externalBaseMessages.push({ role: 'user', content: `Gespeichertes Nutzerziel: ${goalInput.state.text}` })
+    }
+    let goalReport: Omit<GoalStepResult, 'messageId' | 'fingerprint'> | undefined
+
+    let streamStarted = false
+    executionGate.assert(turnExecution)
+    turnExecution.signal.throwIfAborted()
+    if (isVisible()) void playSfx('loading')
+    const {
+      finalText,
+      requestId,
+      model,
+      provider,
+      useCase,
+      inferenceTarget,
+      routeDecisionId,
+      toolFailures,
+      toolSuccesses,
+      ephemeralDataUsed,
+      tokenUsage,
+      specialistOutcomes,
+      agentRunEvaluations,
+      continuation,
+      interrupted,
+    } = await runAgent({
+      ...turnThinking,
+      effectJournal: createChatEffectJournal({
+        principalId: captured.principalId,
+        projectId: pid,
+        conversationId,
+        runId: handle.runId,
+      }),
+      execution: turnExecution,
+      conversationId,
+      runId: handle.runId,
+      onRunWaiting: state => handle.setWaiting(state),
+      onBudget: progress => {
+        if (turnExecution.signal.aborted) return
+        const next = { ...thinkingBudgets.value }
+        if (progress) next[assistant.id] = { projectId: pid, messageId: assistant.id, progress }
+        else delete next[assistant.id]
+        thinkingBudgets.value = next
+      },
+      agentMode: goalInput?.state.phase !== 'review',
+      toolAccess: captured.readOnlyReview || goalInput?.state.phase === 'review' ? 'read-only' : undefined,
+      goalTracking: goalInput
+        ? {
+            phase: goalInput.state.phase,
+            candidateText:
+              goalInput.state.phase === 'review'
+                ? mutations.getProjectMessages(pid).find(message => message.id === goalInput.state.lastMessageId)
+                    ?.content
+                : undefined,
+            report: report => {
+              goalReport = report
+            },
+          }
+        : undefined,
+      agentTeamPreset: turnTeamPreset,
+      requestAgentTeamApproval: approval =>
+        requestPayloadApproval(
+          {
+            title: `Agententeam freigeben: ${approval.preset}`,
+            scopeLabel: `${prj?.name ?? pid} · ${state.conversations?.find(chat => chat.id === conversationId)?.title ?? 'Chat'}`,
+            destination: approval.destination,
+            hash: approval.packetHash,
+            content: JSON.stringify(
+              {
+                hinweis:
+                  'Externe Agenten erhalten ausschließlich die folgenden Pakete. Die Modellwahl erfolgt pro Rolle auf dem Server. Kosten und Datennutzung stehen bei den Kandidaten.',
+                ...approval,
+              },
+              null,
+              2
+            ),
+          },
+          turnExecution.signal
+        ),
+      continuation: resume?.checkpoint,
+      pendingTaskCreateVerifications,
+      principalScopeId,
+      workspaceBindingId: scopeKey.workspaceBindingId,
+      taskCreateRecoveryReady,
+      projectId: pid,
+      baseMessages,
+      // This list is assembled exclusively through the existing provider-safe
+      // prompt path. Local-only broker fragments are never reused here.
+      externalBaseMessages,
+      contextEgress: externalFallbackAllowed ? 'external_allowed' : 'local_only',
+      routingSettings: {
+        localModelId: captured.expectedLocalModelId,
+        preference:
+          turnRouteMode === 'external' ? 'force_external' : turnRouteMode === 'auto' ? 'ask_external' : 'local_only',
+        experimentalFlashNext,
+      },
+      requestExternalApproval: ({ packetHash, destination, messages: outgoing }) =>
+        requestPayloadApproval(
+          {
+            title: 'Externes Modell: Nachrichten einmal freigeben',
+            scopeLabel: `${prj?.name ?? pid} · ${state.conversations?.find(chat => chat.id === conversationId)?.title ?? 'Chat'}`,
+            destination,
+            hash: packetHash,
+            content: JSON.stringify(outgoing, null, 2),
+          },
+          turnExecution.signal
+        ),
+      mode: captured.mode,
+      getMode: () => mode.value,
+      toolChoice: goalInput ? 'auto' : shouldRequireToolCall(text) ? 'required' : 'auto',
+      taskType: promptContext.taskType,
+      // The composer is a chat contract. The task type stays a context-retrieval
+      // hint; it must not decide the signed capability, which used to change with
+      // single keywords like "test", "plan" or "prüfen" in the user's sentence.
+      requiredCapability: 'chat',
+      contextId: promptContext.contextId,
+      repoId: promptContext.repoId,
+      branch: promptContext.branch,
+      commitSha: promptContext.commitSha,
+      inputSource,
+      signal: turnExecution.signal,
+      onCheckpoint: async checkpoint => {
+        if (turnExecution.signal.aborted || checkpoint.principalScopeId !== principalScopeId) return
+        const targetMessageId = resume?.messageId ?? assistant.id
+        continuations.value = { ...continuations.value, [targetMessageId]: checkpoint }
+        await replacePendingTaskCreates(principalScopeId, pid, checkpoint.pendingTaskCreateVerifications ?? [])
+      },
+
+      onProgress: event => {
+        if (turnExecution.signal.aborted) return
+        const activity = chatActivities.value[assistant.id]
+        if (activity) updateChatActivity(activity, event)
+        // Fixed application phase labels are public; do not read numeric token
+        // ticks or raw tool payloads aloud on every update.
+        if (isVisible() && activity && event.phase === 'tools')
+          void commentarySpeech.enqueueStatus({
+            scope: speechScope,
+            key: `phase:${event.phase}`,
+            text: activityLabel(activity, false),
+          })
+      },
+      onRoundComplete: round => {
+        if (turnExecution.signal.aborted || round.kind !== 'commentary') return
+        const entry = completedCommentary(round)
+        if (!entry) return
+        if (entry.serverSpeechAllowed) {
+          latestPublicCheckpoint = entry.content
+          retainMemoryCheckpoint(entry.content)
+        }
+        const current = mutations.getProjectMessages(pid).find(message => message.id === assistant.id)
+        const previous = current?.meta.commentary ?? []
+        if (previous.some(item => item.id === entry.id)) return
+        mutations.patchMessage(pid, assistant.id, {
+          // Clear only this live slot, after retaining its completed text.
+          content: '',
+          raw: '',
+          parsed: null,
+          meta: { commentary: [...previous, entry], question: '', summary: '', bullets: [] },
+        })
+        if (isVisible()) progressiveSpeech.completeCommentary(entry)
+      },
+      onUsage: usage => {
+        if (turnExecution.signal.aborted) return
+        mutations.patchMessage(pid, assistant.id, { meta: { tokenUsage: usage } })
+      },
+      // Render public answer content as soon as each transport chunk arrives.
+      onToken: raw => {
+        if (turnExecution.signal.aborted) return
+        if (!streamStarted) {
+          streamStarted = true
+          stopAssistantLoading()
+          try {
+            stopSfx('loading')
+          } catch {}
+        }
+        applyStreamedContent(pid, assistant.id, raw, false)
+        if (isVisible() && turnSpeechGeneration === speechGeneration) progressiveSpeech.update()
+      },
+    })
 
     try {
-      await forceScroll('auto')
-      await nextTick()
-      executionGate.assert(turnExecution)
-      startAssistantLoading(pid, assistant.id)
-      // Build the wire history: system preamble + visible user/assistant text.
-      const fullHistory: WireMessage[] = mutations
-        .getProjectMessages(pid)
-        .filter(m => m.id !== assistant.id)
-        .filter(m => m.role === 'user' || m.role === 'assistant')
-        .filter(message => message.meta?.dataHandling !== 'ephemeral')
-        .filter(m => safeTrim(m.content).length > 0)
-        .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
-      const settingsStore = await Store.load('luczor.settings.json')
-      const historyBudget = clampNumber(
-        (await settingsStore.get<number>('client_history_token_budget')) ?? 2400,
-        400,
-        12000
-      )
-      // The laptop profile has an 8k context window. Reduce history and
-      // retrieved project context before native tokenization, rather than
-      // relying on the runtime to recover after a complete prompt is built.
-      const compactLocalProfile = modelUsageSettings.value.localModelId === 'local-tier-light'
-      const localHistory = normalizeConversationHistory(
-        compactLocalProfile
-          ? compactHistory(normalizeConversationHistory(fullHistory), Math.min(historyBudget, 900))
-          : fullHistory
-      )
-      const experimentalFlashNext = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
-      const history = normalizeConversationHistory(
-        compactHistory(normalizeConversationHistory(fullHistory), historyBudget)
-      )
+      stopSfx('loading')
+    } catch {}
+    stopAssistantLoading()
 
-      const contextFragments: PromptFragment[] = []
-      const recentToolContext = buildRecentToolOutcomeContext(
-        mutations.getProjectMessages(pid, { includeHidden: true })
-      )
-      if (recentToolContext) {
-        contextFragments.push({
-          id: 'recent-tool-outcomes',
-          source: 'tool',
-          trust: 'untrusted_data',
-          scope: 'session',
-          egress: 'allowed',
-          priority: 60,
-          content: recentToolContext,
-        })
-      }
-
-      // Keep the active plan in front of the model across turns.
-      const detailedPlan = planningHub.get(pid)
-      const planContext = detailedPlan?.plan
-        ? JSON.stringify({ revision: detailedPlan.revision, status: detailedPlan.status, plan: detailedPlan.plan })
-        : buildPlanContext(pid)
-      if (planContext) {
-        contextFragments.push({
-          id: 'active-plan',
-          source: 'project',
-          trust: 'untrusted_data',
-          scope: 'project',
-          egress: detailedPlan?.plan ? 'local_only' : 'allowed',
-          priority: 80,
-          content: planContext,
-        })
-      }
-
-      // Build one deterministic, bounded and redacted provider context. Absolute
-      // workspace paths remain local; providers only ever receive @project.
-      let promptContext: PromptContextDetails = { text: '', taskType }
-      const memoryPrefs = await getMemoryPrefs().catch(() => ({ inject: true, injectCount: 5 }))
-      try {
-        if (prj) {
-          const startContext = await backgroundPreparation.projectContext(prj, workspace, memoryPrefs, turnExecution)
-          contextFragments.push(...startContext.sourceFragments)
-        }
-      } catch (error) {
-        console.warn('[prompt] start context skipped:', error)
-      }
-
-      // Add query-specific Memory/Repository retrieval. Repository snippets enter
-      // only after a fresh per-turn approval when the local policy requires it.
-      try {
-        if (memoryPrefs.inject) {
-          promptContext = await buildLocalPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType)
-          if (promptContext.text) {
-            contextFragments.push({
-              id: 'query-context',
-              source: 'repository',
-              trust: 'untrusted_data',
-              scope: 'project',
-              egress: 'local_only',
-              priority: 75,
-              content: promptContext.text,
-            })
-          }
-        }
-      } catch (e) {
-        console.warn('[memory] context injection skipped:', e)
-      }
-
-      const accountScope = await getVerifiedAccountSnapshot()
-      executionGate.assert(turnExecution)
-      const scopeKey: ContextScopeKey = {
-        principalId: accountScope?.principalId ?? (await resolveWorkspacePrincipalId()),
-        serverInstance: accountScope?.serverInstance ?? 'device-local',
-        projectId: pid,
-        workspaceBindingId: JSON.stringify([workspace?.rootPath ?? '', workspace?.updatedAt ?? '']),
-        sessionId: assistant.id,
-        taskType,
-      }
-      const principalScopeId = JSON.stringify([scopeKey.serverInstance, scopeKey.principalId])
-      checkpointMemoryPrincipal = scopeKey.principalId
-      let taskCreateRecoveryReady = true
-      const pendingTaskCreateVerifications = await loadPendingTaskCreates(principalScopeId, pid).catch(error => {
-        taskCreateRecoveryReady = false
-        console.warn('[task-create] recovery ledger unavailable:', error)
-        return []
+    if (turnExecution.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    executionGate.assert(turnExecution)
+    {
+      const next = { ...continuations.value }
+      if (resume) delete next[resume.messageId]
+      if (continuation) next[assistant.id] = continuation
+      else delete next[assistant.id]
+      continuations.value = next
+    }
+    if (continuation || interrupted)
+      await handle.interrupt('Fortschritt gesichert. Aktuellen Zustand prüfen und weiterarbeiten.')
+    applyStreamedContent(pid, assistant.id, finalText, true)
+    finishChatActivity(chatActivities.value[assistant.id]!, 'done')
+    // Attach the server-reported routing metadata to the assistant message.
+    {
+      const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
+      mutations.patchMessage(pid, assistant.id, {
+        meta: {
+          ...(current?.meta ?? {}),
+          model,
+          provider,
+          useCase,
+          inferenceTarget,
+          routeDecisionId,
+          tokenUsage,
+          specialistOutcomes: ephemeralDataUsed ? undefined : specialistOutcomes,
+          serverSpeechAllowed: !ephemeralDataUsed,
+          dataHandling: ephemeralDataUsed ? 'ephemeral' : 'syncable',
+        },
       })
-      executionGate.assert(turnExecution)
-      if (workspace?.rootPath)
-        contextFragments.push({
-          id: 'local-workspace-path',
-          source: 'project',
-          trust: 'policy',
-          scope: 'workspace',
-          egress: 'local_only',
-          priority: 100,
-          content: `Lokaler Projektordner: ${workspace.rootPath}`,
-        })
-      const packages = await buildTargetContextPackages({
-        scopeKey,
-        fragments: contextFragments.map(fragment => ({
-          ...fragment,
-          scope: scopeKey,
-          lifecycle: 'active',
-          sensitivity: 'normal',
-          audiences: ['local_model', 'external_provider'],
-          contentHash: '',
-        })),
-        budget: compactLocalProfile
-          ? { maxChars: 2_400, maxFragments: 6, maxFragmentChars: 500 }
-          : { maxChars: 9_000, maxFragments: 20, maxFragmentChars: 1_800 },
+    }
+    if (requestId) {
+      const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
+      mutations.patchMessage(pid, assistant.id, {
+        meta: { ...(current?.meta ?? {}), llmRequestId: requestId, userFeedback: null } as any,
       })
-      const assistantProfile = await refreshAssistantProfile()
-      executionGate.assert(turnExecution)
-      const localProfilePrompt = localAssistantProfilePrompt(assistantProfile)
-      const baseMessages: WireMessage[] = [
-        {
-          role: 'system',
-          content: composeProviderSystemPrompt(
-            buildSystemPreamble(mode.value, prj?.name ?? pid, appearance.assistantName),
-            [localProfilePrompt, packages.local.text].filter(Boolean).join('\n\n')
-          ),
-        },
-        ...sanitizeInferenceMessagesForTarget(localConversationHistory(localHistory), 'local_llama_cpp'),
-      ]
-      const externalBaseMessages: WireMessage[] = [
-        {
-          role: 'system',
-          content: composeProviderSystemPrompt(
-            buildSystemPreamble(mode.value, prj?.name ?? pid, appearance.assistantName),
-            packages.external.text
-          ),
-        },
-        ...sanitizeInferenceMessagesForTarget(history, 'laravel_proxy'),
-      ]
-
-      if (goalInput) {
-        // Detailed goal progress may contain local evidence. It never enters the external packet.
-        baseMessages.push({ role: 'user', content: text })
-        externalBaseMessages.push({ role: 'user', content: `Gespeichertes Nutzerziel: ${goalInput.state.text}` })
-      }
-      let goalReport: Omit<GoalStepResult, 'messageId' | 'fingerprint'> | undefined
-
-      let streamStarted = false
-      executionGate.assert(turnExecution)
-      if (abort.signal.aborted) throw new DOMException('Aborted', 'AbortError')
-      void playSfx('loading')
-      const {
-        finalText,
-        requestId,
-        model,
-        provider,
-        useCase,
-        inferenceTarget,
-        routeDecisionId,
-        toolFailures,
-        toolSuccesses,
-        ephemeralDataUsed,
-        tokenUsage,
-        specialistOutcomes,
-        agentRunEvaluations,
-        continuation,
-        interrupted,
-      } = await runAgent({
-        ...turnThinking,
-        onBudget: progress => {
-          if (turnExecution.signal.aborted || activeTurn.value?.messageId !== assistant.id) return
-          activeThinkingBudget.value = progress ? { projectId: pid, messageId: assistant.id, progress } : null
-        },
-        agentMode: goalInput?.state.phase !== 'review',
-        toolAccess: goalInput?.state.phase === 'review' ? 'read-only' : undefined,
-        goalTracking: goalInput
-          ? {
-              phase: goalInput.state.phase,
-              candidateText:
-                goalInput.state.phase === 'review'
-                  ? mutations.getProjectMessages(pid).find(message => message.id === goalInput.state.lastMessageId)
-                      ?.content
-                  : undefined,
-              report: report => {
-                goalReport = report
-              },
-            }
-          : undefined,
-        agentTeamPreset: turnTeamPreset,
-        requestAgentTeamApproval: approval =>
-          requestPayloadApproval(
+    }
+    const evaluations: AgentRunEvaluation[] = agentRunEvaluations?.length
+      ? agentRunEvaluations
+      : requestId
+        ? [
             {
-              title: `Agententeam freigeben: ${approval.preset}`,
-              destination: approval.destination,
-              hash: approval.packetHash,
-              content: JSON.stringify(
-                {
-                  hinweis:
-                    'Externe Agenten erhalten ausschließlich die folgenden Pakete. Die Modellwahl erfolgt pro Rolle auf dem Server. Kosten und Datennutzung stehen bei den Kandidaten.',
-                  ...approval,
-                },
-                null,
-                2
-              ),
+              requestId,
+              role: 'worker',
+              toolFailures,
+              toolSuccesses,
+              continuation: Boolean(continuation),
+              interrupted,
             },
-            turnExecution.signal
-          ),
-        continuation: resume?.checkpoint,
-        pendingTaskCreateVerifications,
-        principalScopeId,
-        workspaceBindingId: scopeKey.workspaceBindingId,
-        taskCreateRecoveryReady,
-        projectId: pid,
-        baseMessages,
-        // This list is assembled exclusively through the existing provider-safe
-        // prompt path. Local-only broker fragments are never reused here.
-        externalBaseMessages,
-        contextEgress: externalFallbackAllowed ? 'external_allowed' : 'local_only',
-        routingSettings: {
-          preference:
-            turnRouteMode === 'external' ? 'force_external' : turnRouteMode === 'auto' ? 'ask_external' : 'local_only',
-          experimentalFlashNext,
-        },
-        requestExternalApproval: ({ packetHash, destination, messages: outgoing }) =>
-          requestPayloadApproval(
-            {
-              title: 'Externes Modell: Nachrichten einmal freigeben',
-              destination,
-              hash: packetHash,
-              content: JSON.stringify(outgoing, null, 2),
-            },
-            turnExecution.signal
-          ),
-        mode: mode.value,
-        getMode: () => mode.value,
-        toolChoice: goalInput ? 'auto' : shouldRequireToolCall(text) ? 'required' : 'auto',
-        taskType: promptContext.taskType,
-        // The composer is a chat contract. The task type stays a context-retrieval
-        // hint; it must not decide the signed capability, which used to change with
-        // single keywords like "test", "plan" or "prüfen" in the user's sentence.
-        requiredCapability: 'chat',
-        contextId: promptContext.contextId,
-        repoId: promptContext.repoId,
-        branch: promptContext.branch,
-        commitSha: promptContext.commitSha,
-        inputSource,
-        signal: turnExecution.signal,
-        onCheckpoint: async checkpoint => {
-          if (turnExecution.signal.aborted || checkpoint.principalScopeId !== principalScopeId) return
-          const targetMessageId = resume?.messageId ?? assistant.id
-          continuations.value = { ...continuations.value, [targetMessageId]: checkpoint }
-          await replacePendingTaskCreates(principalScopeId, pid, checkpoint.pendingTaskCreateVerifications ?? [])
-        },
+          ]
+        : []
+    for (const evaluation of evaluations) evaluateAgentRun(evaluation)
+    await saveAppStateStrict(state)
 
-        onProgress: event => {
-          if (turnExecution.signal.aborted) return
-          const activity = chatActivities.value[assistant.id]
-          if (activity) updateChatActivity(activity, event)
-          // Fixed application phase labels are public; do not read numeric token
-          // ticks or raw tool payloads aloud on every update.
-          if (activity && event.phase === 'tools')
-            void commentarySpeech.enqueueStatus({
-              scope: speechScope,
-              key: `phase:${event.phase}`,
-              text: activityLabel(activity, false),
-            })
-        },
-        onRoundComplete: round => {
-          if (turnExecution.signal.aborted || round.kind !== 'commentary') return
-          const entry = completedCommentary(round)
-          if (!entry) return
-          if (entry.serverSpeechAllowed) {
-            latestPublicCheckpoint = entry.content
-            retainMemoryCheckpoint(entry.content)
-          }
-          const current = mutations.getProjectMessages(pid).find(message => message.id === assistant.id)
-          const previous = current?.meta.commentary ?? []
-          if (previous.some(item => item.id === entry.id)) return
-          mutations.patchMessage(pid, assistant.id, {
-            // Clear only this live slot, after retaining its completed text.
-            content: '',
-            raw: '',
-            parsed: null,
-            meta: { commentary: [...previous, entry], question: '', summary: '', bullets: [] },
-          })
-          progressiveSpeech.completeCommentary(entry)
-        },
-        onUsage: usage => {
-          if (turnExecution.signal.aborted) return
-          mutations.patchMessage(pid, assistant.id, { meta: { tokenUsage: usage } })
-        },
-        // Render public answer content as soon as each transport chunk arrives.
-        onToken: raw => {
-          if (turnExecution.signal.aborted) return
-          if (!streamStarted) {
-            streamStarted = true
-            stopAssistantLoading()
-            try {
-              stopSfx('loading')
-            } catch {}
-          }
-          applyStreamedContent(pid, assistant.id, raw, false)
-          if (turnSpeechGeneration === speechGeneration) progressiveSpeech.update()
-        },
-      })
-
+    if (isVisible()) setStatus('idle')
+    if (isVisible() && turnSpeechGeneration === speechGeneration) progressiveSpeech.completeAnswer()
+    if (!ephemeralDataUsed && !continuation && !interrupted)
+      void rememberExchange(pid, text, assistant.id, scopeKey.principalId, turnExecution)
+    if (goalInput) {
+      if (interrupted)
+        throw new Error(
+          'Die Zielbearbeitung wurde durch einen Modellfehler unterbrochen. Der Fortschritt bleibt erhalten.'
+        )
+      if (continuation) return { status: 'continue', summary: finalText.slice(0, 1200), messageId: assistant.id }
+      if (!goalReport) throw new Error('Das Modell hat keinen prüfbaren Zielstatus geliefert. Das Ziel bleibt offen.')
+      if (goalReport.status === 'completed' && (toolFailures > 0 || !goalReport.evidence?.trim()))
+        return {
+          status: 'continue',
+          summary: 'Die Abschlussprüfung ist noch nicht erfolgreich.',
+          messageId: assistant.id,
+        }
+      return { ...goalReport, messageId: assistant.id }
+    }
+  } catch (e: any) {
+    progressiveSpeech.cancel()
+    const ownsCurrentTurn = isVisible()
+    if (ownsCurrentTurn) {
       try {
         stopSfx('loading')
       } catch {}
       stopAssistantLoading()
+    }
 
-      if (turnExecution.signal.aborted) throw new DOMException('Aborted', 'AbortError')
-      executionGate.assert(turnExecution)
-      {
-        const next = { ...continuations.value }
-        if (resume) delete next[resume.messageId]
-        if (continuation) next[assistant.id] = continuation
-        else delete next[assistant.id]
-        continuations.value = next
-      }
-      applyStreamedContent(pid, assistant.id, finalText, true)
-      finishChatActivity(chatActivities.value[assistant.id]!, 'done')
-      // Attach the server-reported routing metadata to the assistant message.
-      {
-        const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
-        mutations.patchMessage(pid, assistant.id, {
-          meta: {
-            ...(current?.meta ?? {}),
-            model,
-            provider,
-            useCase,
-            inferenceTarget,
-            routeDecisionId,
-            tokenUsage,
-            specialistOutcomes: ephemeralDataUsed ? undefined : specialistOutcomes,
-            serverSpeechAllowed: !ephemeralDataUsed,
-            dataHandling: ephemeralDataUsed ? 'ephemeral' : 'syncable',
-          },
-        })
-      }
-      if (requestId) {
-        const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
-        mutations.patchMessage(pid, assistant.id, {
-          meta: { ...(current?.meta ?? {}), llmRequestId: requestId, userFeedback: null } as any,
-        })
-      }
-      const evaluations: AgentRunEvaluation[] = agentRunEvaluations?.length
-        ? agentRunEvaluations
-        : requestId
-          ? [
-              {
-                requestId,
-                role: 'worker',
-                toolFailures,
-                toolSuccesses,
-                continuation: Boolean(continuation),
-                interrupted,
-              },
-            ]
-          : []
-      for (const evaluation of evaluations) evaluateAgentRun(evaluation)
+    const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
+    const currentContent = safeTrim(current?.content)
 
-      setStatus('idle')
-      if (turnSpeechGeneration === speechGeneration) progressiveSpeech.completeAnswer()
-      if (!ephemeralDataUsed && !continuation && !interrupted)
-        void rememberExchange(pid, text, assistant.id, scopeKey.principalId, turnExecution)
-      if (goalInput) {
-        if (interrupted)
-          throw new Error(
-            'Die Zielbearbeitung wurde durch einen Modellfehler unterbrochen. Der Fortschritt bleibt erhalten.'
-          )
-        if (continuation) return { status: 'continue', summary: finalText.slice(0, 1200), messageId: assistant.id }
-        if (!goalReport) throw new Error('Das Modell hat keinen prüfbaren Zielstatus geliefert. Das Ziel bleibt offen.')
-        if (goalReport.status === 'completed' && (toolFailures > 0 || !goalReport.evidence?.trim()))
-          return {
-            status: 'continue',
-            summary: 'Die Abschlussprüfung ist noch nicht erfolgreich.',
-            messageId: assistant.id,
-          }
-        return { ...goalReport, messageId: assistant.id }
-      }
-    } catch (e: any) {
-      progressiveSpeech.cancel()
-      const ownsCurrentTurn = turnGeneration === chatRunGeneration && activeTurn.value?.messageId === assistant.id
-      if (ownsCurrentTurn) {
-        try {
-          stopSfx('loading')
-        } catch {}
-        stopAssistantLoading()
-      }
-
-      const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
-      const currentContent = safeTrim(current?.content)
-
-      if (turnExecution.signal.aborted) {
-        finishChatActivity(chatActivities.value[assistant.id]!, 'canceled')
-        if (ownsCurrentTurn) setStatus('idle')
-        void recordDebugEvent('warn', 'assistant_request_interrupted', {
-          code: interruptionCode(turnExecution.signal),
-        })
-        mutations.patchMessage(pid, assistant.id, {
-          content: currentContent || interruptionMessage(turnExecution.signal),
-          meta: { ...(current?.meta ?? {}), isLoading: false } as any,
-        })
-        if (goalInput) throw new DOMException('Zielbearbeitung unterbrochen.', 'AbortError')
-        return
-      }
-
-      finishChatActivity(chatActivities.value[assistant.id]!, 'failed')
-      if (ownsCurrentTurn) setStatus('error')
-      const transportInterruption = unexpectedInferenceInterruption(e)
-      if (transportInterruption)
-        void recordDebugEvent('warn', 'assistant_request_interrupted', { code: transportInterruption.code })
+    if (turnExecution.signal.aborted) {
+      finishChatActivity(chatActivities.value[assistant.id]!, 'canceled')
+      if (ownsCurrentTurn) setStatus('idle')
+      void recordDebugEvent('warn', 'assistant_request_interrupted', {
+        code: interruptionCode(turnExecution.signal),
+      })
       mutations.patchMessage(pid, assistant.id, {
-        content: [currentContent, `[Fehler] ${transportInterruption?.message ?? e?.message ?? String(e)}`]
-          .filter(Boolean)
-          .join('\n\n'),
+        content: currentContent || interruptionMessage(turnExecution.signal),
         meta: { ...(current?.meta ?? {}), isLoading: false } as any,
       })
-      if (goalInput) throw e
-    } finally {
-      retainMemoryCheckpoint(latestPublicCheckpoint, true)
-      if (turnGeneration === chatRunGeneration) {
-        try {
-          stopSfx('loading')
-        } catch {}
-      }
-
-      if (abortController.value === abort) {
-        abortController.value = null
-        sending.value = false
-        cancelCurrent = null
-      }
-      if (activeTurn.value?.messageId === assistant.id) activeTurn.value = null
-      if (activeThinkingBudget.value?.messageId === assistant.id) activeThinkingBudget.value = null
+      throw turnExecution.signal.reason ?? new DOMException('Auftrag unterbrochen.', 'AbortError')
     }
+
+    finishChatActivity(chatActivities.value[assistant.id]!, 'failed')
+    if (ownsCurrentTurn) setStatus('error')
+    const transportInterruption = unexpectedInferenceInterruption(e)
+    if (transportInterruption)
+      void recordDebugEvent('warn', 'assistant_request_interrupted', { code: transportInterruption.code })
+    mutations.patchMessage(pid, assistant.id, {
+      content: [currentContent, `[Fehler] ${transportInterruption?.message ?? e?.message ?? String(e)}`]
+        .filter(Boolean)
+        .join('\n\n'),
+      meta: { ...(current?.meta ?? {}), isLoading: false } as any,
+    })
+    throw e
   } finally {
-    if (turnGeneration === chatRunGeneration) sendAdmission.value = false
+    retainMemoryCheckpoint(latestPublicCheckpoint, true)
+    if (isVisible()) stopSfx('loading')
+    const next = { ...thinkingBudgets.value }
+    delete next[assistant.id]
+    thinkingBudgets.value = next
+    scheduleSave(state)
   }
 }
 
@@ -2071,14 +2222,27 @@ const miniChat = useMiniChatHost({
   chat: () =>
     projectChatBinding(
       activeProject.value,
-      state.messages,
-      getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, activeProjectId.value) ?? [],
-      sending.value || sendAdmission.value
+      messages.value,
+      (getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, activeProjectId.value) ?? []).filter(
+        call => call.conversationId === activeConversationId.value
+      ),
+      sending.value || sendAdmission.value,
+      activeConversationId.value
     ),
   sendChat: async (text, projectId) => {
     await send(false, undefined, { text, projectId })
   },
   stopChat: stopGenerating,
+  conversationId: () => activeConversationId.value,
+  conversations: () =>
+    (state.conversations ?? [])
+      .filter(chat => chat.projectId === activeProjectId.value && !chat.archivedAt)
+      .map(chat => ({ id: chat.id, title: chat.title, busy: chatRuns.hasLive(chat.id) })),
+  selectConversation,
+  newConversation: projectId => {
+    openProject(projectId)
+    newChat()
+  },
   selectProject: async id => {
     if (conversationBusy.value) throw new Error('Der aktuelle Auftrag läuft noch.')
     if (!projects.value.some(project => project.id === id && !project.archivedAt))
@@ -2167,10 +2331,11 @@ const miniChat = useMiniChatHost({
 })
 // Voice and both composers must share admission and mute state, including hotkeys.
 const conversationBusy = computed(
-  () => sending.value || sendAdmission.value || miniChat.state.busy || showPlanning.value || planningBusy.value
+  () => sending.value || sendAdmission.value || showPlanning.value || planningBusy.value
 )
 const autonomousGoal = useAutonomousGoal({
   projectId: () => activeProjectId.value,
+  conversationId: () => activeConversationId.value,
   available: () =>
     appReady.value &&
     !conversationBusy.value &&
@@ -2208,12 +2373,12 @@ watch(
 const backgroundPreparation = useBackgroundPreparation({
   project: () => activeProject.value,
   workspace: () => activeWorkspace.value,
-  busy: () => conversationBusy.value || hud.killSwitch,
+  busy: () => chatRuns.hasLive() || conversationBusy.value || hud.killSwitch,
   draft: () => input.value,
 })
 useIdleOptimization({
   project: () => activeProject.value,
-  busy: () => conversationBusy.value || hud.killSwitch,
+  busy: () => chatRuns.hasLive() || conversationBusy.value || hud.killSwitch,
   draft: () => input.value,
 })
 watch(conversationBusy, busy => voiceInputSession.setMuted(busy || voiceMuteDepth > 0), { flush: 'sync' })
@@ -2223,6 +2388,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
 </script>
 
 <template>
+  <DeviceClusterPanel :open="showDeviceCluster" :project-id="activeProjectId" @close="showDeviceCluster = false" />
   <PayloadApproval />
   <CloudProjectsPanel
     :open="showCloudProjects"
@@ -2297,6 +2463,15 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       :title="appearance.assistantName"
       :items="projectItems"
       :active-id="activeProjectId"
+      :active-chat-id="activeConversationId"
+      @select-chat="selectConversation"
+      @rename-chat="renameConversation"
+      @new-project-chat="
+        projectId => {
+          openProject(projectId)
+          newChat()
+        }
+      "
       @select="openProject"
       @rename="renameProject"
       @new-chat="newChat"
@@ -2307,6 +2482,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       @planning="openPlanning()"
       @workflows="openWorkflows()"
       @cloud-projects="showCloudProjects = true"
+      @devices="showDeviceCluster = true"
     />
 
     <main class="main-col">
@@ -2334,6 +2510,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             />
           </button>
           <div class="header__workspace">
+            {{ activeConversation?.title ?? 'Chat' }} ·
             {{ activeWorkspace ? `@project · ${activeWorkspace.displayName}` : '@project · kein Ordner' }}
           </div>
         </div>
@@ -2874,6 +3051,24 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       </div>
 
       <div ref="composerShell" class="ai-main-composer">
+        <div
+          v-if="interruptedRun && !sending"
+          class="ai-muted"
+          role="status"
+          style="display: flex; align-items: center; gap: 8px; margin-bottom: 6px"
+        >
+          <span>Unterbrochener Auftrag · Fortschritt bleibt erhalten.</span>
+          <button type="button" class="ai-button" @click="prepareInterruptedReview">Stand zuerst prüfen</button>
+        </div>
+        <div
+          v-if="sending && input.trim()"
+          class="ai-muted"
+          style="display: flex; justify-content: flex-end; margin-bottom: 6px"
+        >
+          <button type="button" class="ai-button" :disabled="sendAdmission" @click="send()">
+            Nachricht nach diesem Auftrag senden
+          </button>
+        </div>
         <PromptBar
           ref="promptBar"
           v-model="input"
@@ -2888,13 +3083,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           :commands="promptCommands"
           @input="setComposerInput(input, 'keyboard')"
           @send="send"
-          @stop="
-            planningBusy
-              ? planningHub.cancel(activeProjectId)
-              : miniChat.state.busy
-                ? miniChat.stop()
-                : stopGenerating()
-          "
+          @stop="sending ? stopGenerating() : planningBusy ? planningHub.cancel(activeProjectId) : stopGenerating()"
           @record="togglePushToTalk"
           @listen="toggleListening"
           @voice-start="startConfiguredVoice"

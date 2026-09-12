@@ -2,6 +2,8 @@ import { state } from '@/state/store'
 import { agentProjectSnapshot, prepareAgentJob } from './hub'
 import { executePreparedAgentJob } from './managedJob'
 import type { AgentExecutionOptions, AgentPermission, AgentRole, AgentRunResult } from './types'
+import type { WorkflowArtifactScope } from '@/services/workflows/browser'
+import { freezeAgentWorkflowScope } from './workflowScope'
 
 export type WorkflowAgentResult = Readonly<{
   ok: boolean
@@ -28,7 +30,12 @@ export async function runWorkflowAgent(
   projectDir?: string,
   signal?: AbortSignal,
   explicitProjectId?: string,
-  options: AgentExecutionOptions & { model?: string; role?: AgentRole; permission?: AgentPermission } = {}
+  options: AgentExecutionOptions & {
+    model?: string
+    role?: AgentRole
+    permission?: AgentPermission
+    workflowScope?: WorkflowArtifactScope
+  } = {}
 ): Promise<WorkflowAgentResult> {
   const adapterId = agent.trim().toLowerCase()
   if (adapterId !== 'codex' && adapterId !== 'claude') {
@@ -41,7 +48,8 @@ export async function runWorkflowAgent(
   if (!project) throw new Error('Für den Workflow ist kein aktives Projekt verfügbar.')
   const snapshot = await agentProjectSnapshot(project.id)
   if (!snapshot.rootPath) throw new Error('Dem aktiven Projekt ist kein verfügbarer Projektordner zugeordnet.')
-  if (projectDir && canonicalPath(projectDir) !== canonicalPath(snapshot.rootPath)) {
+  const workflowScope = freezeAgentWorkflowScope(options.workflowScope, snapshot)
+  if (projectDir && canonicalPath(projectDir) !== canonicalPath(workflowScope?.expectedRootPath ?? snapshot.rootPath)) {
     throw new Error('Der Workflow-Projektordner entspricht nicht dem aktiven Luczor-Projekt.')
   }
   const job = await prepareAgentJob({
@@ -49,6 +57,7 @@ export async function runWorkflowAgent(
     adapterId,
     prompt,
     ...options,
+    workflowScope,
     role: options.role ?? 'implementer',
     permission: options.permission ?? 'workspace-write',
     includeMemory: false,

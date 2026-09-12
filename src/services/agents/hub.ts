@@ -11,6 +11,7 @@ import { createCodexAgentAdapter, listCodexSessions, getCodexModelCapabilities }
 import { createClaudeAgentAdapter, CLAUDE_CAPABILITIES } from './claudeAgent'
 import { selectAgentEffort } from './effort'
 import { resolveAgentDefaultModel } from './defaultModel'
+import { freezeAgentWorkflowScope } from './workflowScope'
 import { createModelAgentAdapter, type ModelAgentApprovalRequest } from './modelAgent'
 import type { AgentJobInput, AgentPermission, AgentProjectSnapshot, AgentExecutionOptions } from './types'
 
@@ -45,7 +46,11 @@ export async function validateAgentScope(project: AgentProjectSnapshot, permissi
   validateControls(permission)
   if ((await resolveWorkspacePrincipalId()) !== project.principalId)
     throw new Error('Das aktive Konto hat sich geändert.')
-  if (!state.projects.some(item => item.id === project.projectId && !item.archivedAt && canAccessCloudProject(item, project.principalId)))
+  if (
+    !state.projects.some(
+      item => item.id === project.projectId && !item.archivedAt && canAccessCloudProject(item, project.principalId)
+    )
+  )
     throw new Error('Das Projekt ist nicht mehr aktiv.')
   const workspace = await getProjectWorkspace(project.projectId, project.principalId)
   if (
@@ -116,6 +121,7 @@ export async function agentProjectSnapshot(projectId: string): Promise<AgentProj
 
 export async function prepareAgentJob(
   input: AgentExecutionOptions & {
+    workflowScope?: AgentJobInput['workflowScope']
     projectId: string
     adapterId: 'codex' | 'claude' | 'local' | 'policy'
     prompt: string
@@ -141,6 +147,12 @@ export async function prepareAgentJob(
   const project = state.projects.find(item => item.id === input.projectId)
   if (!project) throw new Error('Projekt nicht gefunden.')
   const snapshot = await agentProjectSnapshot(project.id)
+  const workflowScope = freezeAgentWorkflowScope(input.workflowScope, snapshot)
+  if (
+    workflowScope &&
+    (input.resume || !['codex', 'claude'].includes(input.adapterId) || input.promptAssembly !== 'exact-reviewed')
+  )
+    throw new Error('Workflow-Arbeitskopien benötigen einen eigenständigen, geprüften Coding-Auftrag.')
   input.assertExecution?.()
   if (
     input.expectedProject &&
@@ -208,6 +220,7 @@ export async function prepareAgentJob(
   input.assertExecution?.()
   const job = agentHub.enqueue({
     project: snapshot,
+    workflowScope,
     adapterId: input.adapterId,
     prompt: assembledPrompt,
     role,

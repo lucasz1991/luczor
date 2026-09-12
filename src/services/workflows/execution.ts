@@ -23,6 +23,7 @@ import { runWorkflowLlm } from './llm'
 import { createWorkflowBrowser } from './browser'
 import { runWorkflowImage } from './image'
 import { retainWorkflowResources, releaseWorkflowResources, sweepWorkflowResources } from './runResources'
+import { prepareMirrorTestWorkspace } from '@/services/coordination/mirror'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 
@@ -59,16 +60,29 @@ export async function runWorkflowDeviceJob(
     throw new Error('workflow_execution_account_changed')
   const scope = await workflowAccountScope(config)
   const localProjectId = projectLocalIdForServer(metadata.project_id, account.principalId)
-  const workspace = await getProjectWorkspace(localProjectId, account.principalId)
+  let workspace = await getProjectWorkspace(localProjectId, account.principalId)
   assertSession()
   if (!workspace || workspace.status !== 'ready' || !workspace.updatedAt)
     throw new Error('workflow_execution_workspace_unavailable')
   if (
+    !metadata.mirror_manifest_id &&
     metadata.file_scope === 'workspace' &&
     metadata.workspace_root_id &&
     canonicalWorkflowPath(metadata.workspace_root_id) !== canonicalWorkflowPath(workspace.rootPath)
   )
     throw new Error('workflow_execution_root_changed')
+  if (metadata.mirror_manifest_id) {
+    const workcopy = await prepareMirrorTestWorkspace(
+      localProjectId,
+      metadata.mirror_manifest_id,
+      metadata.resource_run ?? metadata.run,
+      account,
+      parentTicket
+    )
+    assertSession()
+    workspace = { ...workspace, rootPath: workcopy.rootPath, updatedAt: workcopy.workspaceUpdatedAt }
+  }
+  if (!workspace.updatedAt) throw new Error('workflow_execution_workspace_revision_missing')
   const controller = new AbortController()
   let automated = false
   const automationRevision = workflowAutomationRevision(scope, metadata.definition_id ?? 0)
@@ -243,7 +257,7 @@ function workflowPrimitives(
   assert: () => void,
   automated: boolean
 ): WorkflowTaskPrimitives {
-  const projectId = bundle.workflow.project_id!
+  const projectId = workspace.projectId
   const workspaceIdentity = {
     principalId,
     projectId,
@@ -270,7 +284,10 @@ function workflowPrimitives(
     httpFetch: (method, url, headers, body) =>
       invokeTask('wf_http_request', { method, url, headers, body, timeout_seconds: 30 }),
     runAgent: (agent, prompt, projectDir, options) =>
-      runWorkflowAgent(agent, prompt, projectDir ?? workspace.rootPath, ticket.signal, projectId, options),
+      runWorkflowAgent(agent, prompt, projectDir ?? workspace.rootPath, ticket.signal, projectId, {
+        ...options,
+        ...(bundle.workflow.mirror_manifest_id ? { workflowScope: artifactScope } : {}),
+      }),
     runLlm: input => runWorkflowLlm(input, { projectId, ticket, thinkingTier: bundle.workflow.thinking_tier }),
     runAgentFlow: async (team, params) => {
       const { runWorkflowAgentFlow } = await import('./agentFlow')
@@ -281,6 +298,7 @@ function workflowPrimitives(
         thinkingTier: bundle.workflow.thinking_tier,
         runPublicId: bundle.workflow.run,
         stepId: bundle.workflow.step_id,
+        ...(bundle.workflow.mirror_manifest_id ? { workflowScope: artifactScope } : {}),
       })
     },
     browserSession: createWorkflowBrowser({
@@ -299,6 +317,8 @@ function workflowPrimitives(
         workflowExecutionId: bundle.workflow.execution_id!,
       }),
     fileRead: async path => {
+      if (bundle.workflow.mirror_manifest_id)
+        return invokeTask('wf_scoped_file_read', { scope: artifactScope, path }, false)
       if (!workspaceFiles) return invokeTask('wf_file_read', { path }, false)
       const result = await invokeTask<{ content: string; bytes: number; truncated: boolean }>(
         'project_fs_read',
@@ -308,6 +328,8 @@ function workflowPrimitives(
       return result
     },
     fileWrite: async (path, content) => {
+      if (bundle.workflow.mirror_manifest_id)
+        return invokeTask('wf_scoped_file_write', { scope: artifactScope, path, content })
       if (!workspaceFiles) return invokeTask('wf_file_write', { path, content })
       return invokeTask('project_fs_write', { ...workspaceIdentity, path, content, originRunId: bundle.workflow.run })
     },

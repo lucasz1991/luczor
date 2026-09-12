@@ -61,6 +61,23 @@ function deferred<T>() {
 }
 
 describe('native Codex agent adapter', () => {
+  it('sends the workcopy scope to native execution without changing the canonical source snapshot', async () => {
+    const fixture = harness()
+    fixture.invoke.mockResolvedValueOnce(snapshot('completed', 'Done'))
+    const original = request()
+    const workflowScope = {
+      principalId: original.project.principalId,
+      projectId: original.project.projectId,
+      runId: '11111111-1111-4111-8111-111111111111',
+      expectedRootPath: 'E:/workcopy',
+      expectedWorkspaceUpdatedAt: original.project.workspaceUpdatedAt!,
+    }
+    await createCodexAgentAdapter(fixture.dependencies).run({ ...original, workflowScope })
+    expect(fixture.invoke).toHaveBeenCalledWith('codex_job_start', {
+      payload: expect.objectContaining({ expectedRootPath: 'E:/workcopy', workflowScope }),
+    })
+    expect(original.project.rootPath).toBe('E:\\project')
+  })
   it('does not dispatch when cancelled during native authorization', async () => {
     const fixture = harness()
     const controller = new AbortController()

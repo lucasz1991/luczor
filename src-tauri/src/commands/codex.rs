@@ -82,6 +82,7 @@ impl Default for CodexJobs {
 }
 
 struct Job {
+    workflow_scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
     principal_id: String,
     project_id: String,
     root: PathBuf,
@@ -130,6 +131,8 @@ impl CodexPermission {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CodexStartPayload {
+    #[serde(default)]
+    workflow_scope: Option<super::workflow_artifacts::WorkflowArtifactScope>,
     principal_id: String,
     project_id: String,
     expected_root_path: String,
@@ -189,7 +192,9 @@ pub struct CodexRuntimeStatus {
 }
 
 #[tauri::command]
-pub async fn codex_runtime_status(window: crate::commands::CallerWebview) -> Result<CodexRuntimeStatus, String> {
+pub async fn codex_runtime_status(
+    window: crate::commands::CallerWebview,
+) -> Result<CodexRuntimeStatus, String> {
     ensure_main_webview(&window)?;
     Ok(CodexRuntimeStatus {
         available: find_codex().is_some(),
@@ -355,8 +360,10 @@ pub async fn codex_job_start(
         payload.effort,
         payload.capability_revision.as_deref(),
     )?;
-    let (root, binding_version) =
-        agent_workspace_snapshot(&app, &payload.principal_id, &payload.project_id)?;
+    let (root, binding_version) = match &payload.workflow_scope {
+        Some(scope) => scope.agent_root(&app, &payload.principal_id, &payload.project_id)?,
+        None => agent_workspace_snapshot(&app, &payload.principal_id, &payload.project_id)?,
+    };
     verify_expected_binding(
         &root,
         binding_version,
@@ -435,6 +442,7 @@ pub async fn codex_job_start(
         turn_failed: false,
     };
     let job = Arc::new(Job {
+        workflow_scope: payload.workflow_scope.clone(),
         principal_id: payload.principal_id.clone(),
         project_id: payload.project_id.clone(),
         root,
@@ -901,14 +909,21 @@ fn run_job(
     }
     check_execution(job)?;
     ensure_binding(app, job)?;
+    // Model defaults remain owned by the canonical project configuration, even
+    // when this run executes against its isolated, frozen workcopy.
+    let (config_root, config_revision) = if job.workflow_scope.is_some() {
+        agent_workspace_snapshot(app, &job.principal_id, &job.project_id)?
+    } else {
+        (job.root.clone(), job.binding_version)
+    };
     super::agent_effort::validate_default_binding(
         app,
         &super::agent_effort::DefaultModelRequest {
             adapter_id: "codex".into(),
             principal_id: job.principal_id.clone(),
             project_id: job.project_id.clone(),
-            expected_root_path: job.root.to_string_lossy().into_owned(),
-            expected_workspace_updated_at: job.binding_version,
+            expected_root_path: config_root.to_string_lossy().into_owned(),
+            expected_workspace_updated_at: config_revision,
         },
         payload.model.as_deref(),
         payload.default_model_revision.as_deref(),
@@ -1064,7 +1079,10 @@ fn check_execution(job: &Job) -> Result<(), String> {
 }
 
 fn ensure_binding(app: &AppHandle, job: &Job) -> Result<(), String> {
-    let current = agent_workspace_snapshot(app, &job.principal_id, &job.project_id)?;
+    let current = match &job.workflow_scope {
+        Some(scope) => scope.agent_root(app, &job.principal_id, &job.project_id)?,
+        None => agent_workspace_snapshot(app, &job.principal_id, &job.project_id)?,
+    };
     if current != (job.root.clone(), job.binding_version) {
         Err("Project workspace binding changed; Codex job stopped.".into())
     } else {
@@ -1508,6 +1526,7 @@ mod tests {
 
     fn job() -> Job {
         Job {
+            workflow_scope: None,
             principal_id: "account:1".into(),
             project_id: "one".into(),
             root: PathBuf::from("test"),

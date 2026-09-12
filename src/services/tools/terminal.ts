@@ -1,6 +1,10 @@
 import type { ToolDef } from './types'
 import { getToolSession } from './toolSessionCoordinator'
 import { validateToolArguments } from './validateArguments'
+import { invoke } from '@tauri-apps/api/core'
+import { executionGate, executionPayload } from '@/services/executionGate'
+import { requireProjectWorkspace, resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
+import { freezeAgentWorkflowScope } from '@/services/agents/workflowScope'
 
 const schema = {
   type: 'object',
@@ -32,6 +36,33 @@ export const terminalTools: ToolDef[] = [
     approvalMode: 'session',
     async execute(args, ctx) {
       validateToolArguments(schema, args)
+      if (ctx.workflowScope) {
+        const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
+        executionGate.assert(ticket, true)
+        const principalId = await resolveWorkspacePrincipalId()
+        const workspace = await requireProjectWorkspace(ctx.projectId, principalId)
+        const scope = freezeAgentWorkflowScope(ctx.workflowScope, {
+          principalId,
+          projectId: ctx.projectId,
+          projectName: '',
+          rootPath: workspace.rootPath,
+          workspaceUpdatedAt: workspace.updatedAt,
+        })!
+        const execution = await executionPayload(ticket, true)
+        const result = await invoke('wf_run_script', {
+          payload: {
+            runtime: args.runtime,
+            code: args.code,
+            timeout_seconds: args.timeout_seconds ?? null,
+            fullAccessAcknowledged: true,
+            scope,
+            execution: { ...execution, workflowExecutionId: scope.runId },
+            ...(args.input !== undefined ? { input: args.input } : {}),
+          },
+        })
+        executionGate.assert(ticket, true)
+        return result
+      }
       const session = await getToolSession(ctx, 'terminal')
       return session.invokeTask('wf_run_script', {
         runtime: args.runtime,

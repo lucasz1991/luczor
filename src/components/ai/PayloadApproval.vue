@@ -14,6 +14,7 @@ import { pendingPayloadApproval, resolvePayloadApproval } from '@/services/paylo
     >
       <section>
         <h2 id="payload-title">{{ pendingPayloadApproval.title }}</h2>
+        <p v-if="pendingPayloadApproval.scopeLabel">{{ pendingPayloadApproval.scopeLabel }}</p>
         <p>Ziel: {{ pendingPayloadApproval.destination }}</p>
         <p>Einmalige Freigabe · verfällt nach zwei Minuten. Der folgende Inhalt wird übertragen.</p>
         <p v-if="pendingPayloadApproval.kind !== 'result'">

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-mirror-stage-begin"
+description = "Enables the project_mirror_stage_begin command without any pre-configured scope."
+commands.allow = ["project_mirror_stage_begin"]
+
+[[permission]]
+identifier = "deny-project-mirror-stage-begin"
+description = "Denies the project_mirror_stage_begin command without any pre-configured scope."
+commands.deny = ["project_mirror_stage_begin"]

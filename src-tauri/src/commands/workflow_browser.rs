@@ -816,7 +816,12 @@ async fn install_request_boundary(
     .await
     .map_err(|_| "workflow_browser_task_failed")?
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+#[path = "workflow_browser_linux.rs"]
+mod linux;
+#[cfg(target_os = "linux")]
+use linux::{devtools, install_request_boundary};
+#[cfg(not(any(windows, target_os = "linux")))]
 async fn install_request_boundary(
     _window: &Webview,
     _app: AppHandle,
@@ -841,7 +846,11 @@ pub(crate) fn capabilities() -> Value {
         .filter(|value| !value.trim().is_empty() && value.len() < 200);
         json!({"available":version.is_some(),"backend":"webview2","version":version,"hostBoundary":"verified-at-session-start"})
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        json!({"available":true,"backend":"webkitgtk","hostBoundary":"verified-at-session-start","platformAcceptance":"requires-device-test"})
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         json!({"available":false,"backend":"unavailable","reason":"windows_webview2_required"})
     }
@@ -917,7 +926,7 @@ async fn devtools(
     .await
     .map_err(|_| "workflow_browser_task_failed")?
 }
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 async fn devtools(
     _window: &Webview,
     _method: &'static str,

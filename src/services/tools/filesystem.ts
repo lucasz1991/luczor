@@ -3,6 +3,7 @@ import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
 import { asString } from './shared'
 import type { ToolContext, ToolDef } from './types'
 import { executionGate, invokeGuarded } from '@/services/executionGate'
+import { freezeAgentWorkflowScope } from '@/services/agents/workflowScope'
 
 type EphemeralToolDef = ToolDef & { dataHandling?: 'ephemeral' }
 
@@ -40,16 +41,24 @@ function mutableTargetPath(value: unknown, label = 'path'): string {
   return path
 }
 
-async function workspacePayload(projectId: string) {
+async function workspacePayload(projectId: string, workflowScope?: ToolContext['workflowScope']) {
   const principalId = await resolveWorkspacePrincipalId()
   const workspace = await getProjectWorkspace(projectId, principalId)
   if (!workspace || workspace.status !== 'ready' || !Number.isSafeInteger(workspace.updatedAt))
     throw new Error('Die lokale Projektzuordnung ist nicht mehr ausführbar.')
+  const captured = freezeAgentWorkflowScope(workflowScope, {
+    principalId,
+    projectId,
+    projectName: '',
+    rootPath: workspace.rootPath,
+    workspaceUpdatedAt: workspace.updatedAt,
+  })
   return {
     principalId,
     projectId,
-    expectedRootPath: workspace.rootPath,
+    expectedRootPath: captured?.expectedRootPath ?? workspace.rootPath,
     expectedWorkspaceUpdatedAt: workspace.updatedAt,
+    ...(captured ? { workflowScope: captured } : {}),
   }
 }
 
@@ -61,7 +70,7 @@ async function invokeProjectFs<T>(
 ): Promise<T> {
   const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
   executionGate.assert(ticket, mutating)
-  const scope = await workspacePayload(ctx.projectId)
+  const scope = await workspacePayload(ctx.projectId, ctx.workflowScope)
   executionGate.assert(ticket, mutating)
   return invokeGuarded<T>(command, { ...scope, ...payload }, ticket, mutating)
 }
@@ -99,6 +108,10 @@ export const filesystemTools: EphemeralToolDef[] = [
       required: [],
     },
     async execute(args, ctx) {
+      if (ctx.workflowScope) {
+        await invokeProjectFs('project_fs_stat', ctx, { path: '.' })
+        return { bound: true, status: 'ready', display_name: 'Workflow-Arbeitskopie', workflow_workcopy: true }
+      }
       const binding = await getProjectWorkspace(ctx.projectId)
       if (!binding) return { bound: false, status: 'unbound' }
       return {

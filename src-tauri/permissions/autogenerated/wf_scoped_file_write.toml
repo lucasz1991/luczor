@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wf-scoped-file-write"
+description = "Enables the wf_scoped_file_write command without any pre-configured scope."
+commands.allow = ["wf_scoped_file_write"]
+
+[[permission]]
+identifier = "deny-wf-scoped-file-write"
+description = "Denies the wf_scoped_file_write command without any pre-configured scope."
+commands.deny = ["wf_scoped_file_write"]

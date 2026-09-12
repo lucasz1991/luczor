@@ -44,6 +44,10 @@ export type MiniWorkspaceBinding = {
   sendChat: (text: string, projectId: string) => Promise<void>
   stopChat: () => void | Promise<void>
   selectProject: (id: string) => void | Promise<void>
+  conversations?: () => NonNullable<MiniSnapshot['conversations']>
+  conversationId?: () => string
+  selectConversation?: (projectId: string, conversationId: string) => void | Promise<void>
+  newConversation?: (projectId: string) => void | Promise<void>
   openPanel: (panel: MiniPanel) => void | Promise<void>
   openWorkflow?: (reference: MiniWorkflowReference) => void | Promise<void>
   runWorkflow?: (reference: MiniWorkflowReference, action: MiniWorkflowAction) => void | Promise<void>
@@ -115,7 +119,9 @@ export function createMiniChatBridge(
   const thinkingControlAck = ref<MiniSnapshot['thinkingControlAck']>(null)
   let pendingThinkingControl: string | null = null
   const selecting = ref(false)
-  const busy = computed(() => controller.state.busy || deps.chat().busy || selecting.value)
+  const busy = computed(
+    () => (view.value === 'workspace' ? controller.state.busy : deps.chat().busy) || selecting.value
+  )
   const rotate = () => {
     sessionId.value = crypto.randomUUID()
     notice.value = ''
@@ -159,10 +165,12 @@ export function createMiniChatBridge(
       sessionId: sessionId.value,
       projects: deps.projects().slice(0, 200),
       project: chat.project,
+      conversations: deps.conversations?.() ?? [],
+      conversationId: deps.conversationId?.(),
       messages: boundMiniMessages(view.value === 'chat' ? chat.messages : controller.state.messages),
       tools: view.value === 'chat' && !controller.state.busy ? chat.tools : controller.state.tools,
       busy: busy.value,
-      mainBusy: controller.state.mainBusy && !chat.busy,
+      mainBusy: false,
       notice: notice.value || (view.value === 'workspace' ? controller.state.notice : ''),
     }
   })
@@ -220,7 +228,7 @@ export function createMiniChatBridge(
       return
     }
     if (action.type === 'stop') {
-      if (controller.state.busy) controller.stop()
+      if (view.value === 'workspace') controller.stop()
       else await deps.stopChat()
       return
     }
@@ -296,8 +304,19 @@ export function createMiniChatBridge(
       }
       return
     }
+    if (action.type === 'select_conversation' || action.type === 'new_conversation') {
+      if (selecting.value) return
+      if (!deps.projects().some(project => project.id === action.projectId)) return
+      if (action.type === 'new_conversation') await deps.newConversation?.(action.projectId)
+      else if (
+        action.projectId === deps.chat().project?.id &&
+        deps.conversations?.().some(chat => chat.id === action.conversationId)
+      )
+        await deps.selectConversation?.(action.projectId, action.conversationId)
+      return
+    }
     if (action.type === 'select_project' || action.type === 'workspace_open') {
-      if (busy.value || controller.state.mainBusy) {
+      if (selecting.value || (action.type === 'workspace_open' && busy.value)) {
         notice.value = 'Der aktuelle Auftrag läuft noch.'
         return
       }
@@ -328,7 +347,7 @@ export function createMiniChatBridge(
       return
     }
     if (action.type === 'send') {
-      if (busy.value || controller.state.mainBusy || !action.text.trim() || action.text.length > 12_000) return
+      if (busy.value || !action.text.trim() || action.text.length > 12_000) return
       notice.value = ''
       if (view.value === 'workspace') return controller.dispatch({ ...action, sessionId: controller.state.sessionId })
       const project = deps.chat().project

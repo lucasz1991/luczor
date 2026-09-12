@@ -22,6 +22,9 @@ runInNewContext(
     module: compiledModule,
     require: (id: string) => {
       if (id === 'vue') return VueRuntime
+      // This client-renderer harness tests interactions; the decorative SVG has
+      // separate SSR coverage and must not load Vite's server-only component.
+      if (id === '@/components/ai/AiIcon.vue') return { default: () => h('svg', { 'aria-hidden': 'true' }) }
       throw new Error(`Unexpected import ${id}`)
     },
   }

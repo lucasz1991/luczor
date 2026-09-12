@@ -37,6 +37,7 @@ pub fn run() {
             Some(vec![]),
         ))
         .setup(|app| {
+            commands::device_jobs::initialize_trust(app.handle());
             #[cfg(debug_assertions)]
             {
                 if let Some(view) = app.get_webview("main") { view.open_devtools(); }
@@ -47,16 +48,27 @@ pub fn run() {
 
             #[cfg(desktop)]
             setup_global_shortcut(app)?;
+            setup_worker_tick(app.handle().clone());
 
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::execution::execution_gate_update,
+            commands::execution::execution_scope_register,
+            commands::execution::execution_scope_revoke,
+            commands::device_run_journal::device_run_journal_read,
+            commands::device_run_journal::device_run_journal_list,
+            commands::device_run_journal::device_run_journal_transition,
             commands::execution::wf_execution_cancel,
             commands::workflow_watch::wf_watch_start,
             commands::workflow_watch::wf_watch_stop,
             commands::workflow_watch::wf_watch_drain,
             commands::workflow_watch::wf_watch_ack,
+            commands::desktop_accessibility::desktop_adapter_status,
+            commands::desktop_accessibility::desktop_portal_setup,
+            commands::desktop_accessibility::desktop_portal_close,
+            commands::desktop_accessibility::desktop_accessibility_observe,
+            commands::desktop_accessibility::desktop_accessibility_action,
             commands::system::desktop_observe,
             commands::codex::codex_job_list,
             commands::codex::codex_session_list,
@@ -92,6 +104,14 @@ pub fn run() {
             commands::voice_input::voice_input_status,
             commands::voice_input::voice_input_stt,
             commands::voice::install_voice_runtime,
+            commands::lan_peer::lan_peer_identity,
+            commands::lan_peer::lan_peer_start,
+            commands::lan_peer::lan_peer_stop,
+            commands::lan_peer::lan_peer_status,
+            commands::lan_peer::lan_peer_send,
+            commands::lan_peer::lan_peer_drain,
+            commands::lan_peer::lan_peer_ack,
+            commands::lan_peer::lan_peer_flush,
             commands::device_jobs::verify_device_job,
             commands::agent::agent_cli_detect,
             commands::codex::codex_runtime_status,
@@ -107,6 +127,8 @@ pub fn run() {
             commands::codex::codex_job_cancel,
             commands::agent::agent_cli_run,
             commands::agent::agent_write_bridge,
+            commands::local_tasks::wf_scoped_file_read,
+            commands::local_tasks::wf_scoped_file_write,
             commands::local_tasks::wf_file_read,
             commands::local_tasks::wf_file_write,
             commands::local_tasks::wf_run_script,
@@ -132,6 +154,18 @@ pub fn run() {
             commands::repository_graph::local_graph_search,
             commands::repository_graph::local_graph_read_snippets,
             commands::repository_graph::local_graph_unbind,
+            commands::project_mirror::project_mirror_stage_begin,
+            commands::project_mirror::project_mirror_stage_page,
+            commands::project_mirror::project_mirror_stage_commit,
+            commands::project_mirror::project_mirror_recover,
+            commands::project_mirror::project_mirror_test_workspace,
+            commands::project_mirror::project_mirror_scan,
+            commands::project_mirror::project_mirror_scan_page,
+            commands::project_mirror::project_mirror_chunk_read,
+            commands::project_mirror::project_mirror_chunk_put,
+            commands::project_mirror::project_mirror_materialize,
+            commands::project_mirror::project_mirror_watch_start,
+            commands::project_mirror::project_mirror_watch_stop,
             commands::project_workspace::project_workspace_bind,
             commands::project_workspace::project_workspace_get,
             commands::project_workspace::project_workspace_unbind,
@@ -179,6 +213,7 @@ pub fn run() {
             event,
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
+            WORKER_TICK_STOP.store(true, std::sync::atomic::Ordering::Release);
             commands::local_model::shutdown_all();
             _app.state::<commands::codex::CodexJobs>().cancel_all();
             _app.state::<commands::claude::ClaudeJobs>().cancel_all();
@@ -209,7 +244,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
             "quit" => {
-                commands::local_model::shutdown_all();
+                WORKER_TICK_STOP.store(true, std::sync::atomic::Ordering::Release);
+            commands::local_model::shutdown_all();
                 app.exit(0);
             }
             "show" => {
@@ -265,4 +301,23 @@ fn setup_global_shortcut(app: &tauri::App) -> Result<(), Box<dyn std::error::Err
     }
 
     Ok(())
+}
+
+// Native timing is independent of background WebView timer throttling.
+static WORKER_TICK_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn setup_worker_tick(app: tauri::AppHandle) {
+    use tauri::Emitter;
+    std::thread::spawn(move || {
+        let mut ticks = 0_u8;
+        while !WORKER_TICK_STOP.load(std::sync::atomic::Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            ticks += 1;
+            if ticks == 10 {
+                ticks = 0;
+                if !WORKER_TICK_STOP.load(std::sync::atomic::Ordering::Acquire) {
+                    let _ = app.emit_to("main", "luczor://worker-tick", ());
+                }
+            }
+        }
+    });
 }

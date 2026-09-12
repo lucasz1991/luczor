@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-device-run-journal-list"
+description = "Enables the device_run_journal_list command without any pre-configured scope."
+commands.allow = ["device_run_journal_list"]
+
+[[permission]]
+identifier = "deny-device-run-journal-list"
+description = "Denies the device_run_journal_list command without any pre-configured scope."
+commands.deny = ["device_run_journal_list"]

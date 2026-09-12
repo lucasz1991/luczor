@@ -48,6 +48,37 @@ const setup = (run = vi.fn().mockResolvedValue({ status: 'blocked', summary: 'Te
 }
 
 describe('device-local goal binding', () => {
+  it('keeps a goal running when another chat in the same project receives a draft', async () => {
+    const conversation = ref('first-chat')
+    const draft = ref('')
+    let finish!: () => void
+    let signal!: AbortSignal
+    const binding = useAutonomousGoal({
+      projectId: () => state.projects[0]!.id,
+      conversationId: () => conversation.value,
+      available: () => true,
+      draft: () => draft.value,
+      run: async (_project, _goal, runSignal) => {
+        signal = runSignal
+        await new Promise<void>(resolve => {
+          finish = resolve
+        })
+        return { status: 'blocked', summary: 'Ergebnis des ursprünglichen Chats gesichert.' }
+      },
+    })
+    await binding.save('Analyse im ersten Chat abschließen')
+    await binding.toggle(true)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(binding.running.value).toBe(true)
+    conversation.value = 'second-chat'
+    draft.value = 'Unabhängiger neuer Auftrag'
+    await nextTick()
+    expect(binding.running.value).toBe(false)
+    expect(signal.aborted).toBe(false)
+    finish()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(binding.model.value?.progress).toContain('ursprünglichen Chats')
+  })
   it('persists the saved text before starting and does not silently activate it', async () => {
     const { binding, run } = setup()
     await binding.save('Dokumentierte Lösung erstellen')

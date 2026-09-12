@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-project-mirror-chunk-read"
+description = "Enables the project_mirror_chunk_read command without any pre-configured scope."
+commands.allow = ["project_mirror_chunk_read"]
+
+[[permission]]
+identifier = "deny-project-mirror-chunk-read"
+description = "Denies the project_mirror_chunk_read command without any pre-configured scope."
+commands.deny = ["project_mirror_chunk_read"]

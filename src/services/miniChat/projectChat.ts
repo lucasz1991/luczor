@@ -59,7 +59,8 @@ export function projectChatBinding(
   project: Project | undefined,
   messages: Message[],
   tools: PendingToolCall[],
-  busy: boolean
+  busy: boolean,
+  conversationId?: string
 ): MiniChatBinding {
   const visible = project
     ? messages.filter(
@@ -67,7 +68,7 @@ export function projectChatBinding(
       )
     : []
   const binding: MiniChatBinding = {
-    key: `${project?.id ?? 'none'}:${visible[0]?.id ?? 'empty'}`,
+    key: `${project?.id ?? 'none'}:${conversationId ?? visible[0]?.id ?? 'empty'}`,
     project: project ? { id: project.id, name: project.name } : null,
     busy,
     messages: visible.slice(-40).map(message => ({

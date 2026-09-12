@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-execution-scope-revoke"
+description = "Enables the execution_scope_revoke command without any pre-configured scope."
+commands.allow = ["execution_scope_revoke"]
+
+[[permission]]
+identifier = "deny-execution-scope-revoke"
+description = "Denies the execution_scope_revoke command without any pre-configured scope."
+commands.deny = ["execution_scope_revoke"]

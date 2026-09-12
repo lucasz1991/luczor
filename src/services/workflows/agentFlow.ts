@@ -2,6 +2,8 @@ import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { executionGate, type ExecutionTicket } from '@/services/executionGate'
 import { agentProjectSnapshot } from '@/services/agents/hub'
 import { runWorkflowAgent } from '@/services/agents/workflowAgent'
+import { freezeAgentWorkflowScope } from '@/services/agents/workflowScope'
+import type { WorkflowArtifactScope } from './browser'
 import { runAgent, type RunAgentOptions, type AgentToolSession } from '@/services/agent'
 import { requestConfirmation } from '@/services/confirmation'
 import { requestPayloadApproval } from '@/services/payloadApproval'
@@ -24,6 +26,7 @@ import {
 import { readVerifiedWorkflowAgentEvidence } from './agentEvidence'
 
 type AgentFlowContext = {
+  workflowScope?: WorkflowArtifactScope
   projectId: string
   runPublicId?: string
   stepId?: number
@@ -151,6 +154,7 @@ export async function runWorkflowAgentFlow(
     assert()
     if (project.principalId !== account.principalId || project.projectId !== context.projectId)
       throw new Error('workflow_agent_scope_changed')
+    const workflowScope = freezeAgentWorkflowScope(context.workflowScope, project)
     const current = async () => {
       assert()
       const activeAccount = await deps.account()
@@ -268,15 +272,27 @@ export async function runWorkflowAgentFlow(
     let result: Record<string, unknown>
     let exportRequired = false
     if (adapter === 'codex' || adapter === 'claude') {
-      const managed = await deps.managed(adapter, prompt, project.rootPath, ticket.signal, context.projectId, {
-        thinkingTier,
-        model: decision?.model ?? (params.model as string | undefined),
-        ...(decision
-          ? { role: decision.role, permission: decision.permission, effort: decision.effortSelection?.requestedEffort }
-          : {}),
-        ...(managedTurns !== undefined ? { maxTurns: managedTurns } : {}),
-        ...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
-      })
+      const managed = await deps.managed(
+        adapter,
+        prompt,
+        workflowScope?.expectedRootPath ?? project.rootPath,
+        ticket.signal,
+        context.projectId,
+        {
+          workflowScope,
+          thinkingTier,
+          model: decision?.model ?? (params.model as string | undefined),
+          ...(decision
+            ? {
+                role: decision.role,
+                permission: decision.permission,
+                effort: decision.effortSelection?.requestedEffort,
+              }
+            : {}),
+          ...(managedTurns !== undefined ? { maxTurns: managedTurns } : {}),
+          ...(maxBudgetUsd !== undefined ? { maxBudgetUsd } : {}),
+        }
+      )
       await current()
       const text = publicAnswerText(managed.stdout, true).trim()
       const complete = managed.ok && managed.code === 0 && text.length > 0 && text.length <= maxOutput
@@ -343,6 +359,9 @@ export async function runWorkflowAgentFlow(
         { role: 'user' as const, content: prompt },
       ]
       const agent = await deps.run({
+        workflowScope,
+        execution: ticket,
+        ...(workflowScope ? { runId: workflowScope.runId } : {}),
         projectId: context.projectId,
         principalScopeId: account.principalId,
         workspaceBindingId: JSON.stringify([project.rootPath ?? '', project.workspaceUpdatedAt ?? '']),

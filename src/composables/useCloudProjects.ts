@@ -2,7 +2,7 @@ import { onBeforeUnmount, onMounted, watch } from 'vue'
 import { state } from '@/state/store'
 import { configureCloudProjectWorkload, listCloudProjects, syncCloudProjects } from '@/services/api/cloudProjects'
 
-/** Opted-in projects synchronize after quiet periods, never between rounds of a live workload. */
+/** Unrelated active chats do not prevent another project's synchronization. */
 export function useCloudProjects(busy: () => boolean) {
   let timer: ReturnType<typeof setTimeout> | undefined
   let interval: ReturnType<typeof setInterval> | undefined
@@ -10,8 +10,7 @@ export function useCloudProjects(busy: () => boolean) {
   let disposed = false
   const detach = configureCloudProjectWorkload(busy)
   const synchronize = async () => {
-    if (disposed || inFlight || busy() || !state.projects.some(project => project.cloud && !project.cloud.paused))
-      return
+    if (disposed || inFlight || !state.projects.some(project => project.cloud && !project.cloud.paused)) return
     inFlight = true
     try {
       await syncCloudProjects()

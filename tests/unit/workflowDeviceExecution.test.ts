@@ -25,6 +25,8 @@ vi.mock('@/services/api/luczorApi', () => ({
 }))
 vi.mock('@/services/confirmation', () => ({ requestConfirmation: mock.confirm }))
 vi.mock('@/services/projectWorkspace', () => ({ getProjectWorkspace: mock.workspace }))
+vi.mock('@/services/cloudProjectAccess', () => ({ projectLocalIdForServer: (id: string) => id }))
+vi.mock('@/services/coordination/mirror', () => ({ prepareMirrorTestWorkspace: vi.fn() }))
 vi.mock('@/services/executionGate', () => ({
   executionGate: { assert: (ticket: { signal: AbortSignal }) => ticket.signal.throwIfAborted() },
   executionPayload: async () => ({ sessionId: 'session', generation: 1 }),

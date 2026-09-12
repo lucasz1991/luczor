@@ -733,6 +733,8 @@ pub async fn move_mouse(
     let payload = payload.request;
     validate_coordinates(payload.x, payload.y)?;
     guard.point(payload.x, payload.y)?;
+    #[cfg(target_os="linux")]
+    if super::desktop_linux::is_wayland() {return super::desktop_accessibility::portal::move_to(&guard,payload.x,payload.y);}
     move_pointer(payload.x, payload.y)
 }
 
@@ -770,6 +772,11 @@ pub async fn mouse_click(
     let payload = payload.request;
     // Validate the complete request before constructing an input session or moving.
     let button = validate_mouse_click(&payload)?;
+    #[cfg(target_os="linux")]
+    if super::desktop_linux::is_wayland() {
+        let (x,y)=payload.x.zip(payload.y).ok_or("desktop_wayland_click_requires_observed_coordinates")?;
+        return super::desktop_accessibility::portal::click(&guard,x,y,button,payload.double.unwrap_or(false));
+    }
     let mut enigo = new_enigo()?;
     if let (Some(x), Some(y)) = (payload.x, payload.y) {
         guard.point(x, y)?;
@@ -809,6 +816,11 @@ pub async fn type_text(
     // cannot inject an unbounded keystroke stream.
     if payload.text.chars().count() > 10_000 {
         return Err("Text too long".into());
+    }
+    #[cfg(target_os="linux")]
+    if super::desktop_linux::is_wayland() {
+        for character in payload.text.chars() {super::desktop_accessibility::portal::press(&guard,match character{'\n'=>Key::Return,'\t'=>Key::Tab,c=>Key::Unicode(c)},&[])?;}
+        return Ok(());
     }
     let mut enigo = new_enigo()?;
     for character in payload.text.chars() {
@@ -864,6 +876,8 @@ pub async fn press_key(
     let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
     let payload = payload.request;
     let key = parse_key(&payload.key)?;
+    #[cfg(target_os="linux")]
+    if super::desktop_linux::is_wayland() {return super::desktop_accessibility::portal::press(&guard,key,&[]);}
     let mut enigo = new_enigo()?;
     guard.check()?;
     enigo
@@ -917,6 +931,8 @@ pub async fn scroll(
     let payload = payload.request;
     let amount = validate_scroll_amount(payload.amount)?;
     let axis = parse_scroll_axis(payload.axis.as_deref())?;
+    #[cfg(target_os="linux")]
+    if super::desktop_linux::is_wayland() {return super::desktop_accessibility::portal::scroll(&guard,amount,axis);}
     let mut enigo = new_enigo()?;
     guard.current_point()?;
     enigo
@@ -972,6 +988,8 @@ pub async fn hotkey(
     let payload = payload.request;
     let modifiers = parse_hotkey_modifiers(&payload.modifiers)?;
     let key = parse_key(&payload.key)?;
+    #[cfg(target_os="linux")]
+    if super::desktop_linux::is_wayland() {return super::desktop_accessibility::portal::press(&guard,key,&modifiers);}
     let mut enigo = new_enigo()?;
     let mut pressed = Vec::new();
     for modifier in &modifiers {

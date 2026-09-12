@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-desktop-portal-close"
+description = "Enables the desktop_portal_close command without any pre-configured scope."
+commands.allow = ["desktop_portal_close"]
+
+[[permission]]
+identifier = "deny-desktop-portal-close"
+description = "Denies the desktop_portal_close command without any pre-configured scope."
+commands.deny = ["desktop_portal_close"]

@@ -75,6 +75,20 @@ pub enum MiniAction {
         #[serde(rename = "projectId")]
         project_id: String,
     },
+    SelectConversation {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "projectId")]
+        project_id: String,
+        #[serde(rename = "conversationId")]
+        conversation_id: String,
+    },
+    NewConversation {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "projectId")]
+        project_id: String,
+    },
     WorkspaceOpen {
         #[serde(rename = "sessionId")]
         session_id: String,
@@ -187,15 +201,18 @@ fn validate_action(action: &MiniAction) -> Result<(), String> {
         | MiniAction::Decide { session_id, .. }
         | MiniAction::View { session_id, .. }
         | MiniAction::SelectProject { session_id, .. }
+        | MiniAction::SelectConversation { session_id, .. }
+        | MiniAction::NewConversation { session_id, .. }
         | MiniAction::WorkflowOpen { session_id, .. }
         | MiniAction::WorkflowImprove { session_id, .. }
         | MiniAction::WorkflowAction { session_id, .. }
         | MiniAction::WorkspaceOpen { session_id, .. } => validate_identifier(session_id)?,
         _ => {}
     }
-    if let MiniAction::SelectProject { project_id, .. } = action {
+    if let MiniAction::SelectProject { project_id, .. } | MiniAction::SelectConversation { project_id, .. } | MiniAction::NewConversation { project_id, .. } = action {
         validate_identifier(project_id)?;
     }
+    if let MiniAction::SelectConversation { conversation_id, .. } = action { validate_identifier(conversation_id)?; }
     if let MiniAction::ThinkingControl {
         request_id,
         control_id,

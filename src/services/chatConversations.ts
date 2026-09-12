@@ -5,12 +5,31 @@ import { getSafeRecordValue, isSafeRecordKey, setSafeRecordValue } from '@/servi
 export const legacyConversationId = (projectId: string): string => `legacy:${projectId}`
 
 export function migrateConversations(state: AppState): void {
-  state.conversations ??= []
+  if (!Array.isArray(state.conversations)) state.conversations = []
+  const validChats = state.conversations.filter(
+    chat => chat && typeof chat.id === 'string' && typeof chat.projectId === 'string' && typeof chat.title === 'string'
+  )
+  if (validChats.length !== state.conversations.length) state.conversations = validChats
   state.global.ui ??= {}
   state.global.ui.lastConversationByProject ??= {}
   for (const project of state.projects) {
     if (!isSafeRecordKey(project.id)) continue
     const legacyId = legacyConversationId(project.id)
+    for (const message of state.messages.filter(item => item.projectId === project.id)) {
+      if (!message.conversationId && message.meta?.conversationId) message.conversationId = message.meta.conversationId
+      const linked = state.conversations.find(chat => chat.id === message.conversationId)
+      if (linked && linked.projectId !== project.id) message.conversationId = undefined
+      if (message.conversationId && !linked) {
+        state.conversations.push({
+          id: message.conversationId,
+          projectId: project.id,
+          title: message.role === 'user' ? message.content.trim().slice(0, 80) || 'Chat' : 'Chat',
+          createdAt: message.createdAt,
+          updatedAt: project.updatedAt,
+          archivedAt: null,
+        })
+      }
+    }
     const unassigned = state.messages.filter(message => message.projectId === project.id && !message.conversationId)
     let chats = state.conversations.filter(chat => chat.projectId === project.id)
     if (unassigned.length || !chats.length) {
@@ -29,9 +48,15 @@ export function migrateConversations(state: AppState): void {
       }
       for (const message of unassigned) message.conversationId = legacyId
     }
+    for (const call of getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, project.id) ?? [])
+      call.conversationId ??= legacyId
     const selected = getSafeRecordValue(state.global.ui.lastConversationByProject, project.id)
     if (!chats.some(chat => chat.id === selected && !chat.archivedAt)) {
-      const chat = chats.find(item => !item.archivedAt)
+      let chat = chats.find(item => !item.archivedAt)
+      if (!chat && chats.length) {
+        chat = chats[0]
+        if (chat) chat.archivedAt = null
+      }
       if (chat) setSafeRecordValue(state.global.ui.lastConversationByProject, project.id, chat.id)
     }
   }

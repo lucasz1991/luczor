@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lan-peer-drain"
+description = "Enables the lan_peer_drain command without any pre-configured scope."
+commands.allow = ["lan_peer_drain"]
+
+[[permission]]
+identifier = "deny-lan-peer-drain"
+description = "Denies the lan_peer_drain command without any pre-configured scope."
+commands.deny = ["lan_peer_drain"]

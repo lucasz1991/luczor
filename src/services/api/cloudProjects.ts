@@ -1,19 +1,20 @@
 import { reactive } from 'vue'
 import { state } from '@/state/store'
-import type { AppState, Message, MemoryItem, Project, ProjectGoal, SummaryItem } from '@/state/types'
+import type { AppState, Conversation, Message, MemoryItem, Project, ProjectGoal, SummaryItem } from '@/state/types'
 import { saveAppStateStrict } from '@/services/persistence'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { requestWithConfig } from './luczorApi'
 import { getSafeRecordValue, isSafeRecordKey, setSafeRecordValue } from '@/services/safeRecord'
 import { cloudProjectPrincipal } from '@/services/cloudProjectAccess'
 
-type PortableMessage = Pick<Message, 'id' | 'role' | 'content' | 'ts' | 'createdAt' | 'visibility'>
+type PortableMessage = Pick<Message, 'id' | 'role' | 'content' | 'ts' | 'createdAt' | 'visibility' | 'conversationId'>
 type PortableMemory = Omit<MemoryItem, 'projectId'>
 type PortableSummary = Omit<SummaryItem, 'projectId'>
 export type CloudProjectSnapshot = {
   schema_version: 1
   project: Pick<Project, 'name' | 'goal' | 'summary' | 'goals' | 'createdAt' | 'updatedAt' | 'archivedAt'>
   messages: PortableMessage[]
+  conversations?: Array<Omit<Conversation, 'projectId' | 'draft'>>
   memories: PortableMemory[]
   summaries: PortableSummary[]
 }
@@ -130,7 +131,6 @@ function linkedProject(id: string, account: VerifiedAccountSnapshot) {
 }
 function assertIdle(id: string): void {
   if (
-    workloadBusy() ||
     state.messages.some(
       message => message.projectId === id && (message.meta?.isLoading || message.meta?.activity?.status === 'running')
     ) ||
@@ -175,13 +175,14 @@ export function snapshotForCloud(projectId: string): CloudProjectSnapshot {
   const project = projectById(projectId)
   const messages = state.messages
     .filter(item => item.projectId === projectId && portableMessage(item))
-    .map(({ id, role, content, ts, createdAt }) => ({
+    .map(({ id, role, content, ts, createdAt, conversationId }) => ({
       id,
       role,
       content,
       ts,
       createdAt,
       visibility: 'visible' as const,
+      ...(conversationId ? { conversationId } : {}),
     }))
   const memories = state.global.memories
     .filter(item => item.projectId === projectId && portableRecord(item))
@@ -202,6 +203,9 @@ export function snapshotForCloud(projectId: string): CloudProjectSnapshot {
         archivedAt: project.archivedAt,
       },
       messages,
+      conversations: (state.conversations ?? [])
+        .filter(item => item.projectId === projectId)
+        .map(({ projectId: _projectId, draft: _draft, ...conversation }) => conversation),
       memories,
       summaries,
     })
@@ -270,6 +274,7 @@ export function validateSnapshot(value: unknown): CloudProjectSnapshot {
         ts: timestamp(message.ts),
         createdAt: timestamp(message.createdAt),
         visibility: 'visible' as const,
+        ...(message.conversationId ? { conversationId: identifier(message.conversationId) } : {}),
       }
     })
   )
@@ -315,6 +320,22 @@ export function validateSnapshot(value: unknown): CloudProjectSnapshot {
       archivedAt: project.archivedAt == null ? null : timestamp(project.archivedAt),
     },
     messages,
+    ...(snapshot.conversations === undefined
+      ? {}
+      : {
+          conversations: unique(
+            list(snapshot.conversations, 10000).map(value => {
+              const item = record(value)
+              return {
+                id: identifier(item.id),
+                title: text(item.title, 200),
+                createdAt: timestamp(item.createdAt),
+                updatedAt: timestamp(item.updatedAt),
+                archivedAt: item.archivedAt == null ? null : timestamp(item.archivedAt),
+              }
+            })
+          ),
+        }),
     memories,
     summaries,
   }
@@ -386,6 +407,10 @@ async function applyRemote(
   const apply = (target: AppState) => {
     const project = target.projects.find(project => project.id === local.id)!
     Object.assign(project, { goal: undefined }, copy(remote.snapshot.project), { cloud: cloudLink })
+    if (remote.snapshot.conversations)
+      target.conversations = (target.conversations ?? [])
+        .filter(item => item.projectId !== local.id)
+        .concat(remote.snapshot.conversations.map(item => ({ ...item, projectId: local.id })))
     target.messages = target.messages
       .filter(item => item.projectId !== local.id || !portableMessage(item))
       .concat(remote.snapshot.messages.map(message => ({ ...message, projectId: local.id, parsed: null, meta: {} })))

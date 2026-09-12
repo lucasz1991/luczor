@@ -2,14 +2,105 @@ use base64::Engine;
 use rsa::pkcs1v15::{Signature, VerifyingKey};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::signature::Verifier;
+use rsa::traits::PublicKeyParts;
 use rsa::RsaPublicKey;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io::Read;
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::ensure_main_webview;
 
 const DEVICE_JOB_PUBLIC_KEY_B64: Option<&str> = option_env!("LUCZOR_DEVICE_JOB_PUBLIC_KEY_B64");
+static TRUST_APP: OnceLock<String> = OnceLock::new();
+static TRUST_KEY: OnceLock<Mutex<Option<(RsaPublicKey, std::time::Instant)>>> = OnceLock::new();
+pub(crate) fn initialize_trust(app: &tauri::AppHandle) {
+    let _ = TRUST_APP.set(app.config().identifier.clone());
+}
+fn parse_trust_key(pem: &str) -> Result<RsaPublicKey, String> {
+    let key = RsaPublicKey::from_public_key_pem(pem).map_err(|_| "device_job_trust_key_invalid")?;
+    if key.n().bits() < 2048 || key.n().bits() > 8192 {
+        return Err("device_job_trust_key_invalid".into());
+    }
+    Ok(key)
+}
+pub(super) fn trusted_device_job_key() -> Result<RsaPublicKey, String> {
+    if let Some(encoded) = DEVICE_JOB_PUBLIC_KEY_B64 {
+        let pem = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| "device_job_trust_key_invalid")?;
+        return parse_trust_key(
+            std::str::from_utf8(&pem).map_err(|_| "device_job_trust_key_invalid")?,
+        );
+    }
+    let mut cached = TRUST_KEY
+        .get_or_init(Mutex::default)
+        .lock()
+        .map_err(|_| "device_job_trust_key_unavailable")?;
+    if let Some((key, time)) = &*cached {
+        if time.elapsed() < std::time::Duration::from_secs(3600) {
+            return Ok(key.clone());
+        }
+    }
+    let app_id = TRUST_APP.get().ok_or("device_job_trust_not_initialized")?;
+    let entry = keyring::Entry::new(app_id, "luczor_device_job_trust_key_v1")
+        .map_err(|_| "device_job_trust_key_unavailable")?;
+    // Public authority is bootstrapped only from this fixed HTTPS origin, using OS-stored device credentials.
+    // A renderer cannot supply a PEM, host override, redirect target or proxy.
+    let fetched = (|| -> Result<String, String> {
+        let token = super::device_key::read_device_key(app_id)?
+            .ok_or("device_job_authentication_unavailable")?;
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(std::time::Duration::from_secs(3))
+            .timeout(std::time::Duration::from_secs(8))
+            .build()
+            .map_err(|_| "device_job_trust_transport_unavailable")?;
+        let response = client
+            .get("https://luczor.follow-flow.de/api/v1/devices/signing-key")
+            .bearer_auth(token)
+            .send()
+            .map_err(|_| "device_job_trust_transport_unavailable")?;
+        if !response.status().is_success() {
+            return Err("device_job_trust_endpoint_unavailable".into());
+        }
+        let mut bytes = Vec::new();
+        response
+            .take(16385)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "device_job_trust_transport_unavailable")?;
+        if bytes.len() > 16384 {
+            return Err("device_job_trust_key_invalid".into());
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|_| "device_job_trust_key_invalid")?;
+        if value["algorithm"] != "RSA-SHA256" {
+            return Err("device_job_trust_key_invalid".into());
+        }
+        let pem = value["public_key"]
+            .as_str()
+            .ok_or("device_job_trust_key_invalid")?
+            .to_string();
+        parse_trust_key(&pem)?;
+        Ok(pem)
+    })();
+    let pem = match fetched {
+        Ok(pem) => {
+            entry
+                .set_password(&pem)
+                .map_err(|_| "device_job_trust_cache_unavailable")?;
+            pem
+        }
+        Err(_) => entry
+            .get_password()
+            .map_err(|_| "device_job_trust_key_unavailable")?,
+    };
+    let key = parse_trust_key(&pem)?;
+    *cached = Some((key.clone(), std::time::Instant::now()));
+    Ok(key)
+}
 
 #[derive(Debug, Deserialize)]
 pub struct VerifyDeviceJobPayload {
@@ -19,6 +110,99 @@ pub struct VerifyDeviceJobPayload {
     pub payload_hash: String,
     pub signature: String,
     pub expires_at: Option<String>,
+    pub protocol_version: Option<u8>,
+    pub user_id: Option<u64>,
+    pub source_device_id: Option<String>,
+    pub target_device_id: Option<String>,
+    pub project_id: Option<String>,
+    pub conversation_id: Option<String>,
+    pub master_epoch: Option<u64>,
+    pub attempt_id: Option<String>,
+    pub expected_user_id: Option<u64>,
+    pub expected_target_device_id: Option<String>,
+    pub expected_master_epoch: Option<u64>,
+    #[serde(default)]
+    pub require_claimed: bool,
+}
+
+/// Struct declaration order is the signed PHP JSON order, unlike serde_json::Map.
+#[derive(Serialize)]
+struct EnvelopeV2<'a> {
+    protocol_version: u8,
+    id: &'a str,
+    user_id: u64,
+    source_device_id: &'a str,
+    target_device_id: &'a str,
+    project_id: &'a Option<String>,
+    conversation_id: &'a Option<String>,
+    master_epoch: u64,
+    attempt_id: &'a Option<String>,
+    tool_profile: &'a str,
+    payload_hash: &'a str,
+    expires_at: &'a Option<String>,
+}
+fn signed_envelope(payload: &VerifyDeviceJobPayload) -> Result<Vec<u8>, String> {
+    match payload.protocol_version.unwrap_or(1) {
+        1 => {
+            if payload.require_claimed
+                || payload.expected_user_id.is_some()
+                || payload.expected_master_epoch.is_some()
+                || payload.expected_target_device_id.is_some()
+            {
+                return Err("A coordinated worker requires a version 2 device job.".into());
+            }
+            serde_json::to_vec(&serde_json::json!({"id":payload.id,"tool_profile":payload.tool_profile,"payload_hash":payload.payload_hash,"expires_at":payload.expires_at})).map_err(|_|"Device job envelope is invalid.".into())
+        }
+        2 => {
+            let user_id = payload
+                .user_id
+                .filter(|id| *id > 0 && *id <= 9_007_199_254_740_991)
+                .ok_or("Device job owner is invalid.")?;
+            let master_epoch = payload
+                .master_epoch
+                .filter(|value| *value > 0 && *value <= 9_007_199_254_740_991)
+                .ok_or("Device job master epoch is invalid.")?;
+            let source = payload
+                .source_device_id
+                .as_deref()
+                .filter(|id| !id.is_empty() && id.len() <= 300)
+                .ok_or("Device job source is invalid.")?;
+            let target = payload
+                .target_device_id
+                .as_deref()
+                .filter(|id| !id.is_empty() && id.len() <= 300)
+                .ok_or("Device job target is invalid.")?;
+            if payload.expected_user_id != Some(user_id)
+                || payload.expected_target_device_id.as_deref() != Some(target)
+                || payload.expected_master_epoch != Some(master_epoch)
+            {
+                return Err("Device job belongs to another owner, target, or master epoch.".into());
+            }
+            uuid::Uuid::parse_str(&payload.id).map_err(|_| "Device job identity is invalid.")?;
+            if let Some(attempt) = &payload.attempt_id {
+                uuid::Uuid::parse_str(attempt).map_err(|_| "Device job attempt is invalid.")?;
+            }
+            if payload.require_claimed && payload.attempt_id.is_none() {
+                return Err("Device job must be claimed before execution.".into());
+            }
+            serde_json::to_vec(&EnvelopeV2 {
+                protocol_version: 2,
+                id: &payload.id,
+                user_id,
+                source_device_id: source,
+                target_device_id: target,
+                project_id: &payload.project_id,
+                conversation_id: &payload.conversation_id,
+                master_epoch,
+                attempt_id: &payload.attempt_id,
+                tool_profile: &payload.tool_profile,
+                payload_hash: &payload.payload_hash,
+                expires_at: &payload.expires_at,
+            })
+            .map_err(|_| "Device job envelope is invalid.".into())
+        }
+        _ => Err("Unsupported device job protocol version.".into()),
+    }
 }
 
 #[tauri::command]
@@ -33,21 +217,10 @@ pub async fn verify_device_job(
     if !computed_hash.eq_ignore_ascii_case(&payload.payload_hash) {
         return Err("Device job payload hash does not match.".into());
     }
-    let key_b64 =
-        DEVICE_JOB_PUBLIC_KEY_B64.ok_or("This app build has no device-job signing key.")?;
-    let pem = String::from_utf8(
-        base64::engine::general_purpose::STANDARD
-            .decode(key_b64)
-            .map_err(|error| error.to_string())?,
-    )
-    .map_err(|error| error.to_string())?;
-    let key = RsaPublicKey::from_public_key_pem(&pem).map_err(|error| error.to_string())?;
-    let canonical = serde_json::json!({
-        "id": payload.id,
-        "tool_profile": payload.tool_profile,
-        "payload_hash": payload.payload_hash,
-        "expires_at": payload.expires_at,
-    });
+    let key = tauri::async_runtime::spawn_blocking(trusted_device_job_key)
+        .await
+        .map_err(|_| "Device job trust worker failed.")??;
+    let canonical = signed_envelope(&payload)?;
     let signature = Signature::try_from(
         base64::engine::general_purpose::STANDARD
             .decode(payload.signature)
@@ -56,7 +229,7 @@ pub async fn verify_device_job(
     )
     .map_err(|error| error.to_string())?;
     VerifyingKey::<Sha256>::new(key)
-        .verify(canonical.to_string().as_bytes(), &signature)
+        .verify(&canonical, &signature)
         .map_err(|_| "Device job signature is invalid.".to_string())?;
 
     let now_ms = SystemTime::now()
@@ -73,6 +246,7 @@ fn sha256(bytes: &[u8]) -> String {
 fn ensure_allowed_tool_profile(profile: &str) -> Result<(), String> {
     match profile {
         "desktop.capture_screen"
+        | "desktop.observe"
         | "desktop.clipboard.read"
         | "desktop.windows.list"
         | "desktop.input.move_mouse"
@@ -98,7 +272,7 @@ fn ensure_not_expired(expires_at: Option<&str>, now_ms: i128) -> Result<(), Stri
     }
 }
 
-fn parse_rfc3339_millis(raw: &str) -> Result<i128, String> {
+pub(super) fn parse_rfc3339_millis(raw: &str) -> Result<i128, String> {
     let value = raw.trim();
     let (date, time_and_zone) = value
         .split_once('T')

@@ -123,8 +123,9 @@ export function createCodexAgentAdapter(dependencies: CodexAgentDependencies = d
         snapshot = await dependencies.invoke<CodexJobSnapshot>('codex_job_start', {
           payload: {
             ...scope,
-            expectedRootPath: request.project.rootPath,
+            expectedRootPath: request.workflowScope?.expectedRootPath ?? request.project.rootPath,
             expectedWorkspaceUpdatedAt: request.project.workspaceUpdatedAt,
+            workflowScope: request.workflowScope,
             prompt: request.prompt,
             permission: request.permission,
             model: request.model,

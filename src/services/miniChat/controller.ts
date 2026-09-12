@@ -119,11 +119,6 @@ export function createMiniChatController(deps: Dependencies) {
     const text = raw.trim()
     refresh()
     if (!text || text.length > 12_000 || state.busy) return
-    if (state.mainBusy) {
-      state.notice = 'Der große Chat arbeitet noch. Bitte warte kurz.'
-      touch()
-      return
-    }
     if (!state.project) {
       state.notice = 'Öffne zuerst ein Projekt in Luczor.'
       touch()
@@ -133,7 +128,15 @@ export function createMiniChatController(deps: Dependencies) {
     const turnThinking = captureThinking(state.thinkingTier ?? 'balanced')
     const sessionId = state.sessionId
     const current = new AbortController()
-    const turnExecution = executionGate.capture(current.signal)
+    const runId = crypto.randomUUID()
+    const conversationId = `workspace:${sessionId}`
+    const workspaceBindingId = deps.context().workspaceBindingId ?? ''
+    const turnExecution = executionGate.capture(current.signal, {
+      projectId: project.id,
+      conversationId,
+      runId,
+      ...(workspaceBindingId ? { workspaceBindingId } : {}),
+    })
     abort = current
     const valid = () => {
       if (state.sessionId !== sessionId || abort !== current || turnExecution.signal.aborted) return false
@@ -245,6 +248,10 @@ export function createMiniChatController(deps: Dependencies) {
         : undefined
       const result = await deps.run({
         ...turnThinking,
+        execution: turnExecution,
+        conversationId,
+        runId,
+        workspaceBindingId,
         onBudget(progress) {
           if (valid()) {
             state.thinkingBudget = progress

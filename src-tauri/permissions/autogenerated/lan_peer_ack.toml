@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lan-peer-ack"
+description = "Enables the lan_peer_ack command without any pre-configured scope."
+commands.allow = ["lan_peer_ack"]
+
+[[permission]]
+identifier = "deny-lan-peer-ack"
+description = "Denies the lan_peer_ack command without any pre-configured scope."
+commands.deny = ["lan_peer_ack"]

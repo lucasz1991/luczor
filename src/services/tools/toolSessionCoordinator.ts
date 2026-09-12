@@ -38,8 +38,8 @@ function notify(): void {
   toolSessionRevision.value++
 }
 
-function sessionKey(projectId: string, kind: InternalSession['meta']['kind']): string {
-  return `${projectId}:${kind}`
+function sessionKey(projectId: string, kind: InternalSession['meta']['kind'], runId?: string): string {
+  return `${projectId}:${kind}:${runId ?? 'legacy'}`
 }
 
 export function listToolSessions(): ToolSession[] {
@@ -53,7 +53,7 @@ export async function getToolSession(
 ): Promise<InternalSession> {
   const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
   executionGate.assert(ticket, kind !== 'vision')
-  const key = sessionKey(ctx.projectId, kind)
+  const key = sessionKey(ctx.projectId, kind, ticket.scope?.runId ?? ctx.toolSessionId)
   const existing = sessions.get(key)
   if (existing && existing.ticket.sessionId === ticket.sessionId && existing.ticket.generation === ticket.generation) {
     executionGate.assert(existing.ticket, kind !== 'vision')

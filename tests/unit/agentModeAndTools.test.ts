@@ -60,6 +60,8 @@ vi.mock('@/services/api/sync', () => ({ logAgentEvent: mocks.logAgentEvent }))
 
 import { buildSystemPreamble, looksLikeInternalReasoningLeak, runAgent, shouldRequireToolCall } from '@/services/agent'
 import { LocalInferenceError } from '@/services/inference/localModelManager'
+import { ChatEffectJournalError } from '@/services/chatEffectJournal'
+import { executionGate } from '@/services/executionGate'
 import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 import type { InferenceRequest } from '@/services/inference/types'
 import {
@@ -87,6 +89,173 @@ const durableTaskCreate = {
 } as const
 
 describe('agent mode and tool reliability', () => {
+  it('stops before tools and receipts when current remote authority is unavailable', async () => {
+    const beforeToolExecution = vi.fn(async () => {
+      throw new Error('lease expired')
+    })
+    const receipt = vi.fn()
+    mocks.streamChatWithTools.mockResolvedValueOnce(toolCallResult)
+    await expect(
+      runAgent({
+        projectId: 'project-2',
+        mode: 'act',
+        baseMessages: [{ role: 'user', content: 'Prüfe den Zustand.' }],
+        beforeToolExecution,
+        effectJournal: { before: receipt },
+      })
+    ).rejects.toThrow('Auftragsfreigabe')
+    expect(beforeToolExecution).toHaveBeenCalledOnce()
+    expect(mocks.execute).not.toHaveBeenCalled()
+    expect(receipt).not.toHaveBeenCalled()
+    expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+  })
+  it('offers only workcopy-capable tools and rejects unsupported tools even if the model requests them', async () => {
+    const workflowScope = {
+      principalId: 'person',
+      projectId: 'project-2',
+      runId: '11111111-1111-4111-8111-111111111111',
+      expectedRootPath: 'E:/frozen-workcopy',
+      expectedWorkspaceUpdatedAt: 42,
+    }
+    mocks.toOpenAITools.mockReturnValue([
+      { type: 'function', function: { name: 'fs_read', parameters: {} } },
+      { type: 'function', function: { name: 'project_get_state', parameters: {} } },
+    ])
+    mocks.streamChatWithTools.mockResolvedValueOnce(toolCallResult)
+    const result = await runAgent({
+      projectId: 'project-2',
+      principalScopeId: 'person',
+      mode: 'observe',
+      workflowScope,
+      baseMessages: [{ role: 'user', content: 'Prüfe den Zustand.' }],
+      maxRounds: 1,
+    })
+    expect(
+      mocks.streamChatWithTools.mock.calls[0]![0].tools.map(
+        (tool: { function: { name: string } }) => tool.function.name
+      )
+    ).toEqual(['fs_read'])
+    expect(mocks.execute).not.toHaveBeenCalled()
+    expect(result.toolFailures).toBe(1)
+  })
+  it('journals a scoped mutation before executing and keeps its result attached to the original chat', async () => {
+    const order: string[] = []
+    const finish = vi.fn(async () => {
+      order.push('completed')
+    })
+    const before = vi.fn(async () => {
+      order.push('started')
+      return { finish }
+    })
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'project',
+      mutating: true,
+      requiresApproval: false,
+      parameters: { type: 'object' },
+      execute: mocks.execute,
+    })
+    mocks.execute.mockImplementation(async () => {
+      order.push('effect')
+      return { ok: true }
+    })
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(toolCallResult)
+      .mockResolvedValueOnce({ content: 'Erledigt.', toolCalls: [], rawToolCalls: [] })
+    await runAgent({
+      projectId: 'project-2',
+      conversationId: 'original-chat',
+      runId: 'original-run',
+      effectJournal: { before },
+      mode: 'act',
+      baseMessages: [{ role: 'user', content: 'Speichern' }],
+    })
+    expect(order).toEqual(['started', 'effect', 'completed'])
+    expect(finish).toHaveBeenCalledWith(true)
+    expect(mocks.queueToolCall).toHaveBeenCalledWith(
+      'project-2',
+      expect.objectContaining({ conversationId: 'original-chat', runId: 'original-run' })
+    )
+    expect(mocks.addHiddenToolMessage).toHaveBeenCalledWith(
+      'project-2',
+      expect.anything(),
+      expect.objectContaining({ conversationId: 'original-chat', runId: 'original-run' })
+    )
+    const queued = mocks.queueToolCall.mock.calls[0]![1]
+    expect(queued.id).not.toBe('call-1')
+    const continuation = mocks.streamChatWithTools.mock.calls[1]![0].messages
+    expect(continuation.find((message: { role: string }) => message.role === 'tool')?.tool_call_id).toBe(queued.id)
+    expect(
+      continuation.find((message: { tool_calls?: unknown[] }) => message.tool_calls?.length)?.tool_calls[0]?.id
+    ).toBe(queued.id)
+    expect(toolCallResult.toolCalls[0]!.id).toBe('call-1')
+  })
+  it('keeps provider tool IDs distinct between different background runs', async () => {
+    for (const runId of ['first-run', 'second-run']) {
+      mocks.streamChatWithTools
+        .mockResolvedValueOnce(toolCallResult)
+        .mockResolvedValueOnce({ content: 'Gelesen.', toolCalls: [], rawToolCalls: [] })
+      await runAgent({
+        projectId: 'project-2',
+        conversationId: runId,
+        runId,
+        mode: 'observe',
+        baseMessages: [{ role: 'user', content: 'Lies den Zustand.' }],
+      })
+    }
+    const ids = mocks.queueToolCall.mock.calls.map(call => call[1].id)
+    expect(ids).toHaveLength(2)
+    expect(new Set(ids).size).toBe(2)
+  })
+  it('propagates a child cancellation into its inherited execution permit without revoking the parent', async () => {
+    const parent = executionGate.capture(undefined, { projectId: 'project-2', runId: crypto.randomUUID() })
+    const child = new AbortController()
+    mocks.streamChatWithTools.mockResolvedValueOnce(toolCallResult)
+    mocks.execute.mockImplementation(async (_args, context) => {
+      expect(context.execution.scope).toEqual(parent.scope)
+      expect(context.execution.signal.aborted).toBe(false)
+      child.abort(new DOMException('Child stopped', 'AbortError'))
+      expect(context.signal.aborted).toBe(true)
+      expect(context.execution.signal.aborted).toBe(true)
+      expect(parent.signal.aborted).toBe(false)
+      context.signal.throwIfAborted()
+    })
+    await expect(
+      runAgent({
+        projectId: 'project-2',
+        execution: parent,
+        signal: child.signal,
+        mode: 'observe',
+        baseMessages: [{ role: 'user', content: 'Lies den Zustand.' }],
+      })
+    ).rejects.toBeDefined()
+    executionGate.assert(parent)
+  })
+  it('fails before any mutation if the durable effect receipt is unavailable', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'project',
+      mutating: true,
+      requiresApproval: false,
+      parameters: { type: 'object' },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools.mockResolvedValueOnce(toolCallResult)
+    await expect(
+      runAgent({
+        projectId: 'project-2',
+        mode: 'act',
+        effectJournal: {
+          before: async () => {
+            throw new ChatEffectJournalError()
+          },
+        },
+        baseMessages: [{ role: 'user', content: 'Speichern' }],
+      })
+    ).rejects.toThrow('Laufjournal')
+    expect(mocks.execute).not.toHaveBeenCalled()
+    expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+  })
   it.each(['balanced', 'ultra'] as const)(
     'preserves successful tools when %s transport aborts without a stop signal',
     async thinkingTier => {

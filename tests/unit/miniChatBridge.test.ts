@@ -494,21 +494,24 @@ describe('mini chat and workspace bridge', () => {
     expect(sendChat).toHaveBeenCalledExactlyOnceWith('Neues Projekt', 'project-b')
   })
 
-  it.each(['chat', 'planning'])('blocks project switches and new sends during active %s work', async kind => {
-    const { bridge, source, send, selectProject, run, sendChat } = setup()
-    source.chatBusy = kind === 'chat'
-    source.planningBusy = kind === 'planning'
-    await bridge.dispatch({
-      type: 'select_project',
-      sessionId: bridge.snapshot.value.sessionId,
-      projectId: 'project-b',
-    })
-    await send('Competing turn')
-    expect(selectProject).not.toHaveBeenCalled()
-    expect(run).not.toHaveBeenCalled()
-    expect(sendChat).not.toHaveBeenCalled()
-    expect(bridge.snapshot.value.notice).toContain('läuft noch')
-  })
+  it.each(['chat', 'planning'])(
+    'allows project navigation and independent workspace work during active %s work',
+    async kind => {
+      const { bridge, source, send, selectProject, run, sendChat } = setup()
+      source.chatBusy = kind === 'chat'
+      source.planningBusy = kind === 'planning'
+      await bridge.dispatch({
+        type: 'select_project',
+        sessionId: bridge.snapshot.value.sessionId,
+        projectId: 'project-b',
+      })
+      await send('Competing turn')
+      expect(selectProject).toHaveBeenCalledWith('project-b')
+      expect(run).toHaveBeenCalledOnce()
+      expect(sendChat).not.toHaveBeenCalled()
+      expect(bridge.snapshot.value.project?.id).toBe('project-b')
+    }
+  )
 
   it('blocks concurrent selection, panel opening and sending until the current selection settles', async () => {
     const { bridge, source, send, selectProject, openPanel, run } = setup()
@@ -547,7 +550,7 @@ describe('mini chat and workspace bridge', () => {
     expect(bridge.snapshot.value.notice).toBe('Projekt nicht verfügbar.')
   })
 
-  it('stops the workspace run even after viewing the shared chat and retains its lock until settlement', async () => {
+  it('stops only the selected chat and keeps a hidden workspace run alive', async () => {
     const finished = deferred<{ finalText: string }>()
     let options!: RunAgentOptions
     const { bridge, controller, send, view, stopChat, selectProject } = setup(
@@ -559,26 +562,28 @@ describe('mini chat and workspace bridge', () => {
     const active = send('Workspace-Auftrag')
     await view('chat')
     await bridge.dispatch({ type: 'stop', sessionId: bridge.snapshot.value.sessionId })
-    expect(options.signal?.aborted).toBe(true)
-    expect(bridge.snapshot.value.busy).toBe(true)
+    expect(options.signal?.aborted).toBe(false)
+    expect(bridge.snapshot.value.busy).toBe(false)
     await bridge.dispatch({
       type: 'select_project',
       sessionId: bridge.snapshot.value.sessionId,
       projectId: 'project-b',
     })
-    expect(selectProject).not.toHaveBeenCalled()
-    expect(stopChat).not.toHaveBeenCalled()
-    finished.resolve({ finalText: 'Too late' })
+    expect(selectProject).toHaveBeenCalledWith('project-b')
+    expect(stopChat).toHaveBeenCalledOnce()
+    expect(options.projectId).toBe('project-a')
+    finished.resolve({ finalText: 'Completed in original workspace' })
     await active
-    expect(controller.state.messages.at(-1)?.status).toBe('canceled')
+    expect(controller.state.messages.at(-1)?.status).toBe('done')
     expect(bridge.snapshot.value.busy).toBe(false)
   })
 
-  it('stops the main chat while the workspace view is selected', async () => {
+  it('never stops the main chat from the workspace view', async () => {
     const { bridge, source, stopChat } = setup()
     source.chatBusy = true
     await bridge.dispatch({ type: 'stop', sessionId: bridge.snapshot.value.sessionId })
-    expect(stopChat).toHaveBeenCalledOnce()
+    expect(stopChat).not.toHaveBeenCalled()
+    expect(source.chatBusy).toBe(true)
     expect(bridge.snapshot.value.busy).toBe(false)
   })
 
