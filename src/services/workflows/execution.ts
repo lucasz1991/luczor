@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
+import { projectLocalIdForServer } from '@/services/cloudProjectAccess'
 import { LuczorApi, requestWithConfig, type DeviceJob, type LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
 import { requestConfirmation } from '@/services/confirmation'
 import { executionGate, executionPayload, type ExecutionTicket } from '@/services/executionGate'
@@ -57,7 +58,8 @@ export async function runWorkflowDeviceJob(
   )
     throw new Error('workflow_execution_account_changed')
   const scope = await workflowAccountScope(config)
-  const workspace = await getProjectWorkspace(metadata.project_id, account.principalId)
+  const localProjectId = projectLocalIdForServer(metadata.project_id, account.principalId)
+  const workspace = await getProjectWorkspace(localProjectId, account.principalId)
   assertSession()
   if (!workspace || workspace.status !== 'ready' || !workspace.updatedAt)
     throw new Error('workflow_execution_workspace_unavailable')
@@ -72,7 +74,7 @@ export async function runWorkflowDeviceJob(
   const automationRevision = workflowAutomationRevision(scope, metadata.definition_id ?? 0)
   const artifactScope = {
     principalId: account.principalId,
-    projectId: metadata.project_id,
+    projectId: localProjectId,
     expectedRootPath: workspace.rootPath,
     expectedWorkspaceUpdatedAt: workspace.updatedAt,
     runId: metadata.resource_run ?? metadata.run,

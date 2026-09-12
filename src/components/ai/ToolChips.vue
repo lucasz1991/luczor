@@ -81,6 +81,7 @@ defineProps<{ tools: ActivityStep[] }>()
   --tool-tone: var(--ai-green);
 }
 .ai-tool summary {
+  position: relative;
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr) auto 12px;
   align-items: center;
@@ -92,6 +93,23 @@ defineProps<{ tools: ActivityStep[] }>()
   color: var(--ai-muted);
   font-size: 12px;
   line-height: 1.5;
+}
+.ai-tool[data-status='running'] summary {
+  overflow: hidden;
+  background: color-mix(in srgb, var(--ai-accent) 7%, transparent);
+}
+.ai-tool[data-status='running'] summary::after {
+  position: absolute;
+  right: 10px;
+  bottom: 4px;
+  left: 10px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--ai-accent), transparent);
+  background-size: 42% 100%;
+  background-repeat: no-repeat;
+  background-position-x: -42%;
+  content: '';
+  animation: tool-progress-sweep 1.45s ease-in-out infinite;
 }
 .ai-tool summary::-webkit-details-marker {
   display: none;
@@ -142,6 +160,9 @@ defineProps<{ tools: ActivityStep[] }>()
   flex: 0 0 4px;
   border-radius: 50%;
   background: currentColor;
+}
+.ai-tool[data-status='running'] .ai-tool__status i {
+  animation: tool-status-pulse 1.25s ease-out infinite;
 }
 .ai-tool__chevron {
   color: var(--ai-faint);
@@ -202,11 +223,32 @@ defineProps<{ tools: ActivityStep[] }>()
   }
 }
 @media (prefers-reduced-motion: reduce) {
+  .ai-tool[data-status='running'] summary::after,
+  .ai-tool[data-status='running'] .ai-tool__status i {
+    animation: none;
+  }
   .ai-tool__chevron {
     transition: none;
   }
 }
 :global(html[data-reduce-motion='1']) .ai-tool__chevron {
   transition: none;
+}
+:global(html[data-reduce-motion='1']) .ai-tool[data-status='running'] summary::after,
+:global(html[data-reduce-motion='1']) .ai-tool[data-status='running'] .ai-tool__status i {
+  animation: none;
+}
+@keyframes tool-progress-sweep {
+  to {
+    background-position-x: 142%;
+  }
+}
+@keyframes tool-status-pulse {
+  70% {
+    box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 0%, transparent);
+  }
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent);
+  }
 }
 </style>

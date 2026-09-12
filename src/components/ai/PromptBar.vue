@@ -131,6 +131,7 @@ defineExpose({ focus: () => field.value?.focus() })
           <slot name="heading-start" />
           <VoiceInputSettings
             class="voice-input-settings--composer"
+            compact
             :busy="busy || voiceBusy"
             :active="listening || recording"
             @start="emit('voice-start', $event)"
@@ -138,7 +139,6 @@ defineExpose({ focus: () => field.value?.focus() })
           />
           <label class="ai-route-mode" :class="{ 'is-active': routeMode !== 'local' }" :title="routeModeHint">
             <AiIcon name="shield" :size="13" />
-            <span class="ai-route-mode__text">Modus</span>
             <select
               class="ai-route-mode__select"
               :value="externalAllowed ? routeMode : 'local'"

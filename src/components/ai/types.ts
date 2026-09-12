@@ -3,6 +3,8 @@ export type ActivityStatus = 'pending' | 'running' | 'done' | 'failed' | 'waitin
 export type ActivityStep = {
   id: string
   label: string
+  createdAt?: number
+  agentRole?: 'planner' | 'worker' | 'reviewer'
   detail?: string
   status: ActivityStatus
   capability?: string

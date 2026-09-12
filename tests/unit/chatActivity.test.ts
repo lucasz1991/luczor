@@ -82,7 +82,13 @@ describe('chat activity lifecycle', () => {
       createdAt: 0,
       updatedAt: 0,
     }
-    expect(presentToolCall(call)).toEqual({ id: 'call', label: 'file_read', status: 'waiting', detail: undefined })
+    expect(presentToolCall(call)).toMatchObject({
+      id: 'call',
+      label: 'file_read',
+      status: 'waiting',
+      detail: undefined,
+      createdAt: 0,
+    })
     expect(JSON.stringify(presentToolCall(call))).not.toContain('private-test')
     expect(presentToolCall({ ...call, status: 'failed' }).status).toBe('failed')
     expect(presentToolCall({ ...call, status: 'rejected' }).status).toBe('canceled')

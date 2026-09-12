@@ -4,7 +4,14 @@ import type { ChatCommentary } from '@/state/types'
 import { readAlongState } from '@/services/voice/readAlong'
 import AiIcon from './AiIcon.vue'
 import StreamingText from './StreamingText.vue'
-const props = defineProps<{ entries: ChatCommentary[]; messageId?: string; active?: boolean }>()
+const props = withDefaults(
+  defineProps<{ entries: ChatCommentary[]; messageId?: string; active?: boolean; compact?: boolean }>(),
+  {
+    messageId: undefined,
+    active: false,
+    compact: false,
+  }
+)
 const latest = computed(() => props.entries.at(-1))
 const earlier = computed(() => props.entries.slice(0, -1))
 // Spoken commentary remains discoverable when playback advances to an earlier entry.
@@ -25,7 +32,12 @@ function retainHistoryChoice(event: Event) {
 </script>
 
 <template>
-  <section v-if="entries.length" class="chat-commentary" aria-label="Öffentliche Fortschrittsmeldungen">
+  <section
+    v-if="entries.length"
+    class="chat-commentary"
+    :class="{ 'is-compact': compact }"
+    aria-label="Öffentliche Fortschrittsmeldungen"
+  >
     <details v-if="earlier.length" class="chat-commentary__history" :open="historyOpen" @toggle="retainHistoryChoice">
       <summary>
         <AiIcon name="chevron" :size="12" />
@@ -68,6 +80,9 @@ function retainHistoryChoice(event: Event) {
   color: var(--ai-muted);
   min-width: 0;
   font-family: var(--ai-font);
+}
+.chat-commentary.is-compact {
+  margin: 4px 0;
 }
 .chat-commentary__entry {
   border-inline-start: 1px solid var(--ai-line-strong);

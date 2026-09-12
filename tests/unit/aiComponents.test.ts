@@ -97,7 +97,7 @@ describe('AI component rendering contracts', () => {
     expect(screen).not.toContain('<img')
   })
 
-  it('keeps route selection in the prompt heading without the deprecated model shortcut', async () => {
+  it('keeps compact icon controls in the prompt heading without the deprecated model shortcut', async () => {
     const html = await renderToString(
       createSSRApp({
         render: () =>
@@ -112,6 +112,9 @@ describe('AI component rendering contracts', () => {
     expect(html).toContain('ai-route-mode')
     expect(html).toContain('ai-prompt__heading')
     expect(html).not.toContain('ai-model-button')
+    expect(html).not.toContain('ai-route-mode__text')
+    expect(html).not.toContain('<span>Sprache</span>')
+    expect(html).not.toContain('<span>Denktiefe</span>')
     expect(html).not.toContain('Enter senden')
     expect(html).not.toContain('Luczor kann Fehler machen')
   })

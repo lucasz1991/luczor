@@ -1,4 +1,5 @@
 import { requestWithConfig, type LuczorApiConfigSnapshot, type RequestOptions } from '@/services/api/luczorApi'
+import { projectExternalIdForServer } from '@/services/cloudProjectAccess'
 import type {
   Workflow,
   WorkflowDefinition,
@@ -17,18 +18,18 @@ export function createWorkflowApi(config: LuczorApiConfigSnapshot, signal?: Abor
   return {
     catalog: () => request<WorkflowEnvelope<WorkflowTask[]>>('/workflows/task-catalog'),
     list: (projectId: string) =>
-      request<WorkflowEnvelope<Workflow[]>>('/workflows', { query: { project_id: projectId } }),
+      request<WorkflowEnvelope<Workflow[]>>('/workflows', { query: { project_id: projectExternalIdForServer(projectId)! } }),
     get: (id: number) => request<WorkflowEnvelope<Workflow>>(`/workflows/${id}`),
     revision: (id: number, version: number) =>
       request<WorkflowEnvelope<WorkflowRevision>>(`/workflows/${id}/revisions/${version}`),
     validate: (definition: WorkflowDefinition, projectId: string, workflowId?: number) =>
       request<WorkflowEnvelope<{ valid: boolean; definition: WorkflowDefinition }>>('/workflows/validate', {
         method: 'POST',
-        body: { definition, project_id: projectId, workflow_definition_id: workflowId },
+        body: { definition, project_id: projectExternalIdForServer(projectId), workflow_definition_id: workflowId },
       }),
-    create: (body: WorkflowWrite) => request<WorkflowEnvelope<Workflow>>('/workflows', { method: 'POST', body }),
+    create: (body: WorkflowWrite) => request<WorkflowEnvelope<Workflow>>('/workflows', { method: 'POST', body: { ...body, project_id: projectExternalIdForServer(body.project_id) } }),
     update: (id: number, body: WorkflowWrite) =>
-      request<WorkflowEnvelope<Workflow>>(`/workflows/${id}`, { method: 'PATCH', body }),
+      request<WorkflowEnvelope<Workflow>>(`/workflows/${id}`, { method: 'PATCH', body: { ...body, project_id: projectExternalIdForServer(body.project_id) } }),
     operation: (id: string) =>
       request<WorkflowEnvelope<{ operation_id: string; status: string; response?: unknown }>>(
         `/workflow-operations/${encodeURIComponent(id)}`
@@ -64,7 +65,7 @@ export function createWorkflowApi(config: LuczorApiConfigSnapshot, signal?: Abor
           tasks: Array<{ id: number; title: string }>
           workflows: Array<{ id: number; name: string }>
         }>
-      >('/workflow-trigger-sources', { query: { project_id: projectId } }),
+      >('/workflow-trigger-sources', { query: { project_id: projectExternalIdForServer(projectId)! } }),
     deliveries: (id: number) =>
       request<
         WorkflowEnvelope<

@@ -2,6 +2,7 @@
 import { reactive } from 'vue'
 import { DEFAULT_STATE } from '@/state/defaults'
 import type * as AppTypes from '@/state/types'
+import { migrateConversations } from '@/services/chatConversations'
 import {
   createSafeRecord,
   deleteSafeRecordValue,
@@ -70,11 +71,12 @@ function ensurePendingBucket(projectId: AppTypes.Id): AppTypes.PendingToolCall[]
 /* =========================================================
  * Message factories
  * ========================================================= */
-function makeMsg(role: AppTypes.ChatRole, content: string, projectId?: AppTypes.Id): AppTypes.Message {
+function makeMsg(role: AppTypes.ChatRole, content: string, projectId?: AppTypes.Id, conversationId?: AppTypes.Id): AppTypes.Message {
   const timestamp = now()
   return {
     id: uid(),
     projectId: projectId ?? getActiveProjectId(),
+    conversationId: conversationId ?? mutations.getActiveConversationId(projectId ?? getActiveProjectId()),
     role,
     content,
     ts: timestamp,
@@ -121,6 +123,8 @@ export const mutations = {
       ? fresh.projects.filter(project => typeof project?.id === 'string' && isSafeRecordKey(project.id))
       : clone(DEFAULT_STATE.projects)
     state.messages = fresh.messages
+    state.conversations = fresh.conversations ?? []
+    state.conversationSchemaVersion = fresh.conversationSchemaVersion
 
     state.todos = fresh.todos ?? []
     state.todoSteps = fresh.todoSteps ?? []
@@ -141,6 +145,7 @@ export const mutations = {
 
     // Ensure buckets exist for known projects
     for (const project of state.projects) ensurePendingBucket(project.id)
+    migrateConversations(state)
   },
 
   ensureDefaults() {
@@ -154,6 +159,7 @@ export const mutations = {
     const pid = state.global.ui!.lastProjectId!
     ensureProjectExists(pid)
     ensurePendingBucket(pid)
+    migrateConversations(state)
 
     const hasAnyVisible = state.messages.some(message => message.projectId === pid && message.visibility !== 'hidden')
 
@@ -264,15 +270,52 @@ export const mutations = {
       .sort((left, right) => left.ts - right.ts)
   },
 
+  getActiveConversationId(projectId: AppTypes.Id): AppTypes.Id {
+    ensureProjectExists(projectId)
+    migrateConversations(state)
+    return getSafeRecordValue(state.global.ui!.lastConversationByProject!, projectId) ?? ''
+  },
+
+  setActiveConversation(projectId: AppTypes.Id, conversationId: AppTypes.Id) {
+    const chat = state.conversations?.find(item => item.id === conversationId && item.projectId === projectId && !item.archivedAt)
+    if (!chat) throw new Error('Chat nicht verfügbar.')
+    this.setActiveProject(projectId)
+    state.global.ui!.lastConversationByProject ??= {}
+    setSafeRecordValue(state.global.ui!.lastConversationByProject, projectId, conversationId)
+  },
+
+  createConversation(projectId: AppTypes.Id, title = 'Neuer Chat'): AppTypes.Conversation {
+    this.getActiveConversationId(projectId)
+    const timestamp = now()
+    const chat: AppTypes.Conversation = { id: uid(), projectId, title: title.trim().slice(0, 160) || 'Neuer Chat', createdAt: timestamp, updatedAt: timestamp, archivedAt: null }
+    state.conversations!.push(chat)
+    this.setActiveConversation(projectId, chat.id)
+    return chat
+  },
+
+  renameConversation(projectId: AppTypes.Id, conversationId: AppTypes.Id, title: string) {
+    const chat = state.conversations?.find(item => item.id === conversationId && item.projectId === projectId)
+    if (!chat || !title.trim()) return
+    chat.title = title.trim().slice(0, 160)
+    chat.updatedAt = now()
+  },
+
+  getConversationMessages(projectId: AppTypes.Id, conversationId: AppTypes.Id, opts?: { includeHidden?: boolean }): AppTypes.Message[] {
+    return this.getProjectMessages(projectId, opts).filter(message => message.conversationId === conversationId || message.meta.conversationId === conversationId)
+  },
+
   addMessage(msg: AppTypes.Message) {
     ensureProjectExists(msg.projectId)
+    msg.conversationId ??= msg.meta.conversationId ?? this.getActiveConversationId(msg.projectId)
     state.messages.push(msg)
     this.touchProject(msg.projectId)
   },
 
   addHiddenToolMessage(projectId: AppTypes.Id, parsed: unknown, meta?: AppTypes.MessageMeta) {
     ensureProjectExists(projectId)
-    state.messages.push(makeHiddenToolMsg(projectId, { parsed, meta }))
+    const message = makeHiddenToolMsg(projectId, { parsed, meta })
+    message.conversationId = meta?.conversationId ?? this.getActiveConversationId(projectId)
+    state.messages.push(message)
     this.touchProject(projectId)
   },
 

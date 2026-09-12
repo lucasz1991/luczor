@@ -12,7 +12,6 @@ function change(event: Event) {
     class="ai-thinking-select"
     :title="nextPrompt ? 'Denktiefe für den nächsten Auftrag' : 'Denktiefe für diesen Auftrag'"
   >
-    <span>Denktiefe</span>
     <select
       :value="modelValue"
       :aria-label="nextPrompt ? 'Denktiefe für den nächsten Auftrag' : 'Denktiefe'"
@@ -26,8 +25,6 @@ function change(event: Event) {
 .ai-thinking-select {
   display: inline-flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 4px;
   min-width: 0;
   font-size: 11px;
   color: var(--ai-text-muted, #a3a5af);

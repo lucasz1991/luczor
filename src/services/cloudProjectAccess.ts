@@ -22,3 +22,14 @@ export function projectExternalIdForServer(
     throw new Error('Das Projekt gehört zu einem anderen Benutzer.')
   return project?.cloud?.externalId ?? projectId
 }
+
+/** Resolve server identities only against projects owned by the verified account. */
+export function projectLocalIdForServer(externalId: string, principalId: string): string {
+  const project = state.projects.find(item =>
+    item.cloud
+      ? item.cloud.principalId === principalId && item.cloud.externalId === externalId
+      : item.id === externalId
+  )
+  if (!project || project.archivedAt) throw new Error('Das globale Projekt ist auf diesem Gerät noch nicht zugeordnet.')
+  return project.id
+}

@@ -25,10 +25,10 @@ export function createChatActivity(now = Date.now()): ChatActivity {
   return {
     startedAt: now,
     status: 'running',
-    steps: [{ id: 'context', label: 'Kontext vorbereiten', status: 'running' }],
+    steps: [{ id: 'context', label: 'Kontext vorbereiten', status: 'running', createdAt: now }],
   }
 }
-export function updateChatActivity(activity: ChatActivity, event: AgentProgress): void {
+export function updateChatActivity(activity: ChatActivity, event: AgentProgress, now = Date.now()): void {
   if (activity.finishedAt !== undefined) return
   // Each phase keeps its own row; token updates only refresh that phase.
   const phaseId = event.phase === 'routing' ? 'routing' : `round-${event.round ?? 1}-${event.phase}`
@@ -63,7 +63,7 @@ export function updateChatActivity(activity: ChatActivity, event: AgentProgress)
     activity.steps.forEach(step => {
       if (step.status === 'running') step.status = 'done'
     })
-    activity.steps.push({ id, label, detail, status: 'running' })
+    activity.steps.push({ id, label, detail, status: 'running', createdAt: now, agentRole: event.agentRole })
   }
 }
 export function finishChatActivity(
@@ -102,6 +102,7 @@ export function presentToolCall(call: PendingToolCall): ActivityStep {
   return {
     id: call.id,
     label: call.name,
+    createdAt: call.createdAt,
     status: TOOL_STATUS[call.status],
     capability,
     model: typeof call.args.model === 'string' ? call.args.model.slice(0, 80) : undefined,

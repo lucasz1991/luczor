@@ -52,7 +52,8 @@ import { logAgentEvent } from '@/services/api/sync'
 import { getApiConfigSnapshot } from '@/services/api/luczorApi'
 import type { AgentProgress } from '@/services/chatActivity'
 import type { ToolCallStatus } from '@/state/types'
-import { executionGate } from '@/services/executionGate'
+import { executionGate, type ExecutionTicket } from '@/services/executionGate'
+import { withRunResources } from '@/services/runs/sharedResourceCoordinator'
 import { validateToolArguments } from '@/services/tools/validateArguments'
 import { INVALID_TOOL_ARGUMENTS, prepareToolCallHistory } from '@/services/inference/toolCallHistory'
 import { loadToolLimits, validToolRounds } from '@/services/toolLimits'
@@ -92,6 +93,9 @@ function pulseForCategory(category: ToolCategory) {
 }
 
 export type RunAgentOptions = {
+  execution?: ExecutionTicket
+  conversationId?: string
+  runId?: string
   thinkingTier?: import('./inference/thinking').ThinkingTier
   thinkingConfig?: import('./inference/thinking').ThinkingConfig
   onBudget?: (progress: import('./inference/thinking').ThinkingBudgetProgress | null) => void
@@ -494,13 +498,15 @@ function recordPersistentOutcome(
   outcome: Outcome,
   dataHandling: ToolDataHandling,
   requestId?: string,
-  durationMs?: number
+  durationMs?: number,
+  runScope?: { conversationId?: string; runId?: string }
 ) {
   mutations.updateToolCallStatus(projectId, callId, status)
   mutations.addHiddenToolMessage(projectId, dataHandling === 'ephemeral' ? redactedOutcome(outcome) : outcome, {
     toolCallId: callId,
     toolName: name,
     dataHandling,
+    ...runScope,
   })
 
   // Append-only agent event to the server brain (best-effort, skipped offline).
@@ -542,7 +548,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   const { projectId, mode } = opts
   const maxRounds = opts.maxRounds ?? (await loadToolLimits()).chat
   if (!validToolRounds(maxRounds)) throw new Error('Tool-Runden müssen zwischen 1 und 64 liegen.')
-  const execution = executionGate.capture(opts.signal)
+  const execution = opts.execution ?? executionGate.capture(opts.signal)
+  executionGate.assert(execution)
   const signal = opts.interruptionSignal
     ? AbortSignal.any([execution.signal, opts.interruptionSignal])
     : execution.signal
@@ -575,7 +582,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     opts.toolSession ? opts.toolSession.update(id, status) : mutations.updateToolCallStatus(projectId, id, status)
   const recordOutcome: typeof recordPersistentOutcome = (...args) => {
     if (opts.toolSession) opts.toolSession.update(args[1], args[3])
-    else recordPersistentOutcome(...args)
+    else recordPersistentOutcome(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], { conversationId: opts.conversationId, runId: opts.runId })
   }
   opts.onProgress?.({ phase: 'routing' })
   const currentMode = () => opts.getMode?.() ?? mode
@@ -1351,15 +1358,19 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       const category = tool?.category ?? 'custom'
       const requiresApproval = !!tool?.requiresApproval
       const dataHandling = tool?.dataHandling ?? 'syncable'
+      const initialStatus =
+        requiresApproval && currentMode() === 'unrestricted' ? ('approved' as const) : ('proposed' as const)
 
       const queuedCall = {
+        conversationId: opts.conversationId,
+        runId: opts.runId,
         id: call.id,
         name: call.name,
         category,
         args: call.arguments,
         requiresApproval,
         dataHandling,
-        status: 'proposed' as const,
+        status: initialStatus,
       }
       if (opts.toolSession) opts.toolSession.queue(queuedCall)
       else mutations.queueToolCall(projectId, queuedCall)
@@ -1852,13 +1863,14 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       }
       try {
         executionGate.assert(execution)
-        const output = await tool.execute(executionArguments, {
+        const resourceKeys = tool.mutating ? [`workspace:${projectId}`, ...(tool.category === 'os' ? ['desktop'] : [])] : []
+        const output = await withRunResources(resourceKeys, signal, () => tool.execute(executionArguments, {
           projectId,
           signal,
           execution,
           inferenceTarget: 'local',
           workspaceScope: opts.workspaceScope,
-        })
+        }))
         executionGate.assert(execution)
         const outcome = normalizeToolOutcome(output)
         const completeGoalTextRead =

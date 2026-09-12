@@ -5,6 +5,7 @@ import { resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
 import { state } from '@/state/store'
 import type { ToolContext } from '@/services/tools/types'
 import { createWorkflowApi } from './api'
+import { projectExternalIdForServer } from '@/services/cloudProjectAccess'
 import type { Workflow } from './types'
 
 export async function captureWorkflowAccess(ctx: ToolContext, requestedProjectId: unknown, mutating: boolean) {
@@ -47,7 +48,7 @@ export async function captureWorkflowAccess(ctx: ToolContext, requestedProjectId
   const workflow = async (id: number): Promise<Workflow> => {
     const response = await api.get(id)
     await check()
-    if (response.data.project_external_id !== projectId)
+    if (response.data.project_external_id !== projectExternalIdForServer(projectId, identity.principalId))
       throw new Error('Der Workflow gehört zu einem anderen Projekt.')
     return response.data
   }

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, useId, watch } from 'vue'
+import AiIcon from '@/components/ai/AiIcon.vue'
 
 type GoalModel = {
   text: string
@@ -14,7 +15,11 @@ type GoalModel = {
   updatedAt: number
 }
 
-const props = defineProps<{ model?: GoalModel; busy?: boolean }>()
+const props = withDefaults(defineProps<{ model?: GoalModel; busy?: boolean; compact?: boolean }>(), {
+  model: undefined,
+  busy: false,
+  compact: false,
+})
 const emit = defineEmits<{ save: [text: string]; toggle: [active: boolean] }>()
 const id = useId()
 const open = ref(false)
@@ -87,9 +92,9 @@ function save(): void {
       :title="`Arbeitsziel · ${status}`"
       @click="setOpen(!open)"
     >
-      <span class="goal-control__dot" aria-hidden="true" />
-      Ziel
-      <span class="goal-control__sr-only">: {{ status }}</span>
+      <AiIcon name="spark" :size="14" />
+      <span v-if="!compact">Ziel</span>
+      <span class="goal-control__sr-only">Arbeitsziel: {{ status }}</span>
     </button>
     <button
       v-if="model?.active"
@@ -200,6 +205,9 @@ function save(): void {
   border: 1px solid transparent;
   border-radius: 6px;
   font-size: 12px !important;
+}
+.goal-control__trigger:has(svg) {
+  min-width: 28px;
 }
 .goal-control__trigger:hover,
 .goal-control__pause:hover {

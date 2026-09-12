@@ -1406,6 +1406,46 @@ describe('agent mode and tool reliability', () => {
     expect(mocks.logAgentEvent).not.toHaveBeenCalled()
   })
 
+  it('queues approval-required tools as approved in unrestricted mode without opening a pending approval', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'project_upsert_goal',
+      category: 'project',
+      mutating: true,
+      requiresApproval: true,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      ...toolCallResult,
+      toolCalls: [{ id: 'call-unrestricted', name: 'project_upsert_goal', arguments: { title: 'Ziel' } }],
+      rawToolCalls: [
+        {
+          id: 'call-unrestricted',
+          type: 'function' as const,
+          function: { name: 'project_upsert_goal', arguments: '{"title":"Ziel"}' },
+        },
+      ],
+    })
+
+    await runAgent({
+      projectId: 'p1',
+      mode: 'unrestricted',
+      baseMessages: [{ role: 'user', content: 'Speichere das Ziel' }],
+      maxRounds: 1,
+    })
+
+    expect(mocks.queueToolCall).toHaveBeenCalledWith(
+      'p1',
+      expect.objectContaining({
+        id: 'call-unrestricted',
+        requiresApproval: true,
+        status: 'approved',
+      })
+    )
+    expect(mocks.awaitApproval).not.toHaveBeenCalled()
+    expect(mocks.execute).toHaveBeenCalledOnce()
+  })
+
   it('does not execute a late tool result after cancellation', async () => {
     const abort = new AbortController()
     mocks.streamChatWithTools.mockImplementationOnce(async () => {

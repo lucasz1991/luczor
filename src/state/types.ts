@@ -11,6 +11,8 @@ export type ChatRole = 'user' | 'assistant' | 'tool'
 export type MessageVisibility = 'visible' | 'hidden'
 
 export type MessageMeta = {
+  runId?: Id
+  conversationId?: Id
   thinkingTier?: import('@/services/inference/thinking').ThinkingTier
   kind?: 'question' | 'statement'
   isLoading?: boolean
@@ -60,6 +62,8 @@ export type ChatCommentary = {
 export type Message = {
   id: Id
   projectId: Id
+  /** Optional only while reading a legacy project transcript. */
+  conversationId?: Id
 
   role: ChatRole
   content: string
@@ -146,6 +150,16 @@ export type Project = {
   updatedAt: number
 }
 
+export type Conversation = {
+  id: Id
+  projectId: Id
+  title: string
+  createdAt: number
+  updatedAt: number
+  archivedAt: number | null
+  draft?: string
+}
+
 /* =========================================================
  * Memories / Summaries (optional but supported)
  * ========================================================= */
@@ -191,6 +205,8 @@ export type ToolCallStatus =
   | 'canceled' // aborted by user/app
 
 export type PendingToolCall = {
+  conversationId?: Id
+  runId?: Id
   id: Id
   projectId: Id
 
@@ -258,6 +274,7 @@ export type GlobalDefaults = {
 
 export type GlobalUi = {
   lastProjectId?: Id
+  lastConversationByProject?: Record<Id, Id>
 }
 
 export type GlobalState = {
@@ -276,6 +293,8 @@ export type AppState = {
   global: GlobalState
 
   projects: Project[]
+  conversations?: Conversation[]
+  conversationSchemaVersion?: 1
   messages: Message[]
 
   // optional legacy / future features

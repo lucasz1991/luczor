@@ -1278,10 +1278,13 @@ html[data-reduce-motion='1'] .ai-shimmer {
   flex-shrink: 0;
 }
 .ai-route-mode {
+  position: relative;
   display: inline-flex;
+  width: 28px;
+  height: 28px;
   align-items: center;
-  gap: 4px;
-  padding: 3px 6px;
+  justify-content: center;
+  padding: 0;
   border: 1px solid var(--border);
   border-radius: 7px;
   background: transparent;
@@ -1298,12 +1301,17 @@ html[data-reduce-motion='1'] .ai-shimmer {
   outline-offset: 2px;
 }
 .ai-route-mode__select {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  margin: 0;
+  appearance: none;
   border: 0;
   background: transparent;
-  color: inherit;
-  font: inherit;
+  color: transparent;
+  font-size: 0;
   cursor: pointer;
-  max-width: 120px;
+  opacity: 0;
 }
 .ai-route-mode__select:focus-visible {
   outline: none;

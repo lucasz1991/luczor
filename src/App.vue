@@ -8,8 +8,6 @@ import { modelUsageSettings, type ChatRouteMode } from '@/services/inference/mod
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import type { SystemStatusDisplayMode } from '@/features/system-status/model'
 import AgentTeamResults from './components/ai/AgentTeamResults.vue'
-import ChatAgentRoster from './components/ai/ChatAgentRoster.vue'
-import ChatCommentary from './components/ai/ChatCommentary.vue'
 import { localAssistantProfilePrompt, refreshAssistantProfile } from '@/services/assistantProfile'
 import PlanPanel from './components/PlanPanel.vue'
 import ChatProjectOverlay from './components/ChatProjectOverlay.vue'
@@ -19,8 +17,8 @@ import AutonomousGoalControl from './components/projects/AutonomousGoalControl.v
 import { useAutonomousGoal } from '@/composables/useAutonomousGoal'
 import type { GoalRunState, GoalStepResult } from '@/services/goals/autonomousGoal'
 import { useCloudProjects } from '@/composables/useCloudProjects'
-import { stopCapturedChatRun } from '@/services/chatRunLifecycle'
-import { createWorkspaceRefresh, watchWorkspaceBinding } from '@/services/workspaceRefresh'
+import { chatRuns, chatRunIsLive, type ChatRunHandle } from '@/services/chatRunManager'
+import { createWorkspaceRefresh } from '@/services/workspaceRefresh'
 import {
   executionAbortReason,
   interruptionCode,
@@ -45,14 +43,15 @@ import { teamPresetForRouteMode } from '@/services/agents/teamPolicy'
 import {
   executionGate,
   invalidateExecution,
+  invalidateExecutionScope,
   updateExecutionControls,
   type ExecutionTicket,
 } from '@/services/executionGate'
 import ChatComposer from './components/ai/ChatComposer.vue'
 import PromptBar from './components/ai/PromptBar.vue'
-import ThinkingState from './components/ai/ThinkingState.vue'
 import StreamingText from './components/ai/StreamingText.vue'
-import ToolChips from './components/ai/ToolChips.vue'
+import ChatTurnTimeline from './components/ai/ChatTurnTimeline.vue'
+import ChatWorkingIndicator from './components/ai/ChatWorkingIndicator.vue'
 import ApprovalCard from './components/ai/ApprovalCard.vue'
 import PayloadApproval from './components/ai/PayloadApproval.vue'
 import { requestPayloadApproval } from '@/services/payloadApproval'
@@ -221,26 +220,32 @@ function setComposerInput(value: string, source: ComposerInputSource) {
   if (source === 'keyboard') voiceInputSession.manualInput()
   writeComposerInput(value, source)
 }
-const sending = ref(false)
-const sendAdmission = ref(false)
+const sending = computed(() => chatRuns.hasLive(activeConversationId.value))
+const admittingConversations = shallowRef(new Set<string>())
+const sendAdmission = computed(() => admittingConversations.value.has(activeConversationId.value))
 // The route mode is a conscious choice for this project in this session.
 // Capture it at turn admission so later UI changes cannot change an in-flight route.
 const chatRouteMode = ref<ChatRouteMode>(
   modelUsageSettings.value.externalEnabled ? modelUsageSettings.value.chatRouteMode : 'local'
 )
 const chatThinkingChoices = ref(new Map<string, ThinkingTier>())
-const activeThinkingBudget = shallowRef<{
+type RunThinkingBudget = {
   projectId: string
   messageId: string
   progress: ThinkingBudgetProgress
-} | null>(null)
+}
+const thinkingBudgets = shallowRef<Record<string, RunThinkingBudget>>({})
+const activeThinkingBudget = computed(() => {
+  const messageId = activeTurn.value?.messageId
+  return messageId ? thinkingBudgets.value[messageId] ?? null : null
+})
 watch(modelUsageSettings, value => {
   chatRouteMode.value = value.externalEnabled ? value.chatRouteMode : 'local'
 })
 const continuations = shallowRef<Record<string, AgentCheckpoint>>({})
 const resetChatRouting = () => {
   chatThinkingChoices.value = new Map()
-  activeThinkingBudget.value = null
+  thinkingBudgets.value = {}
   continuations.value = {}
   chatRouteMode.value = 'local'
 }
@@ -256,7 +261,10 @@ const chatActivities = computed<Record<string, ChatActivity>>(() =>
     state.messages.filter(message => message.meta.activity).map(message => [message.id, message.meta.activity!])
   )
 )
-const activeTurn = ref<{ projectId: string; messageId: string } | null>(null)
+const activeTurn = computed(() => {
+  const run = chatRuns.records.value.find(item => item.conversationId === activeConversationId.value && chatRunIsLive(item) && item.checkpoint?.messageId)
+  return run?.checkpoint?.messageId ? { projectId: run.projectId, messageId: run.checkpoint.messageId, runId: run.runId } : null
+})
 const promptCommands = [
   { id: 'summarize', label: '/zusammenfassen', description: 'Den bisherigen Chat zusammenfassen', icon: 'spark' },
   { id: 'plan', label: '/plan', description: 'Ziele, Fragen und Schritte gemeinsam im Chat besprechen', icon: 'check' },
@@ -311,6 +319,12 @@ function editSelection(instruction: string, selection: string) {
 function messageRunActive(message: Message) {
   return message.meta.activity ? message.meta.activity.status === 'running' : !!message.meta.isLoading
 }
+const activeChatMessage = computed(() => messages.value.find(messageRunActive) ?? null)
+const activeChatLabel = computed(() => {
+  const message = activeChatMessage.value
+  if (!message?.meta.activity) return 'Luczor arbeitet'
+  return activityLabel(message.meta.activity, pendingApprovals.value.length > 0)
+})
 function messageTools(message: Message) {
   const calls = getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, message.projectId) ?? []
   const nextUser = messages.value.find(item => item.role === 'user' && item.ts > message.ts)
@@ -359,9 +373,9 @@ function openSettings(tab: SettingsStartTab = 'server') {
   showSettings.value = true
 }
 
-const abortController = ref<AbortController | null>(null)
-let cancelCurrent: null | (() => Promise<void>) = null
-let chatRunGeneration = 0
+const stopAccountRuns = () => void chatRuns.stopAll(executionAbortReason('execution_session_changed'))
+window.addEventListener('luczor:api-identity-changing', stopAccountRuns)
+onBeforeUnmount(() => { window.removeEventListener('luczor:api-identity-changing', stopAccountRuns); stopAccountRuns() })
 
 function openNotificationCenter() {
   openSettings('notifications')
@@ -472,10 +486,7 @@ const commentarySpeech = createCommentarySpeechQueue({
   speak: (text, { signal, key, source, beforeChunk }) =>
     speakWithVoiceMuted(text, signal, true, key, undefined, { source, beforeChunk }),
   allowLocalContent: getLocalSpeechConsent,
-  onBlocked: () => {
-    speechError.value =
-      'Lokaler Text wurde nicht vorgelesen. Einstellungen → Chat → Auch lokale Inhalte zum Vorlesen freigeben.'
-  },
+  onBlocked: () => undefined,
   canSpeak: async context => {
     const settings = await getAutoSpeechSettings()
     return settings.enabled && shouldSpeakAssistant(settings.mode) && (context.kind === 'message' || sending.value)
@@ -622,6 +633,14 @@ const activeProjectId = computed<string>({
 })
 
 const activeProject = computed(() => projects.value.find(p => p.id === activeProjectId.value))
+const activeConversationId = computed(() => mutations.getActiveConversationId(activeProjectId.value))
+const activeConversation = computed(() => state.conversations?.find(chat => chat.id === activeConversationId.value))
+watch(activeConversationId, (next, previous) => {
+  const old = state.conversations?.find(chat => chat.id === previous)
+  if (old) old.draft = input.value
+  writeComposerInput(state.conversations?.find(chat => chat.id === next)?.draft ?? '', 'keyboard')
+  stopVoiceOutput()
+}, { flush: 'sync' })
 watch(activeProjectId, resetProjectRouting, { flush: 'sync' })
 const activePlanningSession = computed(() => {
   void planningRevision.value
@@ -645,7 +664,7 @@ const planningStatusLabel = computed(() => {
   ])
   return labels.get(activePlanningSession.value?.status ?? '') ?? 'Planungsmodus'
 })
-watch(() => ({ mode: mode.value, killSwitch: hud.killSwitch, scope: activeProjectId.value }), updateExecutionControls, {
+watch(() => ({ mode: mode.value, killSwitch: hud.killSwitch, scope: 'desktop-account' }), updateExecutionControls, {
   immediate: true,
   flush: 'sync',
 })
@@ -654,10 +673,10 @@ onBeforeUnmount(() => {
   window.removeEventListener('luczor:api-identity-changing', invalidateExecution)
   invalidateExecution()
 })
-const messages = computed(() => mutations.getProjectMessages(activeProjectId.value))
+const messages = computed(() => mutations.getConversationMessages(activeProjectId.value, activeConversationId.value))
 const thinkingTier = computed<ThinkingTier>({
   get: () => {
-    const choice = chatThinkingChoices.value.get(activeProjectId.value)
+    const choice = chatThinkingChoices.value.get(activeConversationId.value)
     if (choice) return choice
     const saved = [...messages.value]
       .reverse()
@@ -665,7 +684,7 @@ const thinkingTier = computed<ThinkingTier>({
     return saved ?? thinkingSettings.value.defaultTier
   },
   set: value => {
-    if (isThinkingTier(value)) chatThinkingChoices.value.set(activeProjectId.value, value)
+    if (isThinkingTier(value)) chatThinkingChoices.value.set(activeConversationId.value, value)
   },
 })
 const visibleThinkingBudget = computed(() =>
@@ -767,41 +786,18 @@ const projectSummaries = computed<any[]>(() => {
  * Core actions
  * ------------------------------------------------- */
 async function stopGenerating(pauseGoal = true) {
-  await stopCapturedChatRun({
-    capture: () => ({
-      generation: chatRunGeneration,
-      controller: abortController.value,
-      cancel: cancelCurrent,
-      turn: activeTurn.value,
-    }),
-    isCurrent: snapshot =>
-      snapshot.generation === chatRunGeneration &&
-      snapshot.controller === abortController.value &&
-      snapshot.cancel === cancelCurrent &&
-      snapshot.turn === activeTurn.value,
-    abortReason: executionAbortReason('user_stop'),
-    pauseGoal: pauseGoal && autonomousGoal.model.value?.active ? () => autonomousGoal.stop() : undefined,
-    finishCurrent: () => {
-      finishActiveTurn('canceled')
-      stopVoiceOutput()
-      stopAssistantLoading()
-      // Only approvals belonging to the captured current turn may be rejected.
-      rejectAllApprovals()
-      try {
-        stopSfx('loading')
-      } catch {}
-    },
-    clearCurrent: () => {
-      cancelCurrent = null
-      abortController.value = null
-      sending.value = false
-    },
-  })
+  const selected = chatRuns.records.value.filter(run => run.conversationId === activeConversationId.value && chatRunIsLive(run))
+  if (pauseGoal && autonomousGoal.model.value?.active) await autonomousGoal.stop()
+  for (const run of selected) {
+    const calls = getSafeRecordValue(state.pending.toolCallsByProject, run.projectId) ?? []
+    for (const call of calls.filter(item => item.runId === run.runId)) resolveApproval(call.id, false)
+    await chatRuns.stop(run.runId, executionAbortReason('user_stop'))
+  }
+  stopVoiceOutput()
 }
 
 function openProject(id: string) {
   void voiceInputSession.stop()
-  void stopGenerating()
   activeProjectId.value = id
 }
 
@@ -827,16 +823,21 @@ watch(activeProjectId, () => {
 })
 
 function newChat() {
-  chatThinkingChoices.value.delete(activeProjectId.value)
-  activeThinkingBudget.value = null
   void voiceInputSession.stop()
-  void stopGenerating()
-  mutations.resetProjectChat(activeProjectId.value)
+  mutations.createConversation(activeProjectId.value)
+  scheduleSave(state)
+}
+function selectConversation(projectId: string, conversationId: string) {
+  void voiceInputSession.stop()
+  mutations.setActiveConversation(projectId, conversationId)
+}
+function renameConversation(projectId: string, conversationId: string, title: string) {
+  mutations.renameConversation(projectId, conversationId, title)
+  scheduleSave(state)
 }
 
 async function addProject() {
   void voiceInputSession.stop()
-  void stopGenerating()
   const rootPath = await selectProjectWorkspaceDirectory('Projektordner als neues Luczor-Projekt öffnen')
   if (!rootPath) return
 
@@ -1032,7 +1033,7 @@ function testSelectedVoice(text: string, signal?: AbortSignal, voiceId?: string)
 const pendingApprovals = computed(() => {
   const pid = activeProjectId.value
   const bucket = getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, pid) ?? []
-  return bucket.filter(c => c.status === 'proposed' && c.requiresApproval)
+  return mode.value === 'unrestricted' ? [] : bucket.filter(c => c.conversationId === activeConversationId.value && c.status === 'proposed' && c.requiresApproval)
 })
 
 function approveTool(id: string) {
@@ -1135,16 +1136,17 @@ const workspaceRefresh = createWorkspaceRefresh({
     workspaceMessage.value = error instanceof Error ? error.message : String(error)
   },
 })
-watchWorkspaceBinding(
-  () => activeWorkspace.value,
-  () => {
-    // Chat continuations may contain workspace-scoped mutation history. The
-    // principal/project task ledger is separate and remains available.
-    workspaceRefresh.invalidate()
-    continuations.value = {}
-    invalidateExecution('execution_workspace_changed')
+const knownWorkspaceBindings = new Map<string, string>()
+watch(() => activeWorkspace.value, binding => {
+  if (!binding) return
+  const identity = JSON.stringify([binding.rootPath, binding.gitRootPath, binding.status, binding.updatedAt])
+  const previous = knownWorkspaceBindings.get(binding.projectId)
+  if (previous !== undefined && previous !== identity) {
+    invalidateExecutionScope({ projectId: binding.projectId }, 'execution_workspace_changed')
   }
-)
+  knownWorkspaceBindings.set(binding.projectId, identity)
+}, { flush: 'sync' })
+
 watch(activeProjectId, () => workspaceRefresh.invalidate(), { flush: 'sync' })
 const invalidateWorkspaceIdentity = () => {
   workspaceRefresh.invalidate()
@@ -2732,25 +2734,12 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
               >
             </header>
             <template v-if="m.role === 'assistant'">
-              <ChatAgentRoster
+              <ChatTurnTimeline
                 :activity="chatActivities[m.id]"
-                :loading="messageRunActive(m)"
-                :waiting="messageRunActive(m) && pendingApprovals.length > 0"
-              />
-              <ThinkingState
-                v-if="chatActivities[m.id]"
+                :commentary="m.meta.commentary ?? []"
+                :tools="messageTools(m)"
                 :active="messageRunActive(m)"
-                :status="messageRunActive(m) && pendingApprovals.length > 0 ? 'waiting' : chatActivities[m.id]!.status"
-                :label="activityLabel(chatActivities[m.id]!, pendingApprovals.length > 0 && messageRunActive(m))"
-                :steps="chatActivities[m.id]!.steps"
-                :started-at="chatActivities[m.id]!.startedAt"
-                :duration-ms="
-                  chatActivities[m.id]!.finishedAt
-                    ? chatActivities[m.id]!.finishedAt! - chatActivities[m.id]!.startedAt
-                    : undefined
-                "
               />
-              <ToolChips :tools="messageTools(m)" />
               <WorkflowChatCards
                 :workflows="messageWorkflows(m)"
                 :project-id="activeProjectId"
@@ -2760,7 +2749,6 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
                 @discuss="improveWorkflow"
               />
               <SelectionActions :disabled="sending" @action="editSelection" @speak="speakSelectedText">
-                <ChatCommentary :entries="m.meta.commentary ?? []" :message-id="m.id" :active="messageRunActive(m)" />
                 <StreamingText
                   v-if="m.content || m.meta.question || m.meta.bullets?.length || !chatActivities[m.id]"
                   :content="m.content"
@@ -2817,6 +2805,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             <p v-else class="ai-message__user-text">{{ m.content }}</p>
           </article>
         </template>
+        <ChatWorkingIndicator v-if="activeChatMessage" :label="activeChatLabel" />
       </ChatComposer>
 
       <!-- Tool audit log -->
@@ -2918,6 +2907,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
               :key="activeProjectId"
               :model="autonomousGoal.model.value"
               :busy="conversationBusy"
+              compact
               @save="autonomousGoal.save"
               @toggle="autonomousGoal.toggle"
             />

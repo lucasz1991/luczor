@@ -87,6 +87,7 @@ createApp({
             'heading-start': () =>
               h(AutonomousGoalControl, {
                 model: goal.value,
+                compact: true,
                 onSave: (text: string) => (goal.value = { ...goal.value, text }),
                 onToggle: (active: boolean) => (goal.value = { ...goal.value, active }),
               }),

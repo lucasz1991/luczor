@@ -135,7 +135,7 @@ export async function refreshWorkflowCapabilities(
   for (const name of ['node', 'python'])
     add(
       [`${name}.run`],
-      `windows.user.${name}`,
+      `${native.build.platform}.user.${name}`,
       native.runtimes.some(item => item.runtime === name && item.available)
     )
   const inference = !!local?.manifestAvailable && ['ready', 'busy'].includes(local.state) && !!local.activeModelId

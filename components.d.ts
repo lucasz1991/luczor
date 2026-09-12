@@ -30,6 +30,8 @@ declare module 'vue' {
     ChatComposer: typeof import('./src/components/ai/ChatComposer.vue')['default']
     ChatProjectOverlay: typeof import('./src/components/ChatProjectOverlay.vue')['default']
     ChatSettingsSection: typeof import('./src/components/settings/ChatSettingsSection.vue')['default']
+    ChatTurnTimeline: typeof import('./src/components/ai/ChatTurnTimeline.vue')['default']
+    ChatWorkingIndicator: typeof import('./src/components/ai/ChatWorkingIndicator.vue')['default']
     CloudProjectsPanel: typeof import('./src/components/projects/CloudProjectsPanel.vue')['default']
     CodeBlock: typeof import('./src/components/ai/CodeBlock.vue')['default']
     ContextCards: typeof import('./src/components/ai/ContextCards.vue')['default']

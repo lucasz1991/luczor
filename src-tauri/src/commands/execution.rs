@@ -1,6 +1,6 @@
 //! Process-local execution admission shared by native desktop and workflow commands.
 //! The gate starts closed and old renderer sessions can never reactivate it.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{Mutex, OnceLock};
 
@@ -23,7 +23,46 @@ pub struct ExecutionPermit {
     pub generation: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_execution_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ExecutionScope>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_generation: Option<u64>,
 }
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExecutionScope {
+    pub project_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_binding_id: Option<String>,
+}
+impl ExecutionScope {
+    fn key(&self) -> Result<String, String> {
+        fn valid(value: &str) -> bool {
+            !value.trim().is_empty() && value.len() <= 300 && !value.chars().any(char::is_control)
+        }
+        if !valid(&self.project_id) || [&self.conversation_id, &self.run_id, &self.workspace_binding_id]
+            .into_iter().flatten().any(|value| !valid(value)) {
+            return Err("execution_scope_invalid".into());
+        }
+        Ok(self.run_id.as_ref().map(|id| format!("run:{id}")).unwrap_or_else(||
+            format!("project:{}:conversation:{}", self.project_id, self.conversation_id.as_deref().unwrap_or(""))))
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScopeRegistration {
+    session_id: String,
+    generation: u64,
+    scope_generation: u64,
+    scope: ExecutionScope,
+}
+struct RegisteredScope { scope: ExecutionScope, generation: u64, revoked: bool }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -39,6 +78,7 @@ struct GateState {
     policy: Option<ExecutionPolicy>,
     retired: HashSet<String>,
     cancelled_workflows: HashSet<String>,
+    scopes: HashMap<String, RegisteredScope>,
 }
 
 impl GateState {
@@ -70,6 +110,7 @@ impl GateState {
             }
         }
         self.cancelled_workflows.clear();
+        self.scopes.clear();
         self.policy = Some(next.clone());
         Ok(next)
     }
@@ -90,6 +131,16 @@ impl GateState {
         if policy.kill_switch {
             return Err("Not-Aus is active; native execution is blocked.".into());
         }
+        match (&permit.scope, permit.scope_generation) {
+            (None, None) => {},
+            (Some(scope), Some(generation)) => {
+                let registered = self.scopes.get(&scope.key()?).ok_or("execution_scope_not_registered")?;
+                if registered.revoked || registered.generation != generation || registered.scope != *scope {
+                    return Err("execution_scope_revoked_or_changed".into());
+                }
+            },
+            _ => return Err("execution_scope_invalid".into()),
+        }
         if let Some(id) = &permit.workflow_execution_id {
             if uuid::Uuid::parse_str(id).is_err() || self.cancelled_workflows.contains(id) {
                 return Err("Workflow execution was cancelled or is invalid.".into());
@@ -105,6 +156,49 @@ impl GateState {
         }
         Ok(())
     }
+
+    fn register_scope(&mut self, input: ScopeRegistration, revoke: bool) -> Result<(), String> {
+        self.check(&ExecutionPermit {
+            session_id: input.session_id, generation: input.generation,
+            workflow_execution_id: None, scope: None, scope_generation: None,
+        }, false, false)?;
+        if input.scope_generation == 0 || input.scope_generation > 9_007_199_254_740_991 {
+            return Err("execution_scope_invalid".into());
+        }
+        let key = input.scope.key()?;
+        if let Some(previous) = self.scopes.get_mut(&key) {
+            if previous.scope != input.scope || input.scope_generation < previous.generation {
+                return Err("execution_scope_identity_changed".into());
+            }
+            if revoke {
+                if previous.generation != input.scope_generation { return Err("execution_scope_generation_mismatch".into()); }
+                previous.revoked = true;
+            } else {
+                if previous.revoked && input.scope_generation == previous.generation {
+                    return Err("execution_scope_revoked_or_changed".into());
+                }
+                previous.generation = input.scope_generation;
+                previous.revoked = false;
+            }
+        } else {
+            if self.scopes.len() >= 8192 { return Err("execution_scope_capacity".into()); }
+            self.scopes.insert(key, RegisteredScope {
+                scope: input.scope, generation: input.scope_generation, revoked: revoke,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[tauri::command]
+pub fn execution_scope_register(window: crate::commands::CallerWebview, payload: ScopeRegistration) -> Result<(), String> {
+    ensure_main_webview(&window)?;
+    GATE.get_or_init(Mutex::default).lock().map_err(|_| "Execution gate unavailable.")?.register_scope(payload, false)
+}
+#[tauri::command]
+pub fn execution_scope_revoke(window: crate::commands::CallerWebview, payload: ScopeRegistration) -> Result<(), String> {
+    ensure_main_webview(&window)?;
+    GATE.get_or_init(Mutex::default).lock().map_err(|_| "Execution gate unavailable.")?.register_scope(payload, true)
 }
 
 #[derive(Deserialize)]
@@ -260,6 +354,7 @@ mod tests {
             session_id: session.clone(),
             generation: 1,
             workflow_execution_id: None,
+        scope: None, scope_generation: None,
         };
         let lease = admit(&permit, true).unwrap();
         let worker = std::thread::spawn(move || {
@@ -291,6 +386,7 @@ mod tests {
             session_id: session.clone(),
             generation: 1,
             workflow_execution_id: None,
+        scope: None, scope_generation: None,
         };
         let mut gate = GateState::default();
         assert!(gate.check(&permit, false, false).is_err());
@@ -328,6 +424,7 @@ mod tests {
                     session_id: next,
                     generation: 1,
                     workflow_execution_id: None,
+                scope: None, scope_generation: None,
                 },
                 false,
                 false
@@ -344,6 +441,7 @@ mod tests {
             session_id: session.clone(),
             generation: 1,
             workflow_execution_id: None,
+        scope: None, scope_generation: None,
         };
         assert!(gate.check(&permit, true, true).is_err());
         gate.update(policy(&session, 2, ExecutionMode::Unrestricted, false))
@@ -372,6 +470,7 @@ mod tests {
             session_id: session,
             generation: 1,
             workflow_execution_id: Some(cancelled),
+            scope: None, scope_generation: None,
         };
         assert!(gate.check(&permit, true, false).is_err());
         let other = ExecutionPermit {

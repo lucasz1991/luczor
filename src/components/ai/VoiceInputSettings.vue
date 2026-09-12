@@ -10,7 +10,7 @@ import {
   type ResolvedVoiceSettings,
 } from '@/services/voice/localVoice'
 
-defineProps<{ busy?: boolean; active?: boolean }>()
+withDefaults(defineProps<{ busy?: boolean; active?: boolean; compact?: boolean }>(), { compact: false })
 const emit = defineEmits<{ start: [mode: 'push_to_talk' | 'hands_free']; stop: [] }>()
 const id = useId()
 const open = ref(false)
@@ -59,7 +59,11 @@ async function save(start = false) {
 }
 </script>
 <template>
-  <div class="voice-input-settings" @keydown.esc.stop="open = false">
+  <div
+    class="voice-input-settings"
+    :class="{ 'voice-input-settings--compact': compact }"
+    @keydown.esc.stop="open = false"
+  >
     <button
       type="button"
       class="voice-settings-trigger"
@@ -69,7 +73,7 @@ async function save(start = false) {
       :aria-controls="id"
       @click="toggle"
     >
-      <AiIcon name="settings" :size="14" /><span>Sprache</span>
+      <AiIcon name="settings" :size="14" /><span v-if="!compact">Sprache</span>
     </button>
     <section
       v-if="open"
@@ -144,6 +148,12 @@ async function save(start = false) {
 }
 .voice-input-settings--composer {
   position: static;
+}
+.voice-input-settings--compact .voice-settings-trigger {
+  width: 28px;
+  height: 28px;
+  justify-content: center;
+  padding: 0;
 }
 .voice-settings-trigger {
   display: flex;
