@@ -71,7 +71,10 @@ export type LocalFailureDiagnostic = {
   outputTokens?: number
 }
 
-function includesValue<const Values extends readonly string[]>(values: Values, value: unknown): value is Values[number] {
+function includesValue<const Values extends readonly string[]>(
+  values: Values,
+  value: unknown
+): value is Values[number] {
   return typeof value === 'string' && values.includes(value)
 }
 
@@ -84,7 +87,8 @@ export function readLocalFailureDiagnostic(value: unknown): LocalFailureDiagnost
     !includesValue(stages, source.stage) ||
     !includesValue(failureCodes, source.code) ||
     !includesValue(reasons, source.reason)
-  ) return null
+  )
+    return null
   const diagnostic: LocalFailureDiagnostic = {
     schemaVersion: 1,
     stage: source.stage,
@@ -92,7 +96,12 @@ export function readLocalFailureDiagnostic(value: unknown): LocalFailureDiagnost
     reason: source.reason,
   }
   if (includesValue(parameters, source.parameter)) diagnostic.parameter = source.parameter
-  if (typeof source.httpStatus === 'number' && Number.isInteger(source.httpStatus) && source.httpStatus >= 100 && source.httpStatus <= 599) {
+  if (
+    typeof source.httpStatus === 'number' &&
+    Number.isInteger(source.httpStatus) &&
+    source.httpStatus >= 100 &&
+    source.httpStatus <= 599
+  ) {
     diagnostic.httpStatus = source.httpStatus
   }
   for (const field of ['inputTokens', 'contextTokens', 'outputTokens'] as const) {
@@ -109,24 +118,36 @@ const stageLabels: Record<LocalFailureDiagnostic['stage'], string> = {
   unknown: 'Fehlerstufe nicht gemeldet',
 }
 const reasonDescriptions: Record<LocalFailureDiagnostic['reason'], string> = {
-  context_limit: 'Der Auftrag überschreitet das verfügbare Kontextfenster. Kontextumfang und Antwortreserve prüfen; große Inhalte abschnittsweise bearbeiten.',
-  message_order: 'Die Nachrichtenreihenfolge passt nicht zur Modellvorlage. Rollen und zugehörige Werkzeugantworten im Chatverlauf prüfen.',
+  context_limit:
+    'Der Auftrag überschreitet das verfügbare Kontextfenster. Kontextumfang und Antwortreserve prüfen; große Inhalte abschnittsweise bearbeiten.',
+  message_order:
+    'Die Nachrichtenreihenfolge passt nicht zur Modellvorlage. Rollen und zugehörige Werkzeugantworten im Chatverlauf prüfen.',
   message_shape: 'Das Nachrichtenformat ist ungültig. Rollen und Inhaltstypen der Modellanfrage prüfen.',
-  tool_contract: 'Das Modell konnte die Werkzeugdaten nicht verarbeiten. Werkzeugschema, Argumente und Zuordnung der Werkzeugantworten prüfen.',
-  template: 'Die Chatvorlage konnte nicht angewendet werden. Die Modellvorlage auf Kompatibilität mit Nachrichten und Werkzeugen prüfen.',
-  parameter_type: 'Ein Anfrageparameter hat einen ungültigen Datentyp. Den erwarteten Typ in der Runtime-Schnittstelle prüfen.',
+  tool_contract:
+    'Das Modell konnte die Werkzeugdaten nicht verarbeiten. Werkzeugschema, Argumente und Zuordnung der Werkzeugantworten prüfen.',
+  template:
+    'Die Chatvorlage konnte nicht angewendet werden. Die Modellvorlage auf Kompatibilität mit Nachrichten und Werkzeugen prüfen.',
+  parameter_type:
+    'Ein Anfrageparameter hat einen ungültigen Datentyp. Den erwarteten Typ in der Runtime-Schnittstelle prüfen.',
   parameter_value: 'Ein Anfrageparameter hat einen ungültigen Wert. Den erlaubten Wertebereich der Runtime prüfen.',
-  unsupported_parameter: 'Die Runtime unterstützt einen Anfrageparameter nicht. Parametervertrag und Runtime-Version prüfen.',
-  capacity: 'Die Runtime hat nicht genügend freie Kapazität. Freien RAM und Grafikspeicher sowie Kontext- und Modellbelegung prüfen.',
+  unsupported_parameter:
+    'Die Runtime unterstützt einen Anfrageparameter nicht. Parametervertrag und Runtime-Version prüfen.',
+  capacity:
+    'Die Runtime hat nicht genügend freie Kapazität. Freien RAM und Grafikspeicher sowie Kontext- und Modellbelegung prüfen.',
   authentication: 'Die lokale Runtime hat die Anmeldung abgewiesen. Die native Verbindungskonfiguration prüfen.',
-  model_unavailable: 'Die Runtime konnte das angefragte Modell nicht bereitstellen. Modellzuordnung und lokalen Installationsstatus prüfen.',
-  server: 'Die lokale Runtime meldet einen internen Fehler. Runtime-Status und Version prüfen; anschließend erneut versuchen.',
+  model_unavailable:
+    'Die Runtime konnte das angefragte Modell nicht bereitstellen. Modellzuordnung und lokalen Installationsstatus prüfen.',
+  server:
+    'Die lokale Runtime meldet einen internen Fehler. Runtime-Status und Version prüfen; anschließend erneut versuchen.',
   unclassified: 'Die lokale Modellanfrage ist fehlgeschlagen. Die gemeldete Fehlerstufe und den Runtime-Status prüfen.',
 }
 const codeDescriptions: Partial<Record<LocalFailureCode, string>> = {
-  runtime_reasoning_control_unavailable: 'Die Runtime hat den Abschluss der Denkphase nicht bestätigt. Denkbudget und Runtime-Unterstützung prüfen. Das Modell bleibt geladen.',
-  runtime_stream_failed: 'Die lokale Modellverbindung wurde während der Anfrage unterbrochen. Den Runtime-Status prüfen und die Anfrage erneut versuchen.',
-  runtime_start_failed: 'Das lokale Modell konnte nicht vorbereitet werden. Installationsstatus, Ressourcen und Runtime-Status prüfen.',
+  runtime_reasoning_control_unavailable:
+    'Die Runtime hat den Abschluss der Denkphase nicht bestätigt. Denkbudget und Runtime-Unterstützung prüfen. Das Modell bleibt geladen.',
+  runtime_stream_failed:
+    'Die lokale Modellverbindung wurde während der Anfrage unterbrochen. Den Runtime-Status prüfen und die Anfrage erneut versuchen.',
+  runtime_start_failed:
+    'Das lokale Modell konnte nicht vorbereitet werden. Installationsstatus, Ressourcen und Runtime-Status prüfen.',
 }
 
 /** Public text is composed solely from the fixed diagnostic vocabulary and validated counters. */
@@ -136,12 +157,15 @@ export function describeLocalFailureDiagnostic(value: LocalFailureDiagnostic): s
   const details: string[] = [stageLabels[diagnostic.stage]]
   if (diagnostic.httpStatus !== undefined) details.push(`HTTP ${diagnostic.httpStatus}`)
   if (diagnostic.parameter) details.push(`Parameter: ${diagnostic.parameter}`)
-  const description = diagnostic.reason === 'unclassified'
-    ? codeDescriptions[diagnostic.code] ?? reasonDescriptions.unclassified
-    : reasonDescriptions[diagnostic.reason]
+  const description =
+    diagnostic.reason === 'unclassified'
+      ? (codeDescriptions[diagnostic.code] ?? reasonDescriptions.unclassified)
+      : reasonDescriptions[diagnostic.reason]
   const counts: string[] = []
-  if (diagnostic.inputTokens !== undefined) counts.push(`Eingabe ${diagnostic.inputTokens.toLocaleString('de-DE')}`)
+  if (diagnostic.inputTokens !== undefined)
+    counts.push(`Eingabe (gezählt) ${diagnostic.inputTokens.toLocaleString('de-DE')}`)
   if (diagnostic.contextTokens !== undefined) counts.push(`Kontext ${diagnostic.contextTokens.toLocaleString('de-DE')}`)
-  if (diagnostic.outputTokens !== undefined) counts.push(`Ausgabelimit ${diagnostic.outputTokens.toLocaleString('de-DE')}`)
-  return `${details.join(' · ')}: ${description}${counts.length ? ` Gemeldete Tokens: ${counts.join(' · ')}.` : ''}`
+  if (diagnostic.outputTokens !== undefined)
+    counts.push(`Ausgabelimit ${diagnostic.outputTokens.toLocaleString('de-DE')}`)
+  return `${details.join(' · ')}: ${description}${counts.length ? ` Tokenbudget: ${counts.join(' · ')}.` : ''}`
 }

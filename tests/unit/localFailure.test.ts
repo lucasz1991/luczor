@@ -29,13 +29,18 @@ describe('public local inference failure diagnostics', () => {
     })
     expect(decoded).toEqual({ ...diagnostic, inputTokens: 0, contextTokens: 18000, outputTokens: 2048 })
     expect(JSON.stringify(decoded)).not.toContain('PRIVATE')
-    expect(describeLocalFailureDiagnostic(decoded!)).toContain('Tokenzählung und Kontextprüfung · HTTP 400 · Parameter: reasoning_effort')
+    expect(describeLocalFailureDiagnostic(decoded!)).toContain(
+      'Tokenzählung und Kontextprüfung · HTTP 400 · Parameter: reasoning_effort'
+    )
     expect(describeLocalFailureDiagnostic(decoded!)).toContain('Ausgabelimit 2.048')
     expect(describeLocalFailureDiagnostic(decoded!)).not.toContain('localhost')
   })
 
   it.each([
-    null, [], 'PRIVATE', {},
+    null,
+    [],
+    'PRIVATE',
+    {},
     { ...diagnostic, schemaVersion: 2 },
     { ...diagnostic, stage: 'PRIVATE' },
     { ...diagnostic, reason: 'PRIVATE' },
@@ -46,10 +51,16 @@ describe('public local inference failure diagnostics', () => {
   })
 
   it.each([-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, '2048', null])(
-    'drops invalid token counters without replacing them with estimates (%s)', value => {
-      const decoded = readLocalFailureDiagnostic({ ...diagnostic, inputTokens: value, contextTokens: value, outputTokens: value })
+    'drops invalid token counters without replacing them with estimates (%s)',
+    value => {
+      const decoded = readLocalFailureDiagnostic({
+        ...diagnostic,
+        inputTokens: value,
+        contextTokens: value,
+        outputTokens: value,
+      })
       expect(decoded).toEqual(diagnostic)
-      expect(describeLocalFailureDiagnostic(decoded!)).not.toContain('Gemeldete Tokens')
+      expect(describeLocalFailureDiagnostic(decoded!)).not.toContain('Tokenbudget')
     }
   )
 
@@ -63,23 +74,32 @@ describe('public local inference failure diagnostics', () => {
     const decoded = readLocalFailureDiagnostic({ ...diagnostic, parameter: 'messages[0].content.PRIVATE' })
     expect(decoded?.parameter).toBeUndefined()
     expect(describeLocalFailureDiagnostic(decoded!)).not.toContain('PRIVATE')
-    expect(describeLocalFailureDiagnostic({ ...diagnostic, reason: 'PRIVATE' } as unknown as LocalFailureDiagnostic))
-      .toBe('Für die lokale Modellanfrage liegt keine gültige Fehlerdiagnose vor.')
+    expect(
+      describeLocalFailureDiagnostic({ ...diagnostic, reason: 'PRIVATE' } as unknown as LocalFailureDiagnostic)
+    ).toBe('Für die lokale Modellanfrage liegt keine gültige Fehlerdiagnose vor.')
   })
 
   it.each(['preparation', 'tokenization', 'generation', 'unknown'] as const)(
-    'preserves the reported stage %s without inferring native token counts', stage => {
+    'preserves the reported stage %s without inferring native token counts',
+    stage => {
       const decoded = readLocalFailureDiagnostic({ ...diagnostic, stage })!
       expect(decoded.stage).toBe(stage)
       expect(decoded.inputTokens).toBeUndefined()
-      expect(describeLocalFailureDiagnostic(decoded)).not.toContain('Gemeldete Tokens')
+      expect(describeLocalFailureDiagnostic(decoded)).not.toContain('Tokenbudget')
       if (stage === 'unknown') expect(describeLocalFailureDiagnostic(decoded)).toContain('nicht gemeldet')
     }
   )
 
   it('recognizes preparation failures and gives an actionable non-secret hint', () => {
-    const decoded = readLocalFailureDiagnostic({ schemaVersion: 1, stage: 'preparation', code: 'runtime_start_failed', reason: 'unclassified' })!
+    const decoded = readLocalFailureDiagnostic({
+      schemaVersion: 1,
+      stage: 'preparation',
+      code: 'runtime_start_failed',
+      reason: 'unclassified',
+    })!
     expect(decoded.code).toBe('runtime_start_failed')
-    expect(describeLocalFailureDiagnostic(decoded)).toContain('Installationsstatus, Ressourcen und Runtime-Status prüfen')
+    expect(describeLocalFailureDiagnostic(decoded)).toContain(
+      'Installationsstatus, Ressourcen und Runtime-Status prüfen'
+    )
   })
 })

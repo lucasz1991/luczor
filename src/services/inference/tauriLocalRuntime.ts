@@ -17,11 +17,7 @@ import type { InferenceResult, WireToolCall } from '@/services/inference/types'
 import { readReportedTokenUsage } from '@/services/tokenUsage'
 import { localResources, type LocalResourceConfigState } from './resources'
 import { readThinkingProgress, type ThinkingBudgetProgress, type ThinkingControlAction } from './thinking'
-import {
-  describeLocalFailureDiagnostic,
-  readLocalFailureDiagnostic,
-  type LocalFailureDiagnostic,
-} from './localFailure'
+import { describeLocalFailureDiagnostic, readLocalFailureDiagnostic, type LocalFailureDiagnostic } from './localFailure'
 
 type NativeErrorEvent = {
   type: 'error'
@@ -219,7 +215,9 @@ export const tauriManifestVerifier: NativeManifestVerifier = {
 
 export async function getNativeLocalModelStatus(): Promise<NativeLocalModelStatus> {
   if (!isTauri()) {
-    throw new Error('Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.')
+    throw new Error(
+      'Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.'
+    )
   }
   return invoke<NativeLocalModelStatus>('local_model_status')
 }
@@ -228,7 +226,9 @@ export { getLocalResourceHardware as getNativeHardwareSnapshot } from './resourc
 
 export async function recoverNativeModelMemory(): Promise<HardwareSnapshot> {
   if (!isTauri()) {
-    throw new Error('Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.')
+    throw new Error(
+      'Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.'
+    )
   }
   return invoke<HardwareSnapshot>('local_model_recover_memory')
 }
@@ -238,7 +238,9 @@ export async function prepareNativeLocalModel(
   catalogBinding: LocalCatalogBinding
 ): Promise<LocalReadinessEvidence> {
   if (!isTauri()) {
-    throw new Error('Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.')
+    throw new Error(
+      'Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.'
+    )
   }
   const resourceRevision = (await localResources.get()).appliedRevision
   return invoke<LocalReadinessEvidence>('local_model_prepare', { modelReleaseId, catalogBinding, resourceRevision })
@@ -252,7 +254,9 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
     resourceRevision = 0
   ): Promise<LocalReadinessEvidence> {
     if (!isTauri()) {
-      throw new Error('Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.')
+      throw new Error(
+        'Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.'
+      )
     }
     return invoke<LocalReadinessEvidence>('local_model_prepare', {
       modelReleaseId,
@@ -264,16 +268,20 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
 
   async stream(_release: LocalModelReleaseManifest, request: LocalRuntimeRequest): Promise<InferenceResult> {
     if (!isTauri()) {
-      throw new Error('Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.')
+      throw new Error(
+        'Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.'
+      )
     }
     const observation = localModelDiagnostics.begin(request.modelReleaseId, request.messages)
     const channel = new Channel<NativeInferenceEvent>()
     let accumulated = ''
-    let nativeFailure: {
-      code: LocalFailureDiagnostic['code']
-      retryable: boolean
-      diagnostic?: LocalFailureDiagnostic
-    } | undefined
+    let nativeFailure:
+      | {
+          code: LocalFailureDiagnostic['code']
+          retryable: boolean
+          diagnostic?: LocalFailureDiagnostic
+        }
+      | undefined
     const budget: ActiveBudget = { request, latest: null }
     activeBudgets.set(request.requestId, budget)
     channel.onmessage = event => {
@@ -283,7 +291,10 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
       if (event.type === 'error' && event.requestId === request.requestId && !nativeFailure) {
         const diagnostic = readLocalFailureDiagnostic(event.diagnostic)
         const recognized = readLocalFailureDiagnostic({
-          schemaVersion: 1, stage: 'unknown', code: event.code, reason: 'unclassified',
+          schemaVersion: 1,
+          stage: 'unknown',
+          code: event.code,
+          reason: 'unclassified',
         })
         if (recognized) {
           nativeFailure = {
@@ -383,12 +394,15 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
         if (nativeFailure) {
           // Legacy native events have no measured stage or counters. Do not attach inferred telemetry.
           throw new LocalInferenceError(
-            describeLocalFailureDiagnostic({
-              schemaVersion: 1,
-              stage: 'unknown',
-              code: nativeFailure.code,
-              reason: 'unclassified',
-            }),
+            nativeFailure.code === 'runtime_request_rejected' &&
+              error === 'Local llama.cpp rejected the request (HTTP 400).'
+              ? error
+              : describeLocalFailureDiagnostic({
+                  schemaVersion: 1,
+                  stage: 'unknown',
+                  code: nativeFailure.code,
+                  reason: 'unclassified',
+                }),
             nativeFailure.code,
             nativeFailure.retryable,
             partialOutput

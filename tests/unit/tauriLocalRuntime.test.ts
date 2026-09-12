@@ -27,6 +27,28 @@ const catalogBinding = {
   manifestPayloadSha256: 'a'.repeat(64),
 } as const
 
+function diagnosticRequest(signal?: AbortSignal): LocalRuntimeRequest {
+  return {
+    requestId: 'request-1',
+    modelReleaseId: 'model-1',
+    scopeDigest: 'd'.repeat(64),
+    catalogBinding,
+    messages: [{ role: 'user', content: 'private input' }],
+    signal,
+  }
+}
+
+const failureDiagnostic = {
+  schemaVersion: 1,
+  stage: 'tokenization',
+  httpStatus: 400,
+  code: 'runtime_request_rejected',
+  reason: 'parameter_type',
+  parameter: 'reasoning_budget_tokens',
+  contextTokens: 18000,
+  outputTokens: 2048,
+} as const
+
 describe('Tauri local runtime catalog boundary', () => {
   it('binds live controls to active catalog and generation, drops late progress, and removes the old implicit 2048 cap', async () => {
     let finish!: (value: unknown) => void
@@ -194,7 +216,12 @@ describe('Tauri local runtime catalog boundary', () => {
   it.each([true, false])('classifies tool contract rejection without losing residency (event: %s)', async withEvent => {
     tauri.invoke.mockImplementationOnce(async (_command, args) => {
       if (withEvent) {
-        args.onEvent.onmessage({ type: 'error', requestId: 'request-1', code: 'runtime_tool_contract_rejected', retryable: false })
+        args.onEvent.onmessage({
+          type: 'error',
+          requestId: 'request-1',
+          code: 'runtime_tool_contract_rejected',
+          retryable: false,
+        })
         throw 'private raw tool arguments'
       }
       throw 'Local llama.cpp rejected the tool contract (HTTP 500).'
@@ -219,7 +246,12 @@ describe('Tauri local runtime catalog boundary', () => {
     async withEvent => {
       tauri.invoke.mockImplementationOnce(async (_command, args) => {
         if (withEvent) {
-          args.onEvent.onmessage({ type: 'error', requestId: 'request-1', code: 'runtime_reasoning_control_unavailable', retryable: false })
+          args.onEvent.onmessage({
+            type: 'error',
+            requestId: 'request-1',
+            code: 'runtime_reasoning_control_unavailable',
+            retryable: false,
+          })
           throw 'private control response body'
         }
         throw 'Local thinking control was not confirmed; generation interrupted.'
@@ -243,7 +275,12 @@ describe('Tauri local runtime catalog boundary', () => {
   it.each([true, false])('classifies role rejection without exposing native text (event: %s)', async withEvent => {
     tauri.invoke.mockImplementationOnce(async (_command, args) => {
       if (withEvent) {
-        args.onEvent.onmessage({ type: 'error', requestId: 'request-1', code: 'runtime_chat_history_rejected', retryable: false })
+        args.onEvent.onmessage({
+          type: 'error',
+          requestId: 'request-1',
+          code: 'runtime_chat_history_rejected',
+          retryable: false,
+        })
         throw 'sensitive template and prompt text'
       }
       throw 'Local llama.cpp rejected the conversation role order in its chat template (HTTP 500).'
@@ -292,13 +329,191 @@ describe('Tauri local runtime catalog boundary', () => {
       usage: { inputTokens: 1234, outputTokens: 7, totalTokens: 1241 },
     })
     tauri.invoke.mockImplementationOnce(async (_command, args) => {
-      args.onEvent.onmessage({ type: 'error', requestId: 'request-1', code: 'runtime_context_exceeded', retryable: false })
+      args.onEvent.onmessage({
+        type: 'error',
+        requestId: 'request-1',
+        code: 'runtime_context_exceeded',
+        retryable: false,
+      })
       throw 'sensitive raw native text'
     })
     await expect(transport.stream({} as LocalModelReleaseManifest, request)).rejects.toMatchObject({
       code: 'runtime_context_exceeded',
       retryable: false,
       message: expect.stringContaining('Modell bleibt geladen'),
+    })
+  })
+
+  it.each(['tokenization', 'generation', 'preparation'] as const)(
+    'preserves reported %s diagnostics and public partial output, projecting away private native fields',
+    async stage => {
+      localModelDiagnostics.clear()
+      const diagnostic = { ...failureDiagnostic, stage }
+      tauri.invoke.mockImplementationOnce(async (_command, args) => {
+        args.onEvent.onmessage({
+          type: 'delta',
+          requestId: 'request-1',
+          content: '<think>PRIVATE</think>Erstes Ergebnis',
+        })
+        args.onEvent.onmessage({
+          type: 'error',
+          requestId: 'request-1',
+          code: diagnostic.code,
+          retryable: false,
+          diagnostic: { ...diagnostic, rawBody: 'PRIVATE', parameterValue: 'PRIVATE' },
+        })
+        throw 'PRIVATE native exception'
+      })
+      const error = await new TauriLocalRuntimeTransport()
+        .stream({} as LocalModelReleaseManifest, diagnosticRequest())
+        .catch(value => value)
+      expect(error).toMatchObject({ code: diagnostic.code, retryable: false, partialOutput: true, diagnostic })
+      expect(error.message).toContain('HTTP 400')
+      expect(error.message).toContain('Parameter: reasoning_budget_tokens')
+      expect(error.message).not.toContain('PRIVATE')
+      expect(JSON.stringify(error)).not.toContain('PRIVATE')
+      expect(localModelDiagnostics.state.runs[0]).toMatchObject({
+        state: 'error',
+        failure: diagnostic,
+        output: 'Erstes Ergebnis',
+      })
+      expect(localModelDiagnostics.state.runs[0]?.failure?.inputTokens).toBeUndefined()
+    }
+  )
+
+  it('does not mistake hidden reasoning for a partial public answer', async () => {
+    tauri.invoke.mockImplementationOnce(async (_command, args) => {
+      args.onEvent.onmessage({ type: 'delta', requestId: 'request-1', content: '<think>PRIVATE thinking' })
+      args.onEvent.onmessage({
+        type: 'error',
+        requestId: 'request-1',
+        code: failureDiagnostic.code,
+        diagnostic: failureDiagnostic,
+      })
+      throw 'PRIVATE'
+    })
+    await expect(
+      new TauriLocalRuntimeTransport().stream({} as LocalModelReleaseManifest, diagnosticRequest())
+    ).rejects.toMatchObject({ partialOutput: false })
+  })
+
+  it.each(['other-request', undefined])(
+    'ignores error diagnostics without the exact owning request ID (%s)',
+    async requestId => {
+      localModelDiagnostics.clear()
+      const failure = new Error('native transport failure')
+      tauri.invoke.mockImplementationOnce(async (_command, args) => {
+        args.onEvent.onmessage({
+          type: 'error',
+          requestId,
+          code: failureDiagnostic.code,
+          diagnostic: failureDiagnostic,
+        })
+        throw failure
+      })
+      await expect(
+        new TauriLocalRuntimeTransport().stream({} as LocalModelReleaseManifest, diagnosticRequest())
+      ).rejects.toBe(failure)
+      expect(localModelDiagnostics.state.runs[0]?.failure).toBeUndefined()
+    }
+  )
+
+  it('ignores diagnostics attached to non-error events', async () => {
+    localModelDiagnostics.clear()
+    const failure = new Error('native transport failure')
+    tauri.invoke.mockImplementationOnce(async (_command, args) => {
+      args.onEvent.onmessage({
+        type: 'delta',
+        requestId: 'request-1',
+        content: 'Public',
+        diagnostic: failureDiagnostic,
+      })
+      throw failure
+    })
+    await expect(
+      new TauriLocalRuntimeTransport().stream({} as LocalModelReleaseManifest, diagnosticRequest())
+    ).rejects.toBe(failure)
+    expect(localModelDiagnostics.state.runs[0]?.failure).toBeUndefined()
+  })
+
+  it('keeps aborted requests cancelled even if a late matching error event arrives', async () => {
+    localModelDiagnostics.clear()
+    const controller = new AbortController()
+    const failure = new DOMException('Aborted', 'AbortError')
+    tauri.invoke.mockImplementationOnce(async (_command, args) => {
+      controller.abort()
+      args.onEvent.onmessage({
+        type: 'error',
+        requestId: 'request-1',
+        code: failureDiagnostic.code,
+        diagnostic: failureDiagnostic,
+      })
+      throw failure
+    })
+    await expect(
+      new TauriLocalRuntimeTransport().stream({} as LocalModelReleaseManifest, diagnosticRequest(controller.signal))
+    ).rejects.toBe(failure)
+    expect(localModelDiagnostics.state.runs[0]).toMatchObject({ state: 'cancelled' })
+    expect(localModelDiagnostics.state.runs[0]?.failure).toBeUndefined()
+  })
+
+  it('drops a previous channel error even when a later request reuses its ID', async () => {
+    let oldChannel!: { onmessage: (event: unknown) => void }
+    tauri.invoke.mockImplementationOnce(async (_command, args) => {
+      oldChannel = args.onEvent
+      return { content: 'done', rawToolCalls: [], requestId: 'request-1', finishReason: 'stop' }
+    })
+    const transport = new TauriLocalRuntimeTransport()
+    await transport.stream({} as LocalModelReleaseManifest, diagnosticRequest())
+    const failure = new Error('different request failure')
+    tauri.invoke.mockImplementationOnce(async () => {
+      oldChannel.onmessage({
+        type: 'error',
+        requestId: 'request-1',
+        code: failureDiagnostic.code,
+        diagnostic: failureDiagnostic,
+      })
+      throw failure
+    })
+    await expect(transport.stream({} as LocalModelReleaseManifest, diagnosticRequest())).rejects.toBe(failure)
+  })
+
+  it.each([
+    { ...failureDiagnostic, code: 'runtime_context_exceeded' },
+    { ...failureDiagnostic, schemaVersion: 2 },
+    { ...failureDiagnostic, reason: 'PRIVATE' },
+  ])('rejects mismatched or invalid diagnostics without losing the safe legacy failure code (%j)', async diagnostic => {
+    localModelDiagnostics.clear()
+    tauri.invoke.mockImplementationOnce(async (_command, args) => {
+      args.onEvent.onmessage({ type: 'error', requestId: 'request-1', code: failureDiagnostic.code, diagnostic })
+      throw 'PRIVATE native exception'
+    })
+    const error = await new TauriLocalRuntimeTransport()
+      .stream({} as LocalModelReleaseManifest, diagnosticRequest())
+      .catch(value => value)
+    expect(error).toMatchObject({ code: 'runtime_request_rejected' })
+    expect(error.diagnostic).toBeUndefined()
+    expect(error.message).toContain('Fehlerstufe nicht gemeldet')
+    expect(error.message).not.toContain('PRIVATE')
+    expect(localModelDiagnostics.state.runs[0]?.failure).toBeUndefined()
+  })
+
+  it('preserves the old exact request HTTP 400 contract without fabricating a diagnostic', async () => {
+    tauri.invoke.mockImplementationOnce(async (_command, args) => {
+      args.onEvent.onmessage({
+        type: 'error',
+        requestId: 'request-1',
+        code: 'runtime_request_rejected',
+        retryable: false,
+      })
+      throw 'Local llama.cpp rejected the request (HTTP 400).'
+    })
+    await expect(
+      new TauriLocalRuntimeTransport().stream({} as LocalModelReleaseManifest, diagnosticRequest())
+    ).rejects.toMatchObject({
+      code: 'runtime_request_rejected',
+      message: 'Local llama.cpp rejected the request (HTTP 400).',
+      diagnostic: undefined,
     })
   })
 
