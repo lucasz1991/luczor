@@ -119,6 +119,7 @@ describe('settings section contracts', () => {
         externalEnabled: true,
         agentsByDefault: true,
         teamPreset: 'free',
+        chatRouteMode: 'auto',
       },
     })
     expect(html).not.toContain('Modellnutzung speichern')

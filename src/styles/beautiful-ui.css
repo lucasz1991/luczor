@@ -1210,8 +1210,15 @@
   .ai-prompt__controls {
     gap: 4px;
   }
-  .ai-prompt__controls .ai-agent-mode {
+  .ai-prompt__controls .ai-agent-mode,
+  .ai-prompt__controls .ai-route-mode {
     padding-inline: 6px;
+  }
+  .ai-route-mode__text {
+    display: none;
+  }
+  .ai-route-mode__select {
+    max-width: 92px;
   }
   .ai-trace__row small {
     display: block;
@@ -1294,6 +1301,41 @@ html[data-reduce-motion='1'] .ai-shimmer {
 }
 .ai-agent-mode:disabled {
   opacity: 0.5;
+  cursor: default;
+}
+.ai-route-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+.ai-route-mode.is-active {
+  color: var(--text-primary);
+  border-color: var(--cy, #74c5d9);
+  background: var(--surface-glass);
+}
+.ai-route-mode:focus-within {
+  outline: 2px solid var(--cy, #74c5d9);
+  outline-offset: 2px;
+}
+.ai-route-mode__select {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  max-width: 120px;
+}
+.ai-route-mode__select:focus-visible {
+  outline: none;
+}
+.ai-route-mode__select:disabled {
+  opacity: 0.6;
   cursor: default;
 }
 .ai-continuation {

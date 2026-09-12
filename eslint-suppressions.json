@@ -203,9 +203,6 @@
     }
   },
   "src/state/store.ts": {
-    "id-length": {
-      "count": 23
-    },
     "security/detect-object-injection": {
       "count": 3
     }

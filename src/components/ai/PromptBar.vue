@@ -3,6 +3,7 @@ import { computed, nextTick, ref, watch } from 'vue'
 import AiIcon from './AiIcon.vue'
 import ThinkingSelector from './ThinkingSelector.vue'
 import type { ThinkingTier } from '@/services/inference/thinking'
+import type { ChatRouteMode } from '@/services/inference/modelUsageSettings'
 import VoiceInputSettings from './VoiceInputSettings.vue'
 import SearchList from './SearchList.vue'
 import type { SearchItem } from './types'
@@ -11,7 +12,7 @@ const props = withDefaults(
     modelValue: string
     thinkingTier?: ThinkingTier
     agentMode?: boolean
-    externalFallback?: boolean
+    routeMode?: ChatRouteMode
     externalAllowed?: boolean
     busy?: boolean
     recording?: boolean
@@ -28,12 +29,14 @@ const props = withDefaults(
     commands: () => [],
     contextLabel: '',
     externalAllowed: true,
+    routeMode: 'local',
+    thinkingTier: 'balanced',
   }
 )
 const emit = defineEmits<{
   'update:agentMode': [value: boolean]
   'update:thinkingTier': [value: ThinkingTier]
-  'update:externalFallback': [value: boolean]
+  'update:routeMode': [value: ChatRouteMode]
   'update:modelValue': [value: string]
   input: []
   send: []
@@ -46,6 +49,21 @@ const emit = defineEmits<{
   context: []
   command: [id: string]
 }>()
+
+/** The select is the only writer; an unknown value is discarded rather than emitted. */
+function onRouteMode(event: Event): void {
+  const value = (event.target as HTMLSelectElement).value
+  if (value === 'local' || value === 'auto' || value === 'external') emit('update:routeMode', value)
+}
+const routeModeHint = computed(() => {
+  if (props.agentMode) return 'Im Agentenmodus bestimmt das Agententeam die Route pro Rolle.'
+  if (!props.externalAllowed) return 'Externe Modelle zuerst unter Einstellungen → Chat & Agenten zulassen.'
+  if (props.routeMode === 'external')
+    return 'Überspringt das lokale Modell. Ein externes Modell antwortet erst nach ausdrücklicher Freigabe dieses Nachrichtenpakets.'
+  if (props.routeMode === 'auto')
+    return 'Lokales Modell zuerst. Ein externes Modell nur nach ausdrücklicher Freigabe dieses Nachrichtenpakets.'
+  return 'Nur das signierte lokale Modell. Kein externer Weg.'
+})
 const field = ref<HTMLTextAreaElement | null>(null)
 const menu = ref(false)
 const commandsDismissed = ref(false)
@@ -122,22 +140,21 @@ defineExpose({ focus: () => field.value?.focus() })
             @start="emit('voice-start', $event)"
             @stop="emit('voice-stop')"
           />
-          <button
-            type="button"
-            class="ai-agent-mode"
-            :class="{ 'is-active': externalFallback }"
-            :aria-pressed="!!externalFallback"
-            :disabled="busy || !externalAllowed"
-            aria-label="Externen Fallback nach Freigabe erlauben"
-            :title="
-              externalAllowed
-                ? 'Erlaubt nach einer ausdrücklichen Freigabe den Wechsel zu einem externen Modell'
-                : 'Externe Modelle zuerst unter Einstellungen → Chat & Agenten zulassen'
-            "
-            @click="emit('update:externalFallback', !externalFallback)"
-          >
-            <AiIcon name="shield" :size="13" />Fallback
-          </button>
+          <label class="ai-route-mode" :class="{ 'is-active': routeMode !== 'local' }" :title="routeModeHint">
+            <AiIcon name="shield" :size="13" />
+            <span class="ai-route-mode__text">Modus</span>
+            <select
+              class="ai-route-mode__select"
+              :value="agentMode || !externalAllowed ? 'local' : routeMode"
+              :disabled="busy || !externalAllowed || agentMode"
+              aria-label="Modellroute für diesen Chat wählen"
+              @change="onRouteMode($event)"
+            >
+              <option value="local">Lokal</option>
+              <option value="auto">Auto · lokal zuerst</option>
+              <option value="external">Externes Modell</option>
+            </select>
+          </label>
           <button
             type="button"
             class="ai-agent-mode"

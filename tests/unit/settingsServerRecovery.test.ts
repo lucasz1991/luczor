@@ -11,6 +11,7 @@ const appliedModelUsage = VueRuntime.ref({
   externalEnabled: false,
   agentsByDefault: false,
   teamPreset: 'local',
+  chatRouteMode: 'local',
 })
 const saveModels = vi.fn(async (value: typeof appliedModelUsage.value) => {
   appliedModelUsage.value = { ...value }
@@ -112,7 +113,13 @@ function result(ok: boolean, stale = false): InferenceConnectionResult {
 }
 
 beforeEach(() => {
-  appliedModelUsage.value = { localModelId: null, externalEnabled: false, agentsByDefault: false, teamPreset: 'local' }
+  appliedModelUsage.value = {
+    localModelId: null,
+    externalEnabled: false,
+    agentsByDefault: false,
+    teamPreset: 'local',
+    chatRouteMode: 'local',
+  }
   saveModels.mockClear()
   persist.mockReset().mockResolvedValue(false)
   recover.mockReset().mockResolvedValue(result(true))
@@ -210,6 +217,7 @@ describe('model selection through the shared settings save action', () => {
       externalEnabled: true,
       agentsByDefault: true,
       teamPreset: 'free',
+      chatRouteMode: 'auto',
     }
     first.modelUsageDraft.value = choice
     first.selectTab('server')

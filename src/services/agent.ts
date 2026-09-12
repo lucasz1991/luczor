@@ -25,6 +25,7 @@ import {
   type ResolvedTurnRoute,
 } from '@/services/inference/coordinator'
 import type { HybridRoutingSettings } from '@/services/inference/hybridRouter'
+import type { InferenceCapability } from '@/services/inference/capabilities'
 import { LocalInferenceError } from '@/services/inference/localModelManager'
 import type { InferenceGateway, LuczorMode, ToolChoice, WireMessage } from '@/services/inference/types'
 import { getTool, toOpenAITools, type ToolCategory } from '@/services/tools/registry'
@@ -93,6 +94,11 @@ export type RunAgentOptions = {
   /** Internal local generation preference; cannot alter an approved external request. */
   localReasoningMode?: 'auto' | 'off'
   taskType?: string
+  /**
+   * The signed capability this turn needs. The composer passes it explicitly so
+   * routing no longer depends on which keywords appear in the user's sentence.
+   */
+  requiredCapability?: InferenceCapability
   contextId?: string
   repoId?: string
   branch?: string
@@ -566,6 +572,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
     contextId: opts.contextId,
     repoId: opts.repoId,
     taskType: opts.taskType,
+    requiredCapability: opts.requiredCapability,
     contextEgress:
       opts.agentMode || opts.continuation || opts.workspaceScope ? ('local_only' as const) : opts.contextEgress,
     routingSettings:

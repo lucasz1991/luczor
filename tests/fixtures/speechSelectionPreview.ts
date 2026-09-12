@@ -80,9 +80,10 @@ createApp({
         modelValue: '',
         modelLabel: fallback.value ? 'Lokal · Fallback nach Freigabe' : 'Lokales Modell',
         contextLabel: 'Luczor',
-        externalFallback: fallback.value,
-        'onUpdate:externalFallback': (value: boolean) => {
-          fallback.value = value
+        externalAllowed: true,
+        routeMode: fallback.value ? 'auto' : 'local',
+        'onUpdate:routeMode': (value: 'local' | 'auto' | 'external') => {
+          fallback.value = value !== 'local'
         },
       }),
     ]),

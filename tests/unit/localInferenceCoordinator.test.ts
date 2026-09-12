@@ -308,6 +308,62 @@ describe('explicit specialist routing preference', () => {
     }
   )
 
+  it('waits for a warming local candidate instead of offering external egress', async () => {
+    const input = readyRoutingInput(await manifest('promoted_preferred'))
+    input.readiness = new Map()
+    expect(decideHybridRoute(input)).toMatchObject({ target: 'blocked', reason: 'external_approval_required' })
+    expect(decideHybridRoute({ ...input, localReadinessPending: true })).toMatchObject({
+      target: 'blocked',
+      reason: 'local_readiness_pending',
+    })
+    expect(
+      decideHybridRoute({
+        ...input,
+        localReadinessPending: true,
+        settings: { ...input.settings, preference: 'force_external' },
+      })
+    ).toMatchObject({ target: 'blocked', reason: 'external_approval_required' })
+  })
+
+  it('skips every local candidate for the explicit external composer mode', async () => {
+    const input = readyRoutingInput(await manifest('promoted_preferred'))
+    expect(decideHybridRoute(input).target).toBe('local_llama_cpp')
+    input.settings.preference = 'force_external'
+    expect(decideHybridRoute(input)).toMatchObject({ target: 'blocked', reason: 'external_approval_required' })
+    expect(
+      decideHybridRoute({
+        ...input,
+        expectedEgressPacketHash: payloadHash,
+        externalApproval: { approvalId: 'approved', packetHash: payloadHash, expiresAt: '2026-08-30T12:31:00Z' },
+      })
+    ).toMatchObject({ target: 'laravel_proxy', reason: 'external_approved' })
+  })
+
+  it.each(['context', 'policy', 'hash', 'expiry'] as const)(
+    'does not let the external composer mode override the %s gate',
+    async gate => {
+      const input = readyRoutingInput(await manifest('promoted_preferred'))
+      input.settings.preference = 'force_external'
+      input.expectedEgressPacketHash = payloadHash
+      input.externalApproval = { approvalId: 'approved', packetHash: payloadHash, expiresAt: '2026-08-30T12:31:00Z' }
+      if (gate === 'context') input.contextEgress = 'local_only'
+      if (gate === 'policy') {
+        input.manifest = { ...input.manifest, routing: { ...input.manifest.routing, externalAllowed: false } }
+      }
+      if (gate === 'hash') input.externalApproval.packetHash = 'f'.repeat(64)
+      if (gate === 'expiry') input.externalApproval.expiresAt = '2026-08-30T12:29:00Z'
+      expect(decideHybridRoute(input)).toMatchObject({
+        target: 'blocked',
+        reason:
+          gate === 'context'
+            ? 'local_only_blocked'
+            : gate === 'policy'
+              ? 'external_policy_blocked'
+              : 'external_approval_required',
+      })
+    }
+  )
+
   it.each(['context', 'preference', 'policy', 'hash', 'expiry'] as const)(
     'does not let explicit preference override the %s gate',
     async gate => {
@@ -925,6 +981,45 @@ describe('local inference coordinator and approved external gateway', () => {
       expect.arrayContaining([expect.objectContaining({ ready: false, reasons: [code] })])
     )
     expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('keeps a retryable local start local until the signed health policy is exhausted', async () => {
+    const harness = makeHarness(await manifest('explicit_experiment'))
+    harness.prepareModel.mockRejectedValue(
+      'Local runtime startup stopped to protect available RAM (runtime_startup_ram_pressure).'
+    )
+    await harness.coordinator.initialize(bootstrap())
+    for (const _attempt of [1, 2]) {
+      await expect(harness.coordinator.resolveTurn({ projectId: 'project-1' })).rejects.toMatchObject({
+        code: 'local_readiness_pending',
+        message: expect.stringContaining('Externes Modell'),
+      })
+    }
+    await expect(harness.coordinator.resolveTurn({ projectId: 'project-1' })).rejects.toMatchObject({
+      code: 'external_approval_required',
+    })
+  })
+
+  it('routes the composer by its explicit capability instead of prompt keywords', async () => {
+    const verified = await manifest('promoted_preferred')
+    const narrowed = {
+      ...verified,
+      models: verified.models.map(model => ({ ...model, capabilities: ['chat'] })),
+    } as unknown as typeof verified
+    const harness = makeHarness(narrowed)
+    await harness.coordinator.initialize(bootstrap())
+    // 'coding.fix_bug' is what inferTaskType() produces for a sentence containing
+    // "bug"; deriving the capability from it would demand execution_preparation.
+    await expect(
+      harness.coordinator.resolveTurn({ projectId: 'project-1', taskType: 'coding.fix_bug' })
+    ).rejects.toMatchObject({ code: 'external_approval_required' })
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    const route = await harness.coordinator.resolveTurn({
+      projectId: 'project-1',
+      taskType: 'coding.fix_bug',
+      requiredCapability: 'chat',
+    })
+    expect(route.decision?.target).toBe('local_llama_cpp')
   })
 
   it('clears readiness failures after successful local retry and after identity changes', async () => {

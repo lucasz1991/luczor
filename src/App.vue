@@ -4,7 +4,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import { loadPendingTaskCreates, replacePendingTaskCreates } from '@/services/agents/taskCreateRecoveryLedger'
 import Settings from './components/Settings.vue'
-import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
+import { modelUsageSettings, type ChatRouteMode } from '@/services/inference/modelUsageSettings'
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import type { SystemStatusDisplayMode } from '@/features/system-status/model'
 import TokenCounter from './components/ai/TokenCounter.vue'
@@ -205,9 +205,11 @@ function setComposerInput(value: string, source: ComposerInputSource) {
 }
 const sending = ref(false)
 const sendAdmission = ref(false)
-// External fallback is a conscious choice for this project in this session.
+// The route mode is a conscious choice for this project in this session.
 // Capture it at turn admission so later UI changes cannot change an in-flight route.
-const allowChatExternalFallback = ref(modelUsageSettings.value.externalEnabled)
+const chatRouteMode = ref<ChatRouteMode>(
+  modelUsageSettings.value.externalEnabled ? modelUsageSettings.value.chatRouteMode : 'local'
+)
 const agentMode = ref(modelUsageSettings.value.agentsByDefault)
 const chatThinkingChoices = ref(new Map<string, ThinkingTier>())
 const activeThinkingBudget = shallowRef<{
@@ -221,17 +223,17 @@ const agentTeamPreset = ref<import('@/services/agents/teamPolicy').TeamPresetCho
 watch(modelUsageSettings, value => {
   agentMode.value = value.agentsByDefault
   agentTeamPreset.value = value.externalEnabled ? value.teamPreset : 'local'
-  allowChatExternalFallback.value = value.externalEnabled
+  chatRouteMode.value = value.externalEnabled ? value.chatRouteMode : 'local'
 })
 const continuations = shallowRef<Record<string, AgentCheckpoint>>({})
 const resetChatRouting = () => {
   chatThinkingChoices.value = new Map()
   activeThinkingBudget.value = null
   continuations.value = {}
-  allowChatExternalFallback.value = false
+  chatRouteMode.value = 'local'
 }
 const resetProjectRouting = () => {
-  allowChatExternalFallback.value = false
+  chatRouteMode.value = 'local'
 }
 window.addEventListener('luczor:api-identity-changing', resetChatRouting)
 onBeforeUnmount(() => window.removeEventListener('luczor:api-identity-changing', resetChatRouting))
@@ -1420,8 +1422,12 @@ async function send(
   const turnThinking = resume?.checkpoint.thinkingTier
     ? { thinkingTier: resume.checkpoint.thinkingTier, thinkingConfig: resume.checkpoint.thinkingConfig }
     : captureThinking(thinkingTier.value)
-  const externalFallbackAllowed =
-    modelUsageSettings.value.externalEnabled && !useAgents && !resume && allowChatExternalFallback.value
+  // Agent teams and resumed checkpoints keep their own local-only contract; the
+  // composer mode applies to ordinary turns. Without the global external switch
+  // every mode collapses to local, mirroring resolveInferenceRouteForTurn.
+  const turnRouteMode: ChatRouteMode =
+    modelUsageSettings.value.externalEnabled && !useAgents && !resume ? chatRouteMode.value : 'local'
+  const externalFallbackAllowed = turnRouteMode !== 'local'
   const rawText = resume?.checkpoint.objective ?? (miniInput?.text ?? input.value).trim()
   if (!rawText || conversationBusy.value) return
   if (miniInput && miniInput.projectId !== pid) throw new Error('Der Projektchat wurde inzwischen gewechselt.')
@@ -1728,7 +1734,8 @@ async function send(
         externalBaseMessages,
         contextEgress: externalFallbackAllowed ? 'external_allowed' : 'local_only',
         routingSettings: {
-          preference: externalFallbackAllowed ? 'ask_external' : 'local_only',
+          preference:
+            turnRouteMode === 'external' ? 'force_external' : turnRouteMode === 'auto' ? 'ask_external' : 'local_only',
           experimentalFlashNext,
         },
         requestExternalApproval: ({ packetHash, destination, messages: outgoing }) =>
@@ -1745,6 +1752,10 @@ async function send(
         getMode: () => mode.value,
         toolChoice: shouldRequireToolCall(text) ? 'required' : 'auto',
         taskType: promptContext.taskType,
+        // The composer is a chat contract. The task type stays a context-retrieval
+        // hint; it must not decide the signed capability, which used to change with
+        // single keywords like "test", "plan" or "prüfen" in the user's sentence.
+        requiredCapability: 'chat',
         contextId: promptContext.contextId,
         repoId: promptContext.repoId,
         branch: promptContext.branch,
@@ -2694,13 +2705,19 @@ useWorkflowWatchers()
           v-model="input"
           v-model:agent-mode="agentMode"
           v-model:thinking-tier="thinkingTier"
-          v-model:external-fallback="allowChatExternalFallback"
+          v-model:route-mode="chatRouteMode"
           :external-allowed="modelUsageSettings.externalEnabled"
           :busy="conversationBusy"
           :recording="isRecording"
           :listening="listening"
           :voice-busy="voiceInputView.starting || voiceInputView.finishing"
-          :model-label="allowChatExternalFallback ? 'Lokal · Fallback nach Freigabe' : 'Lokales Modell'"
+          :model-label="
+            chatRouteMode === 'external'
+              ? 'Externes Modell · nach Freigabe'
+              : chatRouteMode === 'auto'
+                ? 'Lokal · Fallback nach Freigabe'
+                : 'Lokales Modell'
+          "
           :context-label="activeWorkspace?.displayName || activeProject?.name"
           :commands="promptCommands"
           @input="setComposerInput(input, 'keyboard')"

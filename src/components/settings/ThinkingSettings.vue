@@ -7,24 +7,30 @@ import {
   resolveThinkingConfig,
   type ThinkingTier,
 } from '@/services/inference/thinking'
-import { thinkingSettings, saveThinkingSettings } from '@/services/inference/thinkingSettings'
+import {
+  thinkingSettings,
+  saveThinkingSettings,
+  readOverride,
+  writeOverride,
+  deleteOverride,
+} from '@/services/inference/thinkingSettings'
 const defaultTier = ref<ThinkingTier>(thinkingSettings.value.defaultTier)
 const editedTier = ref<ThinkingTier>('balanced')
 const draft = reactive({
-  ...resolveThinkingConfig(editedTier.value, thinkingSettings.value.overrides[editedTier.value]),
+  ...resolveThinkingConfig(editedTier.value, readOverride(thinkingSettings.value.overrides, editedTier.value)),
 })
 const notice = ref('')
 watch(editedTier, tier => {
-  Object.assign(draft, resolveThinkingConfig(tier, thinkingSettings.value.overrides[tier]))
+  Object.assign(draft, resolveThinkingConfig(tier, readOverride(thinkingSettings.value.overrides, tier)))
   notice.value = ''
 })
 function save(reset = false) {
   try {
     const overrides = { ...thinkingSettings.value.overrides }
-    if (reset) delete overrides[editedTier.value]
-    else overrides[editedTier.value] = resolveThinkingConfig(editedTier.value, draft)
+    if (reset) deleteOverride(overrides, editedTier.value)
+    else writeOverride(overrides, editedTier.value, resolveThinkingConfig(editedTier.value, draft))
     saveThinkingSettings(defaultTier.value, overrides)
-    Object.assign(draft, resolveThinkingConfig(editedTier.value, overrides[editedTier.value]))
+    Object.assign(draft, resolveThinkingConfig(editedTier.value, readOverride(overrides, editedTier.value)))
     notice.value = 'Auf diesem Gerät gespeichert. Laufende Aufträge behalten ihr Budget.'
   } catch (error) {
     notice.value = error instanceof Error ? error.message : 'Speichern fehlgeschlagen.'

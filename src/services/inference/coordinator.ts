@@ -57,6 +57,12 @@ export type TurnRoutingInput = {
   contextId?: string
   repoId?: string
   taskType?: string
+  /**
+   * The signed capability this turn actually needs. Callers that know their own
+   * contract pass it explicitly; only legacy callers fall back to deriving it
+   * from `taskType`, which for free-text chat is a keyword guess, not a contract.
+   */
+  requiredCapability?: InferenceCapability
   /** Explicit external delegation is restricted to the server-managed agent role namespace. */
   intent?: 'external_specialist'
   contextEgress?: 'local_only' | 'external_allowed'
@@ -246,6 +252,29 @@ function externalSpecialistUnavailableMessage(reason: RouteDecision['reason']): 
   }
   return 'Die signierte Modellrichtlinie erlaubt für diesen Auftrag keinen externen Spezialisten.'
 }
+
+/**
+ * Reasons a later attempt can plausibly clear: load, memory, thermal and
+ * resource-revision conditions, plus a startup that ran out of its signed budget.
+ * Integrity, catalog and configuration failures are deliberately absent — those
+ * never fix themselves, so they must not hold back the external offer.
+ */
+const RETRYABLE_LOCAL_PREPARATION_REASONS: ReadonlySet<string> = new Set([
+  'readiness_pending',
+  'capacity_unknown',
+  'available_ram_below_minimum',
+  'runtime_startup_ram_pressure',
+  'resource_pressure',
+  'thermal_limit',
+  'accelerator_unavailable',
+  'benchmark_failed',
+  'local_preparation_failed',
+  'runtime_download_failed',
+  'resource_config_pending',
+  'resource_config_busy',
+  'resource_revision_mismatch',
+  'resource_revision_required',
+])
 
 const localReadinessMessages = new Map<string, string>([
   ['runtime_platform_mismatch', 'Die hinterlegte Runtime passt nicht zur Linux-Plattform oder Prozessorarchitektur.'],
@@ -553,6 +582,8 @@ export class LocalInferenceCoordinator {
   private lastMemoryRecoveryAt = -Infinity
   private readiness = new Map<string, LocalReadinessEvidence>()
   private preparationFailures = new Map<string, string>()
+  /** Retryable preparation attempts per release, bounded by its signed health policy. */
+  private preparationRetries = new Map<string, number>()
   private catalogBinding?: LocalCatalogBinding
   private generation = 0
   private resourceEpoch = 0
@@ -571,6 +602,7 @@ export class LocalInferenceCoordinator {
     this.assessments.clear()
     this.readiness.clear()
     this.preparationFailures.clear()
+    this.preparationRetries.clear()
   }
 
   beginBootstrap(): number {
@@ -689,8 +721,8 @@ export class LocalInferenceCoordinator {
     }
   }
 
-  modelAdmissions(taskType?: string): readonly LocalModelAdmission[] {
-    const requiredCapability = requiredCapabilityForTask(taskType)
+  modelAdmissions(taskType?: string, capability?: InferenceCapability): readonly LocalModelAdmission[] {
+    const requiredCapability = capability ?? requiredCapabilityForTask(taskType)
     const now = this.dependencies.now().getTime()
     return Object.freeze(
       (this.manifest?.models ?? []).map(model => {
@@ -937,18 +969,25 @@ export class LocalInferenceCoordinator {
     }
 
     const settings = { ...DEFAULT_ROUTING_SETTINGS, ...input.routingSettings }
-    if (!preferExternal && this.dependencies.nativeStatus) {
+    // An explicit external composer choice must not pay for a local cold start
+    // it will never use. It still grants no permission: the external branch of
+    // decideHybridRoute keeps demanding routing.externalAllowed plus a per-turn
+    // approval bound to this exact packet hash.
+    const skipLocalPreparation = preferExternal || settings.preference === 'force_external'
+    if (!skipLocalPreparation && this.dependencies.nativeStatus) {
       const native = await this.dependencies.nativeStatus()
       this.requireActiveGeneration(generation)
       this.reconcileNativeStatus(native)
     }
-    if (!preferExternal) await this.refreshCapacityIfStale(generation)
+    if (!skipLocalPreparation) await this.refreshCapacityIfStale(generation)
     this.requireActiveGeneration(generation)
-    const requiredCapability = requiredCapabilityForTask(input.taskType)
-    if (!preferExternal) await this.prepareFirstAdmissibleCandidate(settings, requiredCapability, generation)
+    const requiredCapability = input.requiredCapability ?? requiredCapabilityForTask(input.taskType)
+    const localReadinessPending = skipLocalPreparation
+      ? false
+      : await this.prepareFirstAdmissibleCandidate(settings, requiredCapability, generation)
     // A cold start/benchmark can outlive the short hardware snapshot. Re-measure
     // after preparation so its own newly allocated RAM is counted as resident.
-    if (!preferExternal) await this.refreshCapacityIfStale(generation, false)
+    if (!skipLocalPreparation) await this.refreshCapacityIfStale(generation, false)
     this.requireActiveGeneration(generation)
     const externalHash = input.externalPackage?.packetHash
 
@@ -966,6 +1005,7 @@ export class LocalInferenceCoordinator {
       expectedEgressPacketHash: externalHash,
       requiredCapability,
       preferExternal,
+      localReadinessPending,
       now: this.dependencies.now(),
     })
 
@@ -1013,7 +1053,7 @@ export class LocalInferenceCoordinator {
     throw new LocalInferenceError(
       preferExternal
         ? externalSpecialistUnavailableMessage(decision.reason)
-        : this.unavailableRouteMessage(settings, input.taskType, decision.reason),
+        : this.unavailableRouteMessage(settings, input.taskType, decision.reason, requiredCapability),
       decision.reason,
       false,
       false
@@ -1073,12 +1113,18 @@ export class LocalInferenceCoordinator {
     }
   }
 
+  /**
+   * Returns true when a candidate cleared every static gate but has no verified
+   * readiness yet. That is a warming runtime, not an unavailable one, so routing
+   * keeps waiting instead of offering external egress. A release that keeps
+   * failing lands in cooldown/error and stops counting as pending.
+   */
   private async prepareFirstAdmissibleCandidate(
     settings: HybridRoutingSettings,
     requiredCapability: InferenceCapability,
     generation: number
-  ): Promise<void> {
-    if (!this.manifest) return
+  ): Promise<boolean> {
+    if (!this.manifest) return false
     const experimental = settings.experimentalFlashNext
       ? this.manifest.routing.experimentalModelIds.filter(modelId => {
           const model = this.manifest?.models.find(candidate => candidate.id === modelId)
@@ -1095,6 +1141,7 @@ export class LocalInferenceCoordinator {
           Number(!!this.assessments.get(left)?.memory?.resident)
       )
     }
+    let pending = false
     for (const modelId of ids) {
       const model = this.manifest.models.find(candidate => candidate.id === modelId)
       const assessment = this.assessments.get(modelId)
@@ -1115,15 +1162,29 @@ export class LocalInferenceCoordinator {
       this.requireActiveGeneration(generation)
       const readiness = this.readiness.get(modelId)
       if (hasVerifiedLocalReadiness(model, readiness, this.manifest.payloadSha256, this.dependencies.now().getTime())) {
-        return
+        this.preparationRetries.delete(modelId)
+        return false
       }
+      const failure = this.preparationFailures.get(modelId) ?? 'readiness_pending'
+      if (!RETRYABLE_LOCAL_PREPARATION_REASONS.has(failure)) {
+        this.preparationRetries.delete(modelId)
+        continue
+      }
+      // A retryable local start keeps the turn local until the signed health
+      // policy has seen enough attempts. Without this, one slow or resource-tight
+      // cold start diverts the very next turn into the external approval dialog.
+      const attempts = (this.preparationRetries.get(modelId) ?? 0) + 1
+      this.preparationRetries.set(modelId, attempts)
+      if (attempts <= Math.max(1, model.healthPolicy.maxConsecutiveFailures)) pending = true
     }
+    return pending
   }
 
   private unavailableRouteMessage(
     settings: HybridRoutingSettings,
     taskType: string | undefined,
-    reason: RouteDecision['reason']
+    reason: RouteDecision['reason'],
+    capability?: InferenceCapability
   ): string {
     const manifest = this.manifest!
     const candidates = new Set<string>(
@@ -1135,7 +1196,7 @@ export class LocalInferenceCoordinator {
             ...manifest.routing.fallbackModelIds,
           ]
     )
-    const admissions = this.modelAdmissions(taskType).filter(model => candidates.has(model.modelReleaseId))
+    const admissions = this.modelAdmissions(taskType, capability).filter(model => candidates.has(model.modelReleaseId))
     const enabledCandidates = admissions.filter(model => model.enabled)
     const attempted = enabledCandidates.filter(model => this.preparationFailures.has(model.modelReleaseId))
     const diagnostics = (attempted.length ? attempted : enabledCandidates.length ? enabledCandidates : admissions)
@@ -1168,7 +1229,9 @@ export class LocalInferenceCoordinator {
     ]
     const local = messages.slice(0, 3).join(' ') || localReadinessMessages.get('readiness_pending')!
     const external =
-      reason === 'external_approval_required'
+      reason === 'local_readiness_pending'
+        ? 'Luczor bereitet das lokale Modell noch vor und wechselt deshalb nicht von selbst zu einem externen Modell. Für einen externen Lauf im Eingabefeld den Modus „Externes Modell" wählen.'
+        : reason === 'external_approval_required'
         ? 'Ein externer Fallback ist nur nach ausdrücklicher Freigabe dieses Nachrichtenpakets möglich.'
         : reason === 'local_only_blocked'
           ? 'Dieser Chat ist auf lokale Modelle eingestellt.'
@@ -1291,6 +1354,7 @@ export class LocalInferenceCoordinator {
     this.assessments.clear()
     this.readiness.clear()
     this.preparationFailures.clear()
+    this.preparationRetries.clear()
   }
 
   private isCurrent(generation: number): boolean {

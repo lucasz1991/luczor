@@ -41,6 +41,7 @@ it('does not replace an existing device selection with stale browser settings', 
     externalEnabled: false,
     agentsByDefault: false,
     teamPreset: 'local',
+    chatRouteMode: 'local',
   }
   native.get.mockResolvedValue(saved)
   vi.mocked(localStorage.getItem).mockReturnValue(JSON.stringify({ localModelId: 'old-large-model' }))

@@ -89,6 +89,18 @@ async function refreshCatalog() {
         Erlaubt externe Chat-Fallbacks und Spezialisten nach Nachrichtenfreigabe. Provider und Rollenmodelle werden im
         Admin verwaltet. Ausschalten sperrt neue externe Modellrunden.
       </p>
+      <label class="lz-label" for="model-usage-route">Standardmodus neuer Chats</label>
+      <select id="model-usage-route" v-model="draft.chatRouteMode" class="lz-input">
+        <option value="local">Lokal · nur das signierte lokale Modell</option>
+        <option value="auto" :disabled="!draft.externalEnabled">Auto · lokal zuerst, extern nach Freigabe</option>
+        <option value="external" :disabled="!draft.externalEnabled">
+          Externes Modell · lokalen Start überspringen
+        </option>
+      </select>
+      <p class="lz-hint">
+        Gilt als Vorauswahl im Eingabefeld; dort ist der Modus pro Chat umstellbar. „Externes Modell" verlangt weiterhin
+        für jede Runde die ausdrückliche Freigabe des Nachrichtenpakets.
+      </p>
       <label class="model-usage-toggle"
         ><input v-model="draft.agentsByDefault" type="checkbox" /> Neue Chats standardmäßig im Agentenmodus</label
       >

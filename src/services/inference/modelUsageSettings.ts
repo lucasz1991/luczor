@@ -3,11 +3,24 @@ import { isTauri } from '@tauri-apps/api/core'
 import { Store } from '@tauri-apps/plugin-store'
 import type { TeamPresetChoice } from '@/services/agents/teamPolicy'
 
+/**
+ * Explicit per-chat route choice in the composer.
+ * - `local`:    only the signed local model; no external route is offered.
+ * - `auto`:     local first; an external model only after an explicit per-turn release.
+ * - `external`: skip the local cold start and go to the external route, still only
+ *               after the same explicit per-turn release.
+ * `external` and `auto` require `externalEnabled`; otherwise the mode degrades to `local`.
+ */
+export type ChatRouteMode = 'local' | 'auto' | 'external'
+
+export const CHAT_ROUTE_MODES: readonly ChatRouteMode[] = ['local', 'auto', 'external'] as const
+
 export type ModelUsageSettings = {
   localModelId: string | null
   externalEnabled: boolean
   agentsByDefault: boolean
   teamPreset: TeamPresetChoice
+  chatRouteMode: ChatRouteMode
 }
 const KEY = 'luczor.device.model-usage.v1'
 export const DEFAULT_MODEL_USAGE: ModelUsageSettings = {
@@ -15,6 +28,7 @@ export const DEFAULT_MODEL_USAGE: ModelUsageSettings = {
   externalEnabled: false,
   agentsByDefault: false,
   teamPreset: 'local',
+  chatRouteMode: 'local',
 }
 export function parseModelUsage(value: unknown): ModelUsageSettings {
   const item = (value ?? {}) as Partial<ModelUsageSettings>
@@ -26,6 +40,11 @@ export function parseModelUsage(value: unknown): ModelUsageSettings {
     externalEnabled: item.externalEnabled === true,
     agentsByDefault: item.agentsByDefault === true,
     teamPreset: ['server', 'local', 'free', 'budget'].includes(item.teamPreset ?? '') ? item.teamPreset! : 'local',
+    // A stored external choice must never survive switching external models off.
+    chatRouteMode:
+      item.externalEnabled === true && CHAT_ROUTE_MODES.includes(item.chatRouteMode as ChatRouteMode)
+        ? (item.chatRouteMode as ChatRouteMode)
+        : 'local',
   }
 }
 function read(): ModelUsageSettings {

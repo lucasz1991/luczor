@@ -1,7 +1,7 @@
 // src/state/store.ts
 import { reactive } from 'vue'
 import { DEFAULT_STATE } from '@/state/defaults'
-import type * as T from '@/state/types'
+import type * as AppTypes from '@/state/types'
 import {
   createSafeRecord,
   deleteSafeRecordValue,
@@ -13,11 +13,11 @@ import {
 /* =========================================================
  * Utils
  * ========================================================= */
-const clone = <X>(x: X): X => {
+const clone = <Value>(value: Value): Value => {
   try {
-    return structuredClone(x)
+    return structuredClone(value)
   } catch {
-    return JSON.parse(JSON.stringify(x)) as X
+    return JSON.parse(JSON.stringify(value)) as Value
   }
 }
 
@@ -28,19 +28,19 @@ const now = () => Date.now()
 /* =========================================================
  * State
  * ========================================================= */
-export const state = reactive<T.AppState>(clone(DEFAULT_STATE))
+export const state = reactive<AppTypes.AppState>(clone(DEFAULT_STATE))
 
 function ensureGlobalUi() {
   state.global.ui ??= {}
 }
 
-function getActiveProjectId(): T.Id {
+function getActiveProjectId(): AppTypes.Id {
   ensureGlobalUi()
   return state.global.ui!.lastProjectId ?? state.projects[0]?.id ?? 'default'
 }
 
-function ensureProjectExists(projectId: T.Id) {
-  if (state.projects.some(p => p.id === projectId)) return
+function ensureProjectExists(projectId: AppTypes.Id) {
+  if (state.projects.some(project => project.id === projectId)) return
 
   state.projects.unshift({
     id: projectId,
@@ -56,13 +56,13 @@ function ensureProjectExists(projectId: T.Id) {
   })
 }
 
-function ensurePendingBucket(projectId: T.Id): T.PendingToolCall[] {
+function ensurePendingBucket(projectId: AppTypes.Id): AppTypes.PendingToolCall[] {
   state.pending.toolCallsByProject ??= {}
   if (!isSafeRecordKey(projectId)) throw new Error('Unsafe project id rejected.')
   const existing = getSafeRecordValue(state.pending.toolCallsByProject, projectId)
   if (existing) return existing
 
-  const bucket: T.PendingToolCall[] = []
+  const bucket: AppTypes.PendingToolCall[] = []
   setSafeRecordValue(state.pending.toolCallsByProject, projectId, bucket)
   return bucket
 }
@@ -70,15 +70,15 @@ function ensurePendingBucket(projectId: T.Id): T.PendingToolCall[] {
 /* =========================================================
  * Message factories
  * ========================================================= */
-function makeMsg(role: T.ChatRole, content: string, projectId?: T.Id): T.Message {
-  const t = now()
+function makeMsg(role: AppTypes.ChatRole, content: string, projectId?: AppTypes.Id): AppTypes.Message {
+  const timestamp = now()
   return {
     id: uid(),
     projectId: projectId ?? getActiveProjectId(),
     role,
     content,
-    ts: t,
-    createdAt: t,
+    ts: timestamp,
+    createdAt: timestamp,
     raw: undefined,
     parsed: null,
     visibility: 'visible',
@@ -87,17 +87,17 @@ function makeMsg(role: T.ChatRole, content: string, projectId?: T.Id): T.Message
 }
 
 function makeHiddenToolMsg(
-  projectId: T.Id,
-  payload: { content?: string; parsed?: unknown; meta?: T.MessageMeta }
-): T.Message {
-  const t = now()
+  projectId: AppTypes.Id,
+  payload: { content?: string; parsed?: unknown; meta?: AppTypes.MessageMeta }
+): AppTypes.Message {
+  const timestamp = now()
   return {
     id: uid(),
     projectId,
     role: 'tool',
     content: payload.content ?? '',
-    ts: t,
-    createdAt: t,
+    ts: timestamp,
+    createdAt: timestamp,
     visibility: 'hidden',
     raw: undefined,
     parsed: payload.parsed ?? null,
@@ -111,7 +111,7 @@ function makeHiddenToolMsg(
 export const mutations = {
   makeMsg,
 
-  hydrate(next: T.AppState) {
+  hydrate(next: AppTypes.AppState) {
     const fresh = clone(next)
 
     state.version = 1
@@ -128,7 +128,7 @@ export const mutations = {
 
     state.summaries = fresh.summaries ?? []
 
-    const safeBuckets = createSafeRecord<T.PendingToolCall[]>()
+    const safeBuckets = createSafeRecord<AppTypes.PendingToolCall[]>()
     const storedBuckets = fresh.pending?.toolCallsByProject
     if (storedBuckets && typeof storedBuckets === 'object') {
       for (const [projectId, bucket] of Object.entries(storedBuckets)) {
@@ -140,7 +140,7 @@ export const mutations = {
     state.pending = { toolCallsByProject: safeBuckets }
 
     // Ensure buckets exist for known projects
-    for (const p of state.projects) ensurePendingBucket(p.id)
+    for (const project of state.projects) ensurePendingBucket(project.id)
   },
 
   ensureDefaults() {
@@ -155,7 +155,7 @@ export const mutations = {
     ensureProjectExists(pid)
     ensurePendingBucket(pid)
 
-    const hasAnyVisible = state.messages.some(m => m.projectId === pid && m.visibility !== 'hidden')
+    const hasAnyVisible = state.messages.some(message => message.projectId === pid && message.visibility !== 'hidden')
 
     if (!hasAnyVisible) {
       state.messages.push(makeMsg('assistant', 'Willkommen. Was ist das Ziel dieses Projekts?', pid))
@@ -165,7 +165,7 @@ export const mutations = {
   /* -----------------------------
    * Project selection & creation
    * ----------------------------- */
-  setActiveProject(projectId: T.Id) {
+  setActiveProject(projectId: AppTypes.Id) {
     ensureGlobalUi()
     ensureProjectExists(projectId)
     ensurePendingBucket(projectId)
@@ -174,11 +174,11 @@ export const mutations = {
     this.touchProject(projectId)
   },
 
-  addProject(p: { id: T.Id; name: string }, activate = true) {
-    if (!state.projects.some(x => x.id === p.id)) {
+  addProject(project: { id: AppTypes.Id; name: string }, activate = true) {
+    if (!state.projects.some(existing => existing.id === project.id)) {
       state.projects.unshift({
-        id: p.id,
-        name: p.name,
+        id: project.id,
+        name: project.name,
         goal: undefined,
         goals: [],
         summary: '',
@@ -190,28 +190,30 @@ export const mutations = {
       })
     }
 
-    ensurePendingBucket(p.id)
-    if (activate) this.setActiveProject(p.id)
+    ensurePendingBucket(project.id)
+    if (activate) this.setActiveProject(project.id)
 
-    const hasAnyVisible = state.messages.some(m => m.projectId === p.id && m.visibility !== 'hidden')
+    const hasAnyVisible = state.messages.some(
+      message => message.projectId === project.id && message.visibility !== 'hidden'
+    )
 
     if (!hasAnyVisible) {
-      state.messages.push(makeMsg('assistant', 'Willkommen. Was ist das Ziel dieses Projekts?', p.id))
+      state.messages.push(makeMsg('assistant', 'Willkommen. Was ist das Ziel dieses Projekts?', project.id))
     }
   },
 
-  renameProject(projectId: T.Id, name: string) {
+  renameProject(projectId: AppTypes.Id, name: string) {
     if (!isSafeRecordKey(projectId)) throw new Error('Unsafe project id rejected.')
     const trimmed = name.trim().slice(0, 160)
     if (!trimmed) return
-    const prj = state.projects.find(p => p.id === projectId)
+    const prj = state.projects.find(project => project.id === projectId)
     if (!prj || prj.name === trimmed) return
     prj.name = trimmed
     prj.updatedAt = now()
   },
 
   /** Roll back a newly added, not-yet-activated project after strict persistence failed. */
-  rollbackProjectCreation(projectId: T.Id) {
+  rollbackProjectCreation(projectId: AppTypes.Id) {
     if (state.global.ui?.lastProjectId === projectId)
       throw new Error('Das aktive Projekt kann nicht als unbestätigt verworfen werden.')
     state.projects = state.projects.filter(project => project.id !== projectId)
@@ -223,26 +225,26 @@ export const mutations = {
     deleteSafeRecordValue(state.pending.toolCallsByProject, projectId)
   },
 
-  touchProject(projectId: T.Id) {
-    const prj = state.projects.find(p => p.id === projectId)
+  touchProject(projectId: AppTypes.Id) {
+    const prj = state.projects.find(project => project.id === projectId)
     if (prj) prj.updatedAt = now()
   },
 
   /* -----------------------------
    * Project data (summary/goals)
    * ----------------------------- */
-  setProjectSummary(projectId: T.Id, summary: string) {
+  setProjectSummary(projectId: AppTypes.Id, summary: string) {
     ensureProjectExists(projectId)
-    const prj = state.projects.find(p => p.id === projectId)!
+    const prj = state.projects.find(project => project.id === projectId)!
     prj.summary = summary
     prj.updatedAt = now()
   },
 
-  upsertGoal(projectId: T.Id, goal: T.ProjectGoal) {
+  upsertGoal(projectId: AppTypes.Id, goal: AppTypes.ProjectGoal) {
     ensureProjectExists(projectId)
-    const prj = state.projects.find(p => p.id === projectId)!
+    const prj = state.projects.find(project => project.id === projectId)!
 
-    const idx = prj.goals.findIndex(g => g.id === goal.id)
+    const idx = prj.goals.findIndex(existingGoal => existingGoal.id === goal.id)
     if (idx === -1) prj.goals.push(goal)
     else prj.goals[idx] = goal
 
@@ -252,40 +254,40 @@ export const mutations = {
   /* -----------------------------
    * Messages
    * ----------------------------- */
-  getProjectMessages(projectId: T.Id, opts?: { includeHidden?: boolean }): T.Message[] {
+  getProjectMessages(projectId: AppTypes.Id, opts?: { includeHidden?: boolean }): AppTypes.Message[] {
     ensureProjectExists(projectId)
     const includeHidden = opts?.includeHidden ?? false
 
     return state.messages
-      .filter(m => m.projectId === projectId)
-      .filter(m => includeHidden || m.visibility !== 'hidden')
-      .sort((a, b) => a.ts - b.ts)
+      .filter(message => message.projectId === projectId)
+      .filter(message => includeHidden || message.visibility !== 'hidden')
+      .sort((left, right) => left.ts - right.ts)
   },
 
-  addMessage(msg: T.Message) {
+  addMessage(msg: AppTypes.Message) {
     ensureProjectExists(msg.projectId)
     state.messages.push(msg)
     this.touchProject(msg.projectId)
   },
 
-  addHiddenToolMessage(projectId: T.Id, parsed: unknown, meta?: T.MessageMeta) {
+  addHiddenToolMessage(projectId: AppTypes.Id, parsed: unknown, meta?: AppTypes.MessageMeta) {
     ensureProjectExists(projectId)
     state.messages.push(makeHiddenToolMsg(projectId, { parsed, meta }))
     this.touchProject(projectId)
   },
 
-  patchMessage(projectId: T.Id, messageId: T.Id, patch: Partial<T.Message>) {
-    const idx = state.messages.findIndex(m => m.projectId === projectId && m.id === messageId)
+  patchMessage(projectId: AppTypes.Id, messageId: AppTypes.Id, patch: Partial<AppTypes.Message>) {
+    const idx = state.messages.findIndex(message => message.projectId === projectId && message.id === messageId)
     if (idx === -1) return
 
     const current = state.messages[idx]!
 
-    const next: T.Message = {
+    const next: AppTypes.Message = {
       ...current,
       ...patch,
       id: current.id,
       projectId: current.projectId,
-      role: (patch.role ?? current.role) as T.ChatRole,
+      role: (patch.role ?? current.role) as AppTypes.ChatRole,
       content: patch.content ?? current.content,
       ts: patch.ts ?? current.ts,
       createdAt: patch.createdAt ?? current.createdAt,
@@ -297,13 +299,13 @@ export const mutations = {
     this.touchProject(projectId)
   },
 
-  resetProjectChat(projectId: T.Id) {
+  resetProjectChat(projectId: AppTypes.Id) {
     ensureProjectExists(projectId)
 
     // Keep hidden backchannel tool messages so AI can retain overview
-    const hidden = state.messages.filter(m => m.projectId === projectId && m.visibility === 'hidden')
+    const hidden = state.messages.filter(message => message.projectId === projectId && message.visibility === 'hidden')
 
-    state.messages = state.messages.filter(m => m.projectId !== projectId)
+    state.messages = state.messages.filter(message => message.projectId !== projectId)
     state.messages.push(...hidden)
 
     state.messages.push(makeMsg('assistant', 'Neuer Chat. Was ist das Ziel?', projectId))
@@ -313,11 +315,11 @@ export const mutations = {
   /* -----------------------------
    * Pending tool calls (approval/execution)
    * ----------------------------- */
-  queueToolCall(projectId: T.Id, call: Omit<T.PendingToolCall, 'projectId' | 'createdAt' | 'updatedAt'>) {
+  queueToolCall(projectId: AppTypes.Id, call: Omit<AppTypes.PendingToolCall, 'projectId' | 'createdAt' | 'updatedAt'>) {
     ensureProjectExists(projectId)
     const bucket = ensurePendingBucket(projectId)
 
-    const full: T.PendingToolCall = {
+    const full: AppTypes.PendingToolCall = {
       ...call,
       projectId,
       createdAt: now(),
@@ -329,24 +331,24 @@ export const mutations = {
     return full
   },
 
-  updateToolCallStatus(projectId: T.Id, toolCallId: T.Id, status: T.ToolCallStatus) {
+  updateToolCallStatus(projectId: AppTypes.Id, toolCallId: AppTypes.Id, status: AppTypes.ToolCallStatus) {
     const bucket = ensurePendingBucket(projectId)
-    const item = bucket.find(x => x.id === toolCallId)
-    if (!item) return
+    const pending = bucket.find(item => item.id === toolCallId)
+    if (!pending) return
 
-    item.status = status
-    item.updatedAt = now()
+    pending.status = status
+    pending.updatedAt = now()
     this.touchProject(projectId)
   },
 
-  setToolResult(projectId: T.Id, result: T.ToolResult) {
+  setToolResult(projectId: AppTypes.Id, result: AppTypes.ToolResult) {
     const bucket = ensurePendingBucket(projectId)
-    const item = bucket.find(x => x.id === result.toolCallId)
-    if (!item) return
+    const pending = bucket.find(item => item.id === result.toolCallId)
+    if (!pending) return
 
-    item.result = result
-    item.status = result.ok ? 'executed' : 'failed'
-    item.updatedAt = now()
+    pending.result = result
+    pending.status = result.ok ? 'executed' : 'failed'
+    pending.updatedAt = now()
 
     // store backchannel result as hidden message (not shown in UI)
     this.addHiddenToolMessage(projectId, result, {

@@ -26,6 +26,7 @@ it('persists model and team choices together before publishing them', async () =
     externalEnabled: true,
     agentsByDefault: true,
     teamPreset: 'free' as const,
+    chatRouteMode: 'auto' as const,
   }
   await saveModelUsageSettings(choice)
   expect(modelUsageSettings.value).toEqual(choice)

@@ -97,16 +97,33 @@ describe('AI component rendering contracts', () => {
     expect(screen).not.toContain('<img')
   })
 
-  it('places the explicit external fallback control in the prompt heading', async () => {
+  it('places the explicit route-mode control in the prompt heading', async () => {
     const html = await renderToString(
       createSSRApp({
-        render: () => h(PromptBar, { modelValue: '', externalFallback: true, modelLabel: 'Lokales Modell' }),
+        render: () =>
+          h(PromptBar, {
+            modelValue: '',
+            routeMode: 'external',
+            externalAllowed: true,
+            modelLabel: 'Externes Modell · nach Freigabe',
+          }),
       })
     )
-    expect(html).toContain('aria-label="Externen Fallback nach Freigabe erlauben"')
-    expect(html).toContain('aria-pressed="true"')
+    expect(html).toContain('aria-label="Modellroute für diesen Chat wählen"')
+    expect(html).toContain('ai-route-mode')
+    expect(html).toContain('Externes Modell')
     expect(html).toContain('ai-prompt__heading')
     expect(html).not.toContain('Enter senden')
     expect(html).not.toContain('Luczor kann Fehler machen')
+  })
+
+  it('pins the route-mode control to local while the agent mode owns the route', async () => {
+    const html = await renderToString(
+      createSSRApp({
+        render: () => h(PromptBar, { modelValue: '', routeMode: 'external', externalAllowed: true, agentMode: true }),
+      })
+    )
+    expect(html).toContain('disabled')
+    expect(html).toContain('Im Agentenmodus bestimmt das Agententeam die Route pro Rolle.')
   })
 })

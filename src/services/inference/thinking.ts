@@ -38,6 +38,8 @@ export function isThinkingTier(value: unknown): value is ThinkingTier {
   return typeof value === 'string' && THINKING_TIERS.some(tier => tier === value)
 }
 export function resolveThinkingConfig(tier: ThinkingTier = 'balanced', overrides?: ThinkingConfig) {
+  // `tier` is always a member of the closed THINKING_TIERS union validated by isThinkingTier at every boundary.
+  // eslint-disable-next-line security/detect-object-injection
   const defaults = THINKING_DEFAULTS[tier]
   const config = {
     initialTokens: overrides?.initialTokens ?? defaults.initialTokens,
@@ -78,47 +80,60 @@ export type ThinkingBudgetProgress = {
   sequence: number
   controlOutcome?: 'applied' | 'stale' | 'unavailable' | 'not_thinking'
 }
+const PROGRESS_NUMBER_FIELDS = [
+  'softTargetTokens',
+  'thinkingLimitTokens',
+  'requestedThinkingLimitTokens',
+  'outputLimitTokens',
+  'responseReserveTokens',
+  'elapsedMs',
+  'sequence',
+] as const
+const PROGRESS_BOOLEAN_FIELDS = ['warning', 'canExtend', 'canAnswer', 'answerRequested'] as const
+/** `key` is always drawn from the closed, hardcoded field lists above — never an arbitrary property name. */
+function readProgressField(
+  record: Record<string, unknown>,
+  key: (typeof PROGRESS_NUMBER_FIELDS)[number] | (typeof PROGRESS_BOOLEAN_FIELDS)[number]
+): unknown {
+  // eslint-disable-next-line security/detect-object-injection
+  return record[key]
+}
 /** Explicit projection: never relay unknown native fields into UI snapshots or logs. */
 export function readThinkingProgress(value: unknown): ThinkingBudgetProgress | null {
   if (!value || typeof value !== 'object') return null
-  const v = value as Record<string, unknown>
+  const raw = value as Record<string, unknown>
   if (
-    typeof v.requestId !== 'string' ||
-    !v.requestId ||
-    v.requestId.length > 160 ||
-    !isThinkingTier(v.tier) ||
-    !['preparing', 'thinking', 'answering', 'unknown'].includes(String(v.phase))
+    typeof raw.requestId !== 'string' ||
+    !raw.requestId ||
+    raw.requestId.length > 160 ||
+    !isThinkingTier(raw.tier) ||
+    !['preparing', 'thinking', 'answering', 'unknown'].includes(String(raw.phase))
   )
     return null
-  const numbers = [
-    'softTargetTokens',
-    'thinkingLimitTokens',
-    'requestedThinkingLimitTokens',
-    'outputLimitTokens',
-    'responseReserveTokens',
-    'elapsedMs',
-    'sequence',
-  ] as const
-  if (numbers.some(key => !Number.isSafeInteger(v[key]) || (v[key] as number) < 0)) return null
-  if (v.generatedTokens !== null && (!Number.isSafeInteger(v.generatedTokens) || (v.generatedTokens as number) < 0))
+  if (
+    PROGRESS_NUMBER_FIELDS.some(
+      key => !Number.isSafeInteger(readProgressField(raw, key)) || (readProgressField(raw, key) as number) < 0
+    )
+  )
     return null
-  const booleans = ['warning', 'canExtend', 'canAnswer', 'answerRequested'] as const
-  if (booleans.some(key => typeof v[key] !== 'boolean')) return null
+  if (raw.generatedTokens !== null && (!Number.isSafeInteger(raw.generatedTokens) || (raw.generatedTokens as number) < 0))
+    return null
+  if (PROGRESS_BOOLEAN_FIELDS.some(key => typeof readProgressField(raw, key) !== 'boolean')) return null
   return {
-    requestId: v.requestId,
-    tier: v.tier,
-    phase: v.phase as ThinkingBudgetProgress['phase'],
-    generatedTokens: v.generatedTokens as number | null,
-    ...(Object.fromEntries(numbers.map(key => [key, v[key]])) as Pick<
+    requestId: raw.requestId,
+    tier: raw.tier,
+    phase: raw.phase as ThinkingBudgetProgress['phase'],
+    generatedTokens: raw.generatedTokens as number | null,
+    ...(Object.fromEntries(PROGRESS_NUMBER_FIELDS.map(key => [key, readProgressField(raw, key)])) as Pick<
       ThinkingBudgetProgress,
-      (typeof numbers)[number]
+      (typeof PROGRESS_NUMBER_FIELDS)[number]
     >),
-    ...(Object.fromEntries(booleans.map(key => [key, v[key]])) as Pick<
+    ...(Object.fromEntries(PROGRESS_BOOLEAN_FIELDS.map(key => [key, readProgressField(raw, key)])) as Pick<
       ThinkingBudgetProgress,
-      (typeof booleans)[number]
+      (typeof PROGRESS_BOOLEAN_FIELDS)[number]
     >),
-    ...(['applied', 'stale', 'unavailable', 'not_thinking'].includes(String(v.controlOutcome))
-      ? { controlOutcome: v.controlOutcome as ThinkingBudgetProgress['controlOutcome'] }
+    ...(['applied', 'stale', 'unavailable', 'not_thinking'].includes(String(raw.controlOutcome))
+      ? { controlOutcome: raw.controlOutcome as ThinkingBudgetProgress['controlOutcome'] }
       : {}),
   }
 }

@@ -9,7 +9,13 @@ import {
 
 export const FLASH_EXPERIMENT_SETTING_KEY = 'local_model_flash_experiment'
 
-export type RoutingPreference = 'local_only' | 'ask_external' | 'allow_external'
+/**
+ * `force_external` is an explicit user choice in the composer: it skips local
+ * candidates instead of granting any new permission. The external route still
+ * requires `routing.externalAllowed`, a per-turn approval bound to the exact
+ * packet hash and the independent server-side policy.
+ */
+export type RoutingPreference = 'local_only' | 'ask_external' | 'allow_external' | 'force_external'
 
 export type HybridRoutingSettings = {
   /** Device selection narrows the signed catalog; it never bypasses readiness. */
@@ -34,6 +40,7 @@ export type RouteDecisionReason =
   | 'external_approval_required'
   | 'external_approved'
   | 'local_only_blocked'
+  | 'local_readiness_pending'
   | 'external_policy_blocked'
 
 export type RouteDecision = {
@@ -122,14 +129,23 @@ export function decideHybridRoute(input: {
   requiredCapability?: string
   /** An explicitly selected specialist route; never grants external permission. */
   preferExternal?: boolean
+  /**
+   * A local candidate passed every static gate and is still warming up. A slow
+   * cold start is a timing artifact and must not push the turn into external
+   * egress; only the explicit `force_external` composer mode does that.
+   */
+  localReadinessPending?: boolean
 }): RouteDecision {
   const now = input.now ?? new Date()
   const decisionId = input.decisionId ?? crypto.randomUUID()
   const models = new Map(input.manifest.models.map(model => [model.id, model]))
   const requiredCapability = input.requiredCapability ?? 'chat'
   const flash = models.get(FLASH_NEXT_MODEL_ID)
+  // Either an approved specialist route or the explicit composer choice skips
+  // every local candidate. Neither of them grants external permission by itself.
+  const skipLocal = input.preferExternal === true || input.settings.preference === 'force_external'
 
-  if (input.manifest.schemaVersion === 2 && !input.preferExternal) {
+  if (input.manifest.schemaVersion === 2 && !skipLocal) {
     const order = input.settings.localModelId
       ? [input.settings.localModelId]
       : [input.manifest.routing.defaultModelId, ...input.manifest.routing.fallbackModelIds]
@@ -167,7 +183,7 @@ export function decideHybridRoute(input: {
   }
 
   const flashAvailable =
-    !input.preferExternal &&
+    !skipLocal &&
     availableLocally(
       flash,
       input.assessments.get(FLASH_NEXT_MODEL_ID),
@@ -195,7 +211,7 @@ export function decideHybridRoute(input: {
 
   const defaultModel = models.get(input.manifest.routing.defaultModelId)
   if (
-    !input.preferExternal &&
+    !skipLocal &&
     availableLocally(
       defaultModel,
       input.assessments.get(input.manifest.routing.defaultModelId),
@@ -222,7 +238,7 @@ export function decideHybridRoute(input: {
 
   // The signed fallback list is consulted only after the signed default is
   // unavailable. Today it contains Orca, but the ordering stays policy-owned.
-  for (const fallbackId of input.preferExternal ? [] : input.manifest.routing.fallbackModelIds) {
+  for (const fallbackId of skipLocal ? [] : input.manifest.routing.fallbackModelIds) {
     if (fallbackId === input.manifest.routing.defaultModelId) continue
     const candidate = models.get(fallbackId)
     if (
@@ -257,9 +273,20 @@ export function decideHybridRoute(input: {
     }
   }
 
+  if (!skipLocal && input.localReadinessPending === true) {
+    return {
+      id: decisionId,
+      policyVersion: input.manifest.policyVersion,
+      target: 'blocked',
+      reason: 'local_readiness_pending',
+    }
+  }
+
   if (
     !input.manifest.routing.externalAllowed ||
-    (input.settings.preference !== 'ask_external' && input.settings.preference !== 'allow_external')
+    (input.settings.preference !== 'ask_external' &&
+      input.settings.preference !== 'allow_external' &&
+      input.settings.preference !== 'force_external')
   ) {
     return {
       id: decisionId,
