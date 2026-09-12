@@ -694,7 +694,10 @@ mod tests {
             "--threads N --threads-batch N --batch-size N --ubatch-size N --flash-attn --cache-type-k TYPE --cache-type-v TYPE",
         );
         let gpu = plan_resources(&hardware(), 32768, 17 * GIB, "cuda", &options);
-        assert!(gpu.arguments.windows(2).any(|pair| pair == ["--flash-attn", "on"]));
+        assert!(gpu
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--flash-attn", "on"]));
         assert!(gpu
             .arguments
             .windows(2)
