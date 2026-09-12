@@ -35,9 +35,6 @@
     },
     "id-length": {
       "count": 2
-    },
-    "security/detect-object-injection": {
-      "count": 3
     }
   },
   "src/services/agents.ts": {

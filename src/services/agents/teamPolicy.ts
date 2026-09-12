@@ -41,6 +41,7 @@ export type TeamPolicy = {
     SpecialistRole,
     {
       ready: boolean
+      tools_ready?: boolean
       reason_code?: string | null
       max_cost_usd?: number
       max_output_tokens?: number

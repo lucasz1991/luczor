@@ -19,6 +19,7 @@ import { visionTools } from './vision'
 import { terminalTools } from './terminal'
 import { modelTools } from './modelControl'
 import { workflowTools } from './workflows'
+import { cloudProjectTools } from './cloudProjects'
 import type { ToolDef } from './types'
 
 export { lastScreenshot } from './os'
@@ -30,6 +31,7 @@ export type { ToolCategory, ToolContext, ToolDef } from './types'
  */
 const TOOLS: ToolDef[] = [
   ...projectStateTools,
+  ...cloudProjectTools,
   ...filesystemTools,
   ...osTools,
   ...browserTools,

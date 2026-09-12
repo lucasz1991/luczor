@@ -166,6 +166,7 @@ export function createAdaptiveAssistance(input: {
   return {
     tools,
     summaries,
+    isLocalJob: (id: unknown) => typeof id === 'string' && jobs.get(id)?.task.target === 'local',
     withUsage(base: TokenUsage): TokenUsage {
       const values = [...jobs.values()].flatMap(job => {
         const output = job.output as { tokenUsage?: TokenUsage } | undefined

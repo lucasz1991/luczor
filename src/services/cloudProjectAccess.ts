@@ -12,9 +12,13 @@ export function canAccessCloudProject(
 }
 
 /** Imported projects keep the same server task/chat identity despite a device-local project ID. */
-export function projectExternalIdForServer(projectId: string | undefined, principalId = cloudProjectPrincipal.value): string | undefined {
+export function projectExternalIdForServer(
+  projectId: string | undefined,
+  principalId = cloudProjectPrincipal.value
+): string | undefined {
   if (!projectId) return projectId
   const project = state.projects.find(item => item.id === projectId)
-  if (project && !canAccessCloudProject(project, principalId)) throw new Error('Das Projekt gehört zu einem anderen Benutzer.')
+  if (project && !canAccessCloudProject(project, principalId))
+    throw new Error('Das Projekt gehört zu einem anderen Benutzer.')
   return project?.cloud?.externalId ?? projectId
 }

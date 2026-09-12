@@ -108,6 +108,9 @@ const TOOL_CONTRACT = [
   { name: 'project_get_state', category: 'project', mutating: false, requiresApproval: false },
   { name: 'project_set_summary', category: 'project', mutating: true, requiresApproval: true },
   { name: 'project_upsert_goal', category: 'project', mutating: true, requiresApproval: true },
+  { name: 'project_cloud_list_files', category: 'project', mutating: false, requiresApproval: false },
+  { name: 'project_cloud_read_file', category: 'project', mutating: false, requiresApproval: false },
+  { name: 'project_cloud_write_file', category: 'project', mutating: true, requiresApproval: true },
   { name: 'workspace_get', category: 'project', mutating: false, requiresApproval: true },
   { name: 'fs_list', category: 'app', mutating: false, requiresApproval: true },
   { name: 'fs_stat', category: 'app', mutating: false, requiresApproval: true },
@@ -186,9 +189,9 @@ const TOOL_CONTRACT = [
   { name: 'workspace_agent_cancel', category: 'app', mutating: true, requiresApproval: false },
 ] as const
 
-// Reviewed additions: managed effort and versioned workflows with bounded execution budgets.
-const TOOL_SCHEMA_SHA256 = 'a6013bb8594cda4465759efc8304914542a56424a1f3e5890062a6c6e24ea8c3'
-const CORE_TOOL_SCHEMA_SHA256 = '7aca890677b09811f1135913e1e525d88c6defdb5d955b90ccf4145e6386dd04'
+// Reviewed addition: scoped cloud project text files with optimistic write revisions.
+const TOOL_SCHEMA_SHA256 = '37d2816f92913d2415f4bc64d5636939588392c813c75b9e6c1b2705afa34abb'
+const CORE_TOOL_SCHEMA_SHA256 = '2868f4ffa5234eb13603df84d22408d2c69446b55b7c09b2cdcb09cdd301758c'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {

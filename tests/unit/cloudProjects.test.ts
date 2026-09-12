@@ -13,6 +13,7 @@ vi.mock('@/services/persistence', () => ({ saveAppStateStrict: harness.save }))
 vi.mock('@/services/accountPrincipal', () => ({ getVerifiedAccountSnapshot: harness.account }))
 import {
   cloudProjectsState,
+  copyCloudProject,
   configureCloudProjectWorkload,
   importCloudProject,
   invalidateCloudProjects,
@@ -133,6 +134,92 @@ describe('portable user-owned cloud projects', () => {
     expect(cloud.snapshot.project.summary).toBe('Fortschritt')
     expect(harness.state.projects[0]!.cloud!.revision).toBe(2)
     expect(harness.request.mock.calls.at(-1)![1].body.expected_revision).toBe(1)
+  })
+
+  it('keeps private project records on the device during upload and remote refresh', async () => {
+    harness.state.global.memories.push(
+      Object.assign(
+        {
+          id: 'private-memory',
+          projectId: 'default',
+          kind: 'note' as const,
+          key: 'private',
+          value: 'PRIVATE_MEMORY',
+          priority: 3 as const,
+          active: true,
+          createdAt: 1,
+          updatedAt: 1,
+          source: { by: 'user' as const },
+        },
+        { visibility: 'private' }
+      )
+    )
+    harness.state.messages.push({
+      id: 'private-answer',
+      projectId: 'default',
+      role: 'assistant',
+      content: 'PRIVATE_ANSWER',
+      ts: 1,
+      createdAt: 1,
+      parsed: null,
+      visibility: 'visible',
+      meta: { serverSpeechAllowed: false },
+    })
+    await publishCloudProject('default')
+    expect(cloud.snapshot.memories).toEqual([])
+    expect(cloud.snapshot.messages).toEqual([])
+    cloud.revision++
+    cloud.snapshot.project.summary = 'Remote change'
+    await syncCloudProjects('default')
+    expect(harness.state.global.memories[0]!.value).toBe('PRIVATE_MEMORY')
+    expect(harness.state.messages[0]!.content).toBe('PRIVATE_ANSWER')
+  })
+
+  it('recovers a committed write after a lost acknowledgement without a second PUT', async () => {
+    harness.request.mockImplementationOnce(async () => ({ data: { id: 7 } }))
+    harness.request.mockImplementationOnce(async (_path, options) => {
+      cloud = remote(options.body.snapshot, 1)
+      throw Object.assign(new Error('network lost'), { status: 0 })
+    })
+    await publishCloudProject('default')
+    expect(harness.state.projects[0]!.cloud!.revision).toBe(1)
+    expect(harness.request.mock.calls.filter(call => call[1].method === 'PUT')).toHaveLength(1)
+  })
+
+  it('preserves live content when a remote pull cannot be saved to disk', async () => {
+    await publishCloudProject('default')
+    cloud.snapshot.project.summary = 'Remote content'
+    cloud.revision = 2
+    harness.save.mockRejectedValueOnce(new Error('disk full'))
+    await expect(syncCloudProjects('default')).rejects.toThrow('disk full')
+    expect(harness.state.projects[0]!.summary).toBe('Lokal')
+    expect(harness.state.projects[0]!.cloud!.revision).toBe(1)
+  })
+
+  it('keeps concurrent edits made while the remote candidate is being persisted', async () => {
+    await publishCloudProject('default')
+    cloud.snapshot.project.summary = 'Remote content'
+    cloud.revision = 2
+    harness.save.mockImplementationOnce(async () => {
+      harness.state.projects[0]!.summary = 'Edited during disk write'
+    })
+    await expect(syncCloudProjects('default')).rejects.toThrow('während des Speicherns')
+    expect(harness.state.projects[0]!.summary).toBe('Edited during disk write')
+    expect(harness.state.projects[0]!.cloud!.revision).toBe(1)
+  })
+
+  it('persists a conflict review copy already paused, before the first save', async () => {
+    await publishCloudProject('default')
+    const snapshots: AppState[] = []
+    harness.save.mockImplementation(async value => {
+      snapshots.push(JSON.parse(JSON.stringify(value)))
+    })
+    const id = await copyCloudProject('default')
+    expect(
+      snapshots.every(snapshot => snapshot.projects.find(project => project.id === id)?.cloud?.paused === true)
+    ).toBe(true)
+    expect(harness.state.projects.find(project => project.id === id)!.name).toContain('Cloud-Kopie')
+    expect(harness.state.projects[0]!.name).toBe('Projekt')
   })
 
   it('imports newer remote content only when local portable state is unchanged and keeps local tool observations', async () => {

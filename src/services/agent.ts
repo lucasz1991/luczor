@@ -319,7 +319,7 @@ const RUNTIME_MODE_MARKER = '[LUCZOR-LAUFZEITMODUS]'
 const RUNTIME_TOOLS_MARKER = '[LUCZOR-LAUFZEITTOOLS]'
 const LEGACY_TOOL_LIST_PREFIX = 'Tatsächlich verfügbare Tools dieser Anfrage:'
 const PLANNING_CHAT_INSTRUCTION =
-  'Planung besprichst du normalerweise im Chat: Kläre Ziel und Randbedingungen, schlage übersichtliche Punkte vor und gehe offene Fragen, Varianten und Entscheidungen gemeinsam mit dem Nutzer durch. Halte den aktuellen Entwurf im Gespräch fest. Das separate Planungsfenster ist optional und wird nur auf Wunsch verwendet. Eine Planbesprechung oder Zustimmung zu einer Variante ist noch kein Ausführungsauftrag. Beginne Änderungen, Agentenaufträge oder die Umsetzung erst nach einer klaren Aufforderung dazu; Modus, Freigaben, Projektgrenzen und Not-Aus bleiben verbindlich.'
+  'Planung besprichst du normalerweise im Chat: Kläre Ziel und Randbedingungen, schlage übersichtliche Punkte vor und gehe offene Fragen, Varianten und Entscheidungen gemeinsam mit dem Nutzer durch. Halte den aktuellen Entwurf im Gespräch fest. Das separate Planungsfenster ist optional und wird nur auf Wunsch verwendet. Eine Planbesprechung oder Zustimmung zu einer Variante ist noch kein Ausführungsauftrag. Beginne Änderungen, schreibende Agentenaufträge oder die Umsetzung erst nach einer klaren Aufforderung dazu; Modus, Freigaben, Projektgrenzen und Not-Aus bleiben verbindlich.'
 
 function permittedDuringPlanningDiscussion(tool: ToolDef | undefined): boolean {
   return !!tool && !tool.mutating && !(tool.effects ?? []).some(effect => effect !== 'read')
@@ -746,7 +746,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   if (planningDiscussion && !resolvedRoute.externalOneShot) {
     messages.unshift({
       role: 'system',
-      content: `${PLANNING_CHAT_INSTRUCTION} Dieser Turn ist eine reine Planbesprechung: nur erforderliche Lesetools, keine Änderungen oder Agentenstarts.`,
+      content: `${PLANNING_CHAT_INSTRUCTION} Dieser Turn ist eine reine Planbesprechung: nur erforderliche Lesetools und gezielte lesende Assistenz, keine Änderungen.`,
     })
   }
   const tools = resolvedRoute.externalOneShot ? [] : allTools
@@ -1290,7 +1290,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       }
       const selectedTool = assistance?.tools.find(tool => tool.name === call.name) ?? getTool(call.name)
       const tool =
-        call.name === 'agent_assist' && call.arguments.target === 'local' && selectedTool
+        ((call.name === 'agent_assist' && call.arguments.target === 'local') ||
+          (call.name === 'agent_assist_status' && assistance?.isLocalJob(call.arguments.job_id))) && selectedTool
           ? { ...selectedTool, dataHandling: 'ephemeral' as const }
           : selectedTool
       const category = tool?.category ?? 'custom'

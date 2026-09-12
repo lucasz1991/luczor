@@ -1,6 +1,6 @@
 import { reactive } from 'vue'
 import { state } from '@/state/store'
-import type { Message, MemoryItem, Project, ProjectGoal, SummaryItem } from '@/state/types'
+import type { AppState, Message, MemoryItem, Project, ProjectGoal, SummaryItem } from '@/state/types'
 import { saveAppStateStrict } from '@/services/persistence'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { requestWithConfig } from './luczorApi'
@@ -74,12 +74,12 @@ function serialize<T>(run: () => Promise<T>): Promise<T> {
   operations = next.catch(() => undefined)
   return next
 }
-async function session() {
+async function session(parentSignal?: AbortSignal) {
   const captured = generation
   const account = await getVerifiedAccountSnapshot()
   if (!account || captured !== generation) throw new Error('Für globale Projekte bitte am Luczor-Server anmelden.')
   cloudProjectPrincipal.value = account.principalId
-  const signal = currentAbort.signal
+  const signal = parentSignal ? AbortSignal.any([currentAbort.signal, parentSignal]) : currentAbort.signal
   const assertCurrent = () => {
     if (captured !== generation || signal.aborted) throw new Error('Die Benutzerzuordnung wurde geändert.')
   }
@@ -121,18 +121,39 @@ function assertIdle(id: string): void {
 }
 const copy = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 
+function portableRecord(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  const item = value as Record<string, unknown>
+  const meta = item.meta && typeof item.meta === 'object' ? (item.meta as Record<string, unknown>) : {}
+  return (
+    item.visibility !== 'private' &&
+    item.scope !== 'private' &&
+    item.retention !== 'session' &&
+    item.sensitivity !== 'secret' &&
+    item.dataHandling !== 'ephemeral' &&
+    meta.dataHandling !== 'ephemeral' &&
+    item.localOnly !== true &&
+    item.local_only !== true &&
+    meta.localOnly !== true &&
+    meta.serverSpeechAllowed !== false
+  )
+}
+
+function portableMessage(message: Message): boolean {
+  return (
+    message.visibility !== 'hidden' &&
+    ['user', 'assistant'].includes(message.role) &&
+    message.meta?.dataHandling !== 'ephemeral' &&
+    message.meta?.serverSpeechAllowed !== false &&
+    !message.meta?.isLoading
+  )
+}
+
 /** Only portable, public project content. No native paths, tools, raw model output or account memories. */
 export function snapshotForCloud(projectId: string): CloudProjectSnapshot {
   const project = projectById(projectId)
   const messages = state.messages
-    .filter(
-      item =>
-        item.projectId === projectId &&
-        item.visibility !== 'hidden' &&
-        ['user', 'assistant'].includes(item.role) &&
-        item.meta?.dataHandling !== 'ephemeral' &&
-        !item.meta?.isLoading
-    )
+    .filter(item => item.projectId === projectId && portableMessage(item))
     .map(({ id, role, content, ts, createdAt }) => ({
       id,
       role,
@@ -142,10 +163,10 @@ export function snapshotForCloud(projectId: string): CloudProjectSnapshot {
       visibility: 'visible' as const,
     }))
   const memories = state.global.memories
-    .filter(item => item.projectId === projectId)
+    .filter(item => item.projectId === projectId && portableRecord(item))
     .map(({ projectId: _projectId, ...memory }) => memory)
   const summaries = state.summaries
-    .filter(item => item.projectId === projectId)
+    .filter(item => item.projectId === projectId && portableRecord(item))
     .map(({ projectId: _projectId, ...summary }) => summary)
   return validateSnapshot(
     copy({
@@ -179,7 +200,7 @@ function timestamp(value: unknown): number {
   return Number(value)
 }
 function identifier(value: unknown): string {
-  const result = text(value, 200)
+  const result = text(value, 120)
   if (!result || !isSafeRecordKey(result)) throw new Error('Ungültige Cloud-Projekt-ID.')
   return result
 }
@@ -208,7 +229,7 @@ export function validateSnapshot(value: unknown): CloudProjectSnapshot {
         id: identifier(goal.id),
         title: text(goal.title, 1000),
         status: goal.status as ProjectGoal['status'],
-        ...(goal.description === undefined ? {} : { description: text(goal.description, 20000) }),
+        ...(goal.description == null ? {} : { description: text(goal.description, 60000) }),
         ...(goal.priority === undefined ? {} : { priority: goal.priority as ProjectGoal['priority'] }),
         createdAt: timestamp(goal.createdAt),
         updatedAt: timestamp(goal.updatedAt),
@@ -246,7 +267,7 @@ export function validateSnapshot(value: unknown): CloudProjectSnapshot {
         id: identifier(memory.id),
         kind: memory.kind as MemoryItem['kind'],
         key: text(memory.key, 1000),
-        value: text(memory.value, 200000),
+        value: text(memory.value, 60000),
         priority: memory.priority as MemoryItem['priority'],
         active: memory.active,
         createdAt: timestamp(memory.createdAt),
@@ -264,7 +285,7 @@ export function validateSnapshot(value: unknown): CloudProjectSnapshot {
   const result: CloudProjectSnapshot = {
     schema_version: 1,
     project: {
-      name: text(project.name, 240),
+      name: text(project.name, 255),
       summary: text(project.summary ?? '', 200000),
       goals,
       ...(project.goal == null ? {} : { goal: text(project.goal, 60000) }),
@@ -332,21 +353,45 @@ async function applyRemote(
   assertIdle(local.id)
   if (JSON.stringify(snapshotForCloud(local.id)) !== baseline)
     throw new Error('Das Projekt wurde während des Abgleichs geändert. Lokale Änderungen bleiben erhalten.')
-  const snapshot = remote.snapshot
-  Object.assign(local, copy(snapshot.project))
-  // The app addresses messages by (projectId, id); device-only tool observations stay on this device.
-  state.messages = state.messages
-    .filter(
-      item => item.projectId !== local.id || item.visibility === 'hidden' || item.meta?.dataHandling === 'ephemeral'
-    )
-    .concat(snapshot.messages.map(message => ({ ...message, projectId: local.id, parsed: null, meta: {} })))
-  state.global.memories = state.global.memories
-    .filter(item => item.projectId !== local.id)
-    .concat(snapshot.memories.map(memory => ({ ...memory, projectId: local.id })))
-  state.summaries = state.summaries
-    .filter(item => item.projectId !== local.id)
-    .concat(snapshot.summaries.map(summary => ({ ...summary, projectId: local.id })))
-  await saveLink(current, local, remote, hash)
+  const cloudLink = {
+    principalId: current.account.principalId,
+    projectId: remote.project_id,
+    externalId: remote.external_id,
+    revision: remote.revision,
+    fingerprint: hash,
+    syncedAt: Date.now(),
+    paused: local.cloud?.paused ?? false,
+  }
+  const apply = (target: AppState) => {
+    const project = target.projects.find(project => project.id === local.id)!
+    Object.assign(project, { goal: undefined }, copy(remote.snapshot.project), { cloud: cloudLink })
+    target.messages = target.messages
+      .filter(item => item.projectId !== local.id || !portableMessage(item))
+      .concat(remote.snapshot.messages.map(message => ({ ...message, projectId: local.id, parsed: null, meta: {} })))
+    target.global.memories = target.global.memories
+      .filter(item => item.projectId !== local.id || !portableRecord(item))
+      .concat(remote.snapshot.memories.map(memory => ({ ...memory, projectId: local.id })))
+    target.summaries = target.summaries
+      .filter(item => item.projectId !== local.id || !portableRecord(item))
+      .concat(remote.snapshot.summaries.map(summary => ({ ...summary, projectId: local.id })))
+  }
+  // Stage the whole persistent snapshot first. A failed write changes no live project content.
+  const candidate = copy(state)
+  apply(candidate)
+  await saveAppStateStrict(candidate)
+  try {
+    current.assertCurrent()
+    assertIdle(local.id)
+    if (JSON.stringify(snapshotForCloud(local.id)) !== baseline)
+      throw new Error('Das Projekt wurde während des Speicherns geändert. Lokale Änderungen bleiben erhalten.')
+  } catch (error) {
+    await saveAppStateStrict(state)
+    throw error
+  }
+  // Preserve private/local-only records or other projects changed while disk persistence was pending.
+  apply(state)
+  await saveAppStateStrict(state)
+  setStatus(local.id, 'synced', `Abgeglichen · Version ${remote.revision}`)
 }
 
 export async function listCloudProjects(): Promise<CloudProjectListItem[]> {
@@ -362,7 +407,7 @@ export async function listCloudProjects(): Promise<CloudProjectListItem[]> {
     for (const item of batch) {
       if (!Number.isSafeInteger(item.id) || item.id < 1) throw new Error('Ungültige Cloud-Projekt-ID.')
       identifier(item.external_id)
-      text(item.name, 240)
+      text(item.name, 255)
       result.push(item)
     }
     if (!batch.length || page >= (response.data.last_page ?? page)) {
@@ -374,23 +419,36 @@ export async function listCloudProjects(): Promise<CloudProjectListItem[]> {
 }
 
 /** Resolve an uncertain acknowledgement by comparing the server's content, never by retrying a blind overwrite. */
-async function writeSnapshot(current: Session, projectId: number, expectedRevision: number, snapshot: CloudProjectSnapshot, expectedHash: string): Promise<CloudProjectDocument> {
+async function writeSnapshot(
+  current: Session,
+  projectId: number,
+  expectedRevision: number,
+  snapshot: CloudProjectSnapshot,
+  expectedHash: string
+): Promise<CloudProjectDocument> {
   if (!Number.isSafeInteger(projectId) || projectId < 1) throw new Error('Ungültige Server-Projekt-ID.')
   const path = `/projects/${projectId}/cloud`
   let remote: CloudProjectDocument
   try {
-    remote = document((await request<{ data: CloudProjectDocument }>(current, path, 'PUT', { expected_revision: expectedRevision, snapshot })).data)
+    remote = document(
+      (
+        await request<{ data: CloudProjectDocument }>(current, path, 'PUT', {
+          expected_revision: expectedRevision,
+          snapshot,
+        })
+      ).data
+    )
   } catch (error) {
     current.assertCurrent()
     const status = (error as { status?: number }).status
     if (status !== 0 && status !== 409 && !(status && status >= 500)) throw error
     remote = document((await request<{ data: CloudProjectDocument }>(current, path)).data)
     const remoteHash = await fingerprint(remote.snapshot)
-    // eslint-disable-next-line security/detect-possible-timing-attacks -- non-secret content equality
     if (remoteHash !== expectedHash || remote.revision <= expectedRevision) throw error
   }
   current.assertCurrent()
-  if (remote.project_id !== projectId || remote.revision <= expectedRevision) throw new Error('Widersprüchliche Server-Projektrevision.')
+  if (remote.project_id !== projectId || remote.revision <= expectedRevision)
+    throw new Error('Widersprüchliche Server-Projektrevision.')
   return remote
 }
 
@@ -539,31 +597,45 @@ export function copyCloudProject(id: string): Promise<string> {
       (await request<{ data: CloudProjectDocument }>(current, `/projects/${local.cloud.projectId}/cloud`)).data
     )
     current.assertCurrent()
+    if (remote.project_id !== local.cloud.projectId || remote.external_id !== local.cloud.externalId)
+      throw new Error('Widersprüchliche Cloud-Projektzuordnung.')
     const newId = `cloud-review-${crypto.randomUUID()}`
+    remote.snapshot.project.name = `${remote.snapshot.project.name.slice(0, 240)} · Cloud-Kopie`
     const clone: Project = {
       id: newId,
       ...copy(remote.snapshot.project),
       defaults: { ...local.defaults },
       focus: { activeTodoId: null, activeStepId: null },
+      cloud: { ...local.cloud, paused: true },
     }
     state.projects.push(clone)
-    await applyRemote(current, clone, remote, JSON.stringify(snapshotForCloud(newId)))
-    clone.name += ' · Cloud-Kopie'
-    clone.cloud!.paused = true
-    await saveAppStateStrict(state)
+    try {
+      await applyRemote(current, clone, remote, JSON.stringify(snapshotForCloud(newId)))
+    } catch (error) {
+      state.projects = state.projects.filter(project => project.id !== newId)
+      state.messages = state.messages.filter(message => message.projectId !== newId)
+      state.global.memories = state.global.memories.filter(memory => memory.projectId !== newId)
+      state.summaries = state.summaries.filter(summary => summary.projectId !== newId)
+      await saveAppStateStrict(state).catch(() => undefined)
+      throw error
+    }
     return newId
   })
 }
 
-export async function cloudProjectFiles(id: string): Promise<CloudProjectFile[]> {
-  const current = await session()
+export async function cloudProjectFiles(id: string, signal?: AbortSignal): Promise<CloudProjectFile[]> {
+  const current = await session(signal)
   const local = linkedProject(id, current.account)
   const response = await request<{ data: CloudProjectFile[] }>(current, `/projects/${local.cloud.projectId}/files`)
   current.assertCurrent()
   return response.data
 }
-export async function readCloudProjectFile(id: string, path: string): Promise<CloudProjectFile & { content: string }> {
-  const current = await session()
+export async function readCloudProjectFile(
+  id: string,
+  path: string,
+  signal?: AbortSignal
+): Promise<CloudProjectFile & { content: string }> {
+  const current = await session(signal)
   const local = linkedProject(id, current.account)
   const response = await request<{ data: CloudProjectFile & { content: string } }>(
     current,
@@ -579,9 +651,10 @@ export async function saveCloudProjectFile(
   id: string,
   path: string,
   content: string,
-  expectedRevision: number
+  expectedRevision: number,
+  signal?: AbortSignal
 ): Promise<CloudProjectFile> {
-  const current = await session()
+  const current = await session(signal)
   const local = linkedProject(id, current.account)
   if (new TextEncoder().encode(content).length > 1024 * 1024)
     throw new Error('Eine Cloud-Datei darf höchstens 1 MiB Text enthalten.')

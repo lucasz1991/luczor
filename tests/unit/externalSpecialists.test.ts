@@ -34,6 +34,7 @@ function policy() {
         role,
         {
           ready: true,
+          tools_ready: true,
           candidates: [{ id: `test/${role}:free`, input_per_million: 0, output_per_million: 0, data_policy: 'Test' }],
         },
       ])

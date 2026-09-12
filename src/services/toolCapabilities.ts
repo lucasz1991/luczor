@@ -13,6 +13,9 @@ const titles: Record<string, string> = {
   project_set_summary: 'Projektzusammenfassung ändern',
   project_upsert_goal: 'Projektziele verwalten',
   project_create: 'Neues Projekt anlegen',
+  project_cloud_list_files: 'Cloud-Projektdateien auflisten',
+  project_cloud_read_file: 'Cloud-Projektdatei lesen',
+  project_cloud_write_file: 'Cloud-Projektdatei speichern',
   workspace_get: 'Projektordner prüfen',
   fs_list: 'Dateien auflisten',
   fs_stat: 'Dateiinformationen lesen',
@@ -87,6 +90,7 @@ export function capabilityTitle(tool: ToolCapability): string {
 }
 
 export function capabilityGroup(tool: ToolCapability): string {
+  if (tool.name.startsWith('project_cloud_')) return 'Globale Projekte'
   if (tool.name === 'local_model_status') return 'Lokales Modell'
   if (tool.name.startsWith('memory_')) return 'Erinnerungen'
   if (tool.name.startsWith('workflow_')) return 'Workflows'

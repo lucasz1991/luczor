@@ -26,6 +26,7 @@ export type SpecialistOutcome = {
   output: string
   durationMs: number
   incomplete?: boolean
+  toolNotice?: string
   tokenUsage: TokenUsage
 }
 export type TeamPacketApproval = {
@@ -145,9 +146,12 @@ export async function prepareExternalSpecialists(
     )
   )
     throw new Error('Externe Spezialisten benötigen einen gesonderten Kontext ohne Werkzeugdaten.')
-  const contextTools = specialistContextTools(input.messages, input.tools ?? [])
   const packets = await Promise.all(
     roles.map(async role => {
+      const contextTools = specialistContextTools(
+        input.messages,
+        roleValue(policy.models_by_role, role).tools_ready === true ? (input.tools ?? []) : []
+      )
       const messages: WireMessage[] = [
         {
           role: 'system',
@@ -171,6 +175,7 @@ export async function prepareExternalSpecialists(
       const modelPolicy = roleValue(policy.models_by_role, role)
       return {
         role,
+        contextTools,
         request,
         packetHash,
         candidates: modelPolicy.candidates,
@@ -205,7 +210,7 @@ export async function prepareExternalSpecialists(
           limits: { ...packet.limits },
         })),
         expiresAt,
-        toolsAllowed: contextTools.tools.length > 0,
+        toolsAllowed: packets.some(packet => packet.contextTools.tools.length > 0),
       }))
     )
       throw new Error('Externe Agentenfreigabe abgelehnt.')
@@ -230,6 +235,7 @@ export async function prepareExternalSpecialists(
       const packet = packets.find(packet => packet.role === role)
       if (!packet || consumed.has(role))
         throw new Error('Dieser Spezialistenauftrag ist nicht verfügbar oder bereits gestartet.')
+      const contextTools = packet.contextTools
       consumed.add(role)
       approved ??= approveBatch()
       const expiresAt = await waitForApproval(approved, signal)
@@ -308,6 +314,12 @@ export async function prepareExternalSpecialists(
         output: output.slice(0, 48_000),
         durationMs: Date.now() - start,
         incomplete: result.finishReason === 'length' || output.length > 48_000,
+        ...(input.tools?.length && !contextTools.tools.length
+          ? {
+              toolNotice:
+                'Für dieses Modell sind keine Kontextwerkzeuge bestätigt; der Teilauftrag wurde als Textanalyse bearbeitet.',
+            }
+          : {}),
         tokenUsage: counter.snapshot(),
       }
     },
