@@ -47,7 +47,11 @@ function scrollToBottom() {
 defineExpose({ scrollToBottom })
 </script>
 <template>
-  <section class="ai-chat" :class="{ 'ai-chat--with-overlay': !!$slots.overlay }" :aria-label="title || 'Chat'">
+  <section
+    class="ai-chat"
+    :class="{ 'ai-chat--with-overlay': !!$slots.overlay, 'ai-chat--with-workspace': !!$slots.workspace }"
+    :aria-label="title || 'Chat'"
+  >
     <header v-if="tabs.length" class="ai-chat__tabs">
       <button
         v-for="tab in tabs"
@@ -60,6 +64,7 @@ defineExpose({ scrollToBottom })
       </button>
     </header>
     <slot name="overlay" />
+    <div v-if="$slots.workspace" class="ai-chat__workspace"><slot name="workspace" /></div>
     <div :id="scrollId || generatedId" ref="scroller" class="ai-chat__messages" @scroll.passive="measure">
       <div ref="thread" class="ai-thread"><slot /></div>
     </div>
@@ -79,6 +84,17 @@ defineExpose({ scrollToBottom })
 .ai-chat--with-overlay > .ai-chat__messages {
   padding-block-start: 72px;
   scroll-padding-block-start: 72px;
+}
+.ai-chat__workspace {
+  position: relative;
+  z-index: 1;
+  min-height: 0;
+  flex: 0 0 auto;
+  padding-top: 48px;
+}
+.ai-chat--with-overlay.ai-chat--with-workspace > .ai-chat__messages {
+  padding-block-start: 24px;
+  scroll-padding-block-start: 24px;
 }
 .ai-chat__messages {
   overscroll-behavior-y: contain;

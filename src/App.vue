@@ -2287,7 +2287,6 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
     :style="appShellStyle"
     :class="{
       'ai-workspace--collapsed': sidebarCollapsed,
-      'ai-workspace--browser': browserPanel.expanded,
       'ai-workspace--system-mini': showSystemPanel && systemStatusDisplayMode === 'mini',
     }"
   >
@@ -2348,6 +2347,17 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
         >
           <span class="mode-toggle__dot" />
           {{ modeLabel }}
+        </button>
+        <button
+          type="button"
+          class="icon-btn"
+          :class="{ 'is-on': browserPanel.expanded }"
+          title="Internen Browser öffnen"
+          :aria-label="browserPanel.expanded ? 'Internen Browser einklappen' : 'Internen Browser öffnen'"
+          :aria-expanded="browserPanel.expanded"
+          @click="browserPanel.expanded = !browserPanel.expanded"
+        >
+          <AiIcon name="panel" :size="16" />
         </button>
         <button
           type="button"
@@ -2663,6 +2673,21 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             </template>
           </ChatProjectOverlay>
         </template>
+        <template #workspace>
+          <BrowserPanel
+            v-if="browserPanel.expanded"
+            :project-id="activeProjectId"
+            :suspended="
+              showSettings ||
+              showAgentHub ||
+              showCloudProjects ||
+              showPlanning ||
+              showWorkflows ||
+              showToolCenter ||
+              showSystemPanel
+            "
+          />
+        </template>
         <div v-if="!hasConversation" class="ai-welcome">
           <span class="ai-welcome__mark"><AiIcon :size="32" /></span>
           <span class="ai-eyebrow">DEIN PERSÖNLICHER WORKSPACE</span>
@@ -2860,14 +2885,6 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       </div>
 
       <div ref="composerShell" class="ai-main-composer">
-        <AutonomousGoalControl
-          :key="activeProjectId"
-          :model="autonomousGoal.model.value"
-          :busy="conversationBusy"
-          @save="autonomousGoal.save"
-          @toggle="autonomousGoal.toggle"
-        />
-        <p v-if="autonomousGoal.error.value" role="alert">{{ autonomousGoal.error.value }}</p>
         <PromptBar
           ref="promptBar"
           v-model="input"
@@ -2878,13 +2895,6 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           :recording="isRecording"
           :listening="listening"
           :voice-busy="voiceInputView.starting || voiceInputView.finishing"
-          :model-label="
-            chatRouteMode === 'external'
-              ? 'Externe Modelle'
-              : chatRouteMode === 'auto'
-                ? 'Lokal + extern'
-                : 'Lokales Modell'
-          "
           :context-label="activeWorkspace?.displayName || activeProject?.name"
           :commands="promptCommands"
           @input="setComposerInput(input, 'keyboard')"
@@ -2900,25 +2910,22 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           @listen="toggleListening"
           @voice-start="startConfiguredVoice"
           @voice-stop="voiceInputSession.stop()"
-          @model="openSettings('chat')"
           @context="showContext = !showContext"
           @command="handlePromptCommand"
-        />
+        >
+          <template #heading-start>
+            <AutonomousGoalControl
+              :key="activeProjectId"
+              :model="autonomousGoal.model.value"
+              :busy="conversationBusy"
+              @save="autonomousGoal.save"
+              @toggle="autonomousGoal.toggle"
+            />
+          </template>
+        </PromptBar>
+        <p v-if="autonomousGoal.error.value" role="alert">{{ autonomousGoal.error.value }}</p>
       </div>
     </main>
-
-    <BrowserPanel
-      :project-id="activeProjectId"
-      :suspended="
-        showSettings ||
-        showAgentHub ||
-        showCloudProjects ||
-        showPlanning ||
-        showWorkflows ||
-        showToolCenter ||
-        showSystemPanel
-      "
-    />
 
     <SystemStatusPanel
       :active="showSystemPanel"

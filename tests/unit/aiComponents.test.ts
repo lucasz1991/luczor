@@ -97,7 +97,7 @@ describe('AI component rendering contracts', () => {
     expect(screen).not.toContain('<img')
   })
 
-  it('places the explicit route-mode control in the prompt heading', async () => {
+  it('keeps route selection in the prompt heading without the deprecated model shortcut', async () => {
     const html = await renderToString(
       createSSRApp({
         render: () =>
@@ -105,14 +105,13 @@ describe('AI component rendering contracts', () => {
             modelValue: '',
             routeMode: 'external',
             externalAllowed: true,
-            modelLabel: 'Externes Modell · nach Freigabe',
           }),
       })
     )
     expect(html).toContain('aria-label="Erlaubte Modelle für diesen Chat wählen"')
     expect(html).toContain('ai-route-mode')
-    expect(html).toContain('Externes Modell')
     expect(html).toContain('ai-prompt__heading')
+    expect(html).not.toContain('ai-model-button')
     expect(html).not.toContain('Enter senden')
     expect(html).not.toContain('Luczor kann Fehler machen')
   })

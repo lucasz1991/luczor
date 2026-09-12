@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::sync::{Mutex, OnceLock};
 use tauri::{AppHandle, LogicalPosition, LogicalSize, Manager, Rect, Webview};
 
-#[derive(Clone, Default, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PanelLayout {
     visible: bool,
@@ -14,6 +14,26 @@ pub struct PanelLayout {
     top: f64,
     width: f64,
     height: f64,
+    #[serde(default = "default_zoom")]
+    zoom: f64,
+}
+
+fn default_zoom() -> f64 {
+    1.0
+}
+
+impl Default for PanelLayout {
+    fn default() -> Self {
+        Self {
+            visible: false,
+            project_id: String::new(),
+            left: 0.0,
+            top: 0.0,
+            width: 0.0,
+            height: 0.0,
+            zoom: default_zoom(),
+        }
+    }
 }
 fn layout() -> &'static Mutex<PanelLayout> {
     static LAYOUT: OnceLock<Mutex<PanelLayout>> = OnceLock::new();
@@ -26,6 +46,8 @@ impl PanelLayout {
             .all(|n| n.is_finite() && *n >= 0.0 && *n <= 32768.0)
             && self.width >= 1.0
             && self.height >= 1.0
+            && self.zoom.is_finite()
+            && (0.05..=4.0).contains(&self.zoom)
             && self.project_id.len() <= 200
     }
 }
@@ -57,6 +79,7 @@ pub fn apply(app: &AppHandle, browser: &Webview, project_id: &str) -> Result<(),
             size: LogicalSize::new(state.width, state.height).into(),
         })
         .map_err(|e| e.to_string())?;
+    browser.set_zoom(state.zoom).map_err(|e| e.to_string())?;
     browser.show().map_err(|e| e.to_string())
 }
 
@@ -115,6 +138,11 @@ mod tests {
         state.left = 0.0;
         state.width = f64::INFINITY;
         assert!(!state.valid());
+        state.width = 400.0;
+        state.zoom = 0.04;
+        assert!(!state.valid());
+        state.zoom = 0.5;
+        assert!(state.valid());
     }
 }
 

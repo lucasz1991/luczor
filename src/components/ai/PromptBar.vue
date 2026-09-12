@@ -18,13 +18,11 @@ const props = withDefaults(
     listening?: boolean
     voiceBusy?: boolean
     placeholder?: string
-    modelLabel?: string
     contextLabel?: string
     commands?: SearchItem[]
   }>(),
   {
     placeholder: 'Was möchtest du als Nächstes tun?',
-    modelLabel: 'Automatisch',
     commands: () => [],
     contextLabel: '',
     externalAllowed: true,
@@ -43,7 +41,6 @@ const emit = defineEmits<{
   listen: []
   'voice-start': [mode: 'push_to_talk' | 'hands_free']
   'voice-stop': []
-  model: []
   context: []
   command: [id: string]
 }>()
@@ -131,6 +128,7 @@ defineExpose({ focus: () => field.value?.focus() })
           <AiIcon name="folder" :size="13" />{{ contextLabel }}
         </button>
         <div class="ai-prompt__controls">
+          <slot name="heading-start" />
           <VoiceInputSettings
             class="voice-input-settings--composer"
             :busy="busy || voiceBusy"
@@ -174,10 +172,7 @@ defineExpose({ focus: () => field.value?.focus() })
             :aria-expanded="showCommands"
             @click="toggleCommands"
           >
-            <AiIcon name="plus" :size="19" /></button
-          ><button type="button" class="ai-model-button" title="Modelleinstellungen öffnen" @click="emit('model')">
-            <AiIcon :size="13" /><span>{{ modelLabel }}</span
-            ><AiIcon name="chevron" :size="11" />
+            <AiIcon name="plus" :size="19" />
           </button>
           <ThinkingSelector
             :model-value="thinkingTier"

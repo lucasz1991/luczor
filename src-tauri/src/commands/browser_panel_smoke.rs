@@ -136,6 +136,7 @@ async fn probe(app: &AppHandle, root: &std::path::Path, host: &str) -> Result<()
         top: 110.0,
         width: 520.0,
         height: 570.0,
+        zoom: 0.5,
     };
     browser_panel_layout(caller(app), app.clone(), placement(true)).await?;
     assert_eq!(
