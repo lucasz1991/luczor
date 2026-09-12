@@ -573,10 +573,13 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
     repoId: opts.repoId,
     taskType: opts.taskType,
     requiredCapability: opts.requiredCapability,
-    contextEgress:
-      opts.agentMode || opts.continuation || opts.workspaceScope ? ('local_only' as const) : opts.contextEgress,
+    // Every chat turn is an agent turn now, so the agent flag no longer decides the route:
+    // the composer's explicit mode does, and each outgoing packet still needs its own
+    // approval. A resumed checkpoint and a workspace-scoped run keep the local-only
+    // contract their saved context was collected under.
+    contextEgress: opts.continuation || opts.workspaceScope ? ('local_only' as const) : opts.contextEgress,
     routingSettings:
-      opts.agentMode || opts.continuation || opts.workspaceScope
+      opts.continuation || opts.workspaceScope
         ? { ...opts.routingSettings, preference: 'local_only' as const }
         : opts.routingSettings,
     externalPackage,
