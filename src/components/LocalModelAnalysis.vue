@@ -1,6 +1,15 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { localModelDiagnostics } from '@/services/inference/localModelDiagnostics'
+import {
+  localModelDiagnostics,
+  localModelDiagnosticCopy,
+  LOCAL_FAILURE_STAGE_LABELS,
+} from '@/services/inference/localModelDiagnostics'
+import { describeLocalFailureDiagnostic } from '@/services/inference/localFailure'
+import { useClipboard } from '@/composables/useClipboard'
+
+const { copy, copied, error: clipboardError } = useClipboard()
+const canCopy = typeof navigator !== 'undefined' && typeof navigator.clipboard?.writeText === 'function'
 
 function clearObservations() {
   localModelDiagnostics.clear()
@@ -11,6 +20,8 @@ const runs = localModelDiagnostics.state.runs
 const run = computed(() => runs.find(item => item.id === selected.value) ?? runs[0])
 const number = (value: number | null | undefined, suffix = '') =>
   value == null ? '—' : `${value.toLocaleString('de-DE', { maximumFractionDigits: 1 })}${suffix}`
+const failureValue = (value: number | string | undefined) =>
+  value === undefined ? 'nicht ermittelt' : typeof value === 'number' ? number(value) : value
 const labels = {
   preparing: 'Vorbereitung',
   responding: 'Antwortstream',
@@ -70,6 +81,55 @@ const contextTrend = computed(() => {
         <strong>{{ run.model }}</strong
         ><span>{{ labels[run.state] }}</span>
       </div>
+      <section v-if="run.state === 'error'" class="analysis-section failure-section" aria-label="Fehlerdiagnose">
+        <div class="section-heading">
+          <h4>Fehlerdiagnose</h4>
+          <button v-if="canCopy" type="button" @click="copy(localModelDiagnosticCopy(run))">
+            {{ copied ? 'Diagnose kopiert' : 'Diagnose kopieren' }}
+          </button>
+        </div>
+        <p class="failure-message">
+          {{
+            run.failure
+              ? describeLocalFailureDiagnostic(run.failure)
+              : 'Für diese Anfrage hat die Runtime keine geprüften Fehlerdetails gemeldet.'
+          }}
+        </p>
+        <dl class="diagnostic-list">
+          <div>
+            <dt>Phase</dt>
+            <dd>{{ run.failure ? LOCAL_FAILURE_STAGE_LABELS[run.failure.stage] : 'nicht ermittelt' }}</dd>
+          </div>
+          <div>
+            <dt>HTTP-Status</dt>
+            <dd>{{ failureValue(run.failure?.httpStatus) }}</dd>
+          </div>
+          <div>
+            <dt>Fehlercode</dt>
+            <dd>{{ failureValue(run.failure?.code) }}</dd>
+          </div>
+          <div>
+            <dt>Parameter</dt>
+            <dd>{{ failureValue(run.failure?.parameter) }}</dd>
+          </div>
+          <div>
+            <dt>Eingabetokens</dt>
+            <dd>{{ failureValue(run.failure?.inputTokens) }}</dd>
+          </div>
+          <div>
+            <dt>Kontextfenster</dt>
+            <dd>{{ failureValue(run.failure?.contextTokens) }}</dd>
+          </div>
+          <div>
+            <dt>Ausgabelimit (Tokens)</dt>
+            <dd>{{ failureValue(run.failure?.outputTokens) }}</dd>
+          </div>
+        </dl>
+        <p>
+          Erfasste Runtime-Werte. Fehlende Werte bleiben „nicht ermittelt“; sie werden nicht aus Textlängen geschätzt.
+        </p>
+        <p v-if="clipboardError" role="status">{{ clipboardError }}</p>
+      </section>
       <dl class="token-grid">
         <div>
           <dt>Eingabe</dt>
@@ -253,6 +313,12 @@ dd {
   border-top: 1px solid var(--ai-line);
   padding: 16px 0;
 }
+.failure-section {
+  margin-top: 18px;
+}
+.failure-message {
+  color: var(--ai-ink);
+}
 h4 {
   font-size: 12px;
   font-weight: 500;
@@ -314,6 +380,7 @@ h4 {
 .diagnostic-list dd {
   margin: 0;
   text-align: right;
+  overflow-wrap: anywhere;
 }
 summary {
   cursor: pointer;

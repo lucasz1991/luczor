@@ -2,6 +2,7 @@ import { reactive, readonly } from 'vue'
 import { publicAnswerText } from '@/services/publicAnswerStream'
 import { readReportedTokenUsage } from '@/services/tokenUsage'
 import type { InferenceRequest, InferenceResult } from './types'
+import { readLocalFailureDiagnostic, describeLocalFailureDiagnostic, type LocalFailureDiagnostic } from './localFailure'
 
 export type RuntimeDiagnostics = {
   cachedTokens?: number | null
@@ -25,7 +26,37 @@ export type ModelObservation = {
   usage?: InferenceResult['usage']
   context?: InferenceResult['contextUsage']
   runtime: RuntimeDiagnostics
+  failure?: LocalFailureDiagnostic
   events: { at: number; label: string }[]
+}
+
+export const LOCAL_FAILURE_STAGE_LABELS: Record<LocalFailureDiagnostic['stage'], string> = {
+  preparation: 'Vorbereitung',
+  tokenization: 'Tokenisierung',
+  generation: 'Generierung',
+  unknown: 'Nicht ermittelt',
+}
+
+/** Only a fixed diagnostic projection is copied; never the observation's output, roles, events or raw data. */
+export function localModelDiagnosticCopy(
+  observation: Readonly<Pick<ModelObservation, 'model' | 'state' | 'failure'>>
+): string {
+  const failure = observation.state === 'error' ? readLocalFailureDiagnostic(observation.failure) : null
+  const value = (field: string | number | undefined) => field ?? 'nicht ermittelt'
+  return [
+    'Luczor – lokale Modelldiagnose',
+    `Modell: ${observation.model.replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 160)}`,
+    `Status: ${observation.state === 'error' ? 'Fehlgeschlagen' : observation.state === 'cancelled' ? 'Abgebrochen' : 'Kein Modellfehler erfasst'}`,
+    `Phase: ${failure ? LOCAL_FAILURE_STAGE_LABELS[failure.stage] : 'nicht ermittelt'}`,
+    `HTTP: ${value(failure?.httpStatus)}`,
+    `Fehlercode: ${value(failure?.code)}`,
+    `Parameter: ${value(failure?.parameter)}`,
+    `Grund: ${value(failure?.reason)}`,
+    `Eingabetokens (erfasst): ${value(failure?.inputTokens)}`,
+    `Kontextfenster (erfasst): ${value(failure?.contextTokens)}`,
+    `Ausgabelimit (Tokens, erfasst): ${value(failure?.outputTokens)}`,
+    ...(failure ? [`Einordnung: ${describeLocalFailureDiagnostic(failure)}`] : []),
+  ].join('\n')
 }
 
 /** Bounded, renderer-local observation of public answers. Never persists prompts or tool payloads. */
@@ -114,9 +145,10 @@ export function createLocalModelDiagnostics(now = Date.now) {
                 : 'Antwort abgeschlossen',
         })
       },
-      fail(cancelled: boolean) {
+      fail(cancelled: boolean, diagnostic?: unknown) {
         if (!current()) return
         run.state = cancelled ? 'cancelled' : 'error'
+        run.failure = cancelled ? undefined : (readLocalFailureDiagnostic(diagnostic) ?? undefined)
         run.endedAt = now()
         run.events.push({ at: now(), label: cancelled ? 'Anfrage abgebrochen' : 'Anfrage fehlgeschlagen' })
       },

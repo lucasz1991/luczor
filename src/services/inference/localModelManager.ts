@@ -1,4 +1,5 @@
 import { localModelDiagnostics } from './localModelDiagnostics'
+import type { LocalFailureDiagnostic } from './localFailure'
 import type { InferenceGateway, InferenceRequest, InferenceResult } from '@/services/inference/types'
 import type { LocalModelReleaseManifest } from '@/services/inference/modelManifest'
 import { stripReasoningBlocks } from '@/services/publicAnswerStream'
@@ -57,7 +58,8 @@ export class LocalInferenceError extends Error {
     message: string,
     readonly code: string,
     readonly retryable: boolean,
-    readonly partialOutput: boolean
+    readonly partialOutput: boolean,
+    readonly diagnostic?: LocalFailureDiagnostic
   ) {
     super(message)
     this.name = 'LocalInferenceError'
@@ -443,17 +445,27 @@ export class LocalModelManager {
       // retains the resident process, so the next valid request stays admissible.
       if (
         error instanceof LocalInferenceError &&
-        [
+        ([
           'runtime_context_exceeded',
           'runtime_chat_history_rejected',
+          'runtime_chat_template_failed',
           'runtime_tool_contract_rejected',
           'runtime_reasoning_control_unavailable',
-        ].includes(error.code)
+        ].includes(error.code) ||
+          (error.code === 'runtime_request_rejected' &&
+            (error.diagnostic?.httpStatus === 400 ||
+              (!error.diagnostic && error.message === 'Local llama.cpp rejected the request (HTTP 400).'))))
       ) {
         if (operationEpoch === this.boundaryEpoch) {
           this.health.set(release.id, { ...previous, state: 'ready', updatedAt: nowIso(this.now) })
         }
-        throw new LocalInferenceError(error.message, error.code, error.retryable, partialOutput || error.partialOutput)
+        throw new LocalInferenceError(
+          error.message,
+          error.code,
+          error.retryable,
+          partialOutput || error.partialOutput,
+          error.diagnostic
+        )
       }
       const failures = previous.consecutiveFailures + 1
       const entersCooldown = failures >= release.healthPolicy.maxConsecutiveFailures
@@ -478,7 +490,13 @@ export class LocalModelManager {
         })
       }
       if (error instanceof LocalInferenceError) {
-        throw new LocalInferenceError(error.message, error.code, error.retryable, partialOutput || error.partialOutput)
+        throw new LocalInferenceError(
+          error.message,
+          error.code,
+          error.retryable,
+          partialOutput || error.partialOutput,
+          error.diagnostic
+        )
       }
       throw new LocalInferenceError(
         unexpectedAbort

@@ -1,7 +1,7 @@
 import { localModelDiagnostics, type RuntimeDiagnostics } from './localModelDiagnostics'
 import { Channel, invoke, isTauri } from '@tauri-apps/api/core'
 import type { HardwareSnapshot } from '@/services/inference/capacity'
-import { LocalInferenceError } from '@/services/inference/localModelManager'
+import { LocalInferenceError, visibleLocalContent } from '@/services/inference/localModelManager'
 import type {
   LocalCatalogBinding,
   LocalRuntimeRequest,
@@ -17,11 +17,24 @@ import type { InferenceResult, WireToolCall } from '@/services/inference/types'
 import { readReportedTokenUsage } from '@/services/tokenUsage'
 import { localResources, type LocalResourceConfigState } from './resources'
 import { readThinkingProgress, type ThinkingBudgetProgress, type ThinkingControlAction } from './thinking'
+import {
+  describeLocalFailureDiagnostic,
+  readLocalFailureDiagnostic,
+  type LocalFailureDiagnostic,
+} from './localFailure'
+
+type NativeErrorEvent = {
+  type: 'error'
+  requestId: string
+  code: string
+  retryable: boolean
+  diagnostic?: unknown
+}
 
 type NativeInferenceEvent =
   | { type: 'started'; requestId: string }
   | { type: 'delta'; requestId: string; content: string }
-  | { type: 'error'; requestId: string; code: string; retryable: boolean }
+  | NativeErrorEvent
   | (ThinkingBudgetProgress & { type: 'budget' })
 type ActiveBudget = { request: LocalRuntimeRequest; latest: ThinkingBudgetProgress | null }
 
@@ -256,21 +269,30 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
     const observation = localModelDiagnostics.begin(request.modelReleaseId, request.messages)
     const channel = new Channel<NativeInferenceEvent>()
     let accumulated = ''
-    let contextRejected = false
-    let historyRejected = false
-    let toolContractRejected = false
-    let thinkingControlUnavailable = false
+    let nativeFailure: {
+      code: LocalFailureDiagnostic['code']
+      retryable: boolean
+      diagnostic?: LocalFailureDiagnostic
+    } | undefined
     const budget: ActiveBudget = { request, latest: null }
     activeBudgets.set(request.requestId, budget)
     channel.onmessage = event => {
-      if (activeBudgets.get(request.requestId) !== budget) return
+      if (activeBudgets.get(request.requestId) !== budget || request.signal?.aborted) return
       if (event.requestId && event.requestId !== request.requestId) return
       if (event.type === 'budget') publishBudget(budget, event)
-      if (event.type === 'error' && event.code === 'runtime_context_exceeded') contextRejected = true
-      if (event.type === 'error' && event.code === 'runtime_chat_history_rejected') historyRejected = true
-      if (event.type === 'error' && event.code === 'runtime_tool_contract_rejected') toolContractRejected = true
-      if (event.type === 'error' && event.code === 'runtime_reasoning_control_unavailable')
-        thinkingControlUnavailable = true
+      if (event.type === 'error' && event.requestId === request.requestId && !nativeFailure) {
+        const diagnostic = readLocalFailureDiagnostic(event.diagnostic)
+        const recognized = readLocalFailureDiagnostic({
+          schemaVersion: 1, stage: 'unknown', code: event.code, reason: 'unclassified',
+        })
+        if (recognized) {
+          nativeFailure = {
+            code: recognized.code,
+            retryable: event.retryable === true,
+            ...(diagnostic?.code === recognized.code ? { diagnostic } : {}),
+          }
+        }
+      }
       if (event.type === 'delta') {
         if (request.signal?.aborted) return
         accumulated += event.content
@@ -299,31 +321,43 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
       onEvent: channel,
     })
       .catch(error => {
-        observation.fail(request.signal?.aborted === true)
+        const cancelled = request.signal?.aborted === true
+        observation.fail(cancelled, cancelled ? undefined : nativeFailure?.diagnostic)
+        if (cancelled) throw error
+        const partialOutput = visibleLocalContent(accumulated).length > 0
+        if (nativeFailure?.diagnostic) {
+          throw new LocalInferenceError(
+            describeLocalFailureDiagnostic(nativeFailure.diagnostic),
+            nativeFailure.code,
+            nativeFailure.retryable,
+            partialOutput,
+            nativeFailure.diagnostic
+          )
+        }
         if (
-          thinkingControlUnavailable ||
+          nativeFailure?.code === 'runtime_reasoning_control_unavailable' ||
           String(error) === 'Local thinking control was not confirmed; generation interrupted.'
         ) {
           throw new LocalInferenceError(
             'Die Runtime hat den Abschluss der Denkphase nicht bestätigt. Die Generation wurde an der Budgetgrenze unterbrochen. Der öffentliche Fortschritt bleibt erhalten; das Modell bleibt geladen.',
             'runtime_reasoning_control_unavailable',
             false,
-            false
+            partialOutput
           )
         }
         if (
-          toolContractRejected ||
+          nativeFailure?.code === 'runtime_tool_contract_rejected' ||
           /^Local llama\.cpp rejected the tool contract \(HTTP (400|500)\)\.$/.test(String(error))
         ) {
           throw new LocalInferenceError(
             'Das lokale Modell konnte die Werkzeugdaten nicht verarbeiten. Bereits ausgeführte Aktionen bleiben erhalten. Das Modell bleibt geladen.',
             'runtime_tool_contract_rejected',
             false,
-            false
+            partialOutput
           )
         }
         if (
-          historyRejected ||
+          nativeFailure?.code === 'runtime_chat_history_rejected' ||
           /^Local llama\.cpp rejected the conversation role order in its chat template \(HTTP (400|500)\)\.$/.test(
             String(error)
           )
@@ -332,18 +366,32 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
             'Das lokale Modell konnte die Nachrichtenstruktur nicht verarbeiten. Bitte die Anfrage erneut senden. Das Modell bleibt geladen.',
             'runtime_chat_history_rejected',
             false,
-            false
+            partialOutput
           )
         }
         if (
-          contextRejected ||
+          nativeFailure?.code === 'runtime_context_exceeded' ||
           String(error) === 'Local llama.cpp rejected the request because the context window was exceeded (HTTP 400).'
         ) {
           throw new LocalInferenceError(
             'Der aktuelle Auftrag passt auch nach der Kontextanpassung nicht vollständig in das lokale Modell. Bitte große Inhalte als Datei abschnittsweise bearbeiten lassen. Das Modell bleibt geladen.',
             'runtime_context_exceeded',
             false,
-            false
+            partialOutput
+          )
+        }
+        if (nativeFailure) {
+          // Legacy native events have no measured stage or counters. Do not attach inferred telemetry.
+          throw new LocalInferenceError(
+            describeLocalFailureDiagnostic({
+              schemaVersion: 1,
+              stage: 'unknown',
+              code: nativeFailure.code,
+              reason: 'unclassified',
+            }),
+            nativeFailure.code,
+            nativeFailure.retryable,
+            partialOutput
           )
         }
         throw error

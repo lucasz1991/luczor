@@ -1,5 +1,18 @@
 import { describe, expect, it } from 'vitest'
-import { createLocalModelDiagnostics } from '@/services/inference/localModelDiagnostics'
+import { createLocalModelDiagnostics, localModelDiagnosticCopy } from '@/services/inference/localModelDiagnostics'
+import type { LocalFailureDiagnostic } from '@/services/inference/localFailure'
+
+const failure: LocalFailureDiagnostic = {
+  schemaVersion: 1,
+  stage: 'generation',
+  httpStatus: 400,
+  code: 'runtime_tool_contract_rejected',
+  parameter: 'tools',
+  reason: 'tool_contract',
+  inputTokens: 1234,
+  contextTokens: 8192,
+  outputTokens: 0,
+}
 
 const result = {
   content: 'Öffentliche Antwort',
@@ -9,6 +22,82 @@ const result = {
 }
 
 describe('local model observation boundary', () => {
+  it('retains only validated failure fields and copies a fixed diagnostic without conversation data', () => {
+    const monitor = createLocalModelDiagnostics()
+    const run = monitor.begin('Laptop Qwen3-4B', [
+      { role: 'system', content: 'hidden-system-instruction' },
+      { role: 'user', content: 'private-user-content' },
+    ])
+    run.delta('<think>private-reasoning</think>Public answer excluded from diagnostic copy')
+    const incoming: Record<string, unknown> = {
+      ...failure,
+      message: 'Raw server body with secret-token',
+      endpoint: 'https://private-endpoint.example',
+      prompt: 'raw-private-prompt',
+    }
+    run.fail(false, incoming)
+    incoming.parameter = 'mutated-after-delivery'
+    const observation = monitor.state.runs[0]!
+    expect(observation.failure).toEqual(failure)
+    const stored = JSON.stringify(observation)
+    const copied = localModelDiagnosticCopy(observation)
+    expect(copied).toContain('Modell: Laptop Qwen3-4B')
+    expect(copied).toContain('HTTP: 400')
+    expect(copied).toContain('Parameter: tools')
+    expect(copied).toContain('Eingabetokens (erfasst): 1234')
+    expect(copied).toContain('Ausgabelimit (Tokens, erfasst): 0')
+    expect(copied).not.toContain('Public answer excluded')
+    expect(copied).not.toContain('roles')
+    expect(copied).not.toContain('events')
+    for (const secret of [
+      'hidden-system',
+      'private-user',
+      'private-reasoning',
+      'secret-token',
+      'private-endpoint',
+      'raw-private-prompt',
+      'mutated-after-delivery',
+    ]) {
+      expect(stored).not.toContain(secret)
+      expect(copied).not.toContain(secret)
+    }
+  })
+
+  it('does not attach an HTTP failure to an intentional cancellation', () => {
+    const monitor = createLocalModelDiagnostics()
+    monitor.begin('local', []).fail(true, failure)
+    const observation = monitor.state.runs[0]!
+    expect(observation.state).toBe('cancelled')
+    expect(observation.failure).toBeUndefined()
+    expect(localModelDiagnosticCopy({ ...observation, failure })).not.toContain('HTTP: 400')
+  })
+
+  it('keeps unsupported/raw failure details unknown and never infers tokens from message lengths', () => {
+    const monitor = createLocalModelDiagnostics()
+    monitor.begin('local', [{ role: 'user', content: 'a'.repeat(12000) }]).fail(false, {
+      schemaVersion: 9,
+      message: 'Raw failure mentioning max_tokens and HTTP 400',
+      inputTokens: 12000,
+    })
+    const observation = monitor.state.runs[0]!
+    expect(observation.failure).toBeUndefined()
+    const copied = localModelDiagnosticCopy(observation)
+    expect(copied).toContain('Eingabetokens (erfasst): nicht ermittelt')
+    expect(copied).toContain('HTTP: nicht ermittelt')
+    expect(copied).not.toContain('12000')
+    expect(JSON.stringify(observation)).not.toContain('Raw failure')
+  })
+
+  it('forgets diagnostics on clear and rejects late failures of cleared observations', () => {
+    const monitor = createLocalModelDiagnostics()
+    for (let index = 0; index < 14; index++) monitor.begin(`model-${index}`, []).fail(false, failure)
+    expect(monitor.state.runs).toHaveLength(12)
+    const late = monitor.begin('pending', [])
+    monitor.clear()
+    late.fail(false, failure)
+    expect(monitor.state.runs).toEqual([])
+  })
+
   it.each(['length', 'stop'])('does not report an empty %s completion as a completed answer', finishReason => {
     const monitor = createLocalModelDiagnostics()
     const run = monitor.begin('local', [])

@@ -661,15 +661,19 @@ mod tests {
     #[test]
     fn slot_save_path_capability_requires_advertised_runtime_support() {
         assert!(!RuntimeOptions::default().slot_save_path);
-        assert!(
-            RuntimeOptions::from_help("--threads N --slot-save-path PATH").slot_save_path
-        );
+        assert!(RuntimeOptions::from_help("--threads N --slot-save-path PATH").slot_save_path);
     }
 
     #[test]
     fn flash_attention_and_kv_quantization_require_advertised_runtime_support() {
         // No advertised support: neither flag is ever emitted, on any backend.
-        let plan = plan_resources(&hardware(), 32768, 17 * GIB, "cuda", &RuntimeOptions::default());
+        let plan = plan_resources(
+            &hardware(),
+            32768,
+            17 * GIB,
+            "cuda",
+            &RuntimeOptions::default(),
+        );
         assert!(!plan.arguments.iter().any(|arg| arg == "--flash-attn"));
         assert!(!plan.arguments.iter().any(|arg| arg == "--cache-type-k"));
     }

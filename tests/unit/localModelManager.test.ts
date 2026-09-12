@@ -198,12 +198,23 @@ describe('LocalModelManager runtime safety', () => {
   it.each([
     'runtime_context_exceeded',
     'runtime_chat_history_rejected',
+    'runtime_chat_template_failed',
     'runtime_tool_contract_rejected',
+    'runtime_request_rejected',
     'runtime_reasoning_control_unavailable',
   ])('keeps the model admissible after %s instead of cooling down or stopping it', async code => {
     const model = await release()
-    const stream = vi.fn().mockRejectedValue(new LocalInferenceError('Input rejected', code, false, false))
-    const transport: LocalRuntimeTransport = { stream, cancel: vi.fn(), stop: vi.fn() }
+    const stream = vi
+      .fn()
+      .mockRejectedValue(
+        new LocalInferenceError(
+          code === 'runtime_request_rejected' ? 'Local llama.cpp rejected the request (HTTP 400).' : 'Input rejected',
+          code,
+          false,
+          false
+        )
+      )
+    const transport: LocalRuntimeTransport = { prepare: vi.fn(), stream, cancel: vi.fn(), stop: vi.fn() }
     const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
     const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -217,6 +228,79 @@ describe('LocalModelManager runtime safety', () => {
     await expect(
       gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'short input' }] })
     ).resolves.toMatchObject({ content: 'OK', provider: 'local' })
+    expect(stream).toHaveBeenCalledTimes(4)
+    expect(transport.prepare).not.toHaveBeenCalled()
+    expect(transport.cancel).not.toHaveBeenCalled()
+    expect(transport.stop).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['runtime_request_rejected', 'parameter_type', 'ready'],
+    ['runtime_auth_failed', 'authentication', 'degraded'],
+    ['runtime_capacity_exhausted', 'capacity', 'degraded'],
+    ['runtime_server_failed', 'server', 'degraded'],
+  ] as const)('preserves the safe diagnostic and partial output for %s', async (code, reason, state) => {
+    const model = await release()
+    const diagnostic = {
+      schemaVersion: 1 as const,
+      stage: 'generation' as const,
+      httpStatus: reason === 'authentication' ? 401 : reason === 'server' ? 500 : 400,
+      code,
+      reason,
+      contextTokens: 16_384,
+      inputTokens: 8_000,
+      outputTokens: 2_048,
+    }
+    const failure = new LocalInferenceError('Geprüfte Diagnose', code, false, false, diagnostic)
+    const transport: LocalRuntimeTransport = {
+      stream: vi.fn(async (_release, request) => {
+        request.onToken?.('Bereits sichtbarer Fortschritt')
+        throw failure
+      }),
+      cancel: vi.fn(),
+      stop: vi.fn(),
+    }
+    const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
+    const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+    await expect(
+      gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'weiter' }] })
+    ).rejects.toMatchObject({
+      code,
+      partialOutput: true,
+      diagnostic,
+    })
+    expect(manager.getHealth(model)).toMatchObject({
+      state,
+      consecutiveFailures: state === 'ready' ? 0 : 1,
+    })
+    expect(transport.stream).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([undefined, 501])('does not assume a generic request rejection with status %s is healthy', async status => {
+    const model = await release()
+    const diagnostic = status
+      ? {
+          schemaVersion: 1 as const,
+          stage: 'generation' as const,
+          httpStatus: status,
+          code: 'runtime_request_rejected',
+          reason: 'unclassified' as const,
+        }
+      : undefined
+    const transport: LocalRuntimeTransport = {
+      stream: vi
+        .fn()
+        .mockRejectedValue(
+          new LocalInferenceError('Request rejected', 'runtime_request_rejected', false, false, diagnostic)
+        ),
+      cancel: vi.fn(),
+      stop: vi.fn(),
+    }
+    const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
+    await expect(
+      manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64)).streamChatWithTools({ messages: [] })
+    ).rejects.toMatchObject({ code: 'runtime_request_rejected' })
+    expect(manager.getHealth(model)).toMatchObject({ state: 'degraded', consecutiveFailures: 1 })
   })
 
   it('propagates a parent abort to native cancel without counting a model failure', async () => {

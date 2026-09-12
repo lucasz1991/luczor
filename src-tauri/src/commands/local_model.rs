@@ -47,6 +47,8 @@ mod accelerator_inventory;
 #[path = "local_model_context.rs"]
 mod context_budget;
 use context_budget::ContextUsage;
+#[path = "local_model_failure.rs"]
+mod failure_diagnostics;
 #[path = "local_model_gpu.rs"]
 mod gpu_runtime;
 #[path = "local_model_install.rs"]
@@ -475,6 +477,7 @@ struct LocalInferenceFailure {
     code: &'static str,
     public_message: String,
     retryable: bool,
+    diagnostic: failure_diagnostics::Diagnostic,
 }
 
 impl LocalInferenceFailure {
@@ -487,8 +490,9 @@ impl LocalInferenceFailure {
             self.code,
             "runtime_context_exceeded"
                 | "runtime_chat_history_rejected"
+                | "runtime_chat_template_failed"
                 | "runtime_tool_contract_rejected"
-        )
+        ) || (self.code == "runtime_request_rejected" && self.diagnostic.http_status == Some(400))
     }
 
     fn stream(message: impl Into<String>) -> Self {
@@ -498,12 +502,20 @@ impl LocalInferenceFailure {
                 code: "runtime_reasoning_control_unavailable",
                 public_message: message,
                 retryable: false,
+                diagnostic: failure_diagnostics::Diagnostic::new(
+                    "runtime_reasoning_control_unavailable",
+                    failure_diagnostics::Stage::Unknown,
+                ),
             };
         }
         Self {
             code: "runtime_stream_failed",
             public_message: message,
             retryable: true,
+            diagnostic: failure_diagnostics::Diagnostic::new(
+                "runtime_stream_failed",
+                failure_diagnostics::Stage::Unknown,
+            ),
         }
     }
 
@@ -512,6 +524,7 @@ impl LocalInferenceFailure {
             code: kind.code(),
             public_message: kind.public_message(status),
             retryable: kind.retryable(status),
+            diagnostic: failure_diagnostics::Diagnostic::http(status, kind),
         }
     }
 }
@@ -801,6 +814,8 @@ pub enum LocalInferenceEvent {
         request_id: String,
         code: String,
         retryable: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        diagnostic: Option<failure_diagnostics::Diagnostic>,
     },
 }
 
@@ -1106,12 +1121,17 @@ pub async fn local_model_infer(
     on_event: Channel<LocalInferenceEvent>,
 ) -> Result<LocalInferenceResult, String> {
     ensure_main_webview(&window)?;
-    validate_inference_request(&request)?;
-    {
+    let preparation = (|| {
+        validate_inference_request(&request)?;
         let mut guard = state()
             .lock()
             .map_err(|_| "Local model manager is unavailable.")?;
         resource_config::ensure_loaded(&app, &mut guard)?;
+        Ok::<(), String>(())
+    })();
+    if let Err(error) = preparation {
+        send_preparation_failure(&request.request_id, &on_event);
+        return Err(error);
     }
     tauri::async_runtime::spawn_blocking(move || infer_blocking(&app, request, on_event))
         .await
@@ -2827,7 +2847,9 @@ fn infer_blocking(
     // Catalog/session/hash validation, model/readiness lookup and ownership
     // claim are one native critical section. A pre-reload request therefore
     // cannot carry an old model snapshot across a session rotation.
-    let (model, cancel) = claim_inference_operation(&request)?;
+    let (model, cancel) = claim_inference_operation(&request).inspect_err(|_| {
+        send_preparation_failure(&request.request_id, &on_event);
+    })?;
     let prepared = if request.use_case == IDLE_CONTEXT_USE_CASE {
         // claim_inference_operation already checked the resident runtime under
         // the same lock as ownership. Idle work must never enter cold start.
@@ -2863,6 +2885,12 @@ fn infer_blocking(
                 "runtime_start_failed".into()
             },
             retryable: outcome != RequestOutcome::Cancelled,
+            diagnostic: (outcome != RequestOutcome::Cancelled).then(|| {
+                failure_diagnostics::Diagnostic::new(
+                    "runtime_start_failed",
+                    failure_diagnostics::Stage::Preparation,
+                )
+            }),
         });
         return Err(error);
     }
@@ -2897,6 +2925,9 @@ fn infer_blocking(
             },
             retryable: outcome != RequestOutcome::Cancelled
                 && failure.is_none_or(|error| error.retryable),
+            diagnostic: (outcome != RequestOutcome::Cancelled)
+                .then(|| failure.map(|error| error.diagnostic.clone()))
+                .flatten(),
         });
     }
     let failure_code = if outcome == RequestOutcome::Failed {
@@ -2912,6 +2943,18 @@ fn infer_blocking(
         failure_code,
     );
     result.map_err(|error| error.public_message)
+}
+
+fn send_preparation_failure(request_id: &str, on_event: &Channel<LocalInferenceEvent>) {
+    let _ = on_event.send(LocalInferenceEvent::Error {
+        request_id: request_id.into(),
+        code: "runtime_start_failed".into(),
+        retryable: false,
+        diagnostic: Some(failure_diagnostics::Diagnostic::new(
+            "runtime_start_failed",
+            failure_diagnostics::Stage::Preparation,
+        )),
+    });
 }
 
 fn claim_inference_operation(
@@ -3339,25 +3382,24 @@ fn start_runtime_attempt(
         None
     };
     let mut command = Command::new(&artifacts.runtime_path);
-    command
-        .args([
-            "--model",
-            artifacts.model_path.to_string_lossy().as_ref(),
-            "--alias",
-            &model.id,
-            "--host",
-            "127.0.0.1",
-            "--port",
-            &port.to_string(),
-            "--api-key-file",
-            api_key_file.to_string_lossy().as_ref(),
-            "--no-webui",
-            "--jinja",
-            "--parallel",
-            "1",
-            "--ctx-size",
-            &context.to_string(),
-        ]);
+    command.args([
+        "--model",
+        artifacts.model_path.to_string_lossy().as_ref(),
+        "--alias",
+        &model.id,
+        "--host",
+        "127.0.0.1",
+        "--port",
+        &port.to_string(),
+        "--api-key-file",
+        api_key_file.to_string_lossy().as_ref(),
+        "--no-webui",
+        "--jinja",
+        "--parallel",
+        "1",
+        "--ctx-size",
+        &context.to_string(),
+    ]);
     if let Some(dir) = &slot_cache_dir {
         command.args(["--slot-save-path", dir.to_string_lossy().as_ref()]);
     }
@@ -3577,7 +3619,10 @@ fn restore_slot_cache(runtime: &ManagedRuntime, dir: &Path, scope_digest: &str) 
     if !path.is_file() {
         return;
     }
-    let Some(filename) = path.file_name().map(|name| name.to_string_lossy().into_owned()) else {
+    let Some(filename) = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+    else {
         return;
     };
     let Ok(client) = local_http_client(Duration::from_secs(2), Duration::from_secs(10)) else {
@@ -3599,11 +3644,10 @@ fn restore_slot_cache(runtime: &ManagedRuntime, dir: &Path, scope_digest: &str) 
 }
 
 fn llama_http_failure(status: u16, response: impl Read) -> LocalInferenceFailure {
-    let kind = read_bounded_error_body(response)
+    read_bounded_error_body(response)
         .as_deref()
-        .map(|body| classify_llama_http_error(status, body))
-        .unwrap_or_else(|| classify_llama_http_status(status));
-    LocalInferenceFailure::http(status, kind)
+        .map(|body| failure_diagnostics::classify(status, body))
+        .unwrap_or_else(|| LocalInferenceFailure::http(status, classify_llama_http_status(status)))
 }
 
 fn read_bounded_error_body(response: impl Read) -> Option<Vec<u8>> {
@@ -3728,6 +3772,20 @@ fn stream_completion(
     on_event: &Channel<LocalInferenceEvent>,
     may_grow: bool,
 ) -> Result<LocalInferenceResult, LocalInferenceFailure> {
+    let diagnostic = failure_diagnostics::Context::new();
+    stream_completion_with_diagnostics(app, model, request, cancel, on_event, may_grow, &diagnostic)
+        .map_err(|failure| diagnostic.annotate(failure))
+}
+
+fn stream_completion_with_diagnostics(
+    app: &AppHandle,
+    model: &ModelRelease,
+    request: &LocalInferenceRequest,
+    cancel: Arc<AtomicBool>,
+    on_event: &Channel<LocalInferenceEvent>,
+    may_grow: bool,
+    diagnostic: &failure_diagnostics::Context,
+) -> Result<LocalInferenceResult, LocalInferenceFailure> {
     if !local_messages::valid_tool_arguments(&request.messages) {
         return Err(LocalInferenceFailure::http(
             400,
@@ -3828,10 +3886,18 @@ fn stream_completion(
         .is_some_and(|artifact| artifact.size_bytes <= COMPACT_MODEL_MAX_ARTIFACT_BYTES);
     let compact_ingress = compact_model.then_some((u64::from(context_limit) / 2).max(1024));
     let mut measured_input = 0;
+    diagnostic
+        .stage
+        .set(failure_diagnostics::Stage::Tokenization);
+    diagnostic.context.set(Some(u64::from(context_limit)));
     let usage = context_budget::fit_adaptive_context_with_ingress(
         &mut body,
         u64::from(context_limit),
         |candidate| {
+            // Clear a previous fitting pass before any new tokenizer operation.
+            // If this count fails its input length is unknown, never estimated.
+            diagnostic.input.set(None);
+            diagnostic.output.set(candidate["max_tokens"].as_u64());
             plan.apply(candidate)?;
             require_runtime_operation_checkpoint(
                 &request.request_id,
@@ -3882,6 +3948,7 @@ fn stream_completion(
             if measured_input == 0 {
                 measured_input = tokens;
             }
+            diagnostic.input.set(Some(tokens));
             Ok(tokens)
         },
         || LocalInferenceFailure::http(400, LlamaHttpFailureKind::ContextWindowExceeded),
@@ -3902,6 +3969,12 @@ fn stream_completion(
         if let Some(target) =
             context_budget::growth_target(context_limit, signed_context, measured_input)
         {
+            diagnostic
+                .stage
+                .set(failure_diagnostics::Stage::Preparation);
+            diagnostic.input.set(None);
+            diagnostic.context.set(None);
+            diagnostic.output.set(None);
             require_runtime_operation_checkpoint(
                 &request.request_id,
                 &request.catalog_binding,
@@ -3943,6 +4016,10 @@ fn stream_completion(
         }
     }
     let usage = usage?;
+    diagnostic.stage.set(failure_diagnostics::Stage::Generation);
+    diagnostic.input.set(Some(usage.input_tokens));
+    diagnostic.context.set(Some(usage.context_tokens));
+    diagnostic.output.set(Some(usage.output_tokens));
     require_runtime_operation_checkpoint(&request.request_id, &request.catalog_binding, &cancel)?;
     if request.use_case == IDLE_CONTEXT_USE_CASE {
         let (status, bytes) = idle_inference::post(
@@ -4549,7 +4626,9 @@ impl CachedArtifact {
         let Ok(modified) = metadata.modified() else {
             return false;
         };
-        self.len == metadata.len() && self.modified == modified && self.identity == platform_identity(file)
+        self.len == metadata.len()
+            && self.modified == modified
+            && self.identity == platform_identity(file)
     }
 }
 

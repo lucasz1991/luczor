@@ -955,6 +955,52 @@ describe('agent mode and tool reliability', () => {
     expect(mocks.execute).toHaveBeenCalledTimes(1)
   })
 
+  it('retains completed changes and reports a parameter rejection without retrying the failing round', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'project',
+      mutating: true,
+      requiresApproval: false,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    const diagnosticMessage = 'Die Antwortgenerierung wurde abgelehnt (HTTP 400). Parameter: enable_thinking.'
+    mocks.streamChatWithTools.mockResolvedValueOnce(toolCallResult).mockRejectedValueOnce(
+      new LocalInferenceError(diagnosticMessage, 'runtime_request_rejected', false, false, {
+        schemaVersion: 1,
+        stage: 'generation',
+        httpStatus: 400,
+        code: 'runtime_request_rejected',
+        parameter: 'enable_thinking',
+        reason: 'parameter_type',
+      })
+    )
+    const interrupted = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Speichere den Projektfortschritt.' }],
+      mode: 'act',
+      maxRounds: 5,
+    })
+    expect(interrupted.interrupted).toMatchObject({ code: 'runtime_request_rejected', round: 2 })
+    expect(interrupted.finalText).toContain(diagnosticMessage)
+    expect(interrupted.continuation?.completedMutations).toHaveLength(1)
+    // An invalid parameter is not evidence that the saved tool history is corrupt.
+    expect(interrupted.continuation?.messages.some(message => message.role === 'tool')).toBe(true)
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(2)
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(toolCallResult)
+      .mockResolvedValueOnce({ content: 'Fortsetzung abgeschlossen.', toolCalls: [], rawToolCalls: [] })
+    const resumed = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [],
+      mode: 'act',
+      continuation: interrupted.continuation,
+      maxRounds: 2,
+    })
+    expect(resumed.finalText).toBe('Fortsetzung abgeschlossen.')
+    expect(mocks.execute).toHaveBeenCalledTimes(1)
+  })
+
   it('does not dispatch an agent twice after rebuilding a rejected local tool history', async () => {
     const dispatchResult = {
       content: 'Agent wird gestartet.',

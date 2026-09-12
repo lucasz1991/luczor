@@ -194,7 +194,7 @@ describe('Tauri local runtime catalog boundary', () => {
   it.each([true, false])('classifies tool contract rejection without losing residency (event: %s)', async withEvent => {
     tauri.invoke.mockImplementationOnce(async (_command, args) => {
       if (withEvent) {
-        args.onEvent.onmessage({ type: 'error', code: 'runtime_tool_contract_rejected', retryable: false })
+        args.onEvent.onmessage({ type: 'error', requestId: 'request-1', code: 'runtime_tool_contract_rejected', retryable: false })
         throw 'private raw tool arguments'
       }
       throw 'Local llama.cpp rejected the tool contract (HTTP 500).'
@@ -219,7 +219,7 @@ describe('Tauri local runtime catalog boundary', () => {
     async withEvent => {
       tauri.invoke.mockImplementationOnce(async (_command, args) => {
         if (withEvent) {
-          args.onEvent.onmessage({ type: 'error', code: 'runtime_reasoning_control_unavailable', retryable: false })
+          args.onEvent.onmessage({ type: 'error', requestId: 'request-1', code: 'runtime_reasoning_control_unavailable', retryable: false })
           throw 'private control response body'
         }
         throw 'Local thinking control was not confirmed; generation interrupted.'
@@ -243,7 +243,7 @@ describe('Tauri local runtime catalog boundary', () => {
   it.each([true, false])('classifies role rejection without exposing native text (event: %s)', async withEvent => {
     tauri.invoke.mockImplementationOnce(async (_command, args) => {
       if (withEvent) {
-        args.onEvent.onmessage({ type: 'error', code: 'runtime_chat_history_rejected', retryable: false })
+        args.onEvent.onmessage({ type: 'error', requestId: 'request-1', code: 'runtime_chat_history_rejected', retryable: false })
         throw 'sensitive template and prompt text'
       }
       throw 'Local llama.cpp rejected the conversation role order in its chat template (HTTP 500).'
@@ -292,7 +292,7 @@ describe('Tauri local runtime catalog boundary', () => {
       usage: { inputTokens: 1234, outputTokens: 7, totalTokens: 1241 },
     })
     tauri.invoke.mockImplementationOnce(async (_command, args) => {
-      args.onEvent.onmessage({ type: 'error', code: 'runtime_context_exceeded', retryable: false })
+      args.onEvent.onmessage({ type: 'error', requestId: 'request-1', code: 'runtime_context_exceeded', retryable: false })
       throw 'sensitive raw native text'
     })
     await expect(transport.stream({} as LocalModelReleaseManifest, request)).rejects.toMatchObject({
