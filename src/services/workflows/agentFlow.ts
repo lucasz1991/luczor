@@ -354,6 +354,7 @@ export async function runWorkflowAgentFlow(
         routingSettings: { preference: 'local_only' },
         signal: ticket.signal,
         agentMode: team,
+        forceAgentTeam: team,
         agentTeamPreset: preset as RunAgentOptions['agentTeamPreset'],
         requestAgentTeamApproval: approveTeam,
         taskType: team ? 'workflow.agent.team' : 'workflow.agent.single',

@@ -53,14 +53,14 @@ function onRouteMode(event: Event): void {
   const value = (event.target as HTMLSelectElement).value
   if (value === 'local' || value === 'auto' || value === 'external') emit('update:routeMode', value)
 }
-/** The mode picks the route AND the agent team: every turn runs as a team. */
+/** The mode permits model routes; delegation is chosen for the actual request. */
 const routeModeHint = computed(() => {
   if (!props.externalAllowed) return 'Externe Modelle zuerst unter Einstellungen → Chat & Agenten zulassen.'
   if (props.routeMode === 'external')
-    return 'Orchestrierung und alle Agenten extern, kein lokales Modell. Jedes Nachrichtenpaket wird einzeln freigegeben.'
+    return 'Externe Modelle bearbeiten die Anfrage und holen bei Bedarf Unterstützung hinzu.'
   if (props.routeMode === 'auto')
-    return 'Lokale Orchestrierung, Agenten lokal und extern. Externe Pakete gehen erst nach ausdrücklicher Freigabe raus.'
-  return 'Orchestrierung und alle Agenten auf dem signierten lokalen Modell. Kein externer Weg.'
+    return 'Das Chatmodell antwortet direkt oder zieht bei Bedarf lokale und externe Unterstützung hinzu.'
+  return 'Das lokale Modell antwortet direkt oder übernimmt mehrere Arbeitsschritte. Inhalte bleiben lokal.'
 })
 const field = ref<HTMLTextAreaElement | null>(null)
 const menu = ref(false)
@@ -145,7 +145,7 @@ defineExpose({ focus: () => field.value?.focus() })
               class="ai-route-mode__select"
               :value="externalAllowed ? routeMode : 'local'"
               :disabled="busy || !externalAllowed"
-              aria-label="Modellroute und Agententeam für diesen Chat wählen"
+              aria-label="Erlaubte Modelle für diesen Chat wählen"
               @change="onRouteMode($event)"
             >
               <option value="local">Lokal</option>

@@ -45,7 +45,7 @@ it('does not replace an existing device selection with stale browser settings', 
   vi.mocked(localStorage.getItem).mockReturnValue(JSON.stringify({ localModelId: 'old-large-model' }))
   const settings = await import('@/services/inference/modelUsageSettings')
   await settings.initializeModelUsageSettings()
-  expect(settings.modelUsageSettings.value).toEqual(saved)
+  expect(settings.modelUsageSettings.value).toEqual({ ...saved, externalToolsEnabled: false })
   expect(native.set).not.toHaveBeenCalled()
 })
 

@@ -22,8 +22,7 @@ async function save() {
   busy.value = true
   try {
     await saveModelUsageSettings(draft.value)
-    message.value =
-      'Gespeichert. Modellwahl und Teamstandard gelten für neue Aufträge; externe Freigaben bleiben erforderlich.'
+    message.value = 'Gespeichert. Modellwahl und erlaubte Unterstützung gelten für neue Aufträge.'
   } catch {
     message.value = 'Die Einstellungen konnten nicht gespeichert werden.'
   } finally {
@@ -50,7 +49,7 @@ async function refreshCatalog() {
   <section class="lz-section" aria-label="Chat- und Agentenmodelle">
     <div class="lz-section__head">
       <h3>Chat &amp; Agenten</h3>
-      <p>Modelle und Teamstandard für dieses Gerät.</p>
+      <p>Modelle und erlaubte Unterstützung für dieses Gerät.</p>
     </div>
     <div class="lz-card">
       <label class="lz-label" for="model-usage-local">Lokales Modell</label>
@@ -86,32 +85,36 @@ async function refreshCatalog() {
         ><input v-model="draft.externalEnabled" type="checkbox" /> Externe Modelle zulassen</label
       >
       <p class="lz-hint">
-        Erlaubt externe Chat-Fallbacks und Spezialisten nach Nachrichtenfreigabe. Provider und Rollenmodelle werden im
-        Admin verwaltet. Ausschalten sperrt neue externe Modellrunden.
+        Erlaubt die automatische Nutzung externer Modelle in passenden Chats. Provider und Rollenmodelle werden im Admin
+        verwaltet. Ausschalten sperrt neue externe Modellrunden.
+      </p>
+      <label class="model-usage-toggle">
+        <input v-model="draft.externalToolsEnabled" type="checkbox" :disabled="!draft.externalEnabled" />
+        Externe Agenten dürfen freigegebenen Kontext gezielt durchsuchen
+      </label>
+      <p class="lz-hint">
+        Ermöglicht gezielte Lesezugriffe innerhalb des freigegebenen Kontexts. Projektgrenzen und gesperrte Inhalte
+        bleiben verbindlich.
       </p>
       <label class="lz-label" for="model-usage-route">Standardmodus neuer Chats</label>
       <select id="model-usage-route" v-model="draft.chatRouteMode" class="lz-input">
-        <option value="local">Lokal · Team nur auf dem signierten lokalen Modell</option>
-        <option value="auto" :disabled="!draft.externalEnabled">
-          Lokal + extern · lokale Orchestrierung, externe Spezialisten nach Freigabe
-        </option>
+        <option value="local">Lokal · signiertes lokales Modell</option>
+        <option value="auto" :disabled="!draft.externalEnabled">Lokal + extern · Unterstützung nach Bedarf</option>
         <option value="external" :disabled="!draft.externalEnabled">Nur extern · kein lokales Modell</option>
       </select>
       <p class="lz-hint">
-        Gilt als Vorauswahl im Eingabefeld; dort ist der Modus pro Chat umstellbar. Jeder Auftrag läuft als Agententeam,
-        und der Modus bestimmt auch dessen Besetzung: „Lokal" hält Orchestrierung und alle Agenten auf dem lokalen
-        Modell, „Lokal + extern" orchestriert lokal und lässt zusätzlich externe Spezialisten zu, „Nur extern" verwendet
-        kein lokales Modell. Externe Läufe verlangen weiterhin für jede Runde die ausdrückliche Freigabe des
-        Nachrichtenpakets.
+        Gilt als Vorauswahl im Eingabefeld; dort ist der Modus pro Chat umstellbar. Das Chatmodell entscheidet anhand
+        der Anfrage, ob es direkt antwortet oder Unterstützung hinzuzieht. „Lokal“ bleibt auf diesem Gerät, „Lokal +
+        extern“ erlaubt zusätzlich externe Modelle, „Nur extern“ verwendet kein lokales Modell.
       </p>
-      <p v-if="!draft.externalEnabled" class="lz-hint">Externe Modelle sind gesperrt. Teams arbeiten lokal.</p>
+      <p v-if="!draft.externalEnabled" class="lz-hint">Externe Modelle sind gesperrt. Luczor arbeitet lokal.</p>
       <div class="model-usage-actions">
         <button v-if="!managed" type="button" class="lz-btn" :disabled="busy" @click="save">
           Modellnutzung speichern
         </button>
         <button type="button" class="lz-btn" @click="draft = { ...DEFAULT_MODEL_USAGE }">Zurücksetzen</button>
       </div>
-      <p v-if="managed" class="lz-hint">�nderungen mit �Speichern� unten im Einstellungsfenster �bernehmen.</p>
+      <p v-if="managed" class="lz-hint">Änderungen mit „Speichern“ unten im Einstellungsfenster übernehmen.</p>
       <p role="status" class="lz-hint">{{ message }}</p>
     </div>
     <LocalResourceSettings />

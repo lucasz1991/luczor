@@ -77,6 +77,7 @@ export async function runChatAgentTeam(
         preset: opts.agentTeamPreset,
         signal: opts.signal,
         approve: opts.requestAgentTeamApproval,
+        automatic: true,
       })
       if (!specialists) notices.push('Das externe Team ist im Admin nicht aktiviert. Lokal weitergearbeitet.')
       else if (specialists.unavailableRoles?.length)
@@ -281,6 +282,7 @@ export async function runChatAgentTeam(
         ...opts,
         resourceWork: localResources.group(`team:${request.runId}`) ?? opts.resourceWork,
         agentMode: false,
+        forceAgentTeam: false,
         inferenceGateway: gateway,
         continuation: { ...nodeCheckpoint, messages },
         baseMessages: messages,

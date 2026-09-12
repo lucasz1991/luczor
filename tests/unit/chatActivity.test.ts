@@ -4,11 +4,34 @@ import {
   createChatActivity,
   finishChatActivity,
   presentToolCall,
+  publicActivityLabel,
   updateChatActivity,
 } from '@/services/chatActivity'
 import type { PendingToolCall } from '@/state/types'
 
 describe('chat activity lifecycle', () => {
+  it('retains distinct role events while presenting public activity without internal role names', () => {
+    const activity = createChatActivity(0)
+    updateChatActivity(activity, { agentRole: 'planner', phase: 'thinking', round: 1 })
+    updateChatActivity(activity, { agentRole: 'worker', phase: 'thinking', round: 1 })
+    updateChatActivity(activity, { agentRole: 'reviewer', phase: 'receiving', round: 1, characters: 30 })
+    expect(activity.steps.map(step => step.id)).toEqual([
+      'context',
+      'planner-round-1-thinking',
+      'worker-round-1-thinking',
+      'reviewer-round-1-receiving',
+    ])
+    expect(activity.steps.slice(1).map(step => step.label)).toEqual([
+      'Vorgehen vorbereiten',
+      'Antwort vorbereiten',
+      'Ergebnis wird geprüft',
+    ])
+    expect(activityLabel(activity, false)).toBe('Ergebnis wird geprüft')
+    expect(publicActivityLabel('Planungsagent: Antwort vorbereiten')).toBe('Vorgehen wird ausgearbeitet')
+    expect(publicActivityLabel('Arbeitsagent: Werkzeuge ausführen')).toBe('Werkzeuge ausführen')
+    expect(publicActivityLabel('Prüfagent: Antwort wird geschrieben')).toBe('Ergebnis wird geprüft')
+  })
+
   it('updates a model round without creating one row per token', () => {
     const activity = createChatActivity(1000)
     updateChatActivity(activity, { phase: 'routing' })

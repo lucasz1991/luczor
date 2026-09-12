@@ -21,6 +21,7 @@ import { loadDeviceKey, saveDeviceKey } from '@/services/secureDeviceKey'
 import { DEFAULT_API_BASE_URL } from './endpoint'
 import { apiTransportFetch } from './transportTarget'
 import type { AssistantProfile } from '@/services/assistantProfileTypes'
+import { projectExternalIdForServer } from '@/services/cloudProjectAccess'
 
 const SETTINGS_FILE = 'luczor.settings.json'
 const API_PREFIX = '/api/v1'
@@ -831,7 +832,7 @@ export const LuczorApi = {
 
   // Projects / conversations / tasks (agent-tool backing, server is SoR).
   createProject: (externalId: string, name: string, signal?: AbortSignal, config?: LuczorApiConfigSnapshot) => {
-    const options = { method: 'POST', body: { external_id: externalId, name }, signal }
+    const options = { method: 'POST', body: { external_id: projectExternalIdForServer(externalId), name }, signal }
     return config
       ? requestWithConfig<{ data: unknown }>('/projects', options, config)
       : request<{ data: unknown }>('/projects', options)
@@ -842,7 +843,11 @@ export const LuczorApi = {
     signal?: AbortSignal,
     config?: LuczorApiConfigSnapshot
   ) => {
-    const options = { method: 'POST', body, signal }
+    const options = {
+      method: 'POST',
+      body: { ...body, project_id: projectExternalIdForServer(body.project_id) },
+      signal,
+    }
     return config
       ? requestWithConfig<{ data: { external_id: string }; meta?: { replayed?: boolean } }>(
           '/conversations',
@@ -856,7 +861,7 @@ export const LuczorApi = {
     signal?: AbortSignal,
     config?: LuczorApiConfigSnapshot
   ) => {
-    const options = { query, signal }
+    const options = { query: { ...query, project_id: projectExternalIdForServer(query?.project_id) }, signal }
     return config
       ? requestWithConfig<{
           data: unknown[]
@@ -875,7 +880,7 @@ export const LuczorApi = {
   ) => {
     const options = {
       method: 'POST',
-      body: { external_id: externalId, project_id: projectId },
+      body: { external_id: externalId, project_id: projectExternalIdForServer(projectId) },
       signal,
     }
     return config
@@ -902,7 +907,11 @@ export const LuczorApi = {
     signal?: AbortSignal,
     config?: LuczorApiConfigSnapshot
   ) => {
-    const options = { method: 'POST', body, signal }
+    const options = {
+      method: 'POST',
+      body: { ...body, project_id: projectExternalIdForServer(body.project_id) },
+      signal,
+    }
     return config
       ? requestWithConfig<{ data: { external_id: string } }>('/tasks', options, config)
       : request<{ data: { external_id: string } }>('/tasks', options)
@@ -912,7 +921,7 @@ export const LuczorApi = {
     signal?: AbortSignal,
     config?: LuczorApiConfigSnapshot
   ) => {
-    const options = { query, signal }
+    const options = { query: { ...query, project_id: projectExternalIdForServer(query?.project_id) }, signal }
     return config
       ? requestWithConfig<{
           data: unknown[]
@@ -931,7 +940,7 @@ export const LuczorApi = {
   ) => {
     const options = {
       method: 'POST',
-      body: { external_id: externalId, project_id: projectId },
+      body: { external_id: externalId, project_id: projectExternalIdForServer(projectId) },
       signal,
     }
     return config
@@ -951,7 +960,14 @@ export const LuczorApi = {
     config?: LuczorApiConfigSnapshot
   ) => {
     const path = `/tasks/${encodeURIComponent(externalId)}`
-    const options = { method: 'PATCH', body, signal }
+    const options = {
+      method: 'PATCH',
+      body: {
+        ...body,
+        ...(typeof body.project_id === 'string' ? { project_id: projectExternalIdForServer(body.project_id) } : {}),
+      },
+      signal,
+    }
     return config
       ? requestWithConfig<{ data: unknown }>(path, options, config)
       : request<{ data: unknown }>(path, options)

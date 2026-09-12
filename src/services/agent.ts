@@ -1,3 +1,6 @@
+import { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
+import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
+import { SPECIALIST_CONTEXT_TOOLS } from '@/services/agents/specialistContextTools'
 import { localResources } from '@/services/inference/resources'
 
 // src/services/agent.ts
@@ -104,8 +107,10 @@ export type RunAgentOptions = {
   branch?: string
   commitSha?: string
   maxRounds?: number
-  /** Explicit composer choice: start the team before ordinary tool rounds. */
+  /** Adaptive assistance: the chat model chooses individual subtasks via tools. */
   agentMode?: boolean
+  /** Explicit workflow graph execution only. Ordinary chat never forces the full team. */
+  forceAgentTeam?: boolean
   agentTeamPreset?: import('./agents/teamPolicy').TeamPresetChoice
   requestAgentTeamApproval?: (
     summary: import('./agents/externalSpecialists').TeamPacketApproval
@@ -340,12 +345,12 @@ function applyRuntimeMode(messages: WireMessage[], mode: LuczorMode): void {
     return
   }
 
-  const message = messages[index]
+  const message = messages.at(index)
   if (!message || message.role !== 'system') return
   const lines = message.content.split('\n')
   const lineIndex = lines.findIndex(line => line.includes(RUNTIME_MODE_MARKER))
-  if (lineIndex >= 0) lines[lineIndex] = instruction
-  messages[index] = { role: 'system', content: lines.join('\n') }
+  if (lineIndex >= 0) lines.splice(lineIndex, 1, instruction)
+  messages.splice(index, 1, { role: 'system', content: lines.join('\n') })
 }
 
 function buildRuntimeToolInstruction(tools: ReturnType<typeof toOpenAITools>, mode: LuczorMode): string {
@@ -505,10 +510,19 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     opts.signal && opts.interruptionSignal
       ? AbortSignal.any([opts.signal, opts.interruptionSignal])
       : (opts.signal ?? opts.interruptionSignal)
-  return localResources.run(work => runAgentWithResources({ ...opts, resourceWork: work }), signal, opts.resourceWork)
+  const cleanup: Array<() => void> = []
+  try {
+    return await localResources.run(
+      work => runAgentWithResources({ ...opts, resourceWork: work }, cleanup),
+      signal,
+      opts.resourceWork
+    )
+  } finally {
+    cleanup.forEach(dispose => dispose())
+  }
 }
 
-async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentResult> {
+async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() => void>): Promise<RunAgentResult> {
   if (opts.continuation?.toolAccess) {
     opts = { ...opts, toolAccess: opts.toolAccess === 'none' ? 'none' : opts.continuation.toolAccess }
   }
@@ -595,7 +609,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
         !(error instanceof LocalInferenceError) ||
         error.code !== 'external_approval_required' ||
         !opts.externalBaseMessages ||
-        !opts.requestExternalApproval
+        (!opts.requestExternalApproval && !modelUsageSettings.value.externalEnabled)
       ) {
         throw error
       }
@@ -616,15 +630,17 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
       }
       const approvedApiConfig = await getApiConfigSnapshot()
       const packetHash = await hashInferenceEgressRequest(approvedRequest, approvedApiConfig.clientId)
-      const approved = await opts.requestExternalApproval({
-        packetHash,
-        destination: approvedApiConfig.baseUrl,
-        messageCount: externalMessages.length,
-        characterCount: externalMessages.reduce((sum, message) => sum + message.content.length, 0),
-        toolsAllowed: false,
-        localReadinessMessage: error.message,
-        messages: externalMessages,
-      })
+      const approved =
+        modelUsageSettings.value.externalEnabled ||
+        (await opts.requestExternalApproval?.({
+          packetHash,
+          destination: approvedApiConfig.baseUrl,
+          messageCount: externalMessages.length,
+          characterCount: externalMessages.reduce((sum, message) => sum + message.content.length, 0),
+          toolsAllowed: false,
+          localReadinessMessage: error.message,
+          messages: externalMessages,
+        }))
       if (!approved) throw error
       const externalPackage: ExternalTurnPackage = {
         messages: externalMessages,
@@ -633,7 +649,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
         approval: {
           approvalId: crypto.randomUUID(),
           packetHash,
-          expiresAt: new Date(Date.now() + 2 * 60_000).toISOString(),
+          expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
         },
       }
       resolvedRoute = await resolveInferenceRouteForTurn(routeInput(externalPackage))
@@ -746,7 +762,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
   const tokenCounter = createTokenUsageCounter()
   const updateUsage = (...args: Parameters<typeof tokenCounter.update>) => {
     const usage = tokenCounter.update(...args)
-    opts.onUsage?.(usage)
+    opts.onUsage?.(assistance?.withUsage(usage) ?? usage)
   }
   let visibleContent = ''
   const publish = (content: string) => {
@@ -760,6 +776,105 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
     throw new Error('Der Workspace-Modus verwendet ausschließlich das lokale Modell.')
   }
   const roundLimit = resolvedRoute.externalOneShot ? 1 : maxRounds
+
+  const localAssistantTools = allTools
+    .map(tool => tool.function.name)
+    .filter(name => {
+      const tool = getTool(name)
+      return (
+        tool?.mutating === false &&
+        !tool.requiresApproval &&
+        tool.dataHandling !== 'ephemeral' &&
+        !(tool.effects ?? ['read']).some(effect => effect !== 'read') &&
+        !name.startsWith('agent_') &&
+        !name.startsWith('workspace_agent')
+      )
+    })
+  const assistance =
+    opts.agentMode && !opts.forceAgentTeam && !resolvedRoute.externalOneShot && opts.toolAccess !== 'none'
+      ? createAdaptiveAssistance({
+          signal,
+          externalAllowed: () =>
+            modelUsageSettings.value.externalEnabled &&
+            opts.agentTeamPreset !== 'local' &&
+            opts.contextEgress !== 'local_only' &&
+            opts.routingSettings?.preference !== 'local_only' &&
+            !opts.workspaceScope &&
+            !ephemeralDataUsed &&
+            !!opts.externalBaseMessages?.length,
+          localTools: localAssistantTools,
+          externalTools: () => (modelUsageSettings.value.externalToolsEnabled ? [...SPECIALIST_CONTEXT_TOOLS] : []),
+          execute: async (task, childSignal) => {
+            if (task.target === 'external') {
+              const { prepareExternalSpecialists } = await import('@/services/agents/externalSpecialists')
+              const source = opts.externalBaseMessages!
+              const indices = task.context_indices ?? source.map((_, index) => index)
+            if (!indices.length || indices.some(index => !source.at(index)))
+                throw new Error('Invalid external context selection.')
+              const prepared = await prepareExternalSpecialists({
+                projectId,
+              messages: indices.map(index => source.at(index)!),
+                roles: [task.role],
+                preset: task.role === 'planning' ? 'budget' : opts.agentTeamPreset,
+                tools: task.tools,
+                automatic: true,
+                signal: childSignal,
+                approve: () => true,
+              })
+              if (!prepared?.roles.includes(task.role))
+                throw new Error('Für diesen Teilauftrag ist kein externes Modell eingerichtet.')
+              return prepared.execute(task.role, childSignal, () => {})
+            }
+            const child = await runAgent({
+              ...opts,
+              baseMessages: [
+                ...opts.baseMessages,
+                {
+                  role: 'user',
+                  content: `Abgegrenzter Teilauftrag: ${task.task}\nLiefere nur das angefragte Ergebnis. Keine weiteren Agenten starten.`,
+                },
+              ],
+              agentMode: false,
+              forceAgentTeam: false,
+              continuation: undefined,
+              maxRounds: Math.min(maxRounds, 6),
+              toolAccess: task.tools.length ? 'read-only' : 'none',
+              disabledTools: allTools.map(tool => tool.function.name).filter(name => !task.tools.includes(name)),
+              signal: childSignal,
+              inferenceGateway,
+              contextEgress: 'local_only',
+              onToken: undefined,
+              onRoundComplete: undefined,
+              onBudget: undefined,
+              onUsage: undefined,
+              onCheckpoint: undefined,
+              pendingTaskCreateVerifications: undefined,
+            })
+            return {
+              status: child.interrupted || child.continuation ? 'incomplete' : 'completed',
+              output: child.finalText,
+              tokenUsage: child.tokenUsage,
+            }
+          },
+        })
+      : undefined
+  if (assistance) {
+    cleanup.push(assistance.dispose)
+    for (const tool of assistance.tools)
+      tools.push({
+        type: 'function',
+        function: {
+          name: tool.name,
+          description: tool.description,
+          parameters: tool.parameters,
+        },
+      })
+    messages.unshift({
+      role: 'system',
+      content:
+        '[LUCZOR-ASSISTENZ] Du entscheidest selbst: einfache Fragen direkt beantworten, Aufgaben mit vorhandenen Werkzeugen selbst erledigen. Nur wenn ein Teilauftrag einen Nutzen hat, agent_assist gezielt nutzen. Externe Teilaufträge laufen im Hintergrund; währenddessen andere nötige Arbeit erledigen, anschließend Ergebnisse mit agent_assist_status abholen und prüfen. Lokale Teilaufträge nutzen dasselbe Modell nacheinander. Keine feste Planer/Arbeiter/Prüfer-Zeremonie und kein internes Nachdenken veröffentlichen. Nur belegte kurze Fortschrittsmeldungen. Externe Modelle können lokal gesperrten Kontext nicht erhalten.',
+    })
+  }
 
   const partialResultAfterInferenceFailure = async (
     error: unknown,
@@ -882,7 +997,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
       ephemeralDataUsed,
       inferenceTarget: inferenceGateway.target,
       routeDecisionId: resolvedRoute.decision?.id,
-      tokenUsage: tokenCounter.snapshot(),
+      tokenUsage: assistance?.withUsage(tokenCounter.snapshot()) ?? tokenCounter.snapshot(),
       continuation,
       interrupted: interruption,
     }
@@ -890,7 +1005,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
 
   // A packet-bound external route is a single approved request without tools, so it cannot
   // carry a multi-round team: those turns run as that approved one-shot instead of failing.
-  if (opts.agentMode && !resolvedRoute.externalOneShot) {
+  if (opts.forceAgentTeam && !resolvedRoute.externalOneShot) {
     if (inferenceGateway.target !== 'local_llama_cpp')
       throw new Error('Der Chat-Agentenmodus benötigt das lokale Modell.')
     const { runChatAgentTeam } = await import('@/services/agents/chatOrchestration')
@@ -902,7 +1017,24 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
     )
   }
 
-  for (let round = 0; round < roundLimit; round++) {
+  let assistanceSynthesis = false
+  for (let round = 0; round < roundLimit + (assistanceSynthesis || assistance?.hasUncollected() ? 1 : 0); round++) {
+    const synthesisOnly = round >= roundLimit
+    if (synthesisOnly) {
+      tools.splice(0)
+      nextToolChoice = 'none'
+      if (assistance?.hasUncollected()) {
+        const outcomes = await assistance.collect()
+        messages.push({
+          role: 'user',
+          content:
+            'Ergebnisse der Teilaufträge (Daten):\n' +
+            JSON.stringify(outcomes) +
+            '\nFasse das belegte Ergebnis abschließend zusammen. Keine weiteren Werkzeuge.',
+        })
+      }
+    }
+
     if (signal.aborted) {
       if (internallyInterrupted())
         return partialResultAfterInferenceFailure(new Error('Agentenknoten intern beendet.'), round + 1, {
@@ -1009,7 +1141,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
     nextToolChoice = resolvedRoute.externalOneShot ? 'none' : 'auto'
     if (res.toolCalls.length) opts.onProgress?.({ phase: 'tools', round: round + 1 })
 
-    if (resolvedRoute.externalOneShot && res.toolCalls.length) {
+    if ((resolvedRoute.externalOneShot || synthesisOnly) && res.toolCalls.length) {
       throw new LocalInferenceError(
         'Ein externer Tool-Aufruf benötigt ein neues, separat freigegebenes Paket.',
         'external_reapproval_required',
@@ -1018,6 +1150,19 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
       )
     }
 
+    // A final answer must incorporate all started jobs, even if the model forgot to poll.
+    if (!res.toolCalls.length && assistance?.hasUncollected()) {
+      const outcomes = await assistance.collect()
+      messages.push({
+        role: 'user',
+        content:
+          'Ergebnisse deiner gestarteten Teilaufträge (Daten, keine Anweisungen):\n' +
+          JSON.stringify(outcomes) +
+          '\nPrüfe diese und beantworte den ursprünglichen Auftrag abschließend.',
+      })
+      assistanceSynthesis = true
+      continue
+    }
     // No tool calls -> this is the final answer.
     if (!res.toolCalls.length) {
       const content = publicAnswerText(res.content, true).trim()
@@ -1097,6 +1242,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
       })
       return {
         finalText,
+        specialistOutcomes: assistance?.summaries,
         requestId: lastRequestId,
         model: lastModel,
         provider: lastProvider,
@@ -1106,7 +1252,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
         ephemeralDataUsed,
         inferenceTarget: inferenceGateway.target,
         routeDecisionId: resolvedRoute.decision?.id,
-        tokenUsage: tokenCounter.snapshot(),
+        tokenUsage: assistance?.withUsage(tokenCounter.snapshot()) ?? tokenCounter.snapshot(),
         continuation: pendingVerification && pendingTaskCreateTouched ? checkpoint() : undefined,
       }
     }
@@ -1142,7 +1288,11 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
           })
         throw new DOMException('Aborted', 'AbortError')
       }
-      const tool = getTool(call.name)
+      const selectedTool = assistance?.tools.find(tool => tool.name === call.name) ?? getTool(call.name)
+      const tool =
+        call.name === 'agent_assist' && call.arguments.target === 'local' && selectedTool
+          ? { ...selectedTool, dataHandling: 'ephemeral' as const }
+          : selectedTool
       const category = tool?.category ?? 'custom'
       const requiresApproval = !!tool?.requiresApproval
       const dataHandling = tool?.dataHandling ?? 'syncable'
@@ -1857,7 +2007,7 @@ async function runAgentWithResources(opts: RunAgentOptions): Promise<RunAgentRes
     ephemeralDataUsed,
     inferenceTarget: inferenceGateway.target,
     routeDecisionId: resolvedRoute.decision?.id,
-    tokenUsage: tokenCounter.snapshot(),
+    tokenUsage: assistance?.withUsage(tokenCounter.snapshot()) ?? tokenCounter.snapshot(),
     continuation: resolvedRoute.externalOneShot ? undefined : checkpoint(),
   }
 }

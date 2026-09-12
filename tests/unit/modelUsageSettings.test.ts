@@ -25,10 +25,14 @@ it('persists model and route choices together before publishing them', async () 
     localModelId: 'local-tier-light',
     externalEnabled: true,
     chatRouteMode: 'auto' as const,
+    externalToolsEnabled: true,
   }
   await saveModelUsageSettings(choice)
   expect(modelUsageSettings.value).toEqual(choice)
-  expect(localStorage.setItem).toHaveBeenCalledWith('luczor.device.model-usage.v1', JSON.stringify(choice))
+  expect(localStorage.setItem).toHaveBeenCalledWith(
+    'luczor.device.model-usage.v1',
+    JSON.stringify(parseModelUsage(choice))
+  )
 })
 it('does not publish unsaved choices when device storage rejects the write', async () => {
   vi.mocked(localStorage.setItem).mockImplementation(() => {

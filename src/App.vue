@@ -7,13 +7,15 @@ import Settings from './components/Settings.vue'
 import { modelUsageSettings, type ChatRouteMode } from '@/services/inference/modelUsageSettings'
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import type { SystemStatusDisplayMode } from '@/features/system-status/model'
-import TokenCounter from './components/ai/TokenCounter.vue'
 import AgentTeamResults from './components/ai/AgentTeamResults.vue'
 import ChatCommentary from './components/ai/ChatCommentary.vue'
 import { localAssistantProfilePrompt, refreshAssistantProfile } from '@/services/assistantProfile'
 import PlanPanel from './components/PlanPanel.vue'
 import ChatProjectOverlay from './components/ChatProjectOverlay.vue'
 import SidebarNav from './components/ai/SidebarNav.vue'
+import CloudProjectsPanel from './components/projects/CloudProjectsPanel.vue'
+import { useCloudProjects } from '@/composables/useCloudProjects'
+import { canAccessCloudProject } from '@/services/cloudProjectAccess'
 import AgentHub from './components/agents/AgentHub.vue'
 import PlanningWorkspace from './components/planning/PlanningWorkspace.vue'
 import WorkflowWorkspace from './components/workflows/WorkflowWorkspace.vue'
@@ -58,7 +60,7 @@ import ToolCenterPanel from './components/tools/ToolCenterPanel.vue'
 import BrowserPanel from './components/browser/BrowserPanel.vue'
 import { browserPanel } from '@/services/browserPanel'
 import { useMiniChatHost } from '@/composables/useMiniChatHost'
-import ThinkingBudgetControl from '@/components/ai/ThinkingBudgetControl.vue'
+import AssistantResponseFooter from '@/components/ai/AssistantResponseFooter.vue'
 import {
   isThinkingTier,
   type ThinkingTier,
@@ -165,6 +167,7 @@ const settingsStartTab = ref<SettingsStartTab>('server')
 const showSystemPanel = ref(false)
 const systemStatusDisplayMode = ref<SystemStatusDisplayMode>('tabs')
 const showAgentHub = ref(false)
+const showCloudProjects = ref(false)
 const showPlanning = ref(false)
 const showWorkflows = ref(false)
 const showToolCenter = ref(false)
@@ -584,14 +587,17 @@ function stopAssistantLoading() {
 /* -------------------------------------------------
  * Derived state from store
  * ------------------------------------------------- */
-const projects = computed(() => state.projects)
+const projects = computed(() => state.projects.filter(project => canAccessCloudProject(project)))
 
 const activeProjectId = computed<string>({
   get() {
     state.global.ui ??= {}
-    return state.global.ui.lastProjectId ?? state.projects[0]?.id ?? 'default'
+    const selected = projects.value.find(project => project.id === state.global.ui?.lastProjectId)
+    return selected?.id ?? projects.value[0]?.id ?? 'default'
   },
   set(id) {
+    const project = state.projects.find(item => item.id === id)
+    if (project && !canAccessCloudProject(project)) return
     mutations.setActiveProject(id)
   },
 })
@@ -668,7 +674,7 @@ const projectActivity = computed<Record<string, boolean>>(() => {
   return Object.fromEntries(active)
 })
 const projectItems = computed(() =>
-  projects.value.map(project => ({ id: project.id, label: project.name, busy: !!projectActivity.value[project.id] }))
+  projects.value.map(project => ({ id: project.id, label: project.name, busy: !!projectActivity.value[project.id], cloud: !!project.cloud }))
 )
 const isWelcomeMessage = (message: Message) =>
   message.role === 'assistant' &&
@@ -1934,7 +1940,7 @@ const miniChat = useMiniChatHost({
     thinkingTier.value = tier
   },
   controlThinking: controlChatThinking,
-  projects: () => miniProjectList(state.projects, state.messages, projectActivity.value),
+  projects: () => miniProjectList(projects.value, state.messages, projectActivity.value),
   chat: () =>
     projectChatBinding(
       activeProject.value,
@@ -1946,7 +1952,7 @@ const miniChat = useMiniChatHost({
   stopChat: stopGenerating,
   selectProject: async id => {
     if (conversationBusy.value) throw new Error('Der aktuelle Auftrag läuft noch.')
-    if (!state.projects.some(project => project.id === id && !project.archivedAt))
+    if (!projects.value.some(project => project.id === id && !project.archivedAt))
       throw new Error('Projekt nicht verfügbar.')
     openProject(id)
     await refreshActiveWorkspace()
@@ -2048,10 +2054,12 @@ useIdleOptimization({
 watch(conversationBusy, busy => voiceInputSession.setMuted(busy || voiceMuteDepth > 0), { flush: 'sync' })
 const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
 useWorkflowWatchers()
+useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.value).some(Boolean))
 </script>
 
 <template>
   <PayloadApproval />
+  <CloudProjectsPanel :open="showCloudProjects" :project-id="activeProjectId" :busy="conversationBusy || Object.values(projectActivity).some(Boolean)" @update:open="showCloudProjects = $event" @select="openProject" />
   <WorkflowWorkspace
     :open="showWorkflows"
     :project-id="activeProjectId"
@@ -2128,6 +2136,7 @@ useWorkflowWatchers()
       @agents="showAgentHub = true"
       @planning="openPlanning()"
       @workflows="openWorkflows()"
+      @cloud-projects="showCloudProjects = true"
     />
 
     <main class="main-col">
@@ -2287,11 +2296,6 @@ useWorkflowWatchers()
             <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
           </svg>
         </button>
-      </div>
-
-      <!-- Unrestricted-mode warning -->
-      <div v-if="mode === 'unrestricted'" class="mode-warning">
-        ⚠ VOLLZUGRIFF AKTIV — Luczor führt Tools ohne Rückfrage aus. Not-Aus im HUD stoppt sofort.
       </div>
 
       <!-- Overlay stays anchored above the independently scrolling conversation. -->
@@ -2589,7 +2593,15 @@ useWorkflowWatchers()
                   >
                 </StreamingText>
               </SelectionActions>
-              <TokenCounter :usage="m.meta.tokenUsage" :active="chatActivities[m.id]?.status === 'running'" />
+              <AssistantResponseFooter
+                :message-id="m.id"
+                :active-message-id="activeThinkingBudget?.messageId"
+                :usage="m.meta.tokenUsage"
+                :active="chatActivities[m.id]?.status === 'running'"
+                :budget="visibleThinkingBudget"
+                :control="controlChatThinking"
+                @stop="stopGenerating"
+              />
               <AgentTeamResults v-if="m.meta.specialistOutcomes?.length" :outcomes="m.meta.specialistOutcomes" />
               <div v-if="continuations[m.id]" class="ai-continuation">
                 <button class="ai-model-button" type="button" :disabled="conversationBusy" @click="resumeWork(m.id)">
@@ -2668,12 +2680,6 @@ useWorkflowWatchers()
       </div>
 
       <div ref="composerShell" class="ai-main-composer">
-        <ThinkingBudgetControl
-          v-if="visibleThinkingBudget"
-          :progress="visibleThinkingBudget"
-          :control="controlChatThinking"
-          @stop="stopGenerating"
-        />
         <PromptBar
           ref="promptBar"
           v-model="input"
@@ -2686,10 +2692,10 @@ useWorkflowWatchers()
           :voice-busy="voiceInputView.starting || voiceInputView.finishing"
           :model-label="
             chatRouteMode === 'external'
-              ? 'Agententeam extern · nach Freigabe'
+              ? 'Externe Modelle'
               : chatRouteMode === 'auto'
-                ? 'Agententeam lokal + extern'
-                : 'Agententeam lokal'
+                ? 'Lokal + extern'
+                : 'Lokales Modell'
           "
           :context-label="activeWorkspace?.displayName || activeProject?.name"
           :commands="promptCommands"
@@ -2715,7 +2721,7 @@ useWorkflowWatchers()
 
     <BrowserPanel
       :project-id="activeProjectId"
-      :suspended="showSettings || showAgentHub || showPlanning || showWorkflows || showToolCenter || showSystemPanel"
+      :suspended="showSettings || showAgentHub || showCloudProjects || showPlanning || showWorkflows || showToolCenter || showSystemPanel"
     />
 
     <SystemStatusPanel

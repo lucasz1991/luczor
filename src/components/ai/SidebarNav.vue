@@ -16,6 +16,7 @@ const emit = defineEmits<{
   agents: []
   planning: []
   workflows: []
+  cloudProjects: []
   'update:collapsed': [value: boolean]
 }>()
 const query = ref('')
@@ -75,6 +76,14 @@ function cancelRename() {
     <button class="ai-sidebar__action" type="button" title="Workflows, Auslöser und Läufe" @click="emit('workflows')">
       <AiIcon name="tool" /><span>Workflows</span>
     </button>
+    <button
+      class="ai-sidebar__action"
+      type="button"
+      title="Projekte auf deinen Geräten abgleichen"
+      @click="emit('cloudProjects')"
+    >
+      <AiIcon name="folder" /><span>Globale Projekte</span>
+    </button>
     <div class="ai-sidebar__section">
       <span>Projekte</span><span>{{ items.length }}</span>
     </div>
@@ -113,6 +122,13 @@ function cancelRename() {
             @blur="commitRename(item)"
           />
           <span v-else>{{ item.label }}</span>
+          <span
+            v-if="item.cloud && !collapsed"
+            class="ai-sidebar__cloud"
+            title="Globales Projekt"
+            aria-label="Globales Projekt"
+            >↔</span
+          >
           <span
             v-if="item.busy"
             class="ai-sidebar__activity"

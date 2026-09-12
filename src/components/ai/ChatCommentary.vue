@@ -5,9 +5,8 @@ defineProps<{ entries: ChatCommentary[]; messageId?: string }>()
 </script>
 
 <template>
-  <section v-if="entries.length" class="chat-commentary" aria-label="Zwischenkommentare">
+  <section v-if="entries.length" class="chat-commentary" aria-label="Öffentliche Fortschrittsmeldungen">
     <div v-for="entry in entries" :key="entry.id" class="chat-commentary__entry">
-      <span class="ai-section-label">Zwischenkommentar · {{ entry.round }}</span>
       <StreamingText
         :content="entry.content"
         :animate="false"

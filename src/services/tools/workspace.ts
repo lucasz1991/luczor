@@ -8,6 +8,7 @@ import { isSafeRecordKey } from '@/services/safeRecord'
 import { agentJobTools } from './agentJobs'
 import type { ToolContext, ToolDef } from './types'
 import { validateToolArguments } from './validateArguments'
+import { canAccessCloudProject } from '@/services/cloudProjectAccess'
 
 type WorkspaceAccess = {
   principalId: string
@@ -51,7 +52,7 @@ function workspaceAccess(ctx: ToolContext, mutating: boolean): WorkspaceAccess {
     if (ctx.signal?.aborted) throw new DOMException('Aborted', 'AbortError')
     if (
       projectId !== undefined &&
-      (!projectIds.has(projectId) || !state.projects.some(project => project.id === projectId && !project.archivedAt))
+      (!projectIds.has(projectId) || !state.projects.some(project => project.id === projectId && !project.archivedAt && canAccessCloudProject(project, principalId)))
     )
       throw new Error('Das Zielprojekt gehört nicht zum freigegebenen Arbeitsbereich.')
   }
@@ -151,7 +152,7 @@ const overview = defineWorkspaceTool({
   async execute(args, _ctx, access) {
     const limit = typeof args.limit === 'number' ? args.limit : 20
     const projects = state.projects
-      .filter(project => !project.archivedAt && access.projectIds.has(project.id))
+      .filter(project => !project.archivedAt && access.projectIds.has(project.id) && canAccessCloudProject(project, access.principalId))
       .sort((left, right) => right.updatedAt - left.updatedAt)
     const liveIds = new Set(projects.map(project => project.id))
     const jobs = agentHub

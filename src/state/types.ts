@@ -109,6 +109,16 @@ export type ProjectDefaults = {
 export type Project = {
   id: Id
   name: string
+  /** User-owned server snapshot. Native folder bindings remain device-local. */
+  cloud?: {
+    principalId: string
+    projectId: number
+    externalId: string
+    revision: number
+    fingerprint: string
+    syncedAt: number
+    paused?: boolean
+  }
 
   /**
    * Optional human-readable "overall goal" (high-level)

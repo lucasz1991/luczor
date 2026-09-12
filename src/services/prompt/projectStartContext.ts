@@ -1,6 +1,7 @@
 import { luczorMemory, type MemoryRecord } from '@/services/memory/luczorMemory'
 import type { ProjectWorkspaceBinding } from '@/services/projectWorkspace'
 import type { Project } from '@/state/types'
+import { canAccessCloudProject } from '@/services/cloudProjectAccess'
 import {
   assemblePromptContext,
   type AssemblePromptContextOptions,
@@ -50,6 +51,7 @@ function memoryFragment(record: MemoryRecord, index: number): PromptFragment {
 }
 
 function projectFragments(project: Project, workspace?: ProjectWorkspaceBinding | null): PromptFragment[] {
+  if (!canAccessCloudProject(project)) throw new Error('Das Projekt gehört zu einem anderen Benutzer.')
   const fragments: PromptFragment[] = [
     {
       id: 'project-identity',

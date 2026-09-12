@@ -4,6 +4,7 @@
 import { Store } from '@tauri-apps/plugin-store'
 import { invoke } from '@tauri-apps/api/core'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
+import { projectExternalIdForServer } from '@/services/cloudProjectAccess'
 import { memoryImportance, memoryPriority, MEMORY_PRIORITIES, type MemoryPriority } from './memoryPriority'
 import { analyzeMemoryRecords, type MemoryAnalysis } from './memoryAnalysis'
 import { trackMemoryActivity } from './activity'
@@ -1277,11 +1278,12 @@ export class LuczorMemoryService {
     input: { projectId?: string; agentId?: string; sessionId?: string; userId?: string },
     principalId: string
   ): MemoryContext {
+    const projectId = projectExternalIdForServer(input.projectId, principalId)
     return {
       principalId,
       scope,
-      dataset: datasetFor(scope, { ...input, userId: principalId }),
-      projectId: input.projectId,
+      dataset: datasetFor(scope, { ...input, projectId, userId: principalId }),
+      projectId,
       agentId: input.agentId,
       sessionId: input.sessionId,
       userId: input.userId,
@@ -1326,7 +1328,7 @@ export class LuczorMemoryService {
       createdAt: now,
       updatedAt: now,
       expiresAt: plan.retention === 'session' ? now + 24 * 60 * 60_000 : undefined,
-      projectId: input.projectId,
+      projectId: context.projectId,
       agentId: input.agentId,
       sessionId: input.sessionId,
       featureKey: input.memoryKey ?? input.featureKey,

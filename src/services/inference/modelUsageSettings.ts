@@ -2,16 +2,9 @@ import { shallowRef } from 'vue'
 import { isTauri } from '@tauri-apps/api/core'
 import { Store } from '@tauri-apps/plugin-store'
 
-/**
- * Explicit per-chat route choice in the composer. Every turn runs as an agent team, so this
- * one control also picks that team (see `teamPresetForRouteMode`):
- * - `local`:    only the signed local model; orchestration and every agent stay local.
- * - `auto`:     local orchestration first, external specialists on top, each only after an
- *               explicit per-turn release.
- * - `external`: no local model at all; the approved external route answers, still only
- *               after the same explicit per-turn release.
- * `external` and `auto` require `externalEnabled`; otherwise the mode degrades to `local`.
- */
+/** Per-device provider choice. The chat model chooses whether targeted assistance is useful.
+ * Enabling external models authorizes automatic, identity-bound provider packets; disabling
+ * them revokes new packets. Context tools are an independent opt-in. */
 export type ChatRouteMode = 'local' | 'auto' | 'external'
 
 export const CHAT_ROUTE_MODES: readonly ChatRouteMode[] = ['local', 'auto', 'external'] as const
@@ -19,12 +12,14 @@ export const CHAT_ROUTE_MODES: readonly ChatRouteMode[] = ['local', 'auto', 'ext
 export type ModelUsageSettings = {
   localModelId: string | null
   externalEnabled: boolean
+  externalToolsEnabled?: boolean
   chatRouteMode: ChatRouteMode
 }
 const KEY = 'luczor.device.model-usage.v1'
 export const DEFAULT_MODEL_USAGE: ModelUsageSettings = {
   localModelId: null,
   externalEnabled: false,
+  externalToolsEnabled: false,
   chatRouteMode: 'local',
 }
 export function parseModelUsage(value: unknown): ModelUsageSettings {
@@ -35,6 +30,7 @@ export function parseModelUsage(value: unknown): ModelUsageSettings {
         ? item.localModelId
         : null,
     externalEnabled: item.externalEnabled === true,
+    externalToolsEnabled: item.externalEnabled === true && item.externalToolsEnabled === true,
     // A stored external choice must never survive switching external models off.
     chatRouteMode:
       item.externalEnabled === true && CHAT_ROUTE_MODES.includes(item.chatRouteMode as ChatRouteMode)

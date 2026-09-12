@@ -73,7 +73,7 @@ describe('AI component rendering contracts', () => {
     expect(html).not.toContain('<script>payload')
   })
 
-  it('keeps finished traces expanded unless explicitly collapsed', async () => {
+  it('keeps activity traces available behind disclosure without opening them by default', async () => {
     const render = (expanded?: boolean) =>
       renderToString(
         createSSRApp({
@@ -81,7 +81,7 @@ describe('AI component rendering contracts', () => {
             h(ThinkingState, { expanded, steps: [{ id: 'read', label: 'Projekt gelesen', status: 'done' }] }),
         })
       )
-    expect(await render()).toContain('aria-expanded="true"')
+    expect(await render()).toContain('aria-expanded="false"')
     expect(await render(true)).toContain('aria-expanded="true"')
     expect(await render(false)).toContain('aria-expanded="false"')
   })
@@ -109,7 +109,7 @@ describe('AI component rendering contracts', () => {
           }),
       })
     )
-    expect(html).toContain('aria-label="Modellroute und Agententeam für diesen Chat wählen"')
+    expect(html).toContain('aria-label="Erlaubte Modelle für diesen Chat wählen"')
     expect(html).toContain('ai-route-mode')
     expect(html).toContain('Externes Modell')
     expect(html).toContain('ai-prompt__heading')
@@ -117,7 +117,7 @@ describe('AI component rendering contracts', () => {
     expect(html).not.toContain('Luczor kann Fehler machen')
   })
 
-  it('offers no agent-mode switch because every turn runs as a team', async () => {
+  it('offers model permissions without claiming every turn needs an agent team', async () => {
     const html = await renderToString(
       createSSRApp({
         render: () => h(PromptBar, { modelValue: '', routeMode: 'auto', externalAllowed: true }),
@@ -125,8 +125,8 @@ describe('AI component rendering contracts', () => {
     )
     expect(html).not.toContain('ai-agent-mode')
     expect(html).not.toContain('Agentenmodus')
-    // The mode keeps describing the team it picks, and stays usable for every mode.
-    expect(html).toContain('Lokale Orchestrierung, Agenten lokal und extern')
+    expect(html).toContain('Das Chatmodell antwortet direkt oder zieht bei Bedarf')
+    expect(html).not.toContain('Jedes Nachrichtenpaket')
     expect(html).not.toContain('<select class="ai-route-mode__select" disabled')
   })
 

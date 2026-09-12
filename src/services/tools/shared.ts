@@ -1,6 +1,7 @@
 import { LuczorApi, type LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
 import { state } from '@/state/store'
 import type { GoalStatus } from '@/state/types'
+import { canAccessCloudProject } from '@/services/cloudProjectAccess'
 
 export function asString(value: unknown): string {
   return typeof value === 'string' ? value : ''
@@ -15,7 +16,9 @@ export function uid(): string {
 }
 
 export function getProject(projectId: string) {
-  return state.projects.find(project => project.id === projectId)
+  const project = state.projects.find(project => project.id === projectId)
+  if (project && !canAccessCloudProject(project)) throw new Error('Das Projekt gehört zu einem anderen Benutzer.')
+  return project
 }
 
 /**
@@ -29,6 +32,7 @@ export async function ensureCurrentProjectOnServer(
   config?: LuczorApiConfigSnapshot
 ): Promise<void> {
   const project = getProject(projectId)
+  if (state.projects.some(item => item.id === projectId) && !project) throw new Error('Das Projekt gehört zu einem anderen Benutzer.')
   signal?.throwIfAborted()
   await LuczorApi.createProject(projectId, project?.name ?? projectId, signal, config)
   signal?.throwIfAborted()

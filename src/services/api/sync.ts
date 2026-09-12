@@ -21,21 +21,23 @@ export type ConnectionResult = { ok: boolean; message: string }
 
 /** Explicit allowlist: native repository paths/graph metadata must never sync. */
 export function projectsForSync(projects: unknown[]): Array<Record<string, unknown>> {
-  return projects.map(project => {
-    const value = (project ?? {}) as Record<string, unknown>
-    return plain({
-      id: value.id,
-      name: value.name,
-      goal: value.goal,
-      goals: value.goals,
-      summary: value.summary,
-      defaults: value.defaults,
-      focus: value.focus,
-      archivedAt: value.archivedAt,
-      createdAt: value.createdAt,
-      updatedAt: value.updatedAt,
+  return projects
+    .filter(project => !(project as { cloud?: unknown } | null)?.cloud)
+    .map(project => {
+      const value = (project ?? {}) as Record<string, unknown>
+      return plain({
+        id: value.id,
+        name: value.name,
+        goal: value.goal,
+        goals: value.goals,
+        summary: value.summary,
+        defaults: value.defaults,
+        focus: value.focus,
+        archivedAt: value.archivedAt,
+        createdAt: value.createdAt,
+        updatedAt: value.updatedAt,
+      })
     })
-  })
 }
 
 /**
@@ -65,12 +67,15 @@ export async function testConnection(): Promise<ConnectionResult> {
 /** Push the entire local state as an idempotent batch. */
 export async function pushAllToServer(): Promise<SyncPushResponse> {
   const cfg = await LuczorApi.getConfig()
+  const cloudIds = new Set(state.projects.filter(project => project.cloud).map(project => project.id))
   return LuczorApi.syncPush({
     client_id: cfg.clientId,
     projects: projectsForSync(state.projects ?? []),
-    messages: messagesForSync(state.messages ?? []),
-    memories: plain(state.global?.memories ?? []),
-    summaries: plain(state.summaries ?? []),
+    messages: messagesForSync((state.messages ?? []).filter(message => !cloudIds.has(message.projectId))),
+    memories: plain(
+      (state.global?.memories ?? []).filter(memory => !memory.projectId || !cloudIds.has(memory.projectId))
+    ),
+    summaries: plain((state.summaries ?? []).filter(summary => !cloudIds.has(summary.projectId))),
   })
 }
 

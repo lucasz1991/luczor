@@ -4,7 +4,7 @@ import type { LocalModelStatusView } from '@/services/localModelStatus'
 import { localModelToolDependencies, localModelTools } from '@/services/tools/localModel'
 
 const mocks = vi.hoisted(() => ({ invoke: vi.fn(), reconcile: vi.fn() }))
-vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke, Channel: class {} }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke, isTauri: () => true, Channel: class {} }))
 vi.mock('@/services/inference/coordinator', () => ({
   localInferenceCoordinator: {
     status: () => ({ mode: 'unavailable', reason: 'no_policy', manifest: null, admissions: [] }),

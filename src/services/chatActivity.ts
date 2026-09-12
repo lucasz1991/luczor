@@ -9,6 +9,18 @@ export type AgentProgress = {
   characters?: number
 }
 export type ChatActivity = { startedAt: number; finishedAt?: number; status: ActivityStatus; steps: ActivityStep[] }
+
+/** Older stored activity labels may still include the former internal role prefix. */
+export function publicActivityLabel(label: string): string {
+  const match = /^(Planungsagent|Arbeitsagent|Prüfagent): (.+)$/.exec(label)
+  if (!match) return label
+  const phase = match[2]!
+  if (phase === 'Antwort vorbereiten' || phase === 'Antwort wird geschrieben') {
+    if (match[1] === 'Planungsagent') return 'Vorgehen wird ausgearbeitet'
+    if (match[1] === 'Prüfagent') return 'Ergebnis wird geprüft'
+  }
+  return phase
+}
 export function createChatActivity(now = Date.now()): ChatActivity {
   return {
     startedAt: now,
@@ -22,17 +34,22 @@ export function updateChatActivity(activity: ChatActivity, event: AgentProgress)
   const phaseId = event.phase === 'routing' ? 'routing' : `round-${event.round ?? 1}-${event.phase}`
   const id = event.agentRole ? `${event.agentRole}-${phaseId}` : phaseId
   const current = activity.steps.find(step => step.id === id)
-  const phaseLabel =
+  const label =
     event.phase === 'routing'
       ? 'Modell vorbereiten'
       : event.phase === 'tools'
         ? 'Werkzeuge ausführen'
         : event.phase === 'receiving'
-          ? 'Antwort wird geschrieben'
-          : 'Antwort vorbereiten'
-  const agentLabel =
-    event.agentRole === 'planner' ? 'Planungsagent' : event.agentRole === 'worker' ? 'Arbeitsagent' : 'Prüfagent'
-  const label = event.agentRole ? `${agentLabel}: ${phaseLabel}` : phaseLabel
+          ? event.agentRole === 'planner'
+            ? 'Vorgehen wird ausgearbeitet'
+            : event.agentRole === 'reviewer'
+              ? 'Ergebnis wird geprüft'
+              : 'Antwort wird geschrieben'
+          : event.agentRole === 'planner'
+            ? 'Vorgehen vorbereiten'
+            : event.agentRole === 'reviewer'
+              ? 'Ergebnis prüfen'
+              : 'Antwort vorbereiten'
   const detail =
     event.characters === undefined
       ? event.round
@@ -98,5 +115,5 @@ export function activityLabel(activity: ChatActivity, waiting: boolean): string 
   if (activity.status === 'failed') return 'Verarbeitung fehlgeschlagen'
   if (activity.status === 'done') return 'Arbeitsschritte abgeschlossen'
   if (waiting) return 'Wartet auf deine Freigabe'
-  return activity.steps[activity.steps.length - 1]?.label ?? 'Luczor arbeitet'
+  return publicActivityLabel(activity.steps[activity.steps.length - 1]?.label ?? 'Luczor arbeitet')
 }

@@ -70,25 +70,26 @@ async function act(action: ThinkingControlAction) {
 }
 </script>
 <template>
-  <section class="thinking-budget" aria-label="Laufendes Denkbudget">
+  <section class="thinking-budget" aria-label="Laufendes Denkbudget" :class="{ 'is-warning': progress.warning }">
     <div class="thinking-budget__summary">
       <strong>{{ phase }}</strong
       ><span>{{ THINKING_DEFAULTS[progress.tier].label }} · {{ Math.floor(progress.elapsedMs / 1000) }} s</span>
+      <span v-if="progress.generatedTokens !== null">{{ fmt(progress.generatedTokens) }} Tokens generiert</span>
     </div>
-    <div class="thinking-budget__numbers">
-      {{
-        progress.generatedTokens === null
-          ? 'Tokenstand noch unbekannt'
-          : `${fmt(progress.generatedTokens)} Tokens generiert`
-      }}
-      · Denkziel {{ fmt(progress.softTargetTokens) }}
-    </div>
-    <p v-if="progress.thinkingLimitTokens < progress.requestedThinkingLimitTokens">
-      Verfügbar: {{ fmt(progress.thinkingLimitTokens) }} von
-      {{ fmt(progress.requestedThinkingLimitTokens) }} Denktokens.
-    </p>
     <details>
       <summary>Budgetdetails</summary>
+      <p>
+        {{
+          progress.generatedTokens === null
+            ? 'Tokenstand noch unbekannt'
+            : `${fmt(progress.generatedTokens)} Tokens generiert`
+        }}
+        · Denkziel {{ fmt(progress.softTargetTokens) }}
+      </p>
+      <p v-if="progress.thinkingLimitTokens < progress.requestedThinkingLimitTokens">
+        Verfügbar: {{ fmt(progress.thinkingLimitTokens) }} von
+        {{ fmt(progress.requestedThinkingLimitTokens) }} Denktokens.
+      </p>
       <p>
         Gesamtausgabe bis {{ fmt(progress.outputLimitTokens) }} Tokens. Antwortreserve
         {{ fmt(progress.responseReserveTokens) }} Tokens. Der Zähler umfasst alle generierten Tokens; er misst keine
@@ -113,13 +114,10 @@ async function act(action: ThinkingControlAction) {
 </template>
 <style scoped>
 .thinking-budget {
-  border: 1px solid var(--ai-border, #373944);
-  border-radius: 9px;
-  padding: 10px 12px;
-  margin: 0 0 8px;
-  font-size: 12px;
-  color: var(--ai-text, #e8e9ef);
-  background: var(--ai-surface, #20222a);
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--ai-text-muted, #b0b2bf);
 }
 .thinking-budget__summary,
 .thinking-budget__actions {
@@ -129,12 +127,16 @@ async function act(action: ThinkingControlAction) {
   gap: 8px;
 }
 .thinking-budget__summary {
-  justify-content: space-between;
+  gap: 8px 12px;
 }
-.thinking-budget__numbers,
+strong {
+  font-weight: 500;
+}
 details {
-  margin-top: 5px;
-  color: var(--ai-text-muted, #b0b2bf);
+  margin-top: 3px;
+}
+.is-warning .thinking-budget__summary {
+  color: var(--ai-text, #e8e9ef);
 }
 p {
   margin: 6px 0;

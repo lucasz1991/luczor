@@ -78,6 +78,7 @@ export const projectStateTools: ToolDef[] = [
     async execute(args, ctx) {
       const summary = asString(args.summary).trim()
       if (!summary) throw new Error('summary is empty')
+      getProject(ctx.projectId)
       mutations.setProjectSummary(ctx.projectId, summary)
       return { ok: true, summary }
     },

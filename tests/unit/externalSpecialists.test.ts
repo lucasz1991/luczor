@@ -8,6 +8,7 @@ import { parseTeamPolicy } from '@/services/agents/teamPolicy'
 import { executionGate } from '@/services/executionGate'
 import type { InferenceRequest } from '@/services/inference/types'
 import type { VerifiedAccountSnapshot } from '@/services/accountPrincipal'
+import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 const account: VerifiedAccountSnapshot = {
   principalId: 'a',
   accountId: 1,
@@ -65,6 +66,67 @@ function fixture() {
   return { deps, stream, approve, input }
 }
 describe('external role packets', () => {
+  it('automatically renews selected context tool packets and sums all rounds without an approval dialog', async () => {
+    const previous = modelUsageSettings.value
+    modelUsageSettings.value = { ...previous, externalEnabled: true, externalToolsEnabled: true }
+    try {
+      const fixtureData = fixture()
+      const stream = vi
+        .fn()
+        .mockResolvedValueOnce({
+          content: '',
+          toolCalls: [{ id: 'c1', name: 'context_search', arguments: { query: 'Auftrag' } }],
+          rawToolCalls: [
+            { id: 'c1', type: 'function', function: { name: 'context_search', arguments: '{"query":"Auftrag"}' } },
+          ],
+          finishReason: 'tool_calls',
+          usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5 },
+        })
+        .mockResolvedValueOnce({
+          content: 'Ergebnis mit Kontextbeleg',
+          toolCalls: [],
+          rawToolCalls: [],
+          finishReason: 'stop',
+          usage: { inputTokens: 7, outputTokens: 3, totalTokens: 10 },
+        })
+      fixtureData.deps.resolveRoute.mockImplementation(async () => ({
+        gateway: { id: 'fixture', target: 'laravel_proxy', streamChatWithTools: stream },
+        externalOneShot: true,
+      }))
+      const prepared = await prepareExternalSpecialists(
+        { ...fixtureData.input, roles: ['research'], tools: ['context_search'], automatic: true },
+        fixtureData.deps
+      )
+      expect(prepared!.roles).toEqual(['research'])
+      const result = await prepared!.execute('research', new AbortController().signal, () => {})
+      expect(fixtureData.approve).not.toHaveBeenCalled()
+      expect(stream).toHaveBeenCalledTimes(2)
+      expect(result.tokenUsage.totalTokens).toBe(15)
+      expect(stream.mock.calls[1]![0].messages.some((message: { role: string }) => message.role === 'tool')).toBe(true)
+      const hashes = fixtureData.deps.resolveRoute.mock.calls.map(([request]) => request.externalPackage!.packetHash)
+      expect(hashes[0]).not.toBe(hashes[1])
+    } finally {
+      modelUsageSettings.value = previous
+    }
+  })
+
+  it('revokes automatic external work before a request when the device setting changes', async () => {
+    const previous = modelUsageSettings.value
+    modelUsageSettings.value = { ...previous, externalEnabled: true }
+    try {
+      const fixtureData = fixture()
+      const prepared = await prepareExternalSpecialists(
+        { ...fixtureData.input, roles: ['review'], automatic: true },
+        fixtureData.deps
+      )
+      modelUsageSettings.value = { ...previous, externalEnabled: false }
+      await expect(prepared!.execute('review', new AbortController().signal, () => {})).rejects.toThrow('deaktiviert')
+      expect(fixtureData.stream).not.toHaveBeenCalled()
+    } finally {
+      modelUsageSettings.value = previous
+    }
+  })
+
   it('prepares available roles while identifying unconfigured roles without granting them a packet', async () => {
     const fixtureData = fixture()
     const partialPolicy = policy()
@@ -155,7 +217,9 @@ describe('external role packets', () => {
       executionGate.invalidate()
       return true
     })
-    await expect(prepared.execute('coding', new AbortController().signal, vi.fn())).rejects.toThrow('Sitzung')
+    await expect(prepared.execute('coding', new AbortController().signal, vi.fn())).rejects.toThrow(
+      /Sitzung|abgebrochen/
+    )
     expect(fixtureData.stream).not.toHaveBeenCalled()
   })
   it('rechecks repository policy after user approval', async () => {

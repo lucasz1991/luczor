@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
   runChatAgentTeam: vi.fn(),
+  prepareExternalSpecialists: vi.fn(),
   streamChatWithTools: vi.fn(),
   getTool: vi.fn(),
   toOpenAITools: vi.fn(),
@@ -20,6 +21,7 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@/services/agents/chatOrchestration', () => ({ runChatAgentTeam: mocks.runChatAgentTeam }))
+vi.mock('@/services/agents/externalSpecialists', () => ({ prepareExternalSpecialists: mocks.prepareExternalSpecialists }))
 vi.mock('@/services/openrouter.service', () => ({
   OpenRouterService: { streamChatWithTools: mocks.streamChatWithTools },
 }))
@@ -56,6 +58,7 @@ vi.mock('@/services/api/sync', () => ({ logAgentEvent: mocks.logAgentEvent }))
 
 import { buildSystemPreamble, looksLikeInternalReasoningLeak, runAgent, shouldRequireToolCall } from '@/services/agent'
 import { LocalInferenceError } from '@/services/inference/localModelManager'
+import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 import type { InferenceRequest } from '@/services/inference/types'
 import {
   buildLaravelProxyBody,
@@ -161,7 +164,7 @@ describe('agent mode and tool reliability', () => {
     }
   })
 
-  it('dispatches active agent mode immediately without an ordinary chat round', async () => {
+  it('runs an explicitly requested workflow team before an ordinary chat round', async () => {
     const gateway = { id: 'local', target: 'local_llama_cpp' as const, streamChatWithTools: mocks.streamChatWithTools }
     mocks.runChatAgentTeam.mockResolvedValue({ finalText: 'Team fertig' })
     const response = await runAgent({
@@ -169,12 +172,71 @@ describe('agent mode and tool reliability', () => {
       baseMessages: [{ role: 'user', content: 'Bearbeite das Projekt' }],
       mode: 'act',
       agentMode: true,
+      forceAgentTeam: true,
       inferenceGateway: gateway,
       maxRounds: 2,
     })
     expect(mocks.runChatAgentTeam).toHaveBeenCalledOnce()
     expect(mocks.streamChatWithTools).not.toHaveBeenCalled()
     expect(response.finalText).toBe('Team fertig')
+  })
+
+  it('answers a simple adaptive chat directly and exposes targeted assistance without a forced team', async () => {
+    mocks.streamChatWithTools.mockResolvedValue({
+      content: 'Hallo!',
+      toolCalls: [],
+      rawToolCalls: [],
+      finishReason: 'stop',
+    })
+    const response = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Hallo' }],
+      mode: 'act',
+      agentMode: true,
+      maxRounds: 2,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(mocks.runChatAgentTeam).not.toHaveBeenCalled()
+    expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+    const sent = mocks.streamChatWithTools.mock.calls[0]![0] as InferenceRequest
+    expect(sent.tools).toEqual(
+      expect.arrayContaining([expect.objectContaining({ function: expect.objectContaining({ name: 'agent_assist' }) })])
+    )
+    expect(response.finalText).toBe('Hallo!')
+  })
+
+  it('continues local inference while an external subtask runs and reserves a tools-free synthesis round', async () => {
+    const previous = modelUsageSettings.value
+    modelUsageSettings.value = { ...previous, externalEnabled: true }
+    let finish!: (value: unknown) => void
+    const pending = new Promise(resolve => { finish = resolve })
+    const execute = vi.fn(() => pending)
+    mocks.prepareExternalSpecialists.mockResolvedValue({ roles: ['research'], execute })
+    const call = { id: 'assist1', name: 'agent_assist', arguments: { task: 'PRIVATE LOCAL LABEL', role: 'research', target: 'external' } }
+    mocks.streamChatWithTools.mockResolvedValueOnce({ content: '', toolCalls: [call], rawToolCalls: [{ id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } }], finishReason: 'tool_calls' })
+      .mockImplementationOnce(async () => {
+        finish({ role: 'research', output: 'Checked result', tokenUsage: { inputTokens: 2, outputTokens: 3, totalTokens: 5, rounds: 1, source: 'reported' } })
+        return { content: 'Provisional response', toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
+      })
+      .mockImplementationOnce(async (request: InferenceRequest) => {
+        expect(request.toolChoice).toBe('none')
+        expect(request.tools).toEqual([])
+        expect(JSON.stringify(request.messages)).toContain('Checked result')
+        return { content: 'Combined final answer', toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
+      })
+    try {
+      const response = await runAgent({ projectId: 'project-2', baseMessages: [{ role: 'system', content: 'PRIVATE LOCAL CONTEXT' }, { role: 'user', content: 'Inspect options' }],
+        externalBaseMessages: [{ role: 'user', content: 'PUBLIC CONTEXT' }], contextEgress: 'external_allowed', agentTeamPreset: 'free',
+        mode: 'act', agentMode: true, maxRounds: 2,
+        inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools } })
+      expect(mocks.prepareExternalSpecialists).toHaveBeenCalledOnce()
+      expect(response.finalText).toBe('Combined final answer')
+      expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(3)
+      expect(mocks.runChatAgentTeam).not.toHaveBeenCalled()
+      expect(JSON.stringify(mocks.prepareExternalSpecialists.mock.calls)).not.toContain('PRIVATE')
+      expect(response.specialistOutcomes).toHaveLength(1)
+      expect(response.tokenUsage.totalTokens).toBeGreaterThanOrEqual(5)
+    } finally { modelUsageSettings.value = previous }
   })
 
   it('retains a resumable checkpoint at the limit without starting a team', async () => {

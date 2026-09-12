@@ -13,10 +13,9 @@ import { loadAudioTriggers } from '@/services/voice/audioTriggers'
 import ChatComposer from '../ai/ChatComposer.vue'
 import StreamingText from '../ai/StreamingText.vue'
 import ChatCommentary from '../ai/ChatCommentary.vue'
-import TokenCounter from '../ai/TokenCounter.vue'
+import AssistantResponseFooter from '../ai/AssistantResponseFooter.vue'
 import ThinkingState from '../ai/ThinkingState.vue'
 import ThinkingSelector from '../ai/ThinkingSelector.vue'
-import ThinkingBudgetControl from '../ai/ThinkingBudgetControl.vue'
 import { createMiniThinkingControl } from '@/services/miniChat/thinkingControl'
 import ApprovalCard from '../ai/ApprovalCard.vue'
 import ToolChips from '../ai/ToolChips.vue'
@@ -654,7 +653,15 @@ onBeforeUnmount(() => {
               :question="message.question"
               :follow-ups="message.status === 'running' ? message.choices : []"
             />
-            <TokenCounter :usage="message.tokenUsage" :active="message.status === 'running'" />
+            <AssistantResponseFooter
+              :message-id="message.id"
+              :active-message-id="lastAssistant?.status === 'running' ? lastAssistant.id : undefined"
+              :usage="message.tokenUsage"
+              :active="snapshot.busy && message.status === 'running'"
+              :budget="snapshot.thinkingBudget"
+              :control="controlThinking"
+              @stop="emit('action', { type: 'stop', sessionId: snapshot.sessionId })"
+            />
             <WorkflowChatCards
               v-if="isChat && message.workflows?.length"
               :workflows="message.workflows"
@@ -731,12 +738,6 @@ onBeforeUnmount(() => {
         {{ clipboardError || 'Antwort kopiert' }}
       </p>
       <form class="mini-composer" @submit.prevent="send()">
-        <ThinkingBudgetControl
-          v-if="snapshot.thinkingBudget"
-          :progress="snapshot.thinkingBudget"
-          :control="controlThinking"
-          @stop="emit('action', { type: 'stop', sessionId: snapshot.sessionId })"
-        />
         <div class="mini-thinking-choice">
           <small>Lokales Modell</small>
           <ThinkingSelector

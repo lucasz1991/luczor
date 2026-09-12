@@ -6,7 +6,7 @@ defineProps<{ outcomes: SpecialistOutcome[] }>()
 const feedback = ref(new Map<string, number>())
 const pending = ref(new Map<string, boolean>())
 const error = ref('')
-const labels = { planning: 'Planung', research: 'Recherchevorschläge', coding: 'Codeentwurf', review: 'Prüfkriterien' }
+const labels = { planning: 'Vorgehen', research: 'Recherche', coding: 'Codevorschlag', review: 'Ergebnisprüfung' }
 async function rate(outcome: SpecialistOutcome, rating: 1 | -1) {
   if (!outcome.requestId || pending.value.get(outcome.requestId)) return
   const id = outcome.requestId
@@ -32,11 +32,8 @@ async function rate(outcome: SpecialistOutcome, rating: 1 | -1) {
 
 <template>
   <details v-if="outcomes.length" class="agent-results">
-    <summary>Agentenbeiträge · {{ outcomes.length }} Modelleinsätze</summary>
-    <p>
-      Bewerte jeden Beitrag einzeln. Daraus lernt die Modellauswahl je Rolle; Tests werden dadurch nicht als bestanden
-      gewertet.
-    </p>
+    <summary>Zusätzliche Ergebnisse · {{ outcomes.length }} Beiträge</summary>
+    <p>Beiträge und verwendete Modelle ansehen oder bewerten. Bewertungen helfen bei der späteren Modellauswahl.</p>
     <section v-for="outcome in outcomes" :key="outcome.requestId ?? outcome.role">
       <!-- Specialists only ever run on the approved external route, so the badge names it. -->
       <strong>{{ labels[outcome.role] }}</strong> · Router · {{ outcome.model ?? 'Servermodell' }}
@@ -75,11 +72,9 @@ async function rate(outcome: SpecialistOutcome, rating: 1 | -1) {
 
 <style scoped>
 .agent-results {
-  margin-block: 0.75rem;
-  padding: 0.75rem;
-  border: 1px solid var(--border, #3b3b3b);
-  border-radius: 0.6rem;
-  font-size: 0.85rem;
+  margin-block: 0.65rem;
+  color: var(--ai-text-muted, #b0b2bf);
+  font-size: 0.75rem;
 }
 summary,
 button {

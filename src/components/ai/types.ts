@@ -11,7 +11,14 @@ export type ActivityStep = {
   dataHandling?: 'syncable' | 'ephemeral'
 }
 export type ContextItem = { id: string; title: string; content: string; source: string; kind?: string }
-export type SearchItem = { id: string; label: string; description?: string; icon?: string; busy?: boolean }
+export type SearchItem = {
+  id: string
+  label: string
+  description?: string
+  icon?: string
+  busy?: boolean
+  cloud?: boolean
+}
 export type TableColumn = { key: string; label: string }
 export type TableRecord = { id: string; [key: string]: string | number }
 export type DiffRecord = { id: string; label: string; before: string; after: string }

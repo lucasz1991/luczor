@@ -1,5 +1,6 @@
 import { shallowRef, watch } from 'vue'
 import { state } from '@/state/store'
+import { canAccessCloudProject } from '@/services/cloudProjectAccess'
 import { hud } from '@/state/hud'
 import { getProjectWorkspace, resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
 import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
@@ -44,7 +45,7 @@ export async function validateAgentScope(project: AgentProjectSnapshot, permissi
   validateControls(permission)
   if ((await resolveWorkspacePrincipalId()) !== project.principalId)
     throw new Error('Das aktive Konto hat sich geändert.')
-  if (!state.projects.some(item => item.id === project.projectId && !item.archivedAt))
+  if (!state.projects.some(item => item.id === project.projectId && !item.archivedAt && canAccessCloudProject(item, project.principalId)))
     throw new Error('Das Projekt ist nicht mehr aktiv.')
   const workspace = await getProjectWorkspace(project.projectId, project.principalId)
   if (
@@ -102,6 +103,7 @@ export async function agentProjectSnapshot(projectId: string): Promise<AgentProj
   const project = state.projects.find(item => item.id === projectId && !item.archivedAt)
   if (!project) throw new Error('Projekt nicht gefunden.')
   const principalId = await resolveWorkspacePrincipalId()
+  if (!canAccessCloudProject(project, principalId)) throw new Error('Das Projekt gehört zu einem anderen Benutzer.')
   const workspace = await getProjectWorkspace(projectId, principalId)
   return {
     principalId,
