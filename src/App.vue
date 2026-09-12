@@ -27,6 +27,7 @@ import {
   planningDiscussionMessage,
 } from '@/services/planningEntry'
 import { configureAgentHub } from '@/services/agents/hub'
+import { teamPresetForRouteMode } from '@/services/agents/teamPolicy'
 import {
   executionGate,
   invalidateExecution,
@@ -1449,11 +1450,7 @@ async function send(
     const turnSpeechGeneration = speechGeneration
 
     // user message (tag spoken input for the "Gesprochen" badge)
-    const userMsg = mutations.makeMsg(
-      'user',
-      resume ? (resume.asTeam ? 'Mit Agententeam fortsetzen' : 'Weiterarbeiten') : text,
-      pid
-    )
+    const userMsg = mutations.makeMsg('user', resume ? 'Weiterarbeiten' : text, pid)
     userMsg.meta = { ...(userMsg.meta ?? {}), inputSource, thinkingTier: turnThinking.thinkingTier }
     mutations.addMessage(userMsg)
     if (!resume && !miniInput) input.value = ''
@@ -1697,8 +1694,8 @@ async function send(
           if (turnExecution.signal.aborted || activeTurn.value?.messageId !== assistant.id) return
           activeThinkingBudget.value = progress ? { projectId: pid, messageId: assistant.id, progress } : null
         },
-        agentMode: useAgents,
-        agentTeamPreset: agentTeamPreset.value,
+        agentMode: true,
+        agentTeamPreset: turnTeamPreset,
         requestAgentTeamApproval: approval =>
           requestPayloadApproval(
             {
@@ -1986,9 +1983,6 @@ const miniChat = useMiniChatHost({
   },
   togglePushToTalk,
   toggleWakeWord: toggleListening,
-  setAgentMode: enabled => {
-    agentMode.value = enabled
-  },
   appearance: () => ({ accent: appearanceAccentColor(), assistantName: appearance.assistantName }),
   context: () => ({
     project: activeProject.value ? { id: activeProject.value.id, name: activeProject.value.name } : null,
@@ -2027,7 +2021,8 @@ const miniChat = useMiniChatHost({
     setKillSwitch(enabled)
     if (enabled) void stopGenerating()
   },
-  agentMode: () => agentMode.value,
+  // Every turn is a team turn now; the mini chat only mirrors that, it cannot switch it.
+  agentMode: () => true,
   voice: () => ({
     wakeWord: listening.value,
     recording: isRecording.value,
@@ -2591,21 +2586,8 @@ useWorkflowWatchers()
               <TokenCounter :usage="m.meta.tokenUsage" :active="chatActivities[m.id]?.status === 'running'" />
               <AgentTeamResults v-if="m.meta.specialistOutcomes?.length" :outcomes="m.meta.specialistOutcomes" />
               <div v-if="continuations[m.id]" class="ai-continuation">
-                <button
-                  class="ai-model-button"
-                  type="button"
-                  :disabled="conversationBusy"
-                  @click="resumeWork(m.id, false)"
-                >
+                <button class="ai-model-button" type="button" :disabled="conversationBusy" @click="resumeWork(m.id)">
                   Weiterarbeiten
-                </button>
-                <button
-                  class="ai-model-button"
-                  type="button"
-                  :disabled="conversationBusy"
-                  @click="resumeWork(m.id, true)"
-                >
-                  Mit Agententeam fortsetzen
                 </button>
               </div>
             </template>
@@ -2686,19 +2668,9 @@ useWorkflowWatchers()
           :control="controlChatThinking"
           @stop="stopGenerating"
         />
-        <label v-if="agentMode" class="chat-routing-choice">
-          Agententeam
-          <select v-model="agentTeamPreset" :disabled="conversationBusy" aria-label="Agententeam auswählen">
-            <option value="server">Admin-Standard</option>
-            <option value="free">Lokale Planung + Free-Spezialisten</option>
-            <option value="budget">Günstige externe Planung + Free-Spezialisten</option>
-            <option value="local">Alle Agenten lokal</option>
-          </select>
-        </label>
         <PromptBar
           ref="promptBar"
           v-model="input"
-          v-model:agent-mode="agentMode"
           v-model:thinking-tier="thinkingTier"
           v-model:route-mode="chatRouteMode"
           :external-allowed="modelUsageSettings.externalEnabled"
@@ -2708,10 +2680,10 @@ useWorkflowWatchers()
           :voice-busy="voiceInputView.starting || voiceInputView.finishing"
           :model-label="
             chatRouteMode === 'external'
-              ? 'Externes Modell · nach Freigabe'
+              ? 'Agententeam extern · nach Freigabe'
               : chatRouteMode === 'auto'
-                ? 'Lokal · Fallback nach Freigabe'
-                : 'Lokales Modell'
+                ? 'Agententeam lokal + extern'
+                : 'Agententeam lokal'
           "
           :context-label="activeWorkspace?.displayName || activeProject?.name"
           :commands="promptCommands"
