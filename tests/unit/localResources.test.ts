@@ -45,6 +45,49 @@ function setup() {
 afterEach(() => vi.useRealTimers())
 
 describe('device resource workflow barrier', () => {
+  it('drains whole logical jobs for a model change while new chats wait and children finish', async () => {
+    const { controller, deps } = setup()
+    const parent = await controller.acquire()
+    const replace = vi.fn(async () => {})
+    const change = controller.switchModel(replace)
+    expect(controller.isModelSwitchPending()).toBe(true)
+    const newJob = controller.acquire()
+    const child = await controller.acquire(undefined, parent.work)
+    expect(replace).not.toHaveBeenCalled()
+    expect(deps.begin).toHaveBeenCalledOnce()
+    await parent.release()
+    expect(replace).not.toHaveBeenCalled()
+    await child.release()
+    await change
+    const resumed = await newJob
+    expect(replace).toHaveBeenCalledOnce()
+    expect(deps.begin).toHaveBeenCalledTimes(2)
+    await resumed.release()
+    expect(controller.isModelSwitchPending()).toBe(false)
+  })
+
+  it('honors a chat stop while waiting for a switch and drops idle maintenance', async () => {
+    const { controller, deps } = setup()
+    let finish!: () => void
+    const change = controller.switchModel(
+      () =>
+        new Promise<void>(resolve => {
+          finish = resolve
+        })
+    )
+    const signal = new AbortController()
+    const waiting = controller.acquire(signal.signal)
+    signal.abort(new Error('user stopped waiting chat'))
+    await expect(waiting).rejects.toThrow('user stopped waiting chat')
+    await expect(controller.runPreemptibleBackground(async () => {}, new AbortController().signal)).rejects.toThrow(
+      'resource_background_unavailable'
+    )
+    expect(deps.begin).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    finish()
+    await change
+  })
+
   it('drops maintenance when a resource switch appears between registration and native begin without applying or retrying it', async () => {
     const { controller, deps } = setup()
     const operation = vi.fn(async () => {})

@@ -222,6 +222,7 @@ export function presentLocalModelStatus(
     coordinator.admissions.some(admission => admission.modelReleaseId === id && admission.admissible)
   )
   const model =
+    manifest.models.find(item => item.id === coordinator.preparingModelId) ??
     manifest.models.find(item => item.id === native.activeModelId) ??
     manifest.models.find(item => item.id === (selectedModelId ?? eligibleId ?? manifest.routing.defaultModelId))
   view.modelName = model?.displayName ?? 'Lokales Modell'
@@ -241,6 +242,16 @@ export function presentLocalModelStatus(
     view.label = 'Katalogabgleich erforderlich'
     view.detail =
       'Die aktuelle native Modellrichtlinie ist abgelaufen oder passt nicht zur App. Serververbindung erneut testen.'
+    return view
+  }
+
+  if (coordinator.preparingModelId === model?.id && model) {
+    view.state = 'loading'
+    view.label =
+      native.activeModelId && native.activeModelId !== model.id
+        ? 'Lokales Modell wird gewechselt'
+        : 'Lokales Modell lädt'
+    view.detail = `${model.displayName}: Dateien werden geprüft und das Modell wird vorbereitet. Die Dauer hängt von Dateigröße und Gerät ab.`
     return view
   }
 
@@ -368,7 +379,9 @@ export function presentLocalModelStatus(
   if (admission.capacity !== 'eligible') {
     view.state = 'blocked'
     view.label = 'Systemressourcen nicht bestätigt'
-    view.detail = 'Arbeitsspeicher, GPU oder Speicherplatz erfüllen die aktuelle Modellfreigabe nicht vollständig.'
+    view.detail = admission.reasons.includes('total_ram_below_minimum')
+      ? `Der gesamte nutzbare Arbeitsspeicher liegt unter der signierten Mindestgrenze von ${((model.capacityPolicy.minTotalRamBytes ?? 0) / 1024 ** 3).toLocaleString('de-DE', { maximumFractionDigits: 1 })} GiB. Die Anzeige des freien RAM ist eine getrennte Startprüfung.`
+      : 'Arbeitsspeicher, GPU oder Speicherplatz erfüllen die aktuelle Modellfreigabe nicht vollständig.'
     return view
   }
   if (native.state === 'starting' || (native.state === 'busy' && !activeModel)) {

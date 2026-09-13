@@ -29,6 +29,7 @@ import {
 } from '@/services/inference/localModelManager'
 import { verifyLocalModelManifest, type VerifiedLocalModelManifest } from '@/services/inference/modelManifest'
 import type { HardwareSnapshot } from '@/services/inference/capacity'
+import type { NativeLocalModelStatus } from '@/services/inference/tauriLocalRuntime'
 import type { InferenceRequest, InferenceResult } from '@/services/inference/types'
 
 const GIB = 1024 ** 3
@@ -191,6 +192,69 @@ const basicRequest: InferenceRequest = {
   projectId: 'project-1',
   taskType: 'chat',
 }
+
+it('unloads the resident release and remeasures hardware before preparing the selected release again', async () => {
+  const verified = await manifest('hardware_tiers')
+  const harness = makeHarness(verified)
+  await harness.coordinator.initialize({
+    ...bootstrap(),
+    local_model_manifest: { ...bootstrap().local_model_manifest!, schema_version: 2 },
+  })
+  const id = verified.models[0]!.id
+  const input = { projectId: 'project-1', routingSettings: { localModelId: id, preference: 'local_only' as const } }
+  await harness.coordinator.resolveTurn(input)
+  const nativeStatus = vi.fn<() => Promise<NativeLocalModelStatus>>(async () => ({
+    manifestAvailable: true,
+    activeModelId: id,
+    state: 'ready',
+    readiness: [],
+  }))
+  harness.dependencies.nativeStatus = nativeStatus
+  const notify = vi.fn()
+  const stop = vi.spyOn(harness.dependencies.manager, 'stop')
+  vi.mocked(harness.dependencies.hardwareSnapshot).mockClear()
+  await harness.coordinator.unloadResidentForModelChange(id, notify)
+  expect(notify).toHaveBeenCalledExactlyOnceWith(id)
+  expect(stop).toHaveBeenCalledWith(
+    expect.objectContaining({ id }),
+    expect.objectContaining({ manifestPayloadSha256: verified.payloadSha256 })
+  )
+  expect(harness.dependencies.hardwareSnapshot).toHaveBeenCalledOnce()
+  expect(stop.mock.invocationCallOrder[0]).toBeLessThan(
+    vi.mocked(harness.dependencies.hardwareSnapshot).mock.invocationCallOrder[0]!
+  )
+  expect(harness.coordinator.status().admissions.find(model => model.modelReleaseId === id)?.ready).toBe(false)
+  nativeStatus.mockResolvedValue({ manifestAvailable: true, activeModelId: null, state: 'stopped', readiness: [] })
+  await harness.coordinator.resolveTurn(input)
+  expect(harness.prepareModel).toHaveBeenCalledTimes(2)
+})
+
+it('does not discard resident readiness when native stop fails or an invalid selection is requested', async () => {
+  const verified = await manifest('hardware_tiers')
+  const harness = makeHarness(verified)
+  await harness.coordinator.initialize({
+    ...bootstrap(),
+    local_model_manifest: { ...bootstrap().local_model_manifest!, schema_version: 2 },
+  })
+  const id = verified.models[0]!.id
+  await harness.coordinator.resolveTurn({
+    projectId: 'project-1',
+    routingSettings: { localModelId: id, preference: 'local_only' },
+  })
+  harness.dependencies.nativeStatus = vi.fn<() => Promise<NativeLocalModelStatus>>(async () => ({
+    manifestAvailable: true,
+    activeModelId: id,
+    state: 'ready',
+    readiness: [],
+  }))
+  const stop = vi.spyOn(harness.dependencies.manager, 'stop').mockRejectedValue(new Error('stop failed'))
+  await expect(harness.coordinator.unloadResidentForModelChange('missing', () => {})).rejects.toThrow(
+    'local_model_selection_unavailable'
+  )
+  expect(stop).not.toHaveBeenCalled()
+  await expect(harness.coordinator.unloadResidentForModelChange(id, () => {})).rejects.toThrow('stop failed')
+  expect(harness.coordinator.status().admissions.find(model => model.modelReleaseId === id)?.ready).toBe(true)
+})
 
 it('honors a fixed local selection even when another signed model is ready', async () => {
   const verified = await manifest('hardware_tiers')

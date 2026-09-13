@@ -572,6 +572,7 @@ export type LocalModelAdmission = Readonly<{
 }>
 
 export class LocalInferenceCoordinator {
+  private preparation?: { modelId: string; generation: number }
   private mode: CoordinatorMode = 'blocked'
   private reason = 'bootstrap_not_initialized'
   private manifest?: VerifiedLocalModelManifest
@@ -593,6 +594,47 @@ export class LocalInferenceCoordinator {
   private recovery?: { generation: number; diagnoseUnavailable: boolean; promise: Promise<InferenceConnectionResult> }
 
   constructor(private readonly dependencies: LocalInferenceCoordinatorDependencies) {}
+
+  /** Called only behind the whole-job resource barrier; never between tool rounds. */
+  async unloadResidentForModelChange(selectedModelId: string | null, onUnloading: (id: string) => void): Promise<void> {
+    const generation = this.generation
+    const previous = this.preparationTail
+    let releaseQueue: () => void = () => undefined
+    this.preparationTail = new Promise<void>(resolve => {
+      releaseQueue = resolve
+    })
+    await previous
+    try {
+      this.requireActiveGeneration(generation)
+      if (
+        selectedModelId &&
+        !this.manifest?.models.some(
+          model => model.id === selectedModelId && model.enabled && isExecutableLocalModel(model)
+        )
+      ) {
+        throw new Error('local_model_selection_unavailable')
+      }
+      if (!this.dependencies.nativeStatus) throw new Error('local_model_status_unavailable')
+      const native = await this.dependencies.nativeStatus()
+      this.requireActiveGeneration(generation)
+      if (native.activeModelId) {
+        const release = this.manifest?.models.find(model => model.id === native.activeModelId)
+        if (!release || !this.catalogBinding) throw new Error('local_model_resident_binding_unavailable')
+        onUnloading(release.id)
+        await this.dependencies.manager.stop(release, this.catalogBinding)
+        this.requireActiveGeneration(generation)
+      }
+      // Re-measure capacity after confirmed process termination, without its old allocations.
+      this.readiness.clear()
+      this.assessments.clear()
+      this.preparationFailures.clear()
+      this.preparationRetries.clear()
+      this.localScope = undefined
+      await this.refreshCapacityIfStale(generation)
+    } finally {
+      releaseQueue()
+    }
+  }
 
   resourcesApplied(revision: number): void {
     if (revision <= this.resourceRevision) return
@@ -709,6 +751,7 @@ export class LocalInferenceCoordinator {
     mode: CoordinatorMode
     reason: string
     appliedResourceRevision?: number
+    preparingModelId?: string
     manifest?: VerifiedLocalModelManifest
     admissions: readonly LocalModelAdmission[]
   } {
@@ -716,6 +759,7 @@ export class LocalInferenceCoordinator {
       mode: this.mode,
       reason: this.reason,
       appliedResourceRevision: this.resourceRevision,
+      preparingModelId: this.preparation?.generation === this.generation ? this.preparation.modelId : undefined,
       manifest: this.manifest,
       admissions: this.modelAdmissions(),
     }
@@ -1088,6 +1132,8 @@ export class LocalInferenceCoordinator {
     this.preparationFailures.delete(modelId)
     const assessment = this.assessments.get(modelId)
     if (assessment?.status !== 'eligible' && !(allowDegraded && assessment?.status === 'degraded')) return
+    const preparation = { modelId, generation }
+    this.preparation = preparation
     try {
       const readiness = await this.dependencies.prepareModel(modelId, catalogBinding)
       if (
@@ -1110,6 +1156,8 @@ export class LocalInferenceCoordinator {
         this.readiness.delete(modelId)
         this.preparationFailures.set(modelId, preparationFailureReason(error))
       }
+    } finally {
+      if (this.preparation === preparation) this.preparation = undefined
     }
   }
 
@@ -1232,10 +1280,10 @@ export class LocalInferenceCoordinator {
       reason === 'local_readiness_pending'
         ? 'Luczor bereitet das lokale Modell noch vor und wechselt deshalb nicht von selbst zu einem externen Modell. Für einen externen Lauf im Eingabefeld den Modus „Externes Modell" wählen.'
         : reason === 'external_approval_required'
-        ? 'Ein externer Fallback ist nur nach ausdrücklicher Freigabe dieses Nachrichtenpakets möglich.'
-        : reason === 'local_only_blocked'
-          ? 'Dieser Chat ist auf lokale Modelle eingestellt.'
-          : 'Die Modellrichtlinie erlaubt für diesen Auftrag keinen externen Fallback.'
+          ? 'Ein externer Fallback ist nur nach ausdrücklicher Freigabe dieses Nachrichtenpakets möglich.'
+          : reason === 'local_only_blocked'
+            ? 'Dieser Chat ist auf lokale Modelle eingestellt.'
+            : 'Die Modellrichtlinie erlaubt für diesen Auftrag keinen externen Fallback.'
     return `${local} ${external}`
   }
 

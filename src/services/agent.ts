@@ -538,6 +538,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       : (opts.signal ?? opts.interruptionSignal)
   const cleanup: Array<() => void> = []
   try {
+    if (!opts.resourceWork && localResources.isModelSwitchPending()) opts.onProgress?.({ phase: 'routing' })
     return await localResources.run(
       work => runAgentWithResources({ ...opts, resourceWork: work }, cleanup),
       signal,

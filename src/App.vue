@@ -85,6 +85,9 @@ import {
 import { captureThinking, thinkingSettings } from '@/services/inference/thinkingSettings'
 import { controlLocalReasoning } from '@/services/inference/tauriLocalRuntime'
 import { useBackgroundPreparation } from '@/composables/useBackgroundPreparation'
+import { useLocalModelSwitch } from '@/composables/useLocalModelSwitch'
+import LocalModelSwitchAlert from '@/components/ai/LocalModelSwitchAlert.vue'
+import { localInferenceCoordinator } from '@/services/inference/coordinator'
 import { useIdleOptimization } from '@/composables/useIdleOptimization'
 import { miniStatus } from '@/services/miniChat/presentation'
 import {
@@ -2394,15 +2397,24 @@ watch(
     if (enabled) void autonomousGoal.stop()
   }
 )
+const localModelSwitch = useLocalModelSwitch()
+const localModelSwitchNames = computed(() =>
+  Object.fromEntries(
+    (localModelSwitch.state.value.phase !== 'idle'
+      ? (localInferenceCoordinator.status().manifest?.models ?? [])
+      : []
+    ).map(model => [model.id, model.displayName])
+  )
+)
 const backgroundPreparation = useBackgroundPreparation({
   project: () => activeProject.value,
   workspace: () => activeWorkspace.value,
-  busy: () => chatRuns.hasLive() || conversationBusy.value || hud.killSwitch,
+  busy: () => localModelSwitch.pending.value || chatRuns.hasLive() || conversationBusy.value || hud.killSwitch,
   draft: () => input.value,
 })
 useIdleOptimization({
   project: () => activeProject.value,
-  busy: () => chatRuns.hasLive() || conversationBusy.value || hud.killSwitch,
+  busy: () => localModelSwitch.pending.value || chatRuns.hasLive() || conversationBusy.value || hud.killSwitch,
   draft: () => input.value,
 })
 watch(conversationBusy, busy => voiceInputSession.setMuted(busy || voiceMuteDepth > 0), { flush: 'sync' })
@@ -2434,6 +2446,11 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
 </script>
 
 <template>
+  <LocalModelSwitchAlert
+    :state="localModelSwitch.state.value"
+    :model-names="localModelSwitchNames"
+    @retry="localModelSwitch.retry"
+  />
   <DeviceClusterPanel :open="showDeviceCluster" :project-id="activeProjectId" @close="showDeviceCluster = false" />
   <PayloadApproval />
   <CloudProjectsPanel

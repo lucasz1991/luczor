@@ -52,6 +52,11 @@ onBeforeUnmount(() => {
       {{ status?.label ?? 'Modellstatus wird gelesen …' }}
     </p>
     <p v-if="status" class="local-model-status__detail">{{ status.detail }}</p>
+    <div v-if="status?.state === 'loading'" class="local-model-status__loading" aria-busy="true">
+      <span class="local-model-status__spinner" aria-hidden="true"></span>
+      <span>Modellvorbereitung läuft …</span>
+      <progress aria-label="Fortschritt der lokalen Modellvorbereitung"></progress>
+    </div>
     <div v-if="status?.resourceConfig" class="local-model-status__configuration" aria-live="polite">
       <span
         >Gewählt: <strong>{{ localResourceModeLabels[status.resourceConfig.requested.mode] }}</strong></span
@@ -89,6 +94,36 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
+.local-model-status__loading {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 10px;
+}
+.local-model-status__loading progress {
+  grid-column: 1 / -1;
+  width: 100%;
+  height: 8px;
+  accent-color: var(--accent);
+}
+.local-model-status__spinner {
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--border-soft);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: local-model-spin 1s linear infinite;
+}
+@keyframes local-model-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .local-model-status__spinner {
+    animation: none;
+  }
+}
 .local-model-status {
   display: grid;
   gap: 10px;

@@ -47,6 +47,7 @@ declare module 'vue' {
     LoadingState: typeof import('./src/components/ai/LoadingState.vue')['default']
     LocalModelAnalysis: typeof import('./src/components/LocalModelAnalysis.vue')['default']
     LocalModelStatus: typeof import('./src/components/LocalModelStatus.vue')['default']
+    LocalModelSwitchAlert: typeof import('./src/components/ai/LocalModelSwitchAlert.vue')['default']
     LocalResourceSettings: typeof import('./src/components/LocalResourceSettings.vue')['default']
     LocalResourceSummary: typeof import('./src/components/LocalResourceSummary.vue')['default']
     MiniChatSurface: typeof import('./src/components/mini/MiniChatSurface.vue')['default']

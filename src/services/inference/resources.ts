@@ -83,6 +83,7 @@ export class LocalResourceController {
   private last?: LocalResourceConfigState
   private foregroundAdmission?: ForegroundAdmission
   private foregroundPending = 0
+  private modelTransition?: Promise<unknown>
   private preemptibleBackground?: { controller: AbortController; drained: Promise<void> }
 
   constructor(private readonly dependencies: ResourceDependencies) {}
@@ -97,6 +98,30 @@ export class LocalResourceController {
 
   hasWork(): boolean {
     return this.leases.size > 0 || this.preemptibleBackground !== undefined || this.foregroundPending > 0
+  }
+
+  isModelSwitchPending(): boolean {
+    return this.modelTransition !== undefined
+  }
+
+  /** Drain whole jobs, then replace the resident model before admitting new jobs. */
+  switchModel<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.modelTransition
+    const transition = (async () => {
+      await previous?.catch(() => undefined)
+      const background = this.preemptibleBackground
+      background?.controller.abort(new Error('resource_background_preempted'))
+      if (background) await background.drained
+      while (this.hasWork()) await waitForChange()
+      if (this.dependencies.enabled()) await this.flush()
+      return operation()
+    })()
+    this.modelTransition = transition
+    const clear = () => {
+      if (this.modelTransition === transition) this.modelTransition = undefined
+    }
+    void transition.then(clear, clear)
+    return transition
   }
 
   private publish(state: LocalResourceConfigState): LocalResourceConfigState {
@@ -273,6 +298,11 @@ export class LocalResourceController {
       lease = inherited
       lease.references += 1
     } else {
+      // Existing parent leases keep working through all tool rounds. New jobs wait.
+      while (this.modelTransition) {
+        if (priority === 'background') throw new Error('resource_background_unavailable')
+        await waitForChange(signal)
+      }
       const isForeground = priority === 'foreground'
       if (isForeground) this.foregroundPending += 1
       let foreground: { release(): void } | undefined
@@ -372,7 +402,7 @@ export class LocalResourceController {
     signal: AbortSignal
   ): Promise<T> {
     signal.throwIfAborted()
-    if (this.hasWork()) throw new Error('resource_background_unavailable')
+    if (this.hasWork() || this.isModelSwitchPending()) throw new Error('resource_background_unavailable')
     const controller = new AbortController()
     const background = { controller, drained: Promise.resolve() }
     this.preemptibleBackground = background

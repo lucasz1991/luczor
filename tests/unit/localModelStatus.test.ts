@@ -53,6 +53,30 @@ it('shows the admissible automatic fallback when the default cannot run', () => 
   expect(presentLocalModelStatus(coordinator, native, now).modelId).toBe(fallback)
 })
 
+it('shows the target during a model switch even while the previous model is still active', () => {
+  const { coordinator, native } = snapshots()
+  const target = manifest.models.find(item => item.id !== native.activeModelId)!
+  coordinator.preparingModelId = target.id
+  const view = presentLocalModelStatus(coordinator, native, now)
+  expect(view.state).toBe('loading')
+  expect(view.modelName).toBe(target.displayName)
+  expect(view.label).toBe('Lokales Modell wird gewechselt')
+  coordinator.preparingModelId = undefined
+  expect(presentLocalModelStatus(coordinator, native, now).state).not.toBe('loading')
+})
+
+it('distinguishes total RAM rejection from the free RAM start requirement', () => {
+  const { coordinator, native } = snapshots()
+  native.activeModelId = undefined
+  coordinator.admissions = [
+    { ...coordinator.admissions[0]!, capacity: 'ineligible', reasons: ['total_ram_below_minimum'] },
+  ]
+  const view = presentLocalModelStatus(coordinator, native, now)
+  expect(view.state).toBe('blocked')
+  expect(view.detail).toContain('gesamte nutzbare Arbeitsspeicher')
+  expect(view.detail).toContain('getrennte Startprüfung')
+})
+
 function snapshots() {
   const model = manifest.models.find(item => item.id === manifest.routing.defaultModelId)!
   const coordinator: CoordinatorStatus = {
