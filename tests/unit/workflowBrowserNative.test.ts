@@ -15,6 +15,7 @@ type Params = {
   maxChars?: number
   url?: string
   maxBytes?: number
+  showCursor?: boolean
 }
 function page() {
   class Element {
@@ -71,10 +72,19 @@ function page() {
     }
   }
   const element = new Input()
+  const marker = {
+    style: { cssText: '', setProperty: vi.fn() },
+    setAttribute: vi.fn(),
+    attachShadow: vi.fn(() => ({ innerHTML: '' })),
+    remove: vi.fn(),
+  }
   const document = {
     readyState: 'complete',
     querySelectorAll: vi.fn(() => [element] as Element[]),
     elementFromPoint: () => element,
+    querySelector: vi.fn(() => null as typeof marker | null),
+    createElement: vi.fn(() => marker),
+    documentElement: { append: vi.fn() },
   }
   const context = {
     location: { href: 'https://example.test/form', origin: 'https://example.test' },
@@ -92,17 +102,45 @@ function page() {
     AbortController,
     setTimeout,
     clearTimeout,
+    requestAnimationFrame: (callback: (time: number) => void) => callback(0),
     fetch: vi.fn(),
     btoa: (value: string) => Buffer.from(value, 'binary').toString('base64'),
   }
   const execute = vm.runInNewContext(`${script}\nluczorWorkflowBrowser`, context) as (
     params: Params
   ) => Promise<Record<string, unknown>>
-  return { execute, context, document, element, Select }
+  return { execute, context, document, element, Select, marker }
 }
 const base = { expectedUrl: 'https://example.test/form', selector: '#field', maxChars: 20 }
 
 describe('fixed native browser DOM protocol', () => {
+  it('renders a non-intercepting private cursor only after validating the target and never uses native input', async () => {
+    const fixture = page()
+    fixture.element.disabled = true
+    await fixture.execute({ ...base, action: 'click', showCursor: true })
+    expect(fixture.document.createElement).not.toHaveBeenCalled()
+    fixture.element.disabled = false
+    expect(await fixture.execute({ ...base, action: 'click', showCursor: true })).toEqual({ ok: true, clicked: true })
+    expect(fixture.marker.style.cssText).toContain('pointer-events:none!important')
+    expect(fixture.marker.attachShadow).toHaveBeenCalledWith({ mode: 'closed' })
+    expect(fixture.marker.style.setProperty).toHaveBeenCalledWith('left', '10px', 'important')
+    expect(fixture.document.documentElement.append).toHaveBeenCalledWith(fixture.marker)
+    fixture.document.querySelector.mockReturnValue(fixture.marker)
+    await fixture.execute({ ...base, action: 'fill', value: 'test', showCursor: false })
+    expect(fixture.marker.remove).toHaveBeenCalledOnce()
+  })
+  it('refuses a target that moves while the cursor frame is painted', async () => {
+    const fixture = page()
+    fixture.context.requestAnimationFrame = callback => {
+      fixture.element.getBoundingClientRect = () => ({ left: 80, top: 0, width: 20, height: 20 })
+      callback(0)
+    }
+    expect(await fixture.execute({ ...base, action: 'click', showCursor: true })).toMatchObject({
+      ok: false,
+      code: 'browser_target_not_actionable',
+    })
+    expect(fixture.element.clicked).toBe(false)
+  })
   it('fills through the native setter and treats code-like content as literal data', async () => {
     const fixture = page()
     const value = '"; globalThis.attacked = true; //'

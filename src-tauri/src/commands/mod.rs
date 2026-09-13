@@ -7,13 +7,15 @@ pub mod codex;
 pub mod desktop_accessibility;
 pub mod desktop_control;
 mod desktop_control_overlay;
-#[cfg(windows)]
-mod desktop_window_input;
+#[cfg(all(test, windows, feature = "native-browser-smoke"))]
+mod desktop_control_smoke;
 #[cfg(target_os = "linux")]
 mod desktop_linux;
 #[cfg(target_os = "linux")]
 mod desktop_pipewire;
 mod desktop_target;
+#[cfg(windows)]
+mod desktop_window_input;
 pub mod device_jobs;
 pub mod device_key;
 pub mod device_run_journal;

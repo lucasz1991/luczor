@@ -333,7 +333,9 @@ describe('tool registry contract', () => {
     expect(fingerprint).toBe(TOOL_SCHEMA_SHA256)
     for (const tool of toOpenAITools().filter(
       item =>
-        !['local_model_status', 'model_capabilities', 'device_list', 'browser_status'].includes(item.function.name)
+        !['local_model_status', 'model_capabilities', 'device_list', 'browser_status', 'os_control_status'].includes(
+          item.function.name
+        )
     )) {
       const parameters = tool.function.parameters as { properties?: Record<string, unknown> }
       expect(Object.keys(parameters.properties ?? {})).not.toHaveLength(0)

@@ -18,6 +18,7 @@ pub fn run() {
     }
 
     let app = builder
+        .plugin(commands::desktop_control::feedback_plugin())
         .on_page_load(|webview, payload| {
             commands::local_model::resource_config::on_main_navigation(
                 webview.label(),

@@ -42,6 +42,13 @@ impl NavigationTracker {
         self.generation
     }
     fn started(&mut self, id: u64, uri: &str) {
+        #[cfg(all(test, feature = "native-browser-smoke"))]
+        eprintln!(
+            "BROWSER_NAV_START id={id} uri={uri} requested={:?}",
+            self.requested
+                .as_ref()
+                .map(|request| (&request.target, request.id))
+        );
         if let Some(request) = &mut self.requested {
             if request.id.is_none() && uri == request.target {
                 request.id = Some(id);
@@ -51,6 +58,8 @@ impl NavigationTracker {
         }
     }
     fn finished(&mut self, id: u64, success: bool) {
+        #[cfg(all(test, feature = "native-browser-smoke"))]
+        eprintln!("BROWSER_NAV_FINISH id={id} success={success}");
         if let Some(request) = &mut self.requested {
             if request.id == Some(id) && request.complete.is_none() {
                 request.complete = Some(success);
@@ -434,6 +443,8 @@ async fn run(
         });
     }
     let mut navigation_generation = None;
+    super::desktop_control::browser_feedback(app, gate.permit()).await?;
+    gate.check()?;
     if input.action == BrowserOperation::Open && app.get_webview(BROWSER_WEBVIEW_LABEL).is_none() {
         let target = input.url.as_deref().map(url).transpose()?.unwrap_or(
             tauri::Url::parse("about:blank").map_err(|_| "workflow_browser_url_invalid")?,

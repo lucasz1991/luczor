@@ -263,10 +263,20 @@ pub(super) mod linux {
             && interfaces
                 .iter()
                 .any(|v| v == "org.a11y.atspi.EditableText");
-        let bounds: (i32,i32,i32,i32) = proxy(bus, &object, "org.a11y.atspi.Component")?
-            .call("GetExtents", &(0_u32,)).map_err(|_| "desktop_accessibility_bounds_unavailable")?;
+        let bounds: (i32, i32, i32, i32) = proxy(bus, &object, "org.a11y.atspi.Component")?
+            .call("GetExtents", &(0_u32,))
+            .map_err(|_| "desktop_accessibility_bounds_unavailable")?;
         let monitor = crate::commands::desktop_control::selected_monitor()?;
-        if bounds.2 <= 0 || bounds.3 <= 0 || !crate::commands::desktop_control::contains_rect(&monitor, bounds.0, bounds.1, bounds.2 as u32, bounds.3 as u32) {
+        if bounds.2 <= 0
+            || bounds.3 <= 0
+            || !crate::commands::desktop_control::contains_rect(
+                &monitor,
+                bounds.0,
+                bounds.1,
+                bounds.2 as u32,
+                bounds.3 as u32,
+            )
+        {
             return Err("desktop_control_window_outside_selected_monitor".into());
         }
         Ok(ObservedNode {
@@ -415,14 +425,26 @@ pub(super) mod linux {
             return Err("desktop_accessibility_target_changed".into());
         }
         gate.check()?;
-        if matches!(request.action, ActionKind::Focus) && crate::commands::desktop_control::isolated() {
+        if matches!(request.action, ActionKind::Focus)
+            && crate::commands::desktop_control::isolated()
+        {
             return Err("desktop_control_isolated_focus_not_supported".into());
         }
-        let (x,y,width,height) = current.bounds;
-        crate::commands::desktop_control::activity(&crate::commands::desktop_target::WindowTarget {
-            window_id:0,process_id:current.public.application_pid,process_started:current.process_started,
-            x,y,width:width as u32,height:height as u32,focused:current.public.focused
-        }, Some((x+width/2,y+height/2)), Some(&payload.execution))?;
+        let (x, y, width, height) = current.bounds;
+        crate::commands::desktop_control::activity(
+            &crate::commands::desktop_target::WindowTarget {
+                window_id: 0,
+                process_id: current.public.application_pid,
+                process_started: current.process_started,
+                x,
+                y,
+                width: width as u32,
+                height: height as u32,
+                focused: current.public.focused,
+            },
+            Some((x + width / 2, y + height / 2)),
+            Some(&payload.execution),
+        )?;
         gate.check()?;
         let result = match request.action {
             ActionKind::Invoke => {

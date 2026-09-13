@@ -40,5 +40,5 @@ export function desktopControlError(error: unknown): string {
     desktop_control_wayland_overlay_unavailable_use_internal_browser:
       'Wayland erlaubt hier keine freie Platzierung der Bildschirmmarkierung. Bitte den internen Luczor-Browser verwenden.',
   }
-  return messages[code] ?? `Bildschirmsteuerung nicht verfügbar: ${code}`
+  return Object.entries(messages).find(([key]) => key === code)?.[1] ?? `Bildschirmsteuerung nicht verfügbar: ${code}`
 }

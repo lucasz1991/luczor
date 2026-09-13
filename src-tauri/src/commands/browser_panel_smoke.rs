@@ -46,8 +46,10 @@ fn native_browser_panel_smoke() {
     context.config_mut().app.windows.clear();
     let (sender, receiver) = mpsc::sync_channel(1);
     let app = tauri::Builder::default()
+        .plugin(crate::commands::desktop_control::feedback_plugin())
         .any_thread()
         .setup(move |app| {
+            crate::commands::desktop_control::initialize(app.handle());
             tauri::WebviewWindowBuilder::new(
                 app,
                 "main",
@@ -101,6 +103,7 @@ async fn probe(app: &AppHandle, root: &std::path::Path, host: &str) -> Result<()
     let run = uuid::Uuid::new_v4().to_string();
     let scope = json!({"principalId":"probe","projectId":"probe","expectedRootPath":workspace["rootPath"],"expectedWorkspaceUpdatedAt":workspace["updatedAt"],"runId":run});
     let execution = json!({"sessionId":identity,"generation":1,"workflowExecutionId":run});
+    crate::commands::desktop_control_smoke::run(app, execution.clone()).await?;
     let base = json!({"scope":scope,"execution":execution,"automated":true,"allowedHosts":[host]});
     let action = |name: &str, fields: Value| {
         let mut value = base.clone();

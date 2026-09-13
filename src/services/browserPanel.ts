@@ -11,6 +11,10 @@ export function revealBrowserPanel(projectId: string): void {
 export function browserFailure(error: unknown): string {
   const code = error instanceof Error ? error.message : String(error)
   const messages: Record<string, string> = {
+    browser_outside_selected_monitor_move_luczor_window:
+      'Bitte das Luczor-Fenster vollständig auf den unter Einstellungen → Bildschirmsteuerung gewählten Bildschirm verschieben.',
+    browser_monitor_position_unavailable:
+      'Die Position des Luczor-Browsers kann auf diesem System nicht sicher einem Bildschirm zugeordnet werden.',
     workflow_execution_identity_required:
       'Die Browser-Ausführung besitzt keine gültige Sitzungs-ID. Bitte Luczor aktualisieren.',
     workflow_browser_host_boundary_required: 'Bitte beim Öffnen die erlaubten Zielhosts in allowed_hosts angeben.',

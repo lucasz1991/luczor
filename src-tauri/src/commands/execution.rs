@@ -306,6 +306,9 @@ pub(crate) struct ExecutionLease {
 }
 
 impl ExecutionLease {
+    pub(super) fn permit(&self) -> &ExecutionPermit {
+        &self.permit
+    }
     pub fn check(&self) -> Result<(), String> {
         GATE.get_or_init(Mutex::default)
             .lock()
