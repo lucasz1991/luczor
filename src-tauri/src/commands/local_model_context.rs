@@ -7,9 +7,12 @@ use serde_json::{json, Value};
 /// presets never determine the allocation. The signed runtime ceiling is final.
 pub(super) fn growth_target(current: u32, ceiling: u32, input: u64) -> Option<u32> {
     let needed = input.checked_add(2048 + 64)?;
-    if needed <= u64::from(current) || current >= ceiling || needed > u64::from(ceiling) {
+    if needed <= u64::from(current) || current >= ceiling {
         return None;
     }
+    // Even a transcript larger than the ceiling can benefit from growth:
+    // fitting can then retain more complete rounds within the real limit.
+    let needed = needed.min(u64::from(ceiling));
     let mut target = current.max(1);
     while u64::from(target) < needed {
         target = target.saturating_mul(2).min(ceiling);
@@ -200,8 +203,34 @@ mod tests {
         assert_eq!(growth_target(65536, 262144, 70000), Some(131072));
         assert_eq!(growth_target(16384, 32768, 17000), Some(32768));
         assert_eq!(growth_target(32768, 32768, 32000), None);
-        assert_eq!(growth_target(32768, 262144, 262144), None);
+        assert_eq!(growth_target(32768, 262144, 262144), Some(262144));
         assert_eq!(growth_target(32768, 262144, u64::MAX), None);
+    }
+
+    #[test]
+    fn five_tiers_fit_reported_20124_input_without_artificial_ingress_limit() {
+        for (start, ceiling) in [
+            (4096, 32768),
+            (4096, 32768),
+            (4096, 32768),
+            (8192, 262144),
+            (4096, 32768),
+        ] {
+            let target = growth_target(start, ceiling, 20124).unwrap();
+            assert_eq!(target, 32768);
+            let mut body = json!({"max_tokens":8256,"messages":[
+                {"role":"system","content":"policy"},
+                {"role":"user","content":"complete current request"}
+            ]});
+            let original = body["messages"].clone();
+            let usage =
+                fit_adaptive_context(&mut body, target.into(), |_| Ok::<_, ()>(20124), || ())
+                    .unwrap();
+            assert_eq!(usage.output_tokens, 8256);
+            assert_eq!(usage.omitted_messages, 0);
+            assert_eq!(body["messages"], original);
+            assert!(usage.input_tokens + usage.output_tokens + 64 <= usage.context_tokens);
+        }
     }
 
     #[test]

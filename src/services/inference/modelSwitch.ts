@@ -41,13 +41,19 @@ export class LocalModelSwitch {
     const request = { revision: this.state.revision + 1, modelId, assertCurrent }
     this.latest = request
     this.publish({ revision: request.revision, selectedModelId: modelId, phase: 'waiting' })
+    return this.startDrain()
+  }
+
+  private startDrain(): Promise<void> {
     if (!this.draining) {
+      const startingRequest = this.latest
       const work = this.dependencies.exclusive(() => this.drain())
       this.draining = work
       void work.then(
         () => this.finish(work),
         () => {
           this.publish({ ...this.state, phase: 'failed' })
+          if (this.latest === startingRequest) this.latest = undefined
           this.finish(work)
         }
       )
@@ -56,7 +62,11 @@ export class LocalModelSwitch {
   }
 
   private finish(work: Promise<void>): void {
-    if (this.draining === work) this.draining = undefined
+    if (this.draining !== work) return
+    this.draining = undefined
+    // An updated selection can arrive after drain() returns but before the outer
+    // exclusive operation settles. It still needs its own drain, not a stuck Waiting.
+    if (this.latest) void this.startDrain().catch(() => undefined)
   }
 
   private async drain(): Promise<void> {

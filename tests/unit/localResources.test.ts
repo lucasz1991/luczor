@@ -45,6 +45,61 @@ function setup() {
 afterEach(() => vi.useRealTimers())
 
 describe('device resource workflow barrier', () => {
+  it('fails a queued switch visibly after exhausted cleanup and reconciles on explicit retry', async () => {
+    vi.useFakeTimers()
+    const { controller, deps, nativeLeases } = setup()
+    const parent = await controller.acquire()
+    const replace = vi.fn(async () => {})
+    const switching = controller.switchModel(replace)
+    const outcome = switching.then(
+      () => null,
+      error => error
+    )
+    deps.end.mockRejectedValue(new Error('temporary native end failure'))
+    const closing = parent.release()
+    await vi.advanceTimersByTimeAsync(8000)
+    await closing
+    expect(await outcome).toEqual(new Error('resource_work_cleanup_failed'))
+    expect(replace).not.toHaveBeenCalled()
+    expect(controller.isModelSwitchPending()).toBe(false)
+    expect(nativeLeases.size).toBe(1)
+    deps.end.mockImplementation(async id => {
+      nativeLeases.delete(id)
+    })
+    const retry = controller.switchModel(replace)
+    await vi.advanceTimersByTimeAsync(1200)
+    await retry
+    expect(replace).toHaveBeenCalledOnce()
+    expect(nativeLeases.size).toBe(0)
+  })
+
+  it('runs a queued model change after an aborted operation has actually drained', async () => {
+    const { controller, deps } = setup()
+    const abort = new AbortController()
+    let finish!: () => void
+    const drained = new Promise<void>(resolve => {
+      finish = resolve
+    })
+    const job = controller.run(async () => {
+      await drained
+      abort.signal.throwIfAborted()
+    }, abort.signal)
+    const outcome = job.then(
+      () => null,
+      error => error
+    )
+    await vi.waitFor(() => expect(deps.begin).toHaveBeenCalledOnce())
+    const replace = vi.fn(async () => {})
+    const switching = controller.switchModel(replace)
+    abort.abort(new Error('stopped'))
+    expect(replace).not.toHaveBeenCalled()
+    finish()
+    expect(await outcome).toEqual(new Error('stopped'))
+    await switching
+    expect(deps.end).toHaveBeenCalledOnce()
+    expect(replace).toHaveBeenCalledOnce()
+  })
+
   it('drains whole logical jobs for a model change while new chats wait and children finish', async () => {
     const { controller, deps } = setup()
     const parent = await controller.acquire()

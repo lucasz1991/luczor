@@ -106,13 +106,25 @@ export class LocalResourceController {
 
   /** Drain whole jobs, then replace the resident model before admitting new jobs. */
   switchModel<T>(operation: () => Promise<T>): Promise<T> {
+    // A new selection/retry is an explicit request to reconcile closing jobs.
+    this.restartCleanup()
     const previous = this.modelTransition
     const transition = (async () => {
       await previous?.catch(() => undefined)
       const background = this.preemptibleBackground
       background?.controller.abort(new Error('resource_background_preempted'))
       if (background) await background.drained
-      while (this.hasWork()) await waitForChange()
+      while (this.hasWork()) {
+        // Never silently wait forever for an exhausted native end acknowledgement.
+        // Keep ownership, surface the failure, and allow the UI retry to reconcile it.
+        if (
+          [...this.cleanups.values()].some(
+            job => !job.timer && !job.running && job.attempts >= CLEANUP_BACKOFF_MS.length
+          )
+        )
+          throw new Error('resource_work_cleanup_failed')
+        await waitForChange()
+      }
       if (this.dependencies.enabled()) await this.flush()
       return operation()
     })()

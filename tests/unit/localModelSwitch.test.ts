@@ -10,6 +10,32 @@ function deferred<T = void>() {
 }
 
 describe('resident model selection switch', () => {
+  it('starts a selection that arrives after draining but before the exclusive barrier settles', async () => {
+    const drained = deferred()
+    const releaseBarrier = deferred()
+    const prepare = vi.fn(async (id: string | null) => id!)
+    let passes = 0
+    const controller = new LocalModelSwitch({
+      exclusive: async operation => {
+        await operation()
+        if (++passes === 1) {
+          drained.resolve()
+          await releaseBarrier.promise
+        }
+      },
+      unload: async () => {},
+      prepare,
+    })
+    const first = controller.request('first', () => {})
+    await drained.promise
+    controller.request('last', () => {})
+    expect(controller.snapshot().phase).toBe('waiting')
+    releaseBarrier.resolve()
+    await first
+    await vi.waitFor(() => expect(controller.snapshot()).toMatchObject({ phase: 'ready', activeModelId: 'last' }))
+    expect(prepare.mock.calls.map(call => call[0])).toEqual(['first', 'last'])
+  })
+
   it('waits for jobs and confirms termination before preparing and publishing readiness', async () => {
     const jobs = deferred()
     const stopped = deferred()

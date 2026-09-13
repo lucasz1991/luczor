@@ -70,9 +70,6 @@ mod trust;
 
 const PUBLIC_KEY_B64: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64");
 const EXPECTED_KEY_ID: Option<&str> = option_env!("LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID");
-// The signed catalog has no size class field yet. GGUF artifacts up to 6 GiB
-// are the compact local profiles (including the laptop Qwen 4B release).
-const COMPACT_MODEL_MAX_ARTIFACT_BYTES: u64 = 6 * 1024 * 1024 * 1024;
 const FLASH_MODEL_ID: &str = "qwen3.8-flash-next";
 const FALLBACK_MODEL_ID: &str = "orcarouter-qwen3.8-27b-uncensored-q4-k-m";
 // SSE framing/timings can exceed the text size many times. The HTTP queue is
@@ -374,6 +371,18 @@ impl Drop for ManagedRuntime {
     fn drop(&mut self) {
         self.stop();
     }
+}
+
+/// Cache saving and process termination are blocking, including ManagedRuntime::drop.
+/// Move ownership into the blocking worker so cancellation of the IPC future cannot
+/// drop the runtime (and a reqwest blocking client) on a Tokio worker.
+async fn stop_runtime_async(runtime: Option<ManagedRuntime>) -> Result<(), String> {
+    if runtime.is_none() {
+        return Ok(());
+    }
+    tauri::async_runtime::spawn_blocking(move || drop(runtime))
+        .await
+        .map_err(|_| "Local runtime teardown failed.".to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -825,15 +834,13 @@ pub async fn local_model_register_manifest_session(
     session_id: String,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
-    let mut previous_runtime = {
+    let previous_runtime = {
         let mut guard = state()
             .lock()
             .map_err(|_| "Local model manager is unavailable.".to_string())?;
         rotate_manifest_session(&mut guard, &session_id)?
     };
-    if let Some(runtime) = previous_runtime.as_mut() {
-        runtime.stop();
-    }
+    stop_runtime_async(previous_runtime).await?;
     Ok(())
 }
 
@@ -844,15 +851,13 @@ pub async fn local_model_begin_manifest_acceptance(
     acceptance_generation: u64,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
-    let mut previous_runtime = {
+    let previous_runtime = {
         let mut guard = state()
             .lock()
             .map_err(|_| "Local model manager is unavailable.".to_string())?;
         begin_manifest_acceptance(&mut guard, &session_id, acceptance_generation)?
     };
-    if let Some(runtime) = previous_runtime.as_mut() {
-        runtime.stop();
-    }
+    stop_runtime_async(previous_runtime).await?;
     Ok(())
 }
 
@@ -887,7 +892,7 @@ pub async fn local_model_verify_manifest(
         return Err("Local-model manifest acceptance generation is invalid.".into());
     }
 
-    let mut previous_runtime = {
+    let previous_runtime = {
         let mut guard = state()
             .lock()
             .map_err(|_| "Local model manager is unavailable.".to_string())?;
@@ -934,9 +939,7 @@ pub async fn local_model_verify_manifest(
         guard.last_error = None;
         previous_runtime
     };
-    if let Some(runtime) = previous_runtime.as_mut() {
-        runtime.stop();
-    }
+    stop_runtime_async(previous_runtime).await?;
     Ok(result)
 }
 
@@ -1145,17 +1148,14 @@ pub async fn local_model_cancel(
     catalog_binding: CatalogBindingInput,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
-    let mut runtime = {
+    let runtime = {
         let mut guard = state()
             .lock()
             .map_err(|_| "Local model manager is unavailable.".to_string())?;
         require_catalog_binding(&guard, &catalog_binding)?;
         cancel_active_operation(&mut guard, &request_id)
     };
-    if let Some(runtime) = runtime.as_mut() {
-        runtime.stop();
-    }
-    Ok(())
+    stop_runtime_async(runtime).await
 }
 
 #[tauri::command]
@@ -1329,7 +1329,7 @@ pub async fn local_model_stop(
     if !safe_id(&model_release_id) {
         return Err("Invalid model release id.".into());
     }
-    let mut runtime = {
+    let runtime = {
         let mut guard = state()
             .lock()
             .map_err(|_| "Local model manager is unavailable.".to_string())?;
@@ -1347,10 +1347,7 @@ pub async fn local_model_stop(
             None
         }
     };
-    if let Some(runtime) = runtime.as_mut() {
-        runtime.stop();
-    }
-    Ok(())
+    stop_runtime_async(runtime).await
 }
 
 pub fn shutdown_all() {
@@ -3880,17 +3877,14 @@ fn stream_completion_with_diagnostics(
     });
     let tokenizer_client = local_http_client(Duration::from_secs(15), Duration::from_secs(15))?;
     let started = Instant::now();
-    let compact_model = model
-        .artifact
-        .as_ref()
-        .is_some_and(|artifact| artifact.size_bytes <= COMPACT_MODEL_MAX_ARTIFACT_BYTES);
-    let compact_ingress = compact_model.then_some((u64::from(context_limit) / 2).max(1024));
     let mut measured_input = 0;
     diagnostic
         .stage
         .set(failure_diagnostics::Stage::Tokenization);
     diagnostic.context.set(Some(u64::from(context_limit)));
-    let usage = context_budget::fit_adaptive_context_with_ingress(
+    // Use the complete available window for every tier. Model size alone
+    // must not discard history at an arbitrary half-window boundary.
+    let usage = context_budget::fit_adaptive_context(
         &mut body,
         u64::from(context_limit),
         |candidate| {
@@ -3952,7 +3946,6 @@ fn stream_completion_with_diagnostics(
             Ok(tokens)
         },
         || LocalInferenceFailure::http(400, LlamaHttpFailureKind::ContextWindowExceeded),
-        compact_ingress,
     );
     // This point is strictly before any completion request or public/tool delta.
     // Only a locally measured context shortage can restart; never replay a
@@ -5308,8 +5301,17 @@ mod tests {
         manager.active_idle_optimization = false;
         let mut resident = super::cancel_active_operation(&mut manager, "idle-request").unwrap();
         assert!(manager.runtime.is_none());
-        resident.stop();
-        assert!(!resident.reuse("model-a", Some("project-a")).unwrap());
+        // Reproduce the real post-chat path: a bound scope saves its cache while
+        // an async IPC command owns teardown. A direct stop here panics in reqwest.
+        resident.slot_cache_dir = Some(fixture.root.clone());
+        tauri::async_runtime::block_on(async move {
+            tauri::async_runtime::spawn(
+                async move { super::stop_runtime_async(Some(resident)).await },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        });
     }
 
     #[cfg(windows)]
