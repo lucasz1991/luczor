@@ -264,7 +264,7 @@ struct ManagedRuntime {
     model_storage: ModelStorage,
     /// Set only when the runtime binary advertised `--slot-save-path` support and the
     /// directory was passed at startup. `stop()` uses it to persist this scope's KV cache
-    /// before the process exits; a fresh process for the same scope restores from it.
+    /// before the process exits; only the same scope and runtime layout may restore it.
     slot_cache_dir: Option<PathBuf>,
     slot_cache_namespace: String,
     #[cfg(target_os = "linux")]
@@ -3580,11 +3580,8 @@ fn await_health(
     Err("llama.cpp health check timed out.".into())
 }
 
-/// Bounds the on-disk slot cache to the most recently used scopes, so switching between
-/// many chats/projects over time cannot grow this directory without limit. Each scope gets
-/// its own file, so there is nothing to erase specifically "on scope change" beyond normal
-/// least-recently-used eviction: a different scope simply never matches another scope's
-/// filename, so cross-scope reuse never happens regardless of what this directory holds.
+/// Bounds the on-disk cache to five scope/layout entries. Scope and runtime layout
+/// are both part of each key; incompatible and legacy entries are never restored.
 const MAX_CACHED_SLOT_SCOPES: usize = 5;
 
 fn slot_cache_path(dir: &Path, namespace: &str, scope_digest: &str) -> PathBuf {
@@ -3615,7 +3612,7 @@ fn prune_slot_cache_dir(dir: &Path) {
 }
 
 /// Best-effort: asks the still-running llama.cpp process to persist its single slot's KV
-/// cache to disk under this scope's digest, so a later cold start for the SAME scope (see
+/// cache to disk under this scope/layout key, so a compatible cold start (see
 /// `restore_slot_cache`) can skip reprocessing the conversation transcript from scratch.
 /// Never surfaces an error: a failed save only costs the next cold start its speedup, it
 /// never affects correctness, and it must never block or fail the teardown it runs inside.
