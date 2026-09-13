@@ -40,6 +40,12 @@ const modes = [
     detail: 'Auf der Grafikkarte rechnen; bei Bedarf automatisch verteilen.',
   },
   { id: 'cpu', title: 'Nur CPU/RAM', detail: 'Ohne GPU-Offload rechnen. Benötigt mehr RAM.' },
+  {
+    id: 'hybrid',
+    title: 'Erzwungener Split',
+    detail:
+      'Modellschichten auf GPU und CPU/RAM verteilen – auch wenn alles in den VRAM passt. Kein CPU-Ersatzbetrieb.',
+  },
 ] as const
 const modeLabel = (mode: LocalResourceConfig['mode']) => modes.find(item => item.id === mode)?.title ?? 'Unbekannt'
 const saveErrors = new Map([
@@ -255,6 +261,11 @@ onBeforeUnmount(() => {
       </div>
       <details class="resource-settings__expert">
         <summary>Details: Grafikkarten, Threads und Speicherpuffer</summary>
+        <p v-if="draft.mode === 'hybrid'">
+          Erzwungener Split lässt mindestens eine Rechenschicht auf der CPU und legt weitere nach verfügbarem VRAM auf
+          die GPU. Die Aufteilung wird beim Start geprüft. Das benötigt mehr RAM als reiner GPU-Betrieb und kann
+          langsamer sein; eine gleichzeitige Vollauslastung beider Prozessoren ist nicht garantiert.
+        </p>
         <p>
           Im Hybridbetrieb verbleiben Modellschichten im RAM und werden dort von der CPU berechnet. Auf die GPU passen
           so viele Schichten, wie freier VRAM und Kontextcache erlauben. Eine SSD speichert die Modelldatei;

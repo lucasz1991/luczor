@@ -2171,6 +2171,9 @@ fn prepare_release(
             "cpu_mode_disallowed_by_manifest",
             "runtime_gpu_capacity_unavailable",
             "gpu_full_offload_not_verified",
+            "forced_split_unavailable",
+            "forced_split_metadata_unavailable",
+            "forced_split_not_verified",
         ]
         .into_iter()
         .find(|code| *code == error)
@@ -3198,6 +3201,9 @@ fn start_runtime(
     )?;
     plan.status.resource_revision = settings.state.applied_revision;
     plan.status.requested_mode = config.mode.clone();
+    if config.mode == "hybrid" {
+        gpu_runtime::force_partial_offload(&mut plan, &artifacts.model_guard)?;
+    }
     if config.mode == "gpu" && !plan.uses_gpu() && plan.status.fallback_reason_code.is_none() {
         plan.status.fallback_reason_code = Some("gpu_mode_auto_fallback_unavailable".into());
     }
@@ -3279,6 +3285,7 @@ fn start_runtime(
     match result {
         Err(error)
             if plan.uses_gpu()
+                && config.mode != "hybrid"
                 && error != resource_runtime::STARTUP_RAM_PRESSURE
                 && error == "runtime_gpu_capacity_unavailable"
                 && !gpu_required

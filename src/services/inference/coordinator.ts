@@ -225,7 +225,7 @@ export type LocalInferenceCoordinatorDependencies = {
   fetchManifest: (config: LuczorApiConfigSnapshot) => Promise<Record<string, unknown>>
   verifyManifest: typeof verifyLocalModelManifest
   hardwareSnapshot: () => Promise<HardwareSnapshot>
-  resourceMode?: () => Promise<'auto' | 'gpu' | 'cpu'>
+  resourceMode?: () => Promise<'auto' | 'gpu' | 'cpu' | 'hybrid'>
   recoverMemory?: () => Promise<HardwareSnapshot>
   nativeStatus?: () => Promise<NativeLocalModelStatus>
   prepareModel: (modelReleaseId: string, catalogBinding: LocalCatalogBinding) => Promise<LocalReadinessEvidence>
@@ -357,6 +357,18 @@ const localReadinessMessages = new Map<string, string>([
   ['runtime_gpu_measurement_unavailable', 'Die tatsächliche GPU-Auslagerung konnte noch nicht bestätigt werden.'],
   ['runtime_gpu_capacity_unavailable', 'Der freie Grafikspeicher reicht unter Berücksichtigung der Reserve nicht aus.'],
   ['gpu_full_offload_not_verified', 'Die vollständige GPU-Auslagerung wurde nicht bestätigt.'],
+  [
+    'forced_split_unavailable',
+    'Erzwungener Split benötigt eine passende GPU-Runtime mit freiem Grafikspeicher. Es erfolgt kein CPU-Ersatzbetrieb.',
+  ],
+  [
+    'forced_split_metadata_unavailable',
+    'Die Schichtaufteilung dieses Modells konnte nicht sicher bestimmt werden. Bitte Automatik verwenden.',
+  ],
+  [
+    'forced_split_not_verified',
+    'Der erzwungene CPU/GPU-Split wurde von der Runtime nicht bestätigt. Bitte Ressourcen prüfen oder Automatik wählen.',
+  ],
   [
     'runtime_platform_protection_unavailable',
     'Die lokale Runtime ist in diesem App-Build unter Linux/macOS noch gesperrt: Dateischutz oder Prozessabsicherung fehlen. Dies ist kein RAM- oder GPU-Mangel.',

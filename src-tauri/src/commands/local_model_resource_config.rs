@@ -157,7 +157,7 @@ pub(super) fn atomic_replace(source: &Path, destination: &Path) -> Result<(), St
     }
 }
 pub(super) fn validate_shape(config: &LocalResourceConfig) -> Result<(), String> {
-    if !matches!(config.mode.as_str(), "auto" | "gpu" | "cpu") {
+    if !matches!(config.mode.as_str(), "auto" | "gpu" | "cpu" | "hybrid") {
         return Err("resource_mode_invalid".into());
     }
     if let Some(ids) = &config.gpu_device_ids {
@@ -411,6 +411,18 @@ pub fn local_model_end_resource_work(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn forced_split_persists_without_changing_the_default() {
+        let config = super::LocalResourceConfig {
+            mode: "hybrid".into(),
+            ..Default::default()
+        };
+        super::validate_shape(&config).unwrap();
+        let encoded = serde_json::to_vec(&config).unwrap();
+        let decoded: super::LocalResourceConfig = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(decoded.mode, "hybrid");
+        assert_eq!(super::LocalResourceConfig::default().mode, "auto");
+    }
     use super::*;
     #[test]
     fn main_navigation_releases_orphaned_work_before_catalog_registration_without_cancelling_native_work(

@@ -21,7 +21,12 @@ export type LocalModelStatusView = {
   resourceConfig?: LocalResourceConfigState
 }
 
-export const localResourceModeLabels = { auto: 'Automatisch', gpu: 'GPU mit Automatik', cpu: 'Nur CPU/RAM' } as const
+export const localResourceModeLabels = {
+  auto: 'Automatisch',
+  gpu: 'GPU mit Automatik',
+  cpu: 'Nur CPU/RAM',
+  hybrid: 'Erzwungener Split',
+} as const
 
 const gpuMessages = new Map<string, string>([
   [
@@ -69,6 +74,18 @@ const preparationMessages = new Map<string, string>([
     'Eine ausgewählte Grafikkarte ist nicht verfügbar. Auswahl prüfen oder Automatik verwenden.',
   ],
   ['gpu_full_offload_not_verified', 'Vollständiger GPU-Offload wurde nicht bestätigt.'],
+  [
+    'forced_split_unavailable',
+    'Erzwungener Split benötigt eine passende GPU-Runtime und freien Grafikspeicher. Kein CPU-Ersatzbetrieb.',
+  ],
+  [
+    'forced_split_metadata_unavailable',
+    'Die Modellschichten konnten für den erzwungenen Split nicht sicher bestimmt werden.',
+  ],
+  [
+    'forced_split_not_verified',
+    'Die Runtime hat keinen echten CPU/GPU-Split bestätigt. Ressourcen prüfen oder Automatik wählen.',
+  ],
   ['runtime_gpu_measurement_unavailable', 'Die tatsächliche GPU-Nutzung konnte beim Start nicht bestätigt werden.'],
   [
     'runtime_gpu_required_no_offload',

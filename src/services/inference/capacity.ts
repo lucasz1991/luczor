@@ -163,7 +163,7 @@ export function assessModelCapacity(input: {
   manifestPayloadSha256?: string
   policy: ModelCapacityPolicy
   artifactSizeBytes: number
-  executionMode?: 'auto' | 'gpu' | 'cpu'
+  executionMode?: 'auto' | 'gpu' | 'cpu' | 'hybrid'
   now?: Date
   validForMs?: number
 }): CapacityAssessment {

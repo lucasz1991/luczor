@@ -11,7 +11,7 @@ use super::{
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 use std::process::{ChildStderr, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -110,6 +110,141 @@ impl AccelerationPlan {
     pub(super) fn uses_gpu(&self) -> bool {
         self.status.backend != "cpu"
     }
+}
+
+/// Read only bounded GGUF metadata from the already verified, retained model.
+/// Numeric layer placement prevents the fitter from silently selecting full GPU.
+pub(super) fn force_partial_offload(
+    plan: &mut AccelerationPlan,
+    model: &File,
+) -> Result<(), String> {
+    if !plan.uses_gpu() || !plan.runtime_options.fit {
+        return Err("forced_split_unavailable".into());
+    }
+    let metadata_error = || "forced_split_metadata_unavailable".to_string();
+    let mut file = model.try_clone().map_err(|_| metadata_error())?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(|_| metadata_error())?;
+    let blocks = gguf_block_count(&mut file.take(16 * MIB)).ok_or_else(metadata_error)?;
+    let bytes = model.metadata().map_err(|_| metadata_error())?.len();
+    configure_partial_offload(plan, blocks, bytes)
+}
+
+fn configure_partial_offload(
+    plan: &mut AccelerationPlan,
+    blocks: u32,
+    model_bytes: u64,
+) -> Result<(), String> {
+    if !plan.uses_gpu() || blocks < 2 || model_bytes == 0 {
+        return Err("forced_split_unavailable".into());
+    }
+    // Leave a transformer block (not merely the output head) on CPU. In addition
+    // to the configured VRAM reserve, leave 20% for KV/compute allocations.
+    // Weight sizes vary by architecture: this is admission planning, not proof.
+    let bytes_per_block = model_bytes.div_ceil(u64::from(blocks));
+    let layers =
+        (plan.gpu_budget_bytes / 5 * 4 / bytes_per_block).min(u64::from(blocks - 1)) as u32;
+    if layers == 0 {
+        return Err("forced_split_unavailable".into());
+    }
+    for (flag, value) in [
+        ("--n-gpu-layers", layers.to_string()),
+        ("--fit", "off".into()),
+    ] {
+        let index = plan
+            .arguments
+            .iter()
+            .position(|arg| arg == flag)
+            .filter(|index| index + 1 < plan.arguments.len())
+            .ok_or("forced_split_unavailable")?;
+        plan.arguments[index + 1] = value;
+    }
+    plan.require_full_offload = false;
+    plan.status.requested_mode = "hybrid".into();
+    plan.status.fallback_reason_code = None;
+    // Do not credit all available VRAM as offloaded model weights when computing
+    // host RAM admission. Include embedding/output tensors in the denominator.
+    plan.gpu_budget_bytes = model_bytes / (u64::from(blocks) + 2) * u64::from(layers);
+    Ok(())
+}
+
+fn gguf_block_count(reader: &mut impl Read) -> Option<u32> {
+    fn number<const N: usize>(r: &mut impl Read) -> Option<[u8; N]> {
+        let mut bytes = [0; N];
+        r.read_exact(&mut bytes).ok()?;
+        Some(bytes)
+    }
+    fn string(r: &mut impl Read) -> Option<String> {
+        let len = u64::from_le_bytes(number(r)?);
+        if len > MIB {
+            return None;
+        }
+        let mut value = vec![0; len as usize];
+        r.read_exact(&mut value).ok()?;
+        String::from_utf8(value).ok()
+    }
+    fn skip(r: &mut impl Read, kind: u32, depth: u8) -> Option<()> {
+        let bytes = match kind {
+            0 | 1 | 7 => 1,
+            2 | 3 => 2,
+            4 | 5 | 6 => 4,
+            10 | 11 | 12 => 8,
+            8 => {
+                string(r)?;
+                return Some(());
+            }
+            9 if depth < 4 => {
+                let item = u32::from_le_bytes(number(r)?);
+                let count = u64::from_le_bytes(number(r)?);
+                if count > 1_000_000 {
+                    return None;
+                }
+                for _ in 0..count {
+                    skip(r, item, depth + 1)?;
+                }
+                return Some(());
+            }
+            _ => return None,
+        };
+        let mut buffer = [0; 8];
+        r.read_exact(&mut buffer[..bytes]).ok()
+    }
+    if number::<4>(reader)? != *b"GGUF" || !matches!(u32::from_le_bytes(number(reader)?), 2 | 3) {
+        return None;
+    }
+    let _tensors = u64::from_le_bytes(number(reader)?);
+    let count = u64::from_le_bytes(number(reader)?);
+    if count > 100_000 {
+        return None;
+    }
+    let mut architecture = None;
+    let mut counts = HashMap::new();
+    for _ in 0..count {
+        let key = string(reader)?;
+        let kind = u32::from_le_bytes(number(reader)?);
+        if key == "general.architecture" && kind == 8 {
+            architecture = Some(string(reader)?);
+        } else if key.ends_with(".block_count") && matches!(kind, 4 | 10) {
+            let value = if kind == 4 {
+                u64::from(u32::from_le_bytes(number(reader)?))
+            } else {
+                u64::from_le_bytes(number(reader)?)
+            };
+            if !(2..=4096).contains(&value) {
+                return None;
+            }
+            counts.insert(key, value as u32);
+        } else {
+            skip(reader, kind, 0)?;
+        }
+        if let Some(value) = architecture
+            .as_ref()
+            .and_then(|arch| counts.get(&format!("{arch}.block_count")))
+        {
+            return Some(*value);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -319,6 +454,9 @@ fn select_configured_plan(
     config: &LocalResourceConfig,
 ) -> Result<AccelerationPlan, String> {
     let cpu = |reason: &str| {
+        if config.mode == "hybrid" {
+            return Err("forced_split_unavailable".into());
+        }
         let mut plan = AccelerationPlan::cpu(reason);
         if config.mode == "gpu" {
             plan.status.fallback_reason_code = Some("gpu_mode_auto_fallback_unavailable".into());
@@ -753,12 +891,20 @@ pub(super) fn finish_measurement(
     if !status.verified {
         return Err("runtime_gpu_measurement_unavailable".into());
     }
+    if plan.status.requested_mode == "hybrid"
+        && !status
+            .offloaded_layers
+            .zip(status.total_layers)
+            .is_some_and(|(offloaded, total)| offloaded > 0 && offloaded < total.saturating_sub(1))
+    {
+        return Err("forced_split_not_verified".into());
+    }
     if plan.require_full_offload
         && (status.offloaded_layers != status.total_layers || status.offloaded_layers == Some(0))
     {
         return Err("gpu_full_offload_not_verified".into());
     }
-    if plan.require_full_offload {
+    if plan.require_full_offload || plan.status.requested_mode == "hybrid" {
         for (device, budget) in &plan.device_budgets {
             let values = status
                 .buffer_sizes
@@ -784,7 +930,8 @@ pub(super) fn capacity_failure(state: &Arc<Mutex<RuntimeAcceleration>>) -> bool 
 // A bounded second fit leaves room for allocations the initial device probe
 // could not predict. Keep GPU placement enabled and rebudget host RAM too.
 pub(super) fn hybrid_retry(plan: &AccelerationPlan) -> Option<AccelerationPlan> {
-    if !plan.uses_gpu() || plan.device_budgets.is_empty() {
+    if !plan.uses_gpu() || plan.device_budgets.is_empty() || plan.status.requested_mode == "hybrid"
+    {
         return None;
     }
     let mut retry = auto_fallback(plan, "runtime_gpu_capacity_unavailable");
@@ -967,6 +1114,97 @@ fn apply_measurement(status: &mut RuntimeAcceleration, line: &str) {
 mod tests {
     use super::*;
     const HELP: &str = "--fit [on|off]\n--fit-target MiB\n--device devices\n--n-gpu-layers N";
+    #[test]
+    fn forced_split_keeps_cpu_blocks_and_never_retries_as_auto() {
+        for (free, expected) in [(23000, 35), (3500, 11)] {
+            let devices = parse_devices(&format!("CUDA0: Test GPU (24576 MiB, {free} MiB free)"));
+            let config = LocalResourceConfig {
+                mode: "hybrid".into(),
+                ..Default::default()
+            };
+            let mut plan = select_configured_plan(
+                &devices,
+                HELP,
+                None,
+                0,
+                "single_device",
+                6000 * MIB,
+                &config,
+            )
+            .unwrap();
+            configure_partial_offload(&mut plan, 36, 6000 * MIB).unwrap();
+            assert!(plan
+                .arguments
+                .windows(2)
+                .any(|v| v == ["--n-gpu-layers", &expected.to_string()]));
+            assert!(plan.arguments.windows(2).any(|v| v == ["--fit", "off"]));
+            assert!(plan.gpu_budget_bytes < 6000 * MIB);
+            assert!(!plan.require_full_offload);
+            assert!(hybrid_retry(&plan).is_none());
+            for (offloaded, valid) in [(0, false), (35, true), (36, false), (37, false)] {
+                let state = Arc::new(Mutex::new(plan.status.clone()));
+                apply_measurement(
+                    &mut state.lock().unwrap(),
+                    &format!("load_tensors: offloaded {offloaded}/37 layers to GPU"),
+                );
+                apply_measurement(
+                    &mut state.lock().unwrap(),
+                    "load_tensors: CUDA0 model buffer size = 1024.00 MiB",
+                );
+                let result =
+                    finish_measurement(&state, &plan, Duration::ZERO, &AtomicBool::new(false));
+                assert_eq!(result.is_ok(), valid, "{result:?}");
+            }
+        }
+        let config = LocalResourceConfig {
+            mode: "hybrid".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            select_configured_plan(&[], HELP, None, 0, "single_device", 1, &config).unwrap_err(),
+            "forced_split_unavailable"
+        );
+        assert!(configure_partial_offload(&mut AccelerationPlan::cpu("test"), 36, 1).is_err());
+    }
+
+    #[test]
+    fn forced_split_gguf_metadata_is_bounded_and_architecture_specific() {
+        fn string(bytes: &mut Vec<u8>, value: &str) {
+            bytes.extend((value.len() as u64).to_le_bytes());
+            bytes.extend(value.as_bytes());
+        }
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend(3u32.to_le_bytes());
+        bytes.extend(0u64.to_le_bytes());
+        bytes.extend(3u64.to_le_bytes());
+        string(&mut bytes, "general.name");
+        bytes.extend(8u32.to_le_bytes());
+        string(&mut bytes, "test");
+        string(&mut bytes, "qwen2.block_count");
+        bytes.extend(4u32.to_le_bytes());
+        bytes.extend(36u32.to_le_bytes());
+        string(&mut bytes, "general.architecture");
+        bytes.extend(8u32.to_le_bytes());
+        string(&mut bytes, "qwen2");
+        assert_eq!(gguf_block_count(&mut bytes.as_slice()), Some(36));
+        assert_eq!(gguf_block_count(&mut &bytes[..bytes.len() - 1]), None);
+        bytes[0] = 0;
+        assert_eq!(gguf_block_count(&mut bytes.as_slice()), None);
+    }
+    #[test]
+    #[ignore = "Explicit opt-in: read GGUF metadata only from LUCZOR_SPLIT_PROBE_MODELS"]
+    fn forced_split_installed_gguf_metadata_probe() {
+        let root = std::env::var("LUCZOR_SPLIT_PROBE_MODELS").unwrap();
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|value| value.to_str()) != Some("gguf") { continue; }
+            let file = File::open(&path).unwrap();
+            let mut plan = select_plan(&parse_devices("CUDA0: Probe (24576 MiB, 23000 MiB free)"), HELP, None, 0);
+            force_partial_offload(&mut plan, &file).unwrap();
+            let index = plan.arguments.iter().position(|arg| arg == "--n-gpu-layers").unwrap();
+            println!("GGUF metadata accepted: {} -> GPU layers {}", path.file_name().unwrap().to_string_lossy(), plan.arguments[index+1]);
+        }
+    }
     #[test]
     fn hybrid_retry_keeps_gpu_and_rebudgets_host_share() {
         let devices = parse_devices("CUDA0: Laptop (4096 MiB, 3500 MiB free)");

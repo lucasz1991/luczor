@@ -178,6 +178,19 @@ describe('device resources settings UI', () => {
     view.app.unmount()
   })
 
+  it('offers forced split as a fourth mode and saves it through the existing pending barrier', async () => {
+    const view = await mount()
+    expect(nodes(view.root).filter(node => node.tag === 'input' && node.props.type === 'radio')).toHaveLength(4)
+    expect(text(view.root)).toContain('Erzwungener Split')
+    expect(view.client.save).not.toHaveBeenCalled()
+    await view.mode('hybrid')
+    expect(text(view.root)).toContain('mindestens eine Rechenschicht')
+    await view.click('Ressourcen speichern')
+    expect(view.client.save).toHaveBeenCalledWith({ ...DEFAULT_LOCAL_RESOURCE_CONFIG, mode: 'hybrid' }, 4)
+    expect(text(view.root)).toContain('Änderung vorgemerkt')
+    view.app.unmount()
+  })
+
   it('preserves an unsaved draft but refuses to overwrite a concurrent configuration change', async () => {
     const view = await mount()
     await view.mode('cpu')

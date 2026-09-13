@@ -2,7 +2,7 @@ import { invoke } from '@tauri-apps/api/core'
 import type { HardwareSnapshot } from './capacity'
 
 export type LocalResourceConfig = {
-  mode: 'auto' | 'gpu' | 'cpu'
+  mode: 'auto' | 'gpu' | 'cpu' | 'hybrid'
   gpuDeviceIds: string[] | null
   threads: number | null
   threadsBatch: number | null
