@@ -1192,20 +1192,6 @@ mod tests {
         assert_eq!(gguf_block_count(&mut bytes.as_slice()), None);
     }
     #[test]
-    #[ignore = "Explicit opt-in: read GGUF metadata only from LUCZOR_SPLIT_PROBE_MODELS"]
-    fn forced_split_installed_gguf_metadata_probe() {
-        let root = std::env::var("LUCZOR_SPLIT_PROBE_MODELS").unwrap();
-        for entry in std::fs::read_dir(root).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|value| value.to_str()) != Some("gguf") { continue; }
-            let file = File::open(&path).unwrap();
-            let mut plan = select_plan(&parse_devices("CUDA0: Probe (24576 MiB, 23000 MiB free)"), HELP, None, 0);
-            force_partial_offload(&mut plan, &file).unwrap();
-            let index = plan.arguments.iter().position(|arg| arg == "--n-gpu-layers").unwrap();
-            println!("GGUF metadata accepted: {} -> GPU layers {}", path.file_name().unwrap().to_string_lossy(), plan.arguments[index+1]);
-        }
-    }
-    #[test]
     fn hybrid_retry_keeps_gpu_and_rebudgets_host_share() {
         let devices = parse_devices("CUDA0: Laptop (4096 MiB, 3500 MiB free)");
         let plan = select_configured_plan(
