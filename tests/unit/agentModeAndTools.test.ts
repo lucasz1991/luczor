@@ -89,6 +89,64 @@ const durableTaskCreate = {
 } as const
 
 describe('agent mode and tool reliability', () => {
+  it('bounds browser host guessing, preserves matching tool replies and continues unrelated work', async () => {
+    mocks.toOpenAITools.mockReturnValue(
+      ['browser_open', 'browser_close', 'browser_status', 'project_get_state'].map(name => ({
+        type: 'function',
+        function: { name, parameters: { type: 'object' } },
+      }))
+    )
+    const browserExecute = vi.fn(async () => {
+      throw new Error('browser_session_hosts_changed')
+    })
+    mocks.getTool.mockImplementation(name => ({
+      name,
+      category: 'app',
+      mutating: false,
+      requiresApproval: false,
+      parameters: { type: 'object', properties: { allowed_hosts: { type: 'array', items: { type: 'string' } } } },
+      execute: name === 'browser_open' ? browserExecute : mocks.execute,
+    }))
+    for (let index = 0; index < 5; index++) {
+      const args = { allowed_hosts: [`guess-${index}.test`] }
+      mocks.streamChatWithTools.mockResolvedValueOnce({
+        content: '',
+        toolCalls: [{ id: `guess-${index}`, name: 'browser_open', arguments: args }],
+        rawToolCalls: [
+          {
+            id: `guess-${index}`,
+            type: 'function',
+            function: { name: 'browser_open', arguments: JSON.stringify(args) },
+          },
+        ],
+      })
+    }
+    mocks.streamChatWithTools.mockResolvedValueOnce(toolCallResult).mockResolvedValueOnce({
+      content: 'Browser benötigt eine Korrektur; Projektzustand ist geprüft.',
+      toolCalls: [],
+      rawToolCalls: [],
+    })
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'act',
+      baseMessages: [{ role: 'user', content: 'Browser und Projekt prüfen.' }],
+      maxRounds: 8,
+    })
+    expect(browserExecute).toHaveBeenCalledTimes(3)
+    expect(mocks.execute).toHaveBeenCalledOnce()
+    expect(result.toolFailures).toBe(5)
+    const lastRequest = mocks.streamChatWithTools.mock.calls.at(-1)![0]
+    expect(lastRequest.tools.map((tool: { function: { name: string } }) => tool.function.name)).toEqual([
+      'browser_close',
+      'browser_status',
+      'project_get_state',
+    ])
+    const replies = lastRequest.messages.filter((message: { role: string }) => message.role === 'tool')
+    expect(replies).toHaveLength(6)
+    expect(new Set(replies.map((message: { tool_call_id: string }) => message.tool_call_id)).size).toBe(6)
+    expect(replies[3].content).toContain('tool_recovery_required')
+  })
+
   it('stops before tools and receipts when current remote authority is unavailable', async () => {
     const beforeToolExecution = vi.fn(async () => {
       throw new Error('lease expired')

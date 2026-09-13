@@ -137,6 +137,7 @@ const TOOL_CONTRACT = [
   { name: 'os_open_url', category: 'os', mutating: true, requiresApproval: true },
   { name: 'os_environment', category: 'os', mutating: false, requiresApproval: true },
   { name: 'os_observe_desktop', category: 'os', mutating: false, requiresApproval: true },
+  { name: 'browser_status', category: 'app', mutating: false, requiresApproval: false },
   { name: 'browser_close', category: 'app', mutating: true, requiresApproval: true },
   { name: 'browser_open', category: 'app', mutating: true, requiresApproval: true },
   { name: 'browser_navigate', category: 'app', mutating: true, requiresApproval: true },
@@ -193,9 +194,9 @@ const TOOL_CONTRACT = [
   { name: 'workspace_agent_cancel', category: 'app', mutating: true, requiresApproval: false },
 ] as const
 
-// Reviewed addition: scoped cloud project text files with optimistic write revisions.
-const TOOL_SCHEMA_SHA256 = '9c002fda6b91f006cee98d26b15017ffabf5fea9d1cfda62a4e1a23d4775105c'
-const CORE_TOOL_SCHEMA_SHA256 = '2de4accc526c340402fef34d0882d4012c173d21d9e25f70d95c5860d54d80f5'
+// Reviewed recovery contract: owned browser status/close, image capabilities and exact goal updates.
+const TOOL_SCHEMA_SHA256 = '80215b02f03277263a59e9cd58cb77b6a7c125cb9141a54b0d63c7838f385783'
+const CORE_TOOL_SCHEMA_SHA256 = 'b8645d7de286a8b873fb8322fd8f690662d8f7148032ed6ff12b629f43f91d9d'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {
@@ -330,7 +331,8 @@ describe('tool registry contract', () => {
 
     expect(fingerprint).toBe(TOOL_SCHEMA_SHA256)
     for (const tool of toOpenAITools().filter(
-      item => !['local_model_status', 'model_capabilities', 'device_list'].includes(item.function.name)
+      item =>
+        !['local_model_status', 'model_capabilities', 'device_list', 'browser_status'].includes(item.function.name)
     )) {
       const parameters = tool.function.parameters as { properties?: Record<string, unknown> }
       expect(Object.keys(parameters.properties ?? {})).not.toHaveLength(0)
@@ -437,6 +439,43 @@ describe('tool registry contract', () => {
     expect(mocks.setProjectSummary).toHaveBeenCalledWith('project-1', 'Neuer Stand')
     expect(goalResult.goal.id).not.toBe('')
     expect(mocks.upsertGoal.mock.calls[0]![1].id).toBe(goalResult.goal.id)
+  })
+
+  it('never turns an unknown goal id or repeated title into a new goal', async () => {
+    mocks.state.projects = [
+      {
+        id: 'project-1',
+        goals: [
+          {
+            id: 'goal-original',
+            title: 'Tooltest abschließen',
+            description: 'Belege sichern',
+            createdAt: 1,
+            priority: 'high',
+            status: 'open',
+          },
+        ],
+      },
+    ]
+    const tool = getTool('project_upsert_goal')!
+    await expect(
+      tool.execute({ id: 'invented', title: 'Tooltest abschließen', status: 'done' }, PROJECT_CONTEXT)
+    ).resolves.toMatchObject({ ok: false, code: 'project_goal_not_found', next_tool: 'project_get_state' })
+    await expect(
+      tool.execute({ title: ' TOOLTEST  abschließen ', status: 'done' }, PROJECT_CONTEXT)
+    ).resolves.toMatchObject({ ok: false, code: 'project_goal_already_exists' })
+    expect(mocks.upsertGoal).not.toHaveBeenCalled()
+    await tool.execute({ id: 'goal-original', title: 'Tooltest abschließen', status: 'done' }, PROJECT_CONTEXT)
+    expect(mocks.upsertGoal).toHaveBeenCalledExactlyOnceWith(
+      'project-1',
+      expect.objectContaining({
+        id: 'goal-original',
+        status: 'done',
+        createdAt: 1,
+        priority: 'high',
+        description: 'Belege sichern',
+      })
+    )
   })
 
   it('routes project, chat and task creation through the established API methods', async () => {

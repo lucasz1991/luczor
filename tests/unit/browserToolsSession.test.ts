@@ -8,7 +8,12 @@ vi.mock('@/services/projectWorkspace', () => ({
   requireProjectWorkspace: vi.fn(async () => ({ rootPath: 'E:/workspace', updatedAt: 10 })),
 }))
 import { browserTools } from '@/services/tools/browser'
-import { clearToolSessions, getToolSession } from '@/services/tools/toolSessionCoordinator'
+import {
+  clearToolSessions,
+  getToolSession,
+  listToolSessions,
+  retainToolSessionRun,
+} from '@/services/tools/toolSessionCoordinator'
 import { executionGate, updateExecutionControls } from '@/services/executionGate'
 import { browserPanel } from '@/services/browserPanel'
 const context = { projectId: 'project' }
@@ -33,6 +38,97 @@ beforeEach(() => {
 })
 
 describe('chat browser native session', () => {
+  it('does not poison the session when the first URL is outside its host boundary', async () => {
+    await expect(
+      execute('browser_open', { url: 'https://example.test', allowed_hosts: ['wrong.test'] })
+    ).rejects.toThrow('außerhalb')
+    expect(listToolSessions()).toEqual([])
+    await execute('browser_open', { url: 'https://example.test', allowed_hosts: ['Example.TEST', 'example.test'] })
+    expect(listToolSessions()[0]?.allowedHosts).toEqual(['example.test'])
+  })
+  it('reports the owned boundary and closes without guessed hosts through native owner cleanup', async () => {
+    await execute('browser_open', { allowed_hosts: ['example.test'] })
+    const id = listToolSessions()[0]!.id
+    await expect(execute('browser_status', {})).resolves.toMatchObject({
+      session: { id, allowed_hosts: ['example.test'] },
+    })
+    await expect(execute('browser_close', { allowed_hosts: ['wrong.test'] })).resolves.toEqual({
+      ok: true,
+      closed: true,
+      already_closed: false,
+    })
+    expect(native.invoke).toHaveBeenCalledWith('wf_browser_cleanup', {
+      payload: {
+        principalId: 'owner',
+        projectId: 'project',
+        expectedRootPath: 'E:/workspace',
+        expectedWorkspaceUpdatedAt: 10,
+        runId: id,
+      },
+    })
+    expect(listToolSessions()).toEqual([])
+    await execute('browser_open', { allowed_hosts: ['other.test'] })
+    expect(listToolSessions()[0]?.allowedHosts).toEqual(['other.test'])
+  })
+  it('does not create sessions for reads, status or idempotent close', async () => {
+    await expect(execute('browser_dom_read', {})).rejects.toThrow('browser_open')
+    await expect(execute('browser_status', {})).resolves.toMatchObject({ session: null })
+    await expect(execute('browser_close', {})).resolves.toMatchObject({ closed: false, already_closed: true })
+    expect(listToolSessions()).toEqual([])
+    expect(native.invoke.mock.calls.filter(([command]) => command.startsWith('wf_browser'))).toEqual([])
+  })
+  it('keeps a failed cleanup retryable and awaits cleanup before opening a replacement', async () => {
+    await execute('browser_open', { allowed_hosts: ['example.test'] })
+    const id = listToolSessions()[0]!.id
+    native.invoke.mockRejectedValueOnce('workflow_browser_cleanup_pending')
+    await expect(execute('browser_close', {})).rejects.toThrow('noch geschlossen')
+    expect(listToolSessions()[0]?.id).toBe(id)
+    await expect(execute('browser_close', {})).resolves.toMatchObject({ closed: true })
+    expect(listToolSessions()).toEqual([])
+  })
+  it('does not expose or close another active run and frees completed run ownership for the next chat', async () => {
+    const firstCtx = {
+      ...context,
+      execution: executionGate.capture(undefined, { projectId: 'project', runId: 'browser-first' }),
+    }
+    const secondCtx = {
+      ...context,
+      execution: executionGate.capture(undefined, { projectId: 'project', runId: 'browser-second' }),
+    }
+    const finish = retainToolSessionRun(firstCtx)
+    const nestedFinish = retainToolSessionRun(firstCtx)
+    const open = browserTools.find(tool => tool.name === 'browser_open')!
+    await open.execute({ allowed_hosts: ['private.test'] }, firstCtx)
+    await expect(
+      browserTools.find(tool => tool.name === 'browser_status')!.execute({}, secondCtx)
+    ).resolves.toMatchObject({ session: null })
+    await expect(
+      browserTools.find(tool => tool.name === 'browser_close')!.execute({}, secondCtx)
+    ).resolves.toMatchObject({ closed: false })
+    nestedFinish()
+    expect(listToolSessions()[0]?.status).toBe('active')
+    await expect(open.execute({ allowed_hosts: ['other.test'] }, secondCtx)).rejects.toThrow('anderer Auftrag')
+    finish()
+    expect(listToolSessions()[0]?.status).toBe('expired')
+    await open.execute({ allowed_hosts: ['other.test'] }, secondCtx)
+    expect(listToolSessions()).toHaveLength(1)
+    expect(listToolSessions()[0]?.allowedHosts).toEqual(['other.test'])
+    const commands = native.invoke.mock.calls.map(([command]) => command)
+    expect(commands.indexOf('wf_browser_cleanup')).toBeLessThan(commands.lastIndexOf('wf_browser_action'))
+  })
+  it('shares an in-flight session creation and rejects admission revoked during preparation', async () => {
+    const [first, second] = await Promise.all([
+      getToolSession(context, 'browser', ['example.test']),
+      getToolSession(context, 'browser', ['example.test']),
+    ])
+    expect(first.meta.id).toBe(second.meta.id)
+    clearToolSessions()
+    const controller = new AbortController()
+    const pending = getToolSession({ ...context, signal: controller.signal }, 'browser', ['example.test'])
+    controller.abort()
+    await expect(pending).rejects.toThrow('Ausführung verworfen')
+    expect(listToolSessions()).toEqual([])
+  })
   it('never reuses another run’s execution permit inside the same project', async () => {
     const firstController = new AbortController()
     const firstTicket = executionGate.capture(firstController.signal, { projectId: 'project', runId: 'first-run' })

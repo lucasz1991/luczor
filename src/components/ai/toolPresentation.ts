@@ -4,6 +4,7 @@ const toolLabels = new Map<string, string>(
   Object.entries({
     browser_open: 'Browser öffnen',
     browser_close: 'Browser beenden',
+    browser_status: 'Browser-Sitzung prüfen',
     browser_navigate: 'Seite öffnen',
     browser_dom_read: 'Seiteninhalt lesen',
     browser_screenshot: 'Seite aufnehmen',

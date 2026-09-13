@@ -57,6 +57,8 @@ import { ChatEffectJournalError, type ChatEffectJournal } from '@/services/chatE
 import { withRunResources } from '@/services/runs/resourceCoordinator'
 import { freezeAgentWorkflowScope, WORKFLOW_WORKCOPY_TOOLS } from '@/services/agents/workflowScope'
 import { validateToolArguments } from '@/services/tools/validateArguments'
+import { ToolRecoveryGuard } from '@/services/tools/toolRecovery'
+import { retainToolSessionRun } from '@/services/tools/toolSessionCoordinator'
 import { INVALID_TOOL_ARGUMENTS, prepareToolCallHistory } from '@/services/inference/toolCallHistory'
 import { loadToolLimits, validToolRounds } from '@/services/toolLimits'
 import { mutationKey, type AgentCheckpoint, type PendingTaskCreateVerification } from '@/services/agents/chatCheckpoint'
@@ -581,6 +583,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       ? Object.freeze({ ...inheritedExecution, signal: AbortSignal.any([inheritedExecution.signal, opts.signal]) })
       : inheritedExecution
   executionGate.assert(execution)
+  cleanup.push(retainToolSessionRun({ projectId, execution, toolSessionId: opts.runId }))
   const signal = AbortSignal.any([
     execution.signal,
     ...(opts.signal ? [opts.signal] : []),
@@ -818,6 +821,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   let toolFailures = 0
   let toolSuccesses = 0
   const toolOutcomes: ToolOutcomeRecord[] = []
+  const toolRecovery = new ToolRecoveryGuard()
   let reasoningRetryUsed = false
   let localContextAdjusted = false
   const tokenCounter = createTokenUsageCounter()
@@ -1135,9 +1139,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     // running. Refresh both the model instruction and the hard execution gate.
     // Approved external messages are immutable: even a mode change while the
     // approval was open must not alter the already approved request hash.
+    const availableTools = tools.filter(tool => toolRecovery.canOffer(tool.function.name))
     if (!resolvedRoute.externalOneShot) {
       applyRuntimeMode(messages, currentMode())
-      applyRuntimeTools(messages, tools, currentMode())
+      applyRuntimeTools(messages, availableTools, currentMode())
     }
 
     setStatus('thinking')
@@ -1146,14 +1151,14 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     // The completed-round callback owns retention. Do not erase the visible
     // commentary just because the next inference request has started.
     visibleContent = ''
-    updateUsage(round + 1, { messages, tools }, '')
+    updateUsage(round + 1, { messages, tools: availableTools }, '')
     let res
     const inferenceStarted = performance.now()
     try {
       res = await inferenceGateway.streamChatWithTools({
         messages,
-        tools,
-        toolChoice: nextToolChoice,
+        tools: availableTools,
+        toolChoice: availableTools.length ? nextToolChoice : 'none',
         ...(inferenceGateway.target === 'local_llama_cpp'
           ? {
               thinkingTier: opts.thinkingTier ?? opts.continuation?.thinkingTier ?? 'balanced',
@@ -1476,6 +1481,14 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       }
 
       let executionArguments = call.arguments
+      const recoveryRequired = toolRecovery.blocked(call.name, executionArguments)
+      if (recoveryRequired) {
+        toolFailures++
+        toolOutcomes.push({ name: call.name, outcome: recoveryRequired })
+        recordOutcome(projectId, call.id, call.name, 'failed', recoveryRequired, dataHandling, res.requestId)
+        messages.push(outcomeMessage(call.id, call.name, recoveryRequired))
+        continue
+      }
       const guardedConversationCreate =
         call.name === 'chat_create' ? conversationCreateTarget(call.arguments, projectId) : null
       let conversationCreateOperation: PendingTaskCreateVerification | undefined
@@ -1957,7 +1970,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           }
         })
         executionGate.assert(execution)
-        const outcome = normalizeToolOutcome(output)
+        const outcome = toolRecovery.record(call.name, executionArguments, normalizeToolOutcome(output))
         const completeGoalTextRead =
           call.name !== GOAL_READ_RESULT_NAME ||
           (!!output && typeof output === 'object' && 'truncated' in output && output.truncated === false)
@@ -2136,7 +2149,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       } catch (e: any) {
         if (e instanceof ChatEffectJournalError || e instanceof ToolExecutionAuthorityError) throw e
         if (execution.signal.aborted) throw new DOMException('Aborted', 'AbortError')
-        const outcome: Outcome = { ok: false, error: e?.message ?? String(e) }
+        const outcome = toolRecovery.record(call.name, executionArguments, {
+          ok: false,
+          error: e?.message ?? String(e),
+        })
         toolFailures++
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(

@@ -16,12 +16,18 @@ export function browserFailure(error: unknown): string {
     workflow_browser_host_boundary_required: 'Bitte beim Öffnen die erlaubten Zielhosts in allowed_hosts angeben.',
     workflow_browser_allowed_hosts_invalid:
       'Die Zielhosts müssen ohne Protokoll oder Pfad angegeben werden, z. B. example.com.',
-    workflow_browser_host_not_allowed: 'Diese Adresse gehört nicht zu den bestätigten Hosts der Browser-Sitzung.',
+    workflow_browser_host_not_allowed:
+      'Diese Adresse liegt außerhalb der bestätigten Hosts. browser_status mit {} zeigt die Bindung. Zum Wechseln browser_close mit {} und anschließend browser_open mit den bestätigten Zielhosts verwenden. Keine Hosts raten.',
+    workflow_browser_url_invalid: 'Browser-URL ist ungültig. Eine HTTP(S)-Adresse ohne Zugangsdaten verwenden.',
     workflow_browser_host_boundary_unavailable: 'Die sichere Browser-Steuerung ist auf diesem System nicht verfügbar.',
     workflow_browser_requires_windows_webview2: 'Diese Browser-Funktion benötigt Windows/WebView2.',
     workflow_browser_session_unavailable: 'Bitte zuerst browser_open mit den erlaubten Hosts ausführen.',
     workflow_browser_owned_by_another_run:
-      'Der Browser wird bereits von einer anderen Sitzung verwendet. Diese zuerst beenden.',
+      'Ein anderer Auftrag verwendet den Browser. Dessen Abschluss abwarten; eigene Hostlisten oder browser_close können seine Sitzung nicht übernehmen.',
+    workflow_browser_cleanup_pending:
+      'Die eigene Browser-Sitzung wird noch geschlossen. Den Abschluss abwarten; noch keine neue Sitzung öffnen.',
+    workflow_browser_cleanup_failed:
+      'Die eigene Browser-Sitzung konnte nicht geschlossen werden. browser_close mit {} kann die Bereinigung erneut versuchen.',
     workflow_browser_url_changed:
       'Die Seite hat sich seit dem letzten Aufruf geändert. Bitte den aktuellen Seitenstand erneut lesen.',
     workflow_browser_navigation_timeout:

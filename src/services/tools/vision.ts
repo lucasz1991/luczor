@@ -8,7 +8,7 @@ const schema = {
   type: 'object',
   additionalProperties: false,
   properties: {
-    action: { type: 'string', enum: ['capture', 'ocr', 'compare', 'vision'] },
+    action: { type: 'string', enum: ['capabilities', 'capture', 'ocr', 'compare', 'vision'] },
     artifact_id: { type: 'string', maxLength: 200 },
     other_artifact_id: { type: 'string', maxLength: 200 },
     monitor_id: { type: 'integer', minimum: 0, maximum: 4294967295 },
@@ -41,7 +41,7 @@ export const visionTools: ToolDef[] = [
     name: 'image_analyze',
     category: 'app',
     description:
-      'Erfasst, liest, vergleicht oder analysiert ein Bild mit einer verfügbaren Vision-Fähigkeit. Rohbilder bleiben temporär.',
+      'Zuerst capabilities für verfügbare lokale Bildfunktionen abfragen. capture erstellt ein temporäres Bild, ocr liest Text, compare vergleicht Pixel. vision benötigt eine separat eingerichtete externe Vision-Route und deren Freigaben; ein lokales Textmodell bietet keine Bildanalyse.',
     parameters: schema,
     mutating: false,
     requiresApproval: true,
@@ -54,6 +54,18 @@ export const visionTools: ToolDef[] = [
     approvalMode: 'session',
     async execute(args, ctx) {
       validateToolArguments(schema, args)
+      if (args.action === 'vision' && args.inference !== 'external') {
+        return {
+          ok: false,
+          code: 'workflow_vision_multimodal_runtime_unavailable',
+          error:
+            'Für diese lokale Runtime ist keine multimodale Bildanalyse verfügbar. Eine Wiederholung oder ein anderer Textprompt ändert diese Fähigkeit nicht.',
+          next_tool: 'image_analyze',
+          next_arguments: { action: 'capabilities' },
+          guidance:
+            'OCR kann Bildtext lesen, aber keine Szene verstehen. Externe Bildanalyse nur über eine eingerichtete und freigegebene Vision-Route anfordern.',
+        }
+      }
       const account = await getVerifiedAccountSnapshot()
       if (!account) throw new Error('Für Bildanalyse ist eine verifizierte Serververbindung erforderlich.')
       const session = await getToolSession(ctx, 'vision')

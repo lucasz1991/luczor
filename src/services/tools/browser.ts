@@ -1,5 +1,5 @@
 import type { ToolDef, ToolContext } from './types'
-import { getToolSession, stopToolSession } from './toolSessionCoordinator'
+import { closeToolSession, findToolSession, getToolSession } from './toolSessionCoordinator'
 import { validateToolArguments } from './validateArguments'
 import { browserPanel, browserFailure, revealBrowserPanel } from '@/services/browserPanel'
 
@@ -27,39 +27,51 @@ const sessionSchema = (required: string[] = []) => ({
 })
 
 function hosts(args: Record<string, unknown>): readonly string[] {
-  return Array.isArray(args.allowed_hosts)
+  const values = Array.isArray(args.allowed_hosts)
     ? args.allowed_hosts
         .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
-        .map(item => item.trim())
+        .map(item => item.trim().toLowerCase())
     : []
+  if (values.some(host => !/^[a-z0-9.:-]+$/u.test(host))) throw new Error('workflow_browser_allowed_hosts_invalid')
+  return [...new Set(values)].sort()
 }
 
 function assertAllowedHost(action: string, args: Record<string, unknown>, allowedHosts: readonly string[]): void {
   if (!['open', 'navigate', 'download'].includes(action) || typeof args.url !== 'string') return
-  if (!allowedHosts.length)
-    throw new Error('Für Browser-Navigation muss mindestens ein bestätigter Host angegeben werden.')
+  if (!allowedHosts.length) throw new Error('workflow_browser_host_boundary_required')
   let hostname: string
   try {
     const target = new URL(args.url)
     if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) throw new Error()
     hostname = target.host.toLowerCase()
   } catch {
-    throw new Error('Browser-URL ist ungültig.')
+    throw new Error('workflow_browser_url_invalid')
   }
-  const allowed = allowedHosts.some(host => {
-    const normalized = host
-      .toLowerCase()
-      .replace(/^https?:\/\//u, '')
-      .split('/')[0]
-    return hostname === normalized
-  })
-  if (!allowed) throw new Error('Browser-URL liegt außerhalb der bestätigten Hosts.')
+  if (!allowedHosts.includes(hostname)) throw new Error('workflow_browser_host_not_allowed')
 }
 
 async function browser(ctx: ToolContext, action: string, args: Record<string, unknown>) {
+  const existing = findToolSession(ctx, 'browser')
+  if (action === 'status') {
+    return {
+      ok: true,
+      session: existing
+        ? { id: existing.meta.id, status: existing.meta.status, allowed_hosts: existing.meta.allowedHosts }
+        : null,
+      next_tool: existing ? 'browser_dom_read' : 'browser_open',
+      guidance:
+        'Die Bindung gilt nur für diesen Auftrag. Zum Schließen browser_close mit {} verwenden. Keine Hosts raten.',
+    }
+  }
+  if (action === 'close') {
+    const closed = existing ? await closeToolSession(existing.meta.id) : false
+    return { ok: true, closed, already_closed: !closed }
+  }
+  if (action !== 'open' && !existing) throw new Error('workflow_browser_session_unavailable')
   const allowedHosts = hosts(args)
+  // Validate before reserving a session. An invalid URL must not freeze the wrong host set.
+  assertAllowedHost(action, args, allowedHosts.length ? allowedHosts : (existing?.meta.allowedHosts ?? []))
   const session = await getToolSession(ctx, 'browser', allowedHosts)
-  assertAllowedHost(action, args, session.meta.allowedHosts)
   const browser = session.browser
   if (!browser) throw new Error('Browser-Sitzung konnte nicht initialisiert werden.')
   switch (action) {
@@ -67,7 +79,7 @@ async function browser(ctx: ToolContext, action: string, args: Record<string, un
       try {
         return await browser.open(typeof args.url === 'string' ? args.url : undefined)
       } catch (error) {
-        stopToolSession(session.meta.id)
+        await closeToolSession(session.meta.id)
         throw error
       }
     case 'navigate':
@@ -84,11 +96,6 @@ async function browser(ctx: ToolContext, action: string, args: Record<string, un
       return browser.select(String(args.selector), String(args.value))
     case 'download':
       return browser.download(String(args.url), typeof args.name === 'string' ? args.name : undefined)
-    case 'close': {
-      const result = await browser.close()
-      stopToolSession(session.meta.id)
-      return result
-    }
     default:
       throw new Error(`Unbekannte Browseraktion: ${action}`)
   }
@@ -133,8 +140,16 @@ function define(
 
 export const browserTools: ToolDef[] = [
   define(
+    'browser_status',
+    'Liest die Browser-Sitzung dieses Auftrags und ihre bestätigten Hosts. Bei Sitzungsfehlern zuerst mit {} aufrufen; keine Hostlisten erraten. Öffnet keine Sitzung.',
+    'status',
+    { type: 'object', additionalProperties: false, properties: {} },
+    false,
+    false
+  ),
+  define(
     'browser_close',
-    'Beendet die gebundene Browser-Sitzung. Zum bloßen Ausblenden das Panel einklappen.',
+    'Beendet nur die Browser-Sitzung dieses Auftrags, auch nach einem fehlgeschlagenen Öffnen. Mit {} aufrufen; allowed_hosts wird beim Schließen nicht benötigt. Zum Ausblenden das Panel einklappen.',
     'close',
     sessionSchema(),
     true,

@@ -86,7 +86,8 @@ export const projectStateTools: ToolDef[] = [
   {
     name: 'project_upsert_goal',
     category: 'project',
-    description: 'Create or update a project goal. Omit id to create a new goal; provide an existing id to update it.',
+    description:
+      'Create or update a project goal. Read project_get_state first. Omit id to create a new goal; copy the exact existing goal id to update it. Unknown ids and duplicate titles are rejected without creating a goal.',
     mutating: true,
     requiresApproval: true,
     parameters: {
@@ -114,10 +115,33 @@ export const projectStateTools: ToolDef[] = [
       const existingId = asString(args.id).trim()
       const now = Date.now()
       const project = getProject(ctx.projectId)
+      if (!project) throw new Error('Projekt nicht gefunden; kein Ziel wurde gespeichert.')
       const existing = existingId ? (project?.goals ?? []).find(goal => goal.id === existingId) : undefined
+      if (existingId && !existing) {
+        return {
+          ok: false,
+          code: 'project_goal_not_found',
+          error:
+            'Diese Ziel-ID existiert im aktuellen Projekt nicht. project_get_state lesen und die vorhandene ID verwenden; es wurde kein Ziel angelegt.',
+          next_tool: 'project_get_state',
+          next_arguments: {},
+        }
+      }
+      const normalizedTitle = (value: string) =>
+        value.normalize('NFKC').trim().replace(/\s+/gu, ' ').toLocaleLowerCase('de-DE')
+      if (!existingId && project.goals?.some(goal => normalizedTitle(goal.title) === normalizedTitle(title))) {
+        return {
+          ok: false,
+          code: 'project_goal_already_exists',
+          error:
+            'Ein Ziel mit diesem Titel existiert bereits. Zum Aktualisieren die ID aus project_get_state verwenden; es wurde kein weiteres Ziel angelegt.',
+          next_tool: 'project_get_state',
+          next_arguments: {},
+        }
+      }
 
       const goal: ProjectGoal = {
-        id: existing?.id ?? (existingId || uid()),
+        id: existing?.id ?? uid(),
         title,
         description: asString(args.description).trim() || existing?.description,
         status: asGoalStatus(args.status),

@@ -4,6 +4,7 @@ import { invoke, isTauri } from '@tauri-apps/api/core'
 import AiIcon from '@/components/ai/AiIcon.vue'
 import { browserFailure, browserPanel } from '@/services/browserPanel'
 import { browserTools } from '@/services/tools/browser'
+import { closeToolSession, listToolSessions } from '@/services/tools/toolSessionCoordinator'
 
 const DESKTOP_WIDTH = 1600
 const DESKTOP_HEIGHT = 900
@@ -133,9 +134,12 @@ async function navigate() {
 async function closeSession() {
   busy.value = true
   try {
-    await browserTools.find(tool => tool.name === 'browser_close')!.execute({}, { projectId: props.projectId })
-    opened.value = false
-    address.value = currentUrl.value = ''
+    // This explicit user action may close the displayed chat's owned session.
+    // A model's browser_close remains restricted to that model's run.
+    const session = listToolSessions().find(item => item.projectId === props.projectId && item.kind === 'browser')
+    if (session) await closeToolSession(session.id)
+    else await browserTools.find(tool => tool.name === 'browser_close')!.execute({}, { projectId: props.projectId })
+    await refresh()
   } catch (error) {
     browserPanel.error = browserFailure(error)
   } finally {
