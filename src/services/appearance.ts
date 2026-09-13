@@ -51,8 +51,8 @@ export const appearance = reactive({
   assistantName: 'Luczor',
 })
 
-function rgba(rgb: [number, number, number], a: number) {
-  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${a})`
+function rgba(rgb: [number, number, number], alpha: number) {
+  return `rgba(${rgb[0]},${rgb[1]},${rgb[2]},${alpha})`
 }
 function rgbHex(rgb: [number, number, number]) {
   return `rgb(${rgb[0]},${rgb[1]},${rgb[2]})`
@@ -67,30 +67,34 @@ function resolveTheme(theme: ThemeName): 'dark' | 'light' {
   return theme
 }
 
+const ACCENT_LOOKUP = new Map<string, Accent>(Object.entries(ACCENTS))
+const ACCENT_LIGHT_LOOKUP = new Map<string, Pick<Accent, 'bright' | 'deep'>>(Object.entries(ACCENTS_LIGHT))
+
 function applyAccent(name: AccentName, light: boolean) {
-  const a = ACCENTS[name] ?? ACCENTS.violet
-  const l = ACCENTS_LIGHT[name] ?? ACCENTS_LIGHT.violet
-  const r = document.documentElement.style
-  r.setProperty('--cy', rgbHex(a.base))
-  r.setProperty('--cy-bright', light ? l.bright : a.bright)
-  r.setProperty('--cy-soft', a.soft)
-  r.setProperty('--cy-deep', light ? l.deep : a.deep)
-  r.setProperty('--cy-04', rgba(a.base, 0.04))
-  r.setProperty('--cy-08', rgba(a.base, 0.08))
-  r.setProperty('--cy-12', rgba(a.base, 0.12))
-  r.setProperty('--cy-16', rgba(a.base, 0.16))
-  r.setProperty('--cy-22', rgba(a.base, 0.22))
-  r.setProperty('--border-soft', rgba(a.base, 0.14))
-  r.setProperty('--border', rgba(a.base, 0.26))
-  r.setProperty('--border-strong', rgba(a.base, 0.42))
-  r.setProperty('--glass-wash', rgba(a.base, 0.06))
+  const accent = ACCENT_LOOKUP.get(name) ?? ACCENTS.violet
+  const lightTone = ACCENT_LIGHT_LOOKUP.get(name) ?? ACCENTS_LIGHT.violet
+  const rootStyle = document.documentElement.style
+  const base = accent.base
+  rootStyle.setProperty('--cy', rgbHex(base))
+  rootStyle.setProperty('--cy-bright', light ? lightTone.bright : accent.bright)
+  rootStyle.setProperty('--cy-soft', accent.soft)
+  rootStyle.setProperty('--cy-deep', light ? lightTone.deep : accent.deep)
+  rootStyle.setProperty('--cy-04', rgba(base, 0.04))
+  rootStyle.setProperty('--cy-08', rgba(base, 0.08))
+  rootStyle.setProperty('--cy-12', rgba(base, 0.12))
+  rootStyle.setProperty('--cy-16', rgba(base, 0.16))
+  rootStyle.setProperty('--cy-22', rgba(base, 0.22))
+  rootStyle.setProperty('--border-soft', rgba(base, 0.14))
+  rootStyle.setProperty('--border', rgba(base, 0.26))
+  rootStyle.setProperty('--border-strong', rgba(base, 0.42))
+  rootStyle.setProperty('--glass-wash', rgba(base, 0.06))
   // Liquid Glass: no neon halos – accent light only as a soft, wide diffusion.
-  r.setProperty('--glow-xs', `0 0 0 1px ${rgba(a.base, 0.22)}`)
-  r.setProperty('--glow-sm', `0 8px 20px -12px ${rgba(a.base, 0.45)}`)
-  r.setProperty('--glow-md', `0 14px 34px -16px ${rgba(a.base, 0.5)}`)
-  r.setProperty('--glow-lg', `0 30px 70px -30px ${rgba(a.base, 0.55)}`)
-  r.setProperty('--glow-text', 'none')
-  r.setProperty('--focus-ring', `0 0 0 1px ${rgba(a.base, 0.7)}, 0 0 0 4px ${rgba(a.base, 0.16)}`)
+  rootStyle.setProperty('--glow-xs', `0 0 0 1px ${rgba(base, 0.22)}`)
+  rootStyle.setProperty('--glow-sm', `0 8px 20px -12px ${rgba(base, 0.45)}`)
+  rootStyle.setProperty('--glow-md', `0 14px 34px -16px ${rgba(base, 0.5)}`)
+  rootStyle.setProperty('--glow-lg', `0 30px 70px -30px ${rgba(base, 0.55)}`)
+  rootStyle.setProperty('--glow-text', 'none')
+  rootStyle.setProperty('--focus-ring', `0 0 0 1px ${rgba(base, 0.7)}, 0 0 0 4px ${rgba(base, 0.16)}`)
 }
 
 let systemThemeMedia: MediaQueryList | null = null
@@ -132,9 +136,9 @@ export async function setTheme(theme: ThemeName): Promise<void> {
   appearance.theme = theme
   applyAppearance()
   try {
-    const s = await Store.load(FILE)
-    await s.set('ui_theme', theme)
-    await s.save()
+    const store = await Store.load(FILE)
+    await store.set('ui_theme', theme)
+    await store.save()
   } catch {
     /* ignore – the choice still applies for this session */
   }
@@ -148,21 +152,21 @@ export async function toggleTheme(): Promise<void> {
 
 export async function loadAppearance(): Promise<void> {
   try {
-    const s = await Store.load(FILE)
-    const acc = await s.get<string>('ui_accent')
+    const store = await Store.load(FILE)
+    const acc = await store.get<string>('ui_accent')
     if (acc && (ACCENT_NAMES as string[]).includes(acc)) appearance.accent = acc as AccentName
-    const theme = await s.get<string>('ui_theme')
+    const theme = await store.get<string>('ui_theme')
     if (isThemeName(theme)) appearance.theme = theme
     appearance.hudVisible = true
-    const hp = await s.get<string>('ui_hud_position')
+    const hp = await store.get<string>('ui_hud_position')
     if (hp === 'br' || hp === 'bl' || hp === 'tr' || hp === 'tl') appearance.hudPosition = hp
-    const rm = await s.get<boolean>('ui_reduce_motion')
+    const rm = await store.get<boolean>('ui_reduce_motion')
     if (typeof rm === 'boolean') appearance.reduceMotion = rm
-    const sg = await s.get<boolean>('ui_show_grid')
+    const sg = await store.get<boolean>('ui_show_grid')
     if (typeof sg === 'boolean') appearance.showGrid = sg
-    const sc = await s.get<number>('ui_scale')
+    const sc = await store.get<number>('ui_scale')
     if (typeof sc === 'number' && !Number.isNaN(sc)) appearance.uiScale = Math.max(0.8, Math.min(1.4, sc))
-    const an = await s.get<string>('assistant_name')
+    const an = await store.get<string>('assistant_name')
     if (an && an.trim()) appearance.assistantName = an.trim()
   } catch {
     /* ignore */

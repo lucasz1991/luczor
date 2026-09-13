@@ -2590,6 +2590,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           <span class="mode-toggle__dot" />
           {{ modeLabel }}
         </button>
+        <div class="header__tools">
         <button
           type="button"
           class="icon-btn"
@@ -2696,7 +2697,9 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             </g>
             <g class="theme-btn__sun">
               <circle cx="12" cy="12" r="4" />
-              <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+              <path
+                d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+              />
             </g>
           </svg>
         </button>
@@ -2744,6 +2747,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
           </svg>
         </button>
+        </div>
       </div>
 
       <!-- Overlay stays anchored above the independently scrolling conversation. -->
@@ -2759,166 +2763,6 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             :checklist-count="activeChecklist.steps.length"
             :checklist-done="checklistDone"
           >
-            <template #context>
-              <div class="info-strip">
-                <div class="info-block">
-                  <div class="info-head">
-                    <span class="tac-label">Projektziele</span>
-                    <span class="info-stat">
-                      {{ goalStats.done }}/{{ goalStats.total }} erledigt · {{ goalStats.inProgress }} aktiv ·
-                      {{ goalStats.open }} offen
-                    </span>
-                  </div>
-                  <div v-if="projectGoals.length" class="goal-cards">
-                    <div v-for="g in projectGoals" :key="g.id" class="goal-card">
-                      <span class="goal-card__text">{{ g.title }}</span>
-                      <span class="badge" :class="g.status" :title="g.status">{{ goalStatusLabel(g.status) }}</span>
-                    </div>
-                  </div>
-                  <div v-else class="empty">Noch keine Ziele im Projekt.</div>
-                </div>
-
-                <div class="info-block">
-                  <span class="tac-label">Zusammenfassungen</span>
-                  <div v-if="projectSummaries.length" class="summaries">
-                    <div v-for="s in projectSummaries" :key="s.id ?? s.createdAt ?? s.ts" class="summary-row">
-                      {{ s.text ?? s.summary ?? s.content ?? '' }}
-                      <time>{{ formatChatTime(s.createdAt ?? s.ts ?? Date.now()) }}</time>
-                    </div>
-                  </div>
-                  <div v-else class="empty">Noch keine Summaries.</div>
-                </div>
-
-                <div class="info-block repo-graph-block">
-                  <div class="info-head">
-                    <span class="tac-label">Lokaler Projektordner</span>
-                    <span class="info-stat" :class="`is-${activeWorkspace?.status ?? 'unbound'}`">
-                      {{
-                        activeWorkspace?.status === 'ready' ? 'bereit' : (activeWorkspace?.status ?? 'nicht zugeordnet')
-                      }}
-                    </span>
-                  </div>
-
-                  <div v-if="activeWorkspace" class="repo-graph-summary workspace-summary">
-                    <strong>{{ activeWorkspace.displayName }}</strong>
-                    <code :title="workspacePathLabel(activeWorkspace.rootPath)">{{
-                      workspacePathLabel(activeWorkspace.rootPath)
-                    }}</code>
-                    <span>
-                      Modellpfad <strong>@project</strong> ·
-                      {{ activeWorkspace.isGitRepository ? 'Git-Repository' : 'normaler Projektordner' }}
-                    </span>
-                  </div>
-                  <p v-else class="repo-graph-privacy">
-                    Ordne diesem Luczor-Projekt einen lokalen Ordner zu. Dateiwerkzeuge und Coding-Agenten bleiben
-                    anschließend strikt auf diesen Ordner begrenzt.
-                  </p>
-
-                  <div v-if="localGraphStatus.status === 'ready'" class="repo-graph-summary">
-                    <strong>Repository-Graph</strong>
-                    <span>
-                      {{ localGraphStatus.files }} Dateien · {{ localGraphStatus.symbols }} Symbole ·
-                      {{ localGraphStatus.edges }} Beziehungen
-                    </span>
-                    <span v-if="localGraphStatus.branch || localGraphStatus.commit_sha" class="repo-graph-revision">
-                      {{ localGraphStatus.branch || 'detached' }} · {{ localGraphStatus.commit_sha?.slice(0, 10) }}
-                    </span>
-                  </div>
-
-                  <label v-if="activeWorkspace?.isGitRepository" class="repo-graph-field">
-                    <span>Code an externe Modelle</span>
-                    <select v-model="repositoryExternalPolicy" @change="saveRepositoryPolicy">
-                      <option value="deny">Nie übertragen</option>
-                      <option value="ask">Nur nach Freigabe</option>
-                      <option value="allow_selected">Ausgewählte Treffer erlauben</option>
-                    </select>
-                  </label>
-
-                  <div class="repo-graph-actions">
-                    <button
-                      v-if="!activeWorkspace"
-                      type="button"
-                      :disabled="workspaceBusy"
-                      @click="bindCurrentProjectWorkspace"
-                    >
-                      Projektordner auswählen
-                    </button>
-                    <button
-                      v-if="activeWorkspace?.isGitRepository"
-                      type="button"
-                      :disabled="localGraphBusy"
-                      @click="reindexRepository"
-                    >
-                      Aktualisieren
-                    </button>
-                    <button
-                      v-if="activeWorkspace"
-                      type="button"
-                      class="is-danger"
-                      :disabled="localGraphBusy || workspaceBusy"
-                      @click="removeRepositoryBinding"
-                    >
-                      Zuordnung lösen
-                    </button>
-                  </div>
-                  <p v-if="workspaceMessage || localGraphMessage || localGraphStatus.error" class="repo-graph-message">
-                    {{ workspaceMessage || localGraphMessage || localGraphStatus.error }}
-                  </p>
-                  <p class="repo-graph-privacy">
-                    Der absolute Pfad, Index, Symbole und Graph bleiben auf diesem Gerät. Externe Modelle sehen nur
-                    <strong>@project</strong> und ausdrücklich freigegebene, redigierte Ausschnitte.
-                  </p>
-                </div>
-
-                <ContextCards
-                  :items="
-                    projectSummaries.map(item => ({
-                      id: item.id,
-                      title: 'Projektzusammenfassung',
-                      content: item.text,
-                      source: activeProject?.name || 'Projekt',
-                      kind: 'Memory',
-                    }))
-                  "
-                  title="Projektkontext"
-                />
-
-                <div class="info-block memory-candidates-block">
-                  <div class="info-head">
-                    <span class="tac-label">Memory-Kandidaten</span>
-                    <span class="info-stat">{{ memoryCandidates.length }} offen</span>
-                    <button
-                      type="button"
-                      class="lz-btn lz-btn--ghost"
-                      :disabled="memoryAnalysisBusy"
-                      @click="analyzeProjectMemories"
-                    >
-                      {{ memoryAnalysisBusy ? 'Prüft…' : 'Erinnerungen analysieren' }}
-                    </button>
-                  </div>
-                  <p v-if="memoryAnalysisMessage" class="memory-candidates-help" role="status">
-                    {{ memoryAnalysisMessage }}
-                  </p>
-                  <p class="memory-candidates-help">
-                    Automatisch erkannte Inhalte bleiben lokal und werden erst nach deiner Bestätigung dauerhaft
-                    übernommen.
-                  </p>
-                  <div v-if="memoryCandidates.length" class="memory-candidate-list">
-                    <RecommendationCard
-                      v-for="candidate in memoryCandidates"
-                      :key="candidate.id"
-                      title="Als Erinnerung behalten?"
-                      :description="candidate.content"
-                      :evidence="`${MEMORY_PRIORITIES[memoryPriority(candidate.importance)].label} · ${candidate.source === 'assistant' ? 'Assistent' : 'Du'} · ${formatChatTime(candidate.updatedAt)}`"
-                      :busy="!!memoryCandidateBusyId"
-                      @accept="acceptMemoryCandidate(candidate)"
-                      @dismiss="rejectMemoryCandidate(candidate)"
-                    />
-                  </div>
-                  <div v-else class="empty">Keine ungeprüften Erinnerungen.</div>
-                </div>
-              </div>
-            </template>
             <template #checklist>
               <section v-if="activePlanningSession" class="planning-status" aria-label="Aktueller Planungsstand">
                 <div aria-live="polite">
@@ -3195,6 +3039,184 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
         <p v-if="autonomousGoal.error.value" role="alert">{{ autonomousGoal.error.value }}</p>
       </div>
     </main>
+
+    <!-- Project context as a docked right column (same state as the "Projektziele" toggle). -->
+    <aside v-if="showContext" class="context-col" aria-label="Projektziele und Kontext">
+      <div class="context-col__head">
+        <span class="tac-label">Kontext</span>
+        <button
+          type="button"
+          class="icon-btn"
+          title="Kontext schließen"
+          aria-label="Kontext schließen"
+          @click="showContext = false"
+        >
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+            <path d="M6 6l12 12M18 6L6 18" />
+          </svg>
+        </button>
+      </div>
+      <div class="context-col__body">
+      <div class="info-strip">
+        <div class="info-block">
+          <div class="info-head">
+            <span class="tac-label">Projektziele</span>
+            <span class="info-stat">
+              {{ goalStats.done }}/{{ goalStats.total }} erledigt · {{ goalStats.inProgress }} aktiv ·
+              {{ goalStats.open }} offen
+            </span>
+          </div>
+          <div v-if="projectGoals.length" class="goal-cards">
+            <div v-for="g in projectGoals" :key="g.id" class="goal-card">
+              <span class="goal-card__text">{{ g.title }}</span>
+              <span class="badge" :class="g.status" :title="g.status">{{ goalStatusLabel(g.status) }}</span>
+            </div>
+          </div>
+          <div v-else class="empty">Noch keine Ziele im Projekt.</div>
+        </div>
+
+        <div class="info-block">
+          <span class="tac-label">Zusammenfassungen</span>
+          <div v-if="projectSummaries.length" class="summaries">
+            <div v-for="s in projectSummaries" :key="s.id ?? s.createdAt ?? s.ts" class="summary-row">
+              {{ s.text ?? s.summary ?? s.content ?? '' }}
+              <time>{{ formatChatTime(s.createdAt ?? s.ts ?? Date.now()) }}</time>
+            </div>
+          </div>
+          <div v-else class="empty">Noch keine Summaries.</div>
+        </div>
+
+        <div class="info-block repo-graph-block">
+          <div class="info-head">
+            <span class="tac-label">Lokaler Projektordner</span>
+            <span class="info-stat" :class="`is-${activeWorkspace?.status ?? 'unbound'}`">
+              {{
+                activeWorkspace?.status === 'ready' ? 'bereit' : (activeWorkspace?.status ?? 'nicht zugeordnet')
+              }}
+            </span>
+          </div>
+
+          <div v-if="activeWorkspace" class="repo-graph-summary workspace-summary">
+            <strong>{{ activeWorkspace.displayName }}</strong>
+            <code :title="workspacePathLabel(activeWorkspace.rootPath)">{{
+              workspacePathLabel(activeWorkspace.rootPath)
+            }}</code>
+            <span>
+              Modellpfad <strong>@project</strong> ·
+              {{ activeWorkspace.isGitRepository ? 'Git-Repository' : 'normaler Projektordner' }}
+            </span>
+          </div>
+          <p v-else class="repo-graph-privacy">
+            Ordne diesem Luczor-Projekt einen lokalen Ordner zu. Dateiwerkzeuge und Coding-Agenten bleiben
+            anschließend strikt auf diesen Ordner begrenzt.
+          </p>
+
+          <div v-if="localGraphStatus.status === 'ready'" class="repo-graph-summary">
+            <strong>Repository-Graph</strong>
+            <span>
+              {{ localGraphStatus.files }} Dateien · {{ localGraphStatus.symbols }} Symbole ·
+              {{ localGraphStatus.edges }} Beziehungen
+            </span>
+            <span v-if="localGraphStatus.branch || localGraphStatus.commit_sha" class="repo-graph-revision">
+              {{ localGraphStatus.branch || 'detached' }} · {{ localGraphStatus.commit_sha?.slice(0, 10) }}
+            </span>
+          </div>
+
+          <label v-if="activeWorkspace?.isGitRepository" class="repo-graph-field">
+            <span>Code an externe Modelle</span>
+            <select v-model="repositoryExternalPolicy" @change="saveRepositoryPolicy">
+              <option value="deny">Nie übertragen</option>
+              <option value="ask">Nur nach Freigabe</option>
+              <option value="allow_selected">Ausgewählte Treffer erlauben</option>
+            </select>
+          </label>
+
+          <div class="repo-graph-actions">
+            <button
+              v-if="!activeWorkspace"
+              type="button"
+              :disabled="workspaceBusy"
+              @click="bindCurrentProjectWorkspace"
+            >
+              Projektordner auswählen
+            </button>
+            <button
+              v-if="activeWorkspace?.isGitRepository"
+              type="button"
+              :disabled="localGraphBusy"
+              @click="reindexRepository"
+            >
+              Aktualisieren
+            </button>
+            <button
+              v-if="activeWorkspace"
+              type="button"
+              class="is-danger"
+              :disabled="localGraphBusy || workspaceBusy"
+              @click="removeRepositoryBinding"
+            >
+              Zuordnung lösen
+            </button>
+          </div>
+          <p v-if="workspaceMessage || localGraphMessage || localGraphStatus.error" class="repo-graph-message">
+            {{ workspaceMessage || localGraphMessage || localGraphStatus.error }}
+          </p>
+          <p class="repo-graph-privacy">
+            Der absolute Pfad, Index, Symbole und Graph bleiben auf diesem Gerät. Externe Modelle sehen nur
+            <strong>@project</strong> und ausdrücklich freigegebene, redigierte Ausschnitte.
+          </p>
+        </div>
+
+        <ContextCards
+          :items="
+            projectSummaries.map(item => ({
+              id: item.id,
+              title: 'Projektzusammenfassung',
+              content: item.text,
+              source: activeProject?.name || 'Projekt',
+              kind: 'Memory',
+            }))
+          "
+          title="Projektkontext"
+        />
+
+        <div class="info-block memory-candidates-block">
+          <div class="info-head">
+            <span class="tac-label">Memory-Kandidaten</span>
+            <span class="info-stat">{{ memoryCandidates.length }} offen</span>
+            <button
+              type="button"
+              class="lz-btn lz-btn--ghost"
+              :disabled="memoryAnalysisBusy"
+              @click="analyzeProjectMemories"
+            >
+              {{ memoryAnalysisBusy ? 'Prüft…' : 'Erinnerungen analysieren' }}
+            </button>
+          </div>
+          <p v-if="memoryAnalysisMessage" class="memory-candidates-help" role="status">
+            {{ memoryAnalysisMessage }}
+          </p>
+          <p class="memory-candidates-help">
+            Automatisch erkannte Inhalte bleiben lokal und werden erst nach deiner Bestätigung dauerhaft
+            übernommen.
+          </p>
+          <div v-if="memoryCandidates.length" class="memory-candidate-list">
+            <RecommendationCard
+              v-for="candidate in memoryCandidates"
+              :key="candidate.id"
+              title="Als Erinnerung behalten?"
+              :description="candidate.content"
+              :evidence="`${MEMORY_PRIORITIES[memoryPriority(candidate.importance)].label} · ${candidate.source === 'assistant' ? 'Assistent' : 'Du'} · ${formatChatTime(candidate.updatedAt)}`"
+              :busy="!!memoryCandidateBusyId"
+              @accept="acceptMemoryCandidate(candidate)"
+              @dismiss="rejectMemoryCandidate(candidate)"
+            />
+          </div>
+          <div v-else class="empty">Keine ungeprüften Erinnerungen.</div>
+        </div>
+      </div>
+      </div>
+    </aside>
 
     <SystemStatusPanel
       :active="showSystemPanel"

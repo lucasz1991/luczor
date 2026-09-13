@@ -72,12 +72,6 @@
   "src/services/appearance.ts": {
     "@typescript-eslint/no-explicit-any": {
       "count": 1
-    },
-    "id-length": {
-      "count": 4
-    },
-    "security/detect-object-injection": {
-      "count": 1
     }
   },
   "src/services/approvals.ts": {

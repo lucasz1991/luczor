@@ -72,7 +72,13 @@ function setup(): SettingsSetup {
     ],
     ['@/services/executionPolicy', { DEFAULT_EXECUTION_POLICY: {} }],
     ['@/services/inference/hybridRouter', {}],
-    ['@/services/appearance', { loadAppearance: async () => {} }],
+    [
+      '@/services/appearance',
+      {
+        loadAppearance: async () => {},
+        isThemeName: (value: unknown) => value === 'dark' || value === 'light' || value === 'system',
+      },
+    ],
     ['@/services/notifications', {}],
     [
       '@/services/voice/localVoice',

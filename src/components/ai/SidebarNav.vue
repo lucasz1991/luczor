@@ -36,7 +36,6 @@ const filtered = computed(() =>
   )
 )
 function beginRename(item: SearchItem) {
-  if (props.collapsed) return
   editingId.value = item.id
   editingLabel.value = item.label
 }
@@ -73,165 +72,330 @@ const runLabels: Record<string, string> = {
 </script>
 <template>
   <aside class="ai-sidebar" :class="{ 'is-collapsed': collapsed }" aria-label="Workspace-Navigation">
-    <div class="ai-sidebar__brand">
-      <span class="ai-brand-mark"><AiIcon :size="21" /></span><strong>{{ title }}</strong
-      ><button
-        class="ai-icon-button"
+    <!-- Icon rail: always visible, labels as tooltips -->
+    <nav class="ai-rail" aria-label="Bereiche">
+      <div class="ai-sidebar__brand">
+        <span class="ai-brand-mark"><AiIcon :size="21" /></span><strong>{{ title }}</strong>
+      </div>
+      <button class="ai-sidebar__new" type="button" title="Neuer Chat" aria-label="Neuer Chat" @click="emit('newChat')">
+        <AiIcon name="plus" /><span>Neuer Chat</span>
+      </button>
+      <button
+        class="ai-icon-button ai-rail__toggle"
         type="button"
-        :aria-label="collapsed ? 'Navigation aufklappen' : 'Navigation einklappen'"
+        :title="collapsed ? 'Projekte andocken' : 'Projekte einklappen'"
+        :aria-label="collapsed ? 'Projekte andocken' : 'Projekte einklappen'"
         :aria-expanded="!collapsed"
         @click="emit('update:collapsed', !collapsed)"
       >
         <AiIcon name="panel" />
       </button>
-    </div>
-    <button class="ai-sidebar__new" type="button" title="Neuer Chat" @click="emit('newChat')">
-      <AiIcon name="plus" /><span>Neuer Chat</span>
-    </button>
-    <button class="ai-sidebar__action" type="button" title="Projektordner öffnen" @click="emit('addProject')">
-      <AiIcon name="folder" /><span>Projektordner öffnen</span>
-    </button>
-    <button class="ai-sidebar__action" type="button" title="Agenten und Erinnerungsübertragung" @click="emit('agents')">
-      <AiIcon name="spark" /><span>Agenten & Erinnerungen</span>
-    </button>
-    <button
-      class="ai-sidebar__action"
-      type="button"
-      title="Optionales Planungsfenster öffnen"
-      @click="emit('planning')"
-    >
-      <AiIcon name="check" /><span>Planungsfenster</span>
-    </button>
-    <button class="ai-sidebar__action" type="button" title="Workflows, Auslöser und Läufe" @click="emit('workflows')">
-      <AiIcon name="tool" /><span>Workflows</span>
-    </button>
-    <button
-      class="ai-sidebar__action"
-      type="button"
-      title="Projekte auf deinen Geräten abgleichen"
-      @click="emit('cloudProjects')"
-    >
-      <AiIcon name="folder" /><span>Globale Projekte</span>
-    </button>
-    <button class="ai-sidebar__action" type="button" title="Geräteverbund" @click="emit('devices')">
-      <AiIcon name="panel" /><span>Geräteverbund</span>
-    </button>
-    <div class="ai-sidebar__section">
-      <span>Projekte</span><span>{{ items.length }}</span>
-    </div>
-    <label v-if="!collapsed" class="ai-search__field"
-      ><AiIcon name="search" /><input
-        v-model="query"
-        type="search"
-        aria-label="Projekte suchen"
-        placeholder="Projekte suchen"
-    /></label>
-    <nav class="ai-sidebar__items">
-      <div
-        v-for="item in filtered"
-        :key="item.id"
-        class="ai-sidebar__project"
-        :class="{ 'is-active': item.id === activeId, 'is-busy': item.busy }"
+      <button
+        class="ai-sidebar__action"
+        type="button"
+        title="Projektordner öffnen"
+        aria-label="Projektordner öffnen"
+        @click="emit('addProject')"
       >
-        <button
-          type="button"
-          class="ai-sidebar__project-main"
-          :title="item.label"
-          :aria-label="`Projekt ${item.label}`"
-          :aria-current="item.id === activeId ? 'page' : undefined"
-          @click="emit('select', item.id)"
+        <AiIcon name="folder" /><span>Projektordner öffnen</span>
+      </button>
+      <button
+        class="ai-sidebar__action"
+        type="button"
+        title="Agenten und Erinnerungsübertragung"
+        aria-label="Agenten und Erinnerungsübertragung"
+        @click="emit('agents')"
+      >
+        <AiIcon name="spark" /><span>Agenten & Erinnerungen</span>
+      </button>
+      <button
+        class="ai-sidebar__action"
+        type="button"
+        title="Optionales Planungsfenster öffnen"
+        aria-label="Planungsfenster öffnen"
+        @click="emit('planning')"
+      >
+        <AiIcon name="check" /><span>Planungsfenster</span>
+      </button>
+      <button
+        class="ai-sidebar__action"
+        type="button"
+        title="Workflows, Auslöser und Läufe"
+        aria-label="Workflows, Auslöser und Läufe"
+        @click="emit('workflows')"
+      >
+        <AiIcon name="tool" /><span>Workflows</span>
+      </button>
+      <button
+        class="ai-sidebar__action"
+        type="button"
+        title="Projekte auf deinen Geräten abgleichen"
+        aria-label="Globale Projekte"
+        @click="emit('cloudProjects')"
+      >
+        <AiIcon name="folder" /><span>Globale Projekte</span>
+      </button>
+      <button
+        class="ai-sidebar__action"
+        type="button"
+        title="Geräteverbund"
+        aria-label="Geräteverbund"
+        @click="emit('devices')"
+      >
+        <AiIcon name="panel" /><span>Geräteverbund</span>
+      </button>
+      <footer>
+        <button type="button" title="Systemstatus und Not-Aus" aria-label="Systemstatus und Not-Aus" @click="emit('system')">
+          <AiIcon name="shield" /><span>Systemstatus</span></button
+        ><button type="button" title="Einstellungen" aria-label="Einstellungen" @click="emit('settings')">
+          <AiIcon name="settings" /><span>Einstellungen</span>
+        </button>
+      </footer>
+    </nav>
+
+    <!-- Projects: docked column, or a fly-out on hover while collapsed -->
+    <div class="ai-sidebar__panel">
+      <div class="ai-sidebar__section">
+        <span>Projekte</span><span>{{ items.length }}</span>
+      </div>
+      <label class="ai-search__field"
+        ><AiIcon name="search" /><input
+          v-model="query"
+          type="search"
+          aria-label="Projekte suchen"
+          placeholder="Projekte suchen"
+      /></label>
+      <nav class="ai-sidebar__items">
+        <div
+          v-for="item in filtered"
+          :key="item.id"
+          class="ai-sidebar__project"
+          :class="{ 'is-active': item.id === activeId, 'is-busy': item.busy }"
         >
-          <AiIcon name="folder" />
-          <input
-            v-if="editingId === item.id"
-            v-model="editingLabel"
-            class="ai-sidebar__rename"
-            aria-label="Projektname bearbeiten"
-            maxlength="160"
-            @click.stop
-            @keydown.enter.prevent="commitRename(item)"
-            @keydown.esc.prevent="cancelRename"
-            @blur="commitRename(item)"
-          />
-          <span v-else>{{ item.label }}</span>
-          <span
-            v-if="item.cloud && !collapsed"
-            class="ai-sidebar__cloud"
-            title="Globales Projekt"
-            aria-label="Globales Projekt"
-            >↔</span
+          <button
+            type="button"
+            class="ai-sidebar__project-main"
+            :title="item.label"
+            :aria-label="`Projekt ${item.label}`"
+            :aria-current="item.id === activeId ? 'page' : undefined"
+            @click="emit('select', item.id)"
           >
-          <span
-            v-if="item.busy"
-            class="ai-sidebar__activity"
-            aria-label="AI läuft"
-            title="In diesem Projekt läuft gerade eine AI"
-          />
-        </button>
-        <button
-          v-if="!collapsed && editingId !== item.id"
-          type="button"
-          class="ai-sidebar__edit"
-          :aria-label="`${item.label} umbenennen`"
-          @click.stop="beginRename(item)"
-        >
-          <AiIcon name="settings" :size="12" />
-        </button>
-        <div v-if="!collapsed && item.id === activeId" class="ai-sidebar__chats" :aria-label="`Chats in ${item.label}`">
-          <div v-for="chat in item.chats ?? []" :key="chat.id" class="ai-sidebar__chat-row">
+            <AiIcon name="folder" />
             <input
-              v-if="editingChat === chat.id"
-              v-model="chatTitle"
+              v-if="editingId === item.id"
+              v-model="editingLabel"
               class="ai-sidebar__rename"
-              aria-label="Chatname bearbeiten"
+              aria-label="Projektname bearbeiten"
               maxlength="160"
-              @keydown.enter.prevent="finishChatRename(item.id, chat.id)"
-              @keydown.esc.prevent="editingChat = ''"
-              @blur="finishChatRename(item.id, chat.id)"
+              @click.stop
+              @keydown.enter.prevent="commitRename(item)"
+              @keydown.esc.prevent="cancelRename"
+              @blur="commitRename(item)"
             />
-            <button
-              v-else
-              type="button"
-              class="ai-sidebar__chat"
-              :class="{ 'is-current': chat.id === activeChatId }"
-              :aria-current="chat.id === activeChatId ? 'page' : undefined"
-              :title="chat.status ? `${chat.label} · ${runLabels[chat.status] ?? chat.status}` : chat.label"
-              @click="emit('selectChat', item.id, chat.id)"
-            >
-              <span v-if="chat.busy" class="ai-sidebar__activity" :aria-label="runLabels[chat.status ?? 'running']" />
-              <span v-else aria-hidden="true">·</span><span>{{ chat.label }}</span>
-              <small v-if="['interrupted', 'failed', 'waiting_approval', 'queued'].includes(chat.status ?? '')">{{
-                runLabels[chat.status!]
-              }}</small>
-            </button>
-            <button
-              v-if="editingChat !== chat.id"
-              type="button"
-              class="ai-sidebar__chat-edit"
-              :aria-label="`Chat ${chat.label} umbenennen`"
-              @click="beginChatRename(chat)"
-            >
-              <AiIcon name="settings" :size="11" />
+            <span v-else>{{ item.label }}</span>
+            <span v-if="item.cloud" class="ai-sidebar__cloud" title="Globales Projekt" aria-label="Globales Projekt">↔</span>
+            <span
+              v-if="item.busy"
+              class="ai-sidebar__activity"
+              aria-label="AI läuft"
+              title="In diesem Projekt läuft gerade eine AI"
+            />
+          </button>
+          <button
+            v-if="editingId !== item.id"
+            type="button"
+            class="ai-sidebar__edit"
+            :aria-label="`${item.label} umbenennen`"
+            @click.stop="beginRename(item)"
+          >
+            <AiIcon name="settings" :size="12" />
+          </button>
+          <div v-if="item.id === activeId" class="ai-sidebar__chats" :aria-label="`Chats in ${item.label}`">
+            <div v-for="chat in item.chats ?? []" :key="chat.id" class="ai-sidebar__chat-row">
+              <input
+                v-if="editingChat === chat.id"
+                v-model="chatTitle"
+                class="ai-sidebar__rename"
+                aria-label="Chatname bearbeiten"
+                maxlength="160"
+                @keydown.enter.prevent="finishChatRename(item.id, chat.id)"
+                @keydown.esc.prevent="editingChat = ''"
+                @blur="finishChatRename(item.id, chat.id)"
+              />
+              <button
+                v-else
+                type="button"
+                class="ai-sidebar__chat"
+                :class="{ 'is-current': chat.id === activeChatId }"
+                :aria-current="chat.id === activeChatId ? 'page' : undefined"
+                :title="chat.status ? `${chat.label} · ${runLabels[chat.status] ?? chat.status}` : chat.label"
+                @click="emit('selectChat', item.id, chat.id)"
+              >
+                <span v-if="chat.busy" class="ai-sidebar__activity" :aria-label="runLabels[chat.status ?? 'running']" />
+                <span v-else aria-hidden="true">·</span><span>{{ chat.label }}</span>
+                <small v-if="['interrupted', 'failed', 'waiting_approval', 'queued'].includes(chat.status ?? '')">{{
+                  runLabels[chat.status!]
+                }}</small>
+              </button>
+              <button
+                v-if="editingChat !== chat.id"
+                type="button"
+                class="ai-sidebar__chat-edit"
+                :aria-label="`Chat ${chat.label} umbenennen`"
+                @click="beginChatRename(chat)"
+              >
+                <AiIcon name="settings" :size="11" />
+              </button>
+            </div>
+            <button type="button" class="ai-sidebar__chat-new" @click="emit('newProjectChat', item.id)">
+              <AiIcon name="plus" :size="12" /> Neuer Chat im Projekt
             </button>
           </div>
-          <button type="button" class="ai-sidebar__chat-new" @click="emit('newProjectChat', item.id)">
-            <AiIcon name="plus" :size="12" /> Neuer Chat im Projekt
-          </button>
         </div>
-      </div>
-      <p v-if="!filtered.length && !collapsed" class="ai-empty">Kein Projekt gefunden.</p>
-    </nav>
-    <footer>
-      <button type="button" title="Systemstatus und Not-Aus" @click="emit('system')">
-        <AiIcon name="shield" /><span>Systemstatus</span></button
-      ><button type="button" title="Einstellungen" @click="emit('settings')">
-        <AiIcon name="settings" /><span>Einstellungen</span>
-      </button>
-    </footer>
+        <p v-if="!filtered.length" class="ai-empty">Kein Projekt gefunden.</p>
+      </nav>
+    </div>
   </aside>
 </template>
 
 <style scoped>
+/* ---------- Leiste + Projektspalte ---------- */
+.ai-sidebar {
+  --rail-w: 56px;
+  --panel-w: 240px;
+  position: relative;
+  display: grid;
+  grid-template-columns: var(--rail-w) minmax(0, 1fr);
+  gap: 0;
+  padding: 0;
+  overflow: visible;
+}
+.ai-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 12px 0 10px;
+  min-height: 0;
+  border-right: 1px solid var(--ai-line);
+  background: var(--ai-canvas);
+}
+.ai-rail .ai-sidebar__brand {
+  width: 38px;
+  height: 38px;
+  margin: 0 0 8px;
+  justify-content: center;
+}
+.ai-rail .ai-sidebar__brand strong,
+.ai-rail button > span,
+.ai-rail footer small {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.ai-rail .ai-sidebar__new,
+.ai-rail .ai-sidebar__action,
+.ai-rail .ai-rail__toggle,
+.ai-rail footer button {
+  width: 38px;
+  min-height: 38px;
+  height: 38px;
+  padding: 0;
+  justify-content: center;
+  border-radius: 11px;
+  flex-shrink: 0;
+}
+.ai-rail .ai-rail__toggle {
+  color: var(--ai-faint);
+  border: 0;
+  background: transparent;
+}
+.ai-rail .ai-rail__toggle:hover,
+.ai-sidebar:not(.is-collapsed) .ai-rail .ai-rail__toggle {
+  color: var(--ai-ink);
+  background: var(--ai-hover);
+}
+.ai-rail footer {
+  margin-top: auto;
+  padding-top: 8px;
+  border-top: 1px solid var(--ai-line);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.ai-sidebar__panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 14px 10px 12px;
+  gap: 6px;
+  background: var(--ai-canvas);
+  border-right: 1px solid var(--ai-line);
+}
+.ai-sidebar__panel .ai-sidebar__section {
+  padding: 0 6px 6px;
+}
+.ai-sidebar__panel .ai-sidebar__items {
+  padding-top: 2px;
+}
+/* Collapsed: rail only, projects fly out on hover */
+.ai-sidebar.is-collapsed {
+  grid-template-columns: var(--rail-w);
+}
+.ai-sidebar.is-collapsed .ai-sidebar__panel {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--rail-w);
+  width: var(--panel-w);
+  z-index: 40;
+  opacity: 0;
+  transform: translateX(-12px);
+  pointer-events: none;
+  box-shadow: 30px 0 60px -34px rgba(0, 0, 0, 0.7);
+  transition:
+    transform var(--dur-slow, 420ms) var(--ease, ease),
+    opacity var(--dur, 240ms) var(--ease, ease);
+}
+.ai-sidebar.is-collapsed:hover .ai-sidebar__panel,
+.ai-sidebar.is-collapsed .ai-sidebar__panel:focus-within {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+@media (max-width: 1100px) {
+  .ai-sidebar {
+    grid-template-columns: var(--rail-w);
+  }
+  .ai-sidebar .ai-sidebar__panel {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: var(--rail-w);
+    width: var(--panel-w);
+    z-index: 40;
+    opacity: 0;
+    transform: translateX(-12px);
+    pointer-events: none;
+  }
+  .ai-sidebar:hover .ai-sidebar__panel,
+  .ai-sidebar .ai-sidebar__panel:focus-within {
+    opacity: 1;
+    transform: none;
+    pointer-events: auto;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-sidebar.is-collapsed .ai-sidebar__panel {
+    transition: none;
+  }
+}
+
 .ai-sidebar__chats {
   flex: 0 0 100%;
   display: grid;
@@ -253,7 +417,8 @@ const runLabels: Record<string, string> = {
   gap: 7px;
   align-items: center;
   min-width: 0;
-  flex: 1;
+  width: auto;
+  flex: 1 1 0;
   padding: 7px 6px;
   border: 0;
   border-radius: 6px;
@@ -276,6 +441,9 @@ const runLabels: Record<string, string> = {
   margin-left: auto;
 }
 .ai-sidebar__chat-edit {
+  width: auto;
+  min-height: 0;
+  flex: 0 0 auto;
   padding: 4px;
   border: 0;
   background: transparent;

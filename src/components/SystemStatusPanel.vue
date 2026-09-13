@@ -397,7 +397,7 @@ details[open] > summary .disclosure-arrow {
   color: var(--ai-ink);
 }
 .system-status-panel[data-mode='mini'] {
-  --system-sidebar-width: 232px;
+  --system-sidebar-width: 296px;
   top: 82px;
   right: auto;
   bottom: var(--system-composer-clearance, 142px);
@@ -410,7 +410,7 @@ details[open] > summary .disclosure-arrow {
   border-radius: 10px;
 }
 .system-status-panel[data-mode='mini'][data-sidebar-collapsed='true'] {
-  --system-sidebar-width: 62px;
+  --system-sidebar-width: 56px;
 }
 .system-status-panel[data-mode='mini'] :deep(.resource-grid) {
   grid-template-columns: minmax(0, 1fr);
@@ -589,17 +589,15 @@ details[open] > summary .disclosure-arrow {
 .system-status-panel[data-native-window='true'] .system-status-panel__content {
   padding-bottom: 20px;
 }
-@media (max-width: 900px) {
-  .system-status-panel[data-mode='mini'] {
-    --system-sidebar-width: 190px;
-  }
+@media (max-width: 1100px) {
+  .system-status-panel[data-mode='mini'],
   .system-status-panel[data-mode='mini'][data-sidebar-collapsed='true'] {
-    --system-sidebar-width: 62px;
+    --system-sidebar-width: 56px;
   }
 }
 @media (max-width: 700px) {
   .system-status-panel[data-mode='mini'] {
-    --system-sidebar-width: 54px;
+    --system-sidebar-width: 56px;
     left: calc(var(--system-sidebar-width) + 8px);
     width: min(148px, calc(100vw - var(--system-sidebar-width) - 16px));
   }

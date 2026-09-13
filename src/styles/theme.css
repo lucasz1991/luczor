@@ -74,7 +74,8 @@
 
   --shadow-1: 0 10px 26px -16px rgba(0, 0, 0, 0.6);
   --shadow-2: 0 30px 60px -30px rgba(0, 0, 0, 0.8);
-  --shadow-panel: 0 50px 100px -40px rgba(0, 0, 0, 0.95), 0 12px 30px -18px rgba(0, 0, 0, 0.6),
+  --shadow-panel:
+    0 50px 100px -40px rgba(0, 0, 0, 0.95), 0 12px 30px -18px rgba(0, 0, 0, 0.6),
     inset 0 1px 1px rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(0, 0, 0, 0.28);
 
   /* Glass material */
@@ -86,9 +87,20 @@
   --g-fill-1: rgba(255, 255, 255, 0.03);
   --g-fill-2: rgba(255, 255, 255, 0.05);
   --g-fill-3: rgba(255, 255, 255, 0.065);
-  --g-glare: radial-gradient(120% 70% at 18% -12%, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.04) 45%, transparent 62%);
-  --g-rim: linear-gradient(155deg, rgba(255, 255, 255, 0.55) 0%, rgba(255, 255, 255, 0.1) 22%, rgba(255, 255, 255, 0.02) 50%,
-    rgba(255, 255, 255, 0.16) 78%, rgba(255, 255, 255, 0.4) 100%);
+  --g-glare: radial-gradient(
+    120% 70% at 18% -12%,
+    rgba(255, 255, 255, 0.2),
+    rgba(255, 255, 255, 0.04) 45%,
+    transparent 62%
+  );
+  --g-rim: linear-gradient(
+    155deg,
+    rgba(255, 255, 255, 0.55) 0%,
+    rgba(255, 255, 255, 0.1) 22%,
+    rgba(255, 255, 255, 0.02) 50%,
+    rgba(255, 255, 255, 0.16) 78%,
+    rgba(255, 255, 255, 0.4) 100%
+  );
   --g-orb-a: rgba(143, 123, 216, 0.55);
   --g-orb-b: rgba(79, 134, 171, 0.4);
 
@@ -171,7 +183,8 @@
 
   --shadow-1: 0 10px 26px -16px rgba(26, 24, 38, 0.25);
   --shadow-2: 0 30px 60px -30px rgba(26, 24, 38, 0.3);
-  --shadow-panel: 0 40px 80px -36px rgba(26, 24, 38, 0.4), 0 10px 26px -16px rgba(26, 24, 38, 0.18),
+  --shadow-panel:
+    0 40px 80px -36px rgba(26, 24, 38, 0.4), 0 10px 26px -16px rgba(26, 24, 38, 0.18),
     inset 0 1px 1px rgba(255, 255, 255, 0.95), inset 0 -1px 0 rgba(26, 24, 38, 0.08);
 
   --g-edge: rgba(255, 255, 255, 0.95);
@@ -182,9 +195,20 @@
   --g-fill-1: rgba(26, 24, 38, 0.035);
   --g-fill-2: rgba(26, 24, 38, 0.055);
   --g-fill-3: rgba(26, 24, 38, 0.075);
-  --g-glare: radial-gradient(120% 70% at 18% -12%, rgba(255, 255, 255, 0.75), rgba(255, 255, 255, 0.2) 45%, transparent 62%);
-  --g-rim: linear-gradient(155deg, rgba(255, 255, 255, 1) 0%, rgba(255, 255, 255, 0.5) 22%, rgba(255, 255, 255, 0.15) 50%,
-    rgba(255, 255, 255, 0.55) 78%, rgba(255, 255, 255, 0.95) 100%);
+  --g-glare: radial-gradient(
+    120% 70% at 18% -12%,
+    rgba(255, 255, 255, 0.75),
+    rgba(255, 255, 255, 0.2) 45%,
+    transparent 62%
+  );
+  --g-rim: linear-gradient(
+    155deg,
+    rgba(255, 255, 255, 1) 0%,
+    rgba(255, 255, 255, 0.5) 22%,
+    rgba(255, 255, 255, 0.15) 50%,
+    rgba(255, 255, 255, 0.55) 78%,
+    rgba(255, 255, 255, 0.95) 100%
+  );
   --g-orb-a: rgba(111, 91, 196, 0.32);
   --g-orb-b: rgba(79, 134, 171, 0.24);
 }

@@ -52,6 +52,10 @@ html[data-theme] .app-shell.ai-workspace > .main-col {
   position: relative;
   z-index: 1;
 }
+/* The project fly-out must paint above the conversation column. */
+html[data-theme] .app-shell.ai-workspace > .ai-sidebar {
+  z-index: 5;
+}
 html[data-theme] .app-shell.ai-workspace .main-col {
   background: transparent;
 }
@@ -335,6 +339,14 @@ html[data-theme='light'] .theme-btn svg .theme-btn__sun {
 html[data-theme='light'] .theme-btn svg .theme-btn__moon {
   opacity: 0;
   transform: rotate(60deg) scale(0.6);
+}
+
+/* Browser autofill must not paint a white field into the glass. */
+html[data-theme] input:-webkit-autofill,
+html[data-theme] input:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 1000px var(--bg-sunken) inset;
+  -webkit-text-fill-color: var(--text-primary);
+  caret-color: var(--text-primary);
 }
 
 /* ---------- accessibility ---------- */

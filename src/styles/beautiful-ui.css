@@ -20,6 +20,19 @@
   --ai-radius: 12px;
   --ai-font: 'Segoe UI Variable', 'Aptos', 'Inter', 'Segoe UI', system-ui, sans-serif;
   --ai-shadow: 0 0 0 1px var(--ai-line), 0 10px 26px -16px rgba(0, 0, 0, 0.6);
+  /* Aliases used by components with hardcoded fallbacks; keep them on the theme. */
+  --ai-text: var(--ai-ink);
+  --ai-text-muted: var(--ai-muted);
+  --ai-border: var(--ai-line-strong);
+  --ai-bg: var(--ai-page);
+  --accent: var(--ai-accent);
+  --border-color: var(--ai-line-strong);
+  --ui-border: var(--ai-line-strong);
+  --ui-text: var(--ai-ink);
+  --ui-text-muted: var(--ai-muted);
+  --muted: var(--ai-muted);
+  --bg-soft: var(--ai-inset);
+  --color-success: var(--ai-green);
 }
 :root[data-theme='light'] {
   --ai-page: #f1f0ec;
@@ -788,20 +801,7 @@
   color: var(--ai-faint);
   font-size: 10px;
 }
-.ai-sidebar.is-collapsed {
-  padding: 20px 9px;
-}
-.ai-sidebar.is-collapsed
-  :is(strong, .ai-sidebar__brand > .ai-brand-mark, .ai-sidebar__section, button > span, footer small) {
-  display: none;
-}
-.ai-sidebar.is-collapsed button {
-  justify-content: center;
-  padding: 10px 4px;
-}
-.ai-sidebar.is-collapsed .ai-sidebar__brand {
-  justify-content: center;
-}
+/* Collapsed layout lives in SidebarNav.vue (rail + fly-out panel). */
 .ai-prompt-wrap {
   position: relative;
   width: 100%;
