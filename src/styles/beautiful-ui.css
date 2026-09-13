@@ -3,23 +3,40 @@
  * Isolated tokens preserve Luczor settings and the native application shell.
  */
 :root {
-  --ai-page: #18191c;
-  --ai-canvas: #1c1d20;
-  --ai-surface: #222327;
-  --ai-inset: #26272c;
-  --ai-hover: #2d2e34;
-  --ai-ink: #f1f2f4;
-  --ai-muted: #a5a7b0;
-  --ai-faint: #7f838e;
-  --ai-line: #32343b;
-  --ai-line-strong: #444750;
-  --ai-accent: #8aafff;
-  --ai-green: #71cba0;
-  --ai-orange: #e6b479;
-  --ai-red: #f28c98;
-  --ai-radius: 10px;
-  --ai-font: 'Inter', 'Segoe UI Variable', 'Segoe UI', system-ui, sans-serif;
-  --ai-shadow: 0 0 0 1px var(--ai-line), 0 2px 5px #0002;
+  --ai-page: #0a0a0b;
+  --ai-canvas: #0e0e10;
+  --ai-surface: #121214;
+  --ai-inset: #17171a;
+  --ai-hover: rgba(255, 255, 255, 0.065);
+  --ai-ink: #eeece6;
+  --ai-muted: #b3b1aa;
+  --ai-faint: #7b7a75;
+  --ai-line: rgba(255, 255, 255, 0.08);
+  --ai-line-strong: rgba(255, 255, 255, 0.14);
+  --ai-accent: #b3a3ec;
+  --ai-green: #6cb98a;
+  --ai-orange: #e07b4a;
+  --ai-red: #e06c75;
+  --ai-radius: 12px;
+  --ai-font: 'Segoe UI Variable', 'Aptos', 'Inter', 'Segoe UI', system-ui, sans-serif;
+  --ai-shadow: 0 0 0 1px var(--ai-line), 0 10px 26px -16px rgba(0, 0, 0, 0.6);
+}
+:root[data-theme='light'] {
+  --ai-page: #f1f0ec;
+  --ai-canvas: #f5f4f0;
+  --ai-surface: #faf9f6;
+  --ai-inset: #f2f1ed;
+  --ai-hover: rgba(26, 24, 38, 0.055);
+  --ai-ink: #1a1826;
+  --ai-muted: #4a4856;
+  --ai-faint: #76747f;
+  --ai-line: rgba(26, 24, 38, 0.09);
+  --ai-line-strong: rgba(26, 24, 38, 0.16);
+  --ai-accent: #6f5bc4;
+  --ai-green: #3f9a6b;
+  --ai-orange: #c9682f;
+  --ai-red: #cf4f5a;
+  --ai-shadow: 0 0 0 1px var(--ai-line), 0 10px 26px -16px rgba(26, 24, 38, 0.25);
 }
 .ai-light {
   color-scheme: light;

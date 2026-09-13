@@ -25,7 +25,7 @@ import {
   type NotificationCategoryPreferences,
 } from '@/services/api/luczorApi'
 import { reinitializeLocalInferenceForCurrentApi } from '@/services/inference/coordinator'
-import { loadAppearance, type HudPosition } from '@/services/appearance'
+import { isThemeName, loadAppearance, type HudPosition, type ThemeName } from '@/services/appearance'
 import {
   getPushNotificationPreferences,
   hasNativeNotificationPermission,
@@ -96,6 +96,7 @@ type AppSettings = {
 
   // Personalization
   ui_accent: string
+  ui_theme: ThemeName
   ui_hud_visible: boolean
   ui_hud_position: HudPosition
   ui_reduce_motion: boolean
@@ -137,6 +138,7 @@ const DEFAULTS: AppSettings = {
   voice_local_stt_language: VOICE_DEFAULTS.localSttLanguage,
 
   ui_accent: 'violet',
+  ui_theme: 'dark',
   ui_hud_visible: true,
   ui_hud_position: 'br',
   ui_reduce_motion: false,
@@ -252,6 +254,8 @@ async function ensureStoreLoaded() {
   // Personalization
   const accent = await settingsStore.get<string>('ui_accent')
   if (accent) settings.ui_accent = accent
+  const theme = await settingsStore.get<string>('ui_theme')
+  if (isThemeName(theme)) settings.ui_theme = theme
   settings.ui_hud_visible = true
   const hudPos = await settingsStore.get<HudPosition>('ui_hud_position')
   if (hudPos === 'br' || hudPos === 'bl' || hudPos === 'tr' || hudPos === 'tl') settings.ui_hud_position = hudPos
@@ -388,6 +392,7 @@ async function persistAll() {
 
   // Personalization
   await settingsStore.set('ui_accent', settings.ui_accent)
+  await settingsStore.set('ui_theme', settings.ui_theme)
   settings.ui_hud_visible = true
   await settingsStore.set('ui_hud_visible', true)
   await settingsStore.set('ui_hud_position', settings.ui_hud_position)
@@ -1030,6 +1035,7 @@ function iconPath(kind: string) {
                 v-else-if="ui.tab === 'appearance'"
                 v-model:assistant-name="settings.assistant_name"
                 v-model:accent="settings.ui_accent"
+                v-model:theme="settings.ui_theme"
                 v-model:hud-position="settings.ui_hud_position"
                 v-model:ui-scale="settings.ui_scale"
                 v-model:hud-visible="settings.ui_hud_visible"

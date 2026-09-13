@@ -2,79 +2,101 @@
  * Quiet obsidian surfaces, a single user-selectable accent and restrained motion.
  */
 
+/* Luczor Liquid-Glass tokens.
+ * Obsidian grounds, one user-selectable accent (see services/appearance.ts),
+ * translucent surfaces with a light edge instead of neon glows.
+ * The light theme is stamped as `data-theme="light"` on <html>.
+ */
 :root {
   color-scheme: dark;
 
-  --bg-void: #08090d;
-  --bg-abyss: #0a0b11;
-  --bg-base: #0d0e15;
-  --bg-deep: #11131c;
-  --bg-raised: #161823;
-  --bg-sunken: #090a0f;
+  --bg-void: #050505;
+  --bg-abyss: #08080a;
+  --bg-base: #0a0a0b;
+  --bg-deep: #0e0e10;
+  --bg-raised: #121214;
+  --bg-sunken: #060607;
 
-  --surface-1: rgba(17, 18, 27, 0.68);
-  --surface-2: rgba(24, 25, 37, 0.76);
-  --surface-3: rgba(31, 32, 46, 0.88);
-  --surface-glass: linear-gradient(145deg, rgba(29, 30, 43, 0.76), rgba(13, 14, 21, 0.9));
-  --glass-wash: rgba(139, 92, 246, 0.07);
+  --surface-1: rgba(44, 44, 54, 0.38);
+  --surface-2: rgba(30, 30, 40, 0.42);
+  --surface-3: rgba(40, 40, 50, 0.6);
+  --surface-glass: linear-gradient(160deg, rgba(48, 48, 60, 0.46), rgba(22, 22, 30, 0.4));
+  --glass-wash: rgba(143, 123, 216, 0.06);
 
-  --border-hair: rgba(255, 255, 255, 0.055);
-  --border-soft: rgba(139, 92, 246, 0.14);
-  --border: rgba(139, 92, 246, 0.28);
-  --border-strong: rgba(167, 139, 250, 0.48);
+  --border-hair: rgba(255, 255, 255, 0.08);
+  --border-soft: rgba(143, 123, 216, 0.14);
+  --border: rgba(143, 123, 216, 0.26);
+  --border-strong: rgba(143, 123, 216, 0.42);
 
-  --text-primary: #f5f3ff;
-  --text-secondary: #c5c2d2;
-  --text-muted: #898695;
-  --text-faint: #625f6d;
-  --text-label: #aaa4bf;
-  --text-on-accent: #09070f;
+  --text-primary: #eeece6;
+  --text-secondary: #b3b1aa;
+  --text-muted: #8c8b85;
+  --text-faint: #6a6964;
+  --text-label: #9b99a8;
+  --text-on-accent: #14101f;
 
-  --cy: #8b5cf6;
-  --cy-bright: #a78bfa;
-  --cy-soft: #c4b5fd;
-  --cy-deep: #5b21b6;
-  --cy-04: rgba(139, 92, 246, 0.04);
-  --cy-08: rgba(139, 92, 246, 0.08);
-  --cy-12: rgba(139, 92, 246, 0.12);
-  --cy-16: rgba(139, 92, 246, 0.16);
-  --cy-22: rgba(139, 92, 246, 0.22);
+  --cy: #8f7bd8;
+  --cy-bright: #b3a3ec;
+  --cy-soft: #c9bdf4;
+  --cy-deep: #5a47ad;
+  --cy-04: rgba(143, 123, 216, 0.04);
+  --cy-08: rgba(143, 123, 216, 0.08);
+  --cy-12: rgba(143, 123, 216, 0.12);
+  --cy-16: rgba(143, 123, 216, 0.16);
+  --cy-22: rgba(143, 123, 216, 0.22);
 
-  --energy: #f3b760;
-  --energy-bright: #ffd696;
-  --energy-wash: rgba(243, 183, 96, 0.1);
-  --energy-border: rgba(243, 183, 96, 0.28);
+  --energy: #d4a054;
+  --energy-bright: #ecc27a;
+  --energy-wash: rgba(212, 160, 84, 0.1);
+  --energy-border: rgba(212, 160, 84, 0.28);
 
-  --success: #45d6a0;
-  --success-soft: #8de8c5;
-  --warn: #f3b760;
-  --warn-soft: #ffdfa9;
-  --danger: #fb7185;
-  --danger-soft: #fda4af;
-  --success-wash: rgba(69, 214, 160, 0.1);
-  --warn-wash: rgba(243, 183, 96, 0.1);
-  --danger-wash: rgba(251, 113, 133, 0.11);
+  --success: #6cb98a;
+  --success-soft: #8fd3ad;
+  --warn: #e07b4a;
+  --warn-soft: #f0a97f;
+  --danger: #e06c75;
+  --danger-soft: #f0949b;
+  --success-wash: rgba(108, 185, 138, 0.12);
+  --warn-wash: rgba(224, 123, 74, 0.12);
+  --danger-wash: rgba(224, 108, 117, 0.12);
 
-  --glow-xs: 0 0 8px rgba(139, 92, 246, 0.2);
-  --glow-sm: 0 0 18px rgba(139, 92, 246, 0.18);
-  --glow-md: 0 0 28px rgba(139, 92, 246, 0.18);
-  --glow-lg: 0 0 54px rgba(139, 92, 246, 0.2);
-  --glow-text: 0 0 14px rgba(167, 139, 250, 0.24);
-  --glow-energy: 0 0 22px rgba(243, 183, 96, 0.16);
-  --glow-success: 0 0 20px rgba(69, 214, 160, 0.22);
-  --glow-danger: 0 0 20px rgba(251, 113, 133, 0.24);
+  /* Glows are kept as names so existing rules resolve, but read as soft diffusion. */
+  --glow-xs: 0 0 0 1px rgba(143, 123, 216, 0.22);
+  --glow-sm: 0 8px 20px -12px rgba(143, 123, 216, 0.45);
+  --glow-md: 0 14px 34px -16px rgba(143, 123, 216, 0.5);
+  --glow-lg: 0 30px 70px -30px rgba(143, 123, 216, 0.55);
+  --glow-text: none;
+  --glow-energy: 0 12px 28px -14px rgba(212, 160, 84, 0.5);
+  --glow-success: 0 12px 28px -14px rgba(108, 185, 138, 0.5);
+  --glow-danger: 0 12px 28px -14px rgba(224, 108, 117, 0.55);
 
-  --focus-ring: 0 0 0 1px rgba(167, 139, 250, 0.6), 0 0 0 4px rgba(139, 92, 246, 0.13);
+  --focus-ring: 0 0 0 1px rgba(143, 123, 216, 0.7), 0 0 0 4px rgba(143, 123, 216, 0.16);
 
-  --shadow-1: 0 4px 14px rgba(0, 0, 0, 0.22);
-  --shadow-2: 0 16px 44px rgba(0, 0, 0, 0.3);
-  --shadow-panel: 0 30px 90px rgba(0, 0, 0, 0.34), inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --shadow-1: 0 10px 26px -16px rgba(0, 0, 0, 0.6);
+  --shadow-2: 0 30px 60px -30px rgba(0, 0, 0, 0.8);
+  --shadow-panel: 0 50px 100px -40px rgba(0, 0, 0, 0.95), 0 12px 30px -18px rgba(0, 0, 0, 0.6),
+    inset 0 1px 1px rgba(255, 255, 255, 0.22), inset 0 -1px 0 rgba(0, 0, 0, 0.28);
 
-  --r-xs: 7px;
+  /* Glass material */
+  --g-edge: rgba(255, 255, 255, 0.28);
+  --g-edge-2: rgba(255, 255, 255, 0.1);
+  --g-sheen: rgba(255, 255, 255, 0.16);
+  --g-bg: rgba(44, 44, 54, 0.38);
+  --g-bg-2: rgba(30, 30, 40, 0.34);
+  --g-fill-1: rgba(255, 255, 255, 0.03);
+  --g-fill-2: rgba(255, 255, 255, 0.05);
+  --g-fill-3: rgba(255, 255, 255, 0.065);
+  --g-glare: radial-gradient(120% 70% at 18% -12%, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.04) 45%, transparent 62%);
+  --g-rim: linear-gradient(155deg, rgba(255, 255, 255, 0.55) 0%, rgba(255, 255, 255, 0.1) 22%, rgba(255, 255, 255, 0.02) 50%,
+    rgba(255, 255, 255, 0.16) 78%, rgba(255, 255, 255, 0.4) 100%);
+  --g-orb-a: rgba(143, 123, 216, 0.55);
+  --g-orb-b: rgba(79, 134, 171, 0.4);
+
+  --r-xs: 8px;
   --r-sm: 10px;
   --r-md: 14px;
-  --r-lg: 18px;
-  --r-xl: 24px;
+  --r-lg: 22px;
+  --r-xl: 28px;
   --r-pill: 999px;
 
   --s1: 4px;
@@ -97,14 +119,74 @@
   --track-label: 0.13em;
   --track-tight: -0.015em;
 
-  --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease: cubic-bezier(0.32, 0.72, 0, 1);
   --ease-soft: cubic-bezier(0.4, 0, 0.2, 1);
   --dur-fast: 130ms;
-  --dur: 220ms;
+  --dur: 240ms;
   --dur-slow: 420ms;
   --dur-morph: 520ms;
-  --blur: 22px;
+  --blur: 36px;
   --sidebar-w: 76px;
+
+  /* Fallback names used by the dialog workspaces (agent hub, planning, workflows). */
+  --surface: var(--bg-deep);
+  --text: var(--text-primary);
+}
+
+/* Light theme: milk glass on warm off-white. Accent tones are darkened by appearance.ts. */
+:root[data-theme='light'] {
+  color-scheme: light;
+
+  --bg-void: #e9e8e3;
+  --bg-abyss: #ecebe7;
+  --bg-base: #f1f0ec;
+  --bg-deep: #f5f4f0;
+  --bg-raised: #faf9f6;
+  --bg-sunken: #e4e3de;
+
+  --surface-1: rgba(255, 255, 255, 0.46);
+  --surface-2: rgba(255, 255, 255, 0.4);
+  --surface-3: rgba(255, 255, 255, 0.72);
+  --surface-glass: linear-gradient(160deg, rgba(255, 255, 255, 0.62), rgba(255, 255, 255, 0.42));
+  --glass-wash: rgba(111, 91, 196, 0.07);
+
+  --border-hair: rgba(26, 24, 38, 0.09);
+
+  --text-primary: #1a1826;
+  --text-secondary: #4a4856;
+  --text-muted: #6f6e78;
+  --text-faint: #9a98a3;
+  --text-label: #76747f;
+  --text-on-accent: #ffffff;
+
+  --success: #3f9a6b;
+  --success-soft: #5fb88a;
+  --warn: #c9682f;
+  --warn-soft: #d98a5a;
+  --danger: #cf4f5a;
+  --danger-soft: #dc7680;
+  --success-wash: rgba(63, 154, 107, 0.13);
+  --warn-wash: rgba(201, 104, 47, 0.13);
+  --danger-wash: rgba(207, 79, 90, 0.13);
+
+  --shadow-1: 0 10px 26px -16px rgba(26, 24, 38, 0.25);
+  --shadow-2: 0 30px 60px -30px rgba(26, 24, 38, 0.3);
+  --shadow-panel: 0 40px 80px -36px rgba(26, 24, 38, 0.4), 0 10px 26px -16px rgba(26, 24, 38, 0.18),
+    inset 0 1px 1px rgba(255, 255, 255, 0.95), inset 0 -1px 0 rgba(26, 24, 38, 0.08);
+
+  --g-edge: rgba(255, 255, 255, 0.95);
+  --g-edge-2: rgba(26, 24, 38, 0.1);
+  --g-sheen: rgba(255, 255, 255, 0.85);
+  --g-bg: rgba(255, 255, 255, 0.46);
+  --g-bg-2: rgba(255, 255, 255, 0.36);
+  --g-fill-1: rgba(26, 24, 38, 0.035);
+  --g-fill-2: rgba(26, 24, 38, 0.055);
+  --g-fill-3: rgba(26, 24, 38, 0.075);
+  --g-glare: radial-gradient(120% 70% at 18% -12%, rgba(255, 255, 255, 0.75), rgba(255, 255, 255, 0.2) 45%, transparent 62%);
+  --g-rim: linear-gradient(155deg, rgba(255, 255, 255, 1) 0%, rgba(255, 255, 255, 0.5) 22%, rgba(255, 255, 255, 0.15) 50%,
+    rgba(255, 255, 255, 0.55) 78%, rgba(255, 255, 255, 0.95) 100%);
+  --g-orb-a: rgba(111, 91, 196, 0.32);
+  --g-orb-b: rgba(79, 134, 171, 0.24);
 }
 
 * {
@@ -150,12 +232,12 @@ select:focus-visible {
 }
 
 ::selection {
-  color: #fff;
-  background: rgba(139, 92, 246, 0.36);
+  color: var(--text-primary);
+  background: var(--cy-22);
 }
 
 * {
-  scrollbar-color: rgba(167, 139, 250, 0.28) transparent;
+  scrollbar-color: var(--cy-22) transparent;
   scrollbar-width: thin;
 }
 
@@ -166,7 +248,7 @@ select:focus-visible {
 
 *::-webkit-scrollbar-thumb {
   border-radius: var(--r-pill);
-  background: rgba(167, 139, 250, 0.24);
+  background: var(--cy-22);
 }
 
 .app-shell {

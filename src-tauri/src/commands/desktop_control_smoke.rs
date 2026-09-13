@@ -174,6 +174,8 @@ pub(super) async fn run(app: &AppHandle, execution: Value) -> Result<(), String>
             serde_json::from_value(json!({"execution":execution,"windowId":window})).unwrap(),
         )
     };
+    let foreground = unsafe { GetForegroundWindow() } as usize;
+    let before = pointer();
     let first = match observe().await {
         Ok(first) => first,
         Err(error) => {
@@ -181,8 +183,6 @@ pub(super) async fn run(app: &AppHandle, execution: Value) -> Result<(), String>
             return Err(error);
         }
     };
-    let foreground = unsafe { GetForegroundWindow() } as usize;
-    let before = pointer();
     system::move_mouse(caller(app),serde_json::from_value(json!({"execution":execution,"observationId":first.observation_id,"x":point.0,"y":point.1})).unwrap()).await?;
     let observed = observe().await?;
     system::type_text(caller(app),serde_json::from_value(json!({"execution":execution,"observationId":observed.observation_id,"text":"Luczor ÄÖü 42"})).unwrap()).await?;
@@ -209,6 +209,13 @@ pub(super) async fn run(app: &AppHandle, execution: Value) -> Result<(), String>
         "isolated actions must not activate a window"
     );
     let feedback = feedback_dom(app).await?;
+    let overlay = app.get_webview_window("desktop-control-feedback").unwrap();
+    assert!(overlay.is_visible().unwrap());
+    let display = control::selected_monitor()?;
+    let origin = overlay.outer_position().unwrap();
+    let size = overlay.outer_size().unwrap();
+    assert_eq!((origin.x, origin.y), (display.x, display.y));
+    assert_eq!((size.width, size.height), (display.width, display.height));
     assert_eq!(feedback["result"]["value"]["ready"], "complete");
     assert_eq!(feedback["result"]["value"]["cursor"], "block");
     assert_eq!(feedback["result"]["value"]["border"], "rgb(57, 140, 255)");

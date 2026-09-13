@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { ACCENT_NAMES, type HudPosition } from '@/services/appearance'
+import { ACCENT_NAMES, type HudPosition, type ThemeName } from '@/services/appearance'
 
 const props = defineProps<{
   assistantName: string
   accent: string
+  theme: ThemeName
   hudPosition: HudPosition
   uiScale: number
   hudVisible: boolean
@@ -15,6 +16,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (event: 'update:assistantName', value: string): void
   (event: 'update:accent', value: string): void
+  (event: 'update:theme', value: ThemeName): void
   (event: 'update:hudPosition', value: HudPosition): void
   (event: 'update:uiScale', value: number): void
   (event: 'update:hudVisible', value: boolean): void
@@ -34,6 +36,12 @@ const uiScaleModel = computed({
   get: () => props.uiScale,
   set: value => emit('update:uiScale', value),
 })
+
+const THEME_OPTIONS: Array<{ value: ThemeName; label: string; hint: string }> = [
+  { value: 'dark', label: 'Dunkel', hint: 'Obsidian-Glas' },
+  { value: 'light', label: 'Hell', hint: 'Milchglas' },
+  { value: 'system', label: 'System', hint: 'folgt Windows' },
+]
 
 function accentColor(name: string): string {
   switch (name) {
@@ -60,6 +68,24 @@ function accentColor(name: string): string {
     <div class="lz-card">
       <label class="lz-label">Assistenten-Name</label>
       <input v-model="assistantNameModel" class="lz-input" placeholder="Luczor" />
+
+      <label class="lz-label" style="margin-top: 6px">Erscheinungsbild</label>
+      <div class="lz-segment" role="radiogroup" aria-label="Erscheinungsbild">
+        <button
+          v-for="option in THEME_OPTIONS"
+          :key="option.value"
+          type="button"
+          role="radio"
+          :aria-checked="theme === option.value"
+          class="lz-segment__item"
+          :class="{ 'is-active': theme === option.value }"
+          @click="emit('update:theme', option.value)"
+        >
+          <span>{{ option.label }}</span>
+          <small>{{ option.hint }}</small>
+        </button>
+      </div>
+      <p class="lz-hint">Wird auf diesem Gerät gespeichert und beim nächsten Start wieder verwendet.</p>
 
       <label class="lz-label" style="margin-top: 6px">Akzentfarbe</label>
       <div class="lz-swatches">

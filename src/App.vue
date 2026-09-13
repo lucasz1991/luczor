@@ -135,7 +135,7 @@ import {
   type StagedProjectSync,
 } from '@/services/api/projectSyncQueue'
 import { refreshStatus } from '@/services/status'
-import { appearance, appearanceAccentColor } from '@/services/appearance'
+import { appearance, appearanceAccentColor, toggleTheme } from '@/services/appearance'
 import { miniProjectList, projectChatBinding } from '@/services/miniChat/projectChat'
 import { recordDebugEvent } from '@/services/debug'
 import { getSafeRecordValue } from '@/services/safeRecord'
@@ -2671,6 +2671,33 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             <circle cx="3.5" cy="6" r="1" />
             <circle cx="3.5" cy="12" r="1" />
             <circle cx="3.5" cy="18" r="1" />
+          </svg>
+        </button>
+
+        <button
+          type="button"
+          class="icon-btn theme-btn"
+          :title="appearance.theme === 'light' ? 'Dunkles Design' : 'Helles Design'"
+          :aria-label="appearance.theme === 'light' ? 'Dunkles Design einschalten' : 'Helles Design einschalten'"
+          @click="toggleTheme()"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            width="16"
+            height="16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <g class="theme-btn__moon">
+              <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />
+            </g>
+            <g class="theme-btn__sun">
+              <circle cx="12" cy="12" r="4" />
+              <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+            </g>
           </svg>
         </button>
 
