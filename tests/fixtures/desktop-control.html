@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="de">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Luczor · Bildschirmsteuerung – UI-Prüfung</title>
+    <style>
+      body {
+        background: #171a1f;
+        color: #e2e5ea;
+        font: 14px system-ui;
+        margin: 0;
+        padding: 28px;
+      }
+      main {
+        max-width: 830px;
+        margin: auto;
+      }
+      .notice {
+        padding: 12px 0;
+        color: #9abce3;
+        border-bottom: 1px solid #35404d;
+        margin-bottom: 28px;
+      }
+      .notice button {
+        margin-left: 12px;
+        background: #242932;
+        color: white;
+        border: 1px solid #505b6a;
+        border-radius: 4px;
+        padding: 6px;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <div class="notice">
+        UI-Prüfung · Beispieldaten. Diese Seite steuert keine Geräte.<button id="reopen">
+          Einstellungen erneut öffnen
+        </button>
+      </div>
+      <div id="app"></div>
+    </main>
+    <script type="module">
+      import { createApp } from 'vue'
+      let config = {
+        revision: 1,
+        monitor: { id: 2, name: 'Luczor-Arbeitsbildschirm' },
+        inputMode: 'isolated',
+        preferInternalBrowser: true,
+        showCursor: true,
+      }
+      window.__TAURI_INTERNALS__ = {
+        invoke: async (command, args) => {
+          if (command === 'desktop_control_status')
+            return {
+              config: structuredClone(config),
+              monitors: [
+                {
+                  id: 1,
+                  name: 'Hauptbildschirm',
+                  x: 0,
+                  y: 0,
+                  width: 2560,
+                  height: 1440,
+                  primary: true,
+                  scale_factor: 1,
+                },
+                {
+                  id: 2,
+                  name: 'Luczor-Arbeitsbildschirm',
+                  x: -1920,
+                  y: 0,
+                  width: 1920,
+                  height: 1080,
+                  primary: false,
+                  scale_factor: 1,
+                },
+              ],
+              selectedAvailable: true,
+              isolatedBackend: 'win32_window_messages',
+              internalBrowserIndependent: true,
+            }
+          if (command === 'desktop_control_save') {
+            if (args.payload.revision !== config.revision) throw Error('desktop_control_config_changed')
+            config = { ...args.payload, revision: config.revision + 1 }
+            return structuredClone(config)
+          }
+          if (command === 'desktop_control_preview') return
+          throw Error('Unsupported fixture command')
+        },
+      }
+      const { default: Settings } = await import('/src/components/settings/DesktopControlSettings.vue')
+      let app = createApp(Settings)
+      app.mount('#app')
+      document.querySelector('#reopen').addEventListener('click', () => {
+        app.unmount()
+        app = createApp(Settings)
+        app.mount('#app')
+      })
+    </script>
+  </body>
+</html>

@@ -1052,7 +1052,13 @@ function iconPath(kind: string) {
             <!-- Footer -->
             <div class="lz-foot">
               <button type="button" class="lz-btn lz-btn--ghost" @click="closeModal">Schließen</button>
-              <button v-if="ui.tab !== 'computer'" type="button" class="lz-btn lz-btn--primary" :disabled="!canSave" @click="saveAll">
+              <button
+                v-if="ui.tab !== 'computer'"
+                type="button"
+                class="lz-btn lz-btn--primary"
+                :disabled="!canSave"
+                @click="saveAll"
+              >
                 Speichern
               </button>
             </div>

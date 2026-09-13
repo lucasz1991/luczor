@@ -76,7 +76,8 @@ async function luczorWorkflowBrowser(p) {
     const hit = document.elementFromPoint(x, y)
     if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight || !hit || (hit !== el && !el.contains(hit))) return fail('browser_target_not_actionable')
     await markPointer()
-    if (!el.isConnected || !visible(el)) return fail('browser_target_not_actionable')
+    const after = el.getBoundingClientRect(), afterHit = document.elementFromPoint(x,y)
+    if (!el.isConnected || !visible(el) || el.disabled || after.left + after.width / 2 !== x || after.top + after.height / 2 !== y || !afterHit || (afterHit !== el && !el.contains(afterHit))) return fail('browser_target_not_actionable')
     el.click()
     return { ok: true, clicked: true }
   }
@@ -89,7 +90,7 @@ async function luczorWorkflowBrowser(p) {
     const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
     if (!setter) return fail('browser_setter_unavailable')
     await markPointer()
-    if (!el.isConnected || !visible(el)) return fail('browser_target_not_actionable')
+    if (!el.isConnected || !visible(el) || el.disabled || el.readOnly) return fail('browser_target_not_actionable')
     setter.call(el, p.value)
     el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }))
     return { ok: el.value === p.value, applied: el.value === p.value }

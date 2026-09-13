@@ -59,7 +59,7 @@ async function browser(ctx: ToolContext, action: string, args: Record<string, un
       ok: true,
       surface: 'luczor_internal_browser',
       system_pointer_used: false,
-      preferred: control?.config.preferInternalBrowser ?? true,
+      preferred: control?.config?.preferInternalBrowser ?? true,
       session: existing
         ? { id: existing.meta.id, status: existing.meta.status, allowed_hosts: existing.meta.allowedHosts }
         : null,

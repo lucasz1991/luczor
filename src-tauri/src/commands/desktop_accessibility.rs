@@ -158,11 +158,13 @@ pub(super) mod linux {
         process_started: u64,
         interfaces: Vec<String>,
         enabled: bool,
+        bounds: (i32, i32, i32, i32),
     }
     struct Observation {
         execution: ExecutionPermit,
         created: Instant,
         nodes: BTreeMap<String, ObservedNode>,
+        control_revision: u64,
     }
     static OBSERVATIONS: OnceLock<Mutex<BTreeMap<String, Observation>>> = OnceLock::new();
     pub(super) fn session() -> Result<Connection, String> {
@@ -261,6 +263,12 @@ pub(super) mod linux {
             && interfaces
                 .iter()
                 .any(|v| v == "org.a11y.atspi.EditableText");
+        let bounds: (i32,i32,i32,i32) = proxy(bus, &object, "org.a11y.atspi.Component")?
+            .call("GetExtents", &(0_u32,)).map_err(|_| "desktop_accessibility_bounds_unavailable")?;
+        let monitor = crate::commands::desktop_control::selected_monitor()?;
+        if bounds.2 <= 0 || bounds.3 <= 0 || !crate::commands::desktop_control::contains_rect(&monitor, bounds.0, bounds.1, bounds.2 as u32, bounds.3 as u32) {
+            return Err("desktop_control_window_outside_selected_monitor".into());
+        }
         Ok(ObservedNode {
             public: Node {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -275,10 +283,12 @@ pub(super) mod linux {
             process_started,
             interfaces,
             enabled: has_state(&states, 8) && has_state(&states, 24),
+            bounds,
         })
     }
     pub(super) fn observe(payload: Guarded<Observe>) -> Result<Snapshot, String> {
         let gate = admit(&payload.execution, false)?;
+        let control_revision = crate::commands::desktop_control::config()?.revision;
         let limit = payload.request.max_nodes.unwrap_or(150);
         if limit == 0 || limit > 300 {
             return Err("desktop_accessibility_limit_invalid".into());
@@ -351,6 +361,7 @@ pub(super) mod linux {
                 execution: payload.execution,
                 created: Instant::now(),
                 nodes,
+                control_revision,
             },
         );
         Ok(Snapshot {
@@ -380,6 +391,7 @@ pub(super) mod linux {
             .ok_or("desktop_accessibility_observation_missing_or_consumed")?;
         if observation.execution != payload.execution
             || observation.created.elapsed() >= Duration::from_secs(30)
+            || observation.control_revision != crate::commands::desktop_control::config()?.revision
         {
             return Err("desktop_accessibility_observation_expired_or_changed".into());
         }
@@ -398,9 +410,19 @@ pub(super) mod linux {
             || observed.public.role != current.public.role
             || observed.public.actions != current.public.actions
             || observed.interfaces != current.interfaces
+            || observed.bounds != current.bounds
         {
             return Err("desktop_accessibility_target_changed".into());
         }
+        gate.check()?;
+        if matches!(request.action, ActionKind::Focus) && crate::commands::desktop_control::isolated() {
+            return Err("desktop_control_isolated_focus_not_supported".into());
+        }
+        let (x,y,width,height) = current.bounds;
+        crate::commands::desktop_control::activity(&crate::commands::desktop_target::WindowTarget {
+            window_id:0,process_id:current.public.application_pid,process_started:current.process_started,
+            x,y,width:width as u32,height:height as u32,focused:current.public.focused
+        }, Some((x+width/2,y+height/2)), Some(&payload.execution))?;
         gate.check()?;
         let result = match request.action {
             ActionKind::Invoke => {

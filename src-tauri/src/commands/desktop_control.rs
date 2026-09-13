@@ -95,11 +95,11 @@ pub fn capture_monitor(requested: Option<u32>) -> Result<u32, String> {
     Ok(selected.id)
 }
 
-pub fn activity(target: &WindowTarget, point: Option<(i32, i32)>) -> Result<(), String> {
+pub fn activity(target: &WindowTarget, point: Option<(i32, i32)>, execution: Option<&super::execution::ExecutionPermit>) -> Result<(), String> {
     let app = APP.get().ok_or("desktop_control_not_initialized")?;
     let monitor = selected_monitor()?;
     let current = config()?;
-    super::desktop_control_overlay::show(app, &monitor, target.window_id, if current.show_cursor { point } else { None })
+    super::desktop_control_overlay::show(app, &monitor, target.window_id, if current.show_cursor { point } else { None }, execution.cloned())
 }
 
 #[tauri::command]
@@ -109,7 +109,7 @@ pub fn desktop_control_status(window: super::CallerWebview) -> Result<serde_json
     let monitors = monitors()?;
     let selected = config.monitor.as_ref().is_some_and(|selection| monitors.iter().any(|monitor| monitor.id == selection.id && monitor.name == selection.name));
     Ok(serde_json::json!({"config":config,"monitors":monitors,"selectedAvailable":selected,
-        "isolatedBackend": if cfg!(windows) { "win32_window_messages" } else { "internal_browser_only" },
+        "isolatedBackend": if cfg!(windows) { "win32_window_messages" } else if cfg!(target_os="linux") { "at_spi" } else { "internal_browser_only" },
         "systemInputIndependent":false,"internalBrowserIndependent":true,
         "guidance":"Interner Browser: eigene DOM-Eingaben. Getrennte Fenstereingaben: unterstützte klassische Windows-Steuerelemente. Systemeingaben teilen Maus und Tastatur mit dem Benutzer; kein automatischer Rückfall."}))
 }
@@ -142,7 +142,7 @@ pub async fn desktop_control_preview(window: super::CallerWebview, app: AppHandl
     super::ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(move || {
         let monitor = selected_monitor()?;
-        super::desktop_control_overlay::show(&app, &monitor, 0, Some((monitor.x + (monitor.width / 2) as i32, monitor.y + (monitor.height / 2) as i32)))
+        super::desktop_control_overlay::show(&app, &monitor, 0, Some((monitor.x + (monitor.width / 2) as i32, monitor.y + (monitor.height / 2) as i32)), None)
     }).await.map_err(|_| "desktop_control_preview_failed")?
 }
 

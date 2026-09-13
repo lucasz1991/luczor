@@ -124,6 +124,7 @@ const TOOL_CONTRACT = [
   { name: 'fs_create_dir', category: 'app', mutating: true, requiresApproval: true },
   { name: 'fs_move', category: 'app', mutating: true, requiresApproval: true },
   { name: 'fs_delete', category: 'app', mutating: true, requiresApproval: true },
+  { name: 'os_control_status', category: 'os', mutating: false, requiresApproval: false },
   { name: 'os_system_diagnostics', category: 'os', mutating: false, requiresApproval: true },
   { name: 'os_read_clipboard', category: 'os', mutating: false, requiresApproval: true },
   { name: 'os_list_windows', category: 'os', mutating: false, requiresApproval: true },
@@ -195,8 +196,8 @@ const TOOL_CONTRACT = [
 ] as const
 
 // Reviewed recovery contract: owned browser status/close, image capabilities and exact goal updates.
-const TOOL_SCHEMA_SHA256 = '80215b02f03277263a59e9cd58cb77b6a7c125cb9141a54b0d63c7838f385783'
-const CORE_TOOL_SCHEMA_SHA256 = 'b8645d7de286a8b873fb8322fd8f690662d8f7148032ed6ff12b629f43f91d9d'
+const TOOL_SCHEMA_SHA256 = 'fdb400ded5d175aa1260c378e45ce930efb642187a24f7b6e9f544181cac4d18'
+const CORE_TOOL_SCHEMA_SHA256 = '42d69d28ea1c76e5eddc8d5e7719dffc721ad1aafa6804b93ebb516b75f3d911'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {

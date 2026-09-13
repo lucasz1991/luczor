@@ -16,7 +16,7 @@ body:before{content:'';position:fixed;inset:0;border:4px solid #398cff;box-sizin
 window.luczorFeedback=p=>{const e=document.getElementById('pointer');e.style.display=p.point?'block':'none';if(p.point){e.style.left=(p.point[0]/devicePixelRatio)+'px';e.style.top=(p.point[1]/devicePixelRatio)+'px'}};
 </script></body></html>"##;
 
-pub fn show(app: &AppHandle, monitor: &MonitorInfo, _target: u64, point: Option<(i32,i32)>) -> Result<(), String> {
+pub fn show(app: &AppHandle, monitor: &MonitorInfo, _target: u64, point: Option<(i32,i32)>, execution: Option<super::execution::ExecutionPermit>) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     if super::desktop_linux::is_wayland() { return Err("desktop_control_wayland_overlay_unavailable_use_internal_browser".into()); }
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
@@ -25,8 +25,12 @@ pub fn show(app: &AppHandle, monitor: &MonitorInfo, _target: u64, point: Option<
     let size = PhysicalSize::new(monitor.width, monitor.height);
     let handle = app.clone();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    let show_permit = execution.clone();
     app.run_on_main_thread(move || {
         if GENERATION.load(Ordering::SeqCst) != generation { let _ = sender.send(Err("desktop_control_overlay_superseded".to_string())); return; }
+        if show_permit.as_ref().is_some_and(|permit| super::execution::admit(permit, false).is_err()) {
+            let _ = sender.send(Err("desktop_control_execution_stopped".to_string())); return;
+        }
         let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             let overlay = if let Some(view) = handle.get_webview_window(LABEL) { view } else {
                 let url = format!("data:text/html;base64,{}", base64::engine::general_purpose::STANDARD.encode(PAGE));
@@ -47,7 +51,12 @@ pub fn show(app: &AppHandle, monitor: &MonitorInfo, _target: u64, point: Option<
     receiver.recv_timeout(std::time::Duration::from_secs(3)).map_err(|_| "desktop_control_overlay_timeout")??;
     let handle = app.clone();
     tauri::async_runtime::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        let start = std::time::Instant::now();
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if GENERATION.load(Ordering::SeqCst) != generation { return; }
+            if start.elapsed() >= std::time::Duration::from_secs(30) || execution.as_ref().is_some_and(|permit| super::execution::admit(permit, false).is_err()) { break; }
+        }
         let other = handle.clone();
         let _ = handle.run_on_main_thread(move || {
             if GENERATION.load(Ordering::SeqCst) == generation {

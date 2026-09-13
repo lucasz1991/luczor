@@ -68,7 +68,7 @@ pub fn observe(payload: ObservePayload) -> Result<DesktopObservation, String> {
     let config = super::desktop_control::config()?;
     let target = read_target(payload.window_id)?;
     super::desktop_control::check_target(&target)?;
-    super::desktop_control::activity(&target, None)?;
+    super::desktop_control::activity(&target, None, Some(&payload.execution))?;
     lease.check()?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -157,17 +157,19 @@ impl DesktopActionGuard {
     pub fn isolated(&self) -> bool { self.observation.visible.input_mode == super::desktop_control::InputMode::Isolated }
     pub fn virtual_point(&self) -> Result<(i32,i32), String> {
         let point = VIRTUAL_POINT.lock().map_err(|_| "desktop_control_pointer_unavailable")?;
-        point.as_ref().filter(|point| point.0 == self.target().window_id && point.1 == self.observation.visible.control_revision && point.2 == self.target().process_started)
+        point.as_ref().filter(|point| point.0 == self.target().window_id && point.1 == self.observation.visible.control_revision && point.2 == self.target().process_started && point.5 == self.observation.execution)
             .map(|point| (point.3,point.4)).ok_or("desktop_control_virtual_pointer_required_move_first".into())
     }
     pub fn show_point(&self, x: i32, y: i32) -> Result<(), String> {
         self.point(x,y)?;
-        *VIRTUAL_POINT.lock().map_err(|_| "desktop_control_pointer_unavailable")? = Some((self.target().window_id, self.observation.visible.control_revision, self.target().process_started,x,y));
-        super::desktop_control::activity(self.target(), Some((x,y)))
+        *VIRTUAL_POINT.lock().map_err(|_| "desktop_control_pointer_unavailable")? = Some((self.target().window_id, self.observation.visible.control_revision, self.target().process_started,x,y,self.observation.execution.clone()));
+        super::desktop_control::activity(self.target(), Some((x,y)), Some(&self.observation.execution))?;
+        self.point(x,y)
     }
     pub fn show_keyboard(&self) -> Result<(), String> {
         self.check()?;
-        super::desktop_control::activity(self.target(), self.virtual_point().ok())
+        super::desktop_control::activity(self.target(), self.virtual_point().ok(), Some(&self.observation.execution))?;
+        self.check()
     }
     pub fn point(&self, x: i32, y: i32) -> Result<(), String> {
         self.check()?;
@@ -187,7 +189,7 @@ impl DesktopActionGuard {
     }
 }
 
-static VIRTUAL_POINT: Mutex<Option<(u64,u64,u64,i32,i32)>> = Mutex::new(None);
+static VIRTUAL_POINT: Mutex<Option<(u64,u64,u64,i32,i32,ExecutionPermit)>> = Mutex::new(None);
 
 #[cfg(test)]
 fn validate_target(
@@ -263,6 +265,10 @@ fn read_target(requested: Option<u64>) -> Result<WindowTarget, String> {
         {
             return Err("Window geometry unavailable.".into());
         }
+        // Invisible resize margins extend beyond a maximized monitor. Use the visible frame.
+        let _ = windows_sys::Win32::Graphics::Dwm::DwmGetWindowAttribute(window,
+            windows_sys::Win32::Graphics::Dwm::DWMWA_EXTENDED_FRAME_BOUNDS as u32,
+            &mut rect as *mut RECT as *mut std::ffi::c_void, std::mem::size_of::<RECT>() as u32);
         Ok(WindowTarget {
             window_id: window as usize as u64,
             process_id,
@@ -365,5 +371,14 @@ mod tests {
         ] {
             assert!(validate_target(&expected, &changed, Duration::from_secs(1)).is_err());
         }
+    }
+    #[test]
+    fn isolated_target_allows_user_focus_elsewhere_but_not_window_or_process_changes() {
+        let expected = target();
+        let background = WindowTarget { focused: false, ..target() };
+        assert!(validate_target_mode(&expected, &background, Duration::from_secs(1), true).is_ok());
+        assert!(validate_target_mode(&expected, &background, VALID_FOR, true).is_err());
+        assert!(validate_target_mode(&expected, &WindowTarget {x: 0, ..background}, Duration::ZERO, true).is_err());
+        assert!(validate_target_mode(&expected, &WindowTarget {process_started: 101, ..target()}, Duration::ZERO, true).is_err());
     }
 }

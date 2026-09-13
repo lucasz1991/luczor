@@ -35,11 +35,19 @@ function coordinate(value: unknown, name: 'x' | 'y'): number {
 
 export const osTools: ToolDef[] = [
   {
-    name: 'os_control_status', category: 'os',
-    description: 'Read this device’s selected Luczor monitor, input mode and internal-browser preference. Desktop input/capture is limited to that monitor. Isolated input never falls back to system input; unsupported controls require a different supported route.',
-    mutating: false, requiresApproval: false, risk: 'low', scope: 'desktop', effects: ['read'],
+    name: 'os_control_status',
+    category: 'os',
+    description:
+      'Read this device’s selected Luczor monitor, input mode and internal-browser preference. Desktop input/capture is limited to that monitor. Isolated input never falls back to system input; unsupported controls require a different supported route.',
+    mutating: false,
+    requiresApproval: false,
+    risk: 'low',
+    scope: 'desktop',
+    effects: ['read'],
     parameters: { type: 'object', additionalProperties: false, properties: {} },
-    async execute() { return invoke('desktop_control_status') },
+    async execute() {
+      return invoke('desktop_control_status')
+    },
   },
   {
     name: 'os_system_diagnostics',
@@ -496,7 +504,12 @@ osTools.push({
     type: 'object',
     additionalProperties: false,
     properties: {
-      window_id: { type: 'integer', minimum: 1, description: 'ID from os_list_windows, on the configured Luczor monitor. Shared mode additionally requires focus.' },
+      window_id: {
+        type: 'integer',
+        minimum: 1,
+        description:
+          'ID from os_list_windows, on the configured Luczor monitor. Shared mode additionally requires focus.',
+      },
     },
     required: [],
   },
