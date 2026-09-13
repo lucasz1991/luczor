@@ -256,6 +256,21 @@ struct RuntimeDevice {
     available_mib: Option<u64>,
 }
 
+fn binding_matches_runtime(bound: &DeviceBinding, device: &RuntimeDevice) -> bool {
+    // NVML inventories a physical NVIDIA card as CUDA even when the verified
+    // runtime exposes it through Vulkan. Name and capacity must still agree;
+    // the caller rejects zero or multiple matching devices.
+    let backend_matches = bound.backend == "unknown"
+        || device.backend == bound.backend
+        || (cfg!(target_os = "linux") && bound.backend == "cuda" && device.backend == "vulkan");
+    device.name == bound.name
+        && backend_matches
+        && bound
+            .total_bytes
+            .zip(device.total_mib)
+            .is_some_and(|(a, b)| a.abs_diff(b.saturating_mul(MIB)) <= 64 * MIB)
+}
+
 pub(super) fn validate_runtime_metadata(runtime: &RuntimeArtifact) -> Result<(), String> {
     if runtime
         .backend
@@ -394,14 +409,7 @@ pub(super) fn choose_acceleration(
         for bound in bindings {
             let matched = devices
                 .iter()
-                .filter(|device| {
-                    device.name == bound.name
-                        && (bound.backend == "unknown" || device.backend == bound.backend)
-                        && bound
-                            .total_bytes
-                            .zip(device.total_mib)
-                            .is_some_and(|(a, b)| a.abs_diff(b.saturating_mul(MIB)) <= 64 * MIB)
-                })
+                .filter(|device| binding_matches_runtime(bound, device))
                 .collect::<Vec<_>>();
             if matched.len() != 1 || !runtime_ids.insert(matched[0].id.clone()) {
                 return Err("resource_gpu_selection_ambiguous".into());
@@ -1113,6 +1121,36 @@ fn apply_measurement(status: &mut RuntimeAcceleration, line: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn physical_cuda_binding_matches_linux_vulkan_without_relaxing_identity() {
+        let bound = DeviceBinding {
+            id: "cuda-0".into(),
+            name: "NVIDIA GeForce RTX 3050 Laptop GPU".into(),
+            backend: "cuda".into(),
+            total_bytes: Some(4096 * MIB),
+        };
+        let mut device = RuntimeDevice {
+            id: "Vulkan1".into(),
+            name: bound.name.clone(),
+            backend: "vulkan".into(),
+            total_mib: Some(4096),
+            available_mib: Some(3500),
+        };
+        assert_eq!(
+            binding_matches_runtime(&bound, &device),
+            cfg!(target_os = "linux")
+        );
+        device.name = "AMD Radeon Graphics".into();
+        assert!(!binding_matches_runtime(&bound, &device));
+        device.name = bound.name.clone();
+        device.total_mib = Some(8192);
+        assert!(!binding_matches_runtime(&bound, &device));
+        device.total_mib = None;
+        assert!(!binding_matches_runtime(&bound, &device));
+        device.total_mib = Some(4096);
+        device.backend = "metal".into();
+        assert!(!binding_matches_runtime(&bound, &device));
+    }
     const HELP: &str = "--fit [on|off]\n--fit-target MiB\n--device devices\n--n-gpu-layers N";
     #[test]
     fn forced_split_keeps_cpu_blocks_and_never_retries_as_auto() {
