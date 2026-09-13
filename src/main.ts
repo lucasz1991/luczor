@@ -3,6 +3,7 @@ import { createApp } from 'vue'
 import './assets/main.css'
 import './styles/theme.css'
 import './styles/beautiful-ui.css'
+import './styles/liquid-glass.css'
 
 // The secondary display must not initialize another model, microphone or store.
 async function mount() {
