@@ -235,6 +235,11 @@ function toggleChecklist() {
   padding: 0;
   border: 0;
 }
+/* Context content is rendered in the docked column; keep the strip closed when the slot is empty. */
+.chat-project-overlay__panel:empty,
+.chat-project-overlay__content:not(:has(.chat-project-overlay__panel:not(:empty))) {
+  display: none;
+}
 .chat-project-overlay__panel :deep(.info-block) {
   min-width: 0;
 }

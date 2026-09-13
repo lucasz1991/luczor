@@ -145,7 +145,12 @@ const runLabels: Record<string, string> = {
         <AiIcon name="panel" /><span>Geräteverbund</span>
       </button>
       <footer>
-        <button type="button" title="Systemstatus und Not-Aus" aria-label="Systemstatus und Not-Aus" @click="emit('system')">
+        <button
+          type="button"
+          title="Systemstatus und Not-Aus"
+          aria-label="Systemstatus und Not-Aus"
+          @click="emit('system')"
+        >
           <AiIcon name="shield" /><span>Systemstatus</span></button
         ><button type="button" title="Einstellungen" aria-label="Einstellungen" @click="emit('settings')">
           <AiIcon name="settings" /><span>Einstellungen</span>
@@ -193,7 +198,9 @@ const runLabels: Record<string, string> = {
               @blur="commitRename(item)"
             />
             <span v-else>{{ item.label }}</span>
-            <span v-if="item.cloud" class="ai-sidebar__cloud" title="Globales Projekt" aria-label="Globales Projekt">↔</span>
+            <span v-if="item.cloud" class="ai-sidebar__cloud" title="Globales Projekt" aria-label="Globales Projekt"
+              >↔</span
+            >
             <span
               v-if="item.busy"
               class="ai-sidebar__activity"
