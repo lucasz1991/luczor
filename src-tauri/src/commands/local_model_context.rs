@@ -13,11 +13,9 @@ pub(super) fn growth_target(current: u32, ceiling: u32, input: u64) -> Option<u3
     // Even a transcript larger than the ceiling can benefit from growth:
     // fitting can then retain more complete rounds within the real limit.
     let needed = needed.min(u64::from(ceiling));
-    let mut target = current.max(1);
-    while u64::from(target) < needed {
-        target = target.saturating_mul(2).min(ceiling);
-    }
-    Some(target)
+    // Allocate in small aligned steps instead of doubling an already large KV
+    // cache. The signed maximum remains available without reserving it early.
+    Some((needed.div_ceil(4096) * 4096).min(u64::from(ceiling)) as u32)
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -199,9 +197,9 @@ mod tests {
     #[test]
     fn growth_is_demand_driven_bounded_and_not_an_output_target() {
         assert_eq!(growth_target(32768, 262144, 14000), None);
-        assert_eq!(growth_target(32768, 262144, 31000), Some(65536));
-        assert_eq!(growth_target(65536, 262144, 70000), Some(131072));
-        assert_eq!(growth_target(16384, 32768, 17000), Some(32768));
+        assert_eq!(growth_target(32768, 262144, 31000), Some(36864));
+        assert_eq!(growth_target(65536, 262144, 70000), Some(73728));
+        assert_eq!(growth_target(16384, 32768, 17000), Some(20480));
         assert_eq!(growth_target(32768, 32768, 32000), None);
         assert_eq!(growth_target(32768, 262144, 262144), Some(262144));
         assert_eq!(growth_target(32768, 262144, u64::MAX), None);
@@ -217,7 +215,7 @@ mod tests {
             (4096, 32768),
         ] {
             let target = growth_target(start, ceiling, 20124).unwrap();
-            assert_eq!(target, 32768);
+            assert_eq!(target, 24576);
             let mut body = json!({"max_tokens":8256,"messages":[
                 {"role":"system","content":"policy"},
                 {"role":"user","content":"complete current request"}
@@ -226,7 +224,7 @@ mod tests {
             let usage =
                 fit_adaptive_context(&mut body, target.into(), |_| Ok::<_, ()>(20124), || ())
                     .unwrap();
-            assert_eq!(usage.output_tokens, 8256);
+            assert_eq!(usage.output_tokens, 4388);
             assert_eq!(usage.omitted_messages, 0);
             assert_eq!(body["messages"], original);
             assert!(usage.input_tokens + usage.output_tokens + 64 <= usage.context_tokens);

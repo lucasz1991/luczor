@@ -73,6 +73,12 @@ impl Diagnostic {
             ..Self::new(kind.code(), Stage::Unknown)
         }
     }
+    pub(super) fn capacity() -> Self {
+        Self {
+            reason: Reason::Capacity,
+            ..Self::new("runtime_capacity_exhausted", Stage::Preparation)
+        }
+    }
 }
 
 fn reason_for(kind: LlamaHttpFailureKind) -> Reason {

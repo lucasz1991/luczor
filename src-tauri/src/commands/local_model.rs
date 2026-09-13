@@ -266,6 +266,7 @@ struct ManagedRuntime {
     /// directory was passed at startup. `stop()` uses it to persist this scope's KV cache
     /// before the process exits; a fresh process for the same scope restores from it.
     slot_cache_dir: Option<PathBuf>,
+    slot_cache_namespace: String,
     #[cfg(target_os = "linux")]
     _linux_bundle: Arc<linux_protection::Bundle>,
     _runtime_guard: File,
@@ -357,7 +358,13 @@ impl ManagedRuntime {
                 .and_then(|child| child.try_wait().ok())
                 .is_some_and(|status| status.is_none())
             {
-                save_slot_cache(self.port, &self.api_key, dir, digest);
+                save_slot_cache(
+                    self.port,
+                    &self.api_key,
+                    dir,
+                    &self.slot_cache_namespace,
+                    digest,
+                );
             }
         }
         if let Some(mut child) = self.child.take() {
@@ -506,6 +513,21 @@ impl LocalInferenceFailure {
 
     fn stream(message: impl Into<String>) -> Self {
         let message = message.into();
+        if matches!(
+            message.as_str(),
+            "ram_budget_insufficient"
+                | "runtime_gpu_capacity_unavailable"
+                | "Available RAM is below the signed model threshold."
+                | "Total RAM is below the signed model threshold."
+        ) || message == resource_runtime::STARTUP_RAM_PRESSURE
+        {
+            return Self {
+                code: "runtime_capacity_exhausted",
+                public_message: message,
+                retryable: true,
+                diagnostic: failure_diagnostics::Diagnostic::capacity(),
+            };
+        }
         if message == reasoning_budget::CONTROL_UNAVAILABLE {
             return Self {
                 code: "runtime_reasoning_control_unavailable",
@@ -3350,6 +3372,19 @@ fn start_runtime_attempt(
         settings.state.applied_revision,
     )?;
     let port = reserve_loopback_port()?;
+    let slot_cache_namespace = sha256_bytes(
+        serde_json::to_string(&json!({
+            "schema": 2,
+            "model": model.artifact.as_ref().map(|artifact| &artifact.sha256),
+            "runtime": model.runtime.as_ref().map(|runtime| &runtime.sha256),
+            "template": model.chat_template_hash,
+            "context": context,
+            "acceleration": plan.arguments,
+            "resources": resource_plan.arguments(),
+        }))
+        .map_err(|_| "Slot cache identity could not be encoded.")?
+        .as_bytes(),
+    );
     let api_key = Uuid::new_v4().simple().to_string();
     let key_dir = app
         .path()
@@ -3444,6 +3479,7 @@ fn start_runtime_attempt(
         resource_plan,
         model_storage: model_storage.clone(),
         slot_cache_dir: slot_cache_dir.clone(),
+        slot_cache_namespace,
         #[cfg(target_os = "linux")]
         _linux_bundle: artifacts.linux_bundle.clone(),
         _runtime_guard: runtime_guard,
@@ -3551,8 +3587,10 @@ fn await_health(
 /// filename, so cross-scope reuse never happens regardless of what this directory holds.
 const MAX_CACHED_SLOT_SCOPES: usize = 5;
 
-fn slot_cache_path(dir: &Path, scope_digest: &str) -> PathBuf {
-    dir.join(format!("{scope_digest}.slot"))
+fn slot_cache_path(dir: &Path, namespace: &str, scope_digest: &str) -> PathBuf {
+    // Never restore old scope-only files into a different model or KV layout.
+    let key = sha256_bytes(format!("v2:{namespace}:{scope_digest}").as_bytes());
+    dir.join(format!("v2-{key}.slot"))
 }
 
 fn prune_slot_cache_dir(dir: &Path) {
@@ -3581,11 +3619,11 @@ fn prune_slot_cache_dir(dir: &Path) {
 /// `restore_slot_cache`) can skip reprocessing the conversation transcript from scratch.
 /// Never surfaces an error: a failed save only costs the next cold start its speedup, it
 /// never affects correctness, and it must never block or fail the teardown it runs inside.
-fn save_slot_cache(port: u16, api_key: &str, dir: &Path, scope_digest: &str) {
+fn save_slot_cache(port: u16, api_key: &str, dir: &Path, namespace: &str, scope_digest: &str) {
     let Ok(client) = local_http_client(Duration::from_secs(2), Duration::from_secs(10)) else {
         return;
     };
-    let filename = slot_cache_path(dir, scope_digest)
+    let filename = slot_cache_path(dir, namespace, scope_digest)
         .file_name()
         .map(|name| name.to_string_lossy().into_owned());
     let Some(filename) = filename else {
@@ -3607,12 +3645,10 @@ fn save_slot_cache(port: u16, api_key: &str, dir: &Path, scope_digest: &str) {
 /// Best-effort restore of a scope's previously saved slot cache into a freshly started
 /// process's slot, so the first turn in a resumed scope does not repay the full prefill
 /// cost that `save_slot_cache` already banked. A missing or unusable save file is the
-/// normal case for a scope's first ever turn and is silently ignored; llama.cpp still
-/// verifies the restored cache against the actual prompt tokens it next receives, so a
-/// stale or corrupt save can only fall back to full reprocessing, never produce a wrong
-/// completion.
+/// normal case for a scope's first ever turn. Only an exact model/runtime/layout
+/// namespace may be restored; matching prompt tokens do not prove KV compatibility.
 fn restore_slot_cache(runtime: &ManagedRuntime, dir: &Path, scope_digest: &str) {
-    let path = slot_cache_path(dir, scope_digest);
+    let path = slot_cache_path(dir, &runtime.slot_cache_namespace, scope_digest);
     if !path.is_file() {
         return;
     }
@@ -5010,6 +5046,48 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn slot_cache_identity_separates_scope_and_runtime_layout_without_legacy_reuse() {
+        let dir = std::path::Path::new("cache");
+        let first = super::slot_cache_path(dir, "model-a-context-4096", "scope-a");
+        assert_eq!(
+            first,
+            super::slot_cache_path(dir, "model-a-context-4096", "scope-a")
+        );
+        assert_ne!(
+            first,
+            super::slot_cache_path(dir, "model-b-context-4096", "scope-a")
+        );
+        assert_ne!(
+            first,
+            super::slot_cache_path(dir, "model-a-context-32768", "scope-a")
+        );
+        assert_ne!(
+            first,
+            super::slot_cache_path(dir, "model-a-context-4096", "scope-b")
+        );
+        assert_ne!(first, dir.join("scope-a.slot"));
+    }
+
+    #[test]
+    fn context_growth_capacity_failure_is_not_reported_as_a_transport_interruption() {
+        for message in [
+            "ram_budget_insufficient",
+            "runtime_gpu_capacity_unavailable",
+            super::resource_runtime::STARTUP_RAM_PRESSURE,
+        ] {
+            let failure = super::LocalInferenceFailure::from(message);
+            assert_eq!(failure.code, "runtime_capacity_exhausted");
+            let diagnostic = serde_json::to_value(failure.diagnostic).unwrap();
+            assert_eq!(diagnostic["reason"], "capacity");
+            assert_eq!(diagnostic["stage"], "preparation");
+            assert!(diagnostic.get("httpStatus").is_none());
+        }
+        assert_eq!(
+            super::LocalInferenceFailure::from("Local tokenizer request failed.").code,
+            "runtime_stream_failed"
+        );
+    }
+    #[test]
     fn resource_work_leases_survive_catalog_refresh_but_not_renderer_replacement() {
         let first = "7ae16b61-de39-4ed8-96f3-dd132abeb149";
         let second = "ed69ed15-e99b-4128-8fd0-70ed08419b85";
@@ -5245,6 +5323,7 @@ mod tests {
                 reason_code: None,
             },
             slot_cache_dir: None,
+            slot_cache_namespace: "test-layout".into(),
             _support_guards: Vec::new(),
             _runtime_guard: open_artifact_guard(&fixture.runtime).unwrap(),
             _model_guard: open_artifact_guard(&fixture.model_directory.join("model-a.gguf"))
