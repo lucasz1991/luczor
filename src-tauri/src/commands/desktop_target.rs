@@ -9,7 +9,6 @@ use super::execution::{admit, ExecutionLease, ExecutionPermit};
 const VALID_FOR: Duration = Duration::from_secs(30);
 static OBSERVATIONS: OnceLock<Mutex<HashMap<String, Observation>>> = OnceLock::new();
 static INPUT: Mutex<()> = Mutex::new(());
-#[cfg(target_os = "linux")]
 pub(super) fn lock_input() -> Result<MutexGuard<'static, ()>, String> {
     INPUT
         .try_lock()
@@ -37,6 +36,8 @@ pub struct DesktopObservation {
     pub target: WindowTarget,
     pub captured_at: u64,
     pub expires_at: u64,
+    pub control_revision: u64,
+    pub input_mode: super::desktop_control::InputMode,
 }
 
 struct Observation {
@@ -62,8 +63,12 @@ pub struct InputPayload<T> {
 }
 
 pub fn observe(payload: ObservePayload) -> Result<DesktopObservation, String> {
+    let _input = lock_input()?;
     let lease = admit(&payload.execution, false)?;
+    let config = super::desktop_control::config()?;
     let target = read_target(payload.window_id)?;
+    super::desktop_control::check_target(&target)?;
+    super::desktop_control::activity(&target, None)?;
     lease.check()?;
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -74,6 +79,8 @@ pub fn observe(payload: ObservePayload) -> Result<DesktopObservation, String> {
         target,
         captured_at: now,
         expires_at: now + VALID_FOR.as_millis() as u64,
+        control_revision: config.revision,
+        input_mode: config.input_mode,
     };
     let mut entries = OBSERVATIONS
         .get_or_init(Mutex::default)
@@ -101,7 +108,6 @@ pub struct DesktopActionGuard {
 }
 
 impl DesktopActionGuard {
-    #[cfg(target_os = "linux")]
     pub(super) fn target(&self) -> &WindowTarget {
         &self.observation.visible.target
     }
@@ -135,12 +141,33 @@ impl DesktopActionGuard {
     }
     pub fn check(&self) -> Result<(), String> {
         self.lease.check()?;
+        let config = super::desktop_control::config()?;
+        if config.revision != self.observation.visible.control_revision {
+            return Err("desktop_control_config_changed_observe_again".into());
+        }
         let current = read_target(Some(self.observation.visible.target.window_id))?;
-        validate_target(
+        super::desktop_control::check_target(&current)?;
+        validate_target_mode(
             &self.observation.visible.target,
             &current,
             self.observation.captured.elapsed(),
+            self.isolated(),
         )
+    }
+    pub fn isolated(&self) -> bool { self.observation.visible.input_mode == super::desktop_control::InputMode::Isolated }
+    pub fn virtual_point(&self) -> Result<(i32,i32), String> {
+        let point = VIRTUAL_POINT.lock().map_err(|_| "desktop_control_pointer_unavailable")?;
+        point.as_ref().filter(|point| point.0 == self.target().window_id && point.1 == self.observation.visible.control_revision && point.2 == self.target().process_started)
+            .map(|point| (point.3,point.4)).ok_or("desktop_control_virtual_pointer_required_move_first".into())
+    }
+    pub fn show_point(&self, x: i32, y: i32) -> Result<(), String> {
+        self.point(x,y)?;
+        *VIRTUAL_POINT.lock().map_err(|_| "desktop_control_pointer_unavailable")? = Some((self.target().window_id, self.observation.visible.control_revision, self.target().process_started,x,y));
+        super::desktop_control::activity(self.target(), Some((x,y)))
+    }
+    pub fn show_keyboard(&self) -> Result<(), String> {
+        self.check()?;
+        super::desktop_control::activity(self.target(), self.virtual_point().ok())
     }
     pub fn point(&self, x: i32, y: i32) -> Result<(), String> {
         self.check()?;
@@ -152,7 +179,7 @@ impl DesktopActionGuard {
         {
             return Err("Input coordinates are outside the observed window.".into());
         }
-        point_targets_window(target.window_id, x, y)
+        if self.isolated() { Ok(()) } else { point_targets_window(target.window_id, x, y) }
     }
     pub fn current_point(&self) -> Result<(), String> {
         let (x, y) = pointer_position()?;
@@ -160,15 +187,24 @@ impl DesktopActionGuard {
     }
 }
 
+static VIRTUAL_POINT: Mutex<Option<(u64,u64,u64,i32,i32)>> = Mutex::new(None);
+
+#[cfg(test)]
 fn validate_target(
     expected: &WindowTarget,
     current: &WindowTarget,
     age: Duration,
 ) -> Result<(), String> {
+    validate_target_mode(expected, current, age, false)
+}
+
+fn validate_target_mode(expected: &WindowTarget, current: &WindowTarget, age: Duration, isolated: bool) -> Result<(), String> {
     if age >= VALID_FOR {
         return Err("Desktop observation expired; observe the target again.".into());
     }
-    if expected != current || !current.focused {
+    let mut comparable = current.clone();
+    if isolated { comparable.focused = expected.focused; }
+    if expected != &comparable || (!isolated && !current.focused) {
         return Err("Desktop focus, window geometry or process changed after observation. No input was sent.".into());
     }
     Ok(())
@@ -189,7 +225,7 @@ fn read_target(requested: Option<u64>) -> Result<WindowTarget, String> {
             .map(|id| id as usize as *mut std::ffi::c_void)
             .unwrap_or(foreground);
         if window.is_null()
-            || window != foreground
+            || (!super::desktop_control::isolated() && window != foreground)
             || IsIconic(window) != 0
             || IsWindowVisible(window) == 0
         {
@@ -236,7 +272,7 @@ fn read_target(requested: Option<u64>) -> Result<WindowTarget, String> {
             y: rect.top,
             width: (i64::from(rect.right) - i64::from(rect.left)) as u32,
             height: (i64::from(rect.bottom) - i64::from(rect.top)) as u32,
-            focused: true,
+            focused: window == foreground,
         })
     }
 }
@@ -266,6 +302,9 @@ fn pointer_position() -> Result<(i32, i32), String> {
 }
 #[cfg(target_os = "linux")]
 fn read_target(requested: Option<u64>) -> Result<WindowTarget, String> {
+    if super::desktop_control::isolated() {
+        return Err("desktop_control_isolated_native_unavailable_use_internal_browser".into());
+    }
     super::desktop_linux::read_target(requested)
 }
 #[cfg(target_os = "linux")]

@@ -369,6 +369,9 @@ pub async fn execution_gate_update(
     payload: ExecutionPolicy,
 ) -> Result<ExecutionPolicy, String> {
     ensure_main_webview(&window)?;
+    if payload.kill_switch || payload.mode == ExecutionMode::Observe {
+        super::desktop_control::stop_feedback();
+    }
     GATE.get_or_init(Mutex::default)
         .lock()
         .map_err(|_| "Execution gate unavailable.")?

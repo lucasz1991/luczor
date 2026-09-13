@@ -10,6 +10,7 @@ import ChatSettingsSection from '@/components/settings/ChatSettingsSection.vue'
 import { modelUsageSettings, saveModelUsageSettings } from '@/services/inference/modelUsageSettings'
 import { DEFAULT_TOOL_LIMITS, loadToolLimits, validToolRounds } from '@/services/toolLimits'
 import ExecutionSettingsSection from '@/components/settings/ExecutionSettingsSection.vue'
+import DesktopControlSettings from '@/components/settings/DesktopControlSettings.vue'
 import { listTools } from '@/services/tools/registry'
 import type { LuczorMode } from '@/services/inference/types'
 import VoiceSettingsSection from '@/components/settings/VoiceSettingsSection.vue'
@@ -41,7 +42,7 @@ import {
   type VoiceMode,
 } from '@/services/voice/localVoice'
 
-type SettingsTab = 'server' | 'notifications' | 'execution' | 'voice' | 'chat' | 'appearance' | 'privacy'
+type SettingsTab = 'server' | 'notifications' | 'execution' | 'computer' | 'voice' | 'chat' | 'appearance' | 'privacy'
 
 const props = withDefaults(
   defineProps<{
@@ -613,6 +614,7 @@ const tabs: Array<{
   { id: 'server', title: 'Server', desc: 'Laravel Sync API', icon: 'server' },
   { id: 'notifications', title: 'Benachrichtigungen', desc: 'Native Pushs', icon: 'bell' },
   { id: 'execution', title: 'Ausführung', desc: 'Freigaben & Sicherheit', icon: 'shield' },
+  { id: 'computer', title: 'Bildschirmsteuerung', desc: 'Bildschirm, Eingaben & Browser', icon: 'computer' },
   { id: 'voice', title: 'Voice', desc: 'Lokale STT · Server-TTS', icon: 'mic' },
   { id: 'chat', title: 'Chat & Agenten', desc: 'Modelle, Ressourcen & Sprache', icon: 'chat' },
   { id: 'appearance', title: 'Appearance', desc: 'UI (später)', icon: 'palette' },
@@ -628,6 +630,8 @@ function selectTab(id: SettingsTab) {
 
 function iconPath(kind: string) {
   switch (kind) {
+    case 'computer':
+      return 'M3 4h18v13H3zM8 21h8M12 17v4'
     case 'key':
       return 'M21 2l-2 2m-7.5 7.5L19 4M7 14a4 4 0 1 1 3.9-5M7 18h4l1.5-1.5L14 18h2l1.5-1.5L19 18h2v-2l-5.5-5.5'
     case 'chat':
@@ -994,6 +998,7 @@ function iconPath(kind: string) {
               />
 
               <!-- VOICE -->
+              <DesktopControlSettings v-else-if="ui.tab === 'computer'" />
               <VoiceSettingsSection
                 v-else-if="ui.tab === 'voice'"
                 v-model:voice-mode="settings.voice_mode"
@@ -1047,7 +1052,7 @@ function iconPath(kind: string) {
             <!-- Footer -->
             <div class="lz-foot">
               <button type="button" class="lz-btn lz-btn--ghost" @click="closeModal">Schließen</button>
-              <button type="button" class="lz-btn lz-btn--primary" :disabled="!canSave" @click="saveAll">
+              <button v-if="ui.tab !== 'computer'" type="button" class="lz-btn lz-btn--primary" :disabled="!canSave" @click="saveAll">
                 Speichern
               </button>
             </div>

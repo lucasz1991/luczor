@@ -5,6 +5,10 @@ pub mod browser_panel;
 pub mod claude;
 pub mod codex;
 pub mod desktop_accessibility;
+pub mod desktop_control;
+mod desktop_control_overlay;
+#[cfg(windows)]
+mod desktop_window_input;
 #[cfg(target_os = "linux")]
 mod desktop_linux;
 #[cfg(target_os = "linux")]

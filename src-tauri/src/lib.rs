@@ -37,6 +37,7 @@ pub fn run() {
             Some(vec![]),
         ))
         .setup(|app| {
+            commands::desktop_control::initialize(app.handle());
             commands::device_jobs::initialize_trust(app.handle());
             #[cfg(debug_assertions)]
             {
@@ -73,6 +74,9 @@ pub fn run() {
             commands::desktop_accessibility::desktop_accessibility_observe,
             commands::desktop_accessibility::desktop_accessibility_action,
             commands::system::desktop_observe,
+            commands::desktop_control::desktop_control_status,
+            commands::desktop_control::desktop_control_save,
+            commands::desktop_control::desktop_control_preview,
             commands::codex::codex_job_list,
             commands::codex::codex_session_list,
             commands::mini_chat::mini_chat_open,

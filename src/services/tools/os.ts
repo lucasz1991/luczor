@@ -35,6 +35,13 @@ function coordinate(value: unknown, name: 'x' | 'y'): number {
 
 export const osTools: ToolDef[] = [
   {
+    name: 'os_control_status', category: 'os',
+    description: 'Read this device’s selected Luczor monitor, input mode and internal-browser preference. Desktop input/capture is limited to that monitor. Isolated input never falls back to system input; unsupported controls require a different supported route.',
+    mutating: false, requiresApproval: false, risk: 'low', scope: 'desktop', effects: ['read'],
+    parameters: { type: 'object', additionalProperties: false, properties: {} },
+    async execute() { return invoke('desktop_control_status') },
+  },
+  {
     name: 'os_system_diagnostics',
     category: 'os',
     description:
@@ -131,7 +138,7 @@ export const osTools: ToolDef[] = [
     name: 'os_screen_capture',
     category: 'os',
     description:
-      'Capture the primary monitor or a monitor_id from os_environment. Returns dimensions and native monitor geometry; the image is shown only in the app, not sent to the model. This tool does not provide visual understanding.',
+      'Capture only the Luczor monitor selected in Settings > Bildschirmsteuerung. Omit monitor_id to use that monitor. An explicit different ID is rejected. Returns dimensions and geometry; image stays in the app, without automatic model vision. Internal browser screenshots use browser_screenshot.',
     mutating: false,
     requiresApproval: true,
     dataHandling: 'ephemeral',
@@ -145,13 +152,13 @@ export const osTools: ToolDef[] = [
         monitor: {
           type: 'string',
           enum: ['primary'],
-          description: 'Capture the primary monitor. Omit when selecting monitor_id.',
+          description: 'Legacy selector. Omit it; the configured Luczor monitor is authoritative.',
         },
         monitor_id: {
           type: 'integer',
           minimum: 0,
           maximum: 4294967295,
-          description: 'Native monitor ID returned by os_environment. Omit for the primary monitor.',
+          description: 'Must match the configured Luczor monitor. Omit to use that monitor.',
         },
       },
       required: [],
@@ -478,7 +485,7 @@ osTools.push({
   name: 'os_observe_desktop',
   category: 'os',
   description:
-    'Observe the focused native window and issue a one-use target ID valid for 30 seconds. Desktop input requires this ID and fails if focus, process or geometry changed.',
+    'Observe a native window fully inside the selected Luczor monitor and issue a one-use ID valid for 30 seconds. Isolated Windows mode accepts visible background windows; shared mode requires foreground. Process, geometry or configuration changes invalidate the ID. For internal browser actions use browser_* instead.',
   mutating: false,
   requiresApproval: true,
   dataHandling: 'ephemeral',
@@ -489,7 +496,7 @@ osTools.push({
     type: 'object',
     additionalProperties: false,
     properties: {
-      window_id: { type: 'integer', minimum: 1, description: 'Optional native window ID; must currently be focused.' },
+      window_id: { type: 'integer', minimum: 1, description: 'ID from os_list_windows, on the configured Luczor monitor. Shared mode additionally requires focus.' },
     },
     required: [],
   },
@@ -500,7 +507,7 @@ osTools.push({
 
 for (const tool of osTools.filter(item => item.effects?.includes('input'))) {
   tool.description +=
-    ' Requires a fresh one-use observation_id from os_observe_desktop; changed focus or geometry rejects the action.'
+    ' Native/external-window route only, never the internal browser. Requires a fresh one-use observation_id. In isolated mode first position the virtual cursor with os_move_mouse; classic Windows buttons/text fields support targeted input and Ctrl+A only. No automatic fallback to the user mouse. Delivery must be verified by a fresh observation; do not retry uncertain writes blindly.'
   tool.parameters.properties = {
     ...(tool.parameters.properties as Record<string, unknown>),
     observation_id: {

@@ -5746,6 +5746,7 @@ dependencies = [
  "tauri-plugin-prevent-default",
  "tauri-plugin-single-instance",
  "tauri-plugin-store",
+ "tokio",
  "tree-sitter",
  "tree-sitter-javascript",
  "tree-sitter-php",

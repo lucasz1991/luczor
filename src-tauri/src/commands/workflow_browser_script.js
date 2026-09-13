@@ -51,10 +51,32 @@ async function luczorWorkflowBrowser(p) {
     return { ok: true, text: text.slice(0, p.maxChars), truncated: text.length > p.maxChars }
   }
   if (!visible(el) || el.disabled || el.readOnly || el.getAttribute('aria-disabled') === 'true') return fail('browser_target_not_actionable')
+  const markPointer = async () => {
+    // This marker belongs to the internal browser only; it never moves/focuses the OS pointer.
+    if (p.showCursor !== true) { document.querySelector?.('luczor-browser-pointer')?.remove(); return }
+    let host = document.querySelector('luczor-browser-pointer')
+    if (!host) {
+      host = document.createElement('luczor-browser-pointer')
+      host.setAttribute('aria-hidden', 'true')
+      host.style.cssText = 'all:initial!important;position:fixed!important;z-index:2147483647!important;pointer-events:none!important;width:26px!important;height:34px!important;display:block!important'
+      const shadow = host.attachShadow({ mode: 'closed' })
+      // Constant markup only. No page text or tool arguments enter HTML.
+      shadow.innerHTML = '<style>:host{pointer-events:none}svg{filter:drop-shadow(0 1px 2px #0008)}span:after{content:"Luczor";font:11px system-ui;color:white;background:#1764c5;border-radius:4px;padding:2px 5px;position:absolute;left:19px;top:24px;white-space:nowrap}</style><svg width="25" height="32" viewBox="0 0 25 32"><path d="M2 2L2 25L8 20L13 30L18 27L13 18L23 18Z" fill="#398cff" stroke="white" stroke-width="2"/></svg><span></span>'
+      document.documentElement.append(host)
+    }
+    const rect = el.getBoundingClientRect()
+    host.style.setProperty('left', `${Math.max(0, Math.min(innerWidth - 26, rect.left + rect.width / 2))}px`, 'important')
+    host.style.setProperty('top', `${Math.max(0, Math.min(innerHeight - 34, rect.top + rect.height / 2))}px`, 'important')
+    // Give visible pages a frame to paint; hidden webviews must never wait indefinitely.
+    await Promise.race([new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))), new Promise(resolve => setTimeout(resolve, 80))])
+    if (location.href !== p.expectedUrl) throw new Error('browser_url_changed')
+  }
   if (p.action === 'click') {
     const rect = el.getBoundingClientRect(), x = rect.left + rect.width / 2, y = rect.top + rect.height / 2
     const hit = document.elementFromPoint(x, y)
     if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight || !hit || (hit !== el && !el.contains(hit))) return fail('browser_target_not_actionable')
+    await markPointer()
+    if (!el.isConnected || !visible(el)) return fail('browser_target_not_actionable')
     el.click()
     return { ok: true, clicked: true }
   }
@@ -66,6 +88,8 @@ async function luczorWorkflowBrowser(p) {
     const prototype = select ? HTMLSelectElement.prototype : el instanceof HTMLInputElement ? HTMLInputElement.prototype : HTMLTextAreaElement.prototype
     const setter = Object.getOwnPropertyDescriptor(prototype, 'value')?.set
     if (!setter) return fail('browser_setter_unavailable')
+    await markPointer()
+    if (!el.isConnected || !visible(el)) return fail('browser_target_not_actionable')
     setter.call(el, p.value)
     el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }))
     return { ok: el.value === p.value, applied: el.value === p.value }

@@ -619,7 +619,7 @@ async fn run(
                 BrowserOperation::Download => "download",
                 _ => return Err("workflow_browser_action_invalid".into()),
             };
-            let params = json!({"action":action,"selector":input.selector,"value":input.value,"url":input.url,"expectedUrl":current_url,"timeoutMs":timeout.as_millis(),"maxChars":20000,"maxBytes":MAX_ARTIFACT_BYTES});
+            let params = json!({"action":action,"selector":input.selector,"value":input.value,"url":input.url,"expectedUrl":current_url,"timeoutMs":timeout.as_millis(),"maxChars":20000,"maxBytes":MAX_ARTIFACT_BYTES,"showCursor":super::desktop_control::config()?.show_cursor});
             let expression = format!(
                 "{}\nluczorWorkflowBrowser({});",
                 include_str!("workflow_browser_script.js"),

@@ -2,6 +2,7 @@ import type { ToolDef, ToolContext } from './types'
 import { closeToolSession, findToolSession, getToolSession } from './toolSessionCoordinator'
 import { validateToolArguments } from './validateArguments'
 import { browserPanel, browserFailure, revealBrowserPanel } from '@/services/browserPanel'
+import { loadDesktopControl } from '@/services/desktopControl'
 
 const url = { type: 'string', minLength: 1, maxLength: 2048 }
 const selector = { type: 'string', minLength: 1, maxLength: 4096 }
@@ -53,8 +54,12 @@ function assertAllowedHost(action: string, args: Record<string, unknown>, allowe
 async function browser(ctx: ToolContext, action: string, args: Record<string, unknown>) {
   const existing = findToolSession(ctx, 'browser')
   if (action === 'status') {
+    const control = await loadDesktopControl().catch(() => null)
     return {
       ok: true,
+      surface: 'luczor_internal_browser',
+      system_pointer_used: false,
+      preferred: control?.config.preferInternalBrowser ?? true,
       session: existing
         ? { id: existing.meta.id, status: existing.meta.status, allowed_hosts: existing.meta.allowedHosts }
         : null,
@@ -112,7 +117,7 @@ function define(
   return {
     name,
     category: 'app',
-    description,
+    description: `${description} Ausschließlich die interne Luczor-Sitzung; keine fremden Browserfenster. DOM-Eingaben verwenden nicht die Systemmaus oder Systemtastatur.`,
     parameters,
     mutating,
     requiresApproval,

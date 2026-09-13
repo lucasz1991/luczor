@@ -52,7 +52,8 @@ pub async fn desktop_observe(
     payload: ObservePayload,
 ) -> Result<DesktopObservation, String> {
     ensure_main_webview(&window)?;
-    super::desktop_target::observe(payload)
+    tauri::async_runtime::spawn_blocking(move || super::desktop_target::observe(payload))
+        .await.map_err(|_| "desktop_control_observation_worker_failed")?
 }
 
 /* =========================================================
@@ -71,7 +72,7 @@ pub struct MonitorInfo {
     pub primary: bool,
 }
 
-fn monitor_info(monitor: &xcap::Monitor) -> Result<MonitorInfo, String> {
+pub(super) fn monitor_info(monitor: &xcap::Monitor) -> Result<MonitorInfo, String> {
     let info = MonitorInfo {
         id: monitor
             .id()
@@ -155,10 +156,11 @@ pub async fn capture_screen(
     payload: Option<ScreenCapturePayload>,
 ) -> Result<ScreenCapture, String> {
     ensure_main_webview(&window)?;
+    let monitor_id = super::desktop_control::capture_monitor(payload.and_then(|p| p.monitor_id))?;
     #[cfg(target_os = "linux")]
     if super::desktop_linux::is_wayland() {
         return tauri::async_runtime::spawn_blocking(move || {
-            super::desktop_accessibility::portal::capture(payload.and_then(|p| p.monitor_id))
+            super::desktop_accessibility::portal::capture(Some(monitor_id))
         })
         .await
         .map_err(|_| "desktop_portal_capture_worker_failed")?;
@@ -168,7 +170,7 @@ pub async fn capture_screen(
         .iter()
         .map(monitor_info)
         .collect::<Result<_, _>>()?;
-    let index = select_monitor_index(&infos, payload.and_then(|payload| payload.monitor_id))?;
+    let index = select_monitor_index(&infos, Some(monitor_id))?;
     let monitor = &monitors[index];
 
     let img = monitor
@@ -741,10 +743,17 @@ pub async fn move_mouse(
     payload: InputPayload<MoveMousePayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    tauri::async_runtime::spawn_blocking(move || move_mouse_bound(payload))
+        .await.map_err(|_| "desktop_control_worker_failed")?
+}
+
+fn move_mouse_bound(payload: InputPayload<MoveMousePayload>) -> Result<(), String> {
     let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
     let payload = payload.request;
     validate_coordinates(payload.x, payload.y)?;
     guard.point(payload.x, payload.y)?;
+    guard.show_point(payload.x, payload.y)?;
+    if guard.isolated() { return Ok(()); }
     #[cfg(target_os = "linux")]
     if super::desktop_linux::is_wayland() {
         return super::desktop_accessibility::portal::move_to(&guard, payload.x, payload.y);
@@ -782,10 +791,21 @@ pub async fn mouse_click(
     payload: InputPayload<MouseClickPayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    tauri::async_runtime::spawn_blocking(move || mouse_click_bound(payload))
+        .await.map_err(|_| "desktop_control_worker_failed")?
+}
+
+fn mouse_click_bound(payload: InputPayload<MouseClickPayload>) -> Result<(), String> {
     let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
     let payload = payload.request;
     // Validate the complete request before constructing an input session or moving.
     let button = validate_mouse_click(&payload)?;
+    if let Some((x,y)) = payload.x.zip(payload.y) { guard.show_point(x,y)?; }
+    #[cfg(windows)]
+    if guard.isolated() {
+        guard.show_keyboard()?;
+        return super::desktop_window_input::click(&guard, payload.button.as_deref().unwrap_or("left"), payload.double.unwrap_or(false));
+    }
     #[cfg(target_os = "linux")]
     if super::desktop_linux::is_wayland() {
         let (x, y) = payload
@@ -830,6 +850,11 @@ pub async fn type_text(
     payload: InputPayload<TypeTextPayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    tauri::async_runtime::spawn_blocking(move || type_text_bound(payload))
+        .await.map_err(|_| "desktop_control_worker_failed")?
+}
+
+fn type_text_bound(payload: InputPayload<TypeTextPayload>) -> Result<(), String> {
     let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
     let payload = payload.request;
     if payload.text.is_empty() {
@@ -840,6 +865,9 @@ pub async fn type_text(
     if payload.text.chars().count() > 10_000 {
         return Err("Text too long".into());
     }
+    guard.show_keyboard()?;
+    #[cfg(windows)]
+    if guard.isolated() { return super::desktop_window_input::text(&guard, &payload.text); }
     #[cfg(target_os = "linux")]
     if super::desktop_linux::is_wayland() {
         for character in payload.text.chars() {
@@ -906,9 +934,17 @@ pub async fn press_key(
     payload: InputPayload<PressKeyPayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    tauri::async_runtime::spawn_blocking(move || press_key_bound(payload))
+        .await.map_err(|_| "desktop_control_worker_failed")?
+}
+
+fn press_key_bound(payload: InputPayload<PressKeyPayload>) -> Result<(), String> {
     let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
     let payload = payload.request;
     let key = parse_key(&payload.key)?;
+    guard.show_keyboard()?;
+    #[cfg(windows)]
+    if guard.isolated() { return super::desktop_window_input::key(&guard, &payload.key, &[]); }
     #[cfg(target_os = "linux")]
     if super::desktop_linux::is_wayland() {
         return super::desktop_accessibility::portal::press(&guard, key, &[]);
@@ -962,10 +998,18 @@ pub async fn scroll(
     payload: InputPayload<ScrollPayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    tauri::async_runtime::spawn_blocking(move || scroll_bound(payload))
+        .await.map_err(|_| "desktop_control_worker_failed")?
+}
+
+fn scroll_bound(payload: InputPayload<ScrollPayload>) -> Result<(), String> {
     let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
     let payload = payload.request;
     let amount = validate_scroll_amount(payload.amount)?;
     let axis = parse_scroll_axis(payload.axis.as_deref())?;
+    guard.show_keyboard()?;
+    #[cfg(windows)]
+    if guard.isolated() { return super::desktop_window_input::scroll(&guard, amount, matches!(axis, Axis::Horizontal)); }
     #[cfg(target_os = "linux")]
     if super::desktop_linux::is_wayland() {
         return super::desktop_accessibility::portal::scroll(&guard, amount, axis);
@@ -1021,10 +1065,18 @@ pub async fn hotkey(
     payload: InputPayload<HotkeyPayload>,
 ) -> Result<(), String> {
     ensure_main_webview(&window)?;
+    tauri::async_runtime::spawn_blocking(move || hotkey_bound(payload))
+        .await.map_err(|_| "desktop_control_worker_failed")?
+}
+
+fn hotkey_bound(payload: InputPayload<HotkeyPayload>) -> Result<(), String> {
     let guard = DesktopActionGuard::acquire(&payload.execution, &payload.observation_id)?;
     let payload = payload.request;
     let modifiers = parse_hotkey_modifiers(&payload.modifiers)?;
     let key = parse_key(&payload.key)?;
+    guard.show_keyboard()?;
+    #[cfg(windows)]
+    if guard.isolated() { return super::desktop_window_input::key(&guard, &payload.key, &payload.modifiers); }
     #[cfg(target_os = "linux")]
     if super::desktop_linux::is_wayland() {
         return super::desktop_accessibility::portal::press(&guard, key, &modifiers);
@@ -1086,6 +1138,9 @@ pub async fn open_url(
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     let url = payload.url.trim();
+    if super::desktop_control::isolated() {
+        return Err("desktop_control_external_browser_launch_uses_system_focus_use_browser_open".into());
+    }
     if !(url.starts_with("https://") || url.starts_with("http://"))
         || url.chars().any(char::is_control)
     {

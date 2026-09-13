@@ -18,6 +18,7 @@ type Params = {
 }
 function page() {
   class Element {
+    isConnected = true
     disabled = false
     readOnly = false
     valueText = ''

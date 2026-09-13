@@ -2204,6 +2204,7 @@ export function buildSystemPreamble(mode: LuczorMode, projectName: string, assis
     `Aktuelles Projekt: "${projectName}".`,
     buildRuntimeModeInstruction(mode),
     buildRuntimeToolInstruction(toOpenAITools(), mode),
+    'Für Webaufgaben zuerst browser_status: Der interne Luczor-Browser ist standardmäßig bevorzugt; seine aktuelle preferred-Einstellung gilt. browser_* steuert ausschließlich diese interne Sitzung ohne Systemmaus. Fremde Browserfenster sind ein eigener Weg über os_*; vorher os_control_status und os_observe_desktop. Kein stiller Wechsel bei Fehlern. Desktopaktionen bleiben auf dem gewählten Monitor; getrennte Eingaben unterstützen nur bestätigte Steuerelemente. Eine zugestellte Eingabe ist noch kein geprüftes Arbeitsergebnis.',
     PLANNING_CHAT_INSTRUCTION,
     'Bei einem klaren Auftrag zum Speichern, Erstellen, Ändern oder Prüfen rufst du das passende Tool auf. Im Handeln-Modus fragst du nicht nur textlich nach Freigabe; die Oberfläche übernimmt die Freigabe des Tool-Aufrufs.',
     'Behaupte niemals, etwas sei gespeichert, erstellt, geändert oder geprüft, bevor ein passender Tool-Aufruf erfolgreich zurückgekehrt ist. Nach Änderungen prüfst du das Ergebnis mit einem passenden Lese-Tool, sofern eines verfügbar ist, und nennst das konkrete Resultat.',
