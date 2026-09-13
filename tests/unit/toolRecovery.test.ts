@@ -50,7 +50,7 @@ describe('tool failure recovery', () => {
     const guard = new ToolRecoveryGuard()
     const outcome = guard.record(
       'os_click',
-      { observation_id: 'expired', x: 5, y: 10 },
+      { observation_id: 'expired' },
       { ok: false, error: 'Desktop observation expired; observe the target again.' }
     )
     expect(outcome.output).toMatchObject({
