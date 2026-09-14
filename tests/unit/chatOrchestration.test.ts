@@ -304,9 +304,13 @@ it.each([
   ['planner', 'runtime_empty_response'],
   ['planner', 'runtime_unsafe_response'],
   ['planner', 'runtime_output_repeated'],
+  ['planner', 'runtime_status_echo'],
+  ['planner', 'runtime_text_tool_output'],
   ['worker', 'runtime_empty_response'],
   ['worker', 'runtime_unsafe_response'],
   ['worker', 'runtime_output_repeated'],
+  ['worker', 'runtime_status_echo'],
+  ['worker', 'runtime_text_tool_output'],
 ] as const)('does not run dependent nodes after an unusable %s response (%s)', async (role, code) => {
   const saved = {
     ...checkpoint,
@@ -364,7 +368,7 @@ it.each([
   })
 })
 
-it.each(['runtime_empty_response', 'runtime_unsafe_response'])(
+it.each(['runtime_empty_response', 'runtime_unsafe_response', 'runtime_status_echo', 'runtime_text_tool_output'])(
   'keeps worker evidence and the typed diagnosis when a reviewer returns %s',
   async code => {
     const interruption: AgentInterruption = {

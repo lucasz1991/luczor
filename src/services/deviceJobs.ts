@@ -247,10 +247,7 @@ export async function startDeviceJobChannel(): Promise<() => void> {
         .then(module => module.pollWorkflowRepairs(channelSession.config, channelSession.signal))
         .catch(() => {})
     }
-    if (
-      !shouldPollDeviceJobs(Date.now(), channelState.lastPollAt, document.visibilityState, navigator.onLine !== false)
-    )
-      return
+    if (!shouldPollDeviceJobs(Date.now(), channelState.lastPollAt, document.visibilityState, true)) return
     void pullPending(config.clientId, channelSession)
   }
   const syncOnline = () => {

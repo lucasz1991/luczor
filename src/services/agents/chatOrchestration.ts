@@ -11,13 +11,15 @@ import type { AgentTeamRun, AgentTeamNodeDefinition } from './teams'
 import { prepareExternalSpecialists, type SpecialistOutcome } from './externalSpecialists'
 import { roleValue, SPECIALIST_LABELS, type SpecialistRole } from './teamPolicy'
 import { chatTeamBudget } from './chatTeamBudget'
+import { isSilentLocalResponseFailure } from '@/services/inference/localResponseGuard'
 
 type Result = Awaited<ReturnType<typeof runAgent>>
 
 /** A diagnostic fallback is not an agent result that dependent nodes can review. */
 function hasUnusableModelResponse(result: Result | undefined): boolean {
-  return ['runtime_empty_response', 'runtime_unsafe_response', 'runtime_output_repeated'].includes(
-    result?.interrupted?.code ?? ''
+  const code = result?.interrupted?.code
+  return (
+    isSilentLocalResponseFailure(code) || ['runtime_empty_response', 'runtime_unsafe_response'].includes(code ?? '')
   )
 }
 
@@ -44,6 +46,8 @@ function interruptionReason(code: string): string {
     return 'Das Modell hat keine verwertbare öffentliche Antwort oder Werkzeugaufrufe geliefert. Die Ursache ist damit noch nicht belegt.'
   if (code === 'runtime_unsafe_response')
     return 'Die Modellantwort konnte auch nach der Korrekturrunde nicht sicher als öffentliche Antwort verwendet werden.'
+  if (isSilentLocalResponseFailure(code))
+    return 'Das Modell hat auch nach der automatischen Korrektur keine verwertbare Antwort geliefert. Die Ausgabe wurde verworfen; daraus folgt keine Diagnose über RAM oder Kontextgröße.'
   if (['readiness_unavailable', 'readiness_refresh_failed'].includes(code))
     return 'Die geprüfte Modellbereitschaft war für diese Runde nicht mehr verfügbar. Das belegt allein keinen Modellabsturz.'
   if (['team_node_interrupted', 'run_timeout', 'node_timeout'].includes(code))
