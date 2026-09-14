@@ -180,6 +180,19 @@ const contextTrend = computed(() => {
           {{ number(run.context?.omittedMessages) }} Nachrichten ausgelassen ·
           {{ number(run.context?.shortenedToolResults) }} Werkzeugergebnisse gekürzt
         </p>
+        <details v-if="run.budget">
+          <summary>Kontextzusammenstellung · Schätzung vor Tokenprüfung</summary>
+          <dl>
+            <dt>Grundregeln</dt><dd>{{ number(run.budget.categories.rules) }} Tokens</dd>
+            <dt>Persönlichkeit und passende Skills</dt><dd>{{ number(run.budget.categories.profile) }} Tokens</dd>
+            <dt>Projektwissen und Erinnerungen</dt><dd>{{ number(run.budget.categories.knowledge) }} Tokens</dd>
+            <dt>Verlauf und Werkzeugergebnisse</dt><dd>{{ number(run.budget.categories.history) }} Tokens</dd>
+            <dt>Werkzeugdefinitionen</dt><dd>{{ number(run.budget.categories.tools) }} Tokens</dd>
+          </dl>
+          <p>{{ number(run.budget.estimatedInputTokens) }} / {{ number(run.budget.targetTokens) }} Tokens Planungsbudget · {{ run.budget.summarizedMessages }} Nachrichten verdichtet · {{ run.budget.shortenedToolResults }} Ergebnisse gekürzt.</p>
+          <p v-if="run.budget.overTarget">Pflichtkontext überschreitet das Planungsbudget. Die native Tokenprüfung entscheidet über Anpassung und Fenstererweiterung.</p>
+          <p>Schätzwerte einschließlich Nachrichtentext und Tools; die gemessene Tokenzahl und Cache-Wiederverwendung stehen separat oben.</p>
+        </details>
         <svg
           v-if="runs.filter(item => item.context).length > 1"
           class="context-trend"

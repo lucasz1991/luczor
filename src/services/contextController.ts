@@ -35,6 +35,7 @@ export type ContextPackage = {
 
 export type PromptContextDetails = {
   text: string
+  fragments?: import('./prompt/promptContextAssembler').PromptFragment[]
   contextId?: string
   repoId?: string
   branch?: string
@@ -107,6 +108,14 @@ export async function buildLocalPromptContextDetails(
     throw new Error('Konto während des lokalen Kontextabrufs geändert.')
   const memories = selectLocalMemories(groups, memoryLimit)
   return {
+    fragments: [
+      ...(repository?.fragments ?? (repository?.text ? [{ id: 'repository', content: repository.text, score: 0 }] : [])).map(fragment => ({
+        id: `query-repo-${fragment.id}`, source: 'repository' as const, trust: 'untrusted_data' as const,
+        scope: 'project' as const, egress: 'local_only' as const, priority: 90 + Math.min(5, Math.max(0, fragment.score || 0) * 5), content: fragment.content,
+      })),
+      ...memories.map(record => ({ id: `query-memory-${record.id}`, source: 'memory' as const, trust: 'untrusted_data' as const,
+        scope: 'project' as const, egress: 'local_only' as const, priority: 96, content: record.content })),
+    ],
     text: [
       repository?.text,
       memories.length

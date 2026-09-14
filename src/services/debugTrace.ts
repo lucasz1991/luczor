@@ -146,6 +146,7 @@ export async function traceInference(
       tools: request.tools,
       toolChoice: request.toolChoice,
       thinkingTier: request.thinkingTier,
+      contextBudget: request.contextBudget,
       taskType: request.taskType,
     },
     scope

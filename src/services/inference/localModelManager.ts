@@ -189,6 +189,7 @@ export class LocalModelManager {
     return Object.freeze({
       id: `local:${release.id}`,
       target: 'local_llama_cpp' as const,
+      contextTokens: Math.min(release.contextLimit ?? 32768, release.runtime?.maxContextTokens ?? 32768),
       streamChatWithTools: (request: InferenceRequest) =>
         traceInference(release.id, request, value =>
           this.stream(release, lease, fixedBinding, scopeDigest, gatewayEpoch, value, idleOptimization)

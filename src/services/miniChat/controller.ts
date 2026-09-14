@@ -5,7 +5,7 @@ import type { LuczorMode, WireMessage } from '@/services/inference/types'
 import { createChatActivity, finishChatActivity, updateChatActivity } from '@/services/chatActivity'
 import { presentEnvelopeStream } from '@/services/envelope'
 import { completedCommentary } from '@/services/chatCommentary'
-import { compactHistory, normalizeConversationHistory, previewToolArguments } from '@/services/chatPresentation'
+import { localConversationHistory, normalizeConversationHistory, previewToolArguments } from '@/services/chatPresentation'
 import { executionGate } from '@/services/executionGate'
 import { isThinkingTier } from '@/services/inference/thinking'
 import { captureThinking, thinkingSettings } from '@/services/inference/thinkingSettings'
@@ -228,7 +228,7 @@ export function createMiniChatController(deps: Dependencies) {
             deps.preamble(state.mode, project.name) +
             '\nTemporärer Mini-Chat: keine Unterhaltung automatisch als Memory oder Projektzusammenfassung speichern. Antworte kurz. Bei einer Rückfrage kannst du ein JSON-Objekt mit summary, question und maximal vier kurzen Antwortoptionen in bullets ausgeben. Eine Antwortoption ist keine Tool-Freigabe.',
         },
-        ...compactHistory(normalizeConversationHistory(transcript), 2400),
+        ...localConversationHistory(normalizeConversationHistory(transcript)),
       ]
       executionGate.assert(turnExecution)
       const continuationForTurn = continuation

@@ -25,6 +25,7 @@ export type ModelObservation = {
   finishReason: string
   usage?: InferenceResult['usage']
   context?: InferenceResult['contextUsage']
+  budget?: InferenceRequest['contextBudget']
   runtime: RuntimeDiagnostics
   failure?: LocalFailureDiagnostic
   events: { at: number; label: string }[]
@@ -68,7 +69,7 @@ export function createLocalModelDiagnostics(now = Date.now) {
   const clear = () => {
     state.runs.splice(0)
   }
-  function begin(model: string, messages: InferenceRequest['messages']) {
+  function begin(model: string, messages: InferenceRequest['messages'], budget?: InferenceRequest['contextBudget']) {
     ownsObservations = true
     const run = reactive<ModelObservation>({
       id: ++sequence,
@@ -81,6 +82,7 @@ export function createLocalModelDiagnostics(now = Date.now) {
       toolCount: 0,
       finishReason: '',
       runtime: {},
+      budget: budget ? structuredClone(budget) : undefined,
       roles: ['system', 'user', 'assistant', 'tool'].map(role => {
         const selected = messages.filter(message => message.role === role)
         return {

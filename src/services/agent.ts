@@ -12,6 +12,7 @@ import {
   isSilentLocalResponseFailure,
 } from '@/services/inference/localResponseGuard'
 import { focusedTools, cleanLocalHistory } from '@/services/inference/focusedTools'
+import { fitRequestContext, compactToolOutput } from '@/services/inference/contextBudget'
 import { recordTrace, debugScope, traceEnabled } from '@/services/debugTrace'
 import {
   createGoalReportTool,
@@ -484,11 +485,11 @@ export function shouldRequireToolCall(text: string): boolean {
 
 function outcomeMessage(toolCallId: string, toolName: string, outcome: Outcome): WireMessage {
   const compactOutcome = outcome.ok
-    ? { ok: true, output: clip(outcome.output, 8000) }
+    ? { ok: true, output: compactToolOutput(outcome.output, 6000) }
     : {
         ok: false,
         error: clip(outcome.error ?? 'Tool fehlgeschlagen.', 2000),
-        ...(outcome.output !== undefined ? { output: clip(outcome.output, 8000) } : {}),
+        ...(outcome.output !== undefined ? { output: compactToolOutput(outcome.output, 6000) } : {}),
       }
   return {
     role: 'tool',
@@ -712,6 +713,9 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       const externalMessages = opts.externalBaseMessages.map(message => ({ ...message })) as WireMessage[]
       applyRuntimeMode(externalMessages, currentMode())
       applyRuntimeTools(externalMessages, [], currentMode())
+      // Assemble before approval/hash, never mutate an approved provider packet.
+      const fittedExternal = fitRequestContext(externalMessages, [], { targetTokens: 10000, summarizeWithoutReader: true })
+      externalMessages.splice(0, externalMessages.length, ...fittedExternal.messages)
       const approvedRequest = {
         messages: externalMessages,
         tools: [],
@@ -884,7 +888,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   }
   let nextToolChoice: ToolChoice = resolvedRoute.externalOneShot ? 'none' : (requestedToolChoice ?? 'auto')
   const inferenceGateway = resolvedRoute.gateway
-  const focused = inferenceGateway.target === 'local_llama_cpp' ? focusedTools(latestUserMessage) : undefined
+  const focused = inferenceGateway.target === 'local_llama_cpp' && !opts.workflowScope ? focusedTools(latestUserMessage, opts.toolAccess === 'none' ? undefined : () => messages) : undefined
   if (focused) messages.splice(0, messages.length, ...cleanLocalHistory(messages))
   if (opts.workspaceScope && inferenceGateway.target !== 'local_llama_cpp') {
     throw new Error('Der Workspace-Modus verwendet ausschließlich das lokale Modell.')
@@ -1225,7 +1229,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       const attempt = ++inferenceAttempt
       // Retry only inference, not this agent/tool round. Never feed the rejected
       // text back, and never change a separately approved external request.
-      const requestMessages: WireMessage[] = retryInRound
+      const candidateMessages: WireMessage[] = retryInRound
         ? [
             ...messages,
             {
@@ -1239,11 +1243,19 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
             },
           ]
         : messages
+      const fittedContext = resolvedRoute.externalOneShot
+        ? { messages: candidateMessages, report: undefined }
+        : fitRequestContext(candidateMessages, availableTools, {
+            contextTokens: inferenceGateway.contextTokens,
+            retrievalAvailable: availableTools.some(tool => tool.function.name === 'context_read_history'),
+          })
+      const requestMessages = fittedContext.messages
       let acceptingOutput = true
       updateUsage(attempt, { messages: requestMessages, tools: availableTools }, '')
       try {
         res = await inferenceGateway.streamChatWithTools({
           debugScope: { conversationId: opts.conversationId, runId: opts.runId },
+          contextBudget: fittedContext.report,
           messages: requestMessages,
           tools: availableTools,
           toolChoice: availableTools.length ? nextToolChoice : 'none',
@@ -1591,8 +1603,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         throw new DOMException('Aborted', 'AbortError')
       }
       const selectedTool =
-        call.name === 'tools_select' && focused && availableTools.some(tool => tool.function.name === call.name)
-          ? focused.selector
+        ['tools_select', 'context_read_history'].includes(call.name) && focused && availableTools.some(tool => tool.function.name === call.name)
+          ? call.name === 'tools_select' ? focused.selector : focused.reader
           : call.name === GOAL_REPORT_NAME
             ? goalReportTool
             : call.name === GOAL_READ_RESULT_NAME
@@ -2397,7 +2409,6 @@ export function buildSystemPreamble(mode: LuczorMode, projectName: string, assis
     `Du bist ${assistantName}, ein deutschsprachiger Assistent, der das Gerät wahrnehmen und steuern kann.`,
     `Aktuelles Projekt: "${projectName}".`,
     buildRuntimeModeInstruction(mode),
-    buildRuntimeToolInstruction(toOpenAITools(), mode),
     'Für Webaufgaben zuerst browser_status: Der interne Luczor-Browser ist standardmäßig bevorzugt; seine aktuelle preferred-Einstellung gilt. browser_* steuert ausschließlich diese interne Sitzung ohne Systemmaus. Fremde Browserfenster sind ein eigener Weg über os_*; vorher os_control_status und os_observe_desktop. Kein stiller Wechsel bei Fehlern. Desktopaktionen bleiben auf dem gewählten Monitor; getrennte Eingaben unterstützen nur bestätigte Steuerelemente. Eine zugestellte Eingabe ist noch kein geprüftes Arbeitsergebnis.',
     PLANNING_CHAT_INSTRUCTION,
     'Bei einem klaren Auftrag zum Speichern, Erstellen, Ändern oder Prüfen rufst du das passende Tool auf. Im Handeln-Modus fragst du nicht nur textlich nach Freigabe; die Oberfläche übernimmt die Freigabe des Tool-Aufrufs.',
@@ -2410,5 +2421,6 @@ export function buildSystemPreamble(mode: LuczorMode, projectName: string, assis
       ? 'Steuernde Aktionen laufen ohne Rückfrage. Kündige riskante Schritte trotzdem kurz an, bevor du sie ausführst.'
       : 'Steuernde Aktionen (Maus/Tastatur/Programme) werden dem Nutzer zur Bestätigung vorgelegt. Erkläre kurz, was du tun willst.',
     'Nutze Tools nur, wenn sie wirklich nötig sind. Nach getaner Arbeit antworte mit kurzem Fließtext auf Deutsch.',
+    buildRuntimeToolInstruction(toOpenAITools(), mode),
   ].join('\n')
 }

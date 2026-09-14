@@ -2778,7 +2778,7 @@ describe('agent mode and tool reliability', () => {
     )
     const outcome = JSON.parse(feedback.content)
     expect(outcome.ok).toBe(false)
-    expect(JSON.parse(outcome.output)).toEqual(partial)
+    expect(outcome.output).toEqual(partial)
     expect(result).toMatchObject({ toolFailures: 1, toolSuccesses: 0, ephemeralDataUsed: true })
     expect(JSON.stringify(mocks.addHiddenToolMessage.mock.calls)).not.toMatch(/LOCAL_MONITOR|LOCAL_WINDOW_ERROR/)
     expect(JSON.stringify(mocks.logAgentEvent.mock.calls)).not.toMatch(/LOCAL_MONITOR|LOCAL_WINDOW_ERROR/)

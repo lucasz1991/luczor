@@ -29,7 +29,8 @@ describe('assistant profile binding and local draft', () => {
     const parsed = parseAssistantProfile(draft)
     expect(parsed.skills).toHaveLength(3)
     expect(localAssistantProfilePrompt(parsed)).toContain('keine Werkzeug-, Datei- oder Netzwerkfreigaben')
-    expect(localAssistantProfilePrompt(parsed)).toContain('Bei Laravel- und PHP-Aufgaben')
+    expect(localAssistantProfilePrompt(parsed, 'Hallo')).not.toContain('Skill:')
+    expect(localAssistantProfilePrompt(parsed, 'Laravel Fehler prüfen', 'coding.fix_bug')).toContain('Bei Laravel- und PHP-Aufgaben')
   })
   it('respects an explicitly empty admin selection', async () => {
     mocks.profile.mockResolvedValue({ data: { persona: null, skills: [], revision: 'empty' } })

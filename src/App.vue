@@ -1770,12 +1770,7 @@ async function executeChatTurn(
     // The laptop profile has an 8k context window. Reduce history and
     // retrieved project context before native tokenization, rather than
     // relying on the runtime to recover after a complete prompt is built.
-    const compactLocalProfile = captured.expectedLocalModelId === 'local-tier-light'
-    const localHistory = normalizeConversationHistory(
-      compactLocalProfile
-        ? compactHistory(normalizeConversationHistory(fullHistory), Math.min(historyBudget, 900))
-        : fullHistory
-    )
+    const localHistory = normalizeConversationHistory(fullHistory)
     const experimentalFlashNext = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
     const history = normalizeConversationHistory(
       compactHistory(normalizeConversationHistory(fullHistory), historyBudget)
@@ -1832,7 +1827,9 @@ async function executeChatTurn(
     try {
       if (memoryPrefs.inject) {
         promptContext = await buildLocalPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType)
-        if (promptContext.text) {
+        if (promptContext.fragments?.length) {
+          contextFragments.push(...promptContext.fragments)
+        } else if (promptContext.text) {
           contextFragments.push({
             id: 'query-context',
             source: 'repository',
@@ -1889,13 +1886,11 @@ async function executeChatTurn(
         audiences: ['local_model', 'external_provider'],
         contentHash: '',
       })),
-      budget: compactLocalProfile
-        ? { maxChars: 2_400, maxFragments: 6, maxFragmentChars: 500 }
-        : { maxChars: 9_000, maxFragments: 20, maxFragmentChars: 1_800 },
+      budget: { maxChars: 6_000, maxFragments: 12, maxFragmentChars: 1_200 },
     })
     const assistantProfile = await refreshAssistantProfile()
     executionGate.assert(turnExecution)
-    const localProfilePrompt = localAssistantProfilePrompt(assistantProfile)
+    const localProfilePrompt = localAssistantProfilePrompt(assistantProfile, text, taskType)
     const baseMessages: WireMessage[] = [
       {
         role: 'system',

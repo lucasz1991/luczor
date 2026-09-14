@@ -272,7 +272,7 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
         'Lokale Modelle benötigen die native Luczor-App. In einer Browser-Vorschau ist keine lokale Runtime verfügbar.'
       )
     }
-    const observation = localModelDiagnostics.begin(request.modelReleaseId, request.messages)
+    const observation = localModelDiagnostics.begin(request.modelReleaseId, request.messages, request.contextBudget)
     const channel = new Channel<NativeInferenceEvent>()
     let accumulated = ''
     let nativeFailure:

@@ -64,6 +64,8 @@ export type InferenceResult = {
 }
 
 export type InferenceRequest = {
+  /** Numeric planning diagnostics only; never serialized to a provider. */
+  contextBudget?: import('./contextBudget').ContextBudgetReport
   /** Local diagnostics only, never serialized into the provider request. */
   debugScope?: { conversationId?: string; runId?: string }
   messages: WireMessage[]
@@ -98,6 +100,8 @@ export type InferenceRequest = {
 
 /** One gateway instance is selected once and retained for the complete agent turn. */
 export interface InferenceGateway {
+  /** Signed ceiling used only for planning; native admission remains authoritative. */
+  readonly contextTokens?: number
   readonly id: string
   readonly target: InferenceTarget
   streamChatWithTools(request: InferenceRequest): Promise<InferenceResult>

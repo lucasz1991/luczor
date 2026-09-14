@@ -38,6 +38,10 @@ describe('local query retrieval', () => {
     )
     expect(result.text).toContain('Local repository snippet')
     expect(result.text).toContain('Confirmed local preference')
+    expect(result.fragments).toEqual(expect.arrayContaining([
+      expect.objectContaining({ source: 'repository', egress: 'local_only' }),
+      expect.objectContaining({ source: 'memory', content: 'Confirmed local preference', egress: 'local_only' }),
+    ]))
     expect(mocks.recall).toHaveBeenCalledWith(expect.objectContaining({ scope: 'private', projectId: 'p1' }))
     expect(mocks.fetch).not.toHaveBeenCalled()
   })
