@@ -1,7 +1,21 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { HardwareSnapshot } from './capacity'
 
-export type ResourcePercentageLimits = { responseCpu: number; contextCpu: number; ram: number; gpu: number }
+export type ResourcePercentageLimits = {
+  responseCpu: number
+  contextCpu: number
+  ram: number
+  gpu: number
+  /** Missing flags retain the previous percentage-profile behavior. */
+  cpuEnabled?: boolean
+  gpuEnabled?: boolean
+}
+
+export type ResourceHardwareCheck = {
+  hardware: HardwareSnapshot | null
+  runtimeUnloaded: boolean
+  reasonCode: string | null
+}
 
 export type LocalResourceConfig = {
   mode: 'auto' | 'gpu' | 'cpu' | 'hybrid'
@@ -106,6 +120,20 @@ export class LocalResourceController {
 
   isModelSwitchPending(): boolean {
     return this.modelTransition !== undefined
+  }
+
+  /** A settings check never preempts or queues behind a live job. */
+  inspectIdle<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.hasWork() || this.modelTransition || this.applying)
+      return Promise.reject(new Error('resource_system_check_busy'))
+    // Install the barrier synchronously, before invoking native cleanup.
+    const transition = Promise.resolve().then(operation)
+    this.modelTransition = transition
+    const clear = () => {
+      if (this.modelTransition === transition) this.modelTransition = undefined
+    }
+    void transition.then(clear, clear)
+    return transition
   }
 
   /** Drain whole jobs, then replace the resident model before admitting new jobs. */
@@ -438,6 +466,24 @@ export class LocalResourceController {
 }
 
 let appliedHandler: ((state: LocalResourceConfigState) => void | Promise<void>) | undefined
+let releasedHandler: (() => void) | undefined
+export function onLocalRuntimeReleased(handler: () => void): void {
+  releasedHandler = handler
+}
+
+let systemCheckFlight: Promise<ResourceHardwareCheck> | undefined
+export async function checkLocalResourceHardware(): Promise<ResourceHardwareCheck> {
+  const pending = (systemCheckFlight ??= localResources.inspectIdle(async () => {
+    const result = await invoke<ResourceHardwareCheck>('local_model_resource_system_check')
+    if (result.runtimeUnloaded) releasedHandler?.()
+    return result
+  }))
+  try {
+    return structuredClone(await pending)
+  } finally {
+    if (systemCheckFlight === pending) systemCheckFlight = undefined
+  }
+}
 export function onLocalResourcesApplied(handler: (state: LocalResourceConfigState) => void | Promise<void>): void {
   appliedHandler = handler
 }

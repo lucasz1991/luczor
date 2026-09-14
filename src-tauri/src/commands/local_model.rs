@@ -409,6 +409,7 @@ struct ManagerState {
     resource_settings: resource_config::ResourceSettings,
     resource_settings_loaded: bool,
     resource_work_leases: HashSet<String>,
+    resource_system_check_id: Option<String>,
     catalog: Option<VerifiedCatalog>,
     runtime: Option<ManagedRuntime>,
     readiness: HashMap<String, ReadinessRecord>,

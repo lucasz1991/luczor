@@ -494,6 +494,8 @@ mod tests {
                 context_cpu: 75,
                 ram: 50,
                 gpu: 100,
+                cpu_enabled: None,
+                gpu_enabled: None,
             }),
             ..Default::default()
         };

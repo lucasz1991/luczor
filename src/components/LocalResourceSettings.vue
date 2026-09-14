@@ -1,12 +1,12 @@
 <script lang="ts">
 import type { HardwareSnapshot } from '@/services/inference/capacity'
 import type { LocalResourceConfig, LocalResourceConfigState } from '@/services/inference/resources'
-import type { ResourcePercentageLimits } from '@/services/inference/resources'
+import type { ResourcePercentageLimits, ResourceHardwareCheck } from '@/services/inference/resources'
 
 export type LocalResourceSettingsClient = {
   read: () => Promise<LocalResourceConfigState>
   save: (config: LocalResourceConfig, revision: number) => Promise<LocalResourceConfigState>
-  hardware: () => Promise<HardwareSnapshot>
+  systemCheck: () => Promise<ResourceHardwareCheck>
   subscribe: (listener: (state: LocalResourceConfigState) => void) => Promise<() => void>
 }
 </script>
@@ -22,7 +22,7 @@ import {
 import {
   getLocalResourceConfig,
   setLocalResourceConfig,
-  getLocalResourceHardware,
+  checkLocalResourceHardware,
   subscribeLocalResourceConfig,
   DEFAULT_LOCAL_RESOURCE_CONFIG,
 } from '@/services/inference/resources'
@@ -31,7 +31,7 @@ const props = defineProps<{ client?: LocalResourceSettingsClient }>()
 const client = props.client ?? {
   read: getLocalResourceConfig,
   save: setLocalResourceConfig,
-  hardware: getLocalResourceHardware,
+  systemCheck: checkLocalResourceHardware,
   subscribe: subscribeLocalResourceConfig,
 }
 const defaults = (): LocalResourceConfig => ({ ...DEFAULT_LOCAL_RESOURCE_CONFIG })
@@ -94,6 +94,7 @@ const hardwareUnavailable = ref(false)
 const revisionConflict = ref(false)
 const checking = ref(false)
 const autoSavePending = ref(false)
+const cleanupNotice = ref('')
 let autoSaveTimer: ReturnType<typeof setTimeout> | undefined
 let editVersion = 0
 let inFlight: { config: LocalResourceConfig; revision: number; editVersion: number } | undefined
@@ -104,6 +105,13 @@ const dirty = computed(() => !!config.value && JSON.stringify(draft.value) !== J
 const cores = computed(() => hardware.value?.cpu.availableLogicalCores ?? hardware.value?.cpu.logicalCores ?? 1024)
 const gib = (bytes: number) => (bytes / 1024 ** 3).toLocaleString('de-DE', { maximumFractionDigits: 2 })
 const percentages = computed(() => draft.value.percentageLimits ?? MAXIMUM_RESOURCE_PERCENTAGES)
+const cpuThrottled = computed(() => !!draft.value.percentageLimits && percentages.value.cpuEnabled !== false)
+const gpuThrottled = computed(() => !!draft.value.percentageLimits && percentages.value.gpuEnabled !== false)
+const throttleLimits = (): ResourcePercentageLimits => ({
+  ...percentages.value,
+  cpuEnabled: cpuThrottled.value,
+  gpuEnabled: gpuThrottled.value,
+})
 const systemCheck = computed(() => {
   if (!hardware.value || hardwareUnavailable.value) return null
   try {
@@ -124,18 +132,21 @@ const percentageRows = computed(() => {
       label: 'CPU · Antworten',
       value: `${check.responseThreads} von ${check.maximumThreads} Threads`,
       disabled: false,
+      throttleOff: !cpuThrottled.value,
     },
     {
       key: 'contextCpu' as const,
       label: 'CPU · Kontext verarbeiten',
       value: `${check.contextThreads} von ${check.maximumThreads} Threads`,
       disabled: false,
+      throttleOff: !cpuThrottled.value,
     },
     {
       key: 'ram' as const,
       label: 'RAM-Budget',
       value: `${gib(check.ramBudget)} von ${gib(check.maximumRam)} GiB`,
       disabled: check.maximumRam === 0,
+      throttleOff: false,
     },
     {
       key: 'gpu' as const,
@@ -143,6 +154,7 @@ const percentageRows = computed(() => {
       value: draft.value.mode === 'cpu' ? 'Im CPU-Modus nicht verwendet' : 'Je Grafikkarte berechnet',
       disabled:
         draft.value.mode === 'cpu' || !check.gpus.some(gpu => gpu.maximum !== null && gpu.maximum >= 256 * 1024 ** 2),
+      throttleOff: !gpuThrottled.value,
     },
   ]
 })
@@ -218,13 +230,31 @@ async function refresh(): Promise<void> {
   autoSavePending.value = false
   loading.value = true
   error.value = ''
-  const [stateResult, hardwareResult] = await Promise.allSettled([client.read(), client.hardware()])
+  cleanupNotice.value = ''
+  const [stateResult, hardwareResult] = await Promise.allSettled([client.read(), readSystemCheck()])
   if (stopped) return
   if (stateResult.status === 'fulfilled') receive(stateResult.value, true)
   else error.value = 'Die Geräteeinstellungen konnten nicht gelesen werden. Bitte erneut laden.'
   hardwareUnavailable.value = hardwareResult.status !== 'fulfilled'
   if (hardwareResult.status === 'fulfilled') hardware.value = hardwareResult.value
+  else error.value = checkErrorMessage(hardwareResult.reason)
   loading.value = false
+}
+
+function checkErrorMessage(failure: unknown): string {
+  const code = failure instanceof Error ? failure.message : String(failure)
+  if (code === 'resource_system_check_busy' || code === 'resource_config_busy')
+    return 'Systemcheck noch nicht möglich: Ein Chat, Agent oder Modellwechsel verwendet die Ressourcen. Nichts wurde beendet. Nach Abschluss erneut prüfen.'
+  return 'Der Systemcheck konnte keine vollständigen CPU-/RAM-Werte ermitteln. Bestehende Einstellungen bleiben erhalten.'
+}
+
+async function readSystemCheck(): Promise<HardwareSnapshot> {
+  const result = await client.systemCheck()
+  if (!stopped) cleanupNotice.value = result.runtimeUnloaded
+    ? 'Eigene Modell-Runtime entladen. RAM und VRAM werden danach neu gemessen; der nächste lokale Auftrag lädt das Modell wieder.'
+    : 'Keine eigene Modell-Runtime geladen. Verfügbarer RAM und VRAM wurden neu gemessen.'
+  if (!result.hardware || result.reasonCode) throw new Error(result.reasonCode ?? 'resource_system_check_failed')
+  return result.hardware
 }
 async function save(automatic = false): Promise<void> {
   if (saving.value) {
@@ -273,7 +303,7 @@ function scheduleAutoSave(): void {
     void save(true)
   }, 400)
 }
-function setPercentage(key: keyof ResourcePercentageLimits, event: Event): void {
+function setPercentage(key: 'responseCpu' | 'contextCpu' | 'ram' | 'gpu', event: Event): void {
   const value = Number((event.target as HTMLInputElement).value)
   if (
     !hardware.value ||
@@ -284,7 +314,19 @@ function setPercentage(key: keyof ResourcePercentageLimits, event: Event): void 
     value > 100
   )
     return
-  draft.value = percentageResourceConfig(hardware.value, draft.value, { ...percentages.value, [key]: value })
+  if (draft.value.percentageLimits && percentages.value[key] === value) return
+  const limits = { ...throttleLimits(), [key]: value }
+  if (key === 'responseCpu' || key === 'contextCpu') limits.cpuEnabled = true
+  if (key === 'gpu') limits.gpuEnabled = true
+  draft.value = percentageResourceConfig(hardware.value, draft.value, limits)
+  editVersion++
+  scheduleAutoSave()
+}
+function toggleThrottle(key: 'cpuEnabled' | 'gpuEnabled', event: Event): void {
+  if (!hardware.value || !systemCheck.value || checking.value || loading.value || revisionConflict.value) return
+  draft.value = percentageResourceConfig(hardware.value, draft.value, {
+    ...throttleLimits(), [key]: (event.target as HTMLInputElement).checked,
+  })
   editVersion++
   scheduleAutoSave()
 }
@@ -293,19 +335,20 @@ async function useSystemMaximum(): Promise<void> {
   checking.value = true
   error.value = ''
   try {
-    const next = await client.hardware()
+    const next = await readSystemCheck()
     if (stopped) return
-    const nextConfig = percentageResourceConfig(next, draft.value, { ...MAXIMUM_RESOURCE_PERCENTAGES })
+    const nextConfig = percentageResourceConfig(next, draft.value, {
+      ...MAXIMUM_RESOURCE_PERCENTAGES, cpuEnabled: false, gpuEnabled: false,
+    })
     hardware.value = next
     hardwareUnavailable.value = false
     draft.value = nextConfig
     editVersion++
     await save(true)
-  } catch {
+  } catch (failure) {
     if (!stopped) {
       hardwareUnavailable.value = true
-      error.value =
-        'Der Systemcheck konnte keine vollständigen CPU-/RAM-Werte ermitteln. Bestehende Einstellungen bleiben erhalten.'
+      error.value = checkErrorMessage(failure)
     }
   } finally {
     checking.value = false
@@ -403,12 +446,13 @@ onBeforeUnmount(() => {
           {{ checking ? 'System wird geprüft …' : 'Systemcheck: Maximalwerte übernehmen' }}
         </button>
       </div>
-      <p v-if="loading || checking" role="status">CPU, Arbeitsspeicher und Grafikkarten werden geprüft …</p>
+      <p v-if="loading || checking" role="status">Eigene inaktive Modell-Runtime freigeben, danach CPU, RAM und Grafikkarten prüfen …</p>
       <p v-else-if="!systemCheck" role="status">
         Keine vollständige Systemmessung verfügbar. Prozentregler bleiben gesperrt; deine bisherigen Einstellungen
         bleiben erhalten.
       </p>
       <template v-else>
+        <p v-if="cleanupNotice" role="status">{{ cleanupNotice }}</p>
         <p>
           {{
             draft.percentageLimits
@@ -418,6 +462,21 @@ onBeforeUnmount(() => {
           100 % bedeutet nutzbares Budget nach Schutzreserven, nicht eine garantierte Auslastung. Threads werden auf
           ganze Zahlen abgerundet, mindestens einer bleibt aktiv.
         </p>
+        <div class="resource-settings__throttles">
+          <label>
+            <input type="checkbox" :checked="cpuThrottled"
+              :disabled="checking || loading || revisionConflict || !config"
+              @change="toggleThrottle('cpuEnabled', $event)" />
+            <span><strong>CPU drosseln</strong><small>{{ cpuThrottled ? 'Antwort- und Kontextregler aktiv' : 'Aus · 100 % des nutzbaren CPU-Budgets' }}</small></span>
+          </label>
+          <label>
+            <input type="checkbox" :checked="gpuThrottled"
+              :disabled="draft.mode === 'cpu' || checking || loading || revisionConflict || !config"
+              @change="toggleThrottle('gpuEnabled', $event)" />
+            <span><strong>GPU drosseln</strong><small>{{ gpuThrottled ? 'VRAM-Budgetregler aktiv' : 'Aus · 100 % des nutzbaren GPU-Budgets' }}</small></span>
+          </label>
+        </div>
+        <p class="resource-settings__footnote">Beide Schalter sind unabhängig. Ausgeschaltete Drosselung behält den Reglerwert für später. GPU-Drosselung begrenzt das VRAM-/Offload-Budget, nicht Takt oder Auslastung; RAM ist separat einstellbar.</p>
         <div class="resource-settings__sliders">
           <label
             v-for="row in percentageRows"
@@ -437,10 +496,11 @@ onBeforeUnmount(() => {
               step="1"
               :value="percentages[row.key]"
               :aria-valuetext="`${percentages[row.key]} Prozent · ${row.value}`"
-              :disabled="row.disabled || checking || loading || revisionConflict || !config"
+              :disabled="row.disabled || row.throttleOff || checking || loading || revisionConflict || !config"
               @input="setPercentage(row.key, $event)"
             />
             <output :for="`${modeGroupId}-${row.key}`">{{ row.value }}</output>
+            <small v-if="row.throttleOff">Drosselung aus · angewandt 100 %; Reglerwert inaktiv</small>
             <template v-if="row.key === 'gpu' && draft.mode !== 'cpu'">
               <small v-for="gpu in systemCheck.gpus" :key="gpu.id"
                 >{{ gpu.name }} ·
@@ -458,6 +518,7 @@ onBeforeUnmount(() => {
           RAM-Reserve {{ gib(systemCheck.ramReserve) }} GiB · GPU-Reserve mindestens 1 GiB je Gerät, zusätzlich
           Laufzeit-/Kontextbedarf. Shared Memory zählt nicht als VRAM. Das freie Budget wird vor jedem Modellstart
           erneut berechnet; niedrigere Werte können ein größeres Modell ausschließen.
+          Andere Programme, Modell-Dateien und Betriebssystem-Caches werden nicht gelöscht oder beendet.
         </p>
         <p role="status" aria-live="polite">
           {{
@@ -672,6 +733,20 @@ onBeforeUnmount(() => {
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
   gap: 16px;
 }
+.resource-settings__throttles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr));
+  gap: 12px;
+}
+.resource-settings__throttles label {
+  display: flex;
+  align-items: start;
+  gap: 12px;
+  min-height: 44px;
+  padding: 8px 0;
+  cursor: pointer;
+}
+.resource-settings__throttles label > span { min-width: 0; }
 .resource-settings__slider {
   display: grid;
   align-content: start;

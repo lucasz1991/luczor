@@ -10,6 +10,16 @@ pub struct ResourcePercentageLimits {
     pub context_cpu: u8,
     pub ram: u8,
     pub gpu: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_enabled: Option<bool>,
+}
+
+impl ResourcePercentageLimits {
+    pub(super) fn gpu_percent(&self) -> u8 {
+        if self.gpu_enabled == Some(false) { 100 } else { self.gpu }
+    }
 }
 
 /// Integer percentage without intermediate overflow; always rounds down.
@@ -38,9 +48,11 @@ pub(super) fn resolve_percentage_host_config(
         let maximum =
             maximum_resource_threads(hardware.logical_cores, hardware.available_logical_cores)
                 as u64;
-        resolved.threads = Some(percentage_budget(maximum, limits.response_cpu).max(1) as usize);
+        let response = if limits.cpu_enabled == Some(false) { 100 } else { limits.response_cpu };
+        let context = if limits.cpu_enabled == Some(false) { 100 } else { limits.context_cpu };
+        resolved.threads = Some(percentage_budget(maximum, response).max(1) as usize);
         resolved.threads_batch =
-            Some(percentage_budget(maximum, limits.context_cpu).max(1) as usize);
+            Some(percentage_budget(maximum, context).max(1) as usize);
         let reserve = (hardware.total_ram_bytes / 12).clamp(GIB, 4 * GIB);
         let budget = hardware
             .available_ram_bytes
@@ -296,6 +308,7 @@ pub(super) fn validate_hardware(
     })
 }
 pub(super) fn require_revision(guard: &ManagerState, revision: Option<u64>) -> Result<u64, String> {
+    require_no_system_check(guard)?;
     let state = &guard.resource_settings.state;
     let revision = match revision {
         Some(revision) => revision,
@@ -413,10 +426,76 @@ pub async fn local_model_apply_resource_config(
     .map_err(|e| e.to_string())?
 }
 fn require_apply_idle(guard: &ManagerState) -> Result<(), String> {
+    require_no_system_check(guard)?;
     if guard.active_request_id.is_some() || !guard.resource_work_leases.is_empty() {
         return Err("resource_config_busy".into());
     }
     Ok(())
+}
+
+fn require_no_system_check(guard: &ManagerState) -> Result<(), String> {
+    if guard.resource_system_check_id.is_some() {
+        return Err("resource_config_busy".into());
+    }
+    Ok(())
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResourceHardwareCheck {
+    hardware: Option<HardwareSnapshot>,
+    runtime_unloaded: bool,
+    reason_code: Option<String>,
+}
+
+struct SystemCheckReservation(String);
+impl Drop for SystemCheckReservation {
+    fn drop(&mut self) {
+        if let Ok(mut guard) = state().lock() {
+            if guard.resource_system_check_id.as_deref() == Some(self.0.as_str()) {
+                guard.resource_system_check_id = None;
+            }
+        }
+    }
+}
+
+fn reserve_system_check(guard: &mut ManagerState, id: &str) -> Result<Option<ManagedRuntime>, String> {
+    require_apply_idle(guard).map_err(|_| "resource_system_check_busy".to_string())?;
+    if guard.pending_catalog_generation.is_some() {
+        return Err("resource_system_check_busy".into());
+    }
+    guard.resource_system_check_id = Some(id.into());
+    guard.readiness.clear();
+    Ok(guard.runtime.take())
+}
+
+/// Release only the app-owned idle inference process before a fresh capacity sample.
+#[tauri::command]
+pub async fn local_model_resource_system_check(
+    window: crate::commands::CallerWebview,
+    app: AppHandle,
+) -> Result<ResourceHardwareCheck, String> {
+    ensure_main_webview(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let id = Uuid::new_v4().to_string();
+        let runtime = {
+            let mut guard = state().lock().map_err(|_| "resource_system_check_failed")?;
+            reserve_system_check(&mut guard, &id)?
+        };
+        let _reservation = SystemCheckReservation(id);
+        let runtime_unloaded = runtime.is_some();
+        // Teardown (including blocking KV-save and process wait) completes BEFORE sampling.
+        // No other apps, model files, disk caches or operating-system caches are purged.
+        drop(runtime);
+        let sample = collect_hardware_snapshot(Some(&app));
+        Ok(ResourceHardwareCheck {
+            reason_code: sample.as_ref().err().map(|_| "resource_system_check_failed".into()),
+            hardware: sample.ok(),
+            runtime_unloaded,
+        })
+    })
+    .await
+    .map_err(|_| "resource_system_check_failed".to_string())?
 }
 pub fn on_main_navigation(label: &str, started: bool) {
     if label != "main" || !started {
@@ -445,6 +524,7 @@ pub fn local_model_begin_resource_work(
         .lock()
         .map_err(|_| "Local model manager is unavailable.")?;
     ensure_loaded(&app, &mut guard)?;
+    require_no_system_check(&guard)?;
     if guard.resource_settings.state.pending {
         return Err("resource_config_pending".into());
     }
@@ -492,6 +572,8 @@ mod tests {
                 context_cpu: 75,
                 ram: 50,
                 gpu: 50,
+                cpu_enabled: None,
+                gpu_enabled: None,
             }),
             ..Default::default()
         };
@@ -532,6 +614,8 @@ mod tests {
                     context_cpu: 100,
                     ram: value,
                     gpu: 100,
+                    cpu_enabled: None,
+                    gpu_enabled: None,
                 }),
                 ..Default::default()
             };

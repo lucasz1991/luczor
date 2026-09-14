@@ -135,6 +135,7 @@ commands.allow = [
     "local_model_cancel",
     "local_model_stop",
     "local_model_get_resource_config",
+    "local_model_resource_system_check",
     "local_model_set_resource_config",
     "local_model_apply_resource_config",
     "local_model_begin_resource_work",

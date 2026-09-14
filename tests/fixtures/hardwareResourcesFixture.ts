@@ -66,7 +66,7 @@ function settingsClient(pending = false): LocalResourceSettingsClient {
   }
   return {
     read: async () => structuredClone(state),
-    hardware: async () => structuredClone(hardware),
+    systemCheck: async () => ({ hardware: structuredClone(hardware), runtimeUnloaded: true, reasonCode: null }),
     save: async (requested, revision) => {
       if (revision !== state.revision) throw new Error('fixture_revision_changed')
       state = { ...state, requested: structuredClone(requested), revision: revision + 1, pending: true }

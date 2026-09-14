@@ -231,6 +231,7 @@ mod tests {
             "local_model_verify_manifest",
             "local_model_status",
             "local_model_hardware_snapshot",
+            "local_model_resource_system_check",
             "local_model_prepare",
             "local_model_infer",
             "local_model_reasoning_control",

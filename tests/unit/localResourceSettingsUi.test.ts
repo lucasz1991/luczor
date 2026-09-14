@@ -126,7 +126,7 @@ async function mount(initial = state(), hardwareSnapshot = hardware) {
   const unsubscribe = vi.fn()
   const client: LocalResourceSettingsClient = {
     read: vi.fn(async () => clone(initial)),
-    hardware: vi.fn(async () => clone(hardwareSnapshot)),
+    systemCheck: vi.fn(async () => ({ hardware: clone(hardwareSnapshot), runtimeUnloaded: true, reasonCode: null })),
     save: vi.fn(async config => {
       initial = { ...clone(initial), requested: clone(config), revision: initial.revision + 1, pending: true }
       listener(clone(initial))
@@ -175,16 +175,16 @@ describe('device resources settings UI', () => {
 
   it('checks inventory automatically, applies safe maxima explicitly and persists percentages', async () => {
     const view = await mount()
-    expect(view.client.hardware).toHaveBeenCalledOnce()
+    expect(view.client.systemCheck).toHaveBeenCalledOnce()
     expect(nodes(view.root).filter(node => node.tag === 'input' && node.props.type === 'range')).toHaveLength(4)
     expect(view.client.save).not.toHaveBeenCalled()
     await view.click('Systemcheck: Maximalwerte übernehmen')
-    expect(view.client.hardware).toHaveBeenCalledTimes(2)
+    expect(view.client.systemCheck).toHaveBeenCalledTimes(2)
     expect(view.client.save).toHaveBeenCalledWith(
       expect.objectContaining({
         threads: 18,
         threadsBatch: 18,
-        percentageLimits: SystemCheckApi.MAXIMUM_RESOURCE_PERCENTAGES,
+        percentageLimits: { ...SystemCheckApi.MAXIMUM_RESOURCE_PERCENTAGES, cpuEnabled: false, gpuEnabled: false },
       }),
       4
     )
@@ -326,7 +326,7 @@ describe('device resources settings UI', () => {
     const view = await mount({ ...state(), requested, applied: requested })
     expect(text(view.root)).toContain('9 von 18 Threads')
     expect(view.client.save).not.toHaveBeenCalled()
-    vi.mocked(view.client.hardware).mockRejectedValue(new Error('secret'))
+    vi.mocked(view.client.systemCheck).mockRejectedValue(new Error('secret'))
     await view.click('Systemcheck: Maximalwerte übernehmen')
     expect(text(view.root)).toContain('Bestehende Einstellungen bleiben erhalten')
     expect(text(view.root)).not.toContain('secret')

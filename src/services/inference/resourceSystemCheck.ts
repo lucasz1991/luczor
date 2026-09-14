@@ -14,6 +14,15 @@ const bytes = (value: unknown): value is number =>
 const percentBudget = (value: number, percent: number) =>
   Math.floor(value / 100) * percent + Math.floor(((value % 100) * percent) / 100)
 
+export function effectiveResourcePercentages(limits: ResourcePercentageLimits) {
+  return {
+    responseCpu: limits.cpuEnabled === false ? 100 : limits.responseCpu,
+    contextCpu: limits.cpuEnabled === false ? 100 : limits.contextCpu,
+    ram: limits.ram,
+    gpu: limits.gpuEnabled === false ? 100 : limits.gpu,
+  }
+}
+
 /** Inventory-based capacity estimate, not a stress test or measured model fit. */
 export function resourceSystemCheck(hardware: HardwareSnapshot, config: LocalResourceConfig) {
   const logical = hardware.cpu.logicalCores
@@ -31,8 +40,10 @@ export function resourceSystemCheck(hardware: HardwareSnapshot, config: LocalRes
   const availableRam = Math.min(hardware.memory.availableBytes, hardware.memory.totalBytes)
   const maximumRam = Math.max(0, availableRam - ramReserve)
   const limits = config.percentageLimits ?? MAXIMUM_RESOURCE_PERCENTAGES
-  if (Object.values(limits).some(value => !Number.isInteger(value) || value < 1 || value > 100))
+  if ([limits.responseCpu, limits.contextCpu, limits.ram, limits.gpu].some(value => !Number.isInteger(value) || value < 1 || value > 100) ||
+      [limits.cpuEnabled, limits.gpuEnabled].some(value => value !== undefined && typeof value !== 'boolean'))
     throw new Error('resource_percentage_invalid')
+  const effective = effectiveResourcePercentages(limits)
   const gpus = hardware.accelerators
     .filter(gpu => config.gpuDeviceIds === null || config.gpuDeviceIds.includes(gpu.id))
     .map(gpu => {
@@ -44,7 +55,7 @@ export function resourceSystemCheck(hardware: HardwareSnapshot, config: LocalRes
         id: gpu.id,
         name: gpu.name,
         maximum,
-        budget: maximum === null ? null : percentBudget(maximum / MIB, limits.gpu) * MIB,
+        budget: maximum === null ? null : percentBudget(maximum / MIB, effective.gpu) * MIB,
       }
     })
   return {
@@ -52,8 +63,8 @@ export function resourceSystemCheck(hardware: HardwareSnapshot, config: LocalRes
     maximumThreads,
     maximumRam,
     ramReserve,
-    responseThreads: Math.max(1, percentBudget(maximumThreads, limits.responseCpu)),
-    contextThreads: Math.max(1, percentBudget(maximumThreads, limits.contextCpu)),
+    responseThreads: Math.max(1, percentBudget(maximumThreads, effective.responseCpu)),
+    contextThreads: Math.max(1, percentBudget(maximumThreads, effective.contextCpu)),
     ramBudget: percentBudget(maximumRam, limits.ram),
     gpus,
   }

@@ -1,5 +1,5 @@
 import type { BootstrapResponse, LuczorApiConfigSnapshot } from '@/services/api/luczorApi'
-import { localResources, onLocalResourcesApplied } from './resources'
+import { localResources, onLocalResourcesApplied, onLocalRuntimeReleased } from './resources'
 import { localModelManifestWithApiConfig, LuczorApi } from '@/services/api/luczorApi'
 import { modelPlatformTarget } from './modelPlatform'
 import {
@@ -656,9 +656,15 @@ export class LocalInferenceCoordinator {
 
   resourcesApplied(revision: number): void {
     if (revision <= this.resourceRevision) return
-    this.dependencies.manager.invalidateResourceBoundary()
+    this.runtimeReleased()
     this.resourceRevision = revision
+  }
+
+  /** A successful idle systemcheck removed residency without changing settings. */
+  runtimeReleased(): void {
+    this.dependencies.manager.invalidateResourceBoundary()
     this.resourceEpoch += 1
+    this.localScope = undefined
     this.assessments.clear()
     this.readiness.clear()
     this.preparationFailures.clear()
@@ -1473,6 +1479,10 @@ export const localInferenceCoordinator = new LocalInferenceCoordinator({
 
 onLocalResourcesApplied(state => {
   localInferenceCoordinator.resourcesApplied(state.appliedRevision)
+  if (typeof window !== 'undefined') window.dispatchEvent(new Event('luczor:resources-applied'))
+})
+onLocalRuntimeReleased(() => {
+  localInferenceCoordinator.runtimeReleased()
   if (typeof window !== 'undefined') window.dispatchEvent(new Event('luczor:resources-applied'))
 })
 

@@ -202,6 +202,7 @@ pub fn run() {
             commands::local_model::local_model_cancel,
             commands::local_model::local_model_stop,
             commands::local_model::resource_config::local_model_get_resource_config,
+            commands::local_model::resource_config::local_model_resource_system_check,
             commands::local_model::resource_config::local_model_set_resource_config,
             commands::local_model::resource_config::local_model_apply_resource_config,
             commands::local_model::resource_config::local_model_begin_resource_work,

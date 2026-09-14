@@ -505,7 +505,7 @@ fn select_configured_plan(
         let percent = config
             .percentage_limits
             .as_ref()
-            .map_or(100, |limits| limits.gpu);
+            .map_or(100, |limits| limits.gpu_percent());
         base + maximum - super::resource_config::percentage_budget(maximum, percent)
     };
     let mut eligible = matching
@@ -1147,6 +1147,8 @@ mod tests {
                 context_cpu: 100,
                 ram: 100,
                 gpu: 50,
+                cpu_enabled: None,
+                gpu_enabled: None,
             }),
             ..Default::default()
         };
