@@ -730,18 +730,26 @@ export const LuczorApi = {
       '/runtime-settings'
     ),
   voiceManifest: () => request<VoiceManifestResponse>('/voice/manifest'),
-  pollDebugRequest: async () => {
-    const cfg = await getApiConfig()
-    return request<{ data: { id: string; requested_at: string } | null }>('/devices/debug/poll', {
-      query: { client_id: cfg.clientId },
-    })
+  pollDebugRequest: async (config?: LuczorApiConfigSnapshot) => {
+    const cfg = config ?? (await getApiConfig())
+    return request<{ data: { id: string; requested_at: string } | null }>(
+      '/devices/debug/poll',
+      {
+        query: { client_id: cfg.clientId },
+      },
+      cfg
+    )
   },
-  completeDebugRequest: async (id: string, report: Record<string, unknown>) => {
-    const cfg = await getApiConfig()
-    return request<{ ok: boolean }>(`/devices/debug/${encodeURIComponent(id)}/complete`, {
-      method: 'POST',
-      body: { client_id: cfg.clientId, report },
-    })
+  completeDebugRequest: async (id: string, report: Record<string, unknown>, config?: LuczorApiConfigSnapshot) => {
+    const cfg = config ?? (await getApiConfig())
+    return request<{ ok: boolean }>(
+      `/devices/debug/${encodeURIComponent(id)}/complete`,
+      {
+        method: 'POST',
+        body: { client_id: cfg.clientId, report },
+      },
+      cfg
+    )
   },
 
   registerDevice: (clientId: string, name: string) =>

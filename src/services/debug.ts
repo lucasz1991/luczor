@@ -1,4 +1,5 @@
 import { Store } from '@tauri-apps/plugin-store'
+import { readTrace, debugScope, traceEnabled } from './debugTrace'
 import { state } from '@/state/store'
 import { getApiConfig, LuczorApi } from '@/services/api/luczorApi'
 import { voiceRuntimeStatus, type VoiceRuntimeStatus } from '@/services/voice/localVoice'
@@ -49,7 +50,8 @@ export type DebugEvent = {
 export type DebugReportEvent = Pick<DebugEvent, 'level' | 'event'> & { count: number }
 
 export type DebugReport = {
-  version: 'luczor-debug-v2'
+  version: 'luczor-debug-v2' | 'luczor-debug-v3'
+  chat_trace?: Awaited<ReturnType<typeof readTrace>>
   created_at: string
   consent: { diagnostics_enabled: true }
   runtime: { tauri_webview: boolean }
@@ -244,8 +246,10 @@ export async function buildDebugReport(): Promise<DebugReport> {
     // Only report that the runtime was unavailable; never include native error text or local paths.
   }
 
+  const chatTrace = await readTrace()
   return {
-    version: 'luczor-debug-v2',
+    version: chatTrace ? 'luczor-debug-v3' : 'luczor-debug-v2',
+    ...(chatTrace ? { chat_trace: chatTrace } : {}),
     created_at: new Date().toISOString(),
     consent: { diagnostics_enabled: true },
     runtime: {
@@ -282,7 +286,8 @@ export async function collectRequestedDebugReport(): Promise<DebugCollectionResu
   try {
     const cfg = await getApiConfig()
     if (!cfg.deviceKey) return 'unconfigured'
-    const response = await LuczorApi.pollDebugRequest()
+    const owner = await debugScope()
+    const response = await LuczorApi.pollDebugRequest(cfg)
     const request = response.data
     if (!request?.id) return 'idle'
 
@@ -290,7 +295,9 @@ export async function collectRequestedDebugReport(): Promise<DebugCollectionResu
     const report = await buildDebugReport()
     // Consent can be revoked while the report is assembled; never upload after that point.
     if (!(await getDebugCollectionEnabled())) return 'disabled'
-    await LuczorApi.completeDebugRequest(request.id, report)
+    if ((await debugScope()) !== owner) return 'disabled'
+    if (report.chat_trace && !(await traceEnabled())) return 'disabled'
+    await LuczorApi.completeDebugRequest(request.id, report, cfg)
     await recordDebugEvent('info', 'debug_report_uploaded')
     return 'uploaded'
   } catch (error) {

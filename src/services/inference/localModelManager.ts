@@ -190,7 +190,9 @@ export class LocalModelManager {
       id: `local:${release.id}`,
       target: 'local_llama_cpp' as const,
       streamChatWithTools: (request: InferenceRequest) =>
-        traceInference(release.id, request, value => this.stream(release, lease, fixedBinding, scopeDigest, gatewayEpoch, value, idleOptimization)),
+        traceInference(release.id, request, value =>
+          this.stream(release, lease, fixedBinding, scopeDigest, gatewayEpoch, value, idleOptimization)
+        ),
     })
   }
 

@@ -208,4 +208,101 @@ describe('debug privacy boundary', () => {
     expect(harness.debug.instance.save).toHaveBeenCalledOnce()
     expect(harness.settings.values.get('assistant_name')).toBe('Luczor')
   })
+
+  it('records public model exchanges and tool content only with separate detailed consent', async () => {
+    const debug = await import('@/services/debug')
+    const trace = await import('@/services/debugTrace')
+    await debug.setDebugCollectionEnabled(true)
+    await trace.recordTrace('tool.request', { arguments: { path: 'src/main.ts' } })
+    expect(harness.debug.values.size).toBe(0)
+    await trace.setTraceEnabled(true)
+    const result = { content: 'Erledigt', toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
+    await expect(
+      trace.traceInference(
+        'test-model',
+        {
+          messages: [{ role: 'user', content: 'Datei prüfen' }],
+          debugScope: { runId: 'run-a', conversationId: 'chat-a' },
+          expectedProxyConfig: { baseUrl: 'https://example.com', clientId: 'private-client', deviceKey: 'private-key' },
+        },
+        async request => {
+          request.onToken?.('Zwischenstand')
+          return result
+        }
+      )
+    ).resolves.toBe(result)
+    await trace.recordTrace('tool.response', {
+      callId: 'tool-1',
+      output: { content: 'Datei gelesen', password: 'not-exported' },
+    })
+    const report = await debug.buildDebugReport()
+    expect(report.version).toBe('luczor-debug-v3')
+    expect(report.chat_trace?.events.map(event => event.kind)).toEqual(
+      expect.arrayContaining(['model.request', 'model.response', 'tool.response'])
+    )
+    const serialized = JSON.stringify(report)
+    expect(serialized).toContain('Datei prüfen')
+    expect(serialized).toContain('Datei gelesen')
+    expect(serialized).toContain('run-a')
+    for (const secret of ['not-exported', 'private-key', 'expectedProxyConfig'])
+      expect(serialized).not.toContain(secret)
+  })
+
+  it('keeps partial public output on error and never carries logs into another account', async () => {
+    const debug = await import('@/services/debug')
+    const trace = await import('@/services/debugTrace')
+    await debug.setDebugCollectionEnabled(true)
+    await trace.setTraceEnabled(true)
+    const failure = new Error('HTTP 400 grammar')
+    await expect(
+      trace.traceInference('test', { messages: [] }, async request => {
+        request.onToken?.('Bereits gelesen')
+        throw failure
+      })
+    ).rejects.toBe(failure)
+    expect(JSON.stringify(await trace.readTrace())).toContain('Bereits gelesen')
+    expect(JSON.stringify(await trace.readTrace())).toContain('HTTP 400 grammar')
+    const owner = await trace.debugScope()
+    harness.getApiConfig.mockResolvedValue({ baseUrl: 'https://other.example', clientId: 'other', deviceKey: 'other' })
+    await trace.recordTrace('tool.response', { content: 'stale data' }, owner)
+    expect((await trace.readTrace())?.events).toEqual([])
+  })
+
+  it('redacts nested JSON credentials, binary data and private reasoning while retaining public text', async () => {
+    const { redactTrace } = await import('@/services/debugTrace')
+    const output = JSON.stringify(
+      redactTrace({
+        args: JSON.stringify({
+          nested: { DB_PASSWORD: 'db-secret-value', token: 'token-secret-value' },
+          public: 'works',
+        }),
+        content: 'Public <think>private-thought</think> Bearer abcsecret data:image/png;base64,YWJjZA==',
+        reasoning_content: 'private-channel',
+      })
+    )
+    expect(output).toContain('works')
+    expect(output).toContain('Public')
+    for (const secret of [
+      'db-secret-value',
+      'token-secret-value',
+      'private-thought',
+      'abcsecret',
+      'YWJjZA==',
+      'private-channel',
+    ])
+      expect(output).not.toContain(secret)
+  })
+
+  it('serializes concurrent writes and explicitly reports oversized payload truncation', async () => {
+    const debug = await import('@/services/debug')
+    const trace = await import('@/services/debugTrace')
+    await debug.setDebugCollectionEnabled(true)
+    await trace.setTraceEnabled(true)
+    await Promise.all(Array.from({ length: 12 }, (_, index) => trace.recordTrace('tool.response', { index })))
+    expect((await trace.readTrace())?.events).toHaveLength(12)
+    await trace.recordTrace('tool.response', { content: 'x'.repeat(600_000) })
+    expect((await trace.readTrace())?.events.at(-1)?.data).toMatchObject({ truncated: true })
+    await trace.setTraceEnabled(false)
+    expect(await trace.readTrace()).toBeUndefined()
+  })
 })

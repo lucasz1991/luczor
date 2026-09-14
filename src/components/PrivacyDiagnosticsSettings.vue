@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { clearDebugData, loadDebugCollectionEnabled, setDebugCollectionEnabled } from '@/services/debug'
+import { traceEnabled, setTraceEnabled } from '@/services/debugTrace'
 
 type StatusMessage = { ok: boolean; text: string }
 
 const enabled = ref(false)
+const detailed = ref(false)
 const loaded = ref(false)
 const busy = ref(false)
 const status = ref<StatusMessage | null>(null)
@@ -18,6 +20,7 @@ async function loadPreference(): Promise<void> {
   status.value = null
   try {
     enabled.value = await loadDebugCollectionEnabled()
+    detailed.value = await traceEnabled()
     loaded.value = true
   } catch (error) {
     enabled.value = false
@@ -35,10 +38,11 @@ async function toggleDiagnostics(): Promise<void> {
   try {
     await setDebugCollectionEnabled(next)
     enabled.value = next
+    detailed.value = await traceEnabled()
     status.value = {
       ok: true,
       text: next
-        ? 'Diagnose ist freigegeben. Nur bei einer Admin-Anfrage wird ein minimierter Report übertragen.'
+        ? 'Diagnose ist freigegeben. Berichte werden nur bei einer Admin-Anfrage übertragen; der Inhalt richtet sich nach der Chat-Diagnose unten.'
         : 'Diagnose ist ausgeschaltet. Vorhandene lokale Diagnosedaten bleiben bis zum Löschen erhalten.',
     }
   } catch (error) {
@@ -57,6 +61,24 @@ async function clearDiagnostics(): Promise<void> {
     status.value = { ok: true, text: 'Alle lokalen Diagnosedaten wurden gelöscht.' }
   } catch (error) {
     status.value = { ok: false, text: errorMessage(error, 'Die lokalen Diagnosedaten konnten nicht gelöscht werden.') }
+  } finally {
+    busy.value = false
+  }
+}
+
+async function toggleDetailed(): Promise<void> {
+  busy.value = true
+  try {
+    await setTraceEnabled(!detailed.value)
+    detailed.value = !detailed.value
+    status.value = {
+      ok: true,
+      text: detailed.value
+        ? 'Ausführliche Chat-Diagnose ab jetzt aktiv. Übertragung nur auf Admin-Anforderung.'
+        : 'Ausführliche Chat-Diagnose ausgeschaltet.',
+    }
+  } catch (error) {
+    status.value = { ok: false, text: errorMessage(error, 'Chat-Diagnose konnte nicht gespeichert werden.') }
   } finally {
     busy.value = false
   }
@@ -91,12 +113,40 @@ onMounted(() => void loadPreference())
       </div>
 
       <div class="privacy-boundary">
-        <strong>Enthalten:</strong> Arten und Anzahl technischer Fehler, Runtime-Status und aggregierte Zähler.
-        <strong>Nicht enthalten:</strong> Chat-Inhalte, Projektnamen, IDs, Server-Adressen, Tokens, Schlüssel, lokale
-        Pfade oder Fehlermeldungstexte.
+        <strong>Basisbericht:</strong> Arten und Anzahl technischer Fehler, Runtime-Status und aggregierte Zähler.
+        <strong>Ohne Chat-Diagnose:</strong> Keine Chat-Inhalte, Projektnamen, IDs, Server-Adressen, Tokens, Schlüssel,
+        lokalen Pfade oder Fehlermeldungstexte.
       </div>
     </section>
 
+    <section class="privacy-card" aria-labelledby="chat-diagnostics-title">
+      <div class="privacy-card__head">
+        <div>
+          <h4 id="chat-diagnostics-title">Ausführliche Chat- und Tool-Diagnose</h4>
+          <p>
+            Speichert ab Aktivierung Modellanfragen, öffentliche Antworten, Tool-Argumente, Ergebnisse, Fehler und
+            Laufzeiten. Diese Inhalte können Projekt- und Dateitexte enthalten und werden auf Debug-Anforderung an deine
+            Server-Administration übertragen.
+          </p>
+          <p>
+            Erkannte Zugangsdaten, private Denkkanäle und Binärdaten werden entfernt. Bis zu 500 Ereignisse / 4 MiB;
+            gekürzte Inhalte und entfernte alte Ereignisse werden im Export ausgewiesen.
+          </p>
+        </div>
+        <button
+          type="button"
+          class="privacy-switch"
+          :class="{ 'is-on': detailed && enabled }"
+          role="switch"
+          :aria-checked="detailed && enabled"
+          aria-label="Ausführliche Chat-Diagnose"
+          :disabled="busy || !enabled || !loaded"
+          @click="toggleDetailed"
+        >
+          <span />
+        </button>
+      </div>
+    </section>
     <section class="privacy-card" aria-labelledby="local-diagnostics-title">
       <div>
         <h4 id="local-diagnostics-title">Lokale Diagnosedaten</h4>

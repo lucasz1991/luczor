@@ -6,5 +6,6 @@ import type { InferenceGateway, InferenceRequest } from '@/services/inference/ty
 export const laravelInferenceGateway: InferenceGateway = Object.freeze({
   id: 'laravel-proxy',
   target: 'laravel_proxy',
-  streamChatWithTools: (request: InferenceRequest) => traceInference('laravel_proxy', request, value => OpenRouterService.streamChatWithTools(value)),
+  streamChatWithTools: (request: InferenceRequest) =>
+    traceInference('laravel_proxy', request, value => OpenRouterService.streamChatWithTools(value)),
 })
