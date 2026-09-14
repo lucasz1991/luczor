@@ -89,6 +89,67 @@ const durableTaskCreate = {
 } as const
 
 describe('agent mode and tool reliability', () => {
+  it('repairs textual local tool output once, then executes only the structured response', async () => {
+    const pseudo = {
+      content: '```json\n<tools>{"name":"project_get_state","arguments":{}}</tools>\n```',
+      finishReason: 'stop',
+      toolCalls: [],
+      rawToolCalls: [],
+    }
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(pseudo)
+      .mockResolvedValueOnce(toolCallResult)
+      .mockResolvedValueOnce({ content: 'Geprüft.', finishReason: 'stop', toolCalls: [], rawToolCalls: [] })
+    const onToken = vi.fn()
+    await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'tools testen bitte' }],
+      maxRounds: 2,
+      onToken,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(mocks.streamChatWithTools.mock.calls[1]![0].toolChoice).toBe('required')
+    expect(mocks.execute).toHaveBeenCalledOnce()
+    expect(onToken.mock.calls.flat().join('')).not.toContain('<tools>')
+  })
+
+  it('bounds repeated pseudo calls and preserves the task without executing text', async () => {
+    mocks.streamChatWithTools.mockResolvedValue({
+      content: '{"name":"project_get_state","arguments":{}}',
+      finishReason: 'stop',
+      toolCalls: [],
+      rawToolCalls: [],
+    })
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'Prüfe den Zustand' }],
+      maxRounds: 1,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(2)
+    expect(mocks.execute).not.toHaveBeenCalled()
+    expect(result.interrupted?.code).toBe('runtime_tool_contract_rejected')
+  })
+
+  it('does not force a call for an explanation of a tool example', async () => {
+    mocks.streamChatWithTools.mockResolvedValue({
+      content: '{"name":"project_get_state","arguments":{}}',
+      finishReason: 'stop',
+      toolCalls: [],
+      rawToolCalls: [],
+    })
+    await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'Erkläre das Beispiel für project_get_state' }],
+      maxRounds: 2,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
   it('loads a requested local tool for the next round without executing it during selection', async () => {
     mocks.toOpenAITools.mockReturnValue(
       ['project_get_state', 'fs_read'].map(name => ({

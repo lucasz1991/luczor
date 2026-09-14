@@ -1,4 +1,5 @@
 import { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
+import { textToolNames, mayRepairTextTool, holdProtocolPrefix } from '@/services/inference/textToolGuard'
 import { focusedTools, cleanLocalHistory } from '@/services/inference/focusedTools'
 import { recordTrace, debugScope, traceEnabled } from '@/services/debugTrace'
 import {
@@ -846,6 +847,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   const toolOutcomes: ToolOutcomeRecord[] = []
   const toolRecovery = new ToolRecoveryGuard()
   let reasoningRetryUsed = false
+  let textToolRetryUsed = false
+  const repairTextTools =
+    resolvedRoute.gateway.target === 'local_llama_cpp' &&
+    !planningDiscussion &&
+    requestedToolChoice !== 'none' &&
+    mayRepairTextTool(latestUserMessage, shouldRequireToolCall(latestUserMessage))
   let repetitionRetries = 0
   let inferenceAttempt = 0
   let localContextAdjusted = false
@@ -1244,7 +1251,15 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               characters: content.length,
             })
             updateUsage(attempt, { messages: requestMessages, tools: availableTools }, content)
-            publish(publicAnswerText(content))
+            if (!(
+              repairTextTools &&
+              (holdProtocolPrefix(content) ||
+                textToolNames(
+                  content,
+                  availableTools.map(tool => tool.function.name)
+                ).length)
+            ))
+              publish(publicAnswerText(content))
           },
         })
         break
@@ -1344,6 +1359,37 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     }
     // No tool calls -> this is the final answer.
     if (!res.toolCalls.length) {
+      const pseudoCalls = repairTextTools
+        ? textToolNames(
+            res.content,
+            availableTools.map(tool => tool.function.name)
+          )
+        : []
+      if (pseudoCalls.length) {
+        publish('')
+        if (!textToolRetryUsed && !synthesisOnly && availableTools.length) {
+          textToolRetryUsed = true
+          nextToolChoice = 'required'
+          messages.push({
+            role: 'system',
+            content:
+              'Die vorige Antwort beschrieb einen Werkzeugaufruf nur als Text; kein Werkzeug wurde ausgeführt. ' +
+              'Erledige den bestehenden Auftrag durch einen echten strukturierten Aufruf eines bereitgestellten Werkzeugs. ' +
+              'Kein XML, kein JSON-Codebeispiel und keine erfundenen Ergebnisse. Bereits erfolgreiche Aktionen nicht wiederholen.',
+          })
+          round-- // One bounded repair of this round, not another user/tool execution.
+          continue
+        }
+        return partialResultAfterInferenceFailure(
+          new LocalInferenceError(
+            'Das lokale Modell hat den Werkzeugaufruf erneut nur als Text ausgegeben. Es wurde dadurch kein Tool ausgeführt. Der bisherige Fortschritt bleibt erhalten.',
+            'runtime_tool_contract_rejected',
+            false,
+            false
+          ),
+          round + 1
+        )
+      }
       const content = publicAnswerText(res.content, true).trim()
       const reasoningLeak = looksLikeInternalReasoningLeak(res.content) || (!!res.content.trim() && !content)
       if (reasoningLeak && resolvedRoute.externalOneShot) {
