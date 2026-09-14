@@ -1,6 +1,7 @@
 <script lang="ts">
 import type { HardwareSnapshot } from '@/services/inference/capacity'
 import type { LocalResourceConfig, LocalResourceConfigState } from '@/services/inference/resources'
+import type { ResourcePercentageLimits } from '@/services/inference/resources'
 
 export type LocalResourceSettingsClient = {
   read: () => Promise<LocalResourceConfigState>
@@ -12,6 +13,12 @@ export type LocalResourceSettingsClient = {
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, useId } from 'vue'
+import {
+  MAXIMUM_RESOURCE_PERCENTAGES,
+  percentageResourceConfig,
+  resourceSystemCheck,
+  sameResourceIntent,
+} from '@/services/inference/resourceSystemCheck'
 import {
   getLocalResourceConfig,
   setLocalResourceConfig,
@@ -49,6 +56,8 @@ const modes = [
 ] as const
 const modeLabel = (mode: LocalResourceConfig['mode']) => modes.find(item => item.id === mode)?.title ?? 'Unbekannt'
 const saveErrors = new Map([
+  ['resource_percentage_invalid', 'Bitte für jeden Regler einen ganzzahligen Wert zwischen 1 und 100 Prozent wählen.'],
+  ['resource_revision_mismatch', 'Die Einstellungen wurden inzwischen geändert. Bitte den aktuellen Stand neu laden.'],
   [
     'resource_config_revision_conflict',
     'Die Einstellungen wurden inzwischen geändert. Bitte den aktuellen Stand neu laden.',
@@ -83,12 +92,60 @@ const error = ref('')
 const notice = ref('')
 const hardwareUnavailable = ref(false)
 const revisionConflict = ref(false)
+const checking = ref(false)
+const autoSavePending = ref(false)
+let autoSaveTimer: ReturnType<typeof setTimeout> | undefined
+let editVersion = 0
+let inFlight: { config: LocalResourceConfig; revision: number; editVersion: number } | undefined
 let stopped = false
 let unsubscribe: (() => void) | undefined
 const copy = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T
 const dirty = computed(() => !!config.value && JSON.stringify(draft.value) !== JSON.stringify(config.value.requested))
 const cores = computed(() => hardware.value?.cpu.availableLogicalCores ?? hardware.value?.cpu.logicalCores ?? 1024)
 const gib = (bytes: number) => (bytes / 1024 ** 3).toLocaleString('de-DE', { maximumFractionDigits: 2 })
+const percentages = computed(() => draft.value.percentageLimits ?? MAXIMUM_RESOURCE_PERCENTAGES)
+const systemCheck = computed(() => {
+  if (!hardware.value || hardwareUnavailable.value) return null
+  try {
+    return resourceSystemCheck(hardware.value, draft.value)
+  } catch {
+    return null
+  }
+})
+const checkedAt = computed(() =>
+  systemCheck.value ? new Date(systemCheck.value.capturedAtMs).toLocaleTimeString('de-DE') : ''
+)
+const percentageRows = computed(() => {
+  const check = systemCheck.value
+  if (!check) return []
+  return [
+    {
+      key: 'responseCpu' as const,
+      label: 'CPU · Antworten',
+      value: `${check.responseThreads} von ${check.maximumThreads} Threads`,
+      disabled: false,
+    },
+    {
+      key: 'contextCpu' as const,
+      label: 'CPU · Kontext verarbeiten',
+      value: `${check.contextThreads} von ${check.maximumThreads} Threads`,
+      disabled: false,
+    },
+    {
+      key: 'ram' as const,
+      label: 'RAM-Budget',
+      value: `${gib(check.ramBudget)} von ${gib(check.maximumRam)} GiB`,
+      disabled: check.maximumRam === 0,
+    },
+    {
+      key: 'gpu' as const,
+      label: 'GPU · VRAM-Budget',
+      value: draft.value.mode === 'cpu' ? 'Im CPU-Modus nicht verwendet' : 'Je Grafikkarte berechnet',
+      disabled:
+        draft.value.mode === 'cpu' || !check.gpus.some(gpu => gpu.maximum !== null && gpu.maximum >= 256 * 1024 ** 2),
+    },
+  ]
+})
 const chosenGpus = computed(
   () =>
     hardware.value?.accelerators.filter(
@@ -139,9 +196,17 @@ function receive(next: LocalResourceConfigState, replaceDraft = false): void {
         (next.revision === config.value.revision && next.appliedRevision < config.value.appliedRevision)))
   )
     return
-  if (!replaceDraft && dirty.value && config.value && next.revision > config.value.revision)
+  const ownAcknowledgement =
+    !!inFlight &&
+    next.revision >= inFlight.revision &&
+    next.revision <= inFlight.revision + 1 &&
+    sameResourceIntent(next.requested, inFlight.config)
+  if (!replaceDraft && dirty.value && config.value && next.revision > config.value.revision && !ownAcknowledgement)
     revisionConflict.value = true
-  const replace = replaceDraft || !dirty.value
+  const replace =
+    replaceDraft ||
+    !dirty.value ||
+    (ownAcknowledgement && inFlight?.editVersion === editVersion && !revisionConflict.value)
   config.value = copy(next)
   if (replace) {
     draft.value = copy(next.requested)
@@ -149,6 +214,8 @@ function receive(next: LocalResourceConfigState, replaceDraft = false): void {
   }
 }
 async function refresh(): Promise<void> {
+  clearTimeout(autoSaveTimer)
+  autoSavePending.value = false
   loading.value = true
   error.value = ''
   const [stateResult, hardwareResult] = await Promise.allSettled([client.read(), client.hardware()])
@@ -159,29 +226,99 @@ async function refresh(): Promise<void> {
   if (hardwareResult.status === 'fulfilled') hardware.value = hardwareResult.value
   loading.value = false
 }
-async function save(): Promise<void> {
-  if (!config.value || validation.value || saving.value || loading.value) return
+async function save(automatic = false): Promise<void> {
+  if (saving.value) {
+    if (automatic) autoSavePending.value = true
+    return
+  }
+  if (!config.value || validation.value || loading.value || !dirty.value) {
+    autoSavePending.value = false
+    return
+  }
+  clearTimeout(autoSaveTimer)
+  autoSavePending.value = false
   saving.value = true
   error.value = ''
   notice.value = ''
+  inFlight = { config: copy(draft.value), revision: config.value.revision, editVersion }
   try {
-    const next = await client.save(copy(draft.value), config.value.revision)
-    receive(next, true)
-    if (!stopped)
+    const next = await client.save(inFlight.config, inFlight.revision)
+    // A final user gesture still persists if the settings view closes mid-save.
+    if (stopped) config.value = copy(next)
+    else receive(next)
+    if (!stopped && !revisionConflict.value && inFlight.editVersion === editVersion)
       notice.value = next.pending
         ? 'Gespeichert. Die Änderung wartet auf das Ende der laufenden Aufträge.'
         : 'Die Ressourceneinstellungen wurden für dieses Gerät gespeichert.'
   } catch (failure) {
     const code = typeof failure === 'string' ? failure : failure instanceof Error ? failure.message : ''
-    if (!stopped)
-      error.value =
-        saveErrors.get(code) ??
-        'Die Einstellung wurde nicht bestätigt. Bitte den aktuellen Stand neu laden und erneut speichern.'
+    error.value =
+      saveErrors.get(code) ??
+      'Die Einstellung wurde nicht bestätigt. Bitte den aktuellen Stand neu laden und erneut speichern.'
+    if (['resource_config_revision_conflict', 'resource_revision_mismatch'].includes(code))
+      revisionConflict.value = true
+    autoSavePending.value = false
   } finally {
-    if (!stopped) saving.value = false
+    inFlight = undefined
+    saving.value = false
+    if (autoSavePending.value && !revisionConflict.value && !error.value) void save(true)
   }
 }
+function scheduleAutoSave(): void {
+  clearTimeout(autoSaveTimer)
+  autoSavePending.value = true
+  error.value = ''
+  notice.value = ''
+  autoSaveTimer = setTimeout(() => {
+    void save(true)
+  }, 400)
+}
+function setPercentage(key: keyof ResourcePercentageLimits, event: Event): void {
+  const value = Number((event.target as HTMLInputElement).value)
+  if (
+    !hardware.value ||
+    !systemCheck.value ||
+    revisionConflict.value ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > 100
+  )
+    return
+  draft.value = percentageResourceConfig(hardware.value, draft.value, { ...percentages.value, [key]: value })
+  editVersion++
+  scheduleAutoSave()
+}
+async function useSystemMaximum(): Promise<void> {
+  if (checking.value || saving.value || loading.value || revisionConflict.value) return
+  checking.value = true
+  error.value = ''
+  try {
+    const next = await client.hardware()
+    if (stopped) return
+    const nextConfig = percentageResourceConfig(next, draft.value, { ...MAXIMUM_RESOURCE_PERCENTAGES })
+    hardware.value = next
+    hardwareUnavailable.value = false
+    draft.value = nextConfig
+    editVersion++
+    await save(true)
+  } catch {
+    if (!stopped) {
+      hardwareUnavailable.value = true
+      error.value =
+        'Der Systemcheck konnte keine vollständigen CPU-/RAM-Werte ermitteln. Bestehende Einstellungen bleiben erhalten.'
+    }
+  } finally {
+    checking.value = false
+  }
+}
+function useManualValues(): void {
+  clearTimeout(autoSaveTimer)
+  autoSavePending.value = false
+  delete draft.value.percentageLimits
+  editVersion++
+}
 function reset(): void {
+  useManualValues()
   draft.value = defaults()
   notice.value = 'Automatik ausgewählt. Zum Übernehmen speichern.'
 }
@@ -190,6 +327,7 @@ function setNumber(
   event: Event,
   factor = 1
 ): void {
+  useManualValues()
   const value = (event.target as HTMLInputElement).value
   const next = value === '' ? null : Number(value) * factor
   switch (key) {
@@ -212,6 +350,7 @@ function toggleGpu(id: string, checked: boolean): void {
   if (checked) selected.add(id)
   else selected.delete(id)
   draft.value.gpuDeviceIds = [...selected]
+  editVersion++
 }
 onMounted(async () => {
   await refresh()
@@ -225,8 +364,10 @@ onMounted(async () => {
   }
 })
 onBeforeUnmount(() => {
+  clearTimeout(autoSaveTimer)
   stopped = true
   unsubscribe?.()
+  if (autoSavePending.value) void save(true)
 })
 </script>
 
@@ -248,7 +389,94 @@ onBeforeUnmount(() => {
         Änderung vorgemerkt. Laufende Chats und Agenten arbeiten mit den bisherigen Einstellungen weiter.
       </p>
     </div>
-    <fieldset :disabled="loading || saving || !config">
+    <section class="resource-settings__check" aria-label="Automatischer Systemcheck" :aria-busy="loading || checking">
+      <div class="resource-settings__check-heading">
+        <div>
+          <h4>Systemcheck & Ressourcenbudget</h4>
+          <p v-if="systemCheck">Automatisch geprüft · {{ checkedAt }} · nur dieses Gerät</p>
+        </div>
+        <button
+          type="button"
+          :disabled="loading || checking || saving || autoSavePending || !config || revisionConflict"
+          @click="useSystemMaximum"
+        >
+          {{ checking ? 'System wird geprüft …' : 'Systemcheck: Maximalwerte übernehmen' }}
+        </button>
+      </div>
+      <p v-if="loading || checking" role="status">CPU, Arbeitsspeicher und Grafikkarten werden geprüft …</p>
+      <p v-else-if="!systemCheck" role="status">
+        Keine vollständige Systemmessung verfügbar. Prozentregler bleiben gesperrt; deine bisherigen Einstellungen
+        bleiben erhalten.
+      </p>
+      <template v-else>
+        <p>
+          {{
+            draft.percentageLimits
+              ? 'Prozentsteuerung aktiv.'
+              : 'Maximalwerte als Vorschau. Bestehende Einstellungen bleiben bis zur Übernahme oder einer Regleränderung erhalten.'
+          }}
+          100 % bedeutet nutzbares Budget nach Schutzreserven, nicht eine garantierte Auslastung. Threads werden auf
+          ganze Zahlen abgerundet, mindestens einer bleibt aktiv.
+        </p>
+        <div class="resource-settings__sliders">
+          <label
+            v-for="row in percentageRows"
+            :key="row.key"
+            class="resource-settings__slider"
+            :for="`${modeGroupId}-${row.key}`"
+          >
+            <span class="resource-settings__slider-heading"
+              ><span>{{ row.label }}</span
+              ><strong>{{ percentages[row.key] }} %</strong></span
+            >
+            <input
+              :id="`${modeGroupId}-${row.key}`"
+              type="range"
+              min="1"
+              max="100"
+              step="1"
+              :value="percentages[row.key]"
+              :aria-valuetext="`${percentages[row.key]} Prozent · ${row.value}`"
+              :disabled="row.disabled || checking || loading || revisionConflict || !config"
+              @input="setPercentage(row.key, $event)"
+            />
+            <output :for="`${modeGroupId}-${row.key}`">{{ row.value }}</output>
+            <template v-if="row.key === 'gpu' && draft.mode !== 'cpu'">
+              <small v-for="gpu in systemCheck.gpus" :key="gpu.id"
+                >{{ gpu.name }} ·
+                {{
+                  gpu.budget === null || gpu.maximum === null
+                    ? 'Freier VRAM unbekannt'
+                    : `${gib(gpu.budget)} von ${gib(gpu.maximum)} GiB`
+                }}</small
+              >
+              <small v-if="!systemCheck.gpus.length">Keine Grafikkarte erkannt.</small>
+            </template>
+          </label>
+        </div>
+        <p class="resource-settings__footnote">
+          RAM-Reserve {{ gib(systemCheck.ramReserve) }} GiB · GPU-Reserve mindestens 1 GiB je Gerät, zusätzlich
+          Laufzeit-/Kontextbedarf. Shared Memory zählt nicht als VRAM. Das freie Budget wird vor jedem Modellstart
+          erneut berechnet; niedrigere Werte können ein größeres Modell ausschließen.
+        </p>
+        <p role="status" aria-live="polite">
+          {{
+            saving
+              ? 'Wird gespeichert …'
+              : autoSavePending
+                ? 'Änderung wird automatisch gespeichert …'
+                : draft.percentageLimits
+                  ? dirty
+                    ? 'Noch nicht gespeichert.'
+                    : config?.pending
+                      ? 'Gespeichert · Anwendung nach laufenden Aufträgen vorgemerkt.'
+                      : 'Prozentwerte auf diesem Gerät gespeichert.'
+                  : 'Regleränderungen werden automatisch gespeichert.'
+          }}
+        </p>
+      </template>
+    </section>
+    <fieldset :disabled="loading || saving || checking || !config">
       <legend>Berechnungsmodus</legend>
       <div class="resource-settings__modes">
         <label v-for="mode in modes" :key="mode.id" :class="{ selected: draft.mode === mode.id }">
@@ -276,6 +504,11 @@ onBeforeUnmount(() => {
         <p>
           Leere Felder verwenden die Automatik. Speicherpuffer sind Sicherheitsabstände für andere Anwendungen; sie
           sperren keinen RAM.
+        </p>
+        <p v-if="draft.percentageLimits">
+          Die Prozentsteuerung berechnet Threads und RAM-Puffer automatisch. Eine manuelle Zahlenänderung beendet die
+          Prozentsteuerung; danach „Ressourcen speichern“ wählen. Der GPU-Puffer wird im Prozentmodus pro Grafikkarte
+          berechnet.
         </p>
         <div class="resource-settings__gpu" :aria-disabled="draft.mode === 'cpu'">
           <label class="resource-settings__automatic"
@@ -378,14 +611,19 @@ onBeforeUnmount(() => {
       </details>
       <p v-if="validation" class="resource-settings__error" role="alert">{{ validation }}</p>
       <div class="resource-settings__actions">
-        <button type="button" :disabled="!dirty || !!validation" @click="save">
+        <button type="button" :disabled="!dirty || !!validation" @click="save(false)">
           {{ saving ? 'Speichert …' : 'Ressourcen speichern' }}</button
         ><button type="button" class="secondary" @click="reset">Auf Automatik zurücksetzen</button>
       </div>
     </fieldset>
     <p v-if="error" class="resource-settings__error" role="alert">{{ error }}</p>
     <p v-if="notice" role="status">{{ notice }}</p>
-    <button type="button" class="resource-settings__reload" :disabled="loading || saving" @click="refresh">
+    <button
+      type="button"
+      class="resource-settings__reload"
+      :disabled="loading || saving || checking || autoSavePending"
+      @click="refresh"
+    >
       Aktuellen Stand neu laden
     </button>
     <p class="resource-settings__footnote">
@@ -410,6 +648,62 @@ onBeforeUnmount(() => {
 .resource-settings h4 {
   margin: 0;
   font-size: 15px;
+}
+.resource-settings__check {
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--bg-soft, #22222b);
+}
+.resource-settings__check-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.resource-settings__check-heading > * {
+  min-width: 0;
+  max-width: 100%;
+}
+.resource-settings__sliders {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  gap: 16px;
+}
+.resource-settings__slider {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  min-width: 0;
+}
+.resource-settings__slider-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+}
+.resource-settings__slider strong,
+.resource-settings__slider output {
+  font-variant-numeric: tabular-nums;
+}
+.resource-settings__slider strong {
+  color: var(--accent, #a899ed);
+  white-space: nowrap;
+}
+.resource-settings__slider output {
+  font-weight: 600;
+}
+.resource-settings__slider small {
+  overflow-wrap: anywhere;
+}
+.resource-settings input[type='range'] {
+  width: 100%;
+  min-width: 0;
+  height: 40px;
+  margin: 0;
+  accent-color: var(--accent, #a899ed);
+  cursor: pointer;
 }
 .resource-settings p {
   margin: 5px 0 0;

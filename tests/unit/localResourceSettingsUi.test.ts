@@ -3,10 +3,11 @@ import { compileScript, parse } from '@vue/compiler-sfc'
 import { createRenderer, nextTick, type Component } from 'vue'
 import * as VueRuntime from 'vue'
 import ts from 'typescript'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { LocalResourceSettingsClient } from '@/components/LocalResourceSettings.vue'
 import source from '@/components/LocalResourceSettings.vue?raw'
 import * as ResourceApi from '@/services/inference/resources'
+import * as SystemCheckApi from '@/services/inference/resourceSystemCheck'
 import { DEFAULT_LOCAL_RESOURCE_CONFIG, type LocalResourceConfigState } from '@/services/inference/resources'
 import type { HardwareSnapshot } from '@/services/inference/capacity'
 
@@ -23,9 +24,12 @@ runInNewContext(
   {
     module: compiledModule,
     exports: compiledModule.exports,
+    setTimeout: (...args: Parameters<typeof setTimeout>) => setTimeout(...args),
+    clearTimeout: (timer: ReturnType<typeof setTimeout>) => clearTimeout(timer),
     require: (id: string) => {
       if (id === 'vue') return VueRuntime
       if (id === '@/services/inference/resources') return ResourceApi
+      if (id === '@/services/inference/resourceSystemCheck') return SystemCheckApi
       throw new Error(`Unexpected test module: ${id}`)
     },
   }
@@ -123,7 +127,11 @@ async function mount(initial = state(), hardwareSnapshot = hardware) {
   const client: LocalResourceSettingsClient = {
     read: vi.fn(async () => clone(initial)),
     hardware: vi.fn(async () => clone(hardwareSnapshot)),
-    save: vi.fn(async config => ({ ...clone(initial), requested: clone(config), revision: 5, pending: true })),
+    save: vi.fn(async config => {
+      initial = { ...clone(initial), requested: clone(config), revision: initial.revision + 1, pending: true }
+      listener(clone(initial))
+      return clone(initial)
+    }),
     subscribe: vi.fn(async callback => {
       listener = callback
       return unsubscribe
@@ -151,11 +159,128 @@ async function mount(initial = state(), hardwareSnapshot = hardware) {
     button,
     click,
     mode,
+    range: async (key: string, value: number) => {
+      const input = nodes(root).find(
+        node => node.tag === 'input' && node.props.type === 'range' && String(node.props.id).endsWith(`-${key}`)
+      )!
+      ;(input.props.onInput as (event: unknown) => void)({ target: { value: String(value) } })
+      await flush()
+    },
     publish: (value: LocalResourceConfigState) => listener(value),
   }
 }
 
 describe('device resources settings UI', () => {
+  afterEach(() => vi.useRealTimers())
+
+  it('checks inventory automatically, applies safe maxima explicitly and persists percentages', async () => {
+    const view = await mount()
+    expect(view.client.hardware).toHaveBeenCalledOnce()
+    expect(nodes(view.root).filter(node => node.tag === 'input' && node.props.type === 'range')).toHaveLength(4)
+    expect(view.client.save).not.toHaveBeenCalled()
+    await view.click('Systemcheck: Maximalwerte übernehmen')
+    expect(view.client.hardware).toHaveBeenCalledTimes(2)
+    expect(view.client.save).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threads: 18,
+        threadsBatch: 18,
+        percentageLimits: SystemCheckApi.MAXIMUM_RESOURCE_PERCENTAGES,
+      }),
+      4
+    )
+    expect(text(view.root)).toContain('Prozentsteuerung aktiv')
+    expect(text(view.root)).toContain('Gespeichert · Anwendung nach laufenden Aufträgen vorgemerkt')
+    view.app.unmount()
+  })
+
+  it('debounces percentage gestures and uses the last value with the observed revision', async () => {
+    vi.useFakeTimers()
+    const view = await mount()
+    await view.range('responseCpu', 80)
+    await view.range('responseCpu', 50)
+    await view.range('contextCpu', 75)
+    expect(view.client.save).not.toHaveBeenCalled()
+    expect(text(view.root)).toContain('9 von 18 Threads')
+    await vi.advanceTimersByTimeAsync(400)
+    await flush()
+    expect(view.client.save).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ threads: 9, threadsBatch: 13 }),
+      4
+    )
+    expect(text(view.root)).not.toContain('zwischenzeitlich geändert')
+    view.app.unmount()
+  })
+
+  it('serializes edits during a save and does not replace a newer slider value with an old acknowledgement', async () => {
+    vi.useFakeTimers()
+    const view = await mount()
+    let resolve!: (state: LocalResourceConfigState) => void
+    vi.mocked(view.client.save).mockImplementationOnce(
+      () =>
+        new Promise(done => {
+          resolve = done
+        })
+    )
+    await view.range('responseCpu', 80)
+    await vi.advanceTimersByTimeAsync(400)
+    await view.range('responseCpu', 25)
+    const first = vi.mocked(view.client.save).mock.calls[0]![0]
+    const acknowledgement = { ...state(), requested: first, revision: 5, pending: true }
+    view.publish(acknowledgement)
+    expect(text(view.root)).not.toContain('zwischenzeitlich geändert')
+    vi.mocked(view.client.save).mockImplementationOnce(async config => ({
+      ...acknowledgement,
+      requested: config,
+      revision: 6,
+    }))
+    resolve(acknowledgement)
+    await flush()
+    expect(view.client.save).toHaveBeenLastCalledWith(expect.objectContaining({ threads: 4 }), 5)
+    expect(text(view.root)).toContain('4 von 18 Threads')
+    view.app.unmount()
+  })
+
+  it('flushes the last slider gesture when the settings panel closes', async () => {
+    vi.useFakeTimers()
+    const view = await mount()
+    await view.range('responseCpu', 50)
+    view.app.unmount()
+    await flush()
+    expect(view.client.save).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ threads: 9 }), 4)
+    await vi.runAllTimersAsync()
+    expect(view.client.save).toHaveBeenCalledOnce()
+  })
+
+  it('blocks automatic saving after an independent concurrent change without discarding the slider draft', async () => {
+    vi.useFakeTimers()
+    const view = await mount()
+    await view.range('responseCpu', 50)
+    view.publish({ ...state(), revision: 8, requested: { ...DEFAULT_LOCAL_RESOURCE_CONFIG, mode: 'cpu' } })
+    await vi.advanceTimersByTimeAsync(400)
+    expect(view.client.save).not.toHaveBeenCalled()
+    expect(text(view.root)).toContain('zwischenzeitlich geändert')
+    expect(text(view.root)).toContain('9 von 18 Threads')
+    view.app.unmount()
+  })
+
+  it('restores saved percentages without overwriting them on mount and handles a failed systemcheck honestly', async () => {
+    const requested = SystemCheckApi.percentageResourceConfig(hardware, DEFAULT_LOCAL_RESOURCE_CONFIG, {
+      responseCpu: 50,
+      contextCpu: 75,
+      ram: 80,
+      gpu: 90,
+    })
+    const view = await mount({ ...state(), requested, applied: requested })
+    expect(text(view.root)).toContain('9 von 18 Threads')
+    expect(view.client.save).not.toHaveBeenCalled()
+    vi.mocked(view.client.hardware).mockRejectedValue(new Error('secret'))
+    await view.click('Systemcheck: Maximalwerte übernehmen')
+    expect(text(view.root)).toContain('Bestehende Einstellungen bleiben erhalten')
+    expect(text(view.root)).not.toContain('secret')
+    expect(nodes(view.root).filter(node => node.props.type === 'range')).toHaveLength(0)
+    expect(view.client.save).not.toHaveBeenCalled()
+    view.app.unmount()
+  })
   it('loads without saving and shows unknown GPU memory/backend honestly', async () => {
     const view = await mount()
     expect(text(view.root)).toContain('Freier VRAM unbekannt')

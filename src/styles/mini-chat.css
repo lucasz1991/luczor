@@ -134,13 +134,13 @@ html.mini-window,
 .mini-status-strip {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 5px 12px;
-  min-height: 66px;
+  gap: 8px;
+  padding: 4px 12px;
+  min-height: 40px;
   flex-shrink: 0;
 }
 .mini-small-orb {
-  width: 54px;
+  width: 32px;
   flex-shrink: 0;
 }
 .mini-status-strip > div:nth-child(2) {
@@ -174,9 +174,9 @@ html.mini-window,
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 7px 16px;
+  padding: 5px 14px;
   border-block: 1px solid var(--ai-line);
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--ai-muted);
 }
 .mini-context > span {
@@ -228,10 +228,23 @@ html.mini-window,
 .mini-chat-picker {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 9px 14px 0;
+  gap: 3px;
+  padding: 5px 14px 0;
   min-width: 0;
   flex-shrink: 0;
+}
+.mini-chat-picker:has(.ai-button) {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.mini-chat-picker:has(.ai-button) label {
+  flex: 0 0 100%;
+}
+.mini-chat-picker:has(.ai-button) select {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 .mini-chat-picker label {
   font-size: 10px;
@@ -241,13 +254,13 @@ html.mini-window,
   display: block;
   width: 100%;
   min-width: 0;
-  min-height: 32px;
-  padding: 6px 9px;
+  min-height: 26px;
+  padding: 4px 8px;
   border: 1px solid var(--ai-line);
   border-radius: 7px;
   color: var(--ai-ink);
   background: var(--ai-surface);
-  font: 11px var(--ai-font);
+  font: 10.5px var(--ai-font);
   text-overflow: ellipsis;
   cursor: pointer;
 }
@@ -484,20 +497,20 @@ html.mini-window,
 .mini-quick-controls {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 6px;
-  padding: 8px 12px 0;
+  gap: 5px;
+  padding: 6px 12px 0;
 }
 .mini-quick-controls button,
 .mini-upload {
   min-width: 0;
   justify-content: center;
-  gap: 5px;
+  gap: 4px;
   border: 1px solid var(--ai-line);
   border-radius: 8px;
   background: var(--ai-inset);
   color: var(--ai-muted);
-  padding: 6px 5px;
-  font-size: 10px;
+  padding: 5px 4px;
+  font-size: 9.5px;
   white-space: nowrap;
 }
 .mini-quick-controls button:hover,
@@ -722,12 +735,25 @@ html.mini-window,
 .mini-grip-panel__kv dd.is-error {
   color: var(--ai-red);
 }
+.mini-grip-panel__divider {
+  margin-top: 4px;
+  padding-top: 6px;
+  border-top: 1px solid var(--ai-line);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ai-faint);
+}
 .mini-grip-panel__text,
 .mini-grip-panel__empty {
   margin: 0;
   font-size: 11.5px;
   line-height: 1.5;
   color: var(--ai-muted);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
 }
 .mini-grip-panel__text strong {
   display: block;

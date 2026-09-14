@@ -485,6 +485,22 @@ fn plan_resources_for_platform(
 mod tests {
     use super::*;
     #[test]
+    fn percentages_reach_runtime_threads_and_keep_the_host_ram_admission_guard() {
+        let mut hardware = hardware();
+        hardware.available_ram_bytes = 20 * GIB;
+        let config = super::super::resource_config::LocalResourceConfig {
+            percentage_limits: Some(super::super::resource_config::ResourcePercentageLimits { response_cpu: 50, context_cpu: 75, ram: 50, gpu: 100 }),
+            ..Default::default()
+        };
+        let resolved = super::super::resource_config::resolve_percentage_host_config(&config, &hardware).unwrap();
+        let plan = plan_resources_configured(&hardware, 4096, GIB, "cpu", &options(), &config, 0, 9).unwrap();
+        assert_eq!(Some(plan.threads), resolved.threads);
+        assert_eq!(Some(plan.threads_batch), resolved.threads_batch);
+        assert!(plan.arguments.windows(2).any(|args| args == ["--threads", &plan.threads.to_string()]));
+        assert_eq!(plan.resource_revision, 9);
+        assert_eq!(plan_resources_configured(&hardware, 4096, 18 * GIB, "cpu", &options(), &config, 0, 9).unwrap_err(), "ram_budget_insufficient");
+    }
+    #[test]
     fn expert_configuration_is_applied_and_cpu_or_hybrid_host_weights_remain_budgeted() {
         let mut hardware = hardware();
         hardware.available_ram_bytes = 20 * GIB;

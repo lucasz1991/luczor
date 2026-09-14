@@ -1,10 +1,97 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  MAXIMUM_RESOURCE_PERCENTAGES,
+  percentageResourceConfig,
+  resourceSystemCheck,
+} from '@/services/inference/resourceSystemCheck'
+import type { HardwareSnapshot } from '@/services/inference/capacity'
+import {
   DEFAULT_LOCAL_RESOURCE_CONFIG,
   LocalResourceController,
   type LocalResourceConfigState,
   type LocalResourceConfig,
 } from '@/services/inference/resources'
+
+describe('hardware-derived percentage budgets', () => {
+  const gib = 1024 ** 3
+  const hardware: HardwareSnapshot = {
+    schemaVersion: 1,
+    snapshotId: 'hardware-test',
+    capturedAtMs: 10,
+    platform: 'windows',
+    arch: 'x86_64',
+    cpu: { logicalCores: 24, availableLogicalCores: 16, loadPercent: null, features: [] },
+    memory: { totalBytes: 32 * gib, availableBytes: 20 * gib },
+    storage: [],
+    accelerators: [
+      { id: 'gpu-large', name: 'Large', backend: 'cuda', totalBytes: 24 * gib, availableBytes: 23 * gib },
+      { id: 'gpu-small', name: 'Small', backend: 'cuda', totalBytes: 8 * gib, availableBytes: 7 * gib },
+      {
+        id: 'gpu-shared',
+        name: 'Shared',
+        backend: 'unknown',
+        totalBytes: 128 * 1024 ** 2,
+        availableBytes: null,
+        sharedSystemLimitBytes: 16 * gib,
+      },
+    ],
+  }
+  it('uses available process cores, whole threads and independent dedicated GPU budgets', () => {
+    const config = percentageResourceConfig(hardware, DEFAULT_LOCAL_RESOURCE_CONFIG, {
+      responseCpu: 50,
+      contextCpu: 75,
+      ram: 50,
+      gpu: 50,
+    })
+    const check = resourceSystemCheck(hardware, config)
+    expect(check.maximumThreads).toBe(14)
+    expect(config.threads).toBe(7)
+    expect(config.threadsBatch).toBe(10)
+    expect(config.ramReserveBytes! + check.ramBudget).toBe(hardware.memory.availableBytes)
+    expect(check.gpus.map(gpu => gpu.budget)).toEqual([11 * gib, 3 * gib, null])
+    expect(config.vramReserveBytes).toBeNull()
+  })
+  it('recomputes smaller budgets for changed hardware and never permits zero threads', () => {
+    const config = percentageResourceConfig(hardware, DEFAULT_LOCAL_RESOURCE_CONFIG, {
+      responseCpu: 1,
+      contextCpu: 1,
+      ram: 1,
+      gpu: 1,
+    })
+    const smaller = {
+      ...hardware,
+      cpu: { ...hardware.cpu, availableLogicalCores: 2 },
+      memory: { ...hardware.memory, availableBytes: 6 * gib },
+    }
+    const changed = percentageResourceConfig(smaller, config, config.percentageLimits!)
+    expect(changed.threads).toBe(1)
+    expect(changed.threadsBatch).toBe(1)
+    expect(resourceSystemCheck(smaller, changed).ramBudget).toBeLessThan(
+      resourceSystemCheck(hardware, config).ramBudget
+    )
+  })
+  it.each([0, 101, 1.5, NaN, Infinity])('rejects an invalid percentage %s instead of applying it', value => {
+    expect(() =>
+      percentageResourceConfig(hardware, DEFAULT_LOCAL_RESOURCE_CONFIG, { ...MAXIMUM_RESOURCE_PERCENTAGES, ram: value })
+    ).toThrow('resource_percentage_invalid')
+  })
+  it('fails closed on incomplete CPU/RAM readings and never credits shared memory as VRAM', () => {
+    expect(() =>
+      resourceSystemCheck(
+        { ...hardware, cpu: { ...hardware.cpu, availableLogicalCores: 0 } },
+        DEFAULT_LOCAL_RESOURCE_CONFIG
+      )
+    ).toThrow()
+    expect(() =>
+      resourceSystemCheck(
+        { ...hardware, memory: { ...hardware.memory, availableBytes: NaN } },
+        DEFAULT_LOCAL_RESOURCE_CONFIG
+      )
+    ).toThrow()
+    const check = resourceSystemCheck(hardware, { ...DEFAULT_LOCAL_RESOURCE_CONFIG, gpuDeviceIds: ['gpu-shared'] })
+    expect(check.gpus).toEqual([{ id: 'gpu-shared', name: 'Shared', maximum: null, budget: null }])
+  })
+})
 
 function setup() {
   let state: LocalResourceConfigState = {

@@ -22,7 +22,7 @@ import ApprovalCard from '../ai/ApprovalCard.vue'
 import ToolChips from '../ai/ToolChips.vue'
 import WorkflowChatCards from '../workflows/WorkflowChatCards.vue'
 import { miniStatus } from '@/services/miniChat/presentation'
-import type { MiniAction, MiniSnapshot, MiniPanel, MiniView } from '@/services/miniChat/types'
+import type { MiniAction, MiniSnapshot, MiniPanel } from '@/services/miniChat/types'
 import type { ActivityStatus } from '../ai/types'
 import { useClipboard } from '@/composables/useClipboard'
 import { listToolSessions, stopToolSession, toolSessionRevision } from '@/services/tools/toolSessionCoordinator'
@@ -46,7 +46,9 @@ const draftKey = computed(
   () =>
     `${props.snapshot.view}:${props.snapshot.view === 'chat' ? (props.snapshot.project?.id ?? 'none') : 'workspace'}`
 )
-const isChat = computed(() => props.snapshot.view === 'chat')
+// Mini is now dedicated to being the screen-edge nudge's chat page; the workspace view
+// (file/agent/workflow shortcuts) is deactivated here and reached from the main app instead.
+const isChat = computed(() => true)
 const contextName = computed(() => (isChat.value ? 'Projektchat' : 'Workspace'))
 const awaitingSend = ref('')
 const { copy, copied, error: clipboardError } = useClipboard()
@@ -191,6 +193,10 @@ const chatsTitle = computed(() => {
   if (chatsState.value === 'unread') return 'Neue Antwort'
   return count ? `${count} Chats` : 'Chats'
 })
+const lastAssistantReply = computed(() => {
+  const reply = [...props.snapshot.messages].reverse().find(message => message.role === 'assistant' && message.content)
+  return reply?.content ?? ''
+})
 const compactWorking = computed(
   () =>
     ['thinking', 'executing', 'listening', 'speaking'].includes(status.value.phase) ||
@@ -313,9 +319,6 @@ function reset() {
   resetConfirm.value = false
   unread.value = false
   clearPeek()
-}
-function changeView(view: MiniView) {
-  emit('action', { type: 'view', sessionId: props.snapshot.sessionId, view })
 }
 function selectProject(event: Event) {
   emit('action', {
@@ -500,14 +503,6 @@ onBeforeUnmount(() => {
           <span aria-hidden="true">−</span>
         </button>
       </header>
-      <div class="mini-scope-tabs" role="group" aria-label="Mini-Arbeitsbereich">
-        <button type="button" :aria-pressed="isChat" @click="changeView('chat')">
-          <AiIcon name="chat" :size="14" /> Projektchat
-        </button>
-        <button type="button" :aria-pressed="!isChat" @click="changeView('workspace')">
-          <AiIcon name="grid" :size="14" /> Workspace
-        </button>
-      </div>
       <div class="mini-status-strip">
         <div class="mini-small-orb"><StatusOrb :phase="status.phase" :level="snapshot.hud.micLevel" /></div>
         <div>
@@ -854,19 +849,8 @@ onBeforeUnmount(() => {
         </div>
       </form>
       <footer class="mini-footer">
-        <button v-if="isChat" type="button" @click="changeView('workspace')">
-          <AiIcon name="grid" :size="12" /> Workspace öffnen
-        </button>
-        <button v-else type="button" @click="resetConfirm = !resetConfirm">
-          <AiIcon name="plus" :size="12" /> Workspace leeren</button
-        ><button
-          type="button"
-          :class="{ 'is-danger': snapshot.hud.killSwitch }"
-          @click="emit('action', { type: 'kill_switch', enabled: !snapshot.hud.killSwitch })"
-        >
-          {{ snapshot.hud.killSwitch ? 'Not-Aus lösen' : 'Not-Aus' }}</button
-        ><button type="button" aria-label="Mini-Chat ausblenden" @click="windowAction('hide')">
-          <AiIcon name="close" :size="13" />
+        <button type="button" aria-label="Mini-Chat ausblenden" @click="windowAction('hide')">
+          <AiIcon name="close" :size="13" /> Ausblenden
         </button>
       </footer>
     </div>
@@ -1012,6 +996,17 @@ onBeforeUnmount(() => {
               </li>
             </ul>
             <p v-else class="mini-grip-panel__empty">Noch keine Chats im Projekt.</p>
+            <template v-if="lastAssistantReply">
+              <div class="mini-grip-panel__divider">Letzte Antwort</div>
+              <p class="mini-grip-panel__text">{{ lastAssistantReply }}</p>
+            </template>
+            <template v-if="decision">
+              <div class="mini-grip-panel__divider">Offene Entscheidung</div>
+              <p class="mini-grip-panel__text">
+                <strong>{{ decision.title }}</strong>
+                {{ decision.description }}
+              </p>
+            </template>
           </template>
           <template v-else-if="activePane === 'decision'">
             <p v-if="decision" class="mini-grip-panel__text">
