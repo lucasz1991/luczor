@@ -43,6 +43,62 @@ function fixture(controller: AbortController | null = new AbortController()) {
 }
 
 describe('captured chat cancellation', () => {
+  it('retracts only the captured unfinished answer and resets speech before patching shared main/mini state', () => {
+    const app = readFileSync('src/App.vue', 'utf8')
+    const start = app.indexOf('onResponseReset: () => {')
+    const source = app
+      .slice(start + 'onResponseReset: '.length, app.indexOf('\n      onRoundComplete:', start))
+      .trim()
+      .replace(/,$/, '')
+    const controller = new AbortController()
+    const order: string[] = []
+    const patchMessage = vi.fn(() => {
+      order.push('patch')
+    })
+    const resetCurrent = vi.fn(() => {
+      order.push('speech')
+    })
+    const reset = runInNewContext(`(${source})`, {
+      turnExecution: { signal: controller.signal },
+      progressiveSpeech: { resetCurrent },
+      mutations: { patchMessage },
+      pid: 'captured-project',
+      assistant: { id: 'captured-answer' },
+    }) as () => void
+    reset()
+    expect(order).toEqual(['speech', 'patch'])
+    expect(patchMessage).toHaveBeenCalledExactlyOnceWith('captured-project', 'captured-answer', {
+      content: '',
+      raw: '',
+      parsed: null,
+      meta: { question: '', summary: '', bullets: [] },
+    })
+    controller.abort()
+    reset()
+    expect(resetCurrent).toHaveBeenCalledOnce()
+    expect(patchMessage).toHaveBeenCalledOnce()
+  })
+
+  it.each([undefined, { code: 'runtime_output_repeated' }])(
+    'does not automatically read exhausted repetition diagnostics: %j',
+    interrupted => {
+      const app = readFileSync('src/App.vue', 'utf8')
+      const start = app.indexOf("if (interrupted?.code === 'runtime_output_repeated') progressiveSpeech.cancel()")
+      const source = app.slice(start, app.indexOf('\n    if (!ephemeralDataUsed', start))
+      const cancel = vi.fn(),
+        completeAnswer = vi.fn()
+      runInNewContext(source, {
+        interrupted,
+        progressiveSpeech: { cancel, completeAnswer },
+        isVisible: () => true,
+        turnSpeechGeneration: 1,
+        speechGeneration: 1,
+      })
+      expect(cancel).toHaveBeenCalledTimes(interrupted ? 1 : 0)
+      expect(completeAnswer).toHaveBeenCalledTimes(interrupted ? 0 : 1)
+    }
+  )
+
   it('keeps automatic and manual admission closed until journal recovery and its public-state save finish', async () => {
     const app = readFileSync('src/App.vue', 'utf8')
     const start = app.indexOf('appRuntimeLifecycle.start().then(')

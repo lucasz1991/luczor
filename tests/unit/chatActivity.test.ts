@@ -10,6 +10,18 @@ import {
 import type { PendingToolCall } from '@/state/types'
 
 describe('chat activity lifecycle', () => {
+  it('shows a correction separately and resumes receiving without leaving its progress stuck', () => {
+    const activity = createChatActivity(0)
+    updateChatActivity(activity, { phase: 'receiving', round: 1, characters: 2000 })
+    updateChatActivity(activity, { phase: 'regenerating', round: 1, attempt: 1 })
+    expect(activityLabel(activity, false)).toBe('Antwort wird neu erstellt')
+    updateChatActivity(activity, { phase: 'receiving', round: 1, attempt: 1, characters: 30 })
+    expect(activityLabel(activity, false)).toBe('Antwort wird geschrieben')
+    expect(activity.steps.at(-2)?.status).toBe('done')
+    expect(activity.steps.at(-1)?.detail).toContain('30 Zeichen')
+    finishChatActivity(activity, 'done')
+    expect(activity.steps.every(step => step.status === 'done')).toBe(true)
+  })
   it('retains distinct role events while presenting public activity without internal role names', () => {
     const activity = createChatActivity(0)
     updateChatActivity(activity, { agentRole: 'planner', phase: 'thinking', round: 1 })

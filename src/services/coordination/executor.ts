@@ -63,6 +63,7 @@ export const executeCoordinatedJob: CoordinatedExecutor = async (job, account, t
         const phase = {
           routing: 'Modell vorbereiten',
           thinking: 'Antwort vorbereiten',
+          regenerating: 'Antwort wird neu erstellt',
           receiving: 'Antwort wird geschrieben',
           tools: 'Werkzeuge ausführen',
         }[event.phase]

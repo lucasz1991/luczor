@@ -14,6 +14,7 @@ function state(phase: 'waiting' | 'running' | 'yielding' | 'paused', reason: str
   idleOptimizationStatus.value = {
     enabled: true,
     phase,
+    task: phase === 'running' ? 'context' : null,
     reason,
     foregroundJobs: 0,
     completed: 2,

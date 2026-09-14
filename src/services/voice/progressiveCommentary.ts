@@ -73,6 +73,14 @@ export function createProgressiveCommentary(options: {
 
   return {
     update,
+    resetCurrent() {
+      if (!round) return
+      const own = round
+      round = null
+      own.source.cancel()
+      options.queue.cancelSource(own.source)
+      sources.delete(own.source)
+    },
     completeCommentary(entry: ChatCommentary) {
       const key = options.answerKey.replace(/:answer$/u, `:${entry.id}`)
       finish(key, () => commentaryForSpeech(entry))

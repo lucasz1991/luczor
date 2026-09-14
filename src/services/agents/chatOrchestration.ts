@@ -16,7 +16,9 @@ type Result = Awaited<ReturnType<typeof runAgent>>
 
 /** A diagnostic fallback is not an agent result that dependent nodes can review. */
 function hasUnusableModelResponse(result: Result | undefined): boolean {
-  return ['runtime_empty_response', 'runtime_unsafe_response'].includes(result?.interrupted?.code ?? '')
+  return ['runtime_empty_response', 'runtime_unsafe_response', 'runtime_output_repeated'].includes(
+    result?.interrupted?.code ?? ''
+  )
 }
 
 const NESTED_AGENT_START_TOOLS = [
@@ -301,6 +303,10 @@ export async function runChatAgentTeam(
         onToken: content => {
           request.onOutput(content)
           opts.onToken?.(content)
+        },
+        onResponseReset: event => {
+          request.onOutput('')
+          opts.onResponseReset?.({ round: event.round + offset })
         },
         onUsage: value => {
           usages.set(request.nodeId, value)

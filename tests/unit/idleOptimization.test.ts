@@ -206,7 +206,7 @@ describe('idle optimization integration', () => {
       memory({ id: 'generated', tags: ['idle-optimization'], content: 'Never recursively optimize own output' }),
     ])
     harness.optimizer.start()
-    await vi.advanceTimersByTimeAsync(45_000)
+    await vi.advanceTimersByTimeAsync(600_000)
     expect(harness.recall).toHaveBeenCalledWith({ query: '', scope: 'project', projectId: 'project-1', limit: 12 })
     const request = harness.stream.mock.calls[0]?.[0]
     expect(request).toMatchObject({ taskType: 'context.optimize', tools: [], toolChoice: 'none' })
@@ -236,7 +236,7 @@ describe('idle optimization integration', () => {
   it('alternates project and user memory without adding project context to the user run, then deduplicates', async () => {
     const harness = fixture()
     harness.optimizer.start()
-    await vi.advanceTimersByTimeAsync(45_000)
+    await vi.advanceTimersByTimeAsync(600_000)
     await vi.advanceTimersByTimeAsync(120_000)
     expect(harness.recall.mock.calls[1]?.[0]).toMatchObject({ scope: 'user', projectId: undefined })
     expect(JSON.stringify(harness.stream.mock.calls[1]?.[0].messages)).not.toContain('verified project summary')
@@ -251,7 +251,7 @@ describe('idle optimization integration', () => {
     const harness = fixture()
     vi.mocked(harness.deps.gateway).mockResolvedValue({ ...harness.localGateway, target: 'laravel_proxy' })
     harness.optimizer.start()
-    await vi.advanceTimersByTimeAsync(45_000)
+    await vi.advanceTimersByTimeAsync(600_000)
     expect(harness.stream).not.toHaveBeenCalled()
     expect(harness.remember).not.toHaveBeenCalled()
     expect(harness.optimizer.snapshot().reason).toBe('failed')
@@ -324,7 +324,7 @@ describe('idle optimization integration', () => {
     const harness = fixture()
     change(harness)
     harness.optimizer.start()
-    await vi.advanceTimersByTimeAsync(45_000)
+    await vi.advanceTimersByTimeAsync(600_000)
     expect(harness.deps.gateway).not.toHaveBeenCalled()
     expect(harness.recall).not.toHaveBeenCalled()
     expect(harness.optimizer.snapshot().reason).toBe(reason)
@@ -338,7 +338,7 @@ describe('idle optimization integration', () => {
       const pending = deferred<InferenceResult>()
       harness.stream.mockImplementation(() => pending.promise)
       harness.optimizer.start()
-      await vi.advanceTimersByTimeAsync(45_000)
+      await vi.advanceTimersByTimeAsync(600_000)
       if (change === 'account') harness.account.principalId = 'account-2'
       if (change === 'catalog') harness.policy.manifest = { ...harness.policy.manifest!, payloadSha256: 'catalog-2' }
       if (change === 'resources') harness.policy.appliedResourceRevision = 2
@@ -359,7 +359,7 @@ describe('idle optimization integration', () => {
     const pending = deferred<InferenceResult>()
     harness.stream.mockImplementation(() => pending.promise)
     harness.optimizer.start()
-    await vi.advanceTimersByTimeAsync(45_000)
+    await vi.advanceTimersByTimeAsync(600_000)
     let userAdmitted = false
     const admission = harness.resources.acquire().then(lease => {
       userAdmitted = true
@@ -394,7 +394,7 @@ describe('idle optimization integration', () => {
       const harness = fixture()
       harness.stream.mockResolvedValue(rejected)
       harness.optimizer.start()
-      await vi.advanceTimersByTimeAsync(45_000)
+      await vi.advanceTimersByTimeAsync(600_000)
       expect(harness.remember).not.toHaveBeenCalled()
       await harness.optimizer.stop()
     }

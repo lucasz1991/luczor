@@ -17,6 +17,7 @@ type SpeechEntry = CommentarySpeechContext & {
   readText: (allowLocalContent: boolean) => string
   resolve: (result: CommentarySpeechResult) => void
   source?: SpeechSource
+  textKey?: string
 }
 
 type CommentarySpeechOptions = {
@@ -92,6 +93,7 @@ export function createCommentarySpeechQueue(options: CommentarySpeechOptions) {
       const textKey = JSON.stringify([entry.scope, text.replace(/\s+/gu, ' ').trim()])
       if (spokenText.has(textKey)) return 'skipped'
       remember(spokenText, textKey)
+      entry.textKey = textKey
 
       // Await the actual speaker even after abort so a new entry cannot overlap
       // with an audio implementation that takes time to release its owner.
@@ -174,6 +176,17 @@ export function createCommentarySpeechQueue(options: CommentarySpeechOptions) {
           serverSpeechText(entry.readMessage(), { allowLocalContent, allowStreaming: !!entry.source }),
         entry.source
       )
+    },
+    /** Cancel only the retracted generation, keeping prior completed comments. */
+    cancelSource(source: SpeechSource): void {
+      if (active?.entry.source === source) {
+        if (active.entry.textKey) spokenText.delete(active.entry.textKey)
+        active.controller.abort()
+      }
+      for (const entry of pending.filter(entry => entry.source === source)) {
+        pending.splice(pending.indexOf(entry), 1)
+        entry.resolve('cancelled')
+      }
     },
     cancel(): void {
       generation++

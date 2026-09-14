@@ -6,6 +6,7 @@ import {
   idleOptimizationEnabled,
   idleOptimizationStatus,
   loadIdleOptimizationSetting,
+  registerIdleOptimizationRequest,
   type IdleOptimizationContext,
 } from '@/services/agents/idleOptimization'
 import { localResources } from '@/services/inference/resources'
@@ -16,11 +17,16 @@ export function useIdleOptimization(context: IdleOptimizationContext & { draft()
   let disposed = false
   const unlistenStores: Array<() => void> = []
   const releaseAdmission = localResources.setForegroundAdmission(signal => optimizer.acquireForeground(signal))
+  const releaseManualRequest = registerIdleOptimizationRequest(() => optimizer.requestNow())
   const releaseStatus = optimizer.subscribe(state => {
     idleOptimizationStatus.value = state
   })
   const releaseInvalidation = onExecutionInvalidated(() => optimizer.interrupt('boundary_changed'))
   const activity = () => optimizer.interrupt('activity')
+  // A real idle period means no meaningful input, not merely an unchanged draft.
+  // Deliberately avoid pointermove: hovering must not continuously postpone work.
+  const userInteraction = () => activity()
+  const interactionTarget = typeof document === 'undefined' ? null : document
   const changing = () => {
     identityChanging.value = true
     optimizer.interrupt('boundary_changed')
@@ -35,6 +41,10 @@ export function useIdleOptimization(context: IdleOptimizationContext & { draft()
     else void optimizer.stop()
   })
   onMounted(async () => {
+    interactionTarget?.addEventListener('pointerdown', userInteraction, { passive: true })
+    interactionTarget?.addEventListener('keydown', userInteraction)
+    interactionTarget?.addEventListener('touchstart', userInteraction, { passive: true })
+    interactionTarget?.addEventListener('focusin', userInteraction)
     window.addEventListener('luczor:api-identity-changing', changing)
     window.addEventListener('luczor:api-identity-changed', changed)
     window.addEventListener('beforeunload', changing)
@@ -71,7 +81,12 @@ export function useIdleOptimization(context: IdleOptimizationContext & { draft()
     void optimizer.stop().finally(releaseAdmission)
     releaseStatus()
     releaseInvalidation()
+    releaseManualRequest()
     unlistenStores.forEach(unlisten => unlisten())
+    interactionTarget?.removeEventListener('pointerdown', userInteraction)
+    interactionTarget?.removeEventListener('keydown', userInteraction)
+    interactionTarget?.removeEventListener('touchstart', userInteraction)
+    interactionTarget?.removeEventListener('focusin', userInteraction)
     window.removeEventListener('luczor:api-identity-changing', changing)
     window.removeEventListener('luczor:api-identity-changed', changed)
     window.removeEventListener('beforeunload', changing)

@@ -2059,6 +2059,16 @@ async function executeChatTurn(
             text: activityLabel(activity, false),
           })
       },
+      onResponseReset: () => {
+        if (turnExecution.signal.aborted) return
+        progressiveSpeech.resetCurrent()
+        mutations.patchMessage(pid, assistant.id, {
+          content: '',
+          raw: '',
+          parsed: null,
+          meta: { question: '', summary: '', bullets: [] },
+        })
+      },
       onRoundComplete: round => {
         if (turnExecution.signal.aborted || round.kind !== 'commentary') return
         const entry = completedCommentary(round)
@@ -2115,7 +2125,10 @@ async function executeChatTurn(
     if (continuation || interrupted)
       await handle.interrupt('Fortschritt gesichert. Aktuellen Zustand prüfen und weiterarbeiten.')
     applyStreamedContent(pid, assistant.id, finalText, true)
-    finishChatActivity(chatActivities.value[assistant.id]!, 'done')
+    finishChatActivity(
+      chatActivities.value[assistant.id]!,
+      interrupted?.code === 'runtime_output_repeated' ? 'failed' : 'done'
+    )
     // Attach the server-reported routing metadata to the assistant message.
     {
       const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
@@ -2158,7 +2171,8 @@ async function executeChatTurn(
     await saveAppStateStrict(state)
 
     if (isVisible()) setStatus('idle')
-    if (isVisible() && turnSpeechGeneration === speechGeneration) progressiveSpeech.completeAnswer()
+    if (interrupted?.code === 'runtime_output_repeated') progressiveSpeech.cancel()
+    else if (isVisible() && turnSpeechGeneration === speechGeneration) progressiveSpeech.completeAnswer()
     if (!ephemeralDataUsed && !continuation && !interrupted)
       void rememberExchange(pid, text, assistant.id, scopeKey.principalId, turnExecution)
     if (goalInput) {

@@ -13,6 +13,7 @@ const fixture = vi.hoisted(() => ({
   releaseAdmission: vi.fn(),
   releaseStatus: vi.fn(),
   releaseInvalidation: vi.fn(),
+  releaseManualRequest: vi.fn(),
   start: vi.fn(),
   stop: vi.fn(),
   interrupt: vi.fn(),
@@ -48,6 +49,7 @@ vi.mock('@/services/agents/idleOptimization', async () => {
     idleOptimizationEnabled: shallowRef(false),
     idleOptimizationStatus: shallowRef<IdleContextOptimizerSnapshot | null>(null),
     loadIdleOptimizationSetting: fixture.loadSetting,
+    registerIdleOptimizationRequest: vi.fn(() => fixture.releaseManualRequest),
     createIdleOptimization: (context: IdleOptimizationContext) => {
       fixture.context = context
       return {
@@ -131,6 +133,7 @@ beforeEach(() => {
   idleOptimizationEnabled.value = false
   idleOptimizationStatus.value = null
   vi.stubGlobal('window', new EventTarget())
+  vi.stubGlobal('document', new EventTarget())
 })
 afterEach(async () => {
   unmount?.()
@@ -163,6 +166,18 @@ describe('idle optimizer lifecycle and invalidation', () => {
     expect(fixture.interrupt).toHaveBeenCalledTimes(2)
     harness.sources.project.id = 'project-2'
     expect(fixture.interrupt).toHaveBeenCalledTimes(3)
+    expect(fixture.interrupt).toHaveBeenLastCalledWith('activity')
+  })
+
+  it('treats actual keyboard and pointer input as activity without reacting to pointer movement', async () => {
+    const harness = setup()
+    await harness.mount()
+    fixture.interrupt.mockClear()
+    document.dispatchEvent(new Event('pointermove'))
+    expect(fixture.interrupt).not.toHaveBeenCalled()
+    document.dispatchEvent(new Event('pointerdown'))
+    document.dispatchEvent(new Event('keydown'))
+    expect(fixture.interrupt).toHaveBeenCalledTimes(2)
     expect(fixture.interrupt).toHaveBeenLastCalledWith('activity')
   })
 
@@ -237,6 +252,7 @@ describe('idle optimizer lifecycle and invalidation', () => {
     expect(fixture.unlistenSettings).toHaveBeenCalledTimes(1)
     expect(fixture.releaseStatus).toHaveBeenCalledTimes(1)
     expect(fixture.releaseInvalidation).toHaveBeenCalledTimes(1)
+    expect(fixture.releaseManualRequest).toHaveBeenCalledTimes(1)
     expect(fixture.releaseAdmission).not.toHaveBeenCalled()
     fixture.interrupt.mockClear()
     window.dispatchEvent(new Event('luczor:api-identity-changing'))

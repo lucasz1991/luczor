@@ -18,6 +18,21 @@ import {
 export const IDLE_OPTIMIZATION_KEY = 'local_idle_context_optimization'
 export const idleOptimizationEnabled = shallowRef(false)
 export const idleOptimizationStatus = shallowRef<IdleContextOptimizerSnapshot | null>(null)
+let requestIdleOptimizationNow: (() => boolean) | null = null
+
+/** Lets the settings UI request one safe pass without owning an optimizer instance. */
+export function requestIdleOptimization(): boolean {
+  return requestIdleOptimizationNow?.() ?? false
+}
+
+/** App lifecycle bridge; only the mounted optimizer may accept a manual request. */
+export function registerIdleOptimizationRequest(request: () => boolean): () => void {
+  requestIdleOptimizationNow = request
+  return () => {
+    if (requestIdleOptimizationNow === request) requestIdleOptimizationNow = null
+  }
+}
+
 export async function loadIdleOptimizationSetting(): Promise<void> {
   const store = await Store.load('luczor.settings.json')
   const saved = await store.get<unknown>(IDLE_OPTIMIZATION_KEY)

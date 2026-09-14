@@ -42,6 +42,8 @@ export type IdleContextOptimizerOptions = {
 export type IdleContextOptimizerSnapshot = Readonly<{
   enabled: boolean
   phase: 'stopped' | 'waiting' | 'paused' | 'running' | 'committing' | 'yielding' | 'cooldown'
+  /** The currently running or most recently completed locally bounded task. */
+  task: 'context' | 'memory' | null
   reason: string | null
   foregroundJobs: number
   completed: number
@@ -50,7 +52,9 @@ export type IdleContextOptimizerSnapshot = Readonly<{
 }>
 
 const DEFAULTS: IdleContextOptimizerOptions = {
-  idleDelayMs: 45_000,
+  // Background model work must never compete with a just-finished user turn.
+  // Ten minutes is long enough to make this a real idle period, not a debounce.
+  idleDelayMs: 600_000,
   intervalMs: 120_000,
   timeoutMs: 60_000,
   monitorMs: 5_000,
@@ -93,6 +97,7 @@ export class IdleContextOptimizer {
   private state: IdleContextOptimizerSnapshot = {
     enabled: false,
     phase: 'stopped',
+    task: null,
     reason: null,
     foregroundJobs: 0,
     completed: 0,
@@ -148,6 +153,23 @@ export class IdleContextOptimizer {
     this.active?.controller.abort(aborted())
     await this.active?.promise
     if (!this.state.enabled) this.publish({ phase: 'stopped' })
+  }
+
+  /**
+   * Schedule one otherwise normal, bounded pass immediately. This does not
+   * bypass eligibility, resource ownership, memory consent, or the local-only
+   * gateway checks in cycle().
+   */
+  requestNow(): boolean {
+    if (!this.state.enabled || this.active || this.state.foregroundJobs) return false
+    // Keep a one-millisecond delay: browsers and timer test environments do
+    // not consistently dispatch a newly registered zero-delay timeout.
+    this.lastActivity = this.now() - this.options.idleDelayMs + 1
+    this.earliestCycle = this.now()
+    this.clearTimer()
+    this.publish({ phase: 'waiting', task: null, reason: 'manual_requested' })
+    this.schedule()
+    return true
   }
 
   /** Prompt typing, account/project changes and emergency-stop changes reset the idle grace. */
@@ -247,13 +269,13 @@ export class IdleContextOptimizer {
       const eligibility = await this.dependencies.inspect(signal, false)
       signal.throwIfAborted()
       if (!eligibility.available || !eligibility.boundary) {
-        this.publish({ phase: 'paused', reason: eligibility.reason ?? 'runtime_unavailable' })
+        this.publish({ phase: 'paused', task: null, reason: eligibility.reason ?? 'runtime_unavailable' })
         return
       }
       const job = await this.dependencies.nextJob(eligibility.boundary, signal)
       signal.throwIfAborted()
       if (!job) {
-        this.publish({ phase: 'paused', reason: 'no_context' })
+        this.publish({ phase: 'paused', task: null, reason: 'no_context' })
         return
       }
       if (
@@ -280,7 +302,7 @@ export class IdleContextOptimizer {
         this.publish({ phase: 'paused', reason: 'boundary_changed' })
         return
       }
-      this.publish({ phase: 'running', reason: null })
+      this.publish({ phase: 'running', task: job.scope === 'project' ? 'context' : 'memory', reason: null })
       monitorEligibility()
       const content = (await this.dependencies.runLocal(job, signal)).trim()
       signal.throwIfAborted()

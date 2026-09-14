@@ -4,8 +4,9 @@ import type { PendingToolCall } from '@/state/types'
 /** Numeric transport progress only; no private reasoning, prompts or tool payloads. */
 export type AgentProgress = {
   agentRole?: 'planner' | 'worker' | 'reviewer'
-  phase: 'routing' | 'thinking' | 'receiving' | 'tools'
+  phase: 'routing' | 'thinking' | 'receiving' | 'tools' | 'regenerating'
   round?: number
+  attempt?: number
   characters?: number
 }
 export type ChatActivity = { startedAt: number; finishedAt?: number; status: ActivityStatus; steps: ActivityStep[] }
@@ -32,24 +33,27 @@ export function updateChatActivity(activity: ChatActivity, event: AgentProgress,
   if (activity.finishedAt !== undefined) return
   // Each phase keeps its own row; token updates only refresh that phase.
   const phaseId = event.phase === 'routing' ? 'routing' : `round-${event.round ?? 1}-${event.phase}`
-  const id = event.agentRole ? `${event.agentRole}-${phaseId}` : phaseId
+  const attemptId = event.attempt ? `${phaseId}-retry-${event.attempt}` : phaseId
+  const id = event.agentRole ? `${event.agentRole}-${attemptId}` : attemptId
   const current = activity.steps.find(step => step.id === id)
   const label =
-    event.phase === 'routing'
-      ? 'Modell vorbereiten'
-      : event.phase === 'tools'
-        ? 'Werkzeuge ausführen'
-        : event.phase === 'receiving'
-          ? event.agentRole === 'planner'
-            ? 'Vorgehen wird ausgearbeitet'
-            : event.agentRole === 'reviewer'
-              ? 'Ergebnis wird geprüft'
-              : 'Antwort wird geschrieben'
-          : event.agentRole === 'planner'
-            ? 'Vorgehen vorbereiten'
-            : event.agentRole === 'reviewer'
-              ? 'Ergebnis prüfen'
-              : 'Antwort vorbereiten'
+    event.phase === 'regenerating'
+      ? 'Antwort wird neu erstellt'
+      : event.phase === 'routing'
+        ? 'Modell vorbereiten'
+        : event.phase === 'tools'
+          ? 'Werkzeuge ausführen'
+          : event.phase === 'receiving'
+            ? event.agentRole === 'planner'
+              ? 'Vorgehen wird ausgearbeitet'
+              : event.agentRole === 'reviewer'
+                ? 'Ergebnis wird geprüft'
+                : 'Antwort wird geschrieben'
+            : event.agentRole === 'planner'
+              ? 'Vorgehen vorbereiten'
+              : event.agentRole === 'reviewer'
+                ? 'Ergebnis prüfen'
+                : 'Antwort vorbereiten'
   const detail =
     event.characters === undefined
       ? event.round

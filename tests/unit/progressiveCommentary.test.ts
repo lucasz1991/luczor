@@ -59,6 +59,43 @@ function setup(options: { allowLocalContent?: () => boolean; canSpeak?: () => bo
 }
 
 describe('progressive commentary coordination', () => {
+  it('retracts active speech, permits a fresh source even with the same prefix, and never speaks the reset', async () => {
+    const test = setup()
+    const prefix = 'Erster Absatz.\n\nZweiter Absatz.\n\n'
+    test.setMessage({ content: prefix, meta: { isLoading: true } })
+    test.coordinator.update()
+    await vi.waitFor(() => expect(test.clips).toHaveLength(1))
+    const oldSettings = test.speak.mock.calls[0]![1]
+    test.coordinator.resetCurrent()
+    expect(oldSettings.signal.aborted).toBe(true)
+    expect(oldSettings.source!.cancelled).toBe(true)
+    test.setMessage({ content: '', meta: { isLoading: true } })
+    test.coordinator.update()
+    test.setMessage({ content: prefix, meta: { isLoading: true } })
+    test.coordinator.update()
+    await vi.waitFor(() => expect(test.clips).toHaveLength(2))
+    test.setMessage({ content: prefix + 'Korrigierte Antwort.', meta: {} })
+    test.coordinator.completeAnswer()
+    await test.queue.drain()
+    expect(test.clips.map(clip => clip.text)).toEqual([prefix, prefix, 'Korrigierte Antwort.'])
+    expect(test.speak).toHaveBeenCalledTimes(2)
+  })
+
+  it('removes queued rejected speech without deleting an already completed commentary', async () => {
+    const enabled = deferred<boolean>()
+    const test = setup({ canSpeak: () => enabled.promise })
+    test.setMessage({ content: 'Geprüftes Werkzeugergebnis.', meta: {} })
+    test.coordinator.completeCommentary(retained('Geprüftes Werkzeugergebnis.'))
+    test.setMessage({ content: 'Falscher Absatz.\n\nFalscher Absatz.\n\n', meta: { isLoading: true } })
+    test.coordinator.update()
+    test.coordinator.resetCurrent()
+    test.setMessage({ content: 'Neue richtige Antwort.', meta: {} })
+    test.coordinator.completeAnswer()
+    enabled.resolve(true)
+    await test.queue.drain()
+    expect(test.clips.map(clip => clip.text)).toEqual(['Geprüftes Werkzeugergebnis.', 'Neue richtige Antwort.'])
+  })
+
   it('does not enqueue incomplete text and reads a short final answer exactly once', async () => {
     const test = setup()
     test.setMessage({ content: 'Ein kurzer noch unvollständiger Absatz', meta: { isLoading: true } })

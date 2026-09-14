@@ -200,6 +200,36 @@ it('numbers reviewer progress after the actual worker rounds instead of the conf
   ])
 })
 
+it('forwards response resets using the same public round offsets as streamed output', async () => {
+  const reset = vi.fn()
+  const tokens = vi.fn()
+  const execute = vi.fn(async (options: RunAgentOptions) => {
+    options.onToken?.('Verworfener Text')
+    options.onResponseReset?.({ round: 1 })
+    options.onToken?.('')
+    options.onToken?.('Korrigiert')
+    return result
+  })
+  await runChatAgentTeam(
+    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'observe', onResponseReset: reset, onToken: tokens },
+    gateway,
+    { ...checkpoint },
+    execute
+  )
+  expect(reset.mock.calls.map(([event]) => event.round)).toEqual([1, 2, 3])
+  expect(tokens.mock.calls.map(([text]) => text)).toEqual([
+    'Verworfener Text',
+    '',
+    'Korrigiert',
+    'Verworfener Text',
+    '',
+    'Korrigiert',
+    'Verworfener Text',
+    '',
+    'Korrigiert',
+  ])
+})
+
 it('distinguishes unavailable readiness from a confirmed runtime failure and preserves the worker result', async () => {
   const execute = vi.fn(async () =>
     execute.mock.calls.length === 3
@@ -273,8 +303,10 @@ it('returns the original checkpoint when the planning agent fails before produci
 it.each([
   ['planner', 'runtime_empty_response'],
   ['planner', 'runtime_unsafe_response'],
+  ['planner', 'runtime_output_repeated'],
   ['worker', 'runtime_empty_response'],
   ['worker', 'runtime_unsafe_response'],
+  ['worker', 'runtime_output_repeated'],
 ] as const)('does not run dependent nodes after an unusable %s response (%s)', async (role, code) => {
   const saved = {
     ...checkpoint,

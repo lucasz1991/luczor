@@ -195,6 +195,8 @@ export type RunAgentOptions = {
   onUsage?: (usage: TokenUsage) => void
   /** Safe UI telemetry without private model channels or tool payloads. */
   onProgress?: (event: AgentProgress) => void
+  /** Retract only the unfinished round, including its queued/playing speech. */
+  onResponseReset?: (event: { round: number }) => void
   /** In-memory tool journal and approval gate for temporary conversations. */
   toolSession?: AgentToolSession
   workspaceScope?: import('./tools/types').WorkspaceScope
@@ -843,6 +845,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   const toolOutcomes: ToolOutcomeRecord[] = []
   const toolRecovery = new ToolRecoveryGuard()
   let reasoningRetryUsed = false
+  let repetitionRetries = 0
+  let inferenceAttempt = 0
   let localContextAdjusted = false
   const tokenCounter = createTokenUsageCounter()
   const updateUsage = (...args: Parameters<typeof tokenCounter.update>) => {
@@ -931,6 +935,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               contextEgress: 'local_only',
               onToken: undefined,
               onRoundComplete: undefined,
+              onResponseReset: undefined,
               onBudget: undefined,
               onUsage: undefined,
               onCheckpoint: undefined,
@@ -1003,16 +1008,13 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     const continuation = checkpoint()
     const repeatedOutput = interruption.code === 'runtime_output_repeated'
     const publicControlPartial =
-      repeatedOutput || interruption.code === 'runtime_reasoning_control_unavailable'
-        ? publicAnswerText(visibleContent, true).trim()
-        : ''
+      interruption.code === 'runtime_reasoning_control_unavailable' ? publicAnswerText(visibleContent, true).trim() : ''
     if (publicControlPartial) {
       continuation.messages.push({ role: 'assistant', content: publicControlPartial })
       continuation.messages.push({
         role: 'user',
-        content: repeatedOutput
-          ? 'Die vorherige Antwort wurde wegen wiederholter Ausgabe gestoppt. Prüfe den aktuellen Stand und setze den Auftrag ohne die wiederholten Abschlussphrasen fort. Bereits erfolgreiche Aktionen nicht wiederholen.'
-          : 'Die vorherige Antwort wurde an der Denkbudgetgrenze unterbrochen. Setze den bestehenden Auftrag anhand dieses öffentlichen Teilstands fort; bereits erfolgreiche Aktionen nicht wiederholen.',
+        content:
+          'Die vorherige Antwort wurde an der Denkbudgetgrenze unterbrochen. Setze den bestehenden Auftrag anhand dieses öffentlichen Teilstands fort; bereits erfolgreiche Aktionen nicht wiederholen.',
       })
     }
     const resetHistory =
@@ -1057,22 +1059,24 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       ]
     }
     const diagnostic = interruption.diagnostic
-    const finalText = [
-      publicControlPartial,
-      `Die lokale Modellrunde ${round} wurde vor dem Abschluss unterbrochen: ${interruption.message}`,
-      diagnostic
-        ? `Diagnose: ${interruption.code}; Abschluss: ${diagnostic.finishReason}; Dauer: ${(diagnostic.durationMs / 1000).toFixed(1)} s; öffentliche Zeichen: ${diagnostic.receivedCharacters}${diagnostic.outputTokens !== undefined ? `; gemeldete Ausgabetokens: ${diagnostic.outputTokens}` : ''}.`
-        : '',
-      diagnostic && toolOutcomes.length ? fallbackToolResult(toolOutcomes) : '',
-      toolOutcomes.length
-        ? `Der bisherige Arbeitsfortschritt bleibt erhalten (${toolSuccesses} Tool-Aufrufe erfolgreich, ${toolFailures} fehlgeschlagen).`
-        : retainedMutationCount
-          ? `Der Fortsetzungsstand bleibt erhalten; ${retainedMutationCount} bereits erfolgreiche Änderungen bleiben vor identischer Wiederholung geschützt.`
-          : 'Der Auftrag wurde in einen bereinigten Fortsetzungsstand überführt.',
-      'Du kannst direkt weiterarbeiten; Luczor liest dabei den aktuellen Zustand erneut ein und wiederholt bereits erfolgreiche Änderungen nicht.',
-    ]
-      .filter(Boolean)
-      .join('\n\n')
+    const finalText = repeatedOutput
+      ? 'Auch nach zwei automatischen Korrekturversuchen konnte das Modell keine Antwort ohne Wiederholung liefern. Die verworfene Ausgabe wurde entfernt. Dein Auftrag und bereits erledigte Arbeit bleiben zum Fortsetzen erhalten.'
+      : [
+          publicControlPartial,
+          `Die lokale Modellrunde ${round} wurde vor dem Abschluss unterbrochen: ${interruption.message}`,
+          diagnostic
+            ? `Diagnose: ${interruption.code}; Abschluss: ${diagnostic.finishReason}; Dauer: ${(diagnostic.durationMs / 1000).toFixed(1)} s; öffentliche Zeichen: ${diagnostic.receivedCharacters}${diagnostic.outputTokens !== undefined ? `; gemeldete Ausgabetokens: ${diagnostic.outputTokens}` : ''}.`
+            : '',
+          diagnostic && toolOutcomes.length ? fallbackToolResult(toolOutcomes) : '',
+          toolOutcomes.length
+            ? `Der bisherige Arbeitsfortschritt bleibt erhalten (${toolSuccesses} Tool-Aufrufe erfolgreich, ${toolFailures} fehlgeschlagen).`
+            : retainedMutationCount
+              ? `Der Fortsetzungsstand bleibt erhalten; ${retainedMutationCount} bereits erfolgreiche Änderungen bleiben vor identischer Wiederholung geschützt.`
+              : 'Der Auftrag wurde in einen bereinigten Fortsetzungsstand überführt.',
+          'Du kannst direkt weiterarbeiten; Luczor liest dabei den aktuellen Zustand erneut ein und wiederholt bereits erfolgreiche Änderungen nicht.',
+        ]
+          .filter(Boolean)
+          .join('\n\n')
     if (typeof window !== 'undefined') {
       window.dispatchEvent(
         new CustomEvent('luczor:debug', {
@@ -1090,13 +1094,15 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         })
       )
     }
-    publish(finalText)
-    opts.onRoundComplete?.({
-      round,
-      content: finalText,
-      kind: 'answer',
-      serverSpeechAllowed: !ephemeralDataUsed,
-    })
+    // An exhausted correction is a UI diagnostic, never a new speech stream.
+    if (!repeatedOutput) publish(finalText)
+    if (!repeatedOutput)
+      opts.onRoundComplete?.({
+        round,
+        content: finalText,
+        kind: 'answer',
+        serverSpeechAllowed: !ephemeralDataUsed,
+      })
     await emitCheckpoint(continuation)
     return {
       finalText,
@@ -1175,73 +1181,118 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     // The completed-round callback owns retention. Do not erase the visible
     // commentary just because the next inference request has started.
     visibleContent = ''
-    updateUsage(round + 1, { messages, tools: availableTools }, '')
     let res
     const inferenceStarted = performance.now()
-    try {
-      res = await inferenceGateway.streamChatWithTools({
-        debugScope: { conversationId: opts.conversationId, runId: opts.runId },
-        messages,
-        tools: availableTools,
-        toolChoice: availableTools.length ? nextToolChoice : 'none',
-        ...(inferenceGateway.target === 'local_llama_cpp'
-          ? {
-              thinkingTier: opts.thinkingTier ?? opts.continuation?.thinkingTier ?? 'balanced',
-              thinkingConfig: opts.thinkingConfig ?? opts.continuation?.thinkingConfig,
-              onBudget: (progress: import('./inference/thinking').ThinkingBudgetProgress | null) => {
-                if (!signal.aborted) opts.onBudget?.(progress)
-              },
-            }
-          : {}),
-        ...(inferenceGateway.target === 'local_llama_cpp' && opts.localReasoningMode
-          ? { reasoningMode: opts.localReasoningMode }
-          : {}),
-        projectId,
-        taskType: opts.taskType,
-        contextId: opts.contextId,
-        repoId: opts.repoId,
-        branch: opts.branch,
-        commitSha: opts.commitSha,
-        inputSource: opts.inputSource,
-        signal,
-        // Public content is released as it arrives. Private channels are ignored
-        // in transports; the guard also withholds known work notes and think tags.
-        onToken: content => {
-          if (signal.aborted) return
-          opts.onProgress?.({ phase: 'receiving', round: round + 1, characters: content.length })
-          updateUsage(round + 1, { messages, tools }, content)
-          publish(publicAnswerText(content))
-        },
-      })
-    } catch (error) {
-      if (internallyInterrupted())
-        return partialResultAfterInferenceFailure(error, round + 1, {
-          code: 'team_node_interrupted',
-          message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
-          round: round + 1,
-        })
-      if (signal.aborted) throw error
+    let retryInRound = 0
+    while (true) {
       executionGate.assert(execution)
-      if (inferenceGateway.target === 'local_llama_cpp' && error instanceof LocalInferenceError && error.diagnostic) {
-        const usage = tokenCounter.recordLocalFailure(round + 1, error.diagnostic)
-        opts.onUsage?.(assistance?.withUsage(usage) ?? usage)
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
+      const attempt = ++inferenceAttempt
+      // Retry only inference, not this agent/tool round. Never feed the rejected
+      // text back, and never change a separately approved external request.
+      const requestMessages: WireMessage[] = retryInRound
+        ? [
+            ...messages,
+            {
+              role: 'system',
+              content:
+                `Korrekturversuch ${retryInRound}: Beantworte den bestehenden Auftrag anhand des bisherigen Kontexts und der vorhandenen Werkzeugergebnisse neu. ` +
+                'Die verworfene Ausgabe war repetitiv. Formuliere die Antwort knapp und konkret, ohne wiederholte Phrasen oder Abschlussbestätigungen, und beende sie danach. Bereits erfolgreich ausgeführte Aktionen nicht wiederholen.',
+            },
+          ]
+        : messages
+      let acceptingOutput = true
+      updateUsage(attempt, { messages: requestMessages, tools: availableTools }, '')
+      try {
+        res = await inferenceGateway.streamChatWithTools({
+          debugScope: { conversationId: opts.conversationId, runId: opts.runId },
+          messages: requestMessages,
+          tools: availableTools,
+          toolChoice: availableTools.length ? nextToolChoice : 'none',
+          ...(inferenceGateway.target === 'local_llama_cpp'
+            ? {
+                thinkingTier: opts.thinkingTier ?? opts.continuation?.thinkingTier ?? 'balanced',
+                thinkingConfig: opts.thinkingConfig ?? opts.continuation?.thinkingConfig,
+                onBudget: (progress: import('./inference/thinking').ThinkingBudgetProgress | null) => {
+                  if (acceptingOutput && !signal.aborted) opts.onBudget?.(progress)
+                },
+              }
+            : {}),
+          ...(inferenceGateway.target === 'local_llama_cpp' && opts.localReasoningMode
+            ? { reasoningMode: opts.localReasoningMode }
+            : {}),
+          projectId,
+          taskType: opts.taskType,
+          contextId: opts.contextId,
+          repoId: opts.repoId,
+          branch: opts.branch,
+          commitSha: opts.commitSha,
+          inputSource: opts.inputSource,
+          signal,
+          // Public content is released as it arrives. Private channels are ignored
+          // in transports; the guard also withholds known work notes and think tags.
+          onToken: content => {
+            if (!acceptingOutput || signal.aborted) return
+            opts.onProgress?.({
+              phase: 'receiving',
+              round: round + 1,
+              ...(retryInRound ? { attempt: retryInRound } : {}),
+              characters: content.length,
+            })
+            updateUsage(attempt, { messages: requestMessages, tools: availableTools }, content)
+            publish(publicAnswerText(content))
+          },
+        })
+        break
+      } catch (error) {
+        acceptingOutput = false
+        if (internallyInterrupted())
+          return partialResultAfterInferenceFailure(error, round + 1, {
+            code: 'team_node_interrupted',
+            message: 'Der Agentenknoten wurde durch das Team-Zeitbudget beendet.',
+            round: round + 1,
+          })
+        if (signal.aborted) throw error
+        executionGate.assert(execution)
+        if (inferenceGateway.target === 'local_llama_cpp' && error instanceof LocalInferenceError && error.diagnostic) {
+          const usage = tokenCounter.recordLocalFailure(attempt, error.diagnostic)
+          opts.onUsage?.(assistance?.withUsage(usage) ?? usage)
+        }
+        if (
+          !resolvedRoute.externalOneShot &&
+          inferenceGateway.target === 'local_llama_cpp' &&
+          error instanceof LocalInferenceError &&
+          error.code === 'runtime_output_repeated'
+        ) {
+          opts.onResponseReset?.({ round: round + 1 })
+          publish('')
+          opts.onBudget?.(null)
+          if (repetitionRetries < 2) {
+            repetitionRetries++
+            retryInRound++
+            opts.onProgress?.({ phase: 'regenerating', round: round + 1, attempt: retryInRound })
+            continue
+          }
+        }
+        const interruption = unexpectedInferenceInterruption(error)
+        if (interruption)
+          error = new LocalInferenceError(interruption.message, interruption.code, true, visibleContent.length > 0)
+        const resettableLocalInputFailure =
+          error instanceof LocalInferenceError &&
+          [
+            'runtime_context_exceeded',
+            'runtime_chat_history_rejected',
+            'runtime_tool_contract_rejected',
+            'runtime_reasoning_control_unavailable',
+            'runtime_output_repeated',
+          ].includes(error.code)
+        if (!resolvedRoute.externalOneShot && (toolOutcomes.length > 0 || resettableLocalInputFailure)) {
+          return partialResultAfterInferenceFailure(error, round + 1)
+        }
+        throw error
+      } finally {
+        acceptingOutput = false
       }
-      const interruption = unexpectedInferenceInterruption(error)
-      if (interruption)
-        error = new LocalInferenceError(interruption.message, interruption.code, true, visibleContent.length > 0)
-      const resettableLocalInputFailure =
-        error instanceof LocalInferenceError &&
-        [
-          'runtime_context_exceeded',
-          'runtime_chat_history_rejected',
-          'runtime_tool_contract_rejected',
-          'runtime_reasoning_control_unavailable',
-          'runtime_output_repeated',
-        ].includes(error.code)
-      if (!resolvedRoute.externalOneShot && (toolOutcomes.length > 0 || resettableLocalInputFailure)) {
-        return partialResultAfterInferenceFailure(error, round + 1)
-      }
-      throw error
     }
     localContextAdjusted ||=
       !!res.contextUsage && (res.contextUsage.omittedMessages > 0 || res.contextUsage.shortenedToolResults > 0)
@@ -1257,7 +1308,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       throw new DOMException('Aborted', 'AbortError')
     }
     executionGate.assert(execution)
-    updateUsage(round + 1, { messages, tools }, res.content, res)
+    updateUsage(inferenceAttempt, { messages, tools: availableTools }, res.content, res)
     lastRequestId = res.requestId ?? lastRequestId
     lastModel = res.model ?? lastModel
     lastProvider = res.provider ?? lastProvider
