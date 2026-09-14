@@ -669,7 +669,7 @@ onBeforeUnmount(() => {
 }
 .resource-settings__sliders {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
   gap: 16px;
 }
 .resource-settings__slider {

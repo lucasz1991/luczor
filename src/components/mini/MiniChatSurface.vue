@@ -31,7 +31,41 @@ const props = withDefaults(defineProps<{ snapshot: MiniSnapshot; native?: boolea
   connectionError: '',
 })
 const emit = defineEmits<{ action: [action: MiniAction]; hide: []; showMain: [] }>()
-const expanded = ref(false)
+// The screen-edge nudge has one window mode: the capsule, with a fly-out per icon. "Chats" is the
+// one pane that can grow into the full chat page — that replaces the old separate Mini "expand" modus.
+type GripPane = 'status' | 'chats' | 'decision' | 'tools' | 'link'
+const gripHover = ref(false)
+const hoverPane = ref<GripPane | null>(null)
+const pinnedPane = ref<GripPane | null>(null)
+const activePane = computed<GripPane>(() => pinnedPane.value ?? hoverPane.value ?? 'status')
+const paneTitles: Record<GripPane, string> = {
+  status: 'Status',
+  chats: 'Chats',
+  decision: 'Entscheidung',
+  tools: 'Werkzeuge',
+  link: 'Verbindung',
+}
+function enterGrip() {
+  gripHover.value = true
+}
+function leaveGrip() {
+  gripHover.value = false
+  hoverPane.value = null
+}
+function pinPane(pane: GripPane) {
+  if (pane === 'chats') {
+    if (pinnedPane.value === 'chats') collapse()
+    else expand()
+    return
+  }
+  pinnedPane.value = pinnedPane.value === pane ? null : pane
+}
+const expanded = computed<boolean>({
+  get: () => pinnedPane.value === 'chats',
+  set: value => {
+    pinnedPane.value = value ? 'chats' : null
+  },
+})
 const thinkingControl = createMiniThinkingControl(
   () => props.snapshot,
   action => emit('action', action),
@@ -160,28 +194,6 @@ onBeforeUnmount(() => {
   void miniVoice.stop()
 })
 const error = computed(() => props.connectionError || windowError.value || props.snapshot.notice)
-type GripPane = 'status' | 'chats' | 'decision' | 'tools' | 'link'
-const gripHover = ref(false)
-const hoverPane = ref<GripPane | null>(null)
-const pinnedPane = ref<GripPane | null>(null)
-const activePane = computed<GripPane>(() => pinnedPane.value ?? hoverPane.value ?? 'status')
-const paneTitles: Record<GripPane, string> = {
-  status: 'Status',
-  chats: 'Chats',
-  decision: 'Entscheidung',
-  tools: 'Werkzeuge',
-  link: 'Verbindung',
-}
-function enterGrip() {
-  gripHover.value = true
-}
-function leaveGrip() {
-  gripHover.value = false
-  hoverPane.value = null
-}
-function pinPane(pane: GripPane) {
-  pinnedPane.value = pinnedPane.value === pane ? null : pane
-}
 const chatsState = computed(() => {
   if (props.snapshot.conversations?.some(chat => chat.busy)) return 'running'
   if (unread.value) return 'unread'
@@ -475,386 +487,6 @@ onBeforeUnmount(() => {
     @pointercancel="endDrag"
     @keydown.esc="collapse"
   >
-    <div v-if="expanded" class="mini-panel">
-      <header class="mini-header" @pointerdown="beginDrag">
-        <span
-          class="mini-drag"
-          tabindex="0"
-          role="button"
-          aria-label="Mini-Chat verschieben, Pfeiltasten verwenden"
-          @keydown="moveKey"
-          ><AiIcon name="grid" :size="13"
-        /></span>
-        <span class="ai-brand-mark"><AiIcon :size="18" /></span>
-        <strong>{{ snapshot.appearance?.assistantName || 'Luczor' }} <span>Mini</span></strong
-        ><span class="mini-temp">{{ contextName }}</span>
-        <button
-          type="button"
-          :aria-label="pinned ? 'Immer im Vordergrund ausschalten' : 'Immer im Vordergrund einschalten'"
-          :aria-pressed="pinned"
-          @click="togglePin"
-        >
-          <AiIcon name="shield" />
-        </button>
-        <button type="button" aria-label="Großes Luczor-Fenster öffnen" @click="windowAction('main')">
-          <AiIcon name="panel" />
-        </button>
-        <button type="button" aria-label="Mini-Chat einklappen" @click="collapse">
-          <span aria-hidden="true">−</span>
-        </button>
-      </header>
-      <div class="mini-status-strip">
-        <div class="mini-small-orb"><StatusOrb :phase="status.phase" :level="snapshot.hud.micLevel" /></div>
-        <div>
-          <strong>{{ status.label }}</strong
-          ><span>{{ status.detail }}</span>
-        </div>
-        <button
-          type="button"
-          class="mini-icon"
-          aria-label="Statusdarstellung erklären"
-          :aria-expanded="showLegend"
-          @click="showLegend = !showLegend"
-        >
-          i
-        </button>
-      </div>
-      <div v-if="sharedToolSessions.length" class="mini-tool-sessions" aria-label="Gemeinsame Tool-Sitzungen">
-        <div class="mini-tool-sessions__heading">
-          <span>Gemeinsame Läufe</span><small>{{ sharedToolSessions.length }}</small>
-        </div>
-        <div v-for="session in sharedToolSessions" :key="session.id" class="mini-tool-session">
-          <span class="mini-tool-session__dot" :data-status="session.status" aria-hidden="true"></span>
-          <span>{{ session.kind }}</span>
-          <small>{{ session.status === 'active' ? 'läuft' : session.status }}</small>
-          <button type="button" aria-label="Tool-Sitzung stoppen" @click="stopToolSession(session.id)">Stop</button>
-        </div>
-      </div>
-      <div v-if="showLegend" class="mini-legend">
-        <p><b>Akzentfarbe, drehend:</b> Modell arbeitet. <b>Orange, drehend:</b> ein Tool läuft.</p>
-        <p>
-          <b>Gelb, still:</b> deine Entscheidung. <b>Cyan:</b> Mikrofon aktiv; Ausschlag folgt dem Pegel.
-          <b>Grün:</b> Sprachausgabe oder neue Antwort. <b>Rot:</b> Fehler.
-        </p>
-        <p>Die Ringe zeigen Aktivität, keine geschätzten Fortschrittsprozente.</p>
-        <button type="button" class="ai-button" @click="resetPosition">Unten rechts platzieren</button>
-      </div>
-      <div class="mini-chat-picker">
-        <label for="mini-project">{{ isChat ? 'Chat im Projekt' : 'Arbeitsprojekt für Dateien & Desktop' }}</label>
-        <select id="mini-project" :value="snapshot.project?.id ?? ''" @change="selectProject">
-          <option v-if="!snapshot.project" value="" disabled>Projekt auswählen</option>
-          <option v-for="project in snapshot.projects" :key="project.id" :value="project.id">{{ project.name }}</option>
-        </select>
-      </div>
-      <div v-if="isChat && snapshot.project && snapshot.conversations?.length" class="mini-chat-picker">
-        <label for="mini-conversation">Unterhaltung</label>
-        <select
-          id="mini-conversation"
-          :value="snapshot.conversationId"
-          @change="
-            emit('action', {
-              type: 'select_conversation',
-              sessionId: snapshot.sessionId,
-              projectId: snapshot.project.id,
-              conversationId: ($event.target as HTMLSelectElement).value,
-            })
-          "
-        >
-          <option v-for="chat in snapshot.conversations" :key="chat.id" :value="chat.id">
-            {{ chat.busy ? 'Läuft · ' : '' }}{{ chat.title }}
-          </option>
-        </select>
-        <button
-          type="button"
-          class="ai-button"
-          @click="
-            emit('action', { type: 'new_conversation', sessionId: snapshot.sessionId, projectId: snapshot.project.id })
-          "
-        >
-          Neuer Chat
-        </button>
-      </div>
-      <div class="mini-context">
-        <span>{{
-          isChat ? 'Mit dem großen Chat verbunden' : `${snapshot.projects.length} Projekte · Übergeordnete Verwaltung`
-        }}</span
-        ><button
-          type="button"
-          @click="emit('action', { type: 'mode', mode: snapshot.mode === 'observe' ? 'act' : 'observe' })"
-        >
-          {{ snapshot.mode === 'observe' ? 'Beobachten' : snapshot.mode === 'act' ? 'Handeln' : 'Vollzugriff' }}
-          <AiIcon name="chevron" :size="10" />
-        </button>
-      </div>
-      <p v-if="!isChat" class="mini-scope-note">
-        Für Workflows das Zielprojekt ausdrücklich nennen. Erstellen und Verbessern startet keinen Lauf.
-      </p>
-      <div class="mini-quick-controls" role="group" aria-label="Mini-Chat Funktionen">
-        <button
-          type="button"
-          :aria-pressed="voiceView.mode === 'hands_free'"
-          :disabled="voiceView.starting || voiceView.finishing || (disabled && !voiceView.mode)"
-          @click="toggleVoice('hands_free')"
-        >
-          <AiIcon name="sound" :size="13" /> {{ voiceView.mode === 'hands_free' ? 'Zuhören stoppen' : 'Zuhören' }}
-        </button>
-        <button
-          type="button"
-          :aria-pressed="voiceView.mode === 'push_to_talk'"
-          :disabled="voiceView.starting || voiceView.finishing || (disabled && !voiceView.mode)"
-          @click="toggleVoice('push_to_talk')"
-        >
-          <AiIcon name="mic" :size="13" /> {{ voiceView.mode === 'push_to_talk' ? 'Diktat beenden' : 'Diktieren' }}
-        </button>
-        <label class="mini-upload">
-          <AiIcon name="upload" :size="13" /> Datei
-          <input type="file" accept=".txt,.md,.json,.csv,.log,.xml,.html,.css,.js,.ts,.vue,.php" @change="attachFile" />
-        </label>
-      </div>
-      <div v-if="!isChat" class="mini-workspace-actions">
-        <button
-          type="button"
-          :disabled="snapshot.busy || snapshot.mainBusy"
-          @click="openWorkspacePanel('project_folder')"
-        >
-          <AiIcon name="folder" :size="13" /> Projektordner
-        </button>
-        <button type="button" :disabled="snapshot.busy || snapshot.mainBusy" @click="openWorkspacePanel('agents')">
-          <AiIcon name="spark" :size="13" /> Agenten
-        </button>
-        <button type="button" :disabled="snapshot.busy || snapshot.mainBusy" @click="openWorkspacePanel('workflows')">
-          <AiIcon name="grid" :size="13" /> Workflows
-        </button>
-        <button type="button" :disabled="snapshot.busy || snapshot.mainBusy" @click="openWorkspacePanel('desktop')">
-          <AiIcon name="panel" :size="13" /> Desktop
-        </button>
-      </div>
-      <ChatComposer
-        :title="isChat ? 'Gemeinsamer Projektchat' : 'Temporäre Workspace-Unterhaltung'"
-        :follow="snapshot.messages.length > 0"
-      >
-        <div v-if="!snapshot.messages.length" class="mini-welcome">
-          <strong>{{ isChat ? 'Im Projekt weiterarbeiten' : 'Dein Workspace, im Blick.' }}</strong>
-          <p>
-            {{
-              isChat
-                ? 'Derselbe Verlauf und dieselben Antworten wie im großen Luczor-Fenster.'
-                : 'Chats und Projekte überblicken, Code-Aufträge vorbereiten und den Desktop steuern.'
-            }}
-          </p>
-          <small>{{
-            isChat
-              ? 'Nachrichten bleiben in diesem Projektchat.'
-              : 'Temporäre Unterhaltung · Lokales Modell · Bestehende Freigaben'
-          }}</small>
-          <div>
-            <button
-              type="button"
-              @click="
-                draft = isChat
-                  ? 'Fasse unseren bisherigen Projektstand zusammen.'
-                  : 'Zeige mir eine Übersicht meiner Projekte, Chats und laufenden Agentenaufträge.'
-              "
-            >
-              {{ isChat ? 'Projektstand ansehen' : 'Workspace überblicken' }}</button
-            ><button
-              type="button"
-              @click="
-                draft = isChat
-                  ? 'Was ist der nächste sinnvolle Schritt in diesem Projekt?'
-                  : 'Hilf mir, einen Code-Auftrag für das ausgewählte Arbeitsprojekt vorzubereiten.'
-              "
-            >
-              {{ isChat ? 'Nächste Schritte' : 'Code-Auftrag planen' }}
-            </button>
-          </div>
-        </div>
-        <article
-          v-for="message in snapshot.messages"
-          :key="message.id"
-          class="mini-message"
-          :class="`is-${message.role}`"
-        >
-          <span class="mini-message-label">{{
-            message.role === 'user' ? 'Du' : snapshot.appearance?.assistantName || 'Luczor'
-          }}</span>
-          <small v-if="!isChat && message.contextLabel" class="mini-scope-note">{{ message.contextLabel }}</small>
-          <p v-if="message.role === 'user'">{{ message.content }}</p>
-          <template v-else>
-            <ChatAgentRoster
-              :activity="message.activity"
-              :loading="message.status === 'running'"
-              :waiting="message.status === 'running' && !!snapshot.decision"
-            />
-            <ThinkingState
-              v-if="message.activity"
-              :active="message.status === 'running'"
-              :status="
-                message.status === 'running'
-                  ? snapshot.decision
-                    ? 'waiting'
-                    : message.activity.status
-                  : message.status
-              "
-              :steps="message.activity.steps"
-              :started-at="message.createdAt"
-              :duration-ms="
-                message.activity.finishedAt ? message.activity.finishedAt - message.activity.startedAt : undefined
-              "
-              :label="
-                message.status === 'running'
-                  ? 'Verarbeitet'
-                  : message.status === 'failed'
-                    ? 'Fehlgeschlagen'
-                    : message.status === 'canceled'
-                      ? 'Abgebrochen'
-                      : 'Abgeschlossen'
-              "
-            />
-            <ChatCommentary :entries="message.commentary ?? []" :active="message.status === 'running'" />
-            <StreamingText
-              v-if="message.content || message.question || message.choices.length || !message.activity"
-              :content="message.content"
-              :streaming="message.status === 'running'"
-              :show-stream-status="!message.activity"
-              :animate="false"
-              :actions="false"
-              :question="message.question"
-              :follow-ups="message.status === 'running' ? message.choices : []"
-            />
-            <AssistantResponseFooter
-              :message-id="message.id"
-              :active-message-id="lastAssistant?.status === 'running' ? lastAssistant.id : undefined"
-              :usage="message.tokenUsage"
-              :active="snapshot.busy && message.status === 'running'"
-              :budget="snapshot.thinkingBudget"
-              :control="controlThinking"
-              @stop="emit('action', { type: 'stop', sessionId: snapshot.sessionId })"
-            />
-            <WorkflowChatCards
-              v-if="isChat && message.workflows?.length"
-              :workflows="message.workflows"
-              :project-id="snapshot.project?.id ?? ''"
-              :host-only="true"
-              :host-runs="snapshot.workflowRuns"
-              :host-runs-verified="snapshot.workflowRunsVerified"
-              :disabled="disabled"
-              :read-only="snapshot.mode === 'observe' || snapshot.hud.killSwitch"
-              @open="reference => openWorkflow(message.id, reference.id)"
-              @action="
-                (reference, action) =>
-                  emit('action', {
-                    type: 'workflow_action',
-                    sessionId: snapshot.sessionId,
-                    messageId: message.id,
-                    workflowId: reference.id,
-                    action,
-                  })
-              "
-              @discuss="
-                reference =>
-                  emit('action', {
-                    type: 'workflow_improve',
-                    sessionId: snapshot.sessionId,
-                    messageId: message.id,
-                    workflowId: reference.id,
-                  })
-              "
-            />
-            <button
-              v-if="message.content && message.status === 'done'"
-              type="button"
-              class="mini-copy"
-              aria-label="Mini-Antwort kopieren"
-              @click="copy(message.content)"
-            >
-              <AiIcon name="copy" :size="12" /> Kopieren
-            </button>
-            <div v-if="message.choices.length && message.status === 'done'" class="mini-choices">
-              <button
-                v-for="choice in message.choices"
-                :key="choice"
-                type="button"
-                :disabled="disabled"
-                @click="send(choice)"
-              >
-                {{ choice }} <AiIcon name="arrow" :size="13" />
-              </button>
-            </div>
-          </template>
-        </article>
-      </ChatComposer>
-      <div v-if="tools.length" class="mini-tools"><ToolChips :tools="tools" /></div>
-      <div v-if="decision" class="mini-decision">
-        <ApprovalCard
-          :key="`${decision.id}:${!!connectionError}`"
-          compact
-          :title="decision.title"
-          :description="decision.description"
-          :detail="decision.detail"
-          :busy="!!connectionError"
-          @approve="decide(true)"
-          @reject="decide(false)"
-        />
-      </div>
-      <div v-if="resetConfirm" class="mini-reset" role="group" aria-label="Temporäre Unterhaltung leeren">
-        <p>Unterhaltung und Entwurf verwerfen? Laufende Anfragen werden abgebrochen.</p>
-        <button type="button" @click="reset">Jetzt leeren</button
-        ><button type="button" @click="resetConfirm = false">Behalten</button>
-      </div>
-      <p v-if="error" class="mini-error" role="alert">{{ error }}</p>
-      <p v-if="copied || clipboardError" class="mini-copy-status" role="status">
-        {{ clipboardError || 'Antwort kopiert' }}
-      </p>
-      <form class="mini-composer" @submit.prevent="send()">
-        <div class="mini-thinking-choice">
-          <small>Lokales Modell</small>
-          <ThinkingSelector
-            :model-value="snapshot.thinkingTier"
-            :next-prompt="snapshot.busy"
-            @update:model-value="emit('action', { type: 'thinking_tier', sessionId: snapshot.sessionId, tier: $event })"
-          />
-        </div>
-        <VoiceInputSettings
-          :busy="disabled || voiceView.starting || voiceView.finishing"
-          :active="!!voiceView.mode"
-          @start="miniVoice.start($event)"
-          @stop="miniVoice.stop()"
-        />
-        <p v-if="voiceView.error || voiceView.notice" :role="voiceView.error ? 'alert' : 'status'">
-          {{ voiceView.error || voiceView.notice }}
-        </p>
-        <textarea
-          ref="field"
-          v-model="draft"
-          aria-label="Nachricht im Mini-Chat"
-          :placeholder="isChat ? 'In diesem Projektchat schreiben …' : 'Was soll Luczor übergreifend organisieren?'"
-          rows="1"
-          maxlength="12000"
-          @keydown="inputKey"
-          @input="miniVoice.manualInput()"
-        />
-        <div>
-          <small>Enter senden · Shift + Enter neue Zeile</small
-          ><button
-            v-if="snapshot.busy"
-            type="button"
-            aria-label="Mini-Anfrage stoppen"
-            @click="emit('action', { type: 'stop', sessionId: snapshot.sessionId })"
-          >
-            <AiIcon name="stop" /></button
-          ><button v-else type="submit" aria-label="Mini-Nachricht senden" :disabled="disabled || !draft.trim()">
-            <AiIcon name="send" />
-          </button>
-        </div>
-      </form>
-      <footer class="mini-footer">
-        <button type="button" aria-label="Mini-Chat ausblenden" @click="windowAction('hide')">
-          <AiIcon name="close" :size="13" /> Ausblenden
-        </button>
-      </footer>
-    </div>
-    <template v-else>
       <aside v-if="peekVisible" class="mini-peek" @mouseenter="pausePeek" @mouseleave="armPeek">
         <template v-if="decision"
           ><span class="mini-peek-source"
@@ -884,11 +516,11 @@ onBeforeUnmount(() => {
       <div
         class="mini-orb-dock"
         :data-phase="status.phase"
-        :class="{ 'has-pin': !!pinnedPane }"
+        :class="{ 'has-pin': !!pinnedPane, 'is-chat-open': expanded }"
         @pointerenter="enterGrip"
         @pointerleave="leaveGrip"
       >
-        <div class="mini-orb-tools">
+        <div v-if="!expanded" class="mini-orb-tools">
           <button type="button" aria-label="Mini-Chat ausblenden" @click="windowAction('hide')">
             <AiIcon name="close" :size="12" />
           </button>
@@ -966,16 +598,402 @@ onBeforeUnmount(() => {
             <AiIcon name="link" :size="11" />
           </button>
         </div>
-        <button type="button" class="mini-status-label" :class="{ 'is-working': compactWorking }" @click="expand">
+        <button
+          v-if="!expanded"
+          type="button"
+          class="mini-status-label"
+          :class="{ 'is-working': compactWorking }"
+          @click="expand"
+        >
           {{ compactWorking ? `Arbeitet · ${status.label}` : status.label }}
         </button>
-        <span v-if="connectionError" class="mini-disconnected" role="alert">Verbindung fehlt</span>
+        <span v-if="connectionError && !expanded" class="mini-disconnected" role="alert">Verbindung fehlt</span>
         <!-- Hover fly-out: one pane per grip icon (hover switches, click pins) -->
-        <div class="mini-grip-panel" :data-pane="activePane" aria-live="polite">
-          <div class="mini-grip-panel__head">
-            <strong>{{ paneTitles[activePane] }}</strong>
-            <span v-if="pinnedPane" class="mini-grip-panel__pin">fixiert</span>
+        <div class="mini-grip-panel" :data-pane="activePane" :class="{ 'is-chat-open': expanded }" aria-live="polite">
+          <div v-if="expanded" class="mini-panel">
+        <header class="mini-header" @pointerdown="beginDrag">
+          <span
+            class="mini-drag"
+            tabindex="0"
+            role="button"
+            aria-label="Mini-Chat verschieben, Pfeiltasten verwenden"
+            @keydown="moveKey"
+            ><AiIcon name="grid" :size="13"
+          /></span>
+          <span class="ai-brand-mark"><AiIcon :size="18" /></span>
+          <strong>{{ snapshot.appearance?.assistantName || 'Luczor' }} <span>Mini</span></strong
+          ><span class="mini-temp">{{ contextName }}</span>
+          <button
+            type="button"
+            :aria-label="pinned ? 'Immer im Vordergrund ausschalten' : 'Immer im Vordergrund einschalten'"
+            :aria-pressed="pinned"
+            @click="togglePin"
+          >
+            <AiIcon name="shield" />
+          </button>
+          <button type="button" aria-label="Großes Luczor-Fenster öffnen" @click="windowAction('main')">
+            <AiIcon name="panel" />
+          </button>
+          <button type="button" aria-label="Mini-Chat einklappen" @click="collapse">
+            <span aria-hidden="true">−</span>
+          </button>
+        </header>
+        <div class="mini-status-strip">
+          <div class="mini-small-orb"><StatusOrb :phase="status.phase" :level="snapshot.hud.micLevel" /></div>
+          <div>
+            <strong>{{ status.label }}</strong
+            ><span>{{ status.detail }}</span>
           </div>
+          <button
+            type="button"
+            class="mini-icon"
+            aria-label="Statusdarstellung erklären"
+            :aria-expanded="showLegend"
+            @click="showLegend = !showLegend"
+          >
+            i
+          </button>
+        </div>
+        <div v-if="sharedToolSessions.length" class="mini-tool-sessions" aria-label="Gemeinsame Tool-Sitzungen">
+          <div class="mini-tool-sessions__heading">
+            <span>Gemeinsame Läufe</span><small>{{ sharedToolSessions.length }}</small>
+          </div>
+          <div v-for="session in sharedToolSessions" :key="session.id" class="mini-tool-session">
+            <span class="mini-tool-session__dot" :data-status="session.status" aria-hidden="true"></span>
+            <span>{{ session.kind }}</span>
+            <small>{{ session.status === 'active' ? 'läuft' : session.status }}</small>
+            <button type="button" aria-label="Tool-Sitzung stoppen" @click="stopToolSession(session.id)">Stop</button>
+          </div>
+        </div>
+        <div v-if="showLegend" class="mini-legend">
+          <p><b>Akzentfarbe, drehend:</b> Modell arbeitet. <b>Orange, drehend:</b> ein Tool läuft.</p>
+          <p>
+            <b>Gelb, still:</b> deine Entscheidung. <b>Cyan:</b> Mikrofon aktiv; Ausschlag folgt dem Pegel.
+            <b>Grün:</b> Sprachausgabe oder neue Antwort. <b>Rot:</b> Fehler.
+          </p>
+          <p>Die Ringe zeigen Aktivität, keine geschätzten Fortschrittsprozente.</p>
+          <button type="button" class="ai-button" @click="resetPosition">Unten rechts platzieren</button>
+        </div>
+        <div class="mini-chat-picker">
+          <label for="mini-project">{{ isChat ? 'Chat im Projekt' : 'Arbeitsprojekt für Dateien & Desktop' }}</label>
+          <select id="mini-project" :value="snapshot.project?.id ?? ''" @change="selectProject">
+            <option v-if="!snapshot.project" value="" disabled>Projekt auswählen</option>
+            <option v-for="project in snapshot.projects" :key="project.id" :value="project.id">{{ project.name }}</option>
+          </select>
+        </div>
+        <div v-if="isChat && snapshot.project && snapshot.conversations?.length" class="mini-chat-picker">
+          <label for="mini-conversation">Unterhaltung</label>
+          <select
+            id="mini-conversation"
+            :value="snapshot.conversationId"
+            @change="
+              emit('action', {
+                type: 'select_conversation',
+                sessionId: snapshot.sessionId,
+                projectId: snapshot.project.id,
+                conversationId: ($event.target as HTMLSelectElement).value,
+              })
+            "
+          >
+            <option v-for="chat in snapshot.conversations" :key="chat.id" :value="chat.id">
+              {{ chat.busy ? 'Läuft · ' : '' }}{{ chat.title }}
+            </option>
+          </select>
+          <button
+            type="button"
+            class="ai-button"
+            @click="
+              emit('action', { type: 'new_conversation', sessionId: snapshot.sessionId, projectId: snapshot.project.id })
+            "
+          >
+            Neuer Chat
+          </button>
+        </div>
+        <div class="mini-context">
+          <span>{{
+            isChat ? 'Mit dem großen Chat verbunden' : `${snapshot.projects.length} Projekte · Übergeordnete Verwaltung`
+          }}</span
+          ><button
+            type="button"
+            @click="emit('action', { type: 'mode', mode: snapshot.mode === 'observe' ? 'act' : 'observe' })"
+          >
+            {{ snapshot.mode === 'observe' ? 'Beobachten' : snapshot.mode === 'act' ? 'Handeln' : 'Vollzugriff' }}
+            <AiIcon name="chevron" :size="10" />
+          </button>
+        </div>
+        <p v-if="!isChat" class="mini-scope-note">
+          Für Workflows das Zielprojekt ausdrücklich nennen. Erstellen und Verbessern startet keinen Lauf.
+        </p>
+        <div class="mini-quick-controls" role="group" aria-label="Mini-Chat Funktionen">
+          <button
+            type="button"
+            :aria-pressed="voiceView.mode === 'hands_free'"
+            :disabled="voiceView.starting || voiceView.finishing || (disabled && !voiceView.mode)"
+            @click="toggleVoice('hands_free')"
+          >
+            <AiIcon name="sound" :size="13" /> {{ voiceView.mode === 'hands_free' ? 'Zuhören stoppen' : 'Zuhören' }}
+          </button>
+          <button
+            type="button"
+            :aria-pressed="voiceView.mode === 'push_to_talk'"
+            :disabled="voiceView.starting || voiceView.finishing || (disabled && !voiceView.mode)"
+            @click="toggleVoice('push_to_talk')"
+          >
+            <AiIcon name="mic" :size="13" /> {{ voiceView.mode === 'push_to_talk' ? 'Diktat beenden' : 'Diktieren' }}
+          </button>
+          <label class="mini-upload">
+            <AiIcon name="upload" :size="13" /> Datei
+            <input type="file" accept=".txt,.md,.json,.csv,.log,.xml,.html,.css,.js,.ts,.vue,.php" @change="attachFile" />
+          </label>
+        </div>
+        <div v-if="!isChat" class="mini-workspace-actions">
+          <button
+            type="button"
+            :disabled="snapshot.busy || snapshot.mainBusy"
+            @click="openWorkspacePanel('project_folder')"
+          >
+            <AiIcon name="folder" :size="13" /> Projektordner
+          </button>
+          <button type="button" :disabled="snapshot.busy || snapshot.mainBusy" @click="openWorkspacePanel('agents')">
+            <AiIcon name="spark" :size="13" /> Agenten
+          </button>
+          <button type="button" :disabled="snapshot.busy || snapshot.mainBusy" @click="openWorkspacePanel('workflows')">
+            <AiIcon name="grid" :size="13" /> Workflows
+          </button>
+          <button type="button" :disabled="snapshot.busy || snapshot.mainBusy" @click="openWorkspacePanel('desktop')">
+            <AiIcon name="panel" :size="13" /> Desktop
+          </button>
+        </div>
+        <ChatComposer
+          :title="isChat ? 'Gemeinsamer Projektchat' : 'Temporäre Workspace-Unterhaltung'"
+          :follow="snapshot.messages.length > 0"
+        >
+          <div v-if="!snapshot.messages.length" class="mini-welcome">
+            <strong>{{ isChat ? 'Im Projekt weiterarbeiten' : 'Dein Workspace, im Blick.' }}</strong>
+            <p>
+              {{
+                isChat
+                  ? 'Derselbe Verlauf und dieselben Antworten wie im großen Luczor-Fenster.'
+                  : 'Chats und Projekte überblicken, Code-Aufträge vorbereiten und den Desktop steuern.'
+              }}
+            </p>
+            <small>{{
+              isChat
+                ? 'Nachrichten bleiben in diesem Projektchat.'
+                : 'Temporäre Unterhaltung · Lokales Modell · Bestehende Freigaben'
+            }}</small>
+            <div>
+              <button
+                type="button"
+                @click="
+                  draft = isChat
+                    ? 'Fasse unseren bisherigen Projektstand zusammen.'
+                    : 'Zeige mir eine Übersicht meiner Projekte, Chats und laufenden Agentenaufträge.'
+                "
+              >
+                {{ isChat ? 'Projektstand ansehen' : 'Workspace überblicken' }}</button
+              ><button
+                type="button"
+                @click="
+                  draft = isChat
+                    ? 'Was ist der nächste sinnvolle Schritt in diesem Projekt?'
+                    : 'Hilf mir, einen Code-Auftrag für das ausgewählte Arbeitsprojekt vorzubereiten.'
+                "
+              >
+                {{ isChat ? 'Nächste Schritte' : 'Code-Auftrag planen' }}
+              </button>
+            </div>
+          </div>
+          <article
+            v-for="message in snapshot.messages"
+            :key="message.id"
+            class="mini-message"
+            :class="`is-${message.role}`"
+          >
+            <span class="mini-message-label">{{
+              message.role === 'user' ? 'Du' : snapshot.appearance?.assistantName || 'Luczor'
+            }}</span>
+            <small v-if="!isChat && message.contextLabel" class="mini-scope-note">{{ message.contextLabel }}</small>
+            <p v-if="message.role === 'user'">{{ message.content }}</p>
+            <template v-else>
+              <ChatAgentRoster
+                :activity="message.activity"
+                :loading="message.status === 'running'"
+                :waiting="message.status === 'running' && !!snapshot.decision"
+              />
+              <ThinkingState
+                v-if="message.activity"
+                :active="message.status === 'running'"
+                :status="
+                  message.status === 'running'
+                    ? snapshot.decision
+                      ? 'waiting'
+                      : message.activity.status
+                    : message.status
+                "
+                :steps="message.activity.steps"
+                :started-at="message.createdAt"
+                :duration-ms="
+                  message.activity.finishedAt ? message.activity.finishedAt - message.activity.startedAt : undefined
+                "
+                :label="
+                  message.status === 'running'
+                    ? 'Verarbeitet'
+                    : message.status === 'failed'
+                      ? 'Fehlgeschlagen'
+                      : message.status === 'canceled'
+                        ? 'Abgebrochen'
+                        : 'Abgeschlossen'
+                "
+              />
+              <ChatCommentary :entries="message.commentary ?? []" :active="message.status === 'running'" />
+              <StreamingText
+                v-if="message.content || message.question || message.choices.length || !message.activity"
+                :content="message.content"
+                :streaming="message.status === 'running'"
+                :show-stream-status="!message.activity"
+                :animate="false"
+                :actions="false"
+                :question="message.question"
+                :follow-ups="message.status === 'running' ? message.choices : []"
+              />
+              <AssistantResponseFooter
+                :message-id="message.id"
+                :active-message-id="lastAssistant?.status === 'running' ? lastAssistant.id : undefined"
+                :usage="message.tokenUsage"
+                :active="snapshot.busy && message.status === 'running'"
+                :budget="snapshot.thinkingBudget"
+                :control="controlThinking"
+                @stop="emit('action', { type: 'stop', sessionId: snapshot.sessionId })"
+              />
+              <WorkflowChatCards
+                v-if="isChat && message.workflows?.length"
+                :workflows="message.workflows"
+                :project-id="snapshot.project?.id ?? ''"
+                :host-only="true"
+                :host-runs="snapshot.workflowRuns"
+                :host-runs-verified="snapshot.workflowRunsVerified"
+                :disabled="disabled"
+                :read-only="snapshot.mode === 'observe' || snapshot.hud.killSwitch"
+                @open="reference => openWorkflow(message.id, reference.id)"
+                @action="
+                  (reference, action) =>
+                    emit('action', {
+                      type: 'workflow_action',
+                      sessionId: snapshot.sessionId,
+                      messageId: message.id,
+                      workflowId: reference.id,
+                      action,
+                    })
+                "
+                @discuss="
+                  reference =>
+                    emit('action', {
+                      type: 'workflow_improve',
+                      sessionId: snapshot.sessionId,
+                      messageId: message.id,
+                      workflowId: reference.id,
+                    })
+                "
+              />
+              <button
+                v-if="message.content && message.status === 'done'"
+                type="button"
+                class="mini-copy"
+                aria-label="Mini-Antwort kopieren"
+                @click="copy(message.content)"
+              >
+                <AiIcon name="copy" :size="12" /> Kopieren
+              </button>
+              <div v-if="message.choices.length && message.status === 'done'" class="mini-choices">
+                <button
+                  v-for="choice in message.choices"
+                  :key="choice"
+                  type="button"
+                  :disabled="disabled"
+                  @click="send(choice)"
+                >
+                  {{ choice }} <AiIcon name="arrow" :size="13" />
+                </button>
+              </div>
+            </template>
+          </article>
+        </ChatComposer>
+        <div v-if="tools.length" class="mini-tools"><ToolChips :tools="tools" /></div>
+        <div v-if="decision" class="mini-decision">
+          <ApprovalCard
+            :key="`${decision.id}:${!!connectionError}`"
+            compact
+            :title="decision.title"
+            :description="decision.description"
+            :detail="decision.detail"
+            :busy="!!connectionError"
+            @approve="decide(true)"
+            @reject="decide(false)"
+          />
+        </div>
+        <div v-if="resetConfirm" class="mini-reset" role="group" aria-label="Temporäre Unterhaltung leeren">
+          <p>Unterhaltung und Entwurf verwerfen? Laufende Anfragen werden abgebrochen.</p>
+          <button type="button" @click="reset">Jetzt leeren</button
+          ><button type="button" @click="resetConfirm = false">Behalten</button>
+        </div>
+        <p v-if="error" class="mini-error" role="alert">{{ error }}</p>
+        <p v-if="copied || clipboardError" class="mini-copy-status" role="status">
+          {{ clipboardError || 'Antwort kopiert' }}
+        </p>
+        <form class="mini-composer" @submit.prevent="send()">
+          <div class="mini-thinking-choice">
+            <small>Lokales Modell</small>
+            <ThinkingSelector
+              :model-value="snapshot.thinkingTier"
+              :next-prompt="snapshot.busy"
+              @update:model-value="emit('action', { type: 'thinking_tier', sessionId: snapshot.sessionId, tier: $event })"
+            />
+          </div>
+          <VoiceInputSettings
+            :busy="disabled || voiceView.starting || voiceView.finishing"
+            :active="!!voiceView.mode"
+            @start="miniVoice.start($event)"
+            @stop="miniVoice.stop()"
+          />
+          <p v-if="voiceView.error || voiceView.notice" :role="voiceView.error ? 'alert' : 'status'">
+            {{ voiceView.error || voiceView.notice }}
+          </p>
+          <textarea
+            ref="field"
+            v-model="draft"
+            aria-label="Nachricht im Mini-Chat"
+            :placeholder="isChat ? 'In diesem Projektchat schreiben …' : 'Was soll Luczor übergreifend organisieren?'"
+            rows="1"
+            maxlength="12000"
+            @keydown="inputKey"
+            @input="miniVoice.manualInput()"
+          />
+          <div>
+            <small>Enter senden · Shift + Enter neue Zeile</small
+            ><button
+              v-if="snapshot.busy"
+              type="button"
+              aria-label="Mini-Anfrage stoppen"
+              @click="emit('action', { type: 'stop', sessionId: snapshot.sessionId })"
+            >
+              <AiIcon name="stop" /></button
+            ><button v-else type="submit" aria-label="Mini-Nachricht senden" :disabled="disabled || !draft.trim()">
+              <AiIcon name="send" />
+            </button>
+          </div>
+        </form>
+        <footer class="mini-footer">
+          <button type="button" aria-label="Mini-Chat ausblenden" @click="windowAction('hide')">
+            <AiIcon name="close" :size="13" /> Ausblenden
+          </button>
+        </footer>
+          </div>
+          <template v-else>
+            <div class="mini-grip-panel__head">
+              <strong>{{ paneTitles[activePane] }}</strong>
+              <span v-if="pinnedPane" class="mini-grip-panel__pin">fixiert</span>
+            </div>
           <template v-if="activePane === 'status'">
             <dl class="mini-grip-panel__kv">
               <dt>Zustand</dt>
@@ -1034,9 +1052,9 @@ onBeforeUnmount(() => {
               <dd>{{ snapshot.hud.killSwitch ? 'aktiv' : 'aus' }}</dd>
             </dl>
           </template>
+          </template>
         </div>
       </div>
-    </template>
   </section>
 </template>
 

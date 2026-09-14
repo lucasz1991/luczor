@@ -465,7 +465,8 @@ pub fn mini_chat_window(
                 false,
             )
         }
-        MiniWindowAction::Expand => resize(&window, 420.0, 660.0, false),
+        // Wider than before: the grip icons stay visible to the right of the expanded chat page.
+        MiniWindowAction::Expand => resize(&window, 480.0, 640.0, false),
         MiniWindowAction::Collapse => resize(&window, 148.0, 184.0, false),
         MiniWindowAction::Peek => resize(&window, 380.0, 370.0, false),
         MiniWindowAction::Hide => window.hide().map_err(|e| e.to_string()),

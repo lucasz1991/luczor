@@ -251,6 +251,59 @@ describe('device resources settings UI', () => {
     expect(view.client.save).toHaveBeenCalledOnce()
   })
 
+  it('persists a queued gesture after closing during an earlier save without reusing its old revision', async () => {
+    vi.useFakeTimers()
+    const view = await mount()
+    let resolve!: (state: LocalResourceConfigState) => void
+    vi.mocked(view.client.save).mockImplementationOnce(
+      () =>
+        new Promise(done => {
+          resolve = done
+        })
+    )
+    await view.range('responseCpu', 80)
+    await vi.advanceTimersByTimeAsync(400)
+    await view.range('responseCpu', 25)
+    view.app.unmount()
+    expect(view.client.save).toHaveBeenCalledOnce()
+    const first = vi.mocked(view.client.save).mock.calls[0]![0]
+    resolve({ ...state(), requested: first, revision: 5, pending: true })
+    await flush()
+    expect(view.client.save).toHaveBeenLastCalledWith(expect.objectContaining({ threads: 4 }), 5)
+    await vi.runAllTimersAsync()
+    expect(view.client.save).toHaveBeenCalledTimes(2)
+  })
+
+  it('settles an unchanged percentage without a stuck autosave indicator', async () => {
+    vi.useFakeTimers()
+    const requested = SystemCheckApi.percentageResourceConfig(hardware, DEFAULT_LOCAL_RESOURCE_CONFIG, {
+      ...SystemCheckApi.MAXIMUM_RESOURCE_PERCENTAGES,
+    })
+    const view = await mount({ ...state(), requested, applied: requested })
+    await view.range('responseCpu', 100)
+    await vi.advanceTimersByTimeAsync(400)
+    await flush()
+    expect(view.client.save).not.toHaveBeenCalled()
+    expect(text(view.root)).not.toContain('Änderung wird automatisch gespeichert')
+    expect(view.button('Systemcheck: Maximalwerte übernehmen').props.disabled).toBe(false)
+    view.app.unmount()
+  })
+
+  it('does not retry a failed automatic write endlessly or falsely report it as saved', async () => {
+    vi.useFakeTimers()
+    const view = await mount()
+    vi.mocked(view.client.save).mockRejectedValue(new Error('secret-path-and-token'))
+    await view.range('ram', 50)
+    await vi.advanceTimersByTimeAsync(400)
+    await flush()
+    expect(text(view.root)).toContain('Die Einstellung wurde nicht bestätigt')
+    expect(text(view.root)).toContain('Noch nicht gespeichert')
+    expect(text(view.root)).not.toContain('secret-path-and-token')
+    await vi.runAllTimersAsync()
+    expect(view.client.save).toHaveBeenCalledOnce()
+    view.app.unmount()
+  })
+
   it('blocks automatic saving after an independent concurrent change without discarding the slider draft', async () => {
     vi.useFakeTimers()
     const view = await mount()

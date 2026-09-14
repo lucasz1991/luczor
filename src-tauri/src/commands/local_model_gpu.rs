@@ -1142,14 +1142,32 @@ mod tests {
     fn percentage_limits_scale_each_gpu_and_fitter_margin_independently() {
         let devices = parse_devices("Available devices:\n  CUDA0: Large (24576 MiB, 23552 MiB free)\n  CUDA1: Small (8192 MiB, 7168 MiB free)");
         let config = LocalResourceConfig {
-            percentage_limits: Some(super::super::resource_config::ResourcePercentageLimits { response_cpu: 100, context_cpu: 100, ram: 100, gpu: 50 }),
+            percentage_limits: Some(super::super::resource_config::ResourcePercentageLimits {
+                response_cpu: 100,
+                context_cpu: 100,
+                ram: 100,
+                gpu: 50,
+            }),
             ..Default::default()
         };
-        let plan = select_configured_plan(&devices, HELP, None, 0, "compatible_group", 64 * 1024 * MIB, &config).unwrap();
+        let help = format!("{HELP}\n--split-mode MODE\n--tensor-split N");
+        let plan = select_configured_plan(
+            &devices,
+            &help,
+            None,
+            0,
+            "compatible_group",
+            64 * 1024 * MIB,
+            &config,
+        )
+        .unwrap();
         assert_eq!(plan.gpu_budget_bytes, (11264 + 3072) * MIB);
         assert_eq!(plan.device_budgets.get("CUDA0"), Some(&(11264 * MIB)));
         assert_eq!(plan.device_budgets.get("CUDA1"), Some(&(3072 * MIB)));
-        assert!(plan.arguments.windows(2).any(|pair| pair == ["--fit-target", "12288,4096"]));
+        assert!(plan
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--fit-target", "12288,4096"]));
         assert!(!plan.arguments.iter().any(|arg| arg == "--tensor-split"));
     }
     use super::*;

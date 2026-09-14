@@ -479,36 +479,66 @@ mod tests {
     #[test]
     fn percentage_limits_round_trip_and_recompute_from_fresh_hardware() {
         let hardware = resource_runtime::ResourceSnapshot {
-            logical_cores: 24, available_logical_cores: 16, physical_cores: Some(12),
-            cpu_load: None, total_ram_bytes: 32 * GIB, available_ram_bytes: 20 * GIB,
+            logical_cores: 24,
+            available_logical_cores: 16,
+            physical_cores: Some(12),
+            cpu_load: None,
+            total_ram_bytes: 32 * GIB,
+            available_ram_bytes: 20 * GIB,
         };
         let config = LocalResourceConfig {
-            percentage_limits: Some(ResourcePercentageLimits { response_cpu: 50, context_cpu: 75, ram: 50, gpu: 50 }),
+            percentage_limits: Some(ResourcePercentageLimits {
+                response_cpu: 50,
+                context_cpu: 75,
+                ram: 50,
+                gpu: 50,
+            }),
             ..Default::default()
         };
         let resolved = resolve_percentage_host_config(&config, &hardware).unwrap();
         assert_eq!(resolved.threads, Some(7));
         assert_eq!(resolved.threads_batch, Some(10));
         let maximum = hardware.available_ram_bytes - hardware.total_ram_bytes / 12;
-        assert_eq!(hardware.available_ram_bytes - resolved.ram_reserve_bytes.unwrap(), percentage_budget(maximum, 50));
+        assert_eq!(
+            hardware.available_ram_bytes - resolved.ram_reserve_bytes.unwrap(),
+            percentage_budget(maximum, 50)
+        );
         let encoded = serde_json::to_vec(&resolved).unwrap();
-        assert_eq!(serde_json::from_slice::<LocalResourceConfig>(&encoded).unwrap(), resolved);
-        let smaller = resource_runtime::ResourceSnapshot { available_logical_cores: 2, available_ram_bytes: 6 * GIB, ..hardware };
+        assert_eq!(
+            serde_json::from_slice::<LocalResourceConfig>(&encoded).unwrap(),
+            resolved
+        );
+        let smaller = resource_runtime::ResourceSnapshot {
+            available_logical_cores: 2,
+            available_ram_bytes: 6 * GIB,
+            ..hardware
+        };
         let fresh = resolve_percentage_host_config(&resolved, &smaller).unwrap();
         assert_eq!(fresh.threads, Some(1));
         assert!(fresh.ram_reserve_bytes.unwrap() < 6 * GIB);
         let legacy = serde_json::to_value(LocalResourceConfig::default()).unwrap();
         assert!(legacy.get("percentageLimits").is_none());
-        assert!(serde_json::from_value::<LocalResourceConfig>(legacy).unwrap().percentage_limits.is_none());
+        assert!(serde_json::from_value::<LocalResourceConfig>(legacy)
+            .unwrap()
+            .percentage_limits
+            .is_none());
     }
     #[test]
     fn invalid_percentages_are_rejected_without_weakening_resource_guards() {
         for value in [0, 101, 255] {
             let config = LocalResourceConfig {
-                percentage_limits: Some(ResourcePercentageLimits { response_cpu: 100, context_cpu: 100, ram: value, gpu: 100 }),
+                percentage_limits: Some(ResourcePercentageLimits {
+                    response_cpu: 100,
+                    context_cpu: 100,
+                    ram: value,
+                    gpu: 100,
+                }),
                 ..Default::default()
             };
-            assert_eq!(validate_shape(&config).unwrap_err(), "resource_percentage_invalid");
+            assert_eq!(
+                validate_shape(&config).unwrap_err(),
+                "resource_percentage_invalid"
+            );
         }
         assert_eq!(percentage_budget(u64::MAX, 100), u64::MAX);
         assert_eq!(maximum_resource_threads(24, 4), 3);

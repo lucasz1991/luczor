@@ -40,8 +40,8 @@ html.mini-window,
   box-sizing: border-box;
 }
 .mini-surface.is-expanded {
-  width: min(420px, 100vw);
-  height: min(660px, 100dvh);
+  width: min(480px, 100vw);
+  height: min(640px, 100dvh);
 }
 .mini-surface.has-peek {
   width: min(380px, 100vw);
