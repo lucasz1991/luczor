@@ -52,5 +52,8 @@ describe('visible capability permissions', () => {
     expect(html).toContain('Im Beobachten gesperrt')
     expect(html).toContain('nicht im Chatarchiv gespeichert')
     expect(html).toContain('type="search"')
+    expect(html).toContain('Kategorie und Unterkategorie')
+    expect(html).toContain('files/local/write')
+    expect(html).toContain('Computer › Bildschirm und Fenster › Lesen und Prüfen')
   })
 })

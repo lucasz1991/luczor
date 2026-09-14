@@ -1,5 +1,6 @@
 import { specialistContextTools } from './specialistContextTools'
 import { fitRequestContext } from '@/services/inference/contextBudget'
+import { openToolUsage, toolUsageContext } from '@/services/tools/usage'
 import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 import { LuczorApi } from '@/services/api/luczorApi'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
@@ -116,6 +117,8 @@ export async function prepareExternalSpecialists(
   }
   const account = await deps.account()
   if (!account) throw new Error('Für das Agententeam fehlt ein verifiziertes Konto.')
+  const toolUsage = await openToolUsage(JSON.stringify([account.serverInstance, account.principalId]))
+  const usageSnapshot = await toolUsage.snapshot()
   executionGate.assert(ticket)
   // This policy governs repository snippets, already omitted from externalBaseMessages.
   // Public role packets remain usable in projects that never permit code export.
@@ -171,6 +174,8 @@ export async function prepareExternalSpecialists(
           content: 'Providerfreigegebener Gesprächskontext (Daten):\n' + JSON.stringify(selectedContext.messages),
         },
       ]
+      const map = toolUsageContext(contextTools.tools, usageSnapshot, false)
+      if (map) messages.splice(1, 0, { role: 'system', content: map })
       if (JSON.stringify(messages).length > 48_000)
         throw new Error('Der externe Agentenkontext ist zu groß. Bitte den Auftrag eingrenzen.')
       const request: InferenceRequest = {
@@ -304,7 +309,16 @@ export async function prepareExternalSpecialists(
           const key = JSON.stringify([call.name, call.arguments])
           if (executed.has(key)) throw new Error('Der Spezialist wiederholt denselben Kontextabruf ohne Fortschritt.')
           executed.add(key)
-          const value = contextTools.execute(call.name, call.arguments)
+          const toolStarted = performance.now()
+          let value: unknown
+          try {
+            value = contextTools.execute(call.name, call.arguments)
+            await toolUsage.record(`${role}:${round}:${call.id}`, call.name, true, performance.now() - toolStarted)
+          } catch (error) {
+            if (contextTools.tools.some(tool => tool.function.name === call.name))
+              await toolUsage.record(`${role}:${round}:${call.id}`, call.name, false, performance.now() - toolStarted)
+            throw error
+          }
           request.messages.push({
             role: 'tool',
             tool_call_id: call.id,

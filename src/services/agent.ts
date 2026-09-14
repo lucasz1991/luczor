@@ -14,6 +14,7 @@ import {
 import { focusedTools, cleanLocalHistory } from '@/services/inference/focusedTools'
 import { fitRequestContext, compactToolOutput } from '@/services/inference/contextBudget'
 import { recordTrace, debugScope, traceEnabled } from '@/services/debugTrace'
+import { openToolUsage, toolUsageContext, TOOL_MAP_MARKER } from '@/services/tools/usage'
 import {
   createGoalReportTool,
   createGoalReadResultTool,
@@ -636,6 +637,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   const debugOwner = await traceEnabled()
     .then(enabled => (enabled ? debugScope() : undefined))
     .catch(() => undefined)
+  const toolUsage = await openToolUsage(opts.principalScopeId ?? (await debugScope().catch(() => undefined)))
   const recordOutcome: typeof recordPersistentOutcome = (...args) => {
     if (debugOwner)
       void recordTrace(
@@ -1217,10 +1219,27 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     // Approved external messages are immutable: even a mode change while the
     // approval was open must not alter the already approved request hash.
     const eligibleTools = tools.filter(tool => toolRecovery.canOffer(tool.function.name))
-    const availableTools = focused ? focused.select(eligibleTools) : eligibleTools
+    const toolStatistics = await toolUsage.snapshot()
+    const availableTools = focused ? focused.select(eligibleTools, toolStatistics) : eligibleTools
     if (!resolvedRoute.externalOneShot) {
       applyRuntimeMode(messages, currentMode())
       applyRuntimeTools(messages, availableTools, currentMode())
+      // Replace this bounded numeric/name map every round; never accumulate history copies.
+      const mappedTools = [...eligibleTools, ...availableTools.filter(tool => !eligibleTools.some(eligible => eligible.function.name === tool.function.name))]
+      const map = toolUsageContext(mappedTools, toolStatistics, !!focused)
+      const mapIndex = messages.findIndex(
+        message => message.role === 'system' && message.content.startsWith(TOOL_MAP_MARKER)
+      )
+      if (mapIndex >= 0) {
+        if (map) messages.splice(mapIndex, 1, { role: 'system', content: map })
+        else messages.splice(mapIndex, 1)
+      } else if (map) {
+        const firstConversation = messages.findIndex(message => message.role !== 'system')
+        messages.splice(firstConversation < 0 ? messages.length : firstConversation, 0, {
+          role: 'system',
+          content: map,
+        })
+      }
     }
 
     setStatus('thinking')
@@ -2169,9 +2188,11 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           const receipt = tool.mutating
             ? await opts.effectJournal?.before({ ...call, arguments: executionArguments })
             : undefined
+          let invokedAt: number | undefined
           try {
             executionGate.assert(execution)
             signal.throwIfAborted()
+            invokedAt = performance.now()
             const result = await tool.execute(executionArguments, {
               projectId,
               signal,
@@ -2181,9 +2202,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               workflowScope: opts.workflowScope,
               toolSessionId: opts.runId,
             })
+            await toolUsage.record(call.id, call.name, normalizeToolOutcome(result).ok, performance.now() - invokedAt)
             await receipt?.finish(normalizeToolOutcome(result).ok)
             return result
           } catch (error) {
+            if (invokedAt !== undefined)
+              await toolUsage.record(call.id, call.name, false, performance.now() - invokedAt)
             if (!(error instanceof ChatEffectJournalError)) await receipt?.finish(false)
             throw error
           }

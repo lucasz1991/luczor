@@ -28,7 +28,7 @@ export function specialistContextTools(messages: readonly WireMessage[], selecte
     },
   ].filter(tool => selected.includes(tool.name))
   return {
-    tools: definitions.map(definition => ({ type: 'function', function: definition })),
+    tools: definitions.map(definition => ({ type: 'function' as const, function: definition })),
     execute(name: string, args: Record<string, unknown>) {
       const tool = definitions.find(tool => tool.name === name)
       if (!tool) throw new Error('Dieses Werkzeug wurde dem externen Auftrag nicht zugeteilt.')

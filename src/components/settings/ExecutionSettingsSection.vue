@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import IdleOptimizationSettings from '@/components/IdleOptimizationSettings.vue'
+import { searchToolCatalog, toolCategoryMap } from '@/services/tools/discovery'
 import type { LuczorMode } from '@/services/inference/types'
 import {
   capabilityAccess,
   capabilityAccessLabels,
-  capabilityGroup,
   capabilityTitle,
   type ToolCapability,
 } from '@/services/toolCapabilities'
@@ -40,14 +40,25 @@ const emit = defineEmits<{
 }>()
 
 const search = ref('')
+const category = ref('')
+const discoveryPool = computed(() =>
+  props.tools.map(tool => ({
+    type: 'function' as const,
+    function: { name: tool.name, description: `${capabilityTitle(tool)} ${tool.description}`, parameters: {} },
+  }))
+)
+const categoryOptions = computed(() => toolCategoryMap(discoveryPool.value))
 const modeLabels: Record<LuczorMode, string> = { observe: 'Beobachten', act: 'Handeln', unrestricted: 'Vollzugriff' }
 const capabilityGroups = computed(() => {
-  const query = search.value.trim().toLocaleLowerCase('de-DE')
+  const matches = new Map(
+    searchToolCatalog(discoveryPool.value, search.value, category.value).map(item => [item.meta.name, item.meta])
+  )
   const groups = new Map<string, Array<{ name: string; title: string; access: string; transient: boolean }>>()
   for (const tool of props.tools) {
     const title = capabilityTitle(tool)
-    const group = capabilityGroup(tool)
-    if (query && !`${title} ${tool.name} ${group}`.toLocaleLowerCase('de-DE').includes(query)) continue
+    const metadata = matches.get(tool.name)
+    if (!metadata) continue
+    const group = metadata.path.join(' › ')
     const entries = groups.get(group) ?? []
     entries.push({
       name: tool.name,
@@ -185,7 +196,16 @@ function toggleAutoExecution(): void {
       <p v-if="killSwitch" role="status" class="lz-hint">Not-Aus aktiv: Alle Werkzeuge sind gesperrt.</p>
       <label class="capability-search">
         <span>Funktion suchen</span>
-        <input v-model="search" type="search" placeholder="Zum Beispiel Bildschirm oder Datei" />
+        <input v-model="search" type="search" placeholder="Zum Beispiel Formular, screenshot oder Gedächtnis" />
+      </label>
+      <label class="capability-search">
+        <span>Kategorie und Unterkategorie</span>
+        <select v-model="category">
+          <option value="">Alle Kategorien</option>
+          <option v-for="node in categoryOptions" :key="node.id" :value="node.id">
+            {{ '— '.repeat(node.id.split('/').length - 1) }}{{ node.label }} ({{ node.tools }})
+          </option>
+        </select>
       </label>
       <div aria-live="polite">
         <section v-for="group in capabilityGroups" :key="group.title" class="capability-group">
@@ -196,6 +216,7 @@ function toggleAutoExecution(): void {
             <li v-for="tool in group.tools" :key="tool.name">
               <div>
                 <span class="capability-title">{{ tool.title }}</span>
+                <small>{{ tool.name }}</small>
                 <small v-if="tool.transient">Ergebnis wird nicht im Chatarchiv gespeichert</small>
               </div>
               <span class="capability-access">{{ tool.access }}</span>
@@ -220,7 +241,8 @@ function toggleAutoExecution(): void {
   margin: 16px 0;
   font-size: 13px;
 }
-.capability-search input {
+.capability-search input,
+.capability-search select {
   width: 100%;
   box-sizing: border-box;
   padding: 10px 12px;
@@ -229,7 +251,8 @@ function toggleAutoExecution(): void {
   background: var(--surface-glass);
   color: var(--text-primary);
 }
-.capability-search input:focus-visible {
+.capability-search input:focus-visible,
+.capability-search select:focus-visible {
   outline: 2px solid var(--cy, #74c5d9);
   outline-offset: 2px;
 }

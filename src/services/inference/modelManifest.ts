@@ -38,6 +38,9 @@ export type LocalModelCapacityPolicy = {
   acceptedAccelerators?: AcceleratorBackend[]
 }
 
+const FEATURE_SUPPORT_VALUES = ['verified', 'candidate', 'unsupported', 'unknown'] as const
+type LocalModelFeatureSupport = (typeof FEATURE_SUPPORT_VALUES)[number]
+
 export type LocalModelReleaseManifest = {
   id: string
   displayName: string
@@ -47,6 +50,7 @@ export type LocalModelReleaseManifest = {
   promoted: boolean
   enabled: boolean
   capabilities: string[]
+  features: Record<string, LocalModelFeatureSupport>
   contextLimit: number | null
   artifact: ModelArtifactManifest | null
   runtime: ModelRuntimeManifest | null
@@ -181,6 +185,25 @@ function stringList(value: unknown, name: string): string[] {
     throw new Error(`Ungültiges Manifestfeld: ${name}.`)
   }
   return [...value]
+}
+
+function isFeatureSupport(value: unknown): value is LocalModelFeatureSupport {
+  return typeof value === 'string' && FEATURE_SUPPORT_VALUES.some(item => item === value)
+}
+
+function featureMap(value: unknown, name: string): Record<string, LocalModelFeatureSupport> {
+  if (value === undefined) return {}
+  const item = record(value, name)
+  const result: Record<string, LocalModelFeatureSupport> = {}
+  const entries = Object.entries(item)
+  if (entries.length > 64) throw new Error(`Ungültiges Manifestfeld: ${name}.`)
+  for (const [key, raw] of entries) {
+    if (!isFeatureSupport(raw) || !SAFE_ID.test(key)) {
+      throw new Error(`Ungültiges Manifestfeld: ${name}.`)
+    }
+    result[key] = raw
+  }
+  return result
 }
 
 function artifact(value: unknown, modelId: string): ModelArtifactManifest | null {
@@ -330,6 +353,7 @@ function parseModel(value: unknown, tierCatalog = false): LocalModelReleaseManif
       'promoted',
       'enabled',
       'capabilities',
+      ...('features' in item ? ['features'] : []),
       'context_limit',
       'artifact',
       'runtime',
@@ -363,6 +387,7 @@ function parseModel(value: unknown, tierCatalog = false): LocalModelReleaseManif
     promoted: requiredBoolean(item.promoted, `${id}.promoted`),
     enabled: requiredBoolean(item.enabled, `${id}.enabled`),
     capabilities: stringList(item.capabilities, `${id}.capabilities`),
+    features: featureMap(item.features, `${id}.features`),
     contextLimit: nullableInteger(item.context_limit, `${id}.context_limit`),
     artifact: artifact(item.artifact, id),
     runtime: runtime(item.runtime, id),
@@ -415,8 +440,8 @@ function parseRouting(value: unknown, tierModels?: LocalModelReleaseManifest[]):
     ? typeof item.preferred_model_id === 'string' &&
       tierIds.includes(item.preferred_model_id) &&
       item.default_model_id === item.preferred_model_id &&
-      fallbacks.length === 4 &&
-      new Set(fallbacks).size === 4 &&
+      fallbacks.length === tierIds.length - 1 &&
+      new Set(fallbacks).size === tierIds.length - 1 &&
       fallbacks.every(id => tierIds.includes(id) && id !== item.preferred_model_id) &&
       experimental.length === 0 &&
       tierModels!.every(
@@ -480,8 +505,12 @@ function decodeEnvelope(input: unknown): {
   const schemaVersion = integer(payloadWire.schema_version, 'schema_version', 1)
   if (schemaVersion !== 1 && schemaVersion !== 2) throw new Error('Nicht unterstützte Manifest-Schemaversion.')
   const models = payloadWire.models.map(model => parseModel(model, schemaVersion === 2))
-  const expectedCount = schemaVersion === 2 ? 5 : 2
-  if (models.length !== expectedCount || new Set(models.map(item => item.id)).size !== expectedCount) {
+  const expectedCount = schemaVersion === 1 ? 2 : models.length
+  if (
+    (schemaVersion === 2 && (models.length < 1 || models.length > 20)) ||
+    (schemaVersion === 1 && models.length !== 2) ||
+    new Set(models.map(item => item.id)).size !== expectedCount
+  ) {
     throw new Error('Der lokale Modellkatalog ist unvollständig oder mehrdeutig.')
   }
   const routing = parseRouting(payloadWire.routing, schemaVersion === 2 ? models : undefined)

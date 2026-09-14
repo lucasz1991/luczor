@@ -98,6 +98,10 @@ export function compactToolOutput(value: unknown, maxChars = 6000): unknown {
 export function contextBreakdown(messages: readonly WireMessage[], tools: readonly unknown[]) {
   const characters = { rules: 0, profile: 0, knowledge: 0, history: 0, tools: JSON.stringify(tools).length }
   for (const message of messages) {
+    if (message.role === 'system' && message.content.startsWith('[Luczor Werkzeugkarte]')) {
+      characters.tools += message.content.length
+      continue
+    }
     if (message.role !== 'system') {
       characters.history += message.content.length
       continue
