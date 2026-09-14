@@ -46,6 +46,8 @@ function interruptionReason(code: string): string {
     return 'Das Modell hat keine verwertbare öffentliche Antwort oder Werkzeugaufrufe geliefert. Die Ursache ist damit noch nicht belegt.'
   if (code === 'runtime_unsafe_response')
     return 'Die Modellantwort konnte auch nach der Korrekturrunde nicht sicher als öffentliche Antwort verwendet werden.'
+  if (code === 'runtime_output_repeated')
+    return 'Eine Wiederholungsschleife wurde erkannt und gestoppt. Der bisherige Antworttext bleibt erhalten; es erfolgt kein automatischer Neuanlauf.'
   if (isSilentLocalResponseFailure(code))
     return 'Das Modell hat auch nach der automatischen Korrektur keine verwertbare Antwort geliefert. Die Ausgabe wurde verworfen; daraus folgt keine Diagnose über RAM oder Kontextgröße.'
   if (['readiness_unavailable', 'readiness_refresh_failed'].includes(code))

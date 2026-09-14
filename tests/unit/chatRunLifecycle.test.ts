@@ -85,7 +85,7 @@ describe('captured chat cancellation', () => {
     { code: 'runtime_output_repeated' },
     { code: 'runtime_status_echo' },
     { code: 'runtime_text_tool_output' },
-  ])('does not automatically read exhausted response correction diagnostics: %j', interrupted => {
+  ])('does not automatically read stopped loops or exhausted correction diagnostics: %j', interrupted => {
     const app = readFileSync('src/App.vue', 'utf8')
     const start = app.indexOf('if (isSilentLocalResponseFailure(interrupted?.code)) progressiveSpeech.cancel()')
     const source = app.slice(start, app.indexOf('\n    if (!ephemeralDataUsed', start))

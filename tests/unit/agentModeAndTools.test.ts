@@ -894,18 +894,13 @@ describe('agent mode and tool reliability', () => {
       ).toEqual(partial ? [partial] : [])
     }
   )
-  it('retracts a repeated answer and retries the same context within one agent round', async () => {
+  it('stops a repeated answer without deleting it or restarting and rejects late callbacks', async () => {
     const partial = 'Geprüfter Zwischenstand. Fertig. Warte auf deine Anweisung.'
     let staleRequest!: InferenceRequest
     mocks.streamChatWithTools.mockImplementationOnce(async (request: InferenceRequest) => {
       staleRequest = request
       request.onToken?.(partial)
       throw new LocalInferenceError('Wiederholung automatisch gestoppt.', 'runtime_output_repeated', false, true)
-    })
-    mocks.streamChatWithTools.mockImplementationOnce(async (request: InferenceRequest) => {
-      staleRequest.onToken?.('Veraltete Ausgabe darf nicht zurückkehren.')
-      request.onToken?.('Das Projekt wurde geprüft.')
-      return { content: 'Das Projekt wurde geprüft.', toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
     })
     const published = vi.fn()
     const reset = vi.fn()
@@ -920,63 +915,62 @@ describe('agent mode and tool reliability', () => {
       onProgress: progress,
       inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
     })
-    expect(result.interrupted).toBeUndefined()
-    expect(result.continuation).toBeUndefined()
-    expect(result.finalText).toBe('Das Projekt wurde geprüft.')
-    expect(published.mock.calls.map(([content]) => content)).toEqual([partial, '', result.finalText])
-    expect(reset).toHaveBeenCalledExactlyOnceWith({ round: 1 })
-    expect(progress).toHaveBeenCalledWith({ phase: 'regenerating', round: 1, attempt: 1 })
-    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(2)
-    const first = mocks.streamChatWithTools.mock.calls[0]![0] as InferenceRequest
-    const second = mocks.streamChatWithTools.mock.calls[1]![0] as InferenceRequest
-    expect(second.messages.slice(0, -1)).toEqual(first.messages)
-    expect(JSON.stringify(second.messages)).not.toContain(partial)
-    expect(second.tools).toEqual(first.tools)
-    expect(second.toolChoice).toEqual(first.toolChoice)
-    expect(result.tokenUsage.rounds).toBe(2)
-    expect(mocks.execute).not.toHaveBeenCalled()
-  })
-
-  it('caps automatic repetition recovery and keeps exhausted diagnostics out of public speech callbacks', async () => {
-    const partial = 'Fertig. '.repeat(40)
-    mocks.streamChatWithTools.mockImplementation(async (request: InferenceRequest) => {
-      request.onToken?.(partial)
-      throw new LocalInferenceError('Wiederholung automatisch gestoppt.', 'runtime_output_repeated', false, true)
-    })
-    const published = vi.fn()
-    const completed = vi.fn()
-    const reset = vi.fn()
-    const result = await runAgent({
-      projectId: 'project-2',
-      mode: 'observe',
-      maxRounds: 1,
-      baseMessages: [{ role: 'user', content: 'Prüfe das Projekt.' }],
-      onToken: published,
-      onRoundComplete: completed,
-      onResponseReset: reset,
-      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
-    })
-    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(3)
-    expect(reset).toHaveBeenCalledTimes(3)
-    expect(published).toHaveBeenLastCalledWith('')
-    expect(completed).not.toHaveBeenCalled()
+    staleRequest.onToken?.('Veraltete Ausgabe darf nicht zurückkehren.')
     expect(result.interrupted?.code).toBe('runtime_output_repeated')
-    expect(result.finalText).not.toContain(partial)
-    expect(JSON.stringify(result.continuation!.messages)).not.toContain(partial)
-    expect(result.tokenUsage.rounds).toBe(3)
+    expect(result.continuation).toBeDefined()
+    expect(result.finalText).toContain(partial)
+    expect(result.finalText).toContain('kein automatischer Neuanlauf')
+    expect(published.mock.calls.map(([content]) => content)).toEqual([partial])
+    expect(reset).not.toHaveBeenCalled()
+    expect(progress.mock.calls.some(([event]) => event.phase === 'regenerating')).toBe(false)
+    expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+    expect(result.tokenUsage.rounds).toBe(1)
     expect(mocks.execute).not.toHaveBeenCalled()
   })
 
-  it('recovers after two failures without replaying the completed tool round', async () => {
+  it.each(['Fertig. '.repeat(40), ''])(
+    'keeps a loop stop silent without retries, even with no public output: %j',
+    async partial => {
+      mocks.streamChatWithTools.mockImplementation(async (request: InferenceRequest) => {
+        request.onToken?.(partial)
+        throw new LocalInferenceError('Wiederholung automatisch gestoppt.', 'runtime_output_repeated', false, true)
+      })
+      const published = vi.fn()
+      const completed = vi.fn()
+      const reset = vi.fn()
+      const result = await runAgent({
+        projectId: 'project-2',
+        mode: 'observe',
+        maxRounds: 1,
+        baseMessages: [{ role: 'user', content: 'Prüfe das Projekt.' }],
+        onToken: published,
+        onRoundComplete: completed,
+        onResponseReset: reset,
+        inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+      })
+      expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+      expect(reset).not.toHaveBeenCalled()
+      expect(published.mock.calls.map(([content]) => content)).toEqual(partial ? [partial] : [])
+      expect(completed).not.toHaveBeenCalled()
+      expect(result.interrupted?.code).toBe('runtime_output_repeated')
+      expect(result.finalText).toContain(partial.trim())
+      expect(result.finalText).not.toMatch(/zwei automatischen|entfernt|verworfen/)
+      expect(
+        result.continuation!.messages.filter(message => message.role === 'assistant').map(message => message.content)
+      ).not.toContain(partial)
+      expect(result.tokenUsage.rounds).toBe(1)
+      expect(mocks.execute).not.toHaveBeenCalled()
+    }
+  )
+
+  it('preserves a completed tool round after a loop and continues only on an explicit new call', async () => {
     const contexts: string[] = []
     mocks.streamChatWithTools.mockResolvedValueOnce({ ...toolCallResult, content: 'Ich prüfe den Projektzustand.' })
-    for (let index = 0; index < 2; index++) {
-      mocks.streamChatWithTools.mockImplementationOnce(async (request: InferenceRequest) => {
-        contexts.push(JSON.stringify(request.messages.filter(message => message.role === 'tool')))
-        request.onToken?.('Verworfene Schleife.')
-        throw new LocalInferenceError('Wiederholung.', 'runtime_output_repeated', false, true)
-      })
-    }
+    mocks.streamChatWithTools.mockImplementationOnce(async (request: InferenceRequest) => {
+      contexts.push(JSON.stringify(request.messages.filter(message => message.role === 'tool')))
+      request.onToken?.('Bisherige Teilantwort.')
+      throw new LocalInferenceError('Wiederholung.', 'runtime_output_repeated', false, true)
+    })
     mocks.streamChatWithTools.mockImplementationOnce(async (request: InferenceRequest) => {
       contexts.push(JSON.stringify(request.messages.filter(message => message.role === 'tool')))
       return { content: 'Die Prüfung ist abgeschlossen.', toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
@@ -990,27 +984,39 @@ describe('agent mode and tool reliability', () => {
       onRoundComplete: completed,
       inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
     })
-    expect(result.finalText).toBe('Die Prüfung ist abgeschlossen.')
-    expect(result.interrupted).toBeUndefined()
+    expect(result.finalText).toContain('Bisherige Teilantwort.')
+    expect(result.interrupted?.code).toBe('runtime_output_repeated')
     expect(mocks.execute).toHaveBeenCalledOnce()
-    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(4)
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(2)
+    const resumed = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      maxRounds: 1,
+      baseMessages: [{ role: 'user', content: 'Bitte fortsetzen.' }],
+      continuation: result.continuation,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(resumed.finalText).toBe('Die Prüfung ist abgeschlossen.')
+    expect(mocks.execute).toHaveBeenCalledOnce()
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(3)
     expect(new Set(contexts).size).toBe(1)
     expect(contexts[0]).toContain('call-1')
     expect(completed.mock.calls.filter(([event]) => event.kind === 'commentary')).toHaveLength(1)
   })
 
-  it.each(['abort', 'scope'] as const)('does not restart after %s during a repetition reset', async stop => {
+  it.each(['abort', 'scope'] as const)('does not restart after %s during repeated output', async stop => {
     const controller = new AbortController()
-    mocks.streamChatWithTools.mockRejectedValueOnce(
-      new LocalInferenceError('Wiederholung.', 'runtime_output_repeated', false, true)
-    )
+    mocks.streamChatWithTools.mockImplementationOnce(async (request: InferenceRequest) => {
+      request.onToken?.('Teilantwort.')
+      throw new LocalInferenceError('Wiederholung.', 'runtime_output_repeated', false, true)
+    })
     const task = runAgent({
       projectId: 'project-2',
       mode: 'observe',
       maxRounds: 1,
       signal: controller.signal,
       baseMessages: [{ role: 'user', content: 'Prüfe das Projekt.' }],
-      onResponseReset: () => {
+      onToken: () => {
         if (stop === 'abort') controller.abort()
         else executionGate.invalidate('execution_session_changed')
       },

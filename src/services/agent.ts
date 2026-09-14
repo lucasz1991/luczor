@@ -875,7 +875,6 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     !planningDiscussion &&
     requestedToolChoice !== 'none' &&
     mayRepairTextTool(latestUserMessage, shouldRequireToolCall(latestUserMessage))
-  let repetitionRetries = 0
   let inferenceAttempt = 0
   let localContextAdjusted = false
   const tokenCounter = createTokenUsageCounter()
@@ -1099,7 +1098,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     }
     const diagnostic = interruption.diagnostic
     const finalText = repeatedOutput
-      ? 'Auch nach zwei automatischen Korrekturversuchen konnte das Modell keine Antwort ohne Wiederholung liefern. Die verworfene Ausgabe wurde entfernt. Dein Auftrag und bereits erledigte Arbeit bleiben zum Fortsetzen erhalten.'
+      ? [
+          publicAnswerText(visibleContent, true).trim(),
+          'Eine Wiederholungsschleife wurde erkannt und gestoppt. Der bisherige Antworttext und Arbeitsfortschritt bleiben erhalten. Es erfolgt kein automatischer Neuanlauf. Du kannst bei Bedarf selbst fortsetzen.',
+        ]
+          .filter(Boolean)
+          .join('\n\n')
       : interruption.code === 'runtime_status_echo'
         ? 'Das Modell hat auch nach zwei automatischen Korrekturversuchen eine unbelegte Statusmeldung statt einer Antwort geliefert. Die Ausgabe wurde verworfen. Dein Auftrag und der gesicherte Arbeitsstand bleiben erhalten.'
         : interruption.code === 'runtime_text_tool_output'
@@ -1137,7 +1141,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         })
       )
     }
-    // An exhausted correction is a UI diagnostic, never a new speech stream.
+    // A stopped loop or exhausted correction is not a new speech stream.
     if (!silentCorrectionFailure) publish(finalText)
     if (!silentCorrectionFailure)
       opts.onRoundComplete?.({
@@ -1228,7 +1232,6 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     let res
     const inferenceStarted = performance.now()
     let retryInRound = 0
-    let correctionReason: 'repetition' | 'status' = 'repetition'
     while (true) {
       executionGate.assert(execution)
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
@@ -1242,9 +1245,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               role: 'system',
               content:
                 `Korrekturversuch ${retryInRound}: Beantworte den bestehenden Auftrag anhand des bisherigen Kontexts und der vorhandenen Werkzeugergebnisse neu. ` +
-                (correctionReason === 'status'
-                  ? 'Die verworfene Ausgabe hat eine Anwendungsdiagnose nachgeahmt. Antworte auf die Nutzerfrage oder verwende erforderliche bereitgestellte Werkzeuge strukturiert. Erfinde keine Laufzeitfehler, HTTP-Statuswerte, Tokenzahlen oder Fortsetzungsstände. Wenn der Auftrag unklar ist, frage gezielt nach. '
-                  : 'Die verworfene Ausgabe war repetitiv. Formuliere die Antwort knapp und konkret, ohne wiederholte Phrasen oder Abschlussbestätigungen, und beende sie danach. ') +
+                'Die verworfene Ausgabe hat eine Anwendungsdiagnose nachgeahmt. Antworte auf die Nutzerfrage oder verwende erforderliche bereitgestellte Werkzeuge strukturiert. Erfinde keine Laufzeitfehler, HTTP-Statuswerte, Tokenzahlen oder Fortsetzungsstände. Wenn der Auftrag unklar ist, frage gezielt nach. ' +
                 'Bereits erfolgreich ausgeführte Aktionen nicht wiederholen.',
             },
           ]
@@ -1340,16 +1341,13 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           !resolvedRoute.externalOneShot &&
           inferenceGateway.target === 'local_llama_cpp' &&
           error instanceof LocalInferenceError &&
-          (error.code === 'runtime_output_repeated' || error.code === 'runtime_status_echo')
+          error.code === 'runtime_status_echo'
         ) {
           opts.onResponseReset?.({ round: round + 1 })
           publish('')
           opts.onBudget?.(null)
-          const statusEcho = error.code === 'runtime_status_echo'
-          if ((statusEcho ? statusEchoRetries : repetitionRetries) < 2) {
-            if (statusEcho) statusEchoRetries++
-            else repetitionRetries++
-            correctionReason = statusEcho ? 'status' : 'repetition'
+          if (statusEchoRetries < 2) {
+            statusEchoRetries++
             retryInRound++
             opts.onProgress?.({ phase: 'regenerating', round: round + 1, attempt: retryInRound })
             continue
