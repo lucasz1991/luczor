@@ -16,9 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use sysinfo::{
-    Components, ProcessRefreshKind, ProcessesToUpdate, System, MINIMUM_CPU_UPDATE_INTERVAL,
-};
+use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System, MINIMUM_CPU_UPDATE_INTERVAL};
 
 use super::desktop_target::{DesktopActionGuard, DesktopObservation, InputPayload, ObservePayload};
 use super::ensure_main_webview;
@@ -279,7 +277,7 @@ pub(crate) fn collect_system_metrics_for_app(
         .lock()
         .map_err(|_| "System metrics cache unavailable")?;
     if let Some((updated_at, metrics)) = cached.as_ref() {
-        if updated_at.elapsed() < Duration::from_secs(2) {
+        if updated_at.elapsed() < Duration::from_millis(500) {
             return Ok(metrics.clone());
         }
     }
@@ -382,6 +380,13 @@ pub(crate) fn collect_system_metrics_for_app(
         ram_total_mb: total_memory / 1024 / 1024,
         gpu_percent: engine_gpu_percent.or(gpu_percent).map(clamp_percent),
         cpu_temp_c,
+        cpu_temp_source: if cpu_temp_c.is_none() {
+            "unavailable"
+        } else if cfg!(windows) {
+            "asus_atk"
+        } else {
+            "system_sensor"
+        },
         gpu_temp_c: nvml_gpu_temp_c.or(sensor_gpu_temp_c),
         app_cpu_percent: app.cpu,
         app_ram_percent: app.ram,
@@ -557,6 +562,7 @@ fn clamp_percent(v: f32) -> f32 {
     }
 }
 
+#[cfg(not(windows))]
 fn clean_temp(v: f32) -> Option<f32> {
     if v.is_finite() && v > 0.0 && v < 130.0 {
         Some((v * 10.0).round() / 10.0)
@@ -572,6 +578,7 @@ fn hotter(current: Option<f32>, next: f32) -> Option<f32> {
     }
 }
 
+#[cfg(any(not(windows), test))]
 fn is_gpu_component(label: &str) -> bool {
     label.contains("gpu")
         || label.contains("nvidia")
@@ -580,6 +587,7 @@ fn is_gpu_component(label: &str) -> bool {
         || label.contains("amd graphics")
 }
 
+#[cfg(any(not(windows), test))]
 fn is_cpu_component(label: &str) -> bool {
     label.contains("cpu")
         || label.contains("package")
@@ -592,8 +600,19 @@ fn is_cpu_component(label: &str) -> bool {
         || label.contains("intel core")
 }
 
+#[cfg(windows)]
 fn component_temperatures() -> (Option<f32>, Option<f32>) {
-    let components = Components::new_with_refreshed_list();
+    // sysinfo 0.32 on Windows exposes only the generic ACPI "Computer" zone.
+    // It can never pass the explicit CPU/GPU label check. Avoid a redundant,
+    // often access-denied WMI connection on every one-second status sample.
+    // ASUS CPU sensors use the installed read-only ATK COM service instead.
+    // GPU temperature remains available through the independent NVML path.
+    (super::system_temperature::cpu_temperature(), None)
+}
+
+#[cfg(not(windows))]
+fn component_temperatures() -> (Option<f32>, Option<f32>) {
+    let components = sysinfo::Components::new_with_refreshed_list();
     let mut cpu_temp = None;
     let mut gpu_temp = None;
 
@@ -1364,14 +1383,16 @@ mod tests {
         assert_eq!(metrics.model_running, Some(false));
         assert!(metrics.model_cpu_percent.is_none());
         println!(
-            "cpu={}, app_cpu={:?}, ram={}, app_ram={:?}, gpu={:?}, app_gpu={:?}, gpu_source={}",
+            "cpu={}, app_cpu={:?}, ram={}, app_ram={:?}, gpu={:?}, app_gpu={:?}, gpu_source={}, cpu_temp={:?}, cpu_temp_source={}",
             metrics.cpu_percent,
             metrics.app_cpu_percent,
             metrics.ram_percent,
             metrics.app_ram_percent,
             metrics.gpu_percent,
             metrics.app_gpu_percent,
-            metrics.gpu_source
+            metrics.gpu_source,
+            metrics.cpu_temp_c,
+            metrics.cpu_temp_source
         );
     }
 

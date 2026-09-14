@@ -192,4 +192,57 @@ describe('local model observation boundary', () => {
     })
     expect(monitor.state.runs[0]?.context).toBeUndefined()
   })
+  it('shares numeric observations without output, message summaries or failures', () => {
+    const owner = createLocalModelDiagnostics(() => 100)
+    const current = owner.begin('model', [{ role: 'user', content: 'private message' }])
+    current.delta('private answer')
+    current.finish({ ...result, content: 'private answer' }, { outputTokensPerSecond: 12 })
+    const snapshot = owner.numericSnapshot()
+    expect(JSON.stringify(snapshot)).not.toMatch(/private|outputTruncated|roles|events|failure/)
+    const viewer = createLocalModelDiagnostics()
+    viewer.acceptNumericSnapshot(snapshot)
+    expect(viewer.state.runs[0]).toMatchObject({
+      model: 'model',
+      state: 'done',
+      remote: true,
+      output: '',
+      roles: [],
+      events: [],
+      runtime: { outputTokensPerSecond: 12 },
+    })
+    expect(viewer.numericSnapshot()).toEqual([])
+  })
+  it('rejects injected content and invalid measurements while retaining local observations', () => {
+    const viewer = createLocalModelDiagnostics(() => 100)
+    const local = viewer.begin('own', [])
+    viewer.acceptNumericSnapshot([
+      {
+        id: 1000,
+        model: 'remote',
+        startedAt: 200,
+        endedAt: null,
+        state: 'responding',
+        output: 'secret',
+        roles: ['secret'],
+        events: ['secret'],
+        failure: { reason: 'secret' },
+        runtime: { outputTokensPerSecond: Infinity },
+        context: { inputTokens: -1 },
+      },
+      { id: -1, model: 'bad', startedAt: 100, state: 'done' },
+    ])
+    expect(viewer.state.runs).toHaveLength(2)
+    expect(viewer.state.runs[0]).toMatchObject({
+      remote: true,
+      output: '',
+      roles: [],
+      events: [],
+      runtime: { outputTokensPerSecond: null },
+    })
+    expect(viewer.state.runs[0]?.context).toBeUndefined()
+    expect(JSON.stringify(viewer.state)).not.toContain('secret')
+    local.delta('local still active')
+    expect(viewer.state.runs.find(run => run.model === 'own')?.output).toBe('local still active')
+    expect(viewer.numericSnapshot().map(run => run.model)).toEqual(['own'])
+  })
 })

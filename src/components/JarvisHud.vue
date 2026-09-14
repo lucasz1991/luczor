@@ -73,11 +73,11 @@ const phase = computed(() => {
     case 'done':
       return { label: 'Antwort bereit', detail: 'Eine neue Antwort steht im Chat.', tone: 'success', moving: false }
     case 'listening':
-      return { label: 'Hört zu', detail: 'Spracheingabe ist aktiv.', tone: 'accent', moving: true }
+      return { label: 'HÃ¶rt zu', detail: 'Spracheingabe ist aktiv.', tone: 'accent', moving: true }
     case 'thinking':
       return { label: 'Verarbeitet', detail: 'Luczor bereitet die Antwort vor.', tone: 'accent', moving: true }
     case 'executing':
-      return { label: 'Arbeitet', detail: 'Eine Aktion wird ausgeführt.', tone: 'accent', moving: true }
+      return { label: 'Arbeitet', detail: 'Eine Aktion wird ausgefÃ¼hrt.', tone: 'accent', moving: true }
     case 'speaking':
       return { label: 'Spricht', detail: 'Die Antwort wird vorgelesen.', tone: 'success', moving: true }
     case 'error':
@@ -105,11 +105,11 @@ const freshness = computed(() => {
     case 'live':
       return `Stand ${stamp.value}`
     case 'stale':
-      return `Veraltet · letzter Stand ${stamp.value}`
+      return `Veraltet Â· letzter Stand ${stamp.value}`
     case 'unavailable':
-      return 'Gerätemessung nicht verfügbar'
+      return 'GerÃ¤temessung nicht verfÃ¼gbar'
     default:
-      return 'Messwerte werden gelesen …'
+      return 'Messwerte werden gelesen â€¦'
   }
 })
 const connectionLabels: Record<ConnState, string> = {
@@ -121,7 +121,7 @@ const connectionLabels: Record<ConnState, string> = {
 }
 const connections = computed(() => [
   { label: 'Server', state: hud.sync.server },
-  { label: 'Gedächtnis', state: hud.sync.cognee },
+  { label: 'GedÃ¤chtnis', state: hud.sync.cognee },
 ])
 const syncing = ref(false)
 const syncMessage = ref('')
@@ -155,7 +155,7 @@ const position = computed(() =>
     class="status-dashboard"
     :class="{ embedded, 'reduce-motion': appearance.reduceMotion, 'is-compact': compact }"
     :style="position"
-    aria-label="Gerät und Verbindungen"
+    aria-label="GerÃ¤t und Verbindungen"
   >
     <button
       v-if="!embedded"
@@ -208,36 +208,44 @@ const position = computed(() =>
         <p v-if="resourceView === 'history'" class="resource-note">
           {{
             metrics.history.length > 1
-              ? 'Letzte Messungen · ca. 3,5 s Abstand · Skala 0–100 %'
-              : 'Der Verlauf entsteht aus den Messungen während dieser Ansicht.'
+              ? 'Letzte Messungen Â· 1 s Zieltakt Â· Skala 0â€“100 %'
+              : 'Der Verlauf entsteht aus den Messungen wÃ¤hrend dieser Ansicht.'
           }}
         </p>
         <SystemMiniModelUsage
-          v-if="compact"
+          v-if="compact || section === 'all'"
           :metrics="compactModelUsage"
           :model-status="modelStatus"
           :running="metrics.sample?.model_running === true"
         />
         <div class="resource-context">
-          <span v-if="gpuProcessUnavailable">GPU-Prozessmessung teilweise nicht verfügbar.</span>
+          <span v-if="gpuProcessUnavailable">GPU-Prozessmessung teilweise nicht verfÃ¼gbar.</span>
         </div>
         <details class="resource-explanation">
           <summary>Zuordnung der Werte</summary>
           <p>
-            Rechner umfasst alle Anwendungen. App zeigt Luczor und seine Unterprozesse ohne den verwalteten
-            Modellprozess. Modell zeigt den zugehörigen lokalen Prozess und seine Unterprozesse. RAM-Werte enthalten
+            Rechner umfasst alle Anwendungen. Der gemeinsame Auï¿½enbogen zeigt System als berechneten Rest nach App und
+            Modell. Fehlende Messwerte bleiben unbekannt. App zeigt Luczor und seine Unterprozesse ohne den verwalteten
+            Modellprozess. Modell zeigt den zugehÃ¶rigen lokalen Prozess und seine Unterprozesse. RAM-Werte enthalten
             gemeinsam genutzte Speicherseiten und sind nicht addierbar.
           </p>
           <p>
-            GPU zeigt pro Bereich die höchste Windows-GPU-Engine-Auslastung. Fehlt diese Messung, kann für den Rechner
-            die höchste Geräteauslastung einer NVIDIA-Karte angezeigt werden. Die Kurven werden nicht addiert. Ein
-            Strich bedeutet nicht verfügbar oder nicht aktiv. CPU und GPU ergänzen die drei Auslastungsringe um die
-            gemeldete Temperatur; ab 75 °C wird sie amber, ab 85 °C rot. Jedes Volume gehört zur Luczor-App oder zum
-            konfigurierten Modellordner. Die drei Aktivitätsringe und die Belegung sind Volume-Werte, keine
-            Prozessanteile.
+            GPU zeigt pro Bereich die hÃ¶chste Windows-GPU-Engine-Auslastung. Fehlt diese Messung, kann fÃ¼r den Rechner
+            die hÃ¶chste GerÃ¤teauslastung einer NVIDIA-Karte angezeigt werden. RAM und GPU sind keine exakt additiven
+            Prozessbilanzen: Der Auï¿½enbogen ist eine berechnete visuelle Aufteilung; Werte ï¿½ber 100 % werden fï¿½r
+            die Bogenlï¿½ngen proportional verkleinert. Die Kurven bleiben Einzelmessungen. Ein Strich bedeutet nicht
+            verfÃ¼gbar oder nicht aktiv. CPU und GPU ergÃ¤nzen die drei Auslastungsringe um die gemeldete Temperatur; ab
+            75 Â°C wird sie amber, ab 85 Â°C rot. Jedes Volume gehÃ¶rt zur Luczor-App oder zum konfigurierten
+            Modellordner. Die drei AktivitÃ¤tsringe und die Belegung sind Volume-Werte, keine Prozessanteile.
           </p>
         </details>
       </div>
+      <SystemMiniModelUsage
+        v-if="section === 'localmodel' && !compact"
+        :metrics="compactModelUsage"
+        :model-status="modelStatus"
+        :running="metrics.sample?.model_running === true"
+      />
       <p v-show="section === 'all' || section === 'localmodel'" class="resource-note">{{ modelStatus }}</p>
       <SystemActivityCharts
         v-show="section === 'all' || section === 'memory' || section === 'network'"
@@ -266,14 +274,14 @@ const position = computed(() =>
             :disabled="syncing || hud.sync.server !== 'online'"
             @click="doSync"
           >
-            {{ syncing ? 'Synchronisiert …' : 'Synchronisieren' }}
+            {{ syncing ? 'Synchronisiert â€¦' : 'Synchronisieren' }}
           </button>
         </div>
         <p v-if="syncMessage" class="sync-result" role="status">{{ syncMessage }}</p>
         <div class="status-controls">
           <div class="last-tool">
             <span class="status-caption">Letztes Tool</span
-            ><span :title="hud.lastTool || undefined">{{ hud.lastTool || 'Noch kein Tool ausgeführt' }}</span>
+            ><span :title="hud.lastTool || undefined">{{ hud.lastTool || 'Noch kein Tool ausgefÃ¼hrt' }}</span>
           </div>
           <SystemStopButton v-if="!embedded" />
         </div>

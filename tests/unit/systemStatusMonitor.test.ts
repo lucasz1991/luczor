@@ -199,7 +199,7 @@ describe('system status process scopes', () => {
     monitor.setActive(true)
     await monitor.refresh()
     expect(monitor.state.history[0]?.model).toEqual({ cpu: 5, ram: 10, gpu: 20 })
-    await vi.advanceTimersByTimeAsync(3_500)
+    await vi.advanceTimersByTimeAsync(1_000)
     expect(monitor.state.sample).toMatchObject({
       model_running: false,
       model_cpu_percent: null,
@@ -213,7 +213,7 @@ describe('system status process scopes', () => {
       model: { cpu: null, ram: null, gpu: null },
     })
     expect(monitor.state.history[0]?.model).toEqual({ cpu: 5, ram: 10, gpu: 20 })
-    await vi.advanceTimersByTimeAsync(3_500)
+    await vi.advanceTimersByTimeAsync(1_000)
     expect(monitor.state.sample).toMatchObject({
       model_running: true,
       model_cpu_percent: null,
@@ -233,7 +233,7 @@ describe('system status process scopes', () => {
     const monitor = createMonitor({ read })
     monitor.setActive(true)
     await monitor.refresh()
-    await vi.advanceTimersByTimeAsync(3_500)
+    await vi.advanceTimersByTimeAsync(1_000)
     expect(monitor.state.availability).toBe('stale')
     expect(monitor.state.sample).toMatchObject(original)
     expect(monitor.state.history[1]).toEqual({
@@ -243,7 +243,7 @@ describe('system status process scopes', () => {
       gpu: null,
       ...unavailableScopes(),
     })
-    await vi.advanceTimersByTimeAsync(3_500)
+    await vi.advanceTimersByTimeAsync(1_000)
     expect(monitor.state.history[2]).toMatchObject({
       cpu: 12,
       app: { cpu: 3 },
@@ -271,21 +271,21 @@ describe('system status monitor', () => {
     expect(monitor.state.history).toEqual([{ at: Date.now(), cpu: 0, ram: 50, gpu: null, ...unavailableScopes() }])
   })
 
-  it('polls at 3.5 second intervals and retains at most 40 actual samples', async () => {
+  it('polls at one second intervals and retains at most 40 actual samples', async () => {
     const read = vi.fn().mockResolvedValue(metrics())
     const monitor = createMonitor({ read, maxHistory: 500 })
     const start = Date.now()
     monitor.setActive(true)
     await monitor.refresh()
-    await vi.advanceTimersByTimeAsync(3_499)
+    await vi.advanceTimersByTimeAsync(999)
     expect(read).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(1)
     expect(read).toHaveBeenCalledTimes(2)
-    await vi.advanceTimersByTimeAsync(3_500 * 43)
+    await vi.advanceTimersByTimeAsync(1_000 * 43)
     expect(read).toHaveBeenCalledTimes(45)
     expect(monitor.state.history).toHaveLength(40)
-    expect(monitor.state.history[0]?.at).toBe(start + 3_500 * 5)
-    expect(monitor.state.history[39]?.at).toBe(start + 3_500 * 44)
+    expect(monitor.state.history[0]?.at).toBe(start + 1_000 * 5)
+    expect(monitor.state.history[39]?.at).toBe(start + 1_000 * 44)
   })
 
   it('marks a failed initial sample unavailable and records a gap without error payloads', async () => {
@@ -316,7 +316,7 @@ describe('system status monitor', () => {
     monitor.setActive(true)
     await monitor.refresh()
     const updatedAt = monitor.state.lastUpdatedAt
-    await vi.advanceTimersByTimeAsync(3_500)
+    await vi.advanceTimersByTimeAsync(1_000)
     expect(monitor.state.availability).toBe('stale')
     expect(monitor.state.sample).toMatchObject(original)
     expect(monitor.state.lastUpdatedAt).toBe(updatedAt)
@@ -327,7 +327,7 @@ describe('system status monitor', () => {
       gpu: null,
       ...unavailableScopes(),
     })
-    await vi.advanceTimersByTimeAsync(3_500)
+    await vi.advanceTimersByTimeAsync(1_000)
     expect(monitor.state.availability).toBe('live')
     expect(monitor.state.lastUpdatedAt).toBe(Date.now())
     expect(monitor.state.history[2]).toEqual({ at: Date.now(), cpu: 20, ram: 50, gpu: null, ...unavailableScopes() })
@@ -355,7 +355,7 @@ describe('system status monitor', () => {
     expect(vi.getTimerCount()).toBe(0)
     pending.resolve(metrics())
     await first
-    await vi.advanceTimersByTimeAsync(3_500)
+    await vi.advanceTimersByTimeAsync(0)
     expect(read).toHaveBeenCalledTimes(2)
   })
 

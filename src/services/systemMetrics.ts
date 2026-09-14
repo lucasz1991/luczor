@@ -32,6 +32,7 @@ export type SystemMetrics = {
   gpu_percent: number | null
   gpu_source?: 'windows_engine' | 'nvml' | 'unavailable'
   cpu_temp_c: number | null
+  cpu_temp_source?: 'asus_atk' | 'system_sensor' | 'unavailable'
   gpu_temp_c: number | null
   /** Process scopes use the same whole-device percentage scale as the total fields. */
   app_cpu_percent?: number | null

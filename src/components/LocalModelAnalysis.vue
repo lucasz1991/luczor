@@ -78,10 +78,11 @@ const contextTrend = computed(() => {
           </option>
         </select>
       </label>
-      <button type="button" :disabled="!runs.length" @click="clearObservations">Anzeige leeren</button>
+      <button type="button" :disabled="!runs.length || run?.remote" @click="clearObservations">Anzeige leeren</button>
     </div>
     <p v-if="!run" class="empty">
-      Noch keine lokale Inferenz in dieser Sitzung. Die nächste Anfrage liefert hier ihre verfügbaren Analysewerte.
+      Noch keine Inferenzmesswerte empfangen. Ein geladenes Modell kann auch ohne aktive Anfrage laufen; seine CPU-,
+      RAM- und GPU-Werte stehen oben.
     </p>
     <template v-else>
       <div class="run-title">
@@ -190,7 +191,7 @@ const contextTrend = computed(() => {
           <path class="baseline" d="M8 8H592M8 76H592" />
           <path :d="contextTrend" />
         </svg>
-        <details>
+        <details v-if="!run.remote">
           <summary>Zusammensetzung der gesendeten Nachrichten</summary>
           <div v-for="part in run.roles" :key="part.role" class="context-role">
             <span>{{ roles[part.role] }}</span>
@@ -227,13 +228,16 @@ const contextTrend = computed(() => {
           </div>
         </dl>
       </section>
-      <details class="analysis-section" open>
+      <p v-if="run.remote" class="empty">
+        Messwerte aus einem anderen lokalen Chatfenster. Antworttexte und Nachrichten bleiben dort.
+      </p>
+      <details v-if="!run.remote" class="analysis-section" open>
         <summary>Öffentliche Ausgabe</summary>
         <pre v-if="run.output">{{ run.output }}</pre>
         <p v-else>Noch kein öffentlicher Antworttext empfangen.</p>
         <p v-if="run.outputTruncated">Vorschau auf 24.000 Zeichen begrenzt. Der vollständige Text bleibt im Chat.</p>
       </details>
-      <details class="analysis-section">
+      <details v-if="!run.remote" class="analysis-section">
         <summary>Ablauf</summary>
         <ol>
           <li v-for="(event, index) in run.events" :key="index">

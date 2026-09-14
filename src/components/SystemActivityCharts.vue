@@ -77,7 +77,7 @@ watch(
     previous = null
     if (active) {
       sample()
-      timer = setInterval(sample, 3500)
+      timer = setInterval(sample, 1000)
     }
   },
   { immediate: true }

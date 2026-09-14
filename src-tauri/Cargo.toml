@@ -77,6 +77,9 @@ webview2-com = "=0.38.2"
 windows_webview = { package = "windows", version = "=0.61.3", features = ["Win32_System_Com"] }
 # Reuse xcap's locked Windows bindings for native adapter inventory (no shell).
 windows = { version = "=0.62.2", features = [
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
     "Win32_Foundation",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",

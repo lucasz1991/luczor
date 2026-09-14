@@ -41,7 +41,7 @@ function emptyResources(): SystemStatusResources {
 export function createSystemStatusMonitor(options: MonitorOptions = {}) {
   const read = options.read ?? readSystemMetrics
   const now = options.now ?? Date.now
-  const intervalMs = Math.max(1, options.intervalMs ?? 3_500)
+  const intervalMs = Math.max(1, options.intervalMs ?? 1_000)
   const maxHistory = Math.min(40, Math.max(1, Math.floor(options.maxHistory ?? 40)))
   const state = reactive<SystemStatusState>({
     sample: null,
@@ -70,6 +70,7 @@ export function createSystemStatusMonitor(options: MonitorOptions = {}) {
     if (inFlight) return inFlight
     clearTimer()
     const requestGeneration = generation
+    const startedAt = now()
     if (!state.sample) state.availability = 'loading'
     const current = () => active && !disposed && generation === requestGeneration
     // Enter the promise first so a synchronously throwing dependency has the same lifecycle as IPC.
@@ -94,6 +95,7 @@ export function createSystemStatusMonitor(options: MonitorOptions = {}) {
           gpu_source: sample.gpu_source,
           network_local: sample.network_local ? { ...sample.network_local } : undefined,
           cpu_temp_c: sample.cpu_temp_c,
+          cpu_temp_source: sample.cpu_temp_source,
           gpu_temp_c: sample.gpu_temp_c,
           app_cpu_percent: percent(sample.app_cpu_percent),
           app_ram_percent: percent(sample.app_ram_percent),
@@ -156,7 +158,7 @@ export function createSystemStatusMonitor(options: MonitorOptions = {}) {
           // A reopened view waits for the old native call to settle before requesting its own sample.
           void refresh()
         } else {
-          timer = setTimeout(() => void refresh(), intervalMs)
+          timer = setTimeout(() => void refresh(), Math.max(0, intervalMs - (now() - startedAt)))
         }
       })
     return inFlight

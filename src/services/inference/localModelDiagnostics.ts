@@ -1,4 +1,4 @@
-import { reactive, readonly } from 'vue'
+import { reactive, readonly, watch } from 'vue'
 import { publicAnswerText } from '@/services/publicAnswerStream'
 import { readReportedTokenUsage } from '@/services/tokenUsage'
 import type { InferenceRequest, InferenceResult } from './types'
@@ -28,6 +28,7 @@ export type ModelObservation = {
   runtime: RuntimeDiagnostics
   failure?: LocalFailureDiagnostic
   events: { at: number; label: string }[]
+  remote?: boolean
 }
 
 export const LOCAL_FAILURE_STAGE_LABELS: Record<LocalFailureDiagnostic['stage'], string> = {
@@ -62,11 +63,13 @@ export function localModelDiagnosticCopy(
 /** Bounded, renderer-local observation of public answers. Never persists prompts or tool payloads. */
 export function createLocalModelDiagnostics(now = Date.now) {
   const state = reactive<{ runs: ModelObservation[] }>({ runs: [] })
+  let ownsObservations = false
   let sequence = 0
   const clear = () => {
     state.runs.splice(0)
   }
   function begin(model: string, messages: InferenceRequest['messages']) {
+    ownsObservations = true
     const run = reactive<ModelObservation>({
       id: ++sequence,
       model: model.slice(0, 160),
@@ -154,7 +157,179 @@ export function createLocalModelDiagnostics(now = Date.now) {
       },
     }
   }
-  return { state: readonly(state), begin, clear }
+  // Window sharing deliberately excludes output, message roles, events,
+  // failure reasons and request/tool data. Receivers rebuild a fixed projection.
+  function numericSnapshot() {
+    return state.runs
+      .filter(run => !run.remote)
+      .map(run => ({
+        id: run.id,
+        model: run.model,
+        startedAt: run.startedAt,
+        endedAt: run.endedAt,
+        state: run.state,
+        toolCount: run.toolCount,
+        finishReason: run.finishReason,
+        usage: run.usage ? { ...run.usage } : undefined,
+        context: run.context ? { ...run.context } : undefined,
+        runtime: { ...run.runtime },
+      }))
+  }
+  function acceptNumericSnapshot(snapshot: unknown) {
+    if (!Array.isArray(snapshot)) return
+    const numeric = (value: unknown) =>
+      typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null
+    const integer = (value: unknown) =>
+      typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null
+    const records: ModelObservation[] = []
+    for (const value of snapshot.slice(0, 12)) {
+      if (!value || typeof value !== 'object') continue
+      const item = value as Record<string, unknown>
+      const id = integer(item.id)
+      const startedAt = integer(item.startedAt)
+      if (
+        id === null ||
+        startedAt === null ||
+        typeof item.model !== 'string' ||
+        !['preparing', 'responding', 'done', 'cancelled', 'error'].includes(String(item.state))
+      )
+        continue
+      const runtime = item.runtime && typeof item.runtime === 'object' ? (item.runtime as Record<string, unknown>) : {}
+      const context = item.context && typeof item.context === 'object' ? (item.context as Record<string, unknown>) : {}
+      const contextNumbers = [
+        context.inputTokens,
+        context.contextTokens,
+        context.outputTokens,
+        context.omittedMessages,
+        context.shortenedToolResults,
+      ].map(integer)
+      records.push({
+        id,
+        model: item.model.replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 160),
+        startedAt,
+        endedAt: item.endedAt === null ? null : integer(item.endedAt),
+        state: item.state as ModelObservation['state'],
+        remote: true,
+        toolCount: integer(item.toolCount) ?? 0,
+        finishReason: ['stop', 'length', 'tool_calls', 'content_filter'].includes(String(item.finishReason))
+          ? String(item.finishReason)
+          : 'other',
+        output: '',
+        outputTruncated: false,
+        roles: [],
+        events: [],
+        usage: readReportedTokenUsage(item.usage),
+        context: contextNumbers.every(value => value !== null)
+          ? {
+              inputTokens: contextNumbers.at(0)!,
+              contextTokens: contextNumbers.at(1)!,
+              outputTokens: contextNumbers.at(2)!,
+              omittedMessages: contextNumbers.at(3)!,
+              shortenedToolResults: contextNumbers.at(4)!,
+            }
+          : undefined,
+        runtime: {
+          cachedTokens: numeric(runtime.cachedTokens),
+          reasoningTokens: numeric(runtime.reasoningTokens),
+          promptMs: numeric(runtime.promptMs),
+          predictedMs: numeric(runtime.predictedMs),
+          promptTokensPerSecond: numeric(runtime.promptTokensPerSecond),
+          outputTokensPerSecond: numeric(runtime.outputTokensPerSecond),
+        },
+      })
+    }
+    const local = state.runs.filter(run => !run.remote)
+    const merged = [...local, ...records].sort((left, right) => right.startedAt - left.startedAt).slice(0, 12)
+    state.runs.splice(0, state.runs.length, ...merged)
+  }
+  return {
+    state: readonly(state),
+    begin,
+    clear,
+    numericSnapshot,
+    acceptNumericSnapshot,
+    ownsObservations: () => ownsObservations,
+  }
 }
 
 export const localModelDiagnostics = createLocalModelDiagnostics()
+
+// Same-origin device windows only. No persistence or server transmission.
+if (typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window && typeof BroadcastChannel !== 'undefined') {
+  const channel = new BroadcastChannel('luczor-local-model-numeric-status-v1')
+  let revision = 0
+  const source = crypto.randomUUID()
+  const snapshots = new Map<string, { at: number; runs: unknown[] }>()
+  const ids = new Map<string, number>()
+  let nextId = 1_000_000
+  const receive = () => {
+    const combined: unknown[] = []
+    for (const [sender, snapshot] of snapshots) {
+      if (Date.now() - snapshot.at > 30_000) {
+        snapshots.delete(sender)
+        continue
+      }
+      for (const value of snapshot.runs.slice(0, 12)) {
+        if (!value || typeof value !== 'object') continue
+        const item = value as Record<string, unknown>
+        if (typeof item.id !== 'number' || !Number.isSafeInteger(item.id) || item.id < 0) continue
+        const key = `${sender}:${item.id}`
+        if (!ids.has(key)) ids.set(key, ++nextId)
+        combined.push({ ...item, id: ids.get(key) })
+      }
+    }
+    combined.sort(
+      (left, right) =>
+        Number((right as Record<string, unknown>).startedAt) - Number((left as Record<string, unknown>).startedAt)
+    )
+    localModelDiagnostics.acceptNumericSnapshot(combined.slice(0, 12))
+    if (ids.size > 1024) ids.clear()
+  }
+  const publish = () => {
+    if (localModelDiagnostics.ownsObservations())
+      channel.postMessage({
+        kind: 'snapshot',
+        source,
+        at: Date.now(),
+        revision: ++revision,
+        runs: localModelDiagnostics.numericSnapshot(),
+      })
+  }
+  channel.onmessage = event => {
+    const data = event.data
+    if (data?.kind === 'request') publish()
+    else if (
+      data?.kind === 'snapshot' &&
+      typeof data.at === 'number' &&
+      Number.isFinite(data.at) &&
+      Math.abs(Date.now() - data.at) < 30_000 &&
+      typeof data.source === 'string' &&
+      data.source.length <= 80 &&
+      data.source !== source &&
+      Array.isArray(data.runs)
+    ) {
+      const previous = snapshots.get(data.source)
+      if (!previous || data.at >= previous.at) {
+        if (snapshots.size >= 8 && !snapshots.has(data.source)) return
+        snapshots.set(data.source, { at: data.at, runs: data.runs.slice(0, 12) })
+        receive()
+      }
+    }
+  }
+  const stop = watch(() => JSON.stringify(localModelDiagnostics.numericSnapshot()), publish, { flush: 'post' })
+  const timer = setInterval(() => {
+    if (localModelDiagnostics.ownsObservations()) publish()
+    else channel.postMessage({ kind: 'request' })
+    receive()
+  }, 1000)
+  channel.postMessage({ kind: 'request' })
+  window.addEventListener(
+    'beforeunload',
+    () => {
+      stop()
+      clearInterval(timer)
+      channel.close()
+    },
+    { once: true }
+  )
+}

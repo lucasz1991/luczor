@@ -34,6 +34,8 @@ mod system_diagnostics;
 pub mod system_status_controller;
 mod system_status_model;
 pub mod system_status_window;
+#[cfg(windows)]
+mod system_temperature;
 pub mod voice;
 pub mod voice_input;
 pub mod workflow_artifacts;

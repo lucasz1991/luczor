@@ -75,7 +75,7 @@ describe('local model failure analysis', () => {
     expect(cancelled).not.toContain('HTTP 400')
     localModelDiagnostics.clear()
     const cleared = await render()
-    expect(cleared).toContain('Noch keine lokale Inferenz')
+    expect(cleared).toContain('Noch keine Inferenzmesswerte empfangen')
     expect(cleared).not.toContain('Fehlerdiagnose')
   })
 })

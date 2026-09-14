@@ -11,6 +11,7 @@ export type ResourceDialSeries = {
   label: string
   detail: string
   value: number | null
+  colorValue?: number | null
   display?: string
   tone?: 'safe' | 'warning' | 'danger' | 'unknown'
   chart?: { path: string; last: { horizontal: number; vertical: number } | null }
@@ -103,6 +104,10 @@ export function useSystemResourceModel(metrics: DeepReadonly<SystemStatusState>)
       detail,
       series: scopes.map((scope, index) => ({
         ...scope,
+        detail:
+          scope.key === 'model' && metrics.sample?.model_running === false
+            ? 'Lokales Modell nicht aktiv'
+            : scope.detail,
         value:
           key !== 'disk' && scope.key === 'model' && metrics.sample?.model_running === false
             ? null
@@ -126,10 +131,11 @@ export function useSystemResourceModel(metrics: DeepReadonly<SystemStatusState>)
       label: 'Temperatur',
       detail:
         temperature === null
-          ? `${label}-Temperatur wird vom System nicht eindeutig gemeldet.`
-          : `${label}-Temperatur · ab 75 °C Hinweis, ab 85 °C kritisch`,
+          ? `${label}-Temperatur: Kein unterstützter Sensoranbieter meldet einen gültigen Wert.`
+          : `${label}-Temperatur${label === 'CPU' && metrics.sample?.cpu_temp_source === 'asus_atk' ? ' · ASUS-Sensor (CPU Package bevorzugt)' : ''} · ab 75 °C Hinweis, ab 85 °C kritisch`,
       value: temperature === null ? null : Math.min(100, Math.max(0, temperature)),
       display: temperature === null ? '—' : `${temperature.toLocaleString('de-DE', { maximumFractionDigits: 1 })} °C`,
+      colorValue: temperature,
       tone: temperatureTone(temperature),
     }
   }

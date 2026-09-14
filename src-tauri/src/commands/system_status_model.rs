@@ -12,6 +12,7 @@ pub struct SystemMetrics {
     pub ram_total_mb: u64,
     pub gpu_percent: Option<f32>,
     pub cpu_temp_c: Option<f32>,
+    pub cpu_temp_source: &'static str,
     pub gpu_temp_c: Option<f32>,
     pub app_cpu_percent: Option<f32>,
     pub app_ram_percent: Option<f32>,
