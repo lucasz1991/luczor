@@ -159,6 +159,14 @@ async function mount(initial = state(), hardwareSnapshot = hardware) {
     button,
     click,
     mode,
+    throttle: async (label: string, checked: boolean) => {
+      const input = nodes(root).find(
+        node =>
+          node.tag === 'input' && node.props.type === 'checkbox' && node.parent && text(node.parent).includes(label)
+      )!
+      ;(input.props.onChange as (event: unknown) => void)({ target: { checked } })
+      await flush()
+    },
     range: async (key: string, value: number) => {
       const input = nodes(root).find(
         node => node.tag === 'input' && node.props.type === 'range' && String(node.props.id).endsWith(`-${key}`)
@@ -172,6 +180,65 @@ async function mount(initial = state(), hardwareSnapshot = hardware) {
 
 describe('device resources settings UI', () => {
   afterEach(() => vi.useRealTimers())
+
+  it('independently enables CPU/GPU throttling, remembers inactive values and autosaves each intent', async () => {
+    vi.useFakeTimers()
+    const requested = SystemCheckApi.percentageResourceConfig(hardware, DEFAULT_LOCAL_RESOURCE_CONFIG, {
+      responseCpu: 50,
+      contextCpu: 25,
+      ram: 100,
+      gpu: 25,
+      cpuEnabled: true,
+      gpuEnabled: true,
+    })
+    const view = await mount({ ...state(), requested, applied: requested })
+    await view.throttle('GPU drosseln', false)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(view.client.save).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        threads: 9,
+        threadsBatch: 4,
+        percentageLimits: expect.objectContaining({ gpu: 25, gpuEnabled: false, cpuEnabled: true }),
+      }),
+      4
+    )
+    const gpuRange = nodes(view.root).find(node => String(node.props.id).endsWith('-gpu'))!
+    expect(gpuRange.props.disabled).toBe(true)
+    expect(gpuRange.props.value).toBe(25)
+    expect(text(view.root)).toContain('Aus · 100 % des nutzbaren GPU-Budgets')
+    await view.throttle('CPU drosseln', false)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(view.client.save).toHaveBeenLastCalledWith(expect.objectContaining({ threads: 18, threadsBatch: 18 }), 5)
+    await view.throttle('CPU drosseln', true)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(view.client.save).toHaveBeenLastCalledWith(expect.objectContaining({ threads: 9, threadsBatch: 4 }), 6)
+    expect(text(view.root)).toContain('Aus · 100 % des nutzbaren GPU-Budgets')
+    view.app.unmount()
+  })
+
+  it('does not apply maxima or claim cleanup when an active job blocks the native check', async () => {
+    const view = await mount()
+    vi.mocked(view.client.systemCheck).mockRejectedValue('resource_system_check_busy')
+    await view.click('Systemcheck: Maximalwerte übernehmen')
+    expect(text(view.root)).toContain('Nichts wurde beendet')
+    expect(text(view.root)).not.toContain('Eigene Modell-Runtime entladen')
+    expect(view.client.save).not.toHaveBeenCalled()
+    view.app.unmount()
+  })
+
+  it('reports released residency even when the subsequent hardware measurement fails', async () => {
+    const view = await mount()
+    vi.mocked(view.client.systemCheck).mockResolvedValue({
+      hardware: null,
+      runtimeUnloaded: true,
+      reasonCode: 'resource_system_check_failed',
+    })
+    await view.click('Systemcheck: Maximalwerte übernehmen')
+    expect(text(view.root)).toContain('Eigene Modell-Runtime entladen, Nachmessung fehlgeschlagen')
+    expect(text(view.root)).toContain('Bestehende Einstellungen bleiben erhalten')
+    expect(view.client.save).not.toHaveBeenCalled()
+    view.app.unmount()
+  })
 
   it('checks inventory automatically, applies safe maxima explicitly and persists percentages', async () => {
     const view = await mount()

@@ -40,8 +40,12 @@ export function resourceSystemCheck(hardware: HardwareSnapshot, config: LocalRes
   const availableRam = Math.min(hardware.memory.availableBytes, hardware.memory.totalBytes)
   const maximumRam = Math.max(0, availableRam - ramReserve)
   const limits = config.percentageLimits ?? MAXIMUM_RESOURCE_PERCENTAGES
-  if ([limits.responseCpu, limits.contextCpu, limits.ram, limits.gpu].some(value => !Number.isInteger(value) || value < 1 || value > 100) ||
-      [limits.cpuEnabled, limits.gpuEnabled].some(value => value !== undefined && typeof value !== 'boolean'))
+  if (
+    [limits.responseCpu, limits.contextCpu, limits.ram, limits.gpu].some(
+      value => !Number.isInteger(value) || value < 1 || value > 100
+    ) ||
+    [limits.cpuEnabled, limits.gpuEnabled].some(value => value !== undefined && typeof value !== 'boolean')
+  )
     throw new Error('resource_percentage_invalid')
   const effective = effectiveResourcePercentages(limits)
   const gpus = hardware.accelerators

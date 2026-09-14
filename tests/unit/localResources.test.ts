@@ -70,6 +70,20 @@ describe('hardware-derived percentage budgets', () => {
       resourceSystemCheck(hardware, config).ramBudget
     )
   })
+  it('disables CPU and GPU throttling independently while retaining the saved percentages', () => {
+    const limits = { responseCpu: 25, contextCpu: 50, ram: 75, gpu: 25, cpuEnabled: true, gpuEnabled: false }
+    const cpuOnly = percentageResourceConfig(hardware, DEFAULT_LOCAL_RESOURCE_CONFIG, limits)
+    expect(cpuOnly.threads).toBe(3)
+    expect(cpuOnly.threadsBatch).toBe(7)
+    expect(resourceSystemCheck(hardware, cpuOnly).gpus[0]!.budget).toBe(22 * gib)
+    const gpuOnly = percentageResourceConfig(hardware, cpuOnly, { ...limits, cpuEnabled: false, gpuEnabled: true })
+    expect(gpuOnly.threads).toBe(14)
+    expect(gpuOnly.threadsBatch).toBe(14)
+    expect(gpuOnly.ramReserveBytes).toBe(cpuOnly.ramReserveBytes)
+    expect(resourceSystemCheck(hardware, gpuOnly).gpus[0]!.budget).toBe(5.5 * gib)
+    expect(gpuOnly.percentageLimits).toMatchObject({ responseCpu: 25, gpu: 25 })
+    expect(percentageResourceConfig(hardware, gpuOnly, limits)).toEqual(cpuOnly)
+  })
   it.each([0, 101, 1.5, NaN, Infinity])('rejects an invalid percentage %s instead of applying it', value => {
     expect(() =>
       percentageResourceConfig(hardware, DEFAULT_LOCAL_RESOURCE_CONFIG, { ...MAXIMUM_RESOURCE_PERCENTAGES, ram: value })
@@ -132,6 +146,48 @@ function setup() {
 afterEach(() => vi.useRealTimers())
 
 describe('device resource workflow barrier', () => {
+  it('refuses cleanup during a whole job and never stops or queues it', async () => {
+    const { controller, deps } = setup()
+    const work = await controller.acquire()
+    const cleanup = vi.fn(async () => {})
+    await expect(controller.inspectIdle(cleanup)).rejects.toThrow('resource_system_check_busy')
+    expect(cleanup).not.toHaveBeenCalled()
+    expect(deps.end).not.toHaveBeenCalled()
+    expect(controller.isModelSwitchPending()).toBe(false)
+    await work.release()
+  })
+
+  it('blocks new foreground and background admission until idle cleanup and measurement finish', async () => {
+    vi.useFakeTimers()
+    const { controller, deps } = setup()
+    let finish!: () => void
+    const checking = controller.inspectIdle(
+      () =>
+        new Promise<void>(resolve => {
+          finish = resolve
+        })
+    )
+    expect(controller.isModelSwitchPending()).toBe(true)
+    await expect(controller.inspectIdle(async () => {})).rejects.toThrow('resource_system_check_busy')
+    await expect(controller.runPreemptibleBackground(async () => {}, new AbortController().signal)).rejects.toThrow(
+      'resource_background_unavailable'
+    )
+    const next = controller.acquire()
+    await vi.advanceTimersByTimeAsync(1)
+    expect(deps.begin).not.toHaveBeenCalled()
+    finish()
+    await checking
+    await vi.advanceTimersByTimeAsync(150)
+    const work = await next
+    expect(deps.begin).toHaveBeenCalledOnce()
+    await work.release()
+    await expect(
+      controller.inspectIdle(async () => {
+        throw new Error('sample failed')
+      })
+    ).rejects.toThrow('sample failed')
+    expect(controller.isModelSwitchPending()).toBe(false)
+  })
   it('fails a queued switch visibly after exhausted cleanup and reconciles on explicit retry', async () => {
     vi.useFakeTimers()
     const { controller, deps, nativeLeases } = setup()

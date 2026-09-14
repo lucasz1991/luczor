@@ -18,7 +18,11 @@ pub struct ResourcePercentageLimits {
 
 impl ResourcePercentageLimits {
     pub(super) fn gpu_percent(&self) -> u8 {
-        if self.gpu_enabled == Some(false) { 100 } else { self.gpu }
+        if self.gpu_enabled == Some(false) {
+            100
+        } else {
+            self.gpu
+        }
     }
 }
 
@@ -48,11 +52,18 @@ pub(super) fn resolve_percentage_host_config(
         let maximum =
             maximum_resource_threads(hardware.logical_cores, hardware.available_logical_cores)
                 as u64;
-        let response = if limits.cpu_enabled == Some(false) { 100 } else { limits.response_cpu };
-        let context = if limits.cpu_enabled == Some(false) { 100 } else { limits.context_cpu };
+        let response = if limits.cpu_enabled == Some(false) {
+            100
+        } else {
+            limits.response_cpu
+        };
+        let context = if limits.cpu_enabled == Some(false) {
+            100
+        } else {
+            limits.context_cpu
+        };
         resolved.threads = Some(percentage_budget(maximum, response).max(1) as usize);
-        resolved.threads_batch =
-            Some(percentage_budget(maximum, context).max(1) as usize);
+        resolved.threads_batch = Some(percentage_budget(maximum, context).max(1) as usize);
         let reserve = (hardware.total_ram_bytes / 12).clamp(GIB, 4 * GIB);
         let budget = hardware
             .available_ram_bytes
@@ -459,7 +470,10 @@ impl Drop for SystemCheckReservation {
     }
 }
 
-fn reserve_system_check(guard: &mut ManagerState, id: &str) -> Result<Option<ManagedRuntime>, String> {
+fn reserve_system_check(
+    guard: &mut ManagerState,
+    id: &str,
+) -> Result<Option<ManagedRuntime>, String> {
     require_apply_idle(guard).map_err(|_| "resource_system_check_busy".to_string())?;
     if guard.pending_catalog_generation.is_some() {
         return Err("resource_system_check_busy".into());
@@ -489,7 +503,10 @@ pub async fn local_model_resource_system_check(
         drop(runtime);
         let sample = collect_hardware_snapshot(Some(&app));
         Ok(ResourceHardwareCheck {
-            reason_code: sample.as_ref().err().map(|_| "resource_system_check_failed".into()),
+            reason_code: sample
+                .as_ref()
+                .err()
+                .map(|_| "resource_system_check_failed".into()),
             hardware: sample.ok(),
             runtime_unloaded,
         })
@@ -580,6 +597,30 @@ mod tests {
         let resolved = resolve_percentage_host_config(&config, &hardware).unwrap();
         assert_eq!(resolved.threads, Some(7));
         assert_eq!(resolved.threads_batch, Some(10));
+        let mut cpu_unthrottled = config.clone();
+        cpu_unthrottled
+            .percentage_limits
+            .as_mut()
+            .unwrap()
+            .cpu_enabled = Some(false);
+        let full_cpu = resolve_percentage_host_config(&cpu_unthrottled, &hardware).unwrap();
+        assert_eq!(full_cpu.threads, Some(14));
+        assert_eq!(full_cpu.threads_batch, Some(14));
+        assert_eq!(
+            full_cpu.percentage_limits.as_ref().unwrap().response_cpu,
+            50
+        );
+        assert_eq!(full_cpu.ram_reserve_bytes, resolved.ram_reserve_bytes);
+        assert_eq!(
+            full_cpu.percentage_limits.as_ref().unwrap().gpu_percent(),
+            50
+        );
+        let restored: LocalResourceConfig =
+            serde_json::from_slice(&serde_json::to_vec(&full_cpu).unwrap()).unwrap();
+        assert_eq!(
+            restored.percentage_limits.as_ref().unwrap().cpu_enabled,
+            Some(false)
+        );
         let maximum = hardware.available_ram_bytes - hardware.total_ram_bytes / 12;
         assert_eq!(
             hardware.available_ram_bytes - resolved.ram_reserve_bytes.unwrap(),
@@ -641,6 +682,42 @@ mod tests {
         assert_eq!(super::LocalResourceConfig::default().mode, "auto");
     }
     use super::*;
+    #[test]
+    fn system_check_refuses_live_work_and_reserves_native_admission_without_revising_settings() {
+        let mut guard = ManagerState::default();
+        guard.resource_work_leases.insert("whole-chat".into());
+        assert_eq!(
+            reserve_system_check(&mut guard, "check").unwrap_err(),
+            "resource_system_check_busy"
+        );
+        assert!(guard.resource_system_check_id.is_none());
+        assert!(guard.resource_work_leases.contains("whole-chat"));
+        guard.resource_work_leases.clear();
+        guard.active_request_id = Some("prepare".into());
+        assert_eq!(
+            reserve_system_check(&mut guard, "check").unwrap_err(),
+            "resource_system_check_busy"
+        );
+        assert_eq!(guard.active_request_id.as_deref(), Some("prepare"));
+        guard.active_request_id = None;
+        guard.pending_catalog_generation = Some(2);
+        assert!(reserve_system_check(&mut guard, "check").is_err());
+        guard.pending_catalog_generation = None;
+        assert!(reserve_system_check(&mut guard, "check").unwrap().is_none());
+        assert_eq!(guard.resource_system_check_id.as_deref(), Some("check"));
+        assert_eq!(
+            require_revision(&guard, Some(0)).unwrap_err(),
+            "resource_config_busy"
+        );
+        assert!(require_apply_idle(&guard).is_err());
+        assert!(require_no_system_check(&guard).is_err());
+        assert!(reserve_system_check(&mut guard, "other-check").is_err());
+        clear_navigation_leases(&mut guard);
+        assert_eq!(guard.resource_system_check_id.as_deref(), Some("check"));
+        assert_eq!(guard.resource_settings.state.revision, 0);
+        guard.resource_system_check_id = None;
+        assert_eq!(require_revision(&guard, Some(0)).unwrap(), 0);
+    }
     #[test]
     fn main_navigation_releases_orphaned_work_before_catalog_registration_without_cancelling_native_work(
     ) {

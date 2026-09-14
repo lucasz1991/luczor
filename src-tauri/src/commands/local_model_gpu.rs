@@ -1171,6 +1171,24 @@ mod tests {
             .windows(2)
             .any(|pair| pair == ["--fit-target", "12288,4096"]));
         assert!(!plan.arguments.iter().any(|arg| arg == "--tensor-split"));
+        let mut unthrottled = config.clone();
+        unthrottled.percentage_limits.as_mut().unwrap().gpu_enabled = Some(false);
+        let full = select_configured_plan(
+            &devices,
+            &help,
+            None,
+            0,
+            "compatible_group",
+            64 * 1024 * MIB,
+            &unthrottled,
+        )
+        .unwrap();
+        assert_eq!(full.gpu_budget_bytes, (22528 + 6144) * MIB);
+        assert!(full
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--fit-target", "1024,1024"]));
+        assert_eq!(unthrottled.percentage_limits.as_ref().unwrap().gpu, 50);
     }
     use super::*;
     #[test]

@@ -249,10 +249,16 @@ function checkErrorMessage(failure: unknown): string {
 }
 
 async function readSystemCheck(): Promise<HardwareSnapshot> {
+  cleanupNotice.value = ''
   const result = await client.systemCheck()
-  if (!stopped) cleanupNotice.value = result.runtimeUnloaded
-    ? 'Eigene Modell-Runtime entladen. RAM und VRAM werden danach neu gemessen; der nächste lokale Auftrag lädt das Modell wieder.'
-    : 'Keine eigene Modell-Runtime geladen. Verfügbarer RAM und VRAM wurden neu gemessen.'
+  if (!stopped)
+    cleanupNotice.value = result.runtimeUnloaded
+      ? result.hardware && !result.reasonCode
+        ? 'Eigene Modell-Runtime entladen. RAM und VRAM wurden danach neu gemessen; der nächste lokale Auftrag lädt das Modell wieder.'
+        : 'Eigene Modell-Runtime entladen, Nachmessung fehlgeschlagen. Der nächste lokale Auftrag lädt das Modell wieder.'
+      : result.hardware && !result.reasonCode
+        ? 'Keine eigene Modell-Runtime geladen. Verfügbarer RAM und VRAM wurden neu gemessen.'
+        : ''
   if (!result.hardware || result.reasonCode) throw new Error(result.reasonCode ?? 'resource_system_check_failed')
   return result.hardware
 }
@@ -314,6 +320,8 @@ function setPercentage(key: 'responseCpu' | 'contextCpu' | 'ram' | 'gpu', event:
     value > 100
   )
     return
+  // The key is one of the four fixed slider keys, never arbitrary renderer data.
+  // eslint-disable-next-line security/detect-object-injection
   if (draft.value.percentageLimits && percentages.value[key] === value) return
   const limits = { ...throttleLimits(), [key]: value }
   if (key === 'responseCpu' || key === 'contextCpu') limits.cpuEnabled = true
@@ -325,7 +333,8 @@ function setPercentage(key: 'responseCpu' | 'contextCpu' | 'ram' | 'gpu', event:
 function toggleThrottle(key: 'cpuEnabled' | 'gpuEnabled', event: Event): void {
   if (!hardware.value || !systemCheck.value || checking.value || loading.value || revisionConflict.value) return
   draft.value = percentageResourceConfig(hardware.value, draft.value, {
-    ...throttleLimits(), [key]: (event.target as HTMLInputElement).checked,
+    ...throttleLimits(),
+    [key]: (event.target as HTMLInputElement).checked,
   })
   editVersion++
   scheduleAutoSave()
@@ -338,7 +347,9 @@ async function useSystemMaximum(): Promise<void> {
     const next = await readSystemCheck()
     if (stopped) return
     const nextConfig = percentageResourceConfig(next, draft.value, {
-      ...MAXIMUM_RESOURCE_PERCENTAGES, cpuEnabled: false, gpuEnabled: false,
+      ...MAXIMUM_RESOURCE_PERCENTAGES,
+      cpuEnabled: false,
+      gpuEnabled: false,
     })
     hardware.value = next
     hardwareUnavailable.value = false
@@ -446,13 +457,15 @@ onBeforeUnmount(() => {
           {{ checking ? 'System wird geprüft …' : 'Systemcheck: Maximalwerte übernehmen' }}
         </button>
       </div>
-      <p v-if="loading || checking" role="status">Eigene inaktive Modell-Runtime freigeben, danach CPU, RAM und Grafikkarten prüfen …</p>
+      <p v-if="cleanupNotice && !loading && !checking" role="status">{{ cleanupNotice }}</p>
+      <p v-if="loading || checking" role="status">
+        Eigene inaktive Modell-Runtime freigeben, danach CPU, RAM und Grafikkarten prüfen …
+      </p>
       <p v-else-if="!systemCheck" role="status">
         Keine vollständige Systemmessung verfügbar. Prozentregler bleiben gesperrt; deine bisherigen Einstellungen
         bleiben erhalten.
       </p>
       <template v-else>
-        <p v-if="cleanupNotice" role="status">{{ cleanupNotice }}</p>
         <p>
           {{
             draft.percentageLimits
@@ -464,19 +477,38 @@ onBeforeUnmount(() => {
         </p>
         <div class="resource-settings__throttles">
           <label>
-            <input type="checkbox" :checked="cpuThrottled"
+            <input
+              type="checkbox"
+              :checked="cpuThrottled"
               :disabled="checking || loading || revisionConflict || !config"
-              @change="toggleThrottle('cpuEnabled', $event)" />
-            <span><strong>CPU drosseln</strong><small>{{ cpuThrottled ? 'Antwort- und Kontextregler aktiv' : 'Aus · 100 % des nutzbaren CPU-Budgets' }}</small></span>
+              @change="toggleThrottle('cpuEnabled', $event)"
+            />
+            <span
+              ><strong>CPU drosseln</strong
+              ><small>{{
+                cpuThrottled ? 'Antwort- und Kontextregler aktiv' : 'Aus · 100 % des nutzbaren CPU-Budgets'
+              }}</small></span
+            >
           </label>
           <label>
-            <input type="checkbox" :checked="gpuThrottled"
+            <input
+              type="checkbox"
+              :checked="gpuThrottled"
               :disabled="draft.mode === 'cpu' || checking || loading || revisionConflict || !config"
-              @change="toggleThrottle('gpuEnabled', $event)" />
-            <span><strong>GPU drosseln</strong><small>{{ gpuThrottled ? 'VRAM-Budgetregler aktiv' : 'Aus · 100 % des nutzbaren GPU-Budgets' }}</small></span>
+              @change="toggleThrottle('gpuEnabled', $event)"
+            />
+            <span
+              ><strong>GPU drosseln</strong
+              ><small>{{
+                gpuThrottled ? 'VRAM-Budgetregler aktiv' : 'Aus · 100 % des nutzbaren GPU-Budgets'
+              }}</small></span
+            >
           </label>
         </div>
-        <p class="resource-settings__footnote">Beide Schalter sind unabhängig. Ausgeschaltete Drosselung behält den Reglerwert für später. GPU-Drosselung begrenzt das VRAM-/Offload-Budget, nicht Takt oder Auslastung; RAM ist separat einstellbar.</p>
+        <p class="resource-settings__footnote">
+          Beide Schalter sind unabhängig. Ausgeschaltete Drosselung behält den Reglerwert für später. GPU-Drosselung
+          begrenzt das VRAM-/Offload-Budget, nicht Takt oder Auslastung; RAM ist separat einstellbar.
+        </p>
         <div class="resource-settings__sliders">
           <label
             v-for="row in percentageRows"
@@ -517,8 +549,8 @@ onBeforeUnmount(() => {
         <p class="resource-settings__footnote">
           RAM-Reserve {{ gib(systemCheck.ramReserve) }} GiB · GPU-Reserve mindestens 1 GiB je Gerät, zusätzlich
           Laufzeit-/Kontextbedarf. Shared Memory zählt nicht als VRAM. Das freie Budget wird vor jedem Modellstart
-          erneut berechnet; niedrigere Werte können ein größeres Modell ausschließen.
-          Andere Programme, Modell-Dateien und Betriebssystem-Caches werden nicht gelöscht oder beendet.
+          erneut berechnet; niedrigere Werte können ein größeres Modell ausschließen. Andere Programme, Modell-Dateien
+          und Betriebssystem-Caches werden nicht gelöscht oder beendet.
         </p>
         <p role="status" aria-live="polite">
           {{
@@ -746,7 +778,9 @@ onBeforeUnmount(() => {
   padding: 8px 0;
   cursor: pointer;
 }
-.resource-settings__throttles label > span { min-width: 0; }
+.resource-settings__throttles label > span {
+  min-width: 0;
+}
 .resource-settings__slider {
   display: grid;
   align-content: start;

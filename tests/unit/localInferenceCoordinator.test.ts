@@ -229,6 +229,25 @@ it('unloads the resident release and remeasures hardware before preparing the se
   expect(harness.prepareModel).toHaveBeenCalledTimes(2)
 })
 
+it('invalidates ready gateways after an idle systemcheck without inventing a resource revision', async () => {
+  const verified = await manifest('hardware_tiers')
+  const harness = makeHarness(verified)
+  await harness.coordinator.initialize({
+    ...bootstrap(),
+    local_model_manifest: { ...bootstrap().local_model_manifest!, schema_version: 2 },
+  })
+  const id = verified.models[0]!.id
+  const input = { projectId: 'project-1', routingSettings: { localModelId: id, preference: 'local_only' as const } }
+  await harness.coordinator.resolveTurn(input)
+  expect(harness.coordinator.status().admissions.find(model => model.modelReleaseId === id)?.ready).toBe(true)
+  const revision = harness.coordinator.status().appliedResourceRevision
+  harness.coordinator.runtimeReleased()
+  expect(harness.coordinator.status().appliedResourceRevision).toBe(revision)
+  expect(harness.coordinator.status().admissions.some(model => model.ready)).toBe(false)
+  await harness.coordinator.resolveTurn(input)
+  expect(harness.prepareModel).toHaveBeenCalledTimes(2)
+})
+
 it('does not discard resident readiness when native stop fails or an invalid selection is requested', async () => {
   const verified = await manifest('hardware_tiers')
   const harness = makeHarness(verified)
