@@ -74,6 +74,7 @@ const APP_COMMANDS: &[&str] = &[
     "mini_chat_publish",
     "mini_chat_snapshot",
     "mini_chat_drag",
+    "mini_chat_snap",
     "mini_chat_window",
     "system_status_window_open",
     "system_status_window_set_mode",

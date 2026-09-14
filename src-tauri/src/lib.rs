@@ -85,6 +85,7 @@ pub fn run() {
             commands::mini_chat::mini_chat_publish,
             commands::mini_chat::mini_chat_snapshot,
             commands::mini_chat::mini_chat_drag,
+            commands::mini_chat::mini_chat_snap,
             commands::mini_chat::mini_chat_window,
             commands::system_status_window::system_status_window_open,
             commands::system_status_window::system_status_window_set_mode,

@@ -39,6 +39,16 @@ html.mini-window,
   padding: 6px;
   box-sizing: border-box;
 }
+/* Flush to the edge: no gap on the side the nudge is docked against. */
+.mini-surface.is-native[data-side='right'] {
+  padding-right: 0;
+}
+.mini-surface.is-native[data-side='left'] {
+  padding-left: 0;
+}
+.mini-surface[data-side='left'] {
+  align-items: flex-start;
+}
 .mini-surface.is-expanded {
   width: min(480px, 100vw);
   height: min(640px, 100dvh);
@@ -608,19 +618,29 @@ html.mini-window,
   padding-bottom: 6px;
   box-sizing: border-box;
 }
-/* Edge grip capsule: orb on top, state icons below */
+[data-side='left'] .mini-orb-dock {
+  align-items: flex-start;
+}
+/* Edge grip capsule: orb on top, state icons below. Flush against the docked edge — square on
+   that side, rounded on the inner side, like a tab built into the screen edge. */
 .mini-grip {
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 4px;
   padding: 4px 4px 5px;
-  border-radius: 999px;
+  border-radius: 999px 0 0 999px;
   background: var(--ai-canvas);
   border: 1px solid var(--ai-line-strong);
+  border-right-width: 0;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.12),
     0 14px 30px -18px rgba(0, 0, 0, 0.8);
+}
+[data-side='left'] .mini-grip {
+  border-radius: 0 999px 999px 0;
+  border-right-width: 1px;
+  border-left-width: 0;
 }
 .mini-grip__icon {
   width: 18px;
@@ -685,10 +705,39 @@ html.mini-window,
     transform 0.32s;
   text-align: left;
 }
+/* Left-docked: the fly-out unfolds to the right of the grip instead, notch mirrored. */
+[data-side='left'] .mini-grip-panel {
+  right: auto;
+  left: 60px;
+  border-radius: 18px 18px 18px 6px;
+  transform: translateX(-8px);
+}
 .mini-orb-dock:hover .mini-grip-panel,
 .mini-orb-dock:focus-within .mini-grip-panel {
   opacity: 1;
   transform: none;
+}
+/* A pinned pane must stay open without the pointer sitting over the (now much bigger) fly-out. */
+.mini-orb-dock.has-pin .mini-grip-panel {
+  opacity: 1;
+  transform: none;
+  pointer-events: auto;
+}
+/* Chats pinned open: the fly-out becomes the full chat page — no separate "Mini window" mode anymore. */
+.mini-grip-panel.is-chat-open {
+  width: min(400px, calc(100vw - 56px));
+  height: min(580px, calc(100vh - 20px));
+  padding: 0;
+  border-radius: 20px;
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  overflow: hidden;
+  transition:
+    opacity 0.28s,
+    transform 0.34s,
+    width 0.34s,
+    height 0.34s;
 }
 .mini-grip-panel__head {
   display: grid;
@@ -850,6 +899,10 @@ html.mini-window,
   transition:
     opacity 0.14s,
     transform 0.14s;
+}
+[data-side='left'] .mini-orb-tools {
+  right: auto;
+  left: 2px;
 }
 .mini-orb-dock:hover .mini-orb-tools,
 .mini-orb-dock:focus-within .mini-orb-tools {
