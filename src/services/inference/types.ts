@@ -64,6 +64,8 @@ export type InferenceResult = {
 }
 
 export type InferenceRequest = {
+  /** Local diagnostics only, never serialized into the provider request. */
+  debugScope?: { conversationId?: string; runId?: string }
   messages: WireMessage[]
   tools?: unknown[]
   toolChoice?: ToolChoice

@@ -1,4 +1,5 @@
 import { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
+import { recordTrace } from '@/services/debugTrace'
 import {
   createGoalReportTool,
   createGoalReadResultTool,
@@ -617,6 +618,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   const updateToolStatus = (id: string, status: ToolCallStatus) =>
     opts.toolSession ? opts.toolSession.update(id, status) : mutations.updateToolCallStatus(projectId, id, status)
   const recordOutcome: typeof recordPersistentOutcome = (...args) => {
+    void recordTrace('tool.response', { projectId, conversationId: opts.conversationId, runId: opts.runId,
+      callId: args[1], tool: args[2], status: args[3], outcome: args[4], requestId: args[6], durationMs: args[7] })
     if (opts.toolSession) opts.toolSession.update(args[1], args[3])
     else
       recordPersistentOutcome(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7], {
@@ -1160,6 +1163,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     const inferenceStarted = performance.now()
     try {
       res = await inferenceGateway.streamChatWithTools({
+        debugScope: { conversationId: opts.conversationId, runId: opts.runId },
         messages,
         tools: availableTools,
         toolChoice: availableTools.length ? nextToolChoice : 'none',
@@ -1394,6 +1398,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     // Handle each tool call. Every call MUST get a matching tool message,
     // otherwise the next request is malformed.
     for (const call of res.toolCalls) {
+      void recordTrace('tool.request', { projectId, conversationId: opts.conversationId, runId: opts.runId,
+        requestId: res.requestId, callId: call.id, tool: call.name, arguments: call.arguments })
       if (signal.aborted) {
         if (internallyInterrupted())
           return partialResultAfterInferenceFailure(new Error('Agentenknoten intern beendet.'), round + 1, {

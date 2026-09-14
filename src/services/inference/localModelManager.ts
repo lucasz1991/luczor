@@ -1,4 +1,5 @@
 import { localModelDiagnostics } from './localModelDiagnostics'
+import { traceInference } from '@/services/debugTrace'
 import type { LocalFailureDiagnostic } from './localFailure'
 import type { InferenceGateway, InferenceRequest, InferenceResult } from '@/services/inference/types'
 import type { LocalModelReleaseManifest } from '@/services/inference/modelManifest'
@@ -189,7 +190,7 @@ export class LocalModelManager {
       id: `local:${release.id}`,
       target: 'local_llama_cpp' as const,
       streamChatWithTools: (request: InferenceRequest) =>
-        this.stream(release, lease, fixedBinding, scopeDigest, gatewayEpoch, request, idleOptimization),
+        traceInference(release.id, request, value => this.stream(release, lease, fixedBinding, scopeDigest, gatewayEpoch, value, idleOptimization)),
     })
   }
 
