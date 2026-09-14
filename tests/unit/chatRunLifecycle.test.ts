@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import { stopCapturedChatRun, type ChatStopSnapshot } from '@/services/chatRunLifecycle'
 import { executionAbortReason } from '@/services/inference/interruption'
+import { isSilentLocalResponseFailure } from '@/services/inference/localResponseGuard'
 
 function deferred() {
   let resolve!: () => void
@@ -79,25 +80,28 @@ describe('captured chat cancellation', () => {
     expect(patchMessage).toHaveBeenCalledOnce()
   })
 
-  it.each([undefined, { code: 'runtime_output_repeated' }])(
-    'does not automatically read exhausted repetition diagnostics: %j',
-    interrupted => {
-      const app = readFileSync('src/App.vue', 'utf8')
-      const start = app.indexOf("if (interrupted?.code === 'runtime_output_repeated') progressiveSpeech.cancel()")
-      const source = app.slice(start, app.indexOf('\n    if (!ephemeralDataUsed', start))
-      const cancel = vi.fn(),
-        completeAnswer = vi.fn()
-      runInNewContext(source, {
-        interrupted,
-        progressiveSpeech: { cancel, completeAnswer },
-        isVisible: () => true,
-        turnSpeechGeneration: 1,
-        speechGeneration: 1,
-      })
-      expect(cancel).toHaveBeenCalledTimes(interrupted ? 1 : 0)
-      expect(completeAnswer).toHaveBeenCalledTimes(interrupted ? 0 : 1)
-    }
-  )
+  it.each([
+    undefined,
+    { code: 'runtime_output_repeated' },
+    { code: 'runtime_status_echo' },
+    { code: 'runtime_text_tool_output' },
+  ])('does not automatically read exhausted response correction diagnostics: %j', interrupted => {
+    const app = readFileSync('src/App.vue', 'utf8')
+    const start = app.indexOf('if (isSilentLocalResponseFailure(interrupted?.code)) progressiveSpeech.cancel()')
+    const source = app.slice(start, app.indexOf('\n    if (!ephemeralDataUsed', start))
+    const cancel = vi.fn(),
+      completeAnswer = vi.fn()
+    runInNewContext(source, {
+      interrupted,
+      isSilentLocalResponseFailure,
+      progressiveSpeech: { cancel, completeAnswer },
+      isVisible: () => true,
+      turnSpeechGeneration: 1,
+      speechGeneration: 1,
+    })
+    expect(cancel).toHaveBeenCalledTimes(interrupted ? 1 : 0)
+    expect(completeAnswer).toHaveBeenCalledTimes(interrupted ? 0 : 1)
+  })
 
   it('keeps automatic and manual admission closed until journal recovery and its public-state save finish', async () => {
     const app = readFileSync('src/App.vue', 'utf8')

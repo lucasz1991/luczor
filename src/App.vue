@@ -162,6 +162,7 @@ import {
   type RepositoryGraphStatus,
 } from '@/services/repositoryGraph'
 import { FLASH_EXPERIMENT_SETTING_KEY } from '@/services/inference/hybridRouter'
+import { isSilentLocalResponseFailure } from '@/services/inference/localResponseGuard'
 
 import { hud, setStatus, setKillSwitch } from '@/state/hud'
 import { state, mutations } from '@/state/store'
@@ -2125,10 +2126,7 @@ async function executeChatTurn(
     if (continuation || interrupted)
       await handle.interrupt('Fortschritt gesichert. Aktuellen Zustand prüfen und weiterarbeiten.')
     applyStreamedContent(pid, assistant.id, finalText, true)
-    finishChatActivity(
-      chatActivities.value[assistant.id]!,
-      interrupted?.code === 'runtime_output_repeated' ? 'failed' : 'done'
-    )
+    finishChatActivity(chatActivities.value[assistant.id]!, interrupted ? 'failed' : 'done')
     // Attach the server-reported routing metadata to the assistant message.
     {
       const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
@@ -2171,7 +2169,7 @@ async function executeChatTurn(
     await saveAppStateStrict(state)
 
     if (isVisible()) setStatus('idle')
-    if (interrupted?.code === 'runtime_output_repeated') progressiveSpeech.cancel()
+    if (isSilentLocalResponseFailure(interrupted?.code)) progressiveSpeech.cancel()
     else if (isVisible() && turnSpeechGeneration === speechGeneration) progressiveSpeech.completeAnswer()
     if (!ephemeralDataUsed && !continuation && !interrupted)
       void rememberExchange(pid, text, assistant.id, scopeKey.principalId, turnExecution)

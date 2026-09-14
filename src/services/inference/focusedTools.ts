@@ -1,5 +1,7 @@
 import type { ToolDef } from '@/services/tools/types'
 import type { WireMessage } from './types'
+import { isRuntimeStatusEcho, explicitlyQuotesRuntimeStatus } from './localResponseGuard'
+import { allowsTextToolExample, isTextToolOutput, holdProtocolPrefix } from './textToolGuard'
 
 type Definition = {
   type: 'function'
@@ -77,18 +79,16 @@ export function focusedTools(objective: string) {
 
 /** Only remove known UI-only failures, never tool receipts or arbitrary quoted text. */
 export function cleanLocalHistory(messages: WireMessage[]): WireMessage[] {
+  let precedingUser = ''
   const continuation =
     'Prüfe zuerst ausschließlich lesend den aktuellen Zustand des unterbrochenen Auftrags. Wiederhole keine Schreibaktionen. Berichte, was bereits nachweisbar erledigt ist und was noch fehlt.\n\nUrsprünglicher Auftrag:\n'
   return messages
-    .filter(
-      message =>
-        !(
-          message.role === 'assistant' &&
-          !message.tool_calls?.length &&
-          /^Die lokale Modellrunde \d+ wurde vor dem Abschluss unterbrochen:/.test(message.content) &&
-          message.content.includes('Der Auftrag wurde in einen bereinigten Fortsetzungsstand überführt.')
-        )
-    )
+    .filter(message => {
+      if (message.role === 'user') precedingUser = message.content
+      if (message.role !== 'assistant' || message.tool_calls?.length) return true
+      if (isRuntimeStatusEcho(message.content) && !explicitlyQuotesRuntimeStatus(precedingUser)) return false
+      return !(holdProtocolPrefix(message.content) && isTextToolOutput(message.content) && !allowsTextToolExample(precedingUser))
+    })
     .map(message => {
       if (message.role !== 'user' || !message.content.startsWith(continuation)) return message
       let content = message.content.slice(continuation.length)

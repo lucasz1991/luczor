@@ -1,5 +1,16 @@
 import { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
-import { textToolNames, mayRepairTextTool, holdProtocolPrefix } from '@/services/inference/textToolGuard'
+import {
+  isTextToolOutput,
+  allowsTextToolExample,
+  mayRepairTextTool,
+  holdProtocolPrefix,
+} from '@/services/inference/textToolGuard'
+import {
+  isRuntimeStatusEcho,
+  holdRuntimeStatusPrefix,
+  explicitlyQuotesRuntimeStatus,
+  isSilentLocalResponseFailure,
+} from '@/services/inference/localResponseGuard'
 import { focusedTools, cleanLocalHistory } from '@/services/inference/focusedTools'
 import { recordTrace, debugScope, traceEnabled } from '@/services/debugTrace'
 import {
@@ -848,6 +859,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   const toolRecovery = new ToolRecoveryGuard()
   let reasoningRetryUsed = false
   let textToolRetryUsed = false
+  let statusEchoRetries = 0
+  const guardTextTools = resolvedRoute.gateway.target === 'local_llama_cpp' && !allowsTextToolExample(latestUserMessage)
+  const guardStatusEcho =
+    resolvedRoute.gateway.target === 'local_llama_cpp' && !explicitlyQuotesRuntimeStatus(latestUserMessage)
   const repairTextTools =
     resolvedRoute.gateway.target === 'local_llama_cpp' &&
     !planningDiscussion &&
@@ -1017,6 +1032,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           })
     const continuation = checkpoint()
     const repeatedOutput = interruption.code === 'runtime_output_repeated'
+    const silentCorrectionFailure = isSilentLocalResponseFailure(interruption.code)
     const publicControlPartial =
       interruption.code === 'runtime_reasoning_control_unavailable' ? publicAnswerText(visibleContent, true).trim() : ''
     if (publicControlPartial) {
@@ -1030,9 +1046,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     const resetHistory =
       interruption.code === 'team_node_interrupted' ||
       (error instanceof LocalInferenceError &&
-        ['runtime_context_exceeded', 'runtime_chat_history_rejected', 'runtime_tool_contract_rejected'].includes(
-          error.code
-        ))
+        [
+          'runtime_context_exceeded',
+          'runtime_chat_history_rejected',
+          'runtime_tool_contract_rejected',
+          'runtime_text_tool_output',
+        ].includes(error.code))
     const retainedMutationCount = completedMutations.size
     if (resetHistory) {
       const objective = continuation.objective.slice(0, 6_000)
@@ -1071,22 +1090,26 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     const diagnostic = interruption.diagnostic
     const finalText = repeatedOutput
       ? 'Auch nach zwei automatischen Korrekturversuchen konnte das Modell keine Antwort ohne Wiederholung liefern. Die verworfene Ausgabe wurde entfernt. Dein Auftrag und bereits erledigte Arbeit bleiben zum Fortsetzen erhalten.'
-      : [
-          publicControlPartial,
-          `Die lokale Modellrunde ${round} wurde vor dem Abschluss unterbrochen: ${interruption.message}`,
-          diagnostic
-            ? `Diagnose: ${interruption.code}; Abschluss: ${diagnostic.finishReason}; Dauer: ${(diagnostic.durationMs / 1000).toFixed(1)} s; öffentliche Zeichen: ${diagnostic.receivedCharacters}${diagnostic.outputTokens !== undefined ? `; gemeldete Ausgabetokens: ${diagnostic.outputTokens}` : ''}.`
-            : '',
-          diagnostic && toolOutcomes.length ? fallbackToolResult(toolOutcomes) : '',
-          toolOutcomes.length
-            ? `Der bisherige Arbeitsfortschritt bleibt erhalten (${toolSuccesses} Tool-Aufrufe erfolgreich, ${toolFailures} fehlgeschlagen).`
-            : retainedMutationCount
-              ? `Der Fortsetzungsstand bleibt erhalten; ${retainedMutationCount} bereits erfolgreiche Änderungen bleiben vor identischer Wiederholung geschützt.`
-              : 'Der Auftrag wurde in einen bereinigten Fortsetzungsstand überführt.',
-          'Du kannst direkt weiterarbeiten; Luczor liest dabei den aktuellen Zustand erneut ein und wiederholt bereits erfolgreiche Änderungen nicht.',
-        ]
-          .filter(Boolean)
-          .join('\n\n')
+      : interruption.code === 'runtime_status_echo'
+        ? 'Das Modell hat auch nach zwei automatischen Korrekturversuchen eine unbelegte Statusmeldung statt einer Antwort geliefert. Die Ausgabe wurde verworfen. Dein Auftrag und der gesicherte Arbeitsstand bleiben erhalten.'
+        : interruption.code === 'runtime_text_tool_output'
+          ? 'Das Modell hat auch nach der automatischen Korrektur nur Werkzeugtext statt einer gültigen Antwort oder eines strukturierten Aufrufs geliefert. Aus diesem Text wurde nichts ausgeführt. Dein Auftrag und der gesicherte Arbeitsstand bleiben erhalten.'
+          : [
+              publicControlPartial,
+              `Die lokale Modellrunde ${round} wurde vor dem Abschluss unterbrochen: ${interruption.message}`,
+              diagnostic
+                ? `Diagnose: ${interruption.code}; Abschluss: ${diagnostic.finishReason}; Dauer: ${(diagnostic.durationMs / 1000).toFixed(1)} s; öffentliche Zeichen: ${diagnostic.receivedCharacters}${diagnostic.outputTokens !== undefined ? `; gemeldete Ausgabetokens: ${diagnostic.outputTokens}` : ''}.`
+                : '',
+              diagnostic && toolOutcomes.length ? fallbackToolResult(toolOutcomes) : '',
+              toolOutcomes.length
+                ? `Der bisherige Arbeitsfortschritt bleibt erhalten (${toolSuccesses} Tool-Aufrufe erfolgreich, ${toolFailures} fehlgeschlagen).`
+                : retainedMutationCount
+                  ? `Der Fortsetzungsstand bleibt erhalten; ${retainedMutationCount} bereits erfolgreiche Änderungen bleiben vor identischer Wiederholung geschützt.`
+                  : 'Der Auftrag wurde in einen bereinigten Fortsetzungsstand überführt.',
+              'Du kannst direkt weiterarbeiten; Luczor liest dabei den aktuellen Zustand erneut ein und wiederholt bereits erfolgreiche Änderungen nicht.',
+            ]
+              .filter(Boolean)
+              .join('\n\n')
     if (typeof window !== 'undefined') {
       window.dispatchEvent(
         new CustomEvent('luczor:debug', {
@@ -1105,8 +1128,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       )
     }
     // An exhausted correction is a UI diagnostic, never a new speech stream.
-    if (!repeatedOutput) publish(finalText)
-    if (!repeatedOutput)
+    if (!silentCorrectionFailure) publish(finalText)
+    if (!silentCorrectionFailure)
       opts.onRoundComplete?.({
         round,
         content: finalText,
@@ -1195,6 +1218,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     let res
     const inferenceStarted = performance.now()
     let retryInRound = 0
+    let correctionReason: 'repetition' | 'status' = 'repetition'
     while (true) {
       executionGate.assert(execution)
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
@@ -1208,7 +1232,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               role: 'system',
               content:
                 `Korrekturversuch ${retryInRound}: Beantworte den bestehenden Auftrag anhand des bisherigen Kontexts und der vorhandenen Werkzeugergebnisse neu. ` +
-                'Die verworfene Ausgabe war repetitiv. Formuliere die Antwort knapp und konkret, ohne wiederholte Phrasen oder Abschlussbestätigungen, und beende sie danach. Bereits erfolgreich ausgeführte Aktionen nicht wiederholen.',
+                (correctionReason === 'status'
+                  ? 'Die verworfene Ausgabe hat eine Anwendungsdiagnose nachgeahmt. Antworte auf die Nutzerfrage oder verwende erforderliche bereitgestellte Werkzeuge strukturiert. Erfinde keine Laufzeitfehler, HTTP-Statuswerte, Tokenzahlen oder Fortsetzungsstände. Wenn der Auftrag unklar ist, frage gezielt nach. '
+                  : 'Die verworfene Ausgabe war repetitiv. Formuliere die Antwort knapp und konkret, ohne wiederholte Phrasen oder Abschlussbestätigungen, und beende sie danach. ') +
+                'Bereits erfolgreich ausgeführte Aktionen nicht wiederholen.',
             },
           ]
         : messages
@@ -1251,17 +1278,31 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               characters: content.length,
             })
             updateUsage(attempt, { messages: requestMessages, tools: availableTools }, content)
-            if (!(
-              repairTextTools &&
-              (holdProtocolPrefix(content) ||
-                textToolNames(
-                  content,
-                  availableTools.map(tool => tool.function.name)
-                ).length)
-            ))
+            if (
+              !(guardStatusEcho && holdRuntimeStatusPrefix(publicAnswerText(content))) &&
+              !(guardTextTools && (holdProtocolPrefix(content) || isTextToolOutput(content)))
+            )
               publish(publicAnswerText(content))
           },
         })
+        if (guardStatusEcho && isRuntimeStatusEcho(publicAnswerText(res.content, true))) {
+          signal.throwIfAborted()
+          executionGate.assert(execution)
+          // Runtime/provider usage remains authoritative; never count numbers from response prose.
+          updateUsage(attempt, { messages: requestMessages, tools: availableTools }, res.content, res)
+          if (!res.toolCalls.length) {
+            throw new LocalInferenceError(
+              'Das Modell hat eine unbelegte Anwendungsdiagnose ausgegeben.',
+              'runtime_status_echo',
+              false,
+              false
+            )
+          }
+          // Valid structured calls still use the normal approval/execution path, without false commentary.
+          opts.onResponseReset?.({ round: round + 1 })
+          publish('')
+          res = { ...res, content: '' }
+        }
         break
       } catch (error) {
         acceptingOutput = false
@@ -1281,13 +1322,16 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           !resolvedRoute.externalOneShot &&
           inferenceGateway.target === 'local_llama_cpp' &&
           error instanceof LocalInferenceError &&
-          error.code === 'runtime_output_repeated'
+          (error.code === 'runtime_output_repeated' || error.code === 'runtime_status_echo')
         ) {
           opts.onResponseReset?.({ round: round + 1 })
           publish('')
           opts.onBudget?.(null)
-          if (repetitionRetries < 2) {
-            repetitionRetries++
+          const statusEcho = error.code === 'runtime_status_echo'
+          if ((statusEcho ? statusEchoRetries : repetitionRetries) < 2) {
+            if (statusEcho) statusEchoRetries++
+            else repetitionRetries++
+            correctionReason = statusEcho ? 'status' : 'repetition'
             retryInRound++
             opts.onProgress?.({ phase: 'regenerating', round: round + 1, attempt: retryInRound })
             continue
@@ -1304,6 +1348,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
             'runtime_tool_contract_rejected',
             'runtime_reasoning_control_unavailable',
             'runtime_output_repeated',
+            'runtime_status_echo',
           ].includes(error.code)
         if (!resolvedRoute.externalOneShot && (toolOutcomes.length > 0 || resettableLocalInputFailure)) {
           return partialResultAfterInferenceFailure(error, round + 1)
@@ -1359,31 +1404,32 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     }
     // No tool calls -> this is the final answer.
     if (!res.toolCalls.length) {
-      const pseudoCalls = repairTextTools
-        ? textToolNames(
-            res.content,
-            availableTools.map(tool => tool.function.name)
-          )
-        : []
-      if (pseudoCalls.length) {
+      if (guardTextTools && isTextToolOutput(res.content)) {
+        opts.onResponseReset?.({ round: round + 1 })
         publish('')
-        if (!textToolRetryUsed && !synthesisOnly && availableTools.length) {
+        opts.onBudget?.(null)
+        if (!textToolRetryUsed) {
           textToolRetryUsed = true
-          nextToolChoice = 'required'
+          // An ambiguous follow-up is not new execution authority; never force a tool for it.
+          nextToolChoice =
+            synthesisOnly || requestedToolChoice === 'none' ? 'none' : repairTextTools ? 'required' : 'auto'
           messages.push({
             role: 'system',
             content:
               'Die vorige Antwort beschrieb einen Werkzeugaufruf nur als Text; kein Werkzeug wurde ausgeführt. ' +
-              'Erledige den bestehenden Auftrag durch einen echten strukturierten Aufruf eines bereitgestellten Werkzeugs. ' +
+              (nextToolChoice === 'required'
+                ? 'Erledige den bestehenden Auftrag durch einen echten strukturierten Aufruf eines bereitgestellten Werkzeugs. '
+                : 'Beantworte die Nutzerfrage. Ist der Auftrag unklar, frage nach. Nur bei einem bestehenden freigegebenen Auftrag dürfen verfügbare Werkzeuge strukturiert aufgerufen werden. ') +
               'Kein XML, kein JSON-Codebeispiel und keine erfundenen Ergebnisse. Bereits erfolgreiche Aktionen nicht wiederholen.',
           })
+          opts.onProgress?.({ phase: 'regenerating', round: round + 1, attempt: 1 })
           round-- // One bounded repair of this round, not another user/tool execution.
           continue
         }
         return partialResultAfterInferenceFailure(
           new LocalInferenceError(
             'Das lokale Modell hat den Werkzeugaufruf erneut nur als Text ausgegeben. Es wurde dadurch kein Tool ausgeführt. Der bisherige Fortschritt bleibt erhalten.',
-            'runtime_tool_contract_rejected',
+            'runtime_text_tool_output',
             false,
             false
           ),
@@ -1482,7 +1528,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       }
     }
 
-    const commentary = publicAnswerText(res.content, true).trim()
+    const protocolCommentary = guardTextTools && isTextToolOutput(res.content)
+    if (protocolCommentary) {
+      opts.onResponseReset?.({ round: round + 1 })
+      publish('')
+    }
+    const commentary = protocolCommentary ? '' : publicAnswerText(res.content, true).trim()
     if (commentary) {
       opts.onRoundComplete?.({
         round: round + 1,
@@ -1509,7 +1560,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     const history = prepareToolCallHistory(res.rawToolCalls)
     messages.push({
       role: 'assistant',
-      content: res.content ?? '',
+      content: protocolCommentary ? '' : (res.content ?? ''),
       tool_calls: history.calls,
     })
 

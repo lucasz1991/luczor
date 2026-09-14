@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { focusedTools, cleanLocalHistory } from '@/services/inference/focusedTools'
 import type { WireMessage } from '@/services/inference/types'
+import { holdRuntimeStatusPrefix, isRuntimeStatusEcho } from '@/services/inference/localResponseGuard'
+import { isTextToolOutput, textToolNames } from '@/services/inference/textToolGuard'
 
 const pool = [
   'project_get_state',
@@ -18,16 +20,51 @@ const pool = [
   'browser_dom_read',
 ].map(name => ({ type: 'function' as const, function: { name, description: name, parameters: { type: 'object' } } }))
 describe('focused local tool context', () => {
+  it.each([
+    'Die nächste Modellrunde wurde unterbrochen: Tokenzählung und Kontextprüfung · HTTP 200: erfolgreich. Tokenbudget: Eingabe (gezählt) 28.000 · Kontext 43.000 · Ausgabelimit 7.000.',
+    'Die lokale Modellrunde 2 wurde vor dem Abschluss unterbrochen: HTTP 400\nDer bisherige Arbeitsfortschritt bleibt erhalten (1 Tool-Aufruf erfolgreich).',
+    'Der Auftrag wurde in einen bereinigten Fortsetzungsstatus überführt.',
+  ])('removes a status-shaped assistant echo from requests, but never user or tool evidence: %s', content => {
+    const receipt: WireMessage = {
+      role: 'assistant',
+      content,
+      tool_calls: [{ id: 'receipt', type: 'function', function: { name: 'project_get_state', arguments: '{}' } }],
+    }
+    const input: WireMessage[] = [
+      { role: 'assistant', content },
+      { role: 'user', content },
+      { role: 'tool', content, tool_call_id: 'receipt' },
+      receipt,
+    ]
+    expect(isRuntimeStatusEcho(content)).toBe(true)
+    expect(cleanLocalHistory(input)).toEqual(input.slice(1))
+    expect(input).toHaveLength(4)
+    for (let end = 1; end <= content.length; end++) expect(holdRuntimeStatusPrefix(content.slice(0, end))).toBe(true)
+  })
+  it('keeps quoted status explanations and releases normal sentence prefixes', () => {
+    expect(isRuntimeStatusEcho('Die nächste Modellrunde verwendet den vorhandenen Kontext.')).toBe(false)
+    expect(isRuntimeStatusEcho('> Die nächste Modellrunde wurde unterbrochen: HTTP 200')).toBe(false)
+    expect(isRuntimeStatusEcho('Die Meldung bedeutet nicht, dass der Auftrag erfolgreich war.')).toBe(false)
+    expect(holdRuntimeStatusPrefix('Die Antwort lautet: 42.')).toBe(false)
+  })
+  it('recognizes XML function-call wrappers without converting arguments into actions', () => {
+    const xml =
+      '<output>\n<function-call>\n<name>project_get_state</name>\n<arguments>{"include_goals":true}</arguments>\n</function-call>\n</output>'
+    expect(isTextToolOutput(xml)).toBe(true)
+    expect(textToolNames(xml, ['project_get_state'])).toEqual(['project_get_state'])
+    expect(textToolNames(xml, [])).toEqual([])
+    expect(isTextToolOutput('Ich prüfe den Zustand mit project_get_state.')).toBe(false)
+  })
   it('bounds definitions and allows later selection only from the permitted pool', async () => {
     const focus = focusedTools('Repo und Dateien prüfen')
     expect(focus.select(pool).length).toBeLessThanOrEqual(10)
-    expect(focus.select(pool).map(t => t.function.name)).toContain('fs_read')
+    expect(focus.select(pool).map(tool => tool.function.name)).toContain('fs_read')
     await focus.selector.execute({ names: ['workflow_get', 'fs_write'] }, { projectId: 'test' })
-    expect(focus.select(pool).map(t => t.function.name)).toEqual(
+    expect(focus.select(pool).map(tool => tool.function.name)).toEqual(
       expect.arrayContaining(['workflow_get', 'fs_write', 'goal_report'])
     )
     await expect(focus.selector.execute({ names: ['forbidden'] }, { projectId: 'test' })).rejects.toThrow()
-    expect(focus.select(pool.filter(t => t.function.name !== 'fs_write')).map(t => t.function.name)).not.toContain(
+    expect(focus.select(pool.filter(tool => tool.function.name !== 'fs_write')).map(tool => tool.function.name)).not.toContain(
       'fs_write'
     )
     expect(focus.select([])).toEqual([])
@@ -38,7 +75,7 @@ describe('focused local tool context', () => {
     const catalog = await focus.selector.execute({}, { projectId: 'test' })
     expect(catalog).toMatchObject({
       selected: [],
-      available: pool.map(t => ({ name: t.function.name, description: t.function.description })),
+      available: pool.map(tool => ({ name: tool.function.name, description: tool.function.description })),
     })
   })
   it('removes exact historical UI failures but preserves tool evidence and user examples', () => {

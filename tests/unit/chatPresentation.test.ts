@@ -12,6 +12,22 @@ import {
 import type { WireMessage } from '../../src/services/openrouter.service'
 
 describe('chat presentation helpers', () => {
+  it('removes local UI status before merging adjacent assistant turns, without changing storage', () => {
+    const history: WireMessage[] = [
+      { role: 'user', content: 'Prüfe den Zustand' },
+      { role: 'assistant', content: 'Projekt wurde gelesen.' },
+      {
+        role: 'assistant',
+        content:
+          'Die lokale Modellrunde 2 wurde vor dem Abschluss unterbrochen: HTTP 400\nDer bisherige Arbeitsfortschritt bleibt erhalten.',
+      },
+      { role: 'assistant', content: 'Die nächste Modellrunde wurde unterbrochen: HTTP 200 · Kontext 43.000.' },
+      { role: 'user', content: 'ok los' },
+    ]
+    const original = structuredClone(history)
+    expect(localConversationHistory(history)).toEqual([history[0], history[1], history[4]])
+    expect(history).toEqual(original)
+  })
   it('lets the native tokenizer budget local history beyond the old small estimate', () => {
     const history: WireMessage[] = [
       { role: 'user', content: 'a'.repeat(12000) },

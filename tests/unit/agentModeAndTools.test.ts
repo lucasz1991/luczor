@@ -89,6 +89,224 @@ const durableTaskCreate = {
 } as const
 
 describe('agent mode and tool reliability', () => {
+  it('corrects the photographed HTTP 200 status echo without publishing invented counters', async () => {
+    const fake =
+      'Die nächste Modellrunde wurde unterbrochen: Tokenzählung und Kontextprüfung · HTTP 200: Der Auftrag wurde erfolgreich bearbeitet. Tokenbudget: Eingabe (gezählt) 28.000 · Kontext 43.000 · Ausgabelimit 7.000.\n\nDer Auftrag wurde in einen bereinigten Fortsetzungsstatus überführt.'
+    let stale!: InferenceRequest
+    mocks.streamChatWithTools
+      .mockImplementationOnce(async (request: InferenceRequest) => {
+        stale = request
+        for (let end = 1; end <= fake.length; end++) request.onToken?.(fake.slice(0, end))
+        return {
+          content: fake,
+          toolCalls: [],
+          rawToolCalls: [],
+          finishReason: 'stop',
+          usage: { inputTokens: 5645, outputTokens: 204, totalTokens: 5849 },
+          contextUsage: {
+            inputTokens: 5645,
+            contextTokens: 8192,
+            outputTokens: 1000,
+            omittedMessages: 0,
+            shortenedToolResults: 0,
+          },
+        }
+      })
+      .mockImplementationOnce(async (request: InferenceRequest) => {
+        stale.onToken?.('Dieser alte Callback darf nicht sichtbar werden.')
+        request.onToken?.('Welchen Teil soll ich als Nächstes prüfen?')
+        return {
+          content: 'Welchen Teil soll ich als Nächstes prüfen?',
+          toolCalls: [],
+          rawToolCalls: [],
+          finishReason: 'stop',
+          usage: { inputTokens: 5700, outputTokens: 20, totalTokens: 5720 },
+          contextUsage: {
+            inputTokens: 5700,
+            contextTokens: 8192,
+            outputTokens: 1000,
+            omittedMessages: 0,
+            shortenedToolResults: 0,
+          },
+        }
+      })
+    const onToken = vi.fn(),
+      onResponseReset = vi.fn(),
+      onRoundComplete = vi.fn()
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'ok los' }],
+      maxRounds: 1,
+      onToken,
+      onResponseReset,
+      onRoundComplete,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(result.interrupted).toBeUndefined()
+    expect(result.finalText).toBe('Welchen Teil soll ich als Nächstes prüfen?')
+    expect(onToken.mock.calls.flat().join('')).not.toMatch(/HTTP|43.000|alte Callback/)
+    expect(onRoundComplete).toHaveBeenCalledOnce()
+    expect(onResponseReset).toHaveBeenCalledExactlyOnceWith({ round: 1 })
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(2)
+    const first = mocks.streamChatWithTools.mock.calls[0]![0] as InferenceRequest
+    const second = mocks.streamChatWithTools.mock.calls[1]![0] as InferenceRequest
+    expect(second.messages.slice(0, -1)).toEqual(first.messages)
+    expect(JSON.stringify(second.messages)).not.toContain(fake)
+    expect(second.toolChoice).toEqual(first.toolChoice)
+    expect(result.tokenUsage).toMatchObject({
+      inputTokens: 11345,
+      outputTokens: 224,
+      contextTokens: 8192,
+      source: 'reported',
+      rounds: 2,
+    })
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
+  it('bounds status-echo corrections and keeps the exhausted result out of speech callbacks', async () => {
+    const fake = 'Die nächste Modellrunde wurde unterbrochen: HTTP 200 · Kontext 43.000.'
+    mocks.streamChatWithTools.mockImplementation(async (request: InferenceRequest) => {
+      request.onToken?.(fake)
+      return { content: fake, toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
+    })
+    const onToken = vi.fn(),
+      onRoundComplete = vi.fn()
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'ok los' }],
+      maxRounds: 1,
+      onToken,
+      onRoundComplete,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(3)
+    expect(result.interrupted?.code).toBe('runtime_status_echo')
+    expect(result.continuation).toBeDefined()
+    expect(JSON.stringify(result.continuation!.messages)).not.toContain(fake)
+    expect(onToken.mock.calls.flat().join('')).toBe('')
+    expect(onRoundComplete).not.toHaveBeenCalled()
+  })
+
+  it.each(['???', 'ok los'])(
+    'withholds XML function-call output for an ambiguous follow-up %s without forcing execution',
+    async objective => {
+      const xml =
+        '<output>\n<function-call>\n<name>project_get_state</name>\n<arguments>{"include_goals":true}</arguments>\n</function-call>\n</output>'
+      mocks.streamChatWithTools
+        .mockImplementationOnce(async (request: InferenceRequest) => {
+          for (let end = 1; end <= xml.length; end++) request.onToken?.(xml.slice(0, end))
+          return { content: xml, toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
+        })
+        .mockResolvedValueOnce({
+          content: 'Was möchtest du prüfen lassen?',
+          toolCalls: [],
+          rawToolCalls: [],
+          finishReason: 'stop',
+        })
+      const onToken = vi.fn(),
+        onRoundComplete = vi.fn(),
+        onResponseReset = vi.fn()
+      const result = await runAgent({
+        projectId: 'project-2',
+        mode: 'observe',
+        baseMessages: [{ role: 'user', content: objective }],
+        maxRounds: 1,
+        onToken,
+        onRoundComplete,
+        onResponseReset,
+        inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+      })
+      expect(result.finalText).toBe('Was möchtest du prüfen lassen?')
+      expect(mocks.streamChatWithTools.mock.calls[1]![0].toolChoice).toBe('auto')
+      expect(onToken.mock.calls.flat().join('')).not.toContain('<')
+      expect(onRoundComplete).toHaveBeenCalledOnce()
+      expect(onResponseReset).toHaveBeenCalledOnce()
+      expect(mocks.execute).not.toHaveBeenCalled()
+    }
+  )
+
+  it('does not replay completed tools when a later answer echoes status', async () => {
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce({ ...toolCallResult, content: 'Ich prüfe den Zustand.' })
+      .mockResolvedValueOnce({
+        content: 'Die nächste Modellrunde wurde unterbrochen: HTTP 200',
+        toolCalls: [],
+        rawToolCalls: [],
+        finishReason: 'stop',
+      })
+      .mockResolvedValueOnce({
+        content: 'Das Projekt ist geprüft.',
+        toolCalls: [],
+        rawToolCalls: [],
+        finishReason: 'stop',
+      })
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'Prüfe das Projekt' }],
+      maxRounds: 2,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(result.interrupted).toBeUndefined()
+    expect(mocks.execute).toHaveBeenCalledOnce()
+    const retry = mocks.streamChatWithTools.mock.calls[2]![0] as InferenceRequest
+    expect(retry.messages.filter(message => message.role === 'tool')).toHaveLength(1)
+  })
+
+  it.each(['status', 'xml'] as const)('does not start a %s correction after cancellation during reset', async kind => {
+    const controller = new AbortController()
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content:
+        kind === 'status'
+          ? 'Die nächste Modellrunde wurde unterbrochen: HTTP 200'
+          : '<function-call><name>project_get_state</name></function-call>',
+      toolCalls: [],
+      rawToolCalls: [],
+      finishReason: 'stop',
+    })
+    await expect(
+      runAgent({
+        projectId: 'project-2',
+        mode: 'observe',
+        baseMessages: [{ role: 'user', content: '???' }],
+        maxRounds: 1,
+        signal: controller.signal,
+        onResponseReset: () => controller.abort(),
+        inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+      })
+    ).rejects.toThrow()
+    expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+  })
+
+  it('preserves an explicitly requested literal status quotation', async () => {
+    const content = 'Die nächste Modellrunde wurde unterbrochen: HTTP 200'
+    mocks.streamChatWithTools.mockResolvedValueOnce({ content, toolCalls: [], rawToolCalls: [], finishReason: 'stop' })
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: `Zitiere wörtlich: ${content}` }],
+      maxRounds: 1,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(result.finalText).toBe(content)
+    expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+  })
+
+  it('does not change or replay an externally approved response', async () => {
+    const content = 'Die nächste Modellrunde wurde unterbrochen: HTTP 200'
+    mocks.streamChatWithTools.mockResolvedValueOnce({ content, toolCalls: [], rawToolCalls: [], finishReason: 'stop' })
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'ok los' }],
+      maxRounds: 1,
+      inferenceGateway: { id: 'external', target: 'laravel_proxy', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(result.finalText).toBe(content)
+    expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+  })
   it('repairs textual local tool output once, then executes only the structured response', async () => {
     const pseudo = {
       content: '```json\n<tools>{"name":"project_get_state","arguments":{}}</tools>\n```',
@@ -130,7 +348,7 @@ describe('agent mode and tool reliability', () => {
     })
     expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(2)
     expect(mocks.execute).not.toHaveBeenCalled()
-    expect(result.interrupted?.code).toBe('runtime_tool_contract_rejected')
+    expect(result.interrupted?.code).toBe('runtime_text_tool_output')
   })
 
   it('does not force a call for an explanation of a tool example', async () => {
@@ -176,10 +394,10 @@ describe('agent mode and tool reliability', () => {
     })
     expect(mocks.execute).not.toHaveBeenCalled()
     expect(
-      mocks.streamChatWithTools.mock.calls[0]![0].tools.map((t: { function: { name: string } }) => t.function.name)
+      mocks.streamChatWithTools.mock.calls[0]![0].tools.map((tool: { function: { name: string } }) => tool.function.name)
     ).not.toContain('fs_read')
     expect(
-      mocks.streamChatWithTools.mock.calls[1]![0].tools.map((t: { function: { name: string } }) => t.function.name)
+      mocks.streamChatWithTools.mock.calls[1]![0].tools.map((tool: { function: { name: string } }) => tool.function.name)
     ).toContain('fs_read')
   })
   it('bounds browser host guessing, preserves matching tool replies and continues unrelated work', async () => {

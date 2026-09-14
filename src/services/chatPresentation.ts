@@ -1,4 +1,5 @@
 import type { WireMessage } from './openrouter.service'
+import { cleanLocalHistory } from './inference/focusedTools'
 
 /** Pure presentation helpers shared by the chat shell and its child views. */
 export function clampNumber(value: number, min: number, max: number): number {
@@ -42,7 +43,8 @@ export function compactHistory(messages: WireMessage[], maxTokens: number): Wire
  * Only bound the IPC envelope here; do not apply the old 2,400-token estimate.
  */
 export function localConversationHistory(messages: WireMessage[]): WireMessage[] {
-  const normalized = normalizeConversationHistory(messages)
+  // Remove UI diagnostics before adjacent assistant messages are merged. Storage is unchanged.
+  const normalized = normalizeConversationHistory(cleanLocalHistory(messages))
   let chars = 0
   let start = normalized.length
   while (start > 0 && normalized.length - start < 240) {
