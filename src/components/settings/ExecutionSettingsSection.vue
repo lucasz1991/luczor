@@ -195,13 +195,13 @@ function toggleAutoExecution(): void {
       </p>
       <p v-if="killSwitch" role="status" class="lz-hint">Not-Aus aktiv: Alle Werkzeuge sind gesperrt.</p>
       <label class="capability-search">
-        <span>Funktion suchen</span>
-        <input v-model="search" type="search" placeholder="Zum Beispiel Formular, screenshot oder Gedächtnis" />
+        <span>Search tools</span>
+        <input v-model="search" type="search" placeholder="For example form, screenshot, memory or Gedächtnis" />
       </label>
       <label class="capability-search">
-        <span>Kategorie und Unterkategorie</span>
+        <span>Category and subcategory</span>
         <select v-model="category">
-          <option value="">Alle Kategorien</option>
+          <option value="">All categories</option>
           <option v-for="node in categoryOptions" :key="node.id" :value="node.id">
             {{ '— '.repeat(node.id.split('/').length - 1) }}{{ node.label }} ({{ node.tools }})
           </option>

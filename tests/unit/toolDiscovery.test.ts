@@ -29,6 +29,14 @@ describe('hierarchical tool discovery', () => {
   ])('finds synonyms without relying on tool descriptions: %s', (query, name) => {
     expect(searchToolCatalog(pool, query).map(item => item.meta.name)).toContain(name)
   })
+
+  it('uses English map labels while German search terms remain valid', () => {
+    const metadata = toolDiscovery(definition('memory_recall'))
+    expect(metadata.path).toEqual(['Knowledge', 'Memories', 'Read and inspect'])
+    expect(metadata.keywords).toEqual(expect.arrayContaining(['memory', 'erinnerung', 'lesen']))
+    expect(searchToolCatalog(pool, 'Erinnerungen').map(item => item.meta.name)).toContain('memory_recall')
+  })
+
   it('keeps internal browser, external browser, desktop and remote devices separate', () => {
     expect(toolDiscovery(definition('browser_fill')).category).toBe('computer/browser/forms')
     expect(searchToolCatalog(pool, '', 'computer/browser').map(item => item.meta.name)).toEqual([
@@ -52,7 +60,7 @@ describe('hierarchical tool discovery', () => {
     )
     expect(result).toMatchObject({
       available: [
-        { name: 'browser_fill', path: ['Computer', 'Luczor-Browser', 'Formulare'] },
+        { name: 'browser_fill', path: ['Computer', 'Luczor browser', 'Forms'] },
         { name: 'browser_dom_read' },
       ],
     })
@@ -94,7 +102,7 @@ describe('hierarchical tool discovery', () => {
     expect(fitted.messages[0]?.content).toBe(map)
     expect(fitted.report.categories.tools).toBeGreaterThan(0)
     expect(focusedTools('hi').select(many, rows)).toHaveLength(10)
-    expect(toolUsageContext(many, [])).toContain('Noch keine gemessene')
+    expect(toolUsageContext(many, [])).toContain('No measured tool usage')
     expect(toolUsageContext([], rows)).toBe('')
     expect(toolUsageContext(many, rows, false)).not.toContain('tools_select(')
   })

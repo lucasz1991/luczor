@@ -329,7 +329,7 @@ describe('agent mode and tool reliability', () => {
     expect(mocks.execute).toHaveBeenCalledTimes(2)
     const lastRequest = mocks.streamChatWithTools.mock.calls[4]![0] as InferenceRequest
     const maps = lastRequest.messages.filter(
-      message => message.role === 'system' && message.content.startsWith('[Luczor Werkzeugkarte]')
+      message => message.role === 'system' && message.content.startsWith('[Luczor Tool map]')
     )
     expect(maps).toHaveLength(1)
     expect(maps[0]?.content).toContain('project_get_state')

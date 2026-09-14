@@ -90,7 +90,8 @@ export function topToolUsage(pool: ToolDescriptor[], rows: ToolUsage[]) {
       path: toolDiscovery(available.get(row.name)!).path,
     }))
 }
-export const TOOL_MAP_MARKER = '[Luczor Werkzeugkarte]'
+/** English canonical marker; the legacy German marker remains readable in historical context. */
+export const TOOL_MAP_MARKER = '[Luczor Tool map]'
 export function toolUsageContext(pool: ToolDescriptor[], rows: ToolUsage[], discovery = true): string {
   if (!pool.length) return ''
   const roots = [...new Set(pool.map(tool => toolDiscovery(tool).nodes[0]!.label))]

@@ -7,11 +7,31 @@ type Branch = { id: string; label: string; keywords: string[] }
 const branch = (id: string, label: string, words: string): Branch => ({ id, label, keywords: words.split(' ') })
 export const TOOL_BRANCHES: Branch[] = [
   branch('project', 'Projects', 'project projects projekt projekte workspace arbeitsbereich vorhaben'),
-  branch('project/state', 'Project management', 'state status zustand projektstand summary zusammenfassung goals ziele create erstellen anlegen'),
-  branch('project/chats', 'Conversations', 'chat conversation conversations unterhaltung unterhaltungen verlauf nachrichten dialog'),
-  branch('project/tasks', 'Tasks and planning', 'task tasks aufgabe aufgaben plan planning schritte todo checklist goal ziel'),
-  branch('files', 'Files', 'file files datei dateien dokument document ordner folder verzeichnis directory quellcode source repo'),
-  branch('files/local', 'Local project folder', 'local lokal dateisystem filesystem pfad path read lesen save speichern search suchen'),
+  branch(
+    'project/state',
+    'Project management',
+    'state status zustand projektstand summary zusammenfassung goals ziele create erstellen anlegen'
+  ),
+  branch(
+    'project/chats',
+    'Conversations',
+    'chat conversation conversations unterhaltung unterhaltungen verlauf nachrichten dialog'
+  ),
+  branch(
+    'project/tasks',
+    'Tasks and planning',
+    'task tasks aufgabe aufgaben plan planning schritte todo checklist goal ziel'
+  ),
+  branch(
+    'files',
+    'Files',
+    'file files datei dateien dokument document ordner folder verzeichnis directory quellcode source repo'
+  ),
+  branch(
+    'files/local',
+    'Local project folder',
+    'local lokal dateisystem filesystem pfad path read lesen save speichern search suchen'
+  ),
   branch('files/cloud', 'Cloud project files', 'cloud server global synchronisieren sync dateipool'),
   branch('computer', 'Computer', 'computer desktop bildschirm screen bedienung control'),
   branch(
@@ -41,11 +61,19 @@ export const TOOL_BRANCHES: Branch[] = [
     'terminal shell befehl command skript script ausführen execute programm build test kompilieren'
   ),
   branch('knowledge', 'Knowledge', 'wissen knowledge kontext context erinnerung gedächtnis memory'),
-  branch('knowledge/memory', 'Memories', 'memory memories erinnerung erinnerungen erinnern recall remember merken notiz notizen erfahrung wissen'),
+  branch(
+    'knowledge/memory',
+    'Memories',
+    'memory memories erinnerung erinnerungen erinnern recall remember merken notiz notizen erfahrung wissen'
+  ),
   branch('knowledge/history', 'Context archive', 'history verlauf archiv nachlesen original context'),
   branch('agents', 'Agents', 'agent agents agenten assistenz assistance delegation mitarbeiter helfer parallel'),
   branch('agents/jobs', 'Individual agents', 'job auftrag teilauftrag delegieren worker spezialist codex claude'),
-  branch('agents/teams', 'Agent teams', 'team teams agententeam agententeams orchestrierung zusammenarbeit koordination'),
+  branch(
+    'agents/teams',
+    'Agent teams',
+    'team teams agententeam agententeams orchestrierung zusammenarbeit koordination'
+  ),
   branch('models', 'Models', 'modell model modelle ki ai inference lokal local llm'),
   branch(
     'models/runtime',
@@ -60,9 +88,17 @@ export const TOOL_BRANCHES: Branch[] = [
   ),
   branch('workflows/runs', 'Runs', 'run runs lauf läufe ausführen starten testen ergebnis stoppen'),
   branch('workflows/triggers', 'Triggers', 'trigger auslöser zeitplan schedule timer ereignis event automatisch'),
-  branch('devices', 'Device cluster', 'gerät geräte device devices laptop rechner master koordinator netzwerk remote fernsteuerung'),
+  branch(
+    'devices',
+    'Device cluster',
+    'gerät geräte device devices laptop rechner master koordinator netzwerk remote fernsteuerung'
+  ),
   branch('devices/jobs', 'Device jobs', 'delegieren dispatch auftrag aufträge job ergebnis status stoppen'),
-  branch('tools', 'Tools', 'tool tools werkzeug werkzeuge funktion function hilfsmittel katalog catalog entdecken discovery'),
+  branch(
+    'tools',
+    'Tools',
+    'tool tools werkzeug werkzeuge funktion function hilfsmittel katalog catalog entdecken discovery'
+  ),
   branch(
     'tools/catalog',
     'Tool discovery',
