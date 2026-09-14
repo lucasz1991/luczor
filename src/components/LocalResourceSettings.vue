@@ -106,10 +106,12 @@ const cores = computed(() => hardware.value?.cpu.availableLogicalCores ?? hardwa
 const gib = (bytes: number) => (bytes / 1024 ** 3).toLocaleString('de-DE', { maximumFractionDigits: 2 })
 const percentages = computed(() => draft.value.percentageLimits ?? MAXIMUM_RESOURCE_PERCENTAGES)
 const cpuThrottled = computed(() => !!draft.value.percentageLimits && percentages.value.cpuEnabled !== false)
+const ramThrottled = computed(() => !!draft.value.percentageLimits && percentages.value.ramEnabled !== false)
 const gpuThrottled = computed(() => !!draft.value.percentageLimits && percentages.value.gpuEnabled !== false)
 const throttleLimits = (): ResourcePercentageLimits => ({
   ...percentages.value,
   cpuEnabled: cpuThrottled.value,
+  ramEnabled: ramThrottled.value,
   gpuEnabled: gpuThrottled.value,
 })
 const systemCheck = computed(() => {
@@ -146,7 +148,7 @@ const percentageRows = computed(() => {
       label: 'RAM-Budget',
       value: `${gib(check.ramBudget)} von ${gib(check.maximumRam)} GiB`,
       disabled: check.maximumRam === 0,
-      throttleOff: false,
+      throttleOff: !ramThrottled.value,
     },
     {
       key: 'gpu' as const,
@@ -325,12 +327,13 @@ function setPercentage(key: 'responseCpu' | 'contextCpu' | 'ram' | 'gpu', event:
   if (draft.value.percentageLimits && percentages.value[key] === value) return
   const limits = { ...throttleLimits(), [key]: value }
   if (key === 'responseCpu' || key === 'contextCpu') limits.cpuEnabled = true
+  if (key === 'ram') limits.ramEnabled = true
   if (key === 'gpu') limits.gpuEnabled = true
   draft.value = percentageResourceConfig(hardware.value, draft.value, limits)
   editVersion++
   scheduleAutoSave()
 }
-function toggleThrottle(key: 'cpuEnabled' | 'gpuEnabled', event: Event): void {
+function toggleThrottle(key: 'cpuEnabled' | 'ramEnabled' | 'gpuEnabled', event: Event): void {
   if (!hardware.value || !systemCheck.value || checking.value || loading.value || revisionConflict.value) return
   draft.value = percentageResourceConfig(hardware.value, draft.value, {
     ...throttleLimits(),
@@ -349,6 +352,7 @@ async function useSystemMaximum(): Promise<void> {
     const nextConfig = percentageResourceConfig(next, draft.value, {
       ...MAXIMUM_RESOURCE_PERCENTAGES,
       cpuEnabled: false,
+      ramEnabled: false,
       gpuEnabled: false,
     })
     hardware.value = next
@@ -493,6 +497,20 @@ onBeforeUnmount(() => {
           <label>
             <input
               type="checkbox"
+              :checked="ramThrottled"
+              :disabled="checking || loading || revisionConflict || !config"
+              @change="toggleThrottle('ramEnabled', $event)"
+            />
+            <span
+              ><strong>RAM drosseln</strong
+              ><small>{{
+                ramThrottled ? 'RAM-Budgetregler aktiv' : 'Aus · 100 % des nutzbaren RAM-Budgets'
+              }}</small></span
+            >
+          </label>
+          <label>
+            <input
+              type="checkbox"
               :checked="gpuThrottled"
               :disabled="draft.mode === 'cpu' || checking || loading || revisionConflict || !config"
               @change="toggleThrottle('gpuEnabled', $event)"
@@ -506,8 +524,8 @@ onBeforeUnmount(() => {
           </label>
         </div>
         <p class="resource-settings__footnote">
-          Beide Schalter sind unabhängig. Ausgeschaltete Drosselung behält den Reglerwert für später. GPU-Drosselung
-          begrenzt das VRAM-/Offload-Budget, nicht Takt oder Auslastung; RAM ist separat einstellbar.
+          Alle drei Schalter sind unabhängig. Ausgeschaltete Drosselung behält den Reglerwert für später. GPU-Drosselung
+          begrenzt das VRAM-/Offload-Budget, nicht Takt oder Auslastung. Der RAM-Sicherheitspuffer bleibt erhalten.
         </p>
         <div class="resource-settings__sliders">
           <label

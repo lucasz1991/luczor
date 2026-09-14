@@ -216,6 +216,36 @@ describe('device resources settings UI', () => {
     view.app.unmount()
   })
 
+  it('toggles RAM alone, disables its inactive slider and restores the saved budget', async () => {
+    vi.useFakeTimers()
+    const limits = { responseCpu: 25, contextCpu: 50, ram: 40, gpu: 50, cpuEnabled: true, gpuEnabled: false }
+    const requested = SystemCheckApi.percentageResourceConfig(hardware, DEFAULT_LOCAL_RESOURCE_CONFIG, limits)
+    const view = await mount({ ...state(), requested, applied: requested })
+    await view.throttle('RAM drosseln', false)
+    await vi.advanceTimersByTimeAsync(400)
+    const full = SystemCheckApi.percentageResourceConfig(hardware, requested, { ...limits, ramEnabled: false })
+    expect(view.client.save).toHaveBeenLastCalledWith(full, 4)
+    const range = nodes(view.root).find(node => String(node.props.id).endsWith('-ram'))!
+    expect(range.props.disabled).toBe(true)
+    expect(range.props.value).toBe(40)
+    expect(text(view.root)).toContain('Aus · 100 % des nutzbaren RAM-Budgets')
+    await view.throttle('RAM drosseln', true)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(view.client.save).toHaveBeenLastCalledWith(
+      { ...requested, percentageLimits: { ...limits, ramEnabled: true } },
+      5
+    )
+    expect(range.props.disabled).toBe(false)
+    expect(range.props.value).toBe(40)
+    await view.range('ram', 60)
+    await vi.advanceTimersByTimeAsync(400)
+    expect(view.client.save).toHaveBeenLastCalledWith(
+      SystemCheckApi.percentageResourceConfig(hardware, requested, { ...limits, ram: 60, ramEnabled: true }),
+      6
+    )
+    view.app.unmount()
+  })
+
   it('does not apply maxima or claim cleanup when an active job blocks the native check', async () => {
     const view = await mount()
     vi.mocked(view.client.systemCheck).mockRejectedValue('resource_system_check_busy')
@@ -251,7 +281,12 @@ describe('device resources settings UI', () => {
       expect.objectContaining({
         threads: 18,
         threadsBatch: 18,
-        percentageLimits: { ...SystemCheckApi.MAXIMUM_RESOURCE_PERCENTAGES, cpuEnabled: false, gpuEnabled: false },
+        percentageLimits: {
+          ...SystemCheckApi.MAXIMUM_RESOURCE_PERCENTAGES,
+          cpuEnabled: false,
+          ramEnabled: false,
+          gpuEnabled: false,
+        },
       }),
       4
     )

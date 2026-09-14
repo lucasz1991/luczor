@@ -495,6 +495,7 @@ mod tests {
                 ram: 50,
                 gpu: 100,
                 cpu_enabled: None,
+                ram_enabled: None,
                 gpu_enabled: None,
             }),
             ..Default::default()

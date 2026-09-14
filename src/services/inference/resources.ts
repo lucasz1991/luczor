@@ -8,6 +8,7 @@ export type ResourcePercentageLimits = {
   gpu: number
   /** Missing flags retain the previous percentage-profile behavior. */
   cpuEnabled?: boolean
+  ramEnabled?: boolean
   gpuEnabled?: boolean
 }
 

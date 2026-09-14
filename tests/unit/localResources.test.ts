@@ -89,6 +89,31 @@ describe('hardware-derived percentage budgets', () => {
       percentageResourceConfig(hardware, DEFAULT_LOCAL_RESOURCE_CONFIG, { ...MAXIMUM_RESOURCE_PERCENTAGES, ram: value })
     ).toThrow('resource_percentage_invalid')
   })
+  it('toggles RAM alone, preserves the saved percentage and keeps the system reserve', () => {
+    const limits = { responseCpu: 25, contextCpu: 50, ram: 40, gpu: 50, cpuEnabled: true, gpuEnabled: false }
+    const limited = percentageResourceConfig(hardware, DEFAULT_LOCAL_RESOURCE_CONFIG, limits)
+    const full = percentageResourceConfig(hardware, limited, { ...limits, ramEnabled: false })
+    const check = resourceSystemCheck(hardware, full)
+    expect(check.ramBudget).toBe(check.maximumRam)
+    expect(full.ramReserveBytes).toBe(check.ramReserve)
+    expect(full.threads).toBe(limited.threads)
+    expect(full.threadsBatch).toBe(limited.threadsBatch)
+    expect(check.gpus).toEqual(resourceSystemCheck(hardware, limited).gpus)
+    expect(full.percentageLimits).toEqual({ ...limits, ramEnabled: false })
+    const restored = percentageResourceConfig(hardware, full, { ...limits, ramEnabled: true })
+    expect(restored.ramReserveBytes).toBe(limited.ramReserveBytes)
+    expect(resourceSystemCheck(hardware, restored).ramBudget).toBe(resourceSystemCheck(hardware, limited).ramBudget)
+    const lowMemory = { ...hardware, memory: { ...hardware.memory, availableBytes: gib } }
+    expect(resourceSystemCheck(lowMemory, full).ramBudget).toBe(0)
+  })
+  it('rejects malformed RAM throttle flags', () => {
+    expect(() =>
+      percentageResourceConfig(hardware, DEFAULT_LOCAL_RESOURCE_CONFIG, {
+        ...MAXIMUM_RESOURCE_PERCENTAGES,
+        ramEnabled: 'false' as unknown as boolean,
+      })
+    ).toThrow('resource_percentage_invalid')
+  })
   it('fails closed on incomplete CPU/RAM readings and never credits shared memory as VRAM', () => {
     expect(() =>
       resourceSystemCheck(

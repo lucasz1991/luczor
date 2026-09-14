@@ -13,6 +13,8 @@ pub struct ResourcePercentageLimits {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ram_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_enabled: Option<bool>,
 }
 
@@ -69,7 +71,12 @@ pub(super) fn resolve_percentage_host_config(
             .available_ram_bytes
             .min(hardware.total_ram_bytes)
             .saturating_sub(reserve);
-        resolved.ram_reserve_bytes = Some(reserve + budget - percentage_budget(budget, limits.ram));
+        let ram = if limits.ram_enabled == Some(false) {
+            100
+        } else {
+            limits.ram
+        };
+        resolved.ram_reserve_bytes = Some(reserve + budget - percentage_budget(budget, ram));
     }
     Ok(resolved)
 }
@@ -590,6 +597,7 @@ mod tests {
                 ram: 50,
                 gpu: 50,
                 cpu_enabled: None,
+                ram_enabled: None,
                 gpu_enabled: None,
             }),
             ..Default::default()
@@ -620,6 +628,37 @@ mod tests {
         assert_eq!(
             restored.percentage_limits.as_ref().unwrap().cpu_enabled,
             Some(false)
+        );
+        let mut ram_unthrottled = config.clone();
+        ram_unthrottled
+            .percentage_limits
+            .as_mut()
+            .unwrap()
+            .ram_enabled = Some(false);
+        let full_ram = resolve_percentage_host_config(&ram_unthrottled, &hardware).unwrap();
+        assert_eq!(
+            full_ram.ram_reserve_bytes,
+            Some(hardware.total_ram_bytes / 12)
+        );
+        assert_eq!(full_ram.threads, resolved.threads);
+        assert_eq!(full_ram.threads_batch, resolved.threads_batch);
+        assert_eq!(
+            full_ram.percentage_limits.as_ref().unwrap().gpu_percent(),
+            50
+        );
+        assert_eq!(full_ram.percentage_limits.as_ref().unwrap().ram, 50);
+        let mut restored_ram: LocalResourceConfig =
+            serde_json::from_slice(&serde_json::to_vec(&full_ram).unwrap()).unwrap();
+        assert_eq!(
+            restored_ram.percentage_limits.as_ref().unwrap().ram_enabled,
+            Some(false)
+        );
+        restored_ram.percentage_limits.as_mut().unwrap().ram_enabled = Some(true);
+        assert_eq!(
+            resolve_percentage_host_config(&restored_ram, &hardware)
+                .unwrap()
+                .ram_reserve_bytes,
+            resolved.ram_reserve_bytes
         );
         let maximum = hardware.available_ram_bytes - hardware.total_ram_bytes / 12;
         assert_eq!(
@@ -656,6 +695,7 @@ mod tests {
                     ram: value,
                     gpu: 100,
                     cpu_enabled: None,
+                    ram_enabled: None,
                     gpu_enabled: None,
                 }),
                 ..Default::default()

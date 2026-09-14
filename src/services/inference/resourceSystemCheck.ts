@@ -18,7 +18,7 @@ export function effectiveResourcePercentages(limits: ResourcePercentageLimits) {
   return {
     responseCpu: limits.cpuEnabled === false ? 100 : limits.responseCpu,
     contextCpu: limits.cpuEnabled === false ? 100 : limits.contextCpu,
-    ram: limits.ram,
+    ram: limits.ramEnabled === false ? 100 : limits.ram,
     gpu: limits.gpuEnabled === false ? 100 : limits.gpu,
   }
 }
@@ -44,7 +44,9 @@ export function resourceSystemCheck(hardware: HardwareSnapshot, config: LocalRes
     [limits.responseCpu, limits.contextCpu, limits.ram, limits.gpu].some(
       value => !Number.isInteger(value) || value < 1 || value > 100
     ) ||
-    [limits.cpuEnabled, limits.gpuEnabled].some(value => value !== undefined && typeof value !== 'boolean')
+    [limits.cpuEnabled, limits.ramEnabled, limits.gpuEnabled].some(
+      value => value !== undefined && typeof value !== 'boolean'
+    )
   )
     throw new Error('resource_percentage_invalid')
   const effective = effectiveResourcePercentages(limits)
@@ -69,7 +71,7 @@ export function resourceSystemCheck(hardware: HardwareSnapshot, config: LocalRes
     ramReserve,
     responseThreads: Math.max(1, percentBudget(maximumThreads, effective.responseCpu)),
     contextThreads: Math.max(1, percentBudget(maximumThreads, effective.contextCpu)),
-    ramBudget: percentBudget(maximumRam, limits.ram),
+    ramBudget: percentBudget(maximumRam, effective.ram),
     gpus,
   }
 }
