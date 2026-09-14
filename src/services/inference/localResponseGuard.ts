@@ -16,12 +16,42 @@ const normalizedStart = (text: string) =>
     .toLocaleLowerCase('de-DE')
     .replace(/\s+/g, ' ')
 
-export function isRuntimeStatusEcho(text: string): boolean {
-  const start = normalizedStart(text)
+/** Inspect top-level paragraphs, not literal Markdown examples or quotations. */
+function publicParagraphs(text: string): string[] {
+  const result: string[] = []
+  let paragraph = ''
+  let fence = ''
+  const flush = () => {
+    if (paragraph.trim()) result.push(normalizedStart(paragraph.trimEnd()))
+    paragraph = ''
+  }
+  for (const line of text.split('\n')) {
+    const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (marker) {
+      flush()
+      if (!fence) fence = marker
+      else if (marker[0] === fence[0] && marker.length >= fence.length) fence = ''
+      continue
+    }
+    if (fence) continue
+    if (!line.trim() || line.trimStart().startsWith('>')) flush()
+    else paragraph += `${line}\n`
+  }
+  flush()
+  return result
+}
+
+function isStatusParagraph(start: string): boolean {
   const unnumbered = start.replace(/^die (lokale|nächste) modellrunde \d+ /, 'die $1 modellrunde ')
   return (
     /^die (?:lokale|nächste) modellrunde wurde (?:vor dem abschluss )?unterbrochen:/.test(unnumbered) ||
-    /^der auftrag wurde in einen (?:bereinigten|gesicherten) fortsetzungs(?:stand|status) überführt/.test(start) ||
+    // Models paraphrase the interruption clause (e.g. "Untergrenze erreicht").
+    // Detect the claimed runtime diagnostic, not one exact failure sentence.
+    (/^die (?:lokale|nächste) modellrunde\b/.test(start) &&
+      /tokenzählung und kontextprüfung|\bhttp\s+[1-5]\d{2}\b|\btokenbudget(?:stand)?\b/.test(start)) ||
+    /^der auftrag wurde in einen (?:bereinigten|gesicherten) fortsetzungs(?:stand|status|runde) überführt/.test(
+      start
+    ) ||
     /^aktuelle fortsetzungsposition:\s*[\d.,]+\s*tokens?/.test(start) ||
     /^tokenzählung und kontextprüfung\s*[·:]\s*http\s*\d+/.test(start) ||
     start.startsWith('auch nach zwei automatischen korrekturversuchen konnte das modell keine antwort') ||
@@ -30,10 +60,15 @@ export function isRuntimeStatusEcho(text: string): boolean {
   )
 }
 
+export function isRuntimeStatusEcho(text: string): boolean {
+  return publicParagraphs(text).some(isStatusParagraph)
+}
+
 /** Hold only diagnostic-shaped beginnings, including split markers, until classified. */
 export function holdRuntimeStatusPrefix(text: string): boolean {
-  const start = normalizedStart(text)
-  return !!start && statusPrefixes.some(prefix => prefix.startsWith(start) || start.startsWith(prefix))
+  return publicParagraphs(text).some(start =>
+    statusPrefixes.some(prefix => prefix.startsWith(start) || start.startsWith(prefix))
+  )
 }
 
 export function explicitlyQuotesRuntimeStatus(objective: string): boolean {

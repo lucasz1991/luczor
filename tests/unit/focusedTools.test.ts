@@ -24,6 +24,8 @@ describe('focused local tool context', () => {
     'Die nächste Modellrunde wurde unterbrochen: Tokenzählung und Kontextprüfung · HTTP 200: erfolgreich. Tokenbudget: Eingabe (gezählt) 28.000 · Kontext 43.000 · Ausgabelimit 7.000.',
     'Die lokale Modellrunde 2 wurde vor dem Abschluss unterbrochen: HTTP 400\nDer bisherige Arbeitsfortschritt bleibt erhalten (1 Tool-Aufruf erfolgreich).',
     'Der Auftrag wurde in einen bereinigten Fortsetzungsstatus überführt.',
+    'Die lokale Modellrunde 1 wurde vor dem Abschluss Untergrenze erreicht: Tokenzählung und Kontextprüfung · HTTP 503: Nicht ausreichend Ressourcen. Der Tokenbudgetstand ist: Eingabe (gezählt) 25.750 · Kontext 40.000 · Ausgabe 6.000.',
+    'Der Auftrag wurde in einen bereinigten Fortsetzungsrunde überführt.',
   ])('removes a status-shaped assistant echo from requests, but never user or tool evidence: %s', content => {
     const receipt: WireMessage = {
       role: 'assistant',
@@ -46,6 +48,23 @@ describe('focused local tool context', () => {
     expect(isRuntimeStatusEcho('> Die nächste Modellrunde wurde unterbrochen: HTTP 200')).toBe(false)
     expect(isRuntimeStatusEcho('Die Meldung bedeutet nicht, dass der Auftrag erfolgreich war.')).toBe(false)
     expect(holdRuntimeStatusPrefix('Die Antwort lautet: 42.')).toBe(false)
+  })
+  it('recognizes paraphrased diagnostics after ordinary commentary, but not fenced or quoted examples', () => {
+    const status =
+      'Die lokale Modellrunde 1 wurde vor dem Abschluss Untergrenze erreicht: Tokenzählung und Kontextprüfung · HTTP 503: Nicht ausreichend Ressourcen.'
+    const mixed = `Ich prüfe das.\n\n${status}`
+    expect(isRuntimeStatusEcho(mixed)).toBe(true)
+    expect(holdRuntimeStatusPrefix(mixed)).toBe(true)
+    expect(isRuntimeStatusEcho(`Beispiel:\n\n\x60\x60\x60text\n${status}\n\nFortsetzung\n\x60\x60\x60`)).toBe(false)
+    expect(isRuntimeStatusEcho(`Das ist ein Zitat:\n\n> ${status}`)).toBe(false)
+    expect(
+      isRuntimeStatusEcho('Die lokale Modellrunde verarbeitet den vorhandenen Kontext und gibt eine Antwort aus.')
+    ).toBe(false)
+    const messages: WireMessage[] = [
+      { role: 'user', content: 'so jetzt aber' },
+      { role: 'assistant', content: mixed },
+    ]
+    expect(cleanLocalHistory(messages)).toEqual([messages[0]])
   })
   it('recognizes XML function-call wrappers without converting arguments into actions', () => {
     const xml =

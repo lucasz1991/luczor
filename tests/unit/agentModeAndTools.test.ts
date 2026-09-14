@@ -189,6 +189,39 @@ describe('agent mode and tool reliability', () => {
     expect(onRoundComplete).not.toHaveBeenCalled()
   })
 
+  it('rejects the new photographed paraphrase after a first correction instead of releasing a fake RAM error', async () => {
+    const attempts = [
+      'Die nächste Modellrunde wurde unterbrochen: Tokenzählung und Kontextprüfung · HTTP 200: erfolgreich.',
+      'Die lokale Modellrunde 1 wurde vor dem Abschluss Untergrenze erreicht: Tokenzählung und Kontextprüfung · HTTP 503: Nicht ausreichend Ressourcen. Der Tokenbudgetstand ist: Eingabe (gezählt) 25.750 · Kontext 40.000 · Ausgabe 6.000.\n\nDer Auftrag wurde in einen bereinigten Fortsetzungsrunde überführt.',
+      'Welche konkrete Aufgabe soll ich im Projekt als Nächstes bearbeiten?',
+    ]
+    let attempt = 0
+    mocks.streamChatWithTools.mockImplementation(async (request: InferenceRequest) => {
+      const content = attempts[attempt++]!
+      for (let end = 1; end <= content.length; end++) request.onToken?.(content.slice(0, end))
+      return { content, toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
+    })
+    const onToken = vi.fn(),
+      onResponseReset = vi.fn(),
+      onRoundComplete = vi.fn()
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      maxRounds: 1,
+      baseMessages: [{ role: 'user', content: 'so jetzt aber' }],
+      onToken,
+      onResponseReset,
+      onRoundComplete,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(result.finalText).toBe(attempts[2])
+    expect(result.interrupted).toBeUndefined()
+    expect(onToken.mock.calls.flat().join('')).not.toMatch(/HTTP|40.000|Untergrenze|Ressourcen/)
+    expect(onResponseReset).toHaveBeenCalledTimes(2)
+    expect(onRoundComplete).toHaveBeenCalledOnce()
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
   it.each(['???', 'ok los'])(
     'withholds XML function-call output for an ambiguous follow-up %s without forcing execution',
     async objective => {
@@ -394,10 +427,14 @@ describe('agent mode and tool reliability', () => {
     })
     expect(mocks.execute).not.toHaveBeenCalled()
     expect(
-      mocks.streamChatWithTools.mock.calls[0]![0].tools.map((tool: { function: { name: string } }) => tool.function.name)
+      mocks.streamChatWithTools.mock.calls[0]![0].tools.map(
+        (tool: { function: { name: string } }) => tool.function.name
+      )
     ).not.toContain('fs_read')
     expect(
-      mocks.streamChatWithTools.mock.calls[1]![0].tools.map((tool: { function: { name: string } }) => tool.function.name)
+      mocks.streamChatWithTools.mock.calls[1]![0].tools.map(
+        (tool: { function: { name: string } }) => tool.function.name
+      )
     ).toContain('fs_read')
   })
   it('bounds browser host guessing, preserves matching tool replies and continues unrelated work', async () => {
