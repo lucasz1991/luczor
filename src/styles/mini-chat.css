@@ -695,22 +695,24 @@ html.mini-window,
   border-color: color-mix(in srgb, var(--ai-red) 40%, transparent);
 }
 /* Hover fly-out beside the grip (in-app surface only) */
+/* The fly-out unrolls out of the edge tab like the design board's nudge: the box itself grows
+   (width, then height for the chats page) instead of a separate panel fading in beside it. Its
+   own overflow:hidden is what reveals the fixed-width content inside as it grows — the content
+   never resizes itself, so nothing reflows mid-animation. */
 .mini-grip-panel {
   position: absolute;
   right: 60px;
   bottom: 0;
-  width: 240px;
-  padding: 12px 14px;
+  width: 0;
+  overflow: hidden;
   border-radius: 18px 18px 6px 18px;
   background: var(--ai-page);
   border: 1px solid var(--ai-line-strong);
   box-shadow: 0 24px 60px -30px rgba(0, 0, 0, 0.85);
-  opacity: 0;
-  transform: translateX(8px);
   pointer-events: none;
   transition:
-    opacity 0.22s,
-    transform 0.32s;
+    width 0.36s var(--ease, ease),
+    height 0.36s var(--ease, ease);
   text-align: left;
 }
 /* Left-docked: the fly-out unfolds to the right of the grip instead, notch mirrored. */
@@ -718,34 +720,33 @@ html.mini-window,
   right: auto;
   left: 60px;
   border-radius: 18px 18px 18px 6px;
-  transform: translateX(-8px);
 }
-.mini-orb-dock:hover .mini-grip-panel,
-.mini-orb-dock:focus-within .mini-grip-panel {
-  opacity: 1;
-  transform: none;
-}
-/* A pinned pane must stay open without the pointer sitting over the (now much bigger) fly-out. */
-.mini-orb-dock.has-pin .mini-grip-panel {
-  opacity: 1;
-  transform: none;
+.mini-orb-dock:hover .mini-grip-panel:not(.is-chat-open),
+.mini-orb-dock:focus-within .mini-grip-panel:not(.is-chat-open),
+.mini-orb-dock.has-pin .mini-grip-panel:not(.is-chat-open) {
+  width: 240px;
   pointer-events: auto;
 }
-/* Chats pinned open: the fly-out becomes the full chat page — no separate "Mini window" mode anymore. */
+/* Chats open: the fly-out becomes the full chat page — no separate "Mini window" mode anymore. */
 .mini-grip-panel.is-chat-open {
-  width: min(400px, calc(100vw - 56px));
-  height: min(580px, calc(100vh - 20px));
-  padding: 0;
+  width: var(--mini-chat-w);
+  height: var(--mini-chat-h);
   border-radius: 20px;
   background: transparent;
   border: 0;
   box-shadow: none;
-  overflow: hidden;
-  transition:
-    opacity 0.28s,
-    transform 0.34s,
-    width 0.34s,
-    height 0.34s;
+  pointer-events: auto;
+}
+.mini-grip-panel__reveal {
+  width: 240px;
+  padding: 12px 14px;
+  opacity: 0;
+  transition: opacity 0.2s ease 0.06s;
+}
+.mini-orb-dock:hover .mini-grip-panel__reveal,
+.mini-orb-dock:focus-within .mini-grip-panel__reveal,
+.mini-orb-dock.has-pin .mini-grip-panel__reveal {
+  opacity: 1;
 }
 .mini-grip-panel__head {
   display: grid;
