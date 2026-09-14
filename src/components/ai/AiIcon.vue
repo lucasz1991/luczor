@@ -21,6 +21,8 @@ const paths: Record<string, string> = {
   clock: 'M12 7v5l3 2M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0',
   shield: 'm12 2 8 3v6c0 5-8 11-8 11S4 16 4 11V5Zm-4 9 3 3 5-5',
   grid: 'M3 3h7v7H3Zm11 0h7v7h-7ZM3 14h7v7H3Zm11 0h7v7h-7Z',
+  chat: 'M4 5h16v11H9l-5 4Z',
+  link: 'M4 8.5a12 12 0 0 1 16 0M7 12a7 7 0 0 1 10 0M10 15.5a2.5 2.5 0 0 1 4 0',
   upload: 'M12 16V4m-5 5 5-5 5 5M4 20h16',
   'thumb-up': 'M7 10v11H3V10Zm0 1 5-8c3 0 2 5 2 7h5c2 0 2 1 2 2l-2 7c0 1-1 2-2 2H7',
   'thumb-down': 'M7 14V3H3v11Zm0-1 5 8c3 0 2-5 2-7h5c2 0 2-1 2-2l-2-7c0-1-1-2-2-2H7',

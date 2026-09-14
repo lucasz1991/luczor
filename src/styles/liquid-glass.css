@@ -14,6 +14,8 @@ html[data-theme] .app-shell.ai-workspace {
   position: fixed;
   background: var(--bg-base);
   isolation: isolate;
+  /* clip, not hidden: the ambient orbs overhang the shell and must never turn it into a scroll container */
+  overflow: clip;
 }
 html[data-theme] .app-shell.ai-workspace::before,
 html[data-theme] .app-shell.ai-workspace::after {
@@ -82,6 +84,8 @@ html[data-theme] .app-shell.ai-workspace .header,
 html[data-theme] .ai-prompt,
 html[data-theme] .mini-panel,
 html[data-theme] .mini-peek,
+html[data-theme] .mini-grip,
+html[data-theme] .mini-grip-panel,
 html[data-theme] #system-panel.system-status-panel,
 html[data-theme] .lz-modal,
 html[data-theme] dialog.agent-hub[open],
@@ -296,6 +300,33 @@ html[data-theme] .mini-orb-button {
     inset 0 -1px 0 rgba(0, 0, 0, 0.3),
     var(--glow-md);
 }
+/* Edge grip: pill capsule with rim light; the fly-out gets the panel radius. */
+html[data-theme] .mini-grip {
+  border-radius: var(--r-pill);
+  border-color: var(--g-edge-2);
+  box-shadow:
+    inset 0 1px 1px var(--g-edge),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+    0 16px 34px -20px rgba(0, 0, 0, 0.85),
+    var(--glow-sm);
+}
+html[data-theme] .mini-grip__icon {
+  background: var(--g-fill-1);
+  border-color: var(--g-edge-2);
+  box-shadow: inset 0 1px 0 var(--g-edge);
+}
+html[data-theme] .mini-grip__icon[data-state='running'],
+html[data-theme] .mini-grip__icon[data-state='waiting'] {
+  background: var(--cy-16);
+  box-shadow:
+    inset 0 1px 0 var(--g-edge),
+    0 0 12px -2px var(--cy-22);
+}
+html[data-theme] .mini-grip-panel {
+  border-radius: var(--r-lg) var(--r-lg) var(--r-sm) var(--r-lg);
+  border-color: var(--g-edge-2);
+  box-shadow: var(--shadow-panel);
+}
 html[data-theme] .mini-status-label,
 html[data-theme] .mini-orb-tools button {
   background: var(--g-bg);
@@ -479,6 +510,8 @@ html[data-theme] input:-webkit-autofill:focus {
   html[data-theme] dialog.wf-workspace[open],
   html[data-theme] .tool-center-panel,
   html[data-theme] .ai-message__user-text,
+  html[data-theme] .mini-grip,
+  html[data-theme] .mini-grip-panel,
   html[data-theme] .mini-orb-button {
     background: var(--bg-raised);
     backdrop-filter: none;

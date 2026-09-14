@@ -142,6 +142,11 @@ function fixture() {
     policy: () => policy,
     gateway: vi.fn(async () => localGateway),
     recall,
+    sharedRecall: vi.fn(async () => []),
+    improve: vi.fn(async () => 'not_scheduled' as const),
+    graphStatus: vi.fn(async () => ({ status: 'unbound' as const, files: 0, symbols: 0, edges: 0, skipped: 0 })),
+    graphSearch: vi.fn(async () => ({ repository_id: 'repo-1', hits: [] })),
+    graphSnippets: vi.fn(async () => ({ snippets: [], omitted: [] })),
     remember,
     resources,
   }

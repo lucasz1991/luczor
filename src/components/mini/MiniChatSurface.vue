@@ -158,6 +158,17 @@ onBeforeUnmount(() => {
   void miniVoice.stop()
 })
 const error = computed(() => props.connectionError || windowError.value || props.snapshot.notice)
+const chatsState = computed(() => {
+  if (props.snapshot.conversations?.some(chat => chat.busy)) return 'running'
+  if (unread.value) return 'unread'
+  return 'idle'
+})
+const chatsTitle = computed(() => {
+  const count = props.snapshot.conversations?.length ?? 0
+  if (chatsState.value === 'running') return 'Ein Chat arbeitet'
+  if (chatsState.value === 'unread') return 'Neue Antwort'
+  return count ? `${count} Chats` : 'Chats'
+})
 const compactWorking = computed(
   () =>
     ['thinking', 'executing', 'listening', 'speaking'].includes(status.value.phase) ||
@@ -863,30 +874,82 @@ onBeforeUnmount(() => {
             Unterhaltung öffnen <AiIcon name="arrow" :size="13" /></button
         ></template>
       </aside>
-      <div class="mini-orb-dock">
+      <div class="mini-orb-dock" :data-phase="status.phase">
         <div class="mini-orb-tools">
           <button type="button" aria-label="Mini-Chat ausblenden" @click="windowAction('hide')">
             <AiIcon name="close" :size="12" />
           </button>
         </div>
-        <button
-          type="button"
-          class="mini-orb-button"
-          :aria-label="`Mini-Chat öffnen: ${status.label}`"
-          :title="status.detail"
-          @pointerdown="beginDrag($event, true)"
-          @click="expand"
-        >
-          <StatusOrb :phase="status.phase" :level="snapshot.hud.micLevel" /><span
-            v-if="decision || unread"
-            class="mini-unread"
-            >{{ decision ? '!' : '1' }}</span
+        <!-- Edge grip: orb plus state icons in one glass capsule; drag on the orb, click opens -->
+        <div class="mini-grip" role="group" aria-label="Status im Überblick">
+          <button
+            type="button"
+            class="mini-orb-button"
+            :aria-label="`Mini-Chat öffnen: ${status.label}`"
+            :title="status.detail"
+            @pointerdown="beginDrag($event, true)"
+            @click="expand"
           >
-        </button>
+            <StatusOrb :phase="status.phase" :level="snapshot.hud.micLevel" /><span
+              v-if="decision || unread"
+              class="mini-unread"
+              >{{ decision ? '!' : '1' }}</span
+            >
+          </button>
+          <span
+            class="mini-grip__icon"
+            data-kind="chats"
+            :data-state="chatsState"
+            :title="chatsTitle"
+            :aria-label="chatsTitle"
+            ><AiIcon name="chat" :size="11"
+          /></span>
+          <span
+            class="mini-grip__icon"
+            data-kind="decision"
+            :data-state="decision ? 'waiting' : 'idle'"
+            :title="decision ? 'Entscheidung offen' : 'Keine Entscheidung offen'"
+            :aria-label="decision ? 'Entscheidung offen' : 'Keine Entscheidung offen'"
+            ><AiIcon name="shield" :size="11"
+          /></span>
+          <span
+            class="mini-grip__icon"
+            data-kind="tools"
+            :data-state="sharedToolSessions.length ? 'running' : 'idle'"
+            :title="
+              sharedToolSessions.length ? `${sharedToolSessions.length} Tool-Sitzungen laufen` : 'Keine Tool-Sitzung'
+            "
+            :aria-label="
+              sharedToolSessions.length ? `${sharedToolSessions.length} Tool-Sitzungen laufen` : 'Keine Tool-Sitzung'
+            "
+            ><AiIcon name="tool" :size="11"
+          /></span>
+          <span
+            class="mini-grip__icon"
+            data-kind="link"
+            :data-state="connectionError ? 'error' : 'ok'"
+            :title="connectionError ? 'Verbindung fehlt' : 'Verbunden'"
+            :aria-label="connectionError ? 'Verbindung fehlt' : 'Verbunden'"
+            ><AiIcon name="link" :size="11"
+          /></span>
+        </div>
         <button type="button" class="mini-status-label" :class="{ 'is-working': compactWorking }" @click="expand">
           {{ compactWorking ? `Arbeitet · ${status.label}` : status.label }}
         </button>
         <span v-if="connectionError" class="mini-disconnected" role="alert">Verbindung fehlt</span>
+        <!-- Hover fly-out (in-app only; the native window is sized to the grip) -->
+        <div v-if="!native" class="mini-grip-panel" aria-hidden="true">
+          <div class="mini-grip-panel__head">
+            <strong>{{ status.label }}</strong>
+            <span>{{ status.detail }}</span>
+          </div>
+          <ul v-if="snapshot.conversations?.length" class="mini-grip-panel__chats">
+            <li v-for="chat in snapshot.conversations" :key="chat.id" :class="{ 'is-busy': chat.busy }">
+              <i aria-hidden="true" /><span>{{ chat.title }}</span
+              ><small v-if="chat.busy">läuft</small>
+            </li>
+          </ul>
+        </div>
       </div>
     </template>
   </section>

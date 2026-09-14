@@ -587,23 +587,140 @@ html.mini-window,
   position: relative;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: flex-end;
   justify-content: flex-end;
   width: 136px;
   height: 176px;
   flex-shrink: 0;
-  padding-bottom: 8px;
+  padding-bottom: 6px;
   box-sizing: border-box;
 }
+/* Edge grip capsule: orb on top, state icons below */
+.mini-grip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 4px 5px;
+  border-radius: 999px;
+  background: var(--ai-canvas);
+  border: 1px solid var(--ai-line-strong);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    0 14px 30px -18px rgba(0, 0, 0, 0.8);
+}
+.mini-grip__icon {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border-radius: 999px;
+  color: var(--ai-faint);
+  background: var(--ai-inset);
+  border: 1px solid var(--ai-line);
+  transition:
+    color 0.24s,
+    background 0.24s;
+}
+.mini-grip__icon[data-state='running'],
+.mini-grip__icon[data-state='waiting'] {
+  color: var(--ai-accent);
+  border-color: color-mix(in srgb, var(--ai-accent) 40%, transparent);
+  animation: mini-pulse 1.4s ease-in-out infinite;
+}
+.mini-grip__icon[data-state='unread'],
+.mini-grip__icon[data-state='ok'] {
+  color: var(--ai-green);
+}
+.mini-grip__icon[data-state='error'] {
+  color: var(--ai-red);
+  border-color: color-mix(in srgb, var(--ai-red) 40%, transparent);
+}
 .mini-orb-button {
-  width: 116px;
-  height: 116px;
+  width: 40px;
+  height: 40px;
   padding: 0 !important;
   position: relative;
   touch-action: none;
   cursor: grab !important;
   border-radius: 50%;
 }
+/* Hover fly-out beside the grip (in-app surface only) */
+.mini-grip-panel {
+  position: absolute;
+  right: 60px;
+  bottom: 0;
+  width: 240px;
+  padding: 12px 14px;
+  border-radius: 18px 18px 6px 18px;
+  background: var(--ai-page);
+  border: 1px solid var(--ai-line-strong);
+  box-shadow: 0 24px 60px -30px rgba(0, 0, 0, 0.85);
+  opacity: 0;
+  transform: translateX(8px);
+  pointer-events: none;
+  transition:
+    opacity 0.22s,
+    transform 0.32s;
+  text-align: left;
+}
+.mini-orb-dock:hover .mini-grip-panel,
+.mini-orb-dock:focus-within .mini-grip-panel {
+  opacity: 1;
+  transform: none;
+}
+.mini-grip-panel__head {
+  display: grid;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+.mini-grip-panel__head strong {
+  font-size: 12px;
+}
+.mini-grip-panel__head span {
+  font-size: 11px;
+  color: var(--ai-muted);
+}
+.mini-grip-panel__chats {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+.mini-grip-panel__chats li {
+  display: grid;
+  grid-template-columns: 8px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 5px 6px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  color: var(--ai-muted);
+}
+.mini-grip-panel__chats li i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ai-faint);
+}
+.mini-grip-panel__chats li.is-busy {
+  color: var(--ai-ink);
+}
+.mini-grip-panel__chats li.is-busy i {
+  background: var(--ai-accent);
+  animation: mini-pulse 1.4s ease-in-out infinite;
+}
+.mini-grip-panel__chats li span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mini-grip-panel__chats li small {
+  font-size: 10px;
+  color: var(--ai-accent);
+}
+
 .mini-orb-button:active {
   cursor: grabbing !important;
 }
@@ -611,8 +728,8 @@ html.mini-window,
   stroke-opacity: 0.6;
 }
 .mini-status-label {
-  margin-top: 5px;
-  padding: 3px 10px;
+  margin-top: 4px;
+  padding: 3px 9px;
   background: var(--ai-surface) !important;
   border: 1px solid var(--ai-line-strong) !important;
   border-radius: 20px;
@@ -637,9 +754,11 @@ html.mini-window,
   animation: mini-pulse 1s ease-in-out infinite;
 }
 .mini-orb-tools {
+  position: absolute;
+  top: 0;
+  right: 2px;
+  z-index: 2;
   display: flex;
-  align-self: flex-end;
-  margin: 0 8px -1px 0;
   padding: 1px 3px;
   background: var(--ai-canvas);
   border-radius: 10px;
@@ -662,8 +781,8 @@ html.mini-window,
 }
 .mini-unread {
   position: absolute;
-  right: 2px;
-  top: 12px;
+  right: -3px;
+  top: -3px;
   display: grid;
   place-items: center;
   width: 19px;

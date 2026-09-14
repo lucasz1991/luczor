@@ -12,6 +12,7 @@ export type IdleOptimizationJob = Readonly<{
   scope: 'user' | 'project'
   projectId?: string
   prompt: string
+  task?: 'context' | 'memory' | 'repository'
 }>
 
 export type IdleOptimizationEligibility = Readonly<{
@@ -37,13 +38,14 @@ export type IdleContextOptimizerOptions = {
   timeoutMs: number
   monitorMs: number
   errorBackoffMs: number
+  successfulIntervalMs?: number
 }
 
 export type IdleContextOptimizerSnapshot = Readonly<{
   enabled: boolean
   phase: 'stopped' | 'waiting' | 'paused' | 'running' | 'committing' | 'yielding' | 'cooldown'
   /** The currently running or most recently completed locally bounded task. */
-  task: 'context' | 'memory' | null
+  task: 'context' | 'memory' | 'repository' | null
   reason: string | null
   foregroundJobs: number
   completed: number
@@ -302,7 +304,7 @@ export class IdleContextOptimizer {
         this.publish({ phase: 'paused', reason: 'boundary_changed' })
         return
       }
-      this.publish({ phase: 'running', task: job.scope === 'project' ? 'context' : 'memory', reason: null })
+      this.publish({ phase: 'running', task: job.task ?? (job.scope === 'project' ? 'context' : 'memory'), reason: null })
       monitorEligibility()
       const content = (await this.dependencies.runLocal(job, signal)).trim()
       signal.throwIfAborted()
@@ -337,7 +339,10 @@ export class IdleContextOptimizer {
       finished = true
       clearTimeout(timeout)
       if (monitor !== undefined) clearTimeout(monitor)
-      this.earliestCycle = Math.max(this.earliestCycle, this.now() + this.options.intervalMs)
+      const delay = this.state.reason === 'candidate_ready'
+        ? (this.options.successfulIntervalMs ?? this.options.intervalMs)
+        : this.options.intervalMs
+      this.earliestCycle = Math.max(this.earliestCycle, this.now() + delay)
     }
   }
 }

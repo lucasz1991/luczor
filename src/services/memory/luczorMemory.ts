@@ -1417,6 +1417,30 @@ export class LuczorMemoryService {
     return trackMemoryActivity('read', markFailed => this.analyzeOperation(scope, ids, markFailed))
   }
 
+  /** Schedule canonical Cognee maintenance without transferring any local source content. */
+  async scheduleImprovement(
+    scope: 'user' | 'project',
+    options: { projectId?: string; expectedPrincipalId: string; signal: AbortSignal }
+  ): Promise<'scheduled' | 'not_scheduled' | 'unavailable'> {
+    options.signal.throwIfAborted()
+    const snapshot = await this.operationSnapshot()
+    if (snapshot.principalId !== options.expectedPrincipalId) throw new Error('Memory account changed.')
+    if (scope === 'project' && !options.projectId?.trim()) throw new Error('A project is required.')
+    const backend = await this.server(snapshot)
+    options.signal.throwIfAborted()
+    if (!backend) return 'unavailable'
+    const current = await getVerifiedAccountSnapshot()
+    if (current?.principalId !== snapshot.principalId) throw new Error('Memory account changed.')
+    options.signal.throwIfAborted()
+    const result = await backend.improve(this.context(scope, options, snapshot.principalId))
+    options.signal.throwIfAborted()
+    if ((await getVerifiedAccountSnapshot())?.principalId !== snapshot.principalId)
+      throw new Error('Memory account changed.')
+    return result && typeof result === 'object' && 'scheduled' in result && result.scheduled === true
+      ? 'scheduled'
+      : 'not_scheduled'
+  }
+
   private async analyzeOperation(
     scope: 'user' | 'project',
     ids: { projectId?: string },
