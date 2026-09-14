@@ -25,6 +25,7 @@ type ChannelSession = {
   signal: AbortSignal
   config: LuczorApiConfigSnapshot
   pollRetry: RetryWindow
+  notificationRetry: RetryWindow
   realtimeError: string | null
 }
 const freshRetry = (): RetryWindow => ({ failures: 0, retryAt: 0, lastError: null })
@@ -150,6 +151,7 @@ export async function startDeviceJobChannel(): Promise<() => void> {
     signal: controller.signal,
     config,
     pollRetry: freshRetry(),
+    notificationRetry: freshRetry(),
     realtimeError: null,
   }
   if ('__TAURI_INTERNALS__' in window) {
@@ -204,7 +206,7 @@ export async function startDeviceJobChannel(): Promise<() => void> {
     scheduleRealtimeSetup(baseDelay + jitter)
   }
 
-  const notificationRetry = freshRetry()
+  const notificationRetry = channelSession.notificationRetry
   let notificationsInFlight = false
   const syncNotifications = () => {
     if (
@@ -219,7 +221,7 @@ export async function startDeviceJobChannel(): Promise<() => void> {
       .then(() => {
         if (!channelSession.isCurrent()) return
         if (notificationRetry.lastError && channelState.lastError === notificationRetry.lastError)
-          updateChannelState({ lastError: null })
+          updateChannelState({ lastError: channelSession.pollRetry.lastError ?? channelSession.realtimeError })
         Object.assign(notificationRetry, freshRetry())
       })
       .catch(error => {
@@ -313,7 +315,9 @@ async function pullPendingBatch(clientId: string, session: ChannelSession): Prom
     updateChannelState({
       rest: 'polling',
       lastPollAt: Date.now(),
-      ...(recoveredError && channelState.lastError === recoveredError ? { lastError: null } : {}),
+      ...(recoveredError && channelState.lastError === recoveredError
+        ? { lastError: session.notificationRetry.lastError ?? session.realtimeError }
+        : {}),
     })
   } catch (error) {
     if (!session.isCurrent()) return
@@ -404,7 +408,9 @@ async function connectRealtime(
       updateChannelState({
         realtime: 'connected',
         lastRealtimeAt: Date.now(),
-        ...(recoveredError && channelState.lastError === recoveredError ? { lastError: null } : {}),
+        ...(recoveredError && channelState.lastError === recoveredError
+          ? { lastError: current.pollRetry.lastError ?? current.notificationRetry.lastError }
+          : {}),
       })
       // Neither REST job delivery nor notifications depend on the other request succeeding.
       syncNotifications()

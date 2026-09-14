@@ -359,6 +359,20 @@ describe('device job transport startup', () => {
     expect(api.registerDevice).toHaveBeenCalledOnce()
   })
 
+  it('does not clear a still-failed channel when another request recovers from the same timeout text', async () => {
+    api.registerDevice.mockImplementation(() => new Promise(() => {}))
+    const error = new Error('Request timed out after 10000 ms.')
+    api.nextDeviceJob.mockRejectedValue(error)
+    notifications.catchUp.mockRejectedValueOnce(error).mockResolvedValue(undefined)
+    const { startDeviceJobChannel, getDeviceJobChannelState } = await import('@/services/deviceJobs')
+    stop = await startDeviceJobChannel()
+    await vi.advanceTimersByTimeAsync(20000)
+    expect(getDeviceJobChannelState()).toMatchObject({ rest: 'error', lastError: error.message })
+    api.nextDeviceJob.mockResolvedValue({ data: null })
+    await vi.advanceTimersByTimeAsync(40000)
+    expect(getDeviceJobChannelState()).toMatchObject({ rest: 'polling', lastError: null })
+  })
+
   it('discards a REST job delivered after stop without verification or effects', async () => {
     let deliver!: (value: unknown) => void
     api.nextDeviceJob.mockImplementationOnce(
