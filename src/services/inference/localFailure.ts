@@ -10,6 +10,7 @@ const failureCodes = [
   'runtime_server_failed',
   'runtime_http_failed',
   'runtime_reasoning_control_unavailable',
+  'runtime_output_repeated',
   'runtime_stream_failed',
   'runtime_start_failed',
 ] as const
@@ -145,6 +146,10 @@ const reasonDescriptions: Record<LocalFailureDiagnostic['reason'], string> = {
   unclassified: 'Die lokale Modellanfrage ist fehlgeschlagen. Die gemeldete Fehlerstufe und den Runtime-Status prüfen.',
 }
 const codeDescriptions: Partial<Record<LocalFailureCode, string>> = {
+  runtime_output_repeated:
+    'Eine Wiederholungsschleife wurde erkannt und automatisch gestoppt. Der bisherige Antworttext und Arbeitsfortschritt bleiben erhalten. Das Modell bleibt geladen.',
+  runtime_tool_contract_rejected:
+    'Das Modell hat keinen gültigen, vollständig abgeschlossenen Werkzeugaufruf geliefert. Aus Antworttext werden keine Aktionen ausgeführt. Das Modell bleibt geladen.',
   runtime_reasoning_control_unavailable:
     'Die Runtime hat den Abschluss der Denkphase nicht bestätigt. Denkbudget und Runtime-Unterstützung prüfen. Das Modell bleibt geladen.',
   runtime_stream_failed:

@@ -32,6 +32,8 @@ use super::{ensure_main_or_system_status_webview, ensure_main_webview};
 
 #[path = "local_model_stream.rs"]
 mod generation_stream;
+#[path = "local_model_generation.rs"]
+mod generation_safety;
 #[path = "local_model_idle.rs"]
 mod idle_inference;
 #[path = "local_model_network.rs"]
@@ -498,7 +500,8 @@ struct LocalInferenceFailure {
 
 impl LocalInferenceFailure {
     fn preserves_resident_runtime(&self) -> bool {
-        self.is_input_rejection() || self.code == "runtime_reasoning_control_unavailable"
+        self.is_input_rejection() || matches!(self.code,
+            "runtime_reasoning_control_unavailable" | "runtime_output_repeated")
     }
 
     fn is_input_rejection(&self) -> bool {
@@ -513,6 +516,15 @@ impl LocalInferenceFailure {
 
     fn stream(message: impl Into<String>) -> Self {
         let message = message.into();
+        if matches!(message.as_str(), generation_safety::REPETITION | generation_safety::TOOL_CONTRACT) {
+            let code = if message == generation_safety::REPETITION {
+                "runtime_output_repeated"
+            } else { "runtime_tool_contract_rejected" };
+            return Self {
+                code, public_message: message, retryable: false,
+                diagnostic: failure_diagnostics::Diagnostic::new(code, failure_diagnostics::Stage::Unknown),
+            };
+        }
         if matches!(
             message.as_str(),
             "ram_budget_insufficient"
@@ -3915,6 +3927,7 @@ fn stream_completion_with_diagnostics(
             "parse_tool_calls": true
         }
     });
+    generation_safety::apply_sampling(&mut body, model.artifact.as_ref().map(|a| a.sha256.as_str()));
     let tokenizer_client = local_http_client(Duration::from_secs(15), Duration::from_secs(15))?;
     let started = Instant::now();
     let mut measured_input = 0;
@@ -4180,6 +4193,8 @@ fn parse_sse_observed(
     let mut completed = false;
     let mut usage = None;
     let mut diagnostics = RuntimeDiagnostics::default();
+    let mut repetition = generation_safety::RepetitionGuard::default();
+    let mut private_repetition = generation_safety::RepetitionGuard::default();
     loop {
         if cancel.load(Ordering::SeqCst) {
             return Err("Local inference was cancelled.".into());
@@ -4220,6 +4235,9 @@ fn parse_sse_observed(
         else {
             continue;
         };
+        // A usage-only trailer is allowed after finish, but never more answer
+        // bytes or tool arguments. A terminal frame's own final delta is valid.
+        if completed { continue; }
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             finish_reason = reason.chars().take(64).collect();
             completed = true;
@@ -4227,8 +4245,14 @@ fn parse_sse_observed(
         let Some(delta) = choice.get("delta").and_then(Value::as_object) else {
             continue;
         };
-        // reasoning_content is deliberately ignored and never leaves native code.
+        // Private text is inspected only in bounded request-local state; never exported.
+        if delta.get("reasoning_content").and_then(Value::as_str)
+            .is_some_and(|chunk| private_repetition.observe(chunk).is_some()) {
+            return Err(generation_safety::REPETITION.into());
+        }
         if let Some(chunk) = delta.get("content").and_then(Value::as_str) {
+            let interrupted_at = repetition.observe(chunk);
+            let chunk = &chunk[..interrupted_at.unwrap_or(chunk.len())];
             content.push_str(chunk);
             if content.len() > MAX_CONTENT_CHARS {
                 return Err("Local llama.cpp content exceeded the native size limit.".into());
@@ -4239,6 +4263,7 @@ fn parse_sse_observed(
                     content: chunk.to_string(),
                 })
                 .map_err(|_| "Local inference event channel closed.".to_string())?;
+            if interrupted_at.is_some() { return Err(generation_safety::REPETITION.into()); }
         }
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
@@ -4269,7 +4294,7 @@ fn parse_sse_observed(
     if !completed {
         return Err("Local llama.cpp stream ended without a terminal marker.".into());
     }
-    let raw_tool_calls = tools
+    let raw_tool_calls: Vec<NativeToolCall> = tools
         .into_values()
         .filter(|(_, name, _)| !name.is_empty())
         .map(|(id, name, arguments)| NativeToolCall {
@@ -4289,6 +4314,9 @@ fn parse_sse_observed(
             },
         })
         .collect();
+    if !generation_safety::valid_tool_completion(&request.tool_choice, &request.tools, &raw_tool_calls, &finish_reason) {
+        return Err(generation_safety::TOOL_CONTRACT.into());
+    }
     Ok(LocalInferenceResult {
         content,
         raw_tool_calls,

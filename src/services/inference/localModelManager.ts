@@ -451,6 +451,7 @@ export class LocalModelManager {
           'runtime_chat_template_failed',
           'runtime_tool_contract_rejected',
           'runtime_reasoning_control_unavailable',
+          'runtime_output_repeated',
         ].includes(error.code) ||
           (error.code === 'runtime_request_rejected' &&
             (error.diagnostic?.httpStatus === 400 ||

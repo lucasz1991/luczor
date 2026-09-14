@@ -981,14 +981,17 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
             round,
           })
     const continuation = checkpoint()
+    const repeatedOutput = interruption.code === 'runtime_output_repeated'
     const publicControlPartial =
-      interruption.code === 'runtime_reasoning_control_unavailable' ? publicAnswerText(visibleContent, true).trim() : ''
+      repeatedOutput || interruption.code === 'runtime_reasoning_control_unavailable'
+        ? publicAnswerText(visibleContent, true).trim() : ''
     if (publicControlPartial) {
       continuation.messages.push({ role: 'assistant', content: publicControlPartial })
       continuation.messages.push({
         role: 'user',
-        content:
-          'Die vorherige Antwort wurde an der Denkbudgetgrenze unterbrochen. Setze den bestehenden Auftrag anhand dieses öffentlichen Teilstands fort; bereits erfolgreiche Aktionen nicht wiederholen.',
+        content: repeatedOutput
+          ? 'Die vorherige Antwort wurde wegen wiederholter Ausgabe gestoppt. Prüfe den aktuellen Stand und setze den Auftrag ohne die wiederholten Abschlussphrasen fort. Bereits erfolgreiche Aktionen nicht wiederholen.'
+          : 'Die vorherige Antwort wurde an der Denkbudgetgrenze unterbrochen. Setze den bestehenden Auftrag anhand dieses öffentlichen Teilstands fort; bereits erfolgreiche Aktionen nicht wiederholen.',
       })
     }
     const resetHistory =
@@ -1211,6 +1214,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           'runtime_chat_history_rejected',
           'runtime_tool_contract_rejected',
           'runtime_reasoning_control_unavailable',
+          'runtime_output_repeated',
         ].includes(error.code)
       if (!resolvedRoute.externalOneShot && (toolOutcomes.length > 0 || resettableLocalInputFailure)) {
         return partialResultAfterInferenceFailure(error, round + 1)
