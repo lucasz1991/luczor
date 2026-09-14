@@ -1010,44 +1010,44 @@ onBeforeUnmount(() => {
               <strong>{{ paneTitles[activePane] }}</strong>
               <span v-if="pinnedPane" class="mini-grip-panel__pin">fixiert</span>
             </div>
-          <template v-if="activePane === 'status'">
-            <dl class="mini-grip-panel__kv">
-              <dt>Zustand</dt>
-              <dd>{{ status.label }}</dd>
-              <dt>Details</dt>
-              <dd>{{ status.detail }}</dd>
-              <dt>Modus</dt>
-              <dd>{{ snapshot.mode === 'observe' ? 'Beobachten' : 'Handeln' }}</dd>
-              <dt v-if="snapshot.thinkingTier">Denkstufe</dt>
-              <dd v-if="snapshot.thinkingTier">{{ snapshot.thinkingTier }}</dd>
-            </dl>
-          </template>
-          <template v-else-if="activePane === 'decision'">
-            <p v-if="decision" class="mini-grip-panel__text">
-              <strong>{{ decision.title }}</strong>
-              {{ decision.description }}
-            </p>
-            <p v-else class="mini-grip-panel__empty">Keine Entscheidung offen.</p>
-          </template>
-          <template v-else-if="activePane === 'tools'">
-            <ul v-if="sharedToolSessions.length" class="mini-grip-panel__chats">
-              <li v-for="session in sharedToolSessions" :key="session.id" class="is-busy">
-                <i aria-hidden="true" /><span>{{ session.kind }}</span
-                ><small>{{ session.id.slice(0, 8) }}</small>
-              </li>
-            </ul>
-            <p v-else class="mini-grip-panel__empty">Keine Tool-Sitzung aktiv.</p>
-          </template>
-          <template v-else>
-            <dl class="mini-grip-panel__kv">
-              <dt>Server</dt>
-              <dd :class="connectionError ? 'is-error' : 'is-ok'">{{ connectionError || 'Verbunden' }}</dd>
-              <dt>HUD</dt>
-              <dd>{{ snapshot.hud.status || '–' }}</dd>
-              <dt>Not-Aus</dt>
-              <dd>{{ snapshot.hud.killSwitch ? 'aktiv' : 'aus' }}</dd>
-            </dl>
-          </template>
+            <template v-if="activePane === 'status'">
+              <dl class="mini-grip-panel__kv">
+                <dt>Zustand</dt>
+                <dd>{{ status.label }}</dd>
+                <dt>Details</dt>
+                <dd>{{ status.detail }}</dd>
+                <dt>Modus</dt>
+                <dd>{{ snapshot.mode === 'observe' ? 'Beobachten' : 'Handeln' }}</dd>
+                <dt v-if="snapshot.thinkingTier">Denkstufe</dt>
+                <dd v-if="snapshot.thinkingTier">{{ snapshot.thinkingTier }}</dd>
+              </dl>
+            </template>
+            <template v-else-if="activePane === 'decision'">
+              <p v-if="decision" class="mini-grip-panel__text">
+                <strong>{{ decision.title }}</strong>
+                {{ decision.description }}
+              </p>
+              <p v-else class="mini-grip-panel__empty">Keine Entscheidung offen.</p>
+            </template>
+            <template v-else-if="activePane === 'tools'">
+              <ul v-if="sharedToolSessions.length" class="mini-grip-panel__chats">
+                <li v-for="session in sharedToolSessions" :key="session.id" class="is-busy">
+                  <i aria-hidden="true" /><span>{{ session.kind }}</span
+                  ><small>{{ session.id.slice(0, 8) }}</small>
+                </li>
+              </ul>
+              <p v-else class="mini-grip-panel__empty">Keine Tool-Sitzung aktiv.</p>
+            </template>
+            <template v-else>
+              <dl class="mini-grip-panel__kv">
+                <dt>Server</dt>
+                <dd :class="connectionError ? 'is-error' : 'is-ok'">{{ connectionError || 'Verbunden' }}</dd>
+                <dt>HUD</dt>
+                <dd>{{ snapshot.hud.status || '–' }}</dd>
+                <dt>Not-Aus</dt>
+                <dd>{{ snapshot.hud.killSwitch ? 'aktiv' : 'aus' }}</dd>
+              </dl>
+            </template>
           </div>
         </template>
       </div>
