@@ -6,85 +6,85 @@ export type ToolDescriptor = {
 type Branch = { id: string; label: string; keywords: string[] }
 const branch = (id: string, label: string, words: string): Branch => ({ id, label, keywords: words.split(' ') })
 export const TOOL_BRANCHES: Branch[] = [
-  branch('project', 'Projekte', 'projekt project workspace arbeitsbereich vorhaben'),
-  branch('project/state', 'Projektverwaltung', 'zustand status zusammenfassung summary ziele goals erstellen anlegen'),
-  branch('project/chats', 'Unterhaltungen', 'chat conversation unterhaltung verlauf nachrichten dialog'),
-  branch('project/tasks', 'Aufgaben und Planung', 'task aufgabe plan schritte todo checklist ziel goal'),
-  branch('files', 'Dateien', 'datei file dokument document ordner folder verzeichnis directory quellcode source repo'),
-  branch('files/local', 'Lokaler Projektordner', 'lokal local dateisystem filesystem pfad path lesen speichern suchen'),
-  branch('files/cloud', 'Cloud-Projektdateien', 'cloud server global synchronisieren sync dateipool'),
+  branch('project', 'Projects', 'project projects projekt projekte workspace arbeitsbereich vorhaben'),
+  branch('project/state', 'Project management', 'state status zustand projektstand summary zusammenfassung goals ziele create erstellen anlegen'),
+  branch('project/chats', 'Conversations', 'chat conversation conversations unterhaltung unterhaltungen verlauf nachrichten dialog'),
+  branch('project/tasks', 'Tasks and planning', 'task tasks aufgabe aufgaben plan planning schritte todo checklist goal ziel'),
+  branch('files', 'Files', 'file files datei dateien dokument document ordner folder verzeichnis directory quellcode source repo'),
+  branch('files/local', 'Local project folder', 'local lokal dateisystem filesystem pfad path read lesen save speichern search suchen'),
+  branch('files/cloud', 'Cloud project files', 'cloud server global synchronisieren sync dateipool'),
   branch('computer', 'Computer', 'computer desktop bildschirm screen bedienung control'),
   branch(
     'computer/browser',
-    'Luczor-Browser',
+    'Luczor browser',
     'browser web internet website seite webpage intern internal dom formular form surfen'
   ),
-  branch('computer/external-browser', 'Externer Browser', 'extern external chrome firefox edge fremd url link öffnen'),
+  branch('computer/external-browser', 'External browser', 'extern external chrome firefox edge fremd url link öffnen'),
   branch(
     'computer/input',
-    'Maus und Tastatur',
+    'Mouse and keyboard',
     'maus mouse zeiger cursor tastatur keyboard taste key tippen eingabe klicken scroll'
   ),
   branch(
     'computer/observation',
-    'Bildschirm und Fenster',
+    'Screen and windows',
     'fenster window screenshot bildschirm capture beobachten observe zwischenablage clipboard bild image vision'
   ),
   branch(
     'computer/system',
-    'Systemdiagnose',
+    'System diagnostics',
     'hardware ram gpu cpu speicher memory leistung performance sicherheit security umgebung environment linux windows'
   ),
   branch(
     'computer/terminal',
-    'Terminal und Programme',
+    'Terminal and programs',
     'terminal shell befehl command skript script ausführen execute programm build test kompilieren'
   ),
-  branch('knowledge', 'Wissen', 'wissen knowledge kontext context erinnerung gedächtnis memory'),
-  branch('knowledge/memory', 'Erinnerungen', 'erinnern recall remember merken notiz notizen erfahrung wissen'),
-  branch('knowledge/history', 'Kontextarchiv', 'history verlauf archiv nachlesen original context'),
-  branch('agents', 'Agenten', 'agent agenten assistenz assistance delegation mitarbeiter helfer parallel'),
-  branch('agents/jobs', 'Einzelagenten', 'job auftrag teilauftrag delegieren worker spezialist codex claude'),
-  branch('agents/teams', 'Agententeams', 'team teams orchestrierung zusammenarbeit koordination'),
-  branch('models', 'Modelle', 'modell model ki ai inference lokal local llm'),
+  branch('knowledge', 'Knowledge', 'wissen knowledge kontext context erinnerung gedächtnis memory'),
+  branch('knowledge/memory', 'Memories', 'memory memories erinnerung erinnerungen erinnern recall remember merken notiz notizen erfahrung wissen'),
+  branch('knowledge/history', 'Context archive', 'history verlauf archiv nachlesen original context'),
+  branch('agents', 'Agents', 'agent agents agenten assistenz assistance delegation mitarbeiter helfer parallel'),
+  branch('agents/jobs', 'Individual agents', 'job auftrag teilauftrag delegieren worker spezialist codex claude'),
+  branch('agents/teams', 'Agent teams', 'team teams agententeam agententeams orchestrierung zusammenarbeit koordination'),
+  branch('models', 'Models', 'modell model modelle ki ai inference lokal local llm'),
   branch(
     'models/runtime',
-    'Modellbetrieb',
+    'Model runtime',
     'runtime bereitschaft readiness status laden steuerung parameter fähigkeit capability'
   ),
   branch('workflows', 'Workflows', 'workflow ablauf automation automatisierung prozess routine'),
   branch(
     'workflows/definitions',
-    'Definitionen',
+    'Definitions',
     'definition vorlage version knoten node erstellen konfigurieren validieren'
   ),
-  branch('workflows/runs', 'Ausführungen', 'run lauf ausführen starten testen ergebnis stoppen'),
-  branch('workflows/triggers', 'Auslöser', 'trigger zeitplan schedule timer ereignis event automatisch'),
-  branch('devices', 'Geräteverbund', 'gerät device laptop rechner master koordinator netzwerk remote fernsteuerung'),
-  branch('devices/jobs', 'Geräteaufträge', 'delegieren dispatch auftrag ergebnis status stoppen'),
-  branch('tools', 'Werkzeuge', 'tool werkzeug funktion function hilfsmittel katalog catalog entdecken discovery'),
+  branch('workflows/runs', 'Runs', 'run runs lauf läufe ausführen starten testen ergebnis stoppen'),
+  branch('workflows/triggers', 'Triggers', 'trigger auslöser zeitplan schedule timer ereignis event automatisch'),
+  branch('devices', 'Device cluster', 'gerät geräte device devices laptop rechner master koordinator netzwerk remote fernsteuerung'),
+  branch('devices/jobs', 'Device jobs', 'delegieren dispatch auftrag aufträge job ergebnis status stoppen'),
+  branch('tools', 'Tools', 'tool tools werkzeug werkzeuge funktion function hilfsmittel katalog catalog entdecken discovery'),
   branch(
     'tools/catalog',
-    'Werkzeugsuche',
+    'Tool discovery',
     'suche search auswählen select finden find kategorie category map synonym keyword'
   ),
-  branch('tools/other', 'Weitere Werkzeuge', 'weitere other custom spezial erweitert'),
+  branch('tools/other', 'Other tools', 'weitere other custom spezial erweitert'),
 ]
 const operations = [
   {
-    ...branch('forms', 'Formulare', 'formular form ausfüllen fill select eingabefeld option dropdown'),
+    ...branch('forms', 'Forms', 'formular formulare form forms ausfüllen fill select eingabefeld option dropdown'),
     match: /^browser_(fill|select)$/,
   },
-  { ...branch('search', 'Suchen', 'suche suchen search find finden durchsuchen lookup'), match: /search/ },
+  { ...branch('search', 'Search', 'suche suchen search find finden durchsuchen lookup'), match: /search/ },
   {
-    ...branch('stop', 'Beenden', 'stop cancel close abbrechen stoppen schließen beenden'),
+    ...branch('stop', 'Stop and close', 'stop cancel close abbrechen stoppen schließen beenden'),
     match: /(?:cancel|stop|close)$/,
   },
-  { ...branch('delete', 'Entfernen', 'delete remove löschen entfernen'), match: /delete/ },
+  { ...branch('delete', 'Delete and remove', 'delete remove löschen entfernen'), match: /delete/ },
   {
     ...branch(
       'write',
-      'Ändern und Speichern',
+      'Write and save',
       'write save create update move remember schreiben speichern erstellen anlegen ändern verschieben'
     ),
     match: /write|save|create|update|move|remember|upsert|set_summary|complete|configure/,
@@ -92,7 +92,7 @@ const operations = [
   {
     ...branch(
       'execute',
-      'Starten und Steuern',
+      'Start and control',
       'start execute run dispatch prepare click type key hotkey scroll öffnen starten ausführen klicken tippen'
     ),
     match: /dispatch|prepare|start|open|navigate|click|type|press|hotkey|scroll|terminal_run/,
@@ -100,7 +100,7 @@ const operations = [
   {
     ...branch(
       'read',
-      'Lesen und Prüfen',
+      'Read and inspect',
       'read list get status inspect observe check lesen lies auflisten liste prüfen prüfe abrufen anzeigen analysieren auslesen'
     ),
     match: /.*/,

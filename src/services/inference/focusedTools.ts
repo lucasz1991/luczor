@@ -18,7 +18,7 @@ export function focusedTools(objective: string, archive?: () => readonly WireMes
     mutating: false,
     requiresApproval: false,
     description:
-      'Werkzeuge nach Suchbegriffen/Synonymen oder Kategoriepfad finden. Ohne Filter: Hauptkategorien und Katalog lesen. category aus categories.id vertieft die Karte. Maximal sechs Namen pro Auswahl für die nächste Runde; keine Aktion wird ausgeführt.',
+      'Find tools by English keywords, German synonyms, or category path. Without filters, read root categories and the catalog. category from categories.id opens a deeper branch. Select at most six names for the next round; no action is executed.',
     parameters: {
       type: 'object',
       properties: {

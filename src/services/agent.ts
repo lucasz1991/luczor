@@ -1225,7 +1225,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       applyRuntimeMode(messages, currentMode())
       applyRuntimeTools(messages, availableTools, currentMode())
       // Replace this bounded numeric/name map every round; never accumulate history copies.
-      const mappedTools = [...eligibleTools, ...availableTools.filter(tool => !eligibleTools.some(eligible => eligible.function.name === tool.function.name))]
+      const mappedTools = [
+        ...eligibleTools,
+        ...availableTools.filter(
+          tool => !eligibleTools.some(eligible => eligible.function.name === tool.function.name)
+        ),
+      ]
       const map = toolUsageContext(mappedTools, toolStatistics, !!focused)
       const mapIndex = messages.findIndex(
         message => message.role === 'system' && message.content.startsWith(TOOL_MAP_MARKER)

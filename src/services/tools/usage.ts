@@ -96,13 +96,13 @@ export function toolUsageContext(pool: ToolDescriptor[], rows: ToolUsage[], disc
   const roots = [...new Set(pool.map(tool => toolDiscovery(tool).nodes[0]!.label))]
   const top = topToolUsage(pool, rows)
   return (
-    `${TOOL_MAP_MARKER}\nKategorien: ${roots.join(' · ')}.\n` +
+    `${TOOL_MAP_MARKER}\nCategories: ${roots.join(' · ')}.\n` +
     (discovery
-      ? 'Suche mit tools_select(query, category, offset); Kategorie-IDs und Synonyme stehen in categories. Namen mit tools_select(names) für die nächste Runde laden. '
-      : 'Verwende ausschließlich die für diese Runde bereitgestellten Werkzeuge. ') +
-    'Die Karte erteilt keine Berechtigungen.\n' +
+      ? 'Search with tools_select(query, category, offset); category IDs and English/German synonyms are in categories. Load names with tools_select(names) for the next round. '
+      : 'Use only the tools supplied for this round. ') +
+    'This map grants no permissions.\n' +
     (top.length
-      ? `Meistgenutzt auf diesem Gerät/Konto (tatsächliche Aufrufe; Erfolg/Fehler):\n${top.map(row => `${row.name} — ${row.path.join(' > ')} [${row.category}] — ${row.calls} (${row.successes}/${row.failures})`).join('\n')}`
-      : 'Noch keine gemessene Werkzeugnutzung für diesen Auftragseigentümer; keine erfundene Top-10-Liste.')
+      ? `Most used on this device/account (actual calls; success/failure):\n${top.map(row => `${row.name} — ${row.path.join(' > ')} [${row.category}] — ${row.calls} (${row.successes}/${row.failures})`).join('\n')}`
+      : 'No measured tool usage for this request owner yet; do not invent a top ten.')
   )
 }

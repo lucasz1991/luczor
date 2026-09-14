@@ -327,6 +327,13 @@ describe('agent mode and tool reliability', () => {
     expect(result.finalText).toBe('Beide Prüfungen abgeschlossen.')
     expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(5)
     expect(mocks.execute).toHaveBeenCalledTimes(2)
+    const lastRequest = mocks.streamChatWithTools.mock.calls[4]![0] as InferenceRequest
+    const maps = lastRequest.messages.filter(
+      message => message.role === 'system' && message.content.startsWith('[Luczor Werkzeugkarte]')
+    )
+    expect(maps).toHaveLength(1)
+    expect(maps[0]?.content).toContain('project_get_state')
+    expect(maps[0]?.content).toContain('2 (2/0)')
     expect(mocks.streamChatWithTools.mock.calls[1]![0].toolChoice).toBe('required')
     expect(mocks.streamChatWithTools.mock.calls[3]![0].toolChoice).toBe('required')
     const corrected = mocks.streamChatWithTools.mock.calls[3]![0] as InferenceRequest
