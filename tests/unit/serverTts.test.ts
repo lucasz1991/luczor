@@ -130,6 +130,65 @@ describe('shared server TTS transport', () => {
     await expect(serverTts('Hallo', config)).rejects.toThrow('Keine Verbindung zum Sprachdienst')
   })
 
+  it.each([429, 503])(
+    'retries HTTP %s once after the advertised delay without changing account, voice or text',
+    async status => {
+      vi.useFakeTimers()
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(new Response('busy', { status, headers: { 'Retry-After': '2' } }))
+        .mockImplementation(async () => response())
+      vi.stubGlobal('fetch', fetchMock)
+      const result = serverTts('Hallo.', config, { voiceId: 'benni' })
+      await vi.advanceTimersByTimeAsync(1999)
+      expect(fetchMock).toHaveBeenCalledOnce()
+      await vi.advanceTimersByTimeAsync(1)
+      await expect(result).resolves.toBeInstanceOf(Blob)
+      expect(fetchMock).toHaveBeenCalledTimes(2)
+      expect(fetchMock.mock.calls[1]).toEqual(fetchMock.mock.calls[0])
+      expect(vi.getTimerCount()).toBe(0)
+    }
+  )
+
+  it('stops after one failed TTS retry and never repeats a request indefinitely', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn(async () => new Response('busy', { status: 503, headers: { 'Retry-After': '1' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const result = serverTts('Hallo.', config).catch((error: unknown) => error)
+    await vi.advanceTimersByTimeAsync(1000)
+    await expect(result).resolves.toMatchObject({ status: 503 })
+    await vi.advanceTimersByTimeAsync(300000)
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it.each([null, '3600', 'invalid'])('does not retry without a short valid Retry-After (%s)', async retryAfter => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response('not configured', {
+          status: 503,
+          headers: retryAfter ? { 'Retry-After': retryAfter } : {},
+        })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    await expect(serverTts('Hallo.', config)).rejects.toMatchObject({ status: 503 })
+    expect(fetchMock).toHaveBeenCalledOnce()
+  })
+
+  it('cancels a pending speech retry when the answer is discarded or the user stops playback', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn(async () => new Response('busy', { status: 503, headers: { 'Retry-After': '2' } }))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    const result = serverTts('Hallo.', config, { signal: controller.signal }).catch((error: unknown) => error)
+    await vi.advanceTimersByTimeAsync(100)
+    controller.abort()
+    await expect(result).resolves.toMatchObject({ name: 'AbortError' })
+    await vi.advanceTimersByTimeAsync(300000)
+    expect(fetchMock).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it.each([
     new Response('<html>secret</html>', { headers: { 'Content-Type': 'text/html' } }),
     new Response('not audio', { headers: { 'Content-Type': 'audio/wav' } }),

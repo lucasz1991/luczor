@@ -91,31 +91,34 @@ export async function serverTts(
 
   try {
     const operation = (async () => {
-      const fetchAudio = () => apiTransportFetch(url, {
-        method: 'POST',
-        headers: {
-          Accept: 'audio/wav',
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${config.deviceKey}`,
-          'X-Luczor-Correlation-Id': correlationId,
-        },
-        body: JSON.stringify({
-          text: clean,
-          language: 'de',
-          speed,
-          ...(voiceId && voiceId !== 'piper' ? { voice_id: voiceId } : {}),
-        }),
-        signal: controller.signal,
-        redirect: 'error',
-        credentials: 'omit',
-        cache: 'no-store',
-      })
+      const fetchAudio = () =>
+        apiTransportFetch(url, {
+          method: 'POST',
+          headers: {
+            Accept: 'audio/wav',
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${config.deviceKey}`,
+            'X-Luczor-Correlation-Id': correlationId,
+          },
+          body: JSON.stringify({
+            text: clean,
+            language: 'de',
+            speed,
+            ...(voiceId && voiceId !== 'piper' ? { voice_id: voiceId } : {}),
+          }),
+          signal: controller.signal,
+          redirect: 'error',
+          credentials: 'omit',
+          cache: 'no-store',
+        })
       let response = await fetchAudio()
       const delay = retryDelay(response)
       if (!controller.signal.aborted && delay !== null) {
         void response.body?.cancel().catch(() => undefined)
         await Promise.race([
-          new Promise<void>(resolve => { retryTimer = globalThis.setTimeout(resolve, delay) }),
+          new Promise<void>(resolve => {
+            retryTimer = globalThis.setTimeout(resolve, delay)
+          }),
           cancellation,
         ])
         if (controller.signal.aborted) throw speechAbortError()

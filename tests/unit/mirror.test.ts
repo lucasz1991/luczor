@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const mock = vi.hoisted(() => ({
   account: vi.fn(),
   native: vi.fn(),
@@ -6,9 +6,15 @@ const mock = vi.hoisted(() => ({
   binary: vi.fn(),
   hasChunk: vi.fn(),
   entries: new Map<string, unknown>(),
+  listeners: new Map<string, (event: { payload: { projectId: string } }) => void>(),
   state: { projects: [{ id: 'local', cloud: { principalId: 'owner', projectId: 7, externalId: 'global' } }] },
 }))
-vi.mock('@tauri-apps/api/event', () => ({ listen: async () => () => {} }))
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: async (name: string, handler: (event: { payload: { projectId: string } }) => void) => {
+    mock.listeners.set(name, handler)
+    return () => mock.listeners.delete(name)
+  },
+}))
 vi.mock('@tauri-apps/plugin-store', () => ({
   Store: {
     load: async () => ({
@@ -43,7 +49,7 @@ vi.mock('@/services/coordination/binaryTransport', () => ({
   decodeBase64: () => new Uint8Array([1]),
   encodeBase64: () => 'AQ==',
 }))
-import { syncProjectMirror } from '@/services/coordination/mirror'
+import { projectMirrorState, startProjectMirrorChannel, syncProjectMirror } from '@/services/coordination/mirror'
 
 const base = '/projects/7/mirror'
 const sha = 'a'.repeat(64)
@@ -51,6 +57,7 @@ type Options = { method?: string; body?: Record<string, unknown> }
 beforeEach(() => {
   vi.clearAllMocks()
   mock.entries.clear()
+  mock.listeners.clear()
   mock.account.mockResolvedValue({
     accountId: 1,
     principalId: 'owner',
@@ -70,8 +77,109 @@ beforeEach(() => {
   mock.hasChunk.mockResolvedValue(false)
   mock.binary.mockResolvedValue(new Uint8Array())
 })
+afterEach(() => {
+  vi.useRealTimers()
+  vi.unstubAllGlobals()
+})
 
 describe('durable full project mirror upload', () => {
+  it('persists a confirmed merge conflict and retries only when the server head changes', async () => {
+    mock.entries.set('owner:local', { revision: 3, localHash: 'changed' })
+    let revision = 2
+    let publishes = 0
+    mock.request.mockImplementation(async (path: string) => {
+      if (path === base) return { data: { revision, manifest_id: `head-${revision}` } }
+      if (path.endsWith('/proposals')) return { data: [{ manifest_id: 'proposal', base_revision: 1 }] }
+      if (path.endsWith('/lease')) return { data: { lease_id: 'lease' } }
+      if (path.endsWith('/publish')) {
+        publishes++
+        if (revision === 2)
+          throw Object.assign(new Error('Overlapping file changes'), { status: 409, code: 'mirror_merge_conflict' })
+        return { data: { revision, manifest_id: 'merged', status: 'published' } }
+      }
+      return { data: {} }
+    })
+    await expect(syncProjectMirror('local')).rejects.toThrow('Entscheidung am Master')
+    expect(mock.entries.get('owner:local:proposal-conflict')).toEqual({
+      proposalId: 'proposal',
+      headId: 'head-2',
+      revision: 2,
+    })
+    for (let attempt = 0; attempt < 4; attempt++)
+      await expect(syncProjectMirror('local')).rejects.toThrow('unveränderte Vorschlag')
+    expect(publishes).toBe(1)
+    expect(projectMirrorState.local).toMatchObject({ busy: false, error: expect.stringContaining('Beide Fassungen') })
+    expect(mock.native).not.toHaveBeenCalledWith(
+      'project_mirror_stage_commit',
+      expect.anything(),
+      expect.anything(),
+      expect.anything()
+    )
+    revision = 3
+    await syncProjectMirror('local')
+    expect(publishes).toBe(2)
+    expect(mock.entries.has('owner:local:proposal-conflict')).toBe(false)
+  })
+
+  it.each(['mirror_revision_conflict', 'mirror_lease_expired', undefined])(
+    'does not persist a transient or unclassified 409 (%s)',
+    async code => {
+      let publishes = 0
+      mock.request.mockImplementation(async (path: string) => {
+        if (path === base) return { data: { revision: 2, manifest_id: 'head' } }
+        if (path.endsWith('/proposals')) return { data: [{ manifest_id: 'proposal' }] }
+        if (path.endsWith('/lease')) return { data: { lease_id: 'lease' } }
+        if (path.endsWith('/publish')) {
+          publishes++
+          throw Object.assign(new Error('Conflict'), { status: 409, code })
+        }
+        return { data: {} }
+      })
+      await expect(syncProjectMirror('local')).rejects.toThrow('Conflict')
+      await expect(syncProjectMirror('local')).rejects.toThrow('Conflict')
+      expect(publishes).toBe(2)
+      expect(mock.entries.has('owner:local:proposal-conflict')).toBe(false)
+    }
+  )
+
+  it('backs off failed background syncs even when filesystem events keep arriving and stops after cleanup', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('window', new EventTarget())
+    vi.stubGlobal('navigator', { onLine: true })
+    mock.request.mockRejectedValue(new Error('Request timed out'))
+    const controller = new AbortController()
+    const stop = await startProjectMirrorChannel(controller.signal)
+    const event = { payload: { projectId: 'local' } }
+    const tick = () => mock.listeners.get('luczor://worker-tick')?.(event)
+    const dirty = () => mock.listeners.get('luczor://project-mirror-dirty')?.(event)
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      expect(mock.request).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(60000)
+      tick()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(mock.request).toHaveBeenCalledTimes(2)
+      dirty()
+      await vi.advanceTimersByTimeAsync(60000)
+      tick()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(mock.request).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(60000)
+      tick()
+      await vi.advanceTimersByTimeAsync(0)
+      expect(mock.request).toHaveBeenCalledTimes(3)
+      const lateTick = mock.listeners.get('luczor://worker-tick')!
+      stop()
+      await vi.advanceTimersByTimeAsync(600000)
+      lateTick(event)
+      window.dispatchEvent(new Event('online'))
+      await vi.advanceTimersByTimeAsync(0)
+      expect(mock.request).toHaveBeenCalledTimes(3)
+    } finally {
+      stop()
+    }
+  })
+
   it('seals stale-base master changes as a proposal so disjoint assistant changes can merge', async () => {
     mock.entries.set('owner:local', { revision: 1, localHash: 'previous' })
     let proposed = false

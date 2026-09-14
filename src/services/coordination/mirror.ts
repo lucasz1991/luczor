@@ -205,13 +205,17 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
           // unknown 409 responses must remain retryable against a fresh head.
           if (
             error instanceof Error &&
-            'status' in error && error.status === 409 &&
-            'code' in error && error.code === 'mirror_merge_conflict' &&
+            'status' in error &&
+            error.status === 409 &&
+            'code' in error &&
+            error.code === 'mirror_merge_conflict' &&
             proposal.manifest_id
           ) {
             executionGate.assert(ticket)
             await disk.set(conflictKey, {
-              proposalId: proposal.manifest_id, headId: head.manifest_id, revision: head.revision,
+              proposalId: proposal.manifest_id,
+              headId: head.manifest_id,
+              revision: head.revision,
             } satisfies ProposalConflict)
             await disk.save()
             throw new Error(CONFLICT_MESSAGE)
@@ -420,7 +424,12 @@ export async function startProjectMirrorChannel(signal: AbortSignal): Promise<()
   const tick = () => {
     if (stopped || signal.aborted || navigator.onLine === false) return
     for (const project of state.projects)
-      if (project.cloud && !project.archivedAt && !pending.has(project.id) && Date.now() >= (due.get(project.id) ?? 0)) {
+      if (
+        project.cloud &&
+        !project.archivedAt &&
+        !pending.has(project.id) &&
+        Date.now() >= (due.get(project.id) ?? 0)
+      ) {
         pending.add(project.id)
         void syncProjectMirror(project.id, signal)
           .then(() => {

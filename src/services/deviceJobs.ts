@@ -207,7 +207,13 @@ export async function startDeviceJobChannel(): Promise<() => void> {
   const notificationRetry = freshRetry()
   let notificationsInFlight = false
   const syncNotifications = () => {
-    if (!channelSession.isCurrent() || navigator.onLine === false || notificationsInFlight || Date.now() < notificationRetry.retryAt) return
+    if (
+      !channelSession.isCurrent() ||
+      navigator.onLine === false ||
+      notificationsInFlight ||
+      Date.now() < notificationRetry.retryAt
+    )
+      return
     notificationsInFlight = true
     void catchUpPushNotifications()
       .then(() => {
@@ -221,7 +227,9 @@ export async function startDeviceJobChannel(): Promise<() => void> {
         const message = deferRetry(notificationRetry, error, '[notifications] catch-up failed')
         updateChannelState({ lastError: message })
       })
-      .finally(() => { notificationsInFlight = false })
+      .finally(() => {
+        notificationsInFlight = false
+      })
   }
   const syncWhenVisible = () => {
     if (!channelSession.isCurrent()) return
@@ -306,7 +314,8 @@ async function pullPendingBatch(clientId: string, session: ChannelSession): Prom
     const recoveredError = session.pollRetry.lastError
     Object.assign(session.pollRetry, freshRetry())
     updateChannelState({
-      rest: 'polling', lastPollAt: Date.now(),
+      rest: 'polling',
+      lastPollAt: Date.now(),
       ...(recoveredError && channelState.lastError === recoveredError ? { lastError: null } : {}),
     })
   } catch (error) {
@@ -396,7 +405,8 @@ async function connectRealtime(
       const recoveredError = current.realtimeError
       current.realtimeError = null
       updateChannelState({
-        realtime: 'connected', lastRealtimeAt: Date.now(),
+        realtime: 'connected',
+        lastRealtimeAt: Date.now(),
         ...(recoveredError && channelState.lastError === recoveredError ? { lastError: null } : {}),
       })
       // Neither REST job delivery nor notifications depend on the other request succeeding.
