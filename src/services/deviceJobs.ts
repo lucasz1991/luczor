@@ -18,7 +18,26 @@ let stop: (() => void) | null = null
 const inFlight = new Set<string>()
 let pollInFlight: { session: number; promise: Promise<void> } | null = null
 let sessionCounter = 0
-type ChannelSession = { id: number; isCurrent: () => boolean; signal: AbortSignal; config: LuczorApiConfigSnapshot }
+type RetryWindow = { failures: number; retryAt: number; lastError: string | null }
+type ChannelSession = {
+  id: number
+  isCurrent: () => boolean
+  signal: AbortSignal
+  config: LuczorApiConfigSnapshot
+  pollRetry: RetryWindow
+  realtimeError: string | null
+}
+const freshRetry = (): RetryWindow => ({ failures: 0, retryAt: 0, lastError: null })
+function deferRetry(retry: RetryWindow, error: unknown, label: string): string {
+  const message = errorMessage(error)
+  retry.failures = Math.min(5, retry.failures + 1)
+  retry.retryAt = Date.now() + Math.min(300_000, 20_000 * 2 ** (retry.failures - 1))
+  // The status retains the error; log once per changed failure instead of
+  // repeating stacks indefinitely during an unchanged outage.
+  if (message !== retry.lastError) console.warn(label, message)
+  retry.lastError = message
+  return message
+}
 
 export type DeviceJobChannelState = {
   running: boolean
@@ -130,6 +149,8 @@ export async function startDeviceJobChannel(): Promise<() => void> {
     isCurrent,
     signal: controller.signal,
     config,
+    pollRetry: freshRetry(),
+    realtimeError: null,
   }
   if ('__TAURI_INTERNALS__' in window) {
     void Promise.all([
@@ -164,9 +185,9 @@ export async function startDeviceJobChannel(): Promise<() => void> {
     }, delayMs)
   }
   const setupRealtime = async () => {
-    if (!active || session !== sessionCounter || realtimeSetupInFlight || pusher) return
+    if (!active || session !== sessionCounter || realtimeSetupInFlight || pusher || navigator.onLine === false) return
     realtimeSetupInFlight = true
-    const connection = await connectRealtime(config, session, () => active, controller.signal)
+    const connection = await connectRealtime(config, session, () => active, channelSession, syncNotifications)
     realtimeSetupInFlight = false
     if (!active || session !== sessionCounter) {
       connection?.pusher.disconnect()
@@ -183,11 +204,24 @@ export async function startDeviceJobChannel(): Promise<() => void> {
     scheduleRealtimeSetup(baseDelay + jitter)
   }
 
+  const notificationRetry = freshRetry()
+  let notificationsInFlight = false
   const syncNotifications = () => {
-    if (!channelSession.isCurrent()) return
-    void catchUpPushNotifications().catch(error => {
-      if (channelSession.isCurrent()) console.warn('[notifications] catch-up failed', error)
-    })
+    if (!channelSession.isCurrent() || navigator.onLine === false || notificationsInFlight || Date.now() < notificationRetry.retryAt) return
+    notificationsInFlight = true
+    void catchUpPushNotifications()
+      .then(() => {
+        if (!channelSession.isCurrent()) return
+        if (notificationRetry.lastError && channelState.lastError === notificationRetry.lastError)
+          updateChannelState({ lastError: null })
+        Object.assign(notificationRetry, freshRetry())
+      })
+      .catch(error => {
+        if (!channelSession.isCurrent()) return
+        const message = deferRetry(notificationRetry, error, '[notifications] catch-up failed')
+        updateChannelState({ lastError: message })
+      })
+      .finally(() => { notificationsInFlight = false })
   }
   const syncWhenVisible = () => {
     if (!channelSession.isCurrent()) return
@@ -197,7 +231,8 @@ export async function startDeviceJobChannel(): Promise<() => void> {
     }
   }
   const pollNow = () => {
-    if (!active || session !== sessionCounter) return
+    if (!active || session !== sessionCounter || navigator.onLine === false) return
+    if (notificationRetry.failures > 0) syncNotifications()
     void reportWorkflowCapabilitiesIfDue(channelSession.config, channelSession.signal)
     if ('__TAURI_INTERNALS__' in window) {
       void import('@/services/workflows/repairAutomation')
@@ -212,6 +247,8 @@ export async function startDeviceJobChannel(): Promise<() => void> {
   }
   const syncOnline = () => {
     if (!channelSession.isCurrent()) return
+    channelSession.pollRetry.retryAt = 0
+    notificationRetry.retryAt = 0
     syncNotifications()
     pollNow()
     if (pusher && pusher.connection.state === 'disconnected') pusher.connect()
@@ -245,6 +282,7 @@ export async function startDeviceJobChannel(): Promise<() => void> {
 }
 
 async function pullPending(clientId: string, session: ChannelSession): Promise<void> {
+  if (!session.isCurrent() || navigator.onLine === false || Date.now() < session.pollRetry.retryAt) return
   if (pollInFlight?.session === session.id) return pollInFlight.promise
   const promise = pullPendingBatch(clientId, session).finally(() => {
     if (pollInFlight?.session === session.id) pollInFlight = null
@@ -265,11 +303,15 @@ async function pullPendingBatch(clientId: string, session: ChannelSession): Prom
     if (!session.isCurrent()) return
     await sweepWorkflowResources(session.config, session.signal)
     if (!session.isCurrent()) return
-    updateChannelState({ rest: 'polling', lastPollAt: Date.now() })
+    const recoveredError = session.pollRetry.lastError
+    Object.assign(session.pollRetry, freshRetry())
+    updateChannelState({
+      rest: 'polling', lastPollAt: Date.now(),
+      ...(recoveredError && channelState.lastError === recoveredError ? { lastError: null } : {}),
+    })
   } catch (error) {
     if (!session.isCurrent()) return
-    updateChannelState({ rest: 'error', lastError: errorMessage(error) })
-    console.warn('[device-jobs] poll failed', error)
+    updateChannelState({ rest: 'error', lastError: deferRetry(session.pollRetry, error, '[device-jobs] poll failed') })
   }
 }
 
@@ -277,7 +319,8 @@ async function connectRealtime(
   config: Awaited<ReturnType<typeof getApiConfig>>,
   session: number,
   isActive: () => boolean,
-  signal: AbortSignal
+  current: ChannelSession,
+  syncNotifications: () => void
 ): Promise<{ pusher: Pusher; channelName: string } | null> {
   try {
     if (!isActive() || session !== sessionCounter) return null
@@ -329,12 +372,6 @@ async function connectRealtime(
       },
     })
     const channel = pusher.subscribe(channelName)
-    const current: ChannelSession = {
-      id: session,
-      isCurrent: () => isActive() && session === sessionCounter,
-      signal,
-      config,
-    }
     channel.bind('device.job.created', (job: DeviceJob) => {
       if (current.isCurrent()) void safeProcessJob(config.clientId, job, current)
     })
@@ -343,7 +380,7 @@ async function connectRealtime(
       void (async () => {
         await handleRealtimeNotification(payload)
         if (!current.isCurrent()) return
-        await catchUpPushNotifications()
+        syncNotifications()
       })().catch(error => {
         if (current.isCurrent()) console.warn('[notifications] realtime handling failed', error)
       })
@@ -356,14 +393,15 @@ async function connectRealtime(
     })
     pusher.connection.bind('connected', () => {
       if (!current.isCurrent()) return
-      updateChannelState({ realtime: 'connected', lastError: null, lastRealtimeAt: Date.now() })
-      void (async () => {
-        await catchUpPushNotifications()
-        if (!current.isCurrent()) return
-        await pullPending(config.clientId, current)
-      })().catch(error => {
-        if (current.isCurrent()) console.warn('[notifications] catch-up failed', error)
+      const recoveredError = current.realtimeError
+      current.realtimeError = null
+      updateChannelState({
+        realtime: 'connected', lastRealtimeAt: Date.now(),
+        ...(recoveredError && channelState.lastError === recoveredError ? { lastError: null } : {}),
       })
+      // Neither REST job delivery nor notifications depend on the other request succeeding.
+      syncNotifications()
+      void pullPending(config.clientId, current)
     })
     pusher.connection.bind('disconnected', () => {
       if (current.isCurrent()) updateChannelState({ realtime: 'reconnecting' })
@@ -388,8 +426,11 @@ async function connectRealtime(
     return { pusher, channelName }
   } catch (error) {
     if (isActive() && session === sessionCounter) {
-      updateChannelState({ realtime: 'unavailable', lastError: errorMessage(error) })
-      console.warn('[device-jobs] realtime unavailable; REST polling remains active', error)
+      const message = errorMessage(error)
+      updateChannelState({ realtime: 'unavailable', lastError: message })
+      if (current.realtimeError !== message)
+        console.warn('[device-jobs] realtime unavailable; REST polling remains active', message)
+      current.realtimeError = message
     }
     return null
   }

@@ -55,6 +55,22 @@ describe('focused local tool context', () => {
     expect(textToolNames(xml, [])).toEqual([])
     expect(isTextToolOutput('Ich prüfe den Zustand mit project_get_state.')).toBe(false)
   })
+  it('cleans unsolicited historical protocol text but preserves requested examples and quotations', () => {
+    const xml = '<output><function-call><name>project_get_state</name></function-call></output>'
+    const status = 'Die nächste Modellrunde wurde unterbrochen: HTTP 200'
+    const unsolicited: WireMessage[] = [
+      { role: 'user', content: '???' },
+      { role: 'assistant', content: xml },
+    ]
+    expect(cleanLocalHistory(unsolicited)).toEqual([unsolicited[0]])
+    const requested: WireMessage[] = [
+      { role: 'user', content: 'Erkläre das XML-Beispiel' },
+      { role: 'assistant', content: xml },
+      { role: 'user', content: `Zitiere wörtlich: ${status}` },
+      { role: 'assistant', content: status },
+    ]
+    expect(cleanLocalHistory(requested)).toEqual(requested)
+  })
   it('bounds definitions and allows later selection only from the permitted pool', async () => {
     const focus = focusedTools('Repo und Dateien prüfen')
     expect(focus.select(pool).length).toBeLessThanOrEqual(10)
@@ -64,9 +80,9 @@ describe('focused local tool context', () => {
       expect.arrayContaining(['workflow_get', 'fs_write', 'goal_report'])
     )
     await expect(focus.selector.execute({ names: ['forbidden'] }, { projectId: 'test' })).rejects.toThrow()
-    expect(focus.select(pool.filter(tool => tool.function.name !== 'fs_write')).map(tool => tool.function.name)).not.toContain(
-      'fs_write'
-    )
+    expect(
+      focus.select(pool.filter(tool => tool.function.name !== 'fs_write')).map(tool => tool.function.name)
+    ).not.toContain('fs_write')
     expect(focus.select([])).toEqual([])
   })
   it('exposes discovery without silently executing anything', async () => {

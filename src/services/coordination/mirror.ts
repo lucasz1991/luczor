@@ -27,6 +27,9 @@ type Scan = { manifestHash: string; snapshotId: string; totalEntries: number; en
 type Head = { revision: number; manifest_id: string | null }
 type Manifest = Head & { entries?: MirrorEntry[]; next_offset?: number | null; status?: string; base_revision?: number }
 type Cursor = { revision: number; localHash: string; proposalHash?: string; paused?: boolean }
+type ProposalConflict = { proposalId: string; headId: string | null; revision: number }
+const CONFLICT_MESSAGE =
+  'Überlappende Dateiänderungen benötigen eine Entscheidung am Master. Beide Fassungen bleiben erhalten; der unveränderte Vorschlag wird nicht erneut veröffentlicht.'
 type UploadCheckpoint = {
   hash: string
   epoch: number
@@ -85,6 +88,8 @@ export async function pauseProjectMirror(projectId: string, paused: boolean) {
   const key = cursorKey(account, projectId)
   const previous = await disk.get<Cursor>(key)
   await disk.set(key, { revision: 0, localHash: '', ...previous, paused })
+  // Explicitly resuming is also a manual retry after resolving a conflict.
+  if (!paused) await disk.delete(`${key}:proposal-conflict`)
   await disk.save()
   status(projectId).paused = paused
   if (paused) controllers.get(projectId)?.abort(new Error('Der Ordnerabgleich wurde pausiert.'))
@@ -171,17 +176,50 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
     // Proposals use a server-side three-way merge and retain both sides on conflict.
     if (master) {
       const proposals = await request<Array<Manifest>>('/proposals')
+      const conflictKey = `${key}:proposal-conflict`
+      const conflict = await disk.get<ProposalConflict>(conflictKey)
+      if (conflict && !proposals.some(proposal => proposal.manifest_id === conflict.proposalId)) {
+        await disk.delete(conflictKey)
+        await disk.save()
+      }
       for (const proposal of proposals) {
+        if (
+          conflict?.proposalId === proposal.manifest_id &&
+          conflict.headId === head.manifest_id &&
+          conflict.revision === head.revision
+        )
+          throw new Error(CONFLICT_MESSAGE)
         const lease = await request<{ lease_id: string }>('/lease', 'POST', {
           master_epoch: cluster.epoch,
           expected_revision: head.revision,
         })
-        await request(`/manifests/${proposal.manifest_id}/publish`, 'POST', {
-          operation_id: crypto.randomUUID(),
-          master_epoch: cluster.epoch,
-          lease_id: lease.lease_id,
-          expected_revision: head.revision,
-        })
+        try {
+          await request(`/manifests/${proposal.manifest_id}/publish`, 'POST', {
+            operation_id: crypto.randomUUID(),
+            master_epoch: cluster.epoch,
+            lease_id: lease.lease_id,
+            expected_revision: head.revision,
+          })
+        } catch (error) {
+          // Only a confirmed merge conflict is durable. Lease/revision races and
+          // unknown 409 responses must remain retryable against a fresh head.
+          if (
+            error instanceof Error &&
+            'status' in error && error.status === 409 &&
+            'code' in error && error.code === 'mirror_merge_conflict' &&
+            proposal.manifest_id
+          ) {
+            executionGate.assert(ticket)
+            await disk.set(conflictKey, {
+              proposalId: proposal.manifest_id, headId: head.manifest_id, revision: head.revision,
+            } satisfies ProposalConflict)
+            await disk.save()
+            throw new Error(CONFLICT_MESSAGE)
+          }
+          throw error
+        }
+        await disk.delete(conflictKey)
+        await disk.save()
         head = await request<Head>()
       }
     }
@@ -376,23 +414,40 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
 
 export async function startProjectMirrorChannel(signal: AbortSignal): Promise<() => void> {
   const due = new Map<string, number>()
+  const failures = new Map<string, number>()
+  const pending = new Set<string>()
+  let stopped = false
   const tick = () => {
-    if (signal.aborted) return
+    if (stopped || signal.aborted || navigator.onLine === false) return
     for (const project of state.projects)
-      if (project.cloud && !project.archivedAt && Date.now() >= (due.get(project.id) ?? 0)) {
-        due.set(project.id, Date.now() + 60000)
-        void syncProjectMirror(project.id, signal).catch(() => {})
+      if (project.cloud && !project.archivedAt && !pending.has(project.id) && Date.now() >= (due.get(project.id) ?? 0)) {
+        pending.add(project.id)
+        void syncProjectMirror(project.id, signal)
+          .then(() => {
+            failures.delete(project.id)
+            due.set(project.id, Date.now() + 60000)
+          })
+          .catch(() => {
+            const count = Math.min(4, (failures.get(project.id) ?? 0) + 1)
+            failures.set(project.id, count)
+            due.set(project.id, Date.now() + Math.min(300000, 60000 * 2 ** (count - 1)))
+          })
+          .finally(() => pending.delete(project.id))
       }
   }
   const dirty = await listen<{ projectId: string }>('luczor://project-mirror-dirty', event => {
+    if (stopped || signal.aborted || failures.has(event.payload.projectId)) return
     due.set(event.payload.projectId, Date.now() + 1500)
   })
   const timer = await listen('luczor://worker-tick', tick)
   window.addEventListener('online', tick)
   const stop = () => {
+    if (stopped) return
+    stopped = true
     dirty()
     timer()
     window.removeEventListener('online', tick)
+    signal.removeEventListener('abort', stop)
   }
   signal.addEventListener('abort', stop, { once: true })
   if (signal.aborted) stop()

@@ -87,7 +87,11 @@ export function cleanLocalHistory(messages: WireMessage[]): WireMessage[] {
       if (message.role === 'user') precedingUser = message.content
       if (message.role !== 'assistant' || message.tool_calls?.length) return true
       if (isRuntimeStatusEcho(message.content) && !explicitlyQuotesRuntimeStatus(precedingUser)) return false
-      return !(holdProtocolPrefix(message.content) && isTextToolOutput(message.content) && !allowsTextToolExample(precedingUser))
+      return !(
+        holdProtocolPrefix(message.content) &&
+        isTextToolOutput(message.content) &&
+        !allowsTextToolExample(precedingUser)
+      )
     })
     .map(message => {
       if (message.role !== 'user' || !message.content.startsWith(continuation)) return message

@@ -6,6 +6,16 @@ export const MAX_TTS_TEXT_CHARS = 4000
 export const MAX_TTS_AUDIO_BYTES = 16 * 1024 * 1024
 export const TTS_TIMEOUT_MS = 160_000
 
+function retryDelay(response: Response): number | null {
+  if (response.redirected || ![429, 503].includes(response.status)) return null
+  // The Luczor speech endpoint advertises transient overload with seconds.
+  // No retry on unknown/configuration errors, nor before a longer server delay.
+  const value = response.headers.get('Retry-After')?.trim()
+  if (!value || !/^\d{1,8}$/.test(value)) return null
+  const delay = Number(value) * 1000
+  return delay <= 30_000 ? Math.max(250, delay) : null
+}
+
 export function speechAbortError(): Error {
   const error = new Error('Sprachausgabe abgebrochen.')
   error.name = 'AbortError'
@@ -62,6 +72,7 @@ export async function serverTts(
   const correlationId = createCorrelationId()
   const controller = new AbortController()
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined
+  let retryTimer: ReturnType<typeof setTimeout> | undefined
   let rejectCancellation: (error: Error) => void = () => undefined
   const cancellation = new Promise<never>((_resolve, reject) => {
     rejectCancellation = reject
@@ -80,7 +91,7 @@ export async function serverTts(
 
   try {
     const operation = (async () => {
-      const response = await apiTransportFetch(url, {
+      const fetchAudio = () => apiTransportFetch(url, {
         method: 'POST',
         headers: {
           Accept: 'audio/wav',
@@ -99,6 +110,18 @@ export async function serverTts(
         credentials: 'omit',
         cache: 'no-store',
       })
+      let response = await fetchAudio()
+      const delay = retryDelay(response)
+      if (!controller.signal.aborted && delay !== null) {
+        void response.body?.cancel().catch(() => undefined)
+        await Promise.race([
+          new Promise<void>(resolve => { retryTimer = globalThis.setTimeout(resolve, delay) }),
+          cancellation,
+        ])
+        if (controller.signal.aborted) throw speechAbortError()
+        // One retry only, with the same captured account/voice and hard deadline.
+        response = await fetchAudio()
+      }
       const rejectResponse = (error: Error): never => {
         void response.body?.cancel().catch(() => undefined)
         throw error
@@ -150,6 +173,7 @@ export async function serverTts(
     throw new LuczorApiError(0, 'Keine Verbindung zum Sprachdienst. Bitte Server und Netzwerk prüfen.', correlationId)
   } finally {
     globalThis.clearTimeout(timeout)
+    if (retryTimer !== undefined) globalThis.clearTimeout(retryTimer)
     options.signal?.removeEventListener('abort', callerAbort)
     try {
       reader?.releaseLock()
