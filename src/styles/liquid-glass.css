@@ -321,6 +321,28 @@ html[data-theme] .mini-orb-dock.is-chat-open {
 html[data-theme] [data-side='left'] .mini-orb-dock.is-chat-open {
   border-radius: 0 var(--r-xl) var(--r-xl) 0;
 }
+/* Working: the whole edge tab throws an accent glow onto the screen (design board "work" mood). */
+html[data-theme] .mini-orb-dock:has(.mini-grip[data-phase='thinking']),
+html[data-theme] .mini-orb-dock:has(.mini-grip[data-phase='executing']),
+html[data-theme] .mini-orb-dock:has(.mini-grip[data-phase='listening']),
+html[data-theme] .mini-orb-dock:has(.mini-grip[data-phase='speaking']) {
+  border-color: var(--border);
+  box-shadow:
+    inset 0 1px 1px var(--g-edge),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+    0 16px 34px -20px rgba(0, 0, 0, 0.85),
+    -24px 0 60px -26px var(--cy);
+}
+html[data-theme] [data-side='left'] .mini-orb-dock:has(.mini-grip[data-phase='thinking']),
+html[data-theme] [data-side='left'] .mini-orb-dock:has(.mini-grip[data-phase='executing']),
+html[data-theme] [data-side='left'] .mini-orb-dock:has(.mini-grip[data-phase='listening']),
+html[data-theme] [data-side='left'] .mini-orb-dock:has(.mini-grip[data-phase='speaking']) {
+  box-shadow:
+    inset 0 1px 1px var(--g-edge),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.28),
+    0 16px 34px -20px rgba(0, 0, 0, 0.85),
+    24px 0 60px -26px var(--cy);
+}
 html[data-theme] .mini-grip-panel {
   border-color: var(--g-edge-2);
 }
@@ -342,14 +364,6 @@ html[data-theme] .mini-grip__icon[data-state='waiting'] {
   box-shadow:
     inset 0 1px 0 var(--g-edge),
     0 0 12px -2px var(--cy-22);
-}
-html[data-theme] .mini-orb-tools button {
-  background: var(--g-bg);
-  backdrop-filter: blur(18px) saturate(160%);
-  -webkit-backdrop-filter: blur(18px) saturate(160%);
-  border: 1px solid var(--g-edge-2);
-  border-radius: var(--r-pill);
-  box-shadow: inset 0 1px 0 var(--g-edge);
 }
 
 /* Settings navigation */

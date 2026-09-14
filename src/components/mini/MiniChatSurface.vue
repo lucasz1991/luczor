@@ -119,8 +119,8 @@ const surfaceStyle = computed(() => ({
   ...(props.native
     ? {}
     : side.value === 'left'
-      ? { left: '0px', bottom: `${bottom.value}px` }
-      : { right: '0px', bottom: `${bottom.value}px` }),
+      ? { left: '0px', bottom: `${bottom.value}px`, '--mini-bottom': `${bottom.value}px` }
+      : { right: '0px', bottom: `${bottom.value}px`, '--mini-bottom': `${bottom.value}px` }),
   ...(props.snapshot.appearance?.accent && /^#[0-9a-f]{6}$/i.test(props.snapshot.appearance.accent)
     ? { '--cy-bright': props.snapshot.appearance.accent }
     : {}),
@@ -531,11 +531,6 @@ onBeforeUnmount(() => {
       @pointerenter="enterGrip"
       @pointerleave="leaveGrip"
     >
-      <div v-if="!expanded" class="mini-orb-tools">
-        <button type="button" aria-label="Mini-Chat ausblenden" @click="windowAction('hide')">
-          <AiIcon name="close" :size="12" />
-        </button>
-      </div>
       <!-- Edge grip: five icon pills in one glass capsule, like the design board's Nano nudge.
            Any icon both drags the capsule (pointer moves) and pins its pane (a plain click) —
            chats pins into the full chat page, the others into their light status pane. -->
@@ -601,6 +596,16 @@ onBeforeUnmount(() => {
           @click="pinPane('link')"
         >
           <AiIcon name="link" :size="11" />
+        </button>
+        <!-- Hide lives in the same column, only revealed on hover — the capsule stays a clean icon stack. -->
+        <button
+          type="button"
+          class="mini-grip__icon mini-grip__hide"
+          aria-label="Mini-Chat ausblenden"
+          title="Ausblenden"
+          @click="windowAction('hide')"
+        >
+          <AiIcon name="close" :size="11" />
         </button>
       </div>
       <!-- Hover fly-out: one pane per grip icon (hover switches, click pins) -->

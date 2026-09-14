@@ -119,3 +119,10 @@ Record durable decisions with date, context, decision, and consequences.
 - Systemstatus-Views rendern nur Shells oder einzelne Anzeigen. Moduswechsel, native Fensteraufrufe, Tastaturnavigation und Fokusverwaltung liegen im Vue-Controller-Composable.
 - Statische Statusverträge und abgeleitete Ressourcenreihen liegen in Feature-Models; Polling und IPC-Transport bleiben getrennte Services.
 - Der native `system_metrics`-Command liegt in einem eigenen Controller und serialisiert ein eigenes Rust-Modell. Die bestehende begrenzte Collector-Logik bleibt Servicecode und behält ihre Webview- und Datenschutzgrenzen.
+
+## 2026-09-14 | Claude Code | Nudge statt Mini-Fenster
+
+- Der Bildschirmrand-Nudge ist der einzige Mini-Modus; der frühere „Expand“-Zustand ist das aufgeklappte Chats-Segment im selben Kasten. Grund: Nutzerentscheidung nach Design-Artefakt; ein Kasten am Rand statt zweier getrennter Fenster.
+- Glas-Schicht als eigene Datei mit `html[data-theme]`-Präfix statt Änderungen in scoped Komponentenstyles. Grund: gewinnt Spezifitäts-Gleichstände ohne `!important`, Controls bleiben unangetastet.
+- Native Fensterbreite bei „expand“ 480 statt 420, damit die Icon-Spalte neben der Chat-Seite sichtbar bleibt.
+- Glas-Deckkraft ≥0.86, weil das native Fenster über fremden Apps keinen Backdrop-Blur erhält.

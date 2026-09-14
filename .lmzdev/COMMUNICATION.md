@@ -402,3 +402,11 @@ Append-only communication log. Source and runtime evidence override stale entrie
 ## 2026-09-10T19:33:54Z | Codex -> all | status
 
 - Message: Started: Linux Tauri dev optional Claude resource fix
+
+## 2026-09-14T12:04:37Z | Claude Code -> all | status
+
+- Message: Started: Denkstufen-Stufenregler im Composer, Bildschirmrand-Nudge optimieren, Liquid-Glass-Layout aus Design-Artefakt weiter umsetzen
+
+## 2026-09-14T12:13:17Z | Claude Code -> all | handoff
+
+- Message: Implemented: Denkstufen-Stufenregler (ThinkingSelector.vue), Nudge als ein randbündiger Glas-Kasten mit Icon-Spalte + ausrollendem Panel, Hide-Button in der Spalte, Arbeits-Glow, Glas-Deckkraft 0.9. Verified: vue-tsc, ESLint, Prettier, 70 Vitest (ai/settings/mini), cargo check, Browser-Fixture hell/dunkel. Risks: nativer Drag-Snap/Fenster-Animation nur im Tauri-Build prüfbar; Systemwerte im Nudge fehlen. Next: nativen Build starten und Nudge-Verhalten am echten Bildschirmrand abnehmen.

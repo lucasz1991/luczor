@@ -63,3 +63,6 @@
 | Device-local resource settings and status UI, independent workflow review | Codex/agent_team_recovery | completed-local; 36 focused tests passed; source ownership returned, final native/browser gates at Root | 2026-09-08T14:09:39Z |
 
 | Systemstatus in Feature-Model, Controller und kleine View-Komponenten aufteilen | Codex/root | completed-local | 2026-09-10T17:24:03Z |
+
+| Liquid-Glass-Design aus Artefakt umsetzen: Sidebar/Topbar/Kontext, Bildschirmrand-Nudge als einziger Mini-Modus, Denkstufen-Regler, Glas-Deckkraft | Claude Code | completed-local; nativer Tauri-Abnahmelauf offen | 2026-09-14 |
+| Systemwerte (CPU/GPU/Temperaturen) in das Nudge-Pane bringen (MiniSnapshot-Datenfeed) | unassigned | open | 2026-09-14 |

@@ -13,7 +13,8 @@ html.mini-window,
   /* Target size of the fully-opened chats page — shared by the outer fly-out (what animates)
      and the inner .mini-panel (what must NOT reflow while that animation runs). */
   --mini-chat-w: min(400px, calc(100vw - 56px));
-  --mini-chat-h: min(580px, calc(100vh - 20px));
+  /* Never taller than the room above the (fixed) bottom edge — the icon column must not be pushed. */
+  --mini-chat-h: min(580px, calc(100vh - var(--mini-bottom, 0px) - 12px));
   --text-primary: var(--ai-ink);
   --text-secondary: var(--ai-muted);
   --text-muted: var(--ai-muted);
@@ -57,10 +58,6 @@ html.mini-window,
 }
 .mini-surface[data-side='left'] {
   align-items: flex-start;
-}
-.mini-surface.is-expanded {
-  width: min(480px, 100vw);
-  height: min(640px, 100dvh);
 }
 .mini-surface.has-peek {
   width: min(380px, 100vw);
@@ -583,8 +580,7 @@ html.mini-window,
 }
 .mini-footer button:hover,
 .mini-copy:hover,
-.mini-read:hover,
-.mini-orb-tools button:hover {
+.mini-read:hover {
   color: var(--ai-ink);
 }
 .mini-footer button:first-child {
@@ -621,10 +617,10 @@ html.mini-window,
    unrolls out of it toward the screen, exactly the design board's .nudge (.gcol + .npanel).
    Square on the docked side, rounded on the inner side. */
 .mini-orb-dock {
+  --mini-grip-h: 146px;
   position: relative;
   display: flex;
   flex-direction: row-reverse;
-  align-items: stretch;
   max-width: 100%;
   border-radius: 18px 0 0 18px;
   background: var(--ai-canvas);
@@ -634,7 +630,12 @@ html.mini-window,
     inset 0 1px 0 rgba(255, 255, 255, 0.12),
     0 14px 30px -18px rgba(0, 0, 0, 0.8);
   overflow: hidden;
-  transition: border-radius 0.3s var(--ease, ease);
+  /* Grows around a fixed bottom edge; the icon column never moves. */
+  align-items: flex-end;
+  transition:
+    border-radius 0.4s var(--ease, ease),
+    box-shadow 0.5s var(--ease, ease),
+    border-color 0.5s var(--ease, ease);
 }
 [data-side='left'] .mini-orb-dock {
   flex-direction: row;
@@ -665,7 +666,9 @@ html.mini-window,
   gap: 5px;
   flex: none;
   width: 32px;
+  height: var(--mini-grip-h);
   padding: 8px 0;
+  box-sizing: border-box;
   cursor: grab;
   touch-action: none;
 }
@@ -710,13 +713,14 @@ html.mini-window,
 .mini-grip-panel {
   width: 0;
   min-width: 0;
+  height: var(--mini-grip-h);
   overflow: hidden;
   pointer-events: none;
   border-right: 0 solid var(--ai-line);
   transition:
-    width 0.36s var(--ease, ease),
-    height 0.36s var(--ease, ease),
-    border-width 0.36s;
+    width 0.52s var(--ease, ease),
+    height 0.52s var(--ease, ease),
+    border-width 0.3s;
   text-align: left;
 }
 [data-side='left'] .mini-grip-panel {
@@ -727,6 +731,8 @@ html.mini-window,
 .mini-orb-dock:focus-within .mini-grip-panel:not(.is-chat-open),
 .mini-orb-dock.has-pin .mini-grip-panel:not(.is-chat-open) {
   width: 240px;
+  height: auto;
+  min-height: var(--mini-grip-h);
   border-right-width: 1px;
   pointer-events: auto;
 }
@@ -755,15 +761,64 @@ html.mini-window,
   background: transparent;
 }
 .mini-grip-panel__reveal {
+  opacity: 0;
+  transform: translateX(10px);
+  transition:
+    opacity 0.16s var(--ease, ease),
+    transform 0.3s var(--ease, ease);
+}
+[data-side='left'] .mini-grip-panel__reveal {
+  transform: translateX(-10px);
+}
+/* The chat page mounts with the open state, so it animates in via keyframes rather than a transition. */
+.mini-orb-dock .mini-panel {
+  animation: mini-panel-in 0.42s var(--ease, ease) 0.08s both;
+}
+[data-side='left'] .mini-orb-dock .mini-panel {
+  animation-name: mini-panel-in-left;
+}
+@keyframes mini-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes mini-panel-in-left {
+  from {
+    opacity: 0;
+    transform: translateX(-10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.mini-grip-panel__reveal {
   width: 240px;
   padding: 12px 14px;
-  opacity: 0;
-  transition: opacity 0.2s ease 0.06s;
 }
 .mini-orb-dock:hover .mini-grip-panel__reveal,
 .mini-orb-dock:focus-within .mini-grip-panel__reveal,
 .mini-orb-dock.has-pin .mini-grip-panel__reveal {
   opacity: 1;
+  transform: none;
+  transition:
+    opacity 0.26s var(--ease, ease) 0.12s,
+    transform 0.42s var(--ease, ease) 0.08s;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mini-orb-dock,
+  .mini-grip-panel,
+  .mini-grip-panel__reveal {
+    transition: none;
+  }
+  .mini-orb-dock .mini-panel {
+    animation: none;
+  }
 }
 .mini-grip-panel__head {
   display: grid;
@@ -880,35 +935,16 @@ html.mini-window,
 .mini-grip:active {
   cursor: grabbing;
 }
-.mini-orb-tools {
-  position: absolute;
-  top: 0;
-  right: 2px;
-  z-index: 2;
-  display: flex;
-  padding: 1px 3px;
-  background: var(--ai-canvas);
-  border-radius: 10px;
-  border: 1px solid var(--ai-line);
+.mini-grip__hide {
   opacity: 0;
-  pointer-events: none;
-  transform: translateY(4px);
-  transition:
-    opacity 0.14s,
-    transform 0.14s;
+  transition: opacity 0.16s;
 }
-[data-side='left'] .mini-orb-tools {
-  right: auto;
-  left: 2px;
-}
-.mini-orb-dock:hover .mini-orb-tools,
-.mini-orb-dock:focus-within .mini-orb-tools {
+.mini-orb-dock:hover .mini-grip__hide,
+.mini-orb-dock:focus-within .mini-grip__hide {
   opacity: 1;
-  pointer-events: auto;
-  transform: translateY(0);
 }
-.mini-orb-tools button {
-  padding: 3px;
+.mini-grip__hide:hover {
+  color: var(--ai-red);
 }
 .mini-unread {
   position: absolute;
