@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import type { HardwareSnapshot } from './capacity'
 
+export type ResourcePercentageLimits = { responseCpu: number; contextCpu: number; ram: number; gpu: number }
+
 export type LocalResourceConfig = {
   mode: 'auto' | 'gpu' | 'cpu' | 'hybrid'
   gpuDeviceIds: string[] | null
@@ -8,6 +10,8 @@ export type LocalResourceConfig = {
   threadsBatch: number | null
   ramReserveBytes: number | null
   vramReserveBytes: number | null
+  /** Optional for compatibility; native admission recalculates from fresh hardware. */
+  percentageLimits?: ResourcePercentageLimits
 }
 
 export type LocalResourceConfigState = {

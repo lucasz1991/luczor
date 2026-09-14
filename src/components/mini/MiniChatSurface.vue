@@ -158,6 +158,28 @@ onBeforeUnmount(() => {
   void miniVoice.stop()
 })
 const error = computed(() => props.connectionError || windowError.value || props.snapshot.notice)
+type GripPane = 'status' | 'chats' | 'decision' | 'tools' | 'link'
+const gripHover = ref(false)
+const hoverPane = ref<GripPane | null>(null)
+const pinnedPane = ref<GripPane | null>(null)
+const activePane = computed<GripPane>(() => pinnedPane.value ?? hoverPane.value ?? 'status')
+const paneTitles: Record<GripPane, string> = {
+  status: 'Status',
+  chats: 'Chats',
+  decision: 'Entscheidung',
+  tools: 'Werkzeuge',
+  link: 'Verbindung',
+}
+function enterGrip() {
+  gripHover.value = true
+}
+function leaveGrip() {
+  gripHover.value = false
+  hoverPane.value = null
+}
+function pinPane(pane: GripPane) {
+  pinnedPane.value = pinnedPane.value === pane ? null : pane
+}
 const chatsState = computed(() => {
   if (props.snapshot.conversations?.some(chat => chat.busy)) return 'running'
   if (unread.value) return 'unread'
@@ -193,7 +215,8 @@ async function windowAction(action: string) {
 let resizeQueue = Promise.resolve()
 function layout() {
   if (props.native) {
-    const action = expanded.value ? 'expand' : peekVisible.value ? 'peek' : 'collapse'
+    // The grip fly-out borrows the peek window size so it has room to unfold beside the capsule.
+    const action = expanded.value ? 'expand' : peekVisible.value || gripHover.value ? 'peek' : 'collapse'
     resizeQueue = resizeQueue.then(() => windowAction(action))
   } else void nextTick(clampPosition)
 }
@@ -367,7 +390,7 @@ function moveKey(event: KeyboardEvent) {
   if (event.key === 'ArrowDown') bottom.value -= 24
   clampPosition()
 }
-watch([expanded, peekVisible], layout)
+watch([expanded, peekVisible, gripHover], layout)
 watch(
   () => props.snapshot.revision,
   () => {
@@ -874,7 +897,13 @@ onBeforeUnmount(() => {
             Unterhaltung öffnen <AiIcon name="arrow" :size="13" /></button
         ></template>
       </aside>
-      <div class="mini-orb-dock" :data-phase="status.phase">
+      <div
+        class="mini-orb-dock"
+        :data-phase="status.phase"
+        :class="{ 'has-pin': !!pinnedPane }"
+        @pointerenter="enterGrip"
+        @pointerleave="leaveGrip"
+      >
         <div class="mini-orb-tools">
           <button type="button" aria-label="Mini-Chat ausblenden" @click="windowAction('hide')">
             <AiIcon name="close" :size="12" />
@@ -896,25 +925,37 @@ onBeforeUnmount(() => {
               >{{ decision ? '!' : '1' }}</span
             >
           </button>
-          <span
+          <button
+            type="button"
             class="mini-grip__icon"
             data-kind="chats"
+            :class="{ 'is-pinned': pinnedPane === 'chats', 'is-active': activePane === 'chats' }"
             :data-state="chatsState"
             :title="chatsTitle"
             :aria-label="chatsTitle"
-            ><AiIcon name="chat" :size="11"
-          /></span>
-          <span
+            @pointerenter="hoverPane = 'chats'"
+            @click="pinPane('chats')"
+          >
+            <AiIcon name="chat" :size="11" />
+          </button>
+          <button
+            type="button"
             class="mini-grip__icon"
             data-kind="decision"
+            :class="{ 'is-pinned': pinnedPane === 'decision', 'is-active': activePane === 'decision' }"
             :data-state="decision ? 'waiting' : 'idle'"
             :title="decision ? 'Entscheidung offen' : 'Keine Entscheidung offen'"
             :aria-label="decision ? 'Entscheidung offen' : 'Keine Entscheidung offen'"
-            ><AiIcon name="shield" :size="11"
-          /></span>
-          <span
+            @pointerenter="hoverPane = 'decision'"
+            @click="pinPane('decision')"
+          >
+            <AiIcon name="shield" :size="11" />
+          </button>
+          <button
+            type="button"
             class="mini-grip__icon"
             data-kind="tools"
+            :class="{ 'is-pinned': pinnedPane === 'tools', 'is-active': activePane === 'tools' }"
             :data-state="sharedToolSessions.length ? 'running' : 'idle'"
             :title="
               sharedToolSessions.length ? `${sharedToolSessions.length} Tool-Sitzungen laufen` : 'Keine Tool-Sitzung'
@@ -922,33 +963,82 @@ onBeforeUnmount(() => {
             :aria-label="
               sharedToolSessions.length ? `${sharedToolSessions.length} Tool-Sitzungen laufen` : 'Keine Tool-Sitzung'
             "
-            ><AiIcon name="tool" :size="11"
-          /></span>
-          <span
+            @pointerenter="hoverPane = 'tools'"
+            @click="pinPane('tools')"
+          >
+            <AiIcon name="tool" :size="11" />
+          </button>
+          <button
+            type="button"
             class="mini-grip__icon"
             data-kind="link"
+            :class="{ 'is-pinned': pinnedPane === 'link', 'is-active': activePane === 'link' }"
             :data-state="connectionError ? 'error' : 'ok'"
             :title="connectionError ? 'Verbindung fehlt' : 'Verbunden'"
             :aria-label="connectionError ? 'Verbindung fehlt' : 'Verbunden'"
-            ><AiIcon name="link" :size="11"
-          /></span>
+            @pointerenter="hoverPane = 'link'"
+            @click="pinPane('link')"
+          >
+            <AiIcon name="link" :size="11" />
+          </button>
         </div>
         <button type="button" class="mini-status-label" :class="{ 'is-working': compactWorking }" @click="expand">
           {{ compactWorking ? `Arbeitet · ${status.label}` : status.label }}
         </button>
         <span v-if="connectionError" class="mini-disconnected" role="alert">Verbindung fehlt</span>
-        <!-- Hover fly-out (in-app only; the native window is sized to the grip) -->
-        <div v-if="!native" class="mini-grip-panel" aria-hidden="true">
+        <!-- Hover fly-out: one pane per grip icon (hover switches, click pins) -->
+        <div class="mini-grip-panel" :data-pane="activePane" aria-live="polite">
           <div class="mini-grip-panel__head">
-            <strong>{{ status.label }}</strong>
-            <span>{{ status.detail }}</span>
+            <strong>{{ paneTitles[activePane] }}</strong>
+            <span v-if="pinnedPane" class="mini-grip-panel__pin">fixiert</span>
           </div>
-          <ul v-if="snapshot.conversations?.length" class="mini-grip-panel__chats">
-            <li v-for="chat in snapshot.conversations" :key="chat.id" :class="{ 'is-busy': chat.busy }">
-              <i aria-hidden="true" /><span>{{ chat.title }}</span
-              ><small v-if="chat.busy">läuft</small>
-            </li>
-          </ul>
+          <template v-if="activePane === 'status'">
+            <dl class="mini-grip-panel__kv">
+              <dt>Zustand</dt>
+              <dd>{{ status.label }}</dd>
+              <dt>Details</dt>
+              <dd>{{ status.detail }}</dd>
+              <dt>Modus</dt>
+              <dd>{{ snapshot.mode === 'observe' ? 'Beobachten' : 'Handeln' }}</dd>
+              <dt v-if="snapshot.thinkingTier">Denkstufe</dt>
+              <dd v-if="snapshot.thinkingTier">{{ snapshot.thinkingTier }}</dd>
+            </dl>
+          </template>
+          <template v-else-if="activePane === 'chats'">
+            <ul v-if="snapshot.conversations?.length" class="mini-grip-panel__chats">
+              <li v-for="chat in snapshot.conversations" :key="chat.id" :class="{ 'is-busy': chat.busy }">
+                <i aria-hidden="true" /><span>{{ chat.title }}</span
+                ><small v-if="chat.busy">läuft</small>
+              </li>
+            </ul>
+            <p v-else class="mini-grip-panel__empty">Noch keine Chats im Projekt.</p>
+          </template>
+          <template v-else-if="activePane === 'decision'">
+            <p v-if="decision" class="mini-grip-panel__text">
+              <strong>{{ decision.title }}</strong>
+              {{ decision.description }}
+            </p>
+            <p v-else class="mini-grip-panel__empty">Keine Entscheidung offen.</p>
+          </template>
+          <template v-else-if="activePane === 'tools'">
+            <ul v-if="sharedToolSessions.length" class="mini-grip-panel__chats">
+              <li v-for="session in sharedToolSessions" :key="session.id" class="is-busy">
+                <i aria-hidden="true" /><span>{{ session.kind }}</span
+                ><small>{{ session.id.slice(0, 8) }}</small>
+              </li>
+            </ul>
+            <p v-else class="mini-grip-panel__empty">Keine Tool-Sitzung aktiv.</p>
+          </template>
+          <template v-else>
+            <dl class="mini-grip-panel__kv">
+              <dt>Server</dt>
+              <dd :class="connectionError ? 'is-error' : 'is-ok'">{{ connectionError || 'Verbunden' }}</dd>
+              <dt>HUD</dt>
+              <dd>{{ snapshot.hud.status || '–' }}</dd>
+              <dt>Not-Aus</dt>
+              <dd>{{ snapshot.hud.killSwitch ? 'aktiv' : 'aus' }}</dd>
+            </dl>
+          </template>
         </div>
       </div>
     </template>

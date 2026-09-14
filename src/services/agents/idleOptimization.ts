@@ -299,9 +299,11 @@ export function createIdleOptimization(context: IdleOptimizationContext, deps = 
           scope: job.scope,
           projectId: job.projectId,
           source: 'assistant',
-          writeIntent: 'automatic',
+          // User-enabled maintenance stores active machine-generated knowledge,
+          // not human-confirmed facts. Ordinary chat capture remains candidate-only.
+          writeIntent: 'system',
           visibility: 'private',
-          retention: 'session',
+          retention: 'durable',
           confidence: 0.35,
           type: 'context_optimization',
           tags: ['idle-optimization'],

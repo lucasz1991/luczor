@@ -5,6 +5,44 @@ const MIB: u64 = 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourcePercentageLimits {
+    pub response_cpu: u8,
+    pub context_cpu: u8,
+    pub ram: u8,
+    pub gpu: u8,
+}
+
+/// Integer percentage without intermediate overflow; always rounds down.
+pub(super) fn percentage_budget(value: u64, percent: u8) -> u64 {
+    value / 100 * u64::from(percent) + value % 100 * u64::from(percent) / 100
+}
+
+pub(super) fn maximum_resource_threads(logical: usize, available: usize) -> usize {
+    let available = available.min(logical).max(1);
+    let reserved = match available { 1 => 0, 2..=7 => 1, _ => 2 };
+    available.saturating_sub(reserved).max(1)
+}
+
+/// Resolve again at admission, not just from a renderer's earlier inventory.
+pub(super) fn resolve_percentage_host_config(
+    config: &LocalResourceConfig,
+    hardware: &resource_runtime::ResourceSnapshot,
+) -> Result<LocalResourceConfig, String> {
+    validate_shape(config)?;
+    let mut resolved = config.clone();
+    if let Some(limits) = &config.percentage_limits {
+        let maximum = maximum_resource_threads(hardware.logical_cores, hardware.available_logical_cores) as u64;
+        resolved.threads = Some(percentage_budget(maximum, limits.response_cpu).max(1) as usize);
+        resolved.threads_batch = Some(percentage_budget(maximum, limits.context_cpu).max(1) as usize);
+        let reserve = (hardware.total_ram_bytes / 12).clamp(GIB, 4 * GIB);
+        let budget = hardware.available_ram_bytes.min(hardware.total_ram_bytes).saturating_sub(reserve);
+        resolved.ram_reserve_bytes = Some(reserve + budget - percentage_budget(budget, limits.ram));
+    }
+    Ok(resolved)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalResourceConfig {
     pub mode: String,
     pub gpu_device_ids: Option<Vec<String>>,
@@ -12,6 +50,8 @@ pub struct LocalResourceConfig {
     pub threads_batch: Option<usize>,
     pub ram_reserve_bytes: Option<u64>,
     pub vram_reserve_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percentage_limits: Option<ResourcePercentageLimits>,
 }
 impl Default for LocalResourceConfig {
     fn default() -> Self {
@@ -22,6 +62,7 @@ impl Default for LocalResourceConfig {
             threads_batch: None,
             ram_reserve_bytes: None,
             vram_reserve_bytes: None,
+            percentage_limits: None,
         }
     }
 }
@@ -157,6 +198,12 @@ pub(super) fn atomic_replace(source: &Path, destination: &Path) -> Result<(), St
     }
 }
 pub(super) fn validate_shape(config: &LocalResourceConfig) -> Result<(), String> {
+    if config.percentage_limits.as_ref().is_some_and(|limits| {
+        [limits.response_cpu, limits.context_cpu, limits.ram, limits.gpu]
+            .into_iter().any(|value| !(1..=100).contains(&value))
+    }) {
+        return Err("resource_percentage_invalid".into());
+    }
     if !matches!(config.mode.as_str(), "auto" | "gpu" | "cpu" | "hybrid") {
         return Err("resource_mode_invalid".into());
     }
@@ -275,12 +322,14 @@ pub async fn local_model_set_resource_config(
 ) -> Result<LocalResourceConfigState, String> {
     ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(move || {
+        let hardware = resource_runtime::sample_hardware()?;
+        let config = resolve_percentage_host_config(&config, &hardware)?;
         let gpus = if config.mode == "cpu" {
             Vec::new()
         } else {
             gpu_snapshot()
         };
-        let bindings = validate_hardware(&config, &resource_runtime::sample_hardware()?, &gpus)?;
+        let bindings = validate_hardware(&config, &hardware, &gpus)?;
         let mut guard = state()
             .lock()
             .map_err(|_| "Local model manager is unavailable.")?;

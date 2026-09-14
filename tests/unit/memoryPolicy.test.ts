@@ -4,6 +4,33 @@ import { projectsForSync } from '@/services/api/sync'
 import { canShareRepositoryContext, shouldUseRepositoryGraph } from '@/services/repositoryGraph'
 
 describe('desktop memory and repository privacy policy', () => {
+  it('stores authorized idle results as durable active AI memories without claiming human confirmation', () => {
+    for (const provenance of [
+      { generated_locally: true },
+      { source_type: 'repository', repository_local_only: true },
+    ]) {
+      expect(
+        planMemoryWrite({
+          content: 'Die Analyse beschreibt die vorhandene Projektstruktur.',
+          source: 'assistant',
+          scope: 'project',
+          writeIntent: 'system',
+          retention: 'durable',
+          visibility: 'private',
+          confidence: 0.35,
+          provenance,
+        })
+      ).toMatchObject({
+        status: 'active',
+        retention: 'durable',
+        writeIntent: 'system',
+        confidence: 0.35,
+        visibility: 'private',
+        localOnly: true,
+      })
+    }
+  })
+
   it('keeps ordinary chat and assistant output as local candidates', () => {
     expect(
       planMemoryWrite({ content: 'Wie funktioniert das?', source: 'user', writeIntent: 'automatic' })

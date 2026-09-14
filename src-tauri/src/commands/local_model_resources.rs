@@ -230,6 +230,8 @@ pub(super) fn plan_resources_configured(
     gpu_budget_bytes: u64,
     revision: u64,
 ) -> Result<ResourcePlan, String> {
+    let resolved = super::resource_config::resolve_percentage_host_config(config, hardware)?;
+    let config = &resolved;
     for value in [config.threads, config.threads_batch].into_iter().flatten() {
         if value == 0 || value > hardware.available_logical_cores {
             return Err("resource_threads_invalid".into());

@@ -461,6 +461,7 @@ fn select_configured_plan(
     model_bytes: u64,
     config: &LocalResourceConfig,
 ) -> Result<AccelerationPlan, String> {
+    super::resource_config::validate_shape(config)?;
     let cpu = |reason: &str| {
         if config.mode == "hybrid" {
             return Err("forced_split_unavailable".into());
@@ -490,12 +491,22 @@ fn select_configured_plan(
         .vram_reserve_bytes
         .unwrap_or(GPU_RESERVE_MIB * MIB)
         .div_ceil(MIB);
+    // Scale each device's own free budget, never add shared RAM to VRAM or
+    // reuse a large card's reserve for a smaller card. Fitter and measured
+    // startup validation consume this same per-device margin.
+    let device_reserve = |device: &RuntimeDevice| {
+        let free = device.available_mib.unwrap_or(0);
+        let base = if config.percentage_limits.is_some() { GPU_RESERVE_MIB } else { reserve_mib };
+        let maximum = free.saturating_sub(base);
+        let percent = config.percentage_limits.as_ref().map_or(100, |limits| limits.gpu);
+        base + maximum - super::resource_config::percentage_budget(maximum, percent)
+    };
     let mut eligible = matching
         .into_iter()
         .filter(|device| {
             device
                 .available_mib
-                .is_some_and(|free| free >= reserve_mib + 256)
+                .is_some_and(|free| free >= device_reserve(device) + 256)
         })
         .collect::<Vec<_>>();
     eligible.sort_by_key(|device| {
@@ -537,7 +548,7 @@ fn select_configured_plan(
                 .map(|d| {
                     d.available_mib
                         .unwrap_or(0)
-                        .saturating_sub(reserve_mib)
+                        .saturating_sub(device_reserve(d))
                         .saturating_mul(MIB)
                 })
                 .sum::<u64>();
@@ -573,7 +584,7 @@ fn select_configured_plan(
                 .map(|d| {
                     d.available_mib
                         .unwrap_or(0)
-                        .saturating_sub(reserve_mib)
+                        .saturating_sub(device_reserve(d))
                         .saturating_mul(MIB)
                 })
                 .sum::<u64>();
@@ -598,7 +609,7 @@ fn select_configured_plan(
         .map(|d| {
             d.available_mib
                 .unwrap_or(0)
-                .saturating_sub(reserve_mib)
+                .saturating_sub(device_reserve(d))
                 .saturating_mul(MIB)
         })
         .sum();
@@ -616,11 +627,11 @@ fn select_configured_plan(
         if full { "off" } else { "on" }.into(),
         "--fit-target".into(),
         if chosen.len() == 1 {
-            reserve_mib.to_string()
+            device_reserve(device).to_string()
         } else {
             chosen
                 .iter()
-                .map(|_| reserve_mib.to_string())
+                .map(|device| device_reserve(device).to_string())
                 .collect::<Vec<_>>()
                 .join(",")
         },
@@ -638,7 +649,7 @@ fn select_configured_plan(
                     .map(|d| {
                         d.available_mib
                             .unwrap_or(0)
-                            .saturating_sub(reserve_mib)
+                            .saturating_sub(device_reserve(d))
                             .to_string()
                     })
                     .collect::<Vec<_>>()
@@ -656,7 +667,7 @@ fn select_configured_plan(
                     d.id.clone(),
                     d.available_mib
                         .unwrap_or(0)
-                        .saturating_sub(reserve_mib)
+                        .saturating_sub(device_reserve(d))
                         .saturating_mul(MIB),
                 )
             })

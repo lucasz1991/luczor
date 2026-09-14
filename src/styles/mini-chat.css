@@ -612,6 +612,8 @@ html.mini-window,
 .mini-grip__icon {
   width: 18px;
   height: 18px;
+  padding: 0 !important;
+  cursor: pointer;
   display: grid;
   place-items: center;
   border-radius: 999px;
@@ -631,6 +633,12 @@ html.mini-window,
 .mini-grip__icon[data-state='unread'],
 .mini-grip__icon[data-state='ok'] {
   color: var(--ai-green);
+}
+.mini-grip__icon.is-active {
+  background: var(--ai-hover);
+}
+.mini-grip__icon.is-pinned {
+  box-shadow: 0 0 0 1.5px var(--ai-accent);
 }
 .mini-grip__icon[data-state='error'] {
   color: var(--ai-red);
@@ -674,12 +682,59 @@ html.mini-window,
   gap: 2px;
   margin-bottom: 8px;
 }
-.mini-grip-panel__head strong {
-  font-size: 12px;
+.mini-grip-panel__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
 }
-.mini-grip-panel__head span {
-  font-size: 11px;
+.mini-grip-panel__head strong {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
   color: var(--ai-muted);
+}
+.mini-grip-panel__pin {
+  font: 10px var(--font-mono, monospace);
+  color: var(--ai-accent);
+}
+.mini-grip-panel__kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--ai-muted);
+}
+.mini-grip-panel__kv dt {
+  color: var(--ai-faint);
+}
+.mini-grip-panel__kv dd {
+  margin: 0;
+  color: var(--ai-ink);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+.mini-grip-panel__kv dd.is-ok {
+  color: var(--ai-green);
+}
+.mini-grip-panel__kv dd.is-error {
+  color: var(--ai-red);
+}
+.mini-grip-panel__text,
+.mini-grip-panel__empty {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ai-muted);
+}
+.mini-grip-panel__text strong {
+  display: block;
+  color: var(--ai-ink);
+}
+.mini-grip-panel__empty {
+  color: var(--ai-faint);
 }
 .mini-grip-panel__chats {
   list-style: none;

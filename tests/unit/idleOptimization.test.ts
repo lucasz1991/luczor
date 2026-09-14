@@ -132,7 +132,7 @@ function fixture() {
   const stream = vi.fn(async (_request: InferenceRequest) => ({ ...response }))
   const localGateway: InferenceGateway = { id: 'resident-only', target: 'local_llama_cpp', streamChatWithTools: stream }
   const recall = vi.fn<typeof idleOptimizationDependencies.recall>(async () => [memory()])
-  const remember = vi.fn<typeof idleOptimizationDependencies.remember>(async () => memory({ status: 'candidate' }))
+  const remember = vi.fn<typeof idleOptimizationDependencies.remember>(async () => memory({ status: 'active' }))
   const deps: typeof idleOptimizationDependencies = {
     native: () => true,
     account: vi.fn(async () => account),
@@ -256,7 +256,7 @@ describe('idle optimization integration', () => {
     await harness.optimizer.stop()
   })
 
-  it('uses bounded local context and writes only private, unconfirmed, account-bound candidates', async () => {
+  it('uses bounded local context and automatically stores private, durable, account-bound AI memories', async () => {
     const harness = fixture()
     harness.recall.mockResolvedValue([
       memory(),
@@ -277,9 +277,9 @@ describe('idle optimization integration', () => {
         projectId: 'project-1',
         scope: 'project',
         source: 'assistant',
-        writeIntent: 'automatic',
+        writeIntent: 'system',
         visibility: 'private',
-        retention: 'session',
+        retention: 'durable',
         confidence: 0.35,
         type: 'context_optimization',
         tags: ['idle-optimization'],

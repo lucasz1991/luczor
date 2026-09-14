@@ -42,15 +42,13 @@ const reason = computed(() => {
         ? 'Analysiert Erinnerungen aus lokalem Speicher, SQL und Cognee'
         : 'Optimiert den Projektkontext'
   if (state?.phase === 'committing')
-    return state.task === 'memory'
-      ? 'Speichert den unbestätigten Erinnerungsvorschlag'
-      : 'Speichert den unbestätigten Kontextvorschlag'
+    return state.task === 'memory' ? 'Speichert die KI-Erinnerung dauerhaft' : 'Speichert den KI-Kontext dauerhaft'
   if (state?.phase === 'yielding') return 'Gibt das Modell für deinen Auftrag frei'
   if (state?.reason === 'manual_requested') return 'Prüfung wird jetzt vorbereitet'
   if (state?.reason === 'memory_pressure') return 'Pausiert: zu wenig freier Arbeitsspeicher'
   if (state?.reason === 'memory_disabled') return 'Pausiert: automatische Erinnerungen sind ausgeschaltet'
   if (state?.reason === 'runtime_unavailable') return 'Wartet auf ein einsatzbereites lokales Modell'
-  if (state?.reason === 'candidate_ready') return 'Optimierungsvorschlag in den Erinnerungen gespeichert'
+  if (state?.reason === 'candidate_ready') return 'KI-Ergebnis automatisch als aktive Erinnerung gespeichert'
   if (state?.reason === 'failed' || state?.reason === 'timeout') return 'Pausiert nach einer unvollständigen Prüfung'
   if (state?.reason === 'unchanged_context') return 'Kontext unverändert – keine erneute Prüfung nötig'
   if (state?.reason === 'native_required') return 'In der Desktop-App verfügbar'
@@ -105,7 +103,7 @@ function startNow() {
     <p class="lz-hint" role="status">
       {{ reason
       }}<template v-if="idleOptimizationStatus?.completed">
-        · {{ idleOptimizationStatus.completed }} Vorschläge in dieser Sitzung</template
+        · {{ idleOptimizationStatus.completed }} automatisch gespeicherte Ergebnisse in dieser Sitzung</template
       >
     </p>
     <p v-if="idleMemoryMaintenance !== 'idle'" class="lz-hint" role="status">
@@ -132,9 +130,10 @@ function startNow() {
       Nach 10 Minuten ohne Eingabe läuft die Hintergrundarbeit ohne Gesamtlaufzeitlimit in einzelnen KI-Prüfungen
       weiter. Neue Themen folgen automatisch; unveränderte Daten werden regelmäßig erneut auf Änderungen geprüft. Ein
       Chat stoppt die lokale KI-Prüfung und erhält das Modell nach dessen Freigabe. Danach beginnt die Leerlaufzeit neu.
-      Die Servereinstellung für Erinnerungen gilt weiterhin. Private KI-Vorschläge bleiben zur Prüfung auf diesem Gerät.
-      Cognee optimiert seine vorhandenen Serverdaten separat; ein eingereihter Serverauftrag läuft unabhängig vom
-      lokalen Chat.
+      Die Servereinstellung für Erinnerungen gilt weiterhin. KI-Ergebnisse werden ohne Einzelbestätigung dauerhaft als
+      aktive, private Erinnerungen auf diesem Gerät gespeichert. KI-Herkunft und Unsicherheit bleiben gekennzeichnet;
+      bestehende Erinnerungen werden nicht überschrieben. Automatische Erinnerungen müssen eingeschaltet sein. Cognee
+      optimiert seine vorhandenen Serverdaten separat; ein eingereihter Serverauftrag läuft unabhängig vom lokalen Chat.
     </p>
     <p v-if="error" role="alert">{{ error }}</p>
   </div>
