@@ -351,12 +351,26 @@ html[data-theme] .mini-orb-dock .mini-panel {
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
   border: 0;
+  border-radius: 0;
   box-shadow: none;
 }
 html[data-theme] .mini-grip__icon {
   background: var(--g-fill-1);
   border-color: var(--g-edge-2);
   box-shadow: inset 0 1px 0 var(--g-edge);
+}
+/* State modifiers must outrank the glass base above (same class count + html[data-theme]). */
+html[data-theme] .mini-grip__icon.is-active {
+  background: var(--g-fill-3);
+}
+html[data-theme] .mini-grip__icon.is-pinned {
+  box-shadow:
+    inset 0 1px 0 var(--g-edge),
+    0 0 0 1.5px var(--cy);
+}
+html[data-theme] .mini-grip__icon[data-state='error'] {
+  border-color: color-mix(in srgb, var(--ai-red) 45%, var(--g-edge-2));
+  background: color-mix(in srgb, var(--ai-red) 12%, var(--g-fill-1));
 }
 html[data-theme] .mini-grip__icon[data-state='running'],
 html[data-theme] .mini-grip__icon[data-state='waiting'] {

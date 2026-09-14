@@ -4,6 +4,9 @@ use std::sync::Mutex;
 use tauri::{Emitter, Manager, PhysicalPosition, PhysicalSize, State, WebviewUrl};
 
 pub const MINI_LABEL: &str = "luczor-mini";
+/// Collapsed nudge window: the 33x148 icon column plus its glass-shadow padding (6/18/18).
+const COLLAPSED_WIDTH: f64 = 160.0;
+const COLLAPSED_HEIGHT: f64 = 200.0;
 const ACTION_EVENT: &str = "luczor://mini-action";
 const STATE_EVENT: &str = "luczor://mini-state";
 
@@ -362,7 +365,16 @@ fn resize(window: &tauri::Window, width: f64, height: f64, reset: bool) -> Resul
     let size = window.outer_size().map_err(|e| e.to_string())?;
     let pos = window.outer_position().map_err(|e| e.to_string())?;
     let width = (width * scale).min(area_width);
-    let height = (height * scale).min(area_height);
+    // Collapsed height is the floor: a taller window may only use the room above the fixed bottom
+    // edge, so the icon column at that edge never moves when a pane unfolds near the top.
+    let min_height = (COLLAPSED_HEIGHT * scale).min(area_height);
+    let bottom = f64::from(pos.y) + f64::from(size.height);
+    let room_above = if reset {
+        area_height
+    } else {
+        (bottom - area_top).max(min_height)
+    };
+    let height = (height * scale).min(area_height).min(room_above);
     // Reset always lands on the right edge (the nudge's default side); otherwise stay on
     // whichever edge the window is already nearest to — every resize keeps it flush, no margin.
     let edge = if reset {
@@ -416,7 +428,7 @@ pub async fn show(app: tauri::AppHandle) -> Result<(), String> {
         WebviewUrl::App("index.html#mini-chat".into()),
     )
     .title("Luczor Mini")
-    .inner_size(148.0, 184.0)
+    .inner_size(COLLAPSED_WIDTH, COLLAPSED_HEIGHT)
     .decorations(false)
     .transparent(true)
     .shadow(false)
@@ -427,7 +439,12 @@ pub async fn show(app: tauri::AppHandle) -> Result<(), String> {
     .disable_drag_drop_handler()
     .build()
     .map_err(|e| e.to_string())?;
-    resize(&window.as_ref().window(), 148.0, 184.0, true)?;
+    resize(
+        &window.as_ref().window(),
+        COLLAPSED_WIDTH,
+        COLLAPSED_HEIGHT,
+        true,
+    )?;
     window.show().map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -552,8 +569,8 @@ pub fn mini_chat_window(
         }
         // Wider than before: the grip icons stay visible to the right of the expanded chat page.
         MiniWindowAction::Expand => resize(&window, 480.0, 640.0, false),
-        MiniWindowAction::Collapse => resize(&window, 148.0, 184.0, false),
-        MiniWindowAction::Peek => resize(&window, 380.0, 370.0, false),
+        MiniWindowAction::Collapse => resize(&window, COLLAPSED_WIDTH, COLLAPSED_HEIGHT, false),
+        MiniWindowAction::Peek => resize(&window, 380.0, 380.0, false),
         MiniWindowAction::Hide => window.hide().map_err(|e| e.to_string()),
         MiniWindowAction::Pin => window.set_always_on_top(true).map_err(|e| e.to_string()),
         MiniWindowAction::Unpin => window.set_always_on_top(false).map_err(|e| e.to_string()),

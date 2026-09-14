@@ -56,6 +56,7 @@ function leaveGrip() {
   hoverPane.value = null
 }
 function pinPane(pane: GripPane) {
+  if (dragged) return
   if (pane === 'chats') {
     if (pinnedPane.value === 'chats') collapse()
     else expand()
@@ -63,6 +64,18 @@ function pinPane(pane: GripPane) {
   }
   pinnedPane.value = pinnedPane.value === pane ? null : pane
 }
+// The chat page stays mounted through the 0.52s close transition so the box never shrinks empty.
+const chatsVisible = ref(false)
+let chatsHideTimer: ReturnType<typeof setTimeout> | undefined
+watch(
+  chatsOpen,
+  open => {
+    clearTimeout(chatsHideTimer)
+    if (open) chatsVisible.value = true
+    else chatsHideTimer = setTimeout(() => (chatsVisible.value = false), 540)
+  },
+  { immediate: true }
+)
 const expanded = computed<boolean>({
   get: () => pinnedPane.value === 'chats',
   set: value => {
@@ -237,11 +250,27 @@ async function snapNativeEdge() {
   }
 }
 let resizeQueue = Promise.resolve()
+let shrinkTimer: ReturnType<typeof setTimeout> | undefined
+type WindowSize = 'collapse' | 'peek' | 'expand'
+const windowRank = (size: WindowSize) => (size === 'expand' ? 2 : size === 'peek' ? 1 : 0)
+let windowSize: WindowSize = 'collapse'
 function layout() {
   if (props.native) {
-    // Hovering the chats icon already grows the window to full size, same as pinning it.
-    const action = chatsOpen.value ? 'expand' : peekVisible.value || gripHover.value ? 'peek' : 'collapse'
-    resizeQueue = resizeQueue.then(() => windowAction(action))
+    // Hovering the chats icon already grows the window to full size, same as pinning it; a pinned
+    // light pane keeps the peek size after the pointer leaves.
+    const action: WindowSize = chatsOpen.value
+      ? 'expand'
+      : peekVisible.value || gripHover.value || pinnedPane.value
+        ? 'peek'
+        : 'collapse'
+    clearTimeout(shrinkTimer)
+    const apply = () => {
+      windowSize = action
+      resizeQueue = resizeQueue.then(() => windowAction(action))
+    }
+    // Grow immediately, shrink only after the CSS close transition has finished (0.52s).
+    if (windowRank(action) < windowRank(windowSize)) shrinkTimer = setTimeout(apply, 560)
+    else apply()
   } else void nextTick(clampPosition)
 }
 function clampPosition() {
@@ -269,8 +298,17 @@ function expand() {
 }
 function collapse() {
   expanded.value = false
+  // Otherwise the pane the pointer is still resting on keeps the page open — nothing visible happens.
+  hoverPane.value = null
   resetConfirm.value = false
   showLegend.value = false
+}
+function hideFromGrip() {
+  if (!dragged) void windowAction('hide')
+}
+// Typing in a page that was only hover-opened must not lose the page when the pointer drifts away.
+function keepChatsOpen() {
+  if (!expanded.value) expanded.value = true
 }
 async function togglePin() {
   pinned.value = !pinned.value
@@ -416,7 +454,7 @@ function moveKey(event: KeyboardEvent) {
   if (event.key === 'ArrowDown') bottom.value -= 24
   clampPosition()
 }
-watch([chatsOpen, peekVisible, gripHover], layout)
+watch([chatsOpen, peekVisible, gripHover, pinnedPane], layout)
 watch(
   () => props.snapshot.revision,
   () => {
@@ -481,6 +519,8 @@ onBeforeUnmount(() => {
   surfaceResize?.disconnect()
   clearTimeout(peekTimer)
   clearTimeout(sendTimer)
+  clearTimeout(shrinkTimer)
+  clearTimeout(chatsHideTimer)
   window.removeEventListener('resize', clampPosition)
 })
 </script>
@@ -544,6 +584,7 @@ onBeforeUnmount(() => {
           :title="status.detail"
           :aria-label="`Mini-Chat öffnen: ${chatsTitle}`"
           @pointerenter="hoverPane = 'chats'"
+          @focus="hoverPane = 'chats'"
           @pointerdown="beginDrag($event, true)"
           @click="pinPane('chats')"
         >
@@ -560,6 +601,7 @@ onBeforeUnmount(() => {
           :title="decision ? 'Entscheidung offen' : 'Keine Entscheidung offen'"
           :aria-label="decision ? 'Entscheidung offen' : 'Keine Entscheidung offen'"
           @pointerenter="hoverPane = 'decision'"
+          @focus="hoverPane = 'decision'"
           @pointerdown="beginDrag($event, true)"
           @click="pinPane('decision')"
         >
@@ -578,6 +620,7 @@ onBeforeUnmount(() => {
             sharedToolSessions.length ? `${sharedToolSessions.length} Tool-Sitzungen laufen` : 'Keine Tool-Sitzung'
           "
           @pointerenter="hoverPane = 'tools'"
+          @focus="hoverPane = 'tools'"
           @pointerdown="beginDrag($event, true)"
           @click="pinPane('tools')"
         >
@@ -592,6 +635,7 @@ onBeforeUnmount(() => {
           :title="connectionError ? 'Verbindung fehlt' : 'Verbunden'"
           :aria-label="connectionError ? 'Verbindung fehlt' : 'Verbunden'"
           @pointerenter="hoverPane = 'link'"
+          @focus="hoverPane = 'link'"
           @pointerdown="beginDrag($event, true)"
           @click="pinPane('link')"
         >
@@ -603,14 +647,15 @@ onBeforeUnmount(() => {
           class="mini-grip__icon mini-grip__hide"
           aria-label="Mini-Chat ausblenden"
           title="Ausblenden"
-          @click="windowAction('hide')"
+          @pointerdown="beginDrag($event, true)"
+          @click="hideFromGrip"
         >
           <AiIcon name="close" :size="11" />
         </button>
       </div>
       <!-- Hover fly-out: one pane per grip icon (hover switches, click pins) -->
       <div class="mini-grip-panel" :data-pane="activePane" :class="{ 'is-chat-open': chatsOpen }" aria-live="polite">
-        <div v-if="chatsOpen" class="mini-panel">
+        <div v-if="chatsVisible" class="mini-panel" @focusin="keepChatsOpen">
           <header class="mini-header" @pointerdown="beginDrag">
             <span
               class="mini-drag"

@@ -14,7 +14,13 @@ html.mini-window,
      and the inner .mini-panel (what must NOT reflow while that animation runs). */
   --mini-chat-w: min(400px, calc(100vw - 56px));
   /* Never taller than the room above the (fixed) bottom edge — the icon column must not be pushed. */
-  --mini-chat-h: min(580px, calc(100vh - var(--mini-bottom, 0px) - 12px));
+  --mini-pad-v: 12px;
+  --mini-room-h: calc(100vh - var(--mini-bottom, 0px) - var(--mini-pad-v));
+  --mini-chat-h: min(580px, var(--mini-room-h));
+  /* Lets the fly-out's `auto` height take part in the spring (no-op where unsupported). */
+  interpolate-size: allow-keywords;
+  /* The surface box is bigger than the drawn nudge; only the drawn parts may catch the pointer. */
+  pointer-events: none;
   --text-primary: var(--ai-ink);
   --text-secondary: var(--ai-muted);
   --text-muted: var(--ai-muted);
@@ -46,8 +52,13 @@ html.mini-window,
   inset: 0;
   width: 100% !important;
   height: 100% !important;
-  padding: 6px;
+  /* Room for the glass shadow below and toward the screen; the docked side stays flush. */
+  padding: 6px 18px 18px;
   box-sizing: border-box;
+  --mini-pad-v: 24px;
+  /* The chat page fills the native window exactly (backend sizes it to 480x640). */
+  --mini-chat-w: calc(100vw - 51px);
+  --mini-chat-h: calc(100vh - 24px);
 }
 /* Flush to the edge: no gap on the side the nudge is docked against. */
 .mini-surface.is-native[data-side='right'] {
@@ -733,6 +744,7 @@ html.mini-window,
   width: 240px;
   height: auto;
   min-height: var(--mini-grip-h);
+  max-height: var(--mini-room-h);
   border-right-width: 1px;
   pointer-events: auto;
 }
@@ -772,7 +784,12 @@ html.mini-window,
 }
 /* The chat page mounts with the open state, so it animates in via keyframes rather than a transition. */
 .mini-orb-dock .mini-panel {
-  animation: mini-panel-in 0.42s var(--ease, ease) 0.08s both;
+  animation: mini-panel-in 0.42s var(--ease, ease) 0.08s backwards;
+  transition: opacity 0.18s var(--ease, ease);
+}
+.mini-orb-dock:not(.is-chat-open) .mini-panel {
+  opacity: 0;
+  pointer-events: none;
 }
 [data-side='left'] .mini-orb-dock .mini-panel {
   animation-name: mini-panel-in-left;
@@ -812,11 +829,20 @@ html.mini-window,
 }
 @media (prefers-reduced-motion: reduce) {
   .mini-orb-dock,
-  .mini-grip-panel,
-  .mini-grip-panel__reveal {
+  .mini-orb-dock .mini-grip-panel,
+  .mini-orb-dock .mini-grip-panel__reveal,
+  .mini-orb-dock:hover .mini-grip-panel__reveal,
+  .mini-orb-dock:focus-within .mini-grip-panel__reveal,
+  .mini-orb-dock.has-pin .mini-grip-panel__reveal {
     transition: none;
+    transform: none;
   }
   .mini-orb-dock .mini-panel {
+    animation: none;
+    transition: none;
+  }
+  .mini-grip__icon[data-state='running'],
+  .mini-grip__icon[data-state='waiting'] {
     animation: none;
   }
 }
@@ -968,6 +994,10 @@ html.mini-window,
   50% {
     opacity: 1;
   }
+}
+.mini-peek,
+.mini-orb-dock {
+  pointer-events: auto;
 }
 .mini-peek {
   width: 100%;

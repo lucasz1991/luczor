@@ -410,3 +410,7 @@ Append-only communication log. Source and runtime evidence override stale entrie
 ## 2026-09-14T12:13:17Z | Claude Code -> all | handoff
 
 - Message: Implemented: Denkstufen-Stufenregler (ThinkingSelector.vue), Nudge als ein randbündiger Glas-Kasten mit Icon-Spalte + ausrollendem Panel, Hide-Button in der Spalte, Arbeits-Glow, Glas-Deckkraft 0.9. Verified: vue-tsc, ESLint, Prettier, 70 Vitest (ai/settings/mini), cargo check, Browser-Fixture hell/dunkel. Risks: nativer Drag-Snap/Fenster-Animation nur im Tauri-Build prüfbar; Systemwerte im Nudge fehlen. Next: nativen Build starten und Nudge-Verhalten am echten Bildschirmrand abnehmen.
+
+## 2026-09-14T20:06:34Z | Claude Code -> all | handoff
+
+- Message: Nudge: Icon-Spalte vertikal fixiert, Spring-Animation wie Artefakt, 12 Review-Fixes (hover/collapse, pointer-events, Icon-States, native Timing/Clipping, Rust resize fit). Verified: Prettier/ESLint/vue-tsc, Vitest mini 53/53, cargo fmt/check, Rust mini_chat 9/9; Browser-Endzustände gemessen (Pane war ausgeblendet, Animationsverlauf zuvor bestätigt). Next: nativer Tauri-Lauf für Fenster-Timing.

@@ -143,6 +143,8 @@ struct ModelRelease {
     promoted: bool,
     enabled: bool,
     capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    features: Option<BTreeMap<String, String>>,
     context_limit: Option<u32>,
     artifact: Option<ModelArtifact>,
     runtime: Option<RuntimeArtifact>,
