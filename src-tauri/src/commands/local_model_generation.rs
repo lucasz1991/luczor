@@ -35,7 +35,11 @@ pub(super) fn apply_required_tool_prefix(
         return;
     };
     if !messages
-        .last()
+        .iter()
+        .rev()
+        // Agent repairs append a system instruction after the user/tool turn.
+        // Preserve it, but do not let it suppress the required-call boundary.
+        .find(|m| m["role"].as_str() != Some("system"))
         .is_some_and(|m| matches!(m["role"].as_str(), Some("user" | "tool")))
     {
         return;
@@ -110,6 +114,48 @@ mod prefix_tests {
         let before = body.clone();
         apply_required_tool_prefix(&mut body, Some(HASH), &props());
         assert_eq!(body, before);
+    }
+
+    #[test]
+    fn required_repair_preserves_trailing_system_instructions_and_is_idempotent() {
+        for role in ["user", "tool"] {
+            let mut body = request();
+            body["messages"][1]["role"] = json!(role);
+            body["messages"].as_array_mut().unwrap().extend([
+                json!({"role":"system","content":"Repair the tool format; never repeat completed writes."}),
+                json!({"role":"system","content":"Keep the existing permissions."}),
+            ]);
+            let original = body["messages"].as_array().unwrap().clone();
+            apply_required_tool_prefix(&mut body, Some(HASH), &props());
+            let messages = body["messages"].as_array().unwrap();
+            assert_eq!(&messages[..original.len()], original.as_slice());
+            assert_eq!(messages.len(), original.len() + 1);
+            assert_eq!(body["continue_final_message"], true);
+            let once = body.clone();
+            apply_required_tool_prefix(&mut body, Some(HASH), &props());
+            assert_eq!(body, once);
+        }
+    }
+
+    #[test]
+    fn system_suffix_does_not_force_auto_none_or_continue_existing_assistant() {
+        for (choice, role) in [
+            ("auto", "user"),
+            ("none", "user"),
+            ("required", "assistant"),
+            ("required", "system"),
+        ] {
+            let mut body = request();
+            body["tool_choice"] = json!(choice);
+            body["messages"][1]["role"] = json!(role);
+            body["messages"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"role":"system","content":"Correction instruction"}));
+            let before = body.clone();
+            apply_required_tool_prefix(&mut body, Some(HASH), &props());
+            assert_eq!(body, before);
+        }
     }
 }
 
