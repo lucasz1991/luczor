@@ -984,7 +984,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     const repeatedOutput = interruption.code === 'runtime_output_repeated'
     const publicControlPartial =
       repeatedOutput || interruption.code === 'runtime_reasoning_control_unavailable'
-        ? publicAnswerText(visibleContent, true).trim() : ''
+        ? publicAnswerText(visibleContent, true).trim()
+        : ''
     if (publicControlPartial) {
       continuation.messages.push({ role: 'assistant', content: publicControlPartial })
       continuation.messages.push({

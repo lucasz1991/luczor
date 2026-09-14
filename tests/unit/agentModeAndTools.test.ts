@@ -490,6 +490,28 @@ describe('agent mode and tool reliability', () => {
       ).toEqual(partial ? [partial] : [])
     }
   )
+  it('retains a repetition-stop answer and checkpoint without retrying or executing text tools', async () => {
+    const partial = 'Geprüfter Zwischenstand. Fertig. Warte auf deine Anweisung.'
+    mocks.streamChatWithTools.mockImplementationOnce(async (request: InferenceRequest) => {
+      request.onToken?.(partial)
+      throw new LocalInferenceError('Wiederholung automatisch gestoppt.', 'runtime_output_repeated', false, true)
+    })
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'Prüfe das Projekt.' }],
+      maxRounds: 5,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(result.interrupted).toMatchObject({ code: 'runtime_output_repeated', round: 1 })
+    expect(result.finalText).toContain(partial)
+    expect(
+      result.continuation!.messages.some(message => message.role === 'assistant' && message.content === partial)
+    ).toBe(true)
+    expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
   it.each(['off', 'auto', undefined] as const)(
     'forwards local reasoning mode %s only to local inference',
     async localReasoningMode => {

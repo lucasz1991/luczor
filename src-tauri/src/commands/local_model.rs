@@ -30,10 +30,10 @@ mod linux_protection;
 
 use super::{ensure_main_or_system_status_webview, ensure_main_webview};
 
-#[path = "local_model_stream.rs"]
-mod generation_stream;
 #[path = "local_model_generation.rs"]
 mod generation_safety;
+#[path = "local_model_stream.rs"]
+mod generation_stream;
 #[path = "local_model_idle.rs"]
 mod idle_inference;
 #[path = "local_model_network.rs"]
@@ -500,8 +500,11 @@ struct LocalInferenceFailure {
 
 impl LocalInferenceFailure {
     fn preserves_resident_runtime(&self) -> bool {
-        self.is_input_rejection() || matches!(self.code,
-            "runtime_reasoning_control_unavailable" | "runtime_output_repeated")
+        self.is_input_rejection()
+            || matches!(
+                self.code,
+                "runtime_reasoning_control_unavailable" | "runtime_output_repeated"
+            )
     }
 
     fn is_input_rejection(&self) -> bool {
@@ -516,13 +519,23 @@ impl LocalInferenceFailure {
 
     fn stream(message: impl Into<String>) -> Self {
         let message = message.into();
-        if matches!(message.as_str(), generation_safety::REPETITION | generation_safety::TOOL_CONTRACT) {
+        if matches!(
+            message.as_str(),
+            generation_safety::REPETITION | generation_safety::TOOL_CONTRACT
+        ) {
             let code = if message == generation_safety::REPETITION {
                 "runtime_output_repeated"
-            } else { "runtime_tool_contract_rejected" };
+            } else {
+                "runtime_tool_contract_rejected"
+            };
             return Self {
-                code, public_message: message, retryable: false,
-                diagnostic: failure_diagnostics::Diagnostic::new(code, failure_diagnostics::Stage::Unknown),
+                code,
+                public_message: message,
+                retryable: false,
+                diagnostic: failure_diagnostics::Diagnostic::new(
+                    code,
+                    failure_diagnostics::Stage::Unknown,
+                ),
             };
         }
         if matches!(
@@ -3923,11 +3936,12 @@ fn stream_completion_with_diagnostics(
         // (see `RuntimeScope`) already guarantees this slot only ever serves one scope at a
         // time, so there is no cross-conversation leakage risk in reusing it.
         "cache_prompt": true,
-        "chat_template_kwargs": {
-            "parse_tool_calls": true
-        }
+        "chat_template_kwargs": {}
     });
-    generation_safety::apply_sampling(&mut body, model.artifact.as_ref().map(|a| a.sha256.as_str()));
+    generation_safety::apply_sampling(
+        &mut body,
+        model.artifact.as_ref().map(|a| a.sha256.as_str()),
+    );
     let tokenizer_client = local_http_client(Duration::from_secs(15), Duration::from_secs(15))?;
     let started = Instant::now();
     let mut measured_input = 0;
@@ -4237,7 +4251,9 @@ fn parse_sse_observed(
         };
         // A usage-only trailer is allowed after finish, but never more answer
         // bytes or tool arguments. A terminal frame's own final delta is valid.
-        if completed { continue; }
+        if completed {
+            continue;
+        }
         if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
             finish_reason = reason.chars().take(64).collect();
             completed = true;
@@ -4246,8 +4262,11 @@ fn parse_sse_observed(
             continue;
         };
         // Private text is inspected only in bounded request-local state; never exported.
-        if delta.get("reasoning_content").and_then(Value::as_str)
-            .is_some_and(|chunk| private_repetition.observe(chunk).is_some()) {
+        if delta
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .is_some_and(|chunk| private_repetition.observe(chunk).is_some())
+        {
             return Err(generation_safety::REPETITION.into());
         }
         if let Some(chunk) = delta.get("content").and_then(Value::as_str) {
@@ -4263,21 +4282,34 @@ fn parse_sse_observed(
                     content: chunk.to_string(),
                 })
                 .map_err(|_| "Local inference event channel closed.".to_string())?;
-            if interrupted_at.is_some() { return Err(generation_safety::REPETITION.into()); }
+            if interrupted_at.is_some() {
+                return Err(generation_safety::REPETITION.into());
+            }
+            // A required call must not spend an entire large answer budget on
+            // prose/fenced pseudo-calls. Private reasoning is budgeted separately.
+            if request.tool_choice == "required" && tools.is_empty() && content.len() > 4096 {
+                return Err(generation_safety::TOOL_CONTRACT.into());
+            }
         }
         if let Some(calls) = delta.get("tool_calls").and_then(Value::as_array) {
             for call in calls {
                 let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 if index >= MAX_TOOL_CALLS {
-                    continue;
+                    return Err(generation_safety::TOOL_CONTRACT.into());
                 }
                 let entry = tools.entry(index).or_default();
                 if let Some(id) = call.get("id").and_then(Value::as_str) {
-                    entry.0 = id.chars().take(160).collect();
+                    if entry.0.len().saturating_add(id.len()) > 160 {
+                        return Err(generation_safety::TOOL_CONTRACT.into());
+                    }
+                    entry.0.push_str(id);
                 }
                 if let Some(function) = call.get("function").and_then(Value::as_object) {
                     if let Some(name) = function.get("name").and_then(Value::as_str) {
-                        entry.1 = name.chars().take(160).collect();
+                        if entry.1.len().saturating_add(name.len()) > 160 {
+                            return Err(generation_safety::TOOL_CONTRACT.into());
+                        }
+                        entry.1.push_str(name);
                     }
                     if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
                         if entry.2.len().saturating_add(arguments.len()) > MAX_TOOL_ARGUMENT_CHARS {
@@ -4289,11 +4321,15 @@ fn parse_sse_observed(
                     }
                 }
             }
+            if generation_safety::repeated_tool_batch(&tools) {
+                return Err(generation_safety::REPETITION.into());
+            }
         }
     }
     if !completed {
         return Err("Local llama.cpp stream ended without a terminal marker.".into());
     }
+    let expected_tool_count = tools.len();
     let raw_tool_calls: Vec<NativeToolCall> = tools
         .into_values()
         .filter(|(_, name, _)| !name.is_empty())
@@ -4314,7 +4350,14 @@ fn parse_sse_observed(
             },
         })
         .collect();
-    if !generation_safety::valid_tool_completion(&request.tool_choice, &request.tools, &raw_tool_calls, &finish_reason) {
+    if raw_tool_calls.len() != expected_tool_count
+        || !generation_safety::valid_tool_completion(
+            &request.tool_choice,
+            &request.tools,
+            &raw_tool_calls,
+            &finish_reason,
+        )
+    {
         return Err(generation_safety::TOOL_CONTRACT.into());
     }
     Ok(LocalInferenceResult {
@@ -5077,6 +5120,159 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    fn generation_fixture(
+        frames: Vec<serde_json::Value>,
+        tool_choice: &str,
+    ) -> (
+        Result<super::LocalInferenceResult, super::LocalInferenceFailure>,
+        String,
+    ) {
+        use super::*;
+        let request: LocalInferenceRequest = serde_json::from_value(json!({
+            "requestId":"synthetic-round","scopeDigest":"a".repeat(64),"modelReleaseId":"synthetic-model","useCase":"chat",
+            "catalogBinding":{"acceptanceSessionId":"00000000-0000-4000-8000-000000000001","acceptanceGeneration":1,"manifestPayloadSha256":"b".repeat(64)},
+            "messages":[{"role":"user","content":"Synthetic probe"}],"tools":[{"type":"function","function":{"name":"read_probe","parameters":{"type":"object"}}}],"toolChoice":tool_choice,"reasoningMode":"auto"
+        })).unwrap();
+        let events = Arc::new(Mutex::new(Vec::<String>::new()));
+        let sink = events.clone();
+        let channel = Channel::new(move |event| {
+            if let tauri::ipc::InvokeResponseBody::Json(event) = event {
+                sink.lock().unwrap().push(event);
+            }
+            Ok(())
+        });
+        let mut stream: String = frames
+            .iter()
+            .map(|frame| format!("data: {frame}\n\n"))
+            .collect();
+        stream.push_str("data: [DONE]\n\n");
+        let result = parse_sse(
+            std::io::Cursor::new(stream.into_bytes()),
+            &request,
+            Arc::new(AtomicBool::new(false)),
+            &channel,
+        );
+        let emitted = events.lock().unwrap().join("\n");
+        (result, emitted)
+    }
+
+    #[test]
+    fn generation_repetition_stops_preserves_partial_and_never_exports_private_deltas() {
+        use serde_json::json;
+        let text = format!(
+            "Geprüfter öffentlicher Befund. {}",
+            "Fertig. Warte auf deine Anweisung. ".repeat(50)
+        );
+        let (result, events) = generation_fixture(
+            vec![json!({"choices":[{"delta":{"content":text}}]})],
+            "auto",
+        );
+        let failure = result.err().unwrap();
+        assert_eq!(failure.code, "runtime_output_repeated");
+        assert!(!failure.retryable);
+        assert!(failure.preserves_resident_runtime());
+        assert!(events.contains("öffentlicher Befund"));
+        assert!(events.len() < text.len());
+        let (result, events) = generation_fixture(
+            vec![
+                json!({"choices":[{"delta":{"reasoning_content":"SYNTHETIC PRIVATE PHRASE. ".repeat(100)}}]}),
+            ],
+            "auto",
+        );
+        assert_eq!(result.err().unwrap().code, "runtime_output_repeated");
+        assert!(!events.contains("PRIVATE"));
+    }
+
+    #[test]
+    fn generation_tools_require_complete_allowed_json_and_ignore_post_finish_deltas() {
+        use serde_json::json;
+        let call = json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","function":{"name":"read_probe","arguments":"{\"key\":\"sample\"}"}}]}}]});
+        for finish in ["stop", "tool_calls"] {
+            let (result, _) = generation_fixture(
+                vec![
+                    call.clone(),
+                    json!({"choices":[{"delta":{},"finish_reason":finish}]}),
+                    json!({"choices":[{"delta":{"content":"LATE_DUPLICATE"}}]}),
+                    json!({"choices":[],"usage":{"prompt_tokens":12,"completion_tokens":4}}),
+                ],
+                "required",
+            );
+            let result = result.unwrap();
+            assert_eq!(result.raw_tool_calls.len(), 1);
+            assert!(result.content.is_empty());
+            assert_eq!(result.usage.unwrap().output_tokens, 4);
+        }
+        for frames in [
+            vec![
+                json!({"choices":[{"delta":{"content":"{\"name\":\"read_probe\",\"arguments\":{}}"},"finish_reason":"stop"}]}),
+            ],
+            vec![
+                call.clone(),
+                json!({"choices":[{"delta":{},"finish_reason":"length"}]}),
+            ],
+            vec![
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"unknown","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}),
+            ],
+            vec![
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"read_probe","arguments":"{"}}]},"finish_reason":"tool_calls"}]}),
+            ],
+        ] {
+            let (result, _) = generation_fixture(frames, "required");
+            let failure = result.err().unwrap();
+            assert_eq!(failure.code, "runtime_tool_contract_rejected");
+            assert!(failure.preserves_resident_runtime());
+            assert!(!failure.retryable);
+        }
+        assert!(generation_fixture(vec![call], "none").0.is_err());
+    }
+
+    #[test]
+    fn generation_assembles_tool_fragments_and_stops_identical_tool_batches() {
+        use serde_json::json;
+        let (result, _) = generation_fixture(
+            vec![
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-","function":{"name":"read_","arguments":"{\"key\":"}}]}}]}),
+                json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"1","function":{"name":"probe","arguments":"\"sample\"}"}}]},"finish_reason":"tool_calls"}]}),
+            ],
+            "required",
+        );
+        let result = result.unwrap();
+        assert_eq!(result.raw_tool_calls[0].id, "call-1");
+        assert_eq!(result.raw_tool_calls[0].function.name, "read_probe");
+        assert_eq!(
+            result.raw_tool_calls[0].function.arguments,
+            "{\"key\":\"sample\"}"
+        );
+        let repeated = (0..4).map(|index|json!({"choices":[{"delta":{"tool_calls":[{"index":index,"id":format!("call-{index}"),"function":{"name":"read_probe","arguments":"{\"key\":\"sample\"}"}}]}}]})).collect();
+        let (result, _) = generation_fixture(repeated, "required");
+        assert_eq!(result.err().unwrap().code, "runtime_output_repeated");
+    }
+
+    #[test]
+    fn generation_sampling_is_hash_bound_and_keeps_context_and_output_limits() {
+        use serde_json::json;
+        let hashes = [
+            "d5c108dfbdac44c738e45a84d5624716cfb8522d1410f46a7108167ee4bd0cac",
+            "b19da8c6aacffdedc7bcd6b7f7d7d4db900f7d5c49f5473de18bb58111b432e5",
+            "75062a7ba3575573cc421a2cbafbf69fb48d0ecb28da2684b577eb609097fbe4",
+            "6c8c7658fe13eef22666aa89862f7fb70aa72109838cf19989e59b15875e5e08",
+            "593e9be6fae0e8c4008bb279f6380154afea89aeed90d9e3f2130d0becc84908",
+        ];
+        for (index, hash) in hashes.iter().enumerate() {
+            let mut body = json!({"max_tokens":8192,"messages":[],"tools":[]});
+            super::generation_safety::apply_sampling(&mut body, Some(hash));
+            assert_eq!(body["max_tokens"], 8192);
+            assert_eq!(body["ignore_eos"], false);
+            assert_eq!(body["parse_tool_calls"], true);
+            assert_eq!(body["dry_allowed_length"], 8);
+            assert_eq!(body["top_p"], if index == 3 { 0.95 } else { 0.8 });
+        }
+        let mut body = json!({"temperature":0.4});
+        super::generation_safety::apply_sampling(&mut body, Some("unknown"));
+        assert_eq!(body["temperature"], 0.4);
+        assert!(body.get("repeat_penalty").is_none());
+    }
+
     #[test]
     fn slot_cache_identity_separates_scope_and_runtime_layout_without_legacy_reuse() {
         let dir = std::path::Path::new("cache");

@@ -213,6 +213,43 @@ describe('Tauri local runtime catalog boundary', () => {
     })
   })
 
+  it.each([true, false])('preserves public output on repetition (diagnostic event: %s)', async withEvent => {
+    const onToken = vi.fn()
+    tauri.invoke.mockImplementationOnce(async (_command, args) => {
+      args.onEvent.onmessage({ type: 'delta', requestId: 'request-1', content: 'Der geprüfte Befund.' })
+      if (withEvent)
+        args.onEvent.onmessage({
+          type: 'error',
+          requestId: 'request-1',
+          code: 'runtime_output_repeated',
+          retryable: false,
+          diagnostic: {
+            schemaVersion: 1,
+            stage: 'generation',
+            reason: 'unclassified',
+            code: 'runtime_output_repeated',
+          },
+        })
+      throw withEvent ? 'PRIVATE_NATIVE_CONTENT' : 'Local generation interrupted after repeated output.'
+    })
+    await expect(
+      new TauriLocalRuntimeTransport().stream({} as LocalModelReleaseManifest, {
+        requestId: 'request-1',
+        modelReleaseId: 'model-1',
+        scopeDigest: 'd'.repeat(64),
+        catalogBinding,
+        messages: [{ role: 'user', content: 'test' }],
+        onToken,
+      })
+    ).rejects.toMatchObject({
+      code: 'runtime_output_repeated',
+      retryable: false,
+      partialOutput: true,
+      message: expect.stringContaining('automatisch gestoppt'),
+    })
+    expect(onToken).toHaveBeenLastCalledWith('Der geprüfte Befund.')
+  })
+
   it.each([true, false])('classifies tool contract rejection without losing residency (event: %s)', async withEvent => {
     tauri.invoke.mockImplementationOnce(async (_command, args) => {
       if (withEvent) {

@@ -208,6 +208,66 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
+    #[test]
+    fn repetition_guard_handles_fragmented_unicode_sentences_and_short_closings() {
+        for phrase in [
+            "Fertig. Warte auf deine Anweisung. ",
+            "Prüfung abgeschlossen. Grüße aus Köln!\n",
+            "Done. ",
+        ] {
+            let mut guard = super::super::generation_safety::RepetitionGuard::default();
+            assert!(guard
+                .observe("Ein hilfreicher, einmaliger Zwischenstand.\n")
+                .is_none());
+            let repeated = phrase.repeat(100);
+            let mut detected = false;
+            for ch in repeated.chars() {
+                if guard.observe(&ch.to_string()).is_some() {
+                    detected = true;
+                    break;
+                }
+            }
+            assert!(detected, "{phrase}");
+        }
+    }
+
+    #[test]
+    fn repetition_guard_keeps_normal_code_tables_and_nonconsecutive_refrains() {
+        let phrase = "Fertig. Warte auf deine Anweisung.\n";
+        for input in [
+            format!("```text\n{}```\nEine normale Antwort.", phrase.repeat(100)),
+            format!("~~~text\n{}~~~\nEine normale Antwort.", phrase.repeat(100)),
+            "    console.log('repeat');\n".repeat(100),
+            "| Status | Erledigt |\n".repeat(100),
+            "{\"status\":\"waiting\"}\n".repeat(100),
+            (0..100)
+                .map(|n| {
+                    format!("{phrase}Ein neuer Abschnitt mit eigenem Inhalt und Nummer {n}.\n")
+                })
+                .collect(),
+        ] {
+            let mut guard = super::super::generation_safety::RepetitionGuard::default();
+            for ch in input.chars() {
+                assert!(guard.observe(&ch.to_string()).is_none());
+            }
+        }
+        let mut guard = super::super::generation_safety::RepetitionGuard::default();
+        for chunk in ["`", "``js\ncode\n`", "`", "`\n"] {
+            assert!(guard.observe(chunk).is_none());
+        }
+        assert!(guard.observe(&phrase.repeat(100)).is_some());
+    }
+    #[test]
+    fn repetition_guard_bounds_empty_generation_but_preserves_fenced_whitespace() {
+        for text in ["\n".repeat(600), "⏎\n".repeat(300)] {
+            let mut guard = super::super::generation_safety::RepetitionGuard::default();
+            assert!(guard.observe(&text).is_some());
+        }
+        let mut guard = super::super::generation_safety::RepetitionGuard::default();
+        assert!(guard
+            .observe(&format!("```text\n{}```", "\n".repeat(600)))
+            .is_none());
+    }
     fn request(socket: &mut TcpStream) {
         socket
             .set_read_timeout(Some(Duration::from_secs(3)))
@@ -245,6 +305,43 @@ mod tests {
             total: Duration::from_secs(3),
         }
     }
+    #[test]
+    fn repeated_generation_closes_owned_http_stream_before_returning_failure() {
+        use serde_json::json;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            request(&mut socket);
+            let data = json!({"choices":[{"delta":{"content":"Fertig. Warte auf deine Anweisung. ".repeat(80)}}]});
+            write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {data}\n\n").unwrap();
+            closed(&mut socket);
+        });
+        let cancel = Arc::new(AtomicBool::new(false));
+        let (status, response) = Stream::open(
+            port,
+            "synthetic-key",
+            b"{}".to_vec(),
+            cancel.clone(),
+            Arc::new(AtomicBool::new(false)),
+            limits(),
+            16384,
+        )
+        .unwrap();
+        assert_eq!(status, 200);
+        let input = serde_json::from_value(json!({
+            "requestId":"synthetic-round","scopeDigest":"a".repeat(64),"modelReleaseId":"synthetic-model","useCase":"chat",
+            "catalogBinding":{"acceptanceSessionId":"00000000-0000-4000-8000-000000000001","acceptanceGeneration":1,"manifestPayloadSha256":"b".repeat(64)},
+            "messages":[],"tools":[],"toolChoice":"none","reasoningMode":"off"
+        })).unwrap();
+        let channel = tauri::ipc::Channel::new(|_| Ok(()));
+        let result = super::super::parse_sse(response, &input, cancel.clone(), &channel);
+        let failure = result.err().unwrap();
+        assert_eq!(failure.code, "runtime_output_repeated");
+        assert!(!cancel.load(Ordering::SeqCst)); // not misreported as a user cancellation
+        server.join().unwrap();
+    }
+
     #[test]
     fn generation_rejection_preserves_bounded_json_body_for_diagnostics() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

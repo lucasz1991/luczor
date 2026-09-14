@@ -346,6 +346,22 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
           )
         }
         if (
+          nativeFailure?.code === 'runtime_output_repeated' ||
+          String(error) === 'Local generation interrupted after repeated output.'
+        ) {
+          throw new LocalInferenceError(
+            describeLocalFailureDiagnostic({
+              schemaVersion: 1,
+              stage: 'generation',
+              reason: 'unclassified',
+              code: 'runtime_output_repeated',
+            }),
+            'runtime_output_repeated',
+            false,
+            partialOutput
+          )
+        }
+        if (
           nativeFailure?.code === 'runtime_reasoning_control_unavailable' ||
           String(error) === 'Local thinking control was not confirmed; generation interrupted.'
         ) {
@@ -358,6 +374,7 @@ export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
         }
         if (
           nativeFailure?.code === 'runtime_tool_contract_rejected' ||
+          String(error) === 'Local generation returned an invalid tool completion.' ||
           /^Local llama\.cpp rejected the tool contract \(HTTP (400|500)\)\.$/.test(String(error))
         ) {
           throw new LocalInferenceError(

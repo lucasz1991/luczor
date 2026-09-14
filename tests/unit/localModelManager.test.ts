@@ -202,6 +202,7 @@ describe('LocalModelManager runtime safety', () => {
     'runtime_tool_contract_rejected',
     'runtime_request_rejected',
     'runtime_reasoning_control_unavailable',
+    'runtime_output_repeated',
   ])('keeps the model admissible after %s instead of cooling down or stopping it', async code => {
     const model = await release()
     const stream = vi
