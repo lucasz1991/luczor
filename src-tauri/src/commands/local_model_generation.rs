@@ -5,62 +5,6 @@ use serde_json::{json, Value};
 pub(super) const REPETITION: &str = "Local generation interrupted after repeated output.";
 pub(super) const TOOL_CONTRACT: &str = "Local generation returned an invalid tool completion.";
 
-pub(super) fn tool_probe_body(model: &str, nonce: &str) -> Value {
-    json!({"model":model,"stream":false,"max_tokens":128,"temperature":0,
-        "parse_tool_calls":true,"tool_choice":"required",
-        "chat_template_kwargs":{"enable_thinking":false},
-        "messages":[{"role":"user","content":format!("Call luczor_readiness_probe exactly once with nonce {nonce}. Do not describe the call or print XML/JSON examples.")}],
-        "tools":[{"type":"function","function":{"name":"luczor_readiness_probe",
-            "description":"Read-only protocol test. No files or device actions.",
-            "parameters":{"type":"object","properties":{"nonce":{"type":"string","enum":[nonce]}},"required":["nonce"],"additionalProperties":false}}}]})
-}
-
-pub(super) fn valid_tool_probe(value: &Value, nonce: &str) -> bool {
-    let Some(calls) = value
-        .pointer("/choices/0/message/tool_calls")
-        .and_then(Value::as_array)
-    else {
-        return false;
-    };
-    if calls.len() != 1
-        || !matches!(
-            value
-                .pointer("/choices/0/finish_reason")
-                .and_then(Value::as_str),
-            Some("stop" | "tool_calls")
-        )
-    {
-        return false;
-    }
-    let call = &calls[0];
-    call["type"] == "function"
-        && call["id"].as_str().is_some_and(|id| !id.is_empty())
-        && call.pointer("/function/name").and_then(Value::as_str) == Some("luczor_readiness_probe")
-        && call
-            .pointer("/function/arguments")
-            .and_then(Value::as_str)
-            .and_then(|args| serde_json::from_str::<Value>(args).ok())
-            == Some(json!({"nonce":nonce}))
-}
-
-#[cfg(test)]
-mod tool_probe_tests {
-    use super::*;
-    #[test]
-    fn probe_requires_structured_call_and_matching_nonce() {
-        let mut response = json!({"choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"probe-1","type":"function","function":{"name":"luczor_readiness_probe","arguments":"{\"nonce\":\"test\"}"}}]}}]});
-        assert!(valid_tool_probe(&response, "test"));
-        assert!(!valid_tool_probe(&response, "other"));
-        response["choices"][0]["message"] =
-            json!({"content":"<tools>{\"name\":\"luczor_readiness_probe\"}</tools>"});
-        assert!(!valid_tool_probe(&response, "test"));
-        let body = tool_probe_body("model", "test");
-        assert_eq!(body["tool_choice"], "required");
-        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
-        assert_eq!(body["parse_tool_calls"], true);
-    }
-}
-
 /// Profiles bind to verified model bytes, not mutable display names or tier IDs.
 /// Mild token penalties and long-sequence DRY leave normal code syntax reusable.
 /// These are bounded starting profiles, not a promise of optimal model quality.

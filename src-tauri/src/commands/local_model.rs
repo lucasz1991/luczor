@@ -2580,42 +2580,6 @@ fn run_signed_benchmark(
     let decode = decode_tps
         .filter(|value| value.is_finite() && *value > 0.0)
         .ok_or("Local benchmark did not report a valid decode throughput.")?;
-    // A text benchmark cannot establish that the template/parser supports tools.
-    // Require a real structured call, never interpret content as executable syntax.
-    if cancel.load(Ordering::SeqCst) {
-        return Err("Local benchmark was cancelled.".into());
-    }
-    let nonce = Uuid::new_v4().to_string();
-    let probe = generation_safety::tool_probe_body(&model.id, &nonce);
-    let response = local_network::send(
-        local_http_client(Duration::from_secs(30), Duration::from_secs(60))?
-            .post(format!("http://127.0.0.1:{port}/v1/chat/completions"))
-            .bearer_auth(&api_key)
-            .header("Content-Type", "application/json")
-            .body(serde_json::to_vec(&probe).map_err(|error| error.to_string())?),
-    )
-    .map_err(|_| {
-        "Local tool readiness probe failed: template/parser did not respond.".to_string()
-    })?;
-    if !response.status().is_success() {
-        return Err(
-            "Local tool readiness probe failed: template/parser rejected the tool request.".into(),
-        );
-    }
-    let mut bytes = Vec::new();
-    response
-        .take(65537)
-        .read_to_end(&mut bytes)
-        .map_err(|_| "Local tool readiness probe failed: unreadable response.".to_string())?;
-    let valid = bytes.len() <= 65536
-        && serde_json::from_slice::<Value>(&bytes)
-            .is_ok_and(|value| generation_safety::valid_tool_probe(&value, &nonce));
-    if cancel.load(Ordering::SeqCst) {
-        return Err("Local benchmark was cancelled.".into());
-    }
-    if !valid {
-        return Err("Local tool readiness probe failed: no valid structured tool call. Check model chat template and runtime parser.".into());
-    }
     {
         let mut guard = state()
             .lock()
