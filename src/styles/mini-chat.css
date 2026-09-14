@@ -26,8 +26,13 @@ html.mini-window,
   flex-direction: column;
   align-items: flex-end;
   justify-content: flex-end;
-  width: 148px;
-  height: 184px;
+  /* Shrink-to-fit: the edge box unrolls in-flow, so the surface must grow with it (in-app test
+     surface only — the native window is sized by the backend and fills 100%). */
+  width: max-content;
+  height: max-content;
+  min-width: 148px;
+  min-height: 184px;
+  max-width: 100vw;
   color: var(--text-primary);
   font-family: var(--ai-font);
   font-size: 13px;
@@ -612,51 +617,57 @@ html.mini-window,
   border-radius: 8px;
   margin-right: 7px;
 }
+/* The nudge is ONE box flush to the screen edge — the icon column sits on the edge, the panel
+   unrolls out of it toward the screen, exactly the design board's .nudge (.gcol + .npanel).
+   Square on the docked side, rounded on the inner side. */
 .mini-orb-dock {
   position: relative;
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  justify-content: flex-end;
-  width: 136px;
-  height: 176px;
-  flex-shrink: 0;
-  padding-bottom: 6px;
-  box-sizing: border-box;
-}
-[data-side='left'] .mini-orb-dock {
-  align-items: flex-start;
-}
-/* Edge grip capsule: a slim column of icon pills, flush against the docked edge — square on
-   that side, rounded on the inner side, like a tab built into the screen edge (design board). */
-.mini-grip {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 4px;
-  border-radius: 999px 0 0 999px;
+  flex-direction: row-reverse;
+  align-items: stretch;
+  max-width: 100%;
+  border-radius: 18px 0 0 18px;
   background: var(--ai-canvas);
   border: 1px solid var(--ai-line-strong);
   border-right-width: 0;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.12),
     0 14px 30px -18px rgba(0, 0, 0, 0.8);
-  cursor: grab;
-  touch-action: none;
+  overflow: hidden;
+  transition: border-radius 0.3s var(--ease, ease);
 }
-[data-side='left'] .mini-grip {
-  border-radius: 0 999px 999px 0;
+[data-side='left'] .mini-orb-dock {
+  flex-direction: row;
+  border-radius: 0 18px 18px 0;
   border-right-width: 1px;
   border-left-width: 0;
 }
+.mini-orb-dock.is-chat-open {
+  border-radius: 22px 0 0 22px;
+}
+[data-side='left'] .mini-orb-dock.is-chat-open {
+  border-radius: 0 22px 22px 0;
+}
 /* The nudge glows toward the screen while Luczor is actively working, same idea as the design
    board's "work" mood — no separate status text needed. */
-.mini-grip[data-phase='thinking'],
-.mini-grip[data-phase='executing'],
-.mini-grip[data-phase='listening'],
-.mini-grip[data-phase='speaking'] {
+.mini-orb-dock:has(.mini-grip[data-phase='thinking']),
+.mini-orb-dock:has(.mini-grip[data-phase='executing']),
+.mini-orb-dock:has(.mini-grip[data-phase='listening']),
+.mini-orb-dock:has(.mini-grip[data-phase='speaking']) {
   border-color: color-mix(in srgb, var(--ai-accent) 40%, var(--ai-line-strong));
+}
+/* Icon column: a slim stack of icon pills on the edge; any icon drags the nudge. */
+.mini-grip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  flex: none;
+  width: 32px;
+  padding: 8px 0;
+  cursor: grab;
+  touch-action: none;
 }
 .mini-grip__icon {
   position: relative;
@@ -694,48 +705,54 @@ html.mini-window,
   color: var(--ai-red);
   border-color: color-mix(in srgb, var(--ai-red) 40%, transparent);
 }
-/* Hover fly-out beside the grip (in-app surface only) */
-/* The fly-out unrolls out of the edge tab like the design board's nudge: the box itself grows
-   (width, then height for the chats page) instead of a separate panel fading in beside it. Its
-   own overflow:hidden is what reveals the fixed-width content inside as it grows — the content
-   never resizes itself, so nothing reflows mid-animation. */
+/* The panel unrolls inside the same box: its width grows, and its own overflow:hidden reveals
+   the fixed-width content — the content never resizes itself, so nothing reflows mid-animation. */
 .mini-grip-panel {
-  position: absolute;
-  right: 60px;
-  bottom: 0;
   width: 0;
+  min-width: 0;
   overflow: hidden;
-  border-radius: 18px 18px 6px 18px;
-  background: var(--ai-page);
-  border: 1px solid var(--ai-line-strong);
-  box-shadow: 0 24px 60px -30px rgba(0, 0, 0, 0.85);
   pointer-events: none;
+  border-right: 0 solid var(--ai-line);
   transition:
     width 0.36s var(--ease, ease),
-    height 0.36s var(--ease, ease);
+    height 0.36s var(--ease, ease),
+    border-width 0.36s;
   text-align: left;
 }
-/* Left-docked: the fly-out unfolds to the right of the grip instead, notch mirrored. */
 [data-side='left'] .mini-grip-panel {
-  right: auto;
-  left: 60px;
-  border-radius: 18px 18px 18px 6px;
+  border-right: 0;
+  border-left: 0 solid var(--ai-line);
 }
 .mini-orb-dock:hover .mini-grip-panel:not(.is-chat-open),
 .mini-orb-dock:focus-within .mini-grip-panel:not(.is-chat-open),
 .mini-orb-dock.has-pin .mini-grip-panel:not(.is-chat-open) {
   width: 240px;
+  border-right-width: 1px;
   pointer-events: auto;
 }
-/* Chats open: the fly-out becomes the full chat page — no separate "Mini window" mode anymore. */
+[data-side='left'] .mini-orb-dock:hover .mini-grip-panel:not(.is-chat-open),
+[data-side='left'] .mini-orb-dock:focus-within .mini-grip-panel:not(.is-chat-open),
+[data-side='left'] .mini-orb-dock.has-pin .mini-grip-panel:not(.is-chat-open) {
+  border-right-width: 0;
+  border-left-width: 1px;
+}
+/* Chats open: the panel becomes the full chat page — no separate "Mini window" mode anymore. */
 .mini-grip-panel.is-chat-open {
   width: var(--mini-chat-w);
   height: var(--mini-chat-h);
-  border-radius: 20px;
-  background: transparent;
-  border: 0;
-  box-shadow: none;
+  border-right-width: 1px;
   pointer-events: auto;
+}
+[data-side='left'] .mini-grip-panel.is-chat-open {
+  border-right-width: 0;
+  border-left-width: 1px;
+}
+/* Inside the shared box the chat page needs no frame of its own. */
+.mini-orb-dock .mini-panel {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
 }
 .mini-grip-panel__reveal {
   width: 240px;
