@@ -1,4 +1,5 @@
 import { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
+import { focusedTools, cleanLocalHistory } from '@/services/inference/focusedTools'
 import { recordTrace, debugScope, traceEnabled } from '@/services/debugTrace'
 import {
   createGoalReportTool,
@@ -83,12 +84,12 @@ export type AgentToolSession = {
 }
 
 /** Truncate a value for the server event payload (avoid huge uploads). */
-function clip(v: unknown, max = 500): unknown {
+function clip(value: unknown, max = 500): unknown {
   try {
-    const s = typeof v === 'string' ? v : JSON.stringify(v)
-    return s.length > max ? s.slice(0, max) + '…' : s
+    const text = typeof value === 'string' ? value : JSON.stringify(value)
+    return text.length > max ? text.slice(0, max) + '…' : text
   } catch {
-    return String(v)
+    return String(value)
   }
 }
 
@@ -861,6 +862,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   }
   let nextToolChoice: ToolChoice = resolvedRoute.externalOneShot ? 'none' : (requestedToolChoice ?? 'auto')
   const inferenceGateway = resolvedRoute.gateway
+  const focused = inferenceGateway.target === 'local_llama_cpp' ? focusedTools(latestUserMessage) : undefined
+  if (focused) messages.splice(0, messages.length, ...cleanLocalHistory(messages))
   if (opts.workspaceScope && inferenceGateway.target !== 'local_llama_cpp') {
     throw new Error('Der Workspace-Modus verwendet ausschließlich das lokale Modell.')
   }
@@ -1169,7 +1172,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     // running. Refresh both the model instruction and the hard execution gate.
     // Approved external messages are immutable: even a mode change while the
     // approval was open must not alter the already approved request hash.
-    const availableTools = tools.filter(tool => toolRecovery.canOffer(tool.function.name))
+    const eligibleTools = tools.filter(tool => toolRecovery.canOffer(tool.function.name))
+    const availableTools = focused ? focused.select(eligibleTools) : eligibleTools
     if (!resolvedRoute.externalOneShot) {
       applyRuntimeMode(messages, currentMode())
       applyRuntimeTools(messages, availableTools, currentMode())
@@ -1490,11 +1494,13 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         throw new DOMException('Aborted', 'AbortError')
       }
       const selectedTool =
-        call.name === GOAL_REPORT_NAME
-          ? goalReportTool
-          : call.name === GOAL_READ_RESULT_NAME
-            ? goalReadResultTool
-            : (assistance?.tools.find(tool => tool.name === call.name) ?? getTool(call.name))
+        call.name === 'tools_select' && focused && availableTools.some(tool => tool.function.name === call.name)
+          ? focused.selector
+          : call.name === GOAL_REPORT_NAME
+            ? goalReportTool
+            : call.name === GOAL_READ_RESULT_NAME
+              ? goalReadResultTool
+              : (assistance?.tools.find(tool => tool.name === call.name) ?? getTool(call.name))
       const tool =
         ((call.name === 'agent_assist' && call.arguments.target === 'local') ||
           (call.name === 'agent_assist_status' && assistance?.isLocalJob(call.arguments.job_id))) &&

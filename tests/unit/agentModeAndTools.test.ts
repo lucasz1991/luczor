@@ -89,6 +89,38 @@ const durableTaskCreate = {
 } as const
 
 describe('agent mode and tool reliability', () => {
+  it('loads a requested local tool for the next round without executing it during selection', async () => {
+    mocks.toOpenAITools.mockReturnValue(
+      ['project_get_state', 'fs_read'].map(name => ({
+        type: 'function',
+        function: { name, description: name, parameters: { type: 'object' } },
+      }))
+    )
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce({
+        content: '',
+        finishReason: 'tool_calls',
+        toolCalls: [{ id: 'select-1', name: 'tools_select', arguments: { names: ['fs_read'] } }],
+        rawToolCalls: [
+          { id: 'select-1', type: 'function', function: { name: 'tools_select', arguments: '{"names":["fs_read"]}' } },
+        ],
+      })
+      .mockResolvedValueOnce({ content: 'Auswahl bereit.', finishReason: 'stop', toolCalls: [], rawToolCalls: [] })
+    await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'hi' }],
+      mode: 'observe',
+      maxRounds: 2,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(mocks.execute).not.toHaveBeenCalled()
+    expect(
+      mocks.streamChatWithTools.mock.calls[0]![0].tools.map((t: { function: { name: string } }) => t.function.name)
+    ).not.toContain('fs_read')
+    expect(
+      mocks.streamChatWithTools.mock.calls[1]![0].tools.map((t: { function: { name: string } }) => t.function.name)
+    ).toContain('fs_read')
+  })
   it('bounds browser host guessing, preserves matching tool replies and continues unrelated work', async () => {
     mocks.toOpenAITools.mockReturnValue(
       ['browser_open', 'browser_close', 'browser_status', 'project_get_state'].map(name => ({

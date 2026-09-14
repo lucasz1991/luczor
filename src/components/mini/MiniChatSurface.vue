@@ -38,6 +38,9 @@ const gripHover = ref(false)
 const hoverPane = ref<GripPane | null>(null)
 const pinnedPane = ref<GripPane | null>(null)
 const activePane = computed<GripPane>(() => pinnedPane.value ?? hoverPane.value ?? 'status')
+// Hovering the chats icon reveals the full chat page too, same as pinning it — the design board's
+// nudge grows into its chats page on hover already, it doesn't wait for a click.
+const chatsOpen = computed(() => activePane.value === 'chats')
 const paneTitles: Record<GripPane, string> = {
   status: 'Status',
   chats: 'Chats',
@@ -111,7 +114,7 @@ let drag: {
 let dragged = false
 const decision = computed(() => props.snapshot.decision ?? props.snapshot.mainDecision)
 const status = computed(() => miniStatus(props.snapshot, unread.value))
-const peekVisible = computed(() => !expanded.value && (!!decision.value || !!peek.value))
+const peekVisible = computed(() => !chatsOpen.value && (!!decision.value || !!peek.value))
 const surfaceStyle = computed(() => ({
   ...(props.native
     ? {}
@@ -210,17 +213,6 @@ const chatsTitle = computed(() => {
   if (chatsState.value === 'unread') return 'Neue Antwort'
   return count ? `${count} Chats` : 'Chats'
 })
-const lastAssistantReply = computed(() => {
-  const reply = [...props.snapshot.messages].reverse().find(message => message.role === 'assistant' && message.content)
-  return reply?.content ?? ''
-})
-const compactWorking = computed(
-  () =>
-    ['thinking', 'executing', 'listening', 'speaking'].includes(status.value.phase) ||
-    props.snapshot.busy ||
-    props.snapshot.mainBusy
-)
-
 async function windowAction(action: string) {
   if (action === 'hide') await miniVoice.stop()
   if (!props.native) {
@@ -247,8 +239,8 @@ async function snapNativeEdge() {
 let resizeQueue = Promise.resolve()
 function layout() {
   if (props.native) {
-    // The grip fly-out borrows the peek window size so it has room to unfold beside the capsule.
-    const action = expanded.value ? 'expand' : peekVisible.value || gripHover.value ? 'peek' : 'collapse'
+    // Hovering the chats icon already grows the window to full size, same as pinning it.
+    const action = chatsOpen.value ? 'expand' : peekVisible.value || gripHover.value ? 'peek' : 'collapse'
     resizeQueue = resizeQueue.then(() => windowAction(action))
   } else void nextTick(clampPosition)
 }
@@ -424,7 +416,7 @@ function moveKey(event: KeyboardEvent) {
   if (event.key === 'ArrowDown') bottom.value -= 24
   clampPosition()
 }
-watch([expanded, peekVisible, gripHover], layout)
+watch([chatsOpen, peekVisible, gripHover], layout)
 watch(
   () => props.snapshot.revision,
   () => {
@@ -460,7 +452,7 @@ watch(
   () => `${lastAssistant.value?.id}:${lastAssistant.value?.status}`,
   () => {
     const message = lastAssistant.value
-    if (!expanded.value && message && ['done', 'failed'].includes(message.status)) {
+    if (!chatsOpen.value && message && ['done', 'failed'].includes(message.status)) {
       unread.value = true
       peek.value = message.content.slice(0, 340)
       armPeek()
@@ -497,7 +489,7 @@ onBeforeUnmount(() => {
   <section
     ref="box"
     class="mini-surface"
-    :class="{ 'is-native': native, 'is-expanded': expanded, 'has-peek': peekVisible, 'has-decision': !!decision }"
+    :class="{ 'is-native': native, 'is-expanded': chatsOpen, 'has-peek': peekVisible, 'has-decision': !!decision }"
     :style="surfaceStyle"
     :data-side="side"
     aria-label="Luczor Mini"
@@ -535,7 +527,7 @@ onBeforeUnmount(() => {
     <div
       class="mini-orb-dock"
       :data-phase="status.phase"
-      :class="{ 'has-pin': !!pinnedPane, 'is-chat-open': expanded }"
+      :class="{ 'has-pin': !!pinnedPane, 'is-chat-open': chatsOpen }"
       @pointerenter="enterGrip"
       @pointerleave="leaveGrip"
     >
@@ -544,34 +536,25 @@ onBeforeUnmount(() => {
           <AiIcon name="close" :size="12" />
         </button>
       </div>
-      <!-- Edge grip: orb plus state icons in one glass capsule; drag on the orb, click opens -->
-      <div class="mini-grip" role="group" aria-label="Status im Überblick">
-        <button
-          type="button"
-          class="mini-orb-button"
-          :aria-label="`Mini-Chat öffnen: ${status.label}`"
-          :title="status.detail"
-          @pointerdown="beginDrag($event, true)"
-          @click="expand"
-        >
-          <StatusOrb :phase="status.phase" :level="snapshot.hud.micLevel" /><span
-            v-if="decision || unread"
-            class="mini-unread"
-            >{{ decision ? '!' : '1' }}</span
-          >
-        </button>
+      <!-- Edge grip: five icon pills in one glass capsule, like the design board's Nano nudge.
+           Any icon both drags the capsule (pointer moves) and pins its pane (a plain click) —
+           chats pins into the full chat page, the others into their light status pane. -->
+      <div class="mini-grip" role="group" aria-label="Status im Überblick" :data-phase="status.phase">
         <button
           type="button"
           class="mini-grip__icon"
           data-kind="chats"
           :class="{ 'is-pinned': pinnedPane === 'chats', 'is-active': activePane === 'chats' }"
           :data-state="chatsState"
-          :title="chatsTitle"
-          :aria-label="chatsTitle"
+          :title="status.detail"
+          :aria-label="`Mini-Chat öffnen: ${chatsTitle}`"
           @pointerenter="hoverPane = 'chats'"
+          @pointerdown="beginDrag($event, true)"
           @click="pinPane('chats')"
         >
-          <AiIcon name="chat" :size="11" />
+          <AiIcon name="chat" :size="12" /><span v-if="decision || unread" class="mini-unread">{{
+            decision ? '!' : '1'
+          }}</span>
         </button>
         <button
           type="button"
@@ -582,6 +565,7 @@ onBeforeUnmount(() => {
           :title="decision ? 'Entscheidung offen' : 'Keine Entscheidung offen'"
           :aria-label="decision ? 'Entscheidung offen' : 'Keine Entscheidung offen'"
           @pointerenter="hoverPane = 'decision'"
+          @pointerdown="beginDrag($event, true)"
           @click="pinPane('decision')"
         >
           <AiIcon name="shield" :size="11" />
@@ -599,6 +583,7 @@ onBeforeUnmount(() => {
             sharedToolSessions.length ? `${sharedToolSessions.length} Tool-Sitzungen laufen` : 'Keine Tool-Sitzung'
           "
           @pointerenter="hoverPane = 'tools'"
+          @pointerdown="beginDrag($event, true)"
           @click="pinPane('tools')"
         >
           <AiIcon name="tool" :size="11" />
@@ -612,24 +597,15 @@ onBeforeUnmount(() => {
           :title="connectionError ? 'Verbindung fehlt' : 'Verbunden'"
           :aria-label="connectionError ? 'Verbindung fehlt' : 'Verbunden'"
           @pointerenter="hoverPane = 'link'"
+          @pointerdown="beginDrag($event, true)"
           @click="pinPane('link')"
         >
           <AiIcon name="link" :size="11" />
         </button>
       </div>
-      <button
-        v-if="!expanded"
-        type="button"
-        class="mini-status-label"
-        :class="{ 'is-working': compactWorking }"
-        @click="expand"
-      >
-        {{ compactWorking ? `Arbeitet · ${status.label}` : status.label }}
-      </button>
-      <span v-if="connectionError && !expanded" class="mini-disconnected" role="alert">Verbindung fehlt</span>
       <!-- Hover fly-out: one pane per grip icon (hover switches, click pins) -->
-      <div class="mini-grip-panel" :data-pane="activePane" :class="{ 'is-chat-open': expanded }" aria-live="polite">
-        <div v-if="expanded" class="mini-panel">
+      <div class="mini-grip-panel" :data-pane="activePane" :class="{ 'is-chat-open': chatsOpen }" aria-live="polite">
+        <div v-if="chatsOpen" class="mini-panel">
           <header class="mini-header" @pointerdown="beginDrag">
             <span
               class="mini-drag"
@@ -1027,10 +1003,13 @@ onBeforeUnmount(() => {
           </footer>
         </div>
         <template v-else>
-          <div class="mini-grip-panel__head">
-            <strong>{{ paneTitles[activePane] }}</strong>
-            <span v-if="pinnedPane" class="mini-grip-panel__pin">fixiert</span>
-          </div>
+          <!-- Fixed-width so the text doesn't reflow while the outer box's width is still
+               animating open — the outer's overflow:hidden reveals it, doesn't resize it. -->
+          <div class="mini-grip-panel__reveal">
+            <div class="mini-grip-panel__head">
+              <strong>{{ paneTitles[activePane] }}</strong>
+              <span v-if="pinnedPane" class="mini-grip-panel__pin">fixiert</span>
+            </div>
           <template v-if="activePane === 'status'">
             <dl class="mini-grip-panel__kv">
               <dt>Zustand</dt>
@@ -1042,26 +1021,6 @@ onBeforeUnmount(() => {
               <dt v-if="snapshot.thinkingTier">Denkstufe</dt>
               <dd v-if="snapshot.thinkingTier">{{ snapshot.thinkingTier }}</dd>
             </dl>
-          </template>
-          <template v-else-if="activePane === 'chats'">
-            <ul v-if="snapshot.conversations?.length" class="mini-grip-panel__chats">
-              <li v-for="chat in snapshot.conversations" :key="chat.id" :class="{ 'is-busy': chat.busy }">
-                <i aria-hidden="true" /><span>{{ chat.title }}</span
-                ><small v-if="chat.busy">läuft</small>
-              </li>
-            </ul>
-            <p v-else class="mini-grip-panel__empty">Noch keine Chats im Projekt.</p>
-            <template v-if="lastAssistantReply">
-              <div class="mini-grip-panel__divider">Letzte Antwort</div>
-              <p class="mini-grip-panel__text">{{ lastAssistantReply }}</p>
-            </template>
-            <template v-if="decision">
-              <div class="mini-grip-panel__divider">Offene Entscheidung</div>
-              <p class="mini-grip-panel__text">
-                <strong>{{ decision.title }}</strong>
-                {{ decision.description }}
-              </p>
-            </template>
           </template>
           <template v-else-if="activePane === 'decision'">
             <p v-if="decision" class="mini-grip-panel__text">
@@ -1089,6 +1048,7 @@ onBeforeUnmount(() => {
               <dd>{{ snapshot.hud.killSwitch ? 'aktiv' : 'aus' }}</dd>
             </dl>
           </template>
+          </div>
         </template>
       </div>
     </div>

@@ -331,6 +331,10 @@ const localReadinessMessages = new Map<string, string>([
   ['artifact_mismatch', 'Die lokalen Modelldateien passen nicht zum signierten Katalog.'],
   ['runtime_mismatch', 'Die lokale Modellruntime passt nicht zum signierten Katalog.'],
   ['benchmark_failed', 'Das lokale Modell hat die vorgeschriebene Bereitschaftsprüfung nicht bestanden.'],
+  [
+    'tool_readiness_failed',
+    'Das lokale Modell hat keinen gültigen Werkzeugaufruf geliefert. Chat-Template und Tool-Parser der Runtime prüfen.',
+  ],
   ['readiness_mismatch', 'Die lokale Bereitschaftsbestätigung ist veraltet oder passt nicht zum signierten Modell.'],
   ['readiness_pending', 'Die Bereitschaft des lokalen Modells ist noch nicht bestätigt.'],
   ['resource_config_pending', 'Die neuen Ressourceneinstellungen werden nach dem laufenden Auftrag angewandt.'],
@@ -439,7 +443,9 @@ function preparationFailureReason(error: unknown): string {
     ['Local benchmark request failed.', 'benchmark_failed'],
   ])
   return (
-    reasons.get(nativeMessage) ??
+    (nativeMessage.startsWith('Local tool readiness probe failed:')
+      ? 'tool_readiness_failed'
+      : reasons.get(nativeMessage)) ??
     (localReadinessMessages.has(nativeMessage) ? nativeMessage : 'local_preparation_failed')
   )
 }

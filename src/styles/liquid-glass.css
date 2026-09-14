@@ -295,26 +295,22 @@ html[data-theme] .ai-sidebar nav .is-active {
   box-shadow: inset 0 1px 0 var(--g-edge);
 }
 
-/* Mini chat orb: glass disc with accent diffusion. */
-html[data-theme] .mini-orb-button {
-  background: var(--g-bg);
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
-  border: 1px solid var(--border-soft);
-  box-shadow:
-    inset 0 1px 1px var(--g-edge),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.3),
-    var(--glow-md);
-}
-/* Edge grip: pill capsule with rim light; the fly-out gets the panel radius. */
+/* Edge grip: pill capsule with rim light, flush to whichever screen edge the nudge is docked on —
+   square on that side, pill on the other; the fly-out gets the panel radius. */
 html[data-theme] .mini-grip {
-  border-radius: var(--r-pill);
+  border-radius: var(--r-pill) 0 0 var(--r-pill);
   border-color: var(--g-edge-2);
+  border-right-width: 0;
   box-shadow:
     inset 0 1px 1px var(--g-edge),
     inset 0 -1px 0 rgba(0, 0, 0, 0.28),
     0 16px 34px -20px rgba(0, 0, 0, 0.85),
     var(--glow-sm);
+}
+html[data-theme] [data-side='left'] .mini-grip {
+  border-radius: 0 var(--r-pill) var(--r-pill) 0;
+  border-right-width: 1px;
+  border-left-width: 0;
 }
 html[data-theme] .mini-grip__icon {
   background: var(--g-fill-1);
@@ -333,7 +329,9 @@ html[data-theme] .mini-grip-panel {
   border-color: var(--g-edge-2);
   box-shadow: var(--shadow-panel);
 }
-html[data-theme] .mini-status-label,
+html[data-theme] [data-side='left'] .mini-grip-panel:not(.is-chat-open) {
+  border-radius: var(--r-lg) var(--r-lg) var(--r-lg) var(--r-sm);
+}
 html[data-theme] .mini-orb-tools button {
   background: var(--g-bg);
   backdrop-filter: blur(18px) saturate(160%);
@@ -716,8 +714,7 @@ html[data-theme] .browser-panel__resize span {
   html[data-theme] .tool-center-panel,
   html[data-theme] .ai-message__user-text,
   html[data-theme] .mini-grip,
-  html[data-theme] .mini-grip-panel,
-  html[data-theme] .mini-orb-button {
+  html[data-theme] .mini-grip-panel {
     background: var(--bg-raised);
     backdrop-filter: none;
     -webkit-backdrop-filter: none;
