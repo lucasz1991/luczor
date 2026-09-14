@@ -551,6 +551,9 @@ fn perform_index<D: GraphDatabaseProvider>(
         return Err("Repository indexing paused for foreground work.".into());
     }
     for relative in unseen {
+        if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err("Repository indexing paused for foreground work.".into());
+        }
         delete_file(&tx, &bound.principal_id, &bound.repository_id, &relative)?;
     }
 
@@ -592,6 +595,9 @@ fn perform_index<D: GraphDatabaseProvider>(
         ],
     )
     .map_err(db_error)?;
+    if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err("Repository indexing paused for foreground work.".into());
+    }
     tx.commit().map_err(db_error)?;
 
     Ok(GraphIndexResult {

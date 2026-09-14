@@ -622,6 +622,85 @@ html[data-theme] .wf-notice {
   background: var(--g-fill-1);
 }
 
+/* ---------- context column: goal cards, summaries, stats (design board §A/§F) ---------- */
+html[data-theme] .context-col .info-stat,
+html[data-theme] .context-col .summary-row time,
+html[data-theme] .context-col .repo-graph-revision,
+html[data-theme] .context-col code {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+html[data-theme] .context-col .goal-card {
+  border-radius: var(--r-md);
+  background: var(--g-bg-2);
+  border: 1px solid var(--g-edge-2);
+  box-shadow: inset 0 1px 0 var(--g-edge);
+}
+html[data-theme] .context-col .summary-row {
+  padding: 6px 0;
+  border-top: 1px solid var(--g-edge-2);
+  border-radius: 0;
+  background: transparent;
+}
+html[data-theme] .context-col .summary-row:first-child {
+  border-top: 0;
+}
+html[data-theme] .context-col .empty {
+  color: var(--text-faint);
+}
+
+/* ---------- Werkzeuge dock: internal browser as a glass tool window ---------- */
+html[data-theme] .browser-panel {
+  margin: 10px 14px 0;
+  border: 1px solid var(--g-edge-2);
+  border-radius: var(--r-lg);
+  background: var(--g-bg-2);
+  box-shadow:
+    inset 0 1px 0 var(--g-edge),
+    var(--shadow-2);
+}
+html[data-theme] .browser-panel__header span,
+html[data-theme] .browser-panel__header code,
+html[data-theme] .browser-panel__state {
+  font-family: var(--font-mono);
+  letter-spacing: 0.04em;
+}
+html[data-theme] .browser-panel__header > div > span:first-child {
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+}
+html[data-theme] .browser-panel__address input {
+  border-radius: var(--r-pill);
+  padding: 7px 14px;
+  background: var(--g-bg-2);
+  border: 1px solid var(--g-edge-2);
+  box-shadow: inset 0 1px 0 var(--g-edge);
+  font-family: var(--font-mono);
+}
+html[data-theme] .browser-panel__address input:focus-visible {
+  outline: 0;
+  border-color: var(--border);
+  box-shadow:
+    inset 0 1px 0 var(--g-edge),
+    var(--focus-ring);
+}
+html[data-theme] .browser-panel__address button {
+  border-radius: var(--r-pill);
+  border: 1px solid var(--g-edge-2);
+  background: var(--g-bg-2);
+  box-shadow: inset 0 1px 0 var(--g-edge);
+}
+html[data-theme] .browser-panel__viewport {
+  border-radius: var(--r-md);
+  border-color: var(--g-edge-2);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.25);
+}
+html[data-theme] .browser-panel__resize span {
+  width: 44px;
+  height: 3px;
+  background: var(--g-edge-2);
+}
+
 /* ---------- accessibility ---------- */
 @media (prefers-reduced-transparency: reduce) {
   html[data-theme] .ai-sidebar,
