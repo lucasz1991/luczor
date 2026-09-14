@@ -329,6 +329,7 @@ describe('LocalModelManager runtime safety', () => {
       messages: [{ role: 'user', content: 'stop' }],
       signal: controller.signal,
     })
+    await vi.waitFor(() => expect(transport.stream).toHaveBeenCalledOnce())
     controller.abort()
 
     await expect(turn).rejects.toMatchObject({ name: 'AbortError' })
@@ -401,8 +402,7 @@ describe('LocalModelManager runtime safety', () => {
     const first = gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'first' }] })
     const second = gateway.streamChatWithTools({ messages: [{ role: 'user', content: 'second' }] })
 
-    await Promise.resolve()
-    expect(transport.stream).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => expect(transport.stream).toHaveBeenCalledTimes(1))
     finishFirst()
     await expect(Promise.all([first, second])).resolves.toHaveLength(2)
     expect(transport.stream).toHaveBeenCalledTimes(2)
@@ -446,6 +446,7 @@ describe('LocalModelManager runtime safety', () => {
     const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
     const controller = new AbortController()
     const first = gateway.streamChatWithTools({ messages: [], signal: controller.signal }).catch(error => error)
+    await vi.waitFor(() => expect(transport.stream).toHaveBeenCalledOnce())
     controller.abort()
     const sameCancellation = manager.cancel('request-1', catalogBinding)
     const second = gateway.streamChatWithTools({ messages: [] })
@@ -510,6 +511,7 @@ describe('LocalModelManager runtime safety', () => {
     const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
     const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
     const first = gateway.streamChatWithTools({ messages: [], signal: controller.signal }).catch(error => error)
+    await vi.waitFor(() => expect(transport.stream).toHaveBeenCalledOnce())
     controller.abort()
     const second = gateway.streamChatWithTools({ messages: [] })
     await expect(first).resolves.toMatchObject({ name: 'AbortError' })
@@ -550,6 +552,7 @@ describe('LocalModelManager runtime safety', () => {
       onToken,
     })
 
+    await vi.waitFor(() => expect(onToken).toHaveBeenCalledWith('visible-before-rotation'))
     manager.invalidateCatalogBoundary()
 
     await expect(turn).rejects.toMatchObject({ name: 'AbortError' })

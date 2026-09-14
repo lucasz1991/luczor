@@ -5,6 +5,114 @@ use serde_json::{json, Value};
 pub(super) const REPETITION: &str = "Local generation interrupted after repeated output.";
 pub(super) const TOOL_CONTRACT: &str = "Local generation returned an invalid tool completion.";
 
+/// b10809's Qwen2.5 auto-parser can accept plain JSON as public content and
+/// wander before the first required XML tool marker. For this verified 3B
+/// artifact only, start a REQUIRED call at the template's tool boundary. The
+/// runtime still produces/validates structured tool_calls; no reply is parsed
+/// or executed here. Auto/none, other artifacts and other runtimes stay intact.
+pub(super) fn apply_required_tool_prefix(
+    body: &mut Value,
+    artifact_hash: Option<&str>,
+    props: &Value,
+) {
+    if artifact_hash != Some("d5c108dfbdac44c738e45a84d5624716cfb8522d1410f46a7108167ee4bd0cac")
+        || props["build_info"].as_str() != Some("b10809-5266f24da")
+        || body["tool_choice"].as_str() != Some("required")
+        || !body["tools"]
+            .as_array()
+            .is_some_and(|tools| !tools.is_empty())
+    {
+        return;
+    }
+    let template = props["chat_template"].as_str().unwrap_or_default();
+    if !template.contains("<tool_call>")
+        || !template.contains("</tool_call>")
+        || !template.contains("<|im_start|>")
+    {
+        return;
+    }
+    let Some(messages) = body["messages"].as_array_mut() else {
+        return;
+    };
+    if !messages
+        .last()
+        .is_some_and(|m| matches!(m["role"].as_str(), Some("user" | "tool")))
+    {
+        return;
+    }
+    messages.push(json!({"role":"assistant", "content":"<tool_call>\n"}));
+    body["continue_final_message"] = json!(true);
+    body["add_generation_prompt"] = json!(false);
+    body["parallel_tool_calls"] = json!(false);
+    // The parser's parallel=false grammar still permits repetitions on this
+    // build. End at the first completed call; full JSON/name validation remains
+    // mandatory before dispatch. The marker is never shown in the chat.
+    body["stop"] = json!(["</tool_call>"]);
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::*;
+    const HASH: &str = "d5c108dfbdac44c738e45a84d5624716cfb8522d1410f46a7108167ee4bd0cac";
+    fn props() -> Value {
+        json!({"build_info":"b10809-5266f24da","chat_template":"<|im_start|> <tool_call> </tool_call>"})
+    }
+    fn request() -> Value {
+        json!({"messages":[{"role":"system","content":"Policy"},{"role":"user","content":"Read project"}],"tools":[{"type":"function","function":{"name":"project_get_state","parameters":{"type":"object"}}}],"tool_choice":"required","max_tokens":2048})
+    }
+    #[test]
+    fn prefix_is_scoped_idempotent_and_preserves_tools_arguments_and_limits() {
+        let mut body = request();
+        let original = body.clone();
+        apply_required_tool_prefix(&mut body, Some(HASH), &props());
+        assert_eq!(
+            body["messages"][2],
+            json!({"role":"assistant","content":"<tool_call>\n"})
+        );
+        assert_eq!(body["messages"][0], original["messages"][0]);
+        assert_eq!(body["messages"][1], original["messages"][1]);
+        assert_eq!(body["tools"], original["tools"]);
+        assert_eq!(body["max_tokens"], original["max_tokens"]);
+        assert_eq!(body["stop"], json!(["</tool_call>"]));
+        let first = body.clone();
+        apply_required_tool_prefix(&mut body, Some(HASH), &props());
+        assert_eq!(body, first);
+    }
+    #[test]
+    fn ordinary_answers_unknown_models_runtimes_and_templates_are_unchanged() {
+        for choice in ["auto", "none"] {
+            let mut body = request();
+            body["tool_choice"] = json!(choice);
+            let before = body.clone();
+            apply_required_tool_prefix(&mut body, Some(HASH), &props());
+            assert_eq!(body, before);
+        }
+        for (hash, metadata) in [
+            (None, props()),
+            (Some("other-model"), props()),
+            (Some(HASH), Value::Null),
+            (
+                Some(HASH),
+                json!({"build_info":"future","chat_template":"<|im_start|> <tool_call> </tool_call>"}),
+            ),
+            (
+                Some(HASH),
+                json!({"build_info":"b10809-5266f24da","chat_template":"different"}),
+            ),
+        ] {
+            let mut body = request();
+            let before = body.clone();
+            apply_required_tool_prefix(&mut body, hash, &metadata);
+            assert_eq!(body, before);
+        }
+        let mut body = request();
+        body["tools"] = json!([]);
+        let before = body.clone();
+        apply_required_tool_prefix(&mut body, Some(HASH), &props());
+        assert_eq!(body, before);
+    }
+}
+
 /// Profiles bind to verified model bytes, not mutable display names or tier IDs.
 /// Mild token penalties and long-sequence DRY leave normal code syntax reusable.
 /// These are bounded starting profiles, not a promise of optimal model quality.

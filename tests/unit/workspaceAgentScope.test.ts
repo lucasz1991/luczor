@@ -113,7 +113,7 @@ beforeEach(() => {
 describe('agent workspace isolation', () => {
   it('omits workspace descriptors and their runtime instructions from ordinary project chat', async () => {
     await runAgent({ projectId: 'selected', mode: 'act', baseMessages, inferenceGateway: gateway() })
-    expect(descriptorNames(firstRequest())).toEqual(['project_get_state'])
+    expect(descriptorNames(firstRequest())).toEqual(['project_get_state', 'context_read_history', 'tools_select'])
     expect(JSON.stringify(firstRequest().messages)).not.toContain('workspace_overview')
   })
 
@@ -138,7 +138,12 @@ describe('agent workspace isolation', () => {
       inferenceGateway: gateway(),
       toolSession: journal,
     })
-    expect(descriptorNames(firstRequest())).toEqual(['project_get_state', 'workspace_overview'])
+    expect(descriptorNames(firstRequest())).toEqual([
+      'project_get_state',
+      'workspace_overview',
+      'context_read_history',
+      'tools_select',
+    ])
     expect(mocks.executeWorkspace).toHaveBeenCalledWith(
       {},
       expect.objectContaining({

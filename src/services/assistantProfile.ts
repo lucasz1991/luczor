@@ -91,12 +91,17 @@ export function localAssistantProfilePrompt(profile: AssistantProfile, query = '
   const sections: string[] = []
   if (profile.persona)
     sections.push(`Persönlichkeit: ${profile.persona.name}\n${profile.persona.prompt.slice(0, 2000)}`)
-  const terms = `${query} ${taskType === 'chat.general' ? '' : taskType}`.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []
-  const ranked = profile.skills.map(skill => {
-    const metadata = `${skill.slug} ${skill.name} ${skill.description} ${skill.tags.join(' ')}`.toLowerCase()
-    const universal = skill.tags.some(tag => ['always', 'global', 'immer'].includes(tag.toLowerCase()))
-    return { skill, score: (universal ? 100 : 0) + terms.filter(term => metadata.includes(term)).length }
-  }).filter(item => item.score > 0).sort((a, b) => b.score - a.score || a.skill.id - b.skill.id).slice(0, 3)
+  const terms =
+    `${query} ${taskType === 'chat.general' ? '' : taskType}`.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []
+  const ranked = profile.skills
+    .map(skill => {
+      const metadata = `${skill.slug} ${skill.name} ${skill.description} ${skill.tags.join(' ')}`.toLowerCase()
+      const universal = skill.tags.some(tag => ['always', 'global', 'immer'].includes(tag.toLowerCase()))
+      return { skill, score: (universal ? 100 : 0) + terms.filter(term => metadata.includes(term)).length }
+    })
+    .filter(item => item.score > 0)
+    .sort((left, right) => right.score - left.score || left.skill.id - right.skill.id)
+    .slice(0, 3)
   for (const { skill } of ranked) {
     const section = `Skill: ${skill.name}\n${skill.prompt.slice(0, 1200)}`
     if (sections.join('\n\n').length + section.length > 4800) break

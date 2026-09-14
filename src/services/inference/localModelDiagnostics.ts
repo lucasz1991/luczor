@@ -2,6 +2,7 @@ import { reactive, readonly, watch } from 'vue'
 import { publicAnswerText } from '@/services/publicAnswerStream'
 import { readReportedTokenUsage } from '@/services/tokenUsage'
 import type { InferenceRequest, InferenceResult } from './types'
+import { readContextBudget } from './contextBudget'
 import { readLocalFailureDiagnostic, describeLocalFailureDiagnostic, type LocalFailureDiagnostic } from './localFailure'
 
 export type RuntimeDiagnostics = {
@@ -41,10 +42,11 @@ export const LOCAL_FAILURE_STAGE_LABELS: Record<LocalFailureDiagnostic['stage'],
 
 /** Only a fixed diagnostic projection is copied; never the observation's output, roles, events or raw data. */
 export function localModelDiagnosticCopy(
-  observation: Readonly<Pick<ModelObservation, 'model' | 'state' | 'failure'>>
+  observation: Readonly<Pick<ModelObservation, 'model' | 'state' | 'failure' | 'budget'>>
 ): string {
   const failure = observation.state === 'error' ? readLocalFailureDiagnostic(observation.failure) : null
   const value = (field: string | number | undefined) => field ?? 'nicht ermittelt'
+  const budget = readContextBudget(observation.budget)
   return [
     'Luczor – lokale Modelldiagnose',
     `Modell: ${observation.model.replace(/[\u0000-\u001f\u007f]/gu, ' ').slice(0, 160)}`,
@@ -58,6 +60,13 @@ export function localModelDiagnosticCopy(
     `Kontextfenster (erfasst): ${value(failure?.contextTokens)}`,
     `Ausgabelimit (Tokens, erfasst): ${value(failure?.outputTokens)}`,
     ...(failure ? [`Einordnung: ${describeLocalFailureDiagnostic(failure)}`] : []),
+    ...(budget
+      ? [
+          `Kontextplanung (geschätzt): ${budget.estimatedInputTokens} · Ziel: ${budget.targetTokens}`,
+          `Anteile (geschätzt): Regeln ${budget.categories.rules} · Profil ${budget.categories.profile} · Wissen ${budget.categories.knowledge} · Verlauf ${budget.categories.history} · Werkzeuge ${budget.categories.tools}`,
+          `Historische Nachrichten als Auszüge: ${budget.summarizedMessages} · Werkzeugergebnisse gekürzt: ${budget.shortenedToolResults}`,
+        ]
+      : []),
   ].join('\n')
 }
 
@@ -82,7 +91,7 @@ export function createLocalModelDiagnostics(now = Date.now) {
       toolCount: 0,
       finishReason: '',
       runtime: {},
-      budget: budget ? structuredClone(budget) : undefined,
+      budget: readContextBudget(budget),
       roles: ['system', 'user', 'assistant', 'tool'].map(role => {
         const selected = messages.filter(message => message.role === role)
         return {
@@ -174,6 +183,7 @@ export function createLocalModelDiagnostics(now = Date.now) {
         finishReason: run.finishReason,
         usage: run.usage ? { ...run.usage } : undefined,
         context: run.context ? { ...run.context } : undefined,
+        budget: readContextBudget(run.budget),
         runtime: { ...run.runtime },
       }))
   }
@@ -221,6 +231,7 @@ export function createLocalModelDiagnostics(now = Date.now) {
         roles: [],
         events: [],
         usage: readReportedTokenUsage(item.usage),
+        budget: readContextBudget(item.budget),
         context: contextNumbers.every(value => value !== null)
           ? {
               inputTokens: contextNumbers.at(0)!,

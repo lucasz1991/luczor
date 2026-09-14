@@ -2,6 +2,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
+import { fitRequestContext } from '@/services/inference/contextBudget'
 import { loadPendingTaskCreates, replacePendingTaskCreates } from '@/services/agents/taskCreateRecoveryLedger'
 import Settings from './components/Settings.vue'
 import DeviceClusterPanel from './components/DeviceClusterPanel.vue'
@@ -172,7 +173,6 @@ import { useAutoScroll } from '@/composables/useAutoScroll'
 import { useChatComposer, type ComposerInputSource } from '@/composables/useChatComposer'
 import {
   clampNumber,
-  compactHistory,
   localConversationHistory,
   composeProviderSystemPrompt,
   formatChatTime,
@@ -1767,14 +1767,13 @@ async function executeChatTurn(
       400,
       12000
     )
-    // The laptop profile has an 8k context window. Reduce history and
-    // retrieved project context before native tokenization, rather than
-    // relying on the runtime to recover after a complete prompt is built.
+    // Retain originals locally. The per-request budget selects excerpts later.
     const localHistory = normalizeConversationHistory(fullHistory)
     const experimentalFlashNext = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
-    const history = normalizeConversationHistory(
-      compactHistory(normalizeConversationHistory(fullHistory), historyBudget)
-    )
+    const history = fitRequestContext(normalizeConversationHistory(fullHistory), [], {
+      targetTokens: historyBudget,
+      summarizeWithoutReader: true,
+    }).messages
 
     const contextFragments: PromptFragment[] = []
     const recentToolContext = buildRecentToolOutcomeContext(

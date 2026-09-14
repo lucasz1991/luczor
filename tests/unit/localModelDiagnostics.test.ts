@@ -22,6 +22,27 @@ const result = {
 }
 
 describe('local model observation boundary', () => {
+  it('shares and copies numeric context categories without extra fields or prompt text', () => {
+    const budget = {
+      estimatedInputTokens: 1200,
+      targetTokens: 4000,
+      overTarget: false,
+      summarizedMessages: 8,
+      shortenedToolResults: 1,
+      categories: { rules: 200, profile: 100, knowledge: 300, history: 500, tools: 100, secret: 'private-category' },
+      prompt: 'private-prompt',
+    }
+    const source = createLocalModelDiagnostics()
+    source.begin('local', [], budget)
+    const target = createLocalModelDiagnostics()
+    target.acceptNumericSnapshot(source.numericSnapshot())
+    const observation = target.state.runs[0]!
+    expect(observation.budget?.categories.history).toBe(500)
+    expect(localModelDiagnosticCopy(observation)).toContain('Kontextplanung (geschätzt): 1200')
+    expect(JSON.stringify(target.state)).not.toContain('private-')
+    target.acceptNumericSnapshot([{ ...source.numericSnapshot()[0], budget: { ...budget, targetTokens: NaN } }])
+    expect(target.state.runs[0]?.budget).toBeUndefined()
+  })
   it('retains only validated failure fields and copies a fixed diagnostic without conversation data', () => {
     const monitor = createLocalModelDiagnostics()
     const run = monitor.begin('Laptop Qwen3-4B', [

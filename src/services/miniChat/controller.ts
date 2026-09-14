@@ -5,7 +5,11 @@ import type { LuczorMode, WireMessage } from '@/services/inference/types'
 import { createChatActivity, finishChatActivity, updateChatActivity } from '@/services/chatActivity'
 import { presentEnvelopeStream } from '@/services/envelope'
 import { completedCommentary } from '@/services/chatCommentary'
-import { localConversationHistory, normalizeConversationHistory, previewToolArguments } from '@/services/chatPresentation'
+import {
+  localConversationHistory,
+  normalizeConversationHistory,
+  previewToolArguments,
+} from '@/services/chatPresentation'
 import { executionGate } from '@/services/executionGate'
 import { isThinkingTier } from '@/services/inference/thinking'
 import { captureThinking, thinkingSettings } from '@/services/inference/thinkingSettings'

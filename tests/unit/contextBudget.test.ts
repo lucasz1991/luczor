@@ -6,7 +6,11 @@ import type { WireMessage } from '@/services/inference/types'
 describe('shared request budget and evidence retention', () => {
   it('compacts complete old rounds, retains the current request and can retrieve exact originals', async () => {
     const history: WireMessage[] = [{ role: 'system', content: 'Never repeat confirmed changes.' }]
-    for (let i = 0; i < 30; i++) history.push({ role: 'user', content: `Requirement ${i}: ` + 'detail '.repeat(500) }, { role: 'assistant', content: 'Unverified response '.repeat(200) })
+    for (let i = 0; i < 30; i++)
+      history.push(
+        { role: 'user', content: `Requirement ${i}: ` + 'detail '.repeat(500) },
+        { role: 'assistant', content: 'Unverified response '.repeat(200) }
+      )
     history.push({ role: 'user', content: 'Now verify the result.' })
     const before = JSON.stringify(history)
     const result = fitRequestContext(history, [], { targetTokens: 6000, retrievalAvailable: true })
@@ -14,7 +18,7 @@ describe('shared request budget and evidence retention', () => {
     expect(result.report.estimatedInputTokens).toBeLessThan(6000)
     expect(result.messages.at(-1)).toEqual(history.at(-1))
     expect(JSON.stringify(history)).toBe(before)
-    expect(result.messages.some(m => m.content.includes('Assistentenaussage, ungeprüft'))).toBe(true)
+    expect(result.messages.some(message => message.content.includes('Assistentenaussage, ungeprüft'))).toBe(true)
     const focus = focusedTools('Verify', () => history)
     const exact = await focus.reader.execute({ index: 1 }, { projectId: 'p' })
     expect(exact).toMatchObject({ index: 1, text: history[1]!.content })
@@ -22,17 +26,35 @@ describe('shared request budget and evidence retention', () => {
   })
   it('keeps current tool pairs and execution arguments unchanged while returning parseable output', () => {
     const history: WireMessage[] = [
-      { role: 'system', content: 'Policy' }, { role: 'user', content: 'Read file' },
-      { role: 'assistant', content: '', tool_calls: [{ id: 'a', type: 'function', function: { name: 'fs_read', arguments: '{"path":"file.ts"}' } }] },
-      { role: 'tool', tool_call_id: 'a', content: JSON.stringify({ ok: true, path: 'file.ts', content: 'x'.repeat(40000) }) },
+      { role: 'system', content: 'Policy' },
+      { role: 'user', content: 'Read file' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'a', type: 'function', function: { name: 'fs_read', arguments: '{"path":"file.ts"}' } }],
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'a',
+        content: JSON.stringify({ ok: true, path: 'file.ts', content: 'x'.repeat(40000) }),
+      },
     ]
     const result = fitRequestContext(history, [], { targetTokens: 2000 })
     expect(result.messages[2]).toEqual(history[2])
-    expect(JSON.parse(result.messages[3]!.content)).toMatchObject({ truncated: true, projection: { ok: true, path: 'file.ts' } })
+    expect(JSON.parse(result.messages[3]!.content)).toMatchObject({
+      truncated: true,
+      projection: { ok: true, path: 'file.ts' },
+    })
     expect(result.report.shortenedToolResults).toBe(1)
   })
   it('counts profile, knowledge and tool arguments separately and flags unavoidable overflow', () => {
-    const messages: WireMessage[] = [{ role: 'system', content: 'rule [LUCZOR-PROFILE]style[LUCZOR-PROFILE-END][LUCZOR-SCOPE-KONTEXT]data[LUCZOR-SCOPE-KONTEXT-END]' }, { role: 'user', content: 'x'.repeat(40000) }]
+    const messages: WireMessage[] = [
+      {
+        role: 'system',
+        content: 'rule [LUCZOR-PROFILE]style[LUCZOR-PROFILE-END][LUCZOR-SCOPE-KONTEXT]data[LUCZOR-SCOPE-KONTEXT-END]',
+      },
+      { role: 'user', content: 'x'.repeat(40000) },
+    ]
     const tools = [{ type: 'function', function: { name: 'test', parameters: { type: 'object' } } }]
     const breakdown = contextBreakdown(messages, tools)
     expect(breakdown.profile).toBeGreaterThan(0)
@@ -45,16 +67,30 @@ describe('shared request budget and evidence retention', () => {
   it('removes optional knowledge records atomically while retaining workspace authority', () => {
     const workspace = JSON.stringify({ id: 'project-workspace', content: 'unbound' })
     const extra = JSON.stringify({ id: 'low-priority', content: 'x'.repeat(9000) })
-    const result = fitRequestContext([{ role: 'system', content: `[LUCZOR-SCOPE-KONTEXT]\n${workspace}\n${extra}\n[LUCZOR-SCOPE-KONTEXT-END]` }, { role: 'user', content: 'hi' }], [], { targetTokens: 1024 })
+    const result = fitRequestContext(
+      [
+        { role: 'system', content: `[LUCZOR-SCOPE-KONTEXT]\n${workspace}\n${extra}\n[LUCZOR-SCOPE-KONTEXT-END]` },
+        { role: 'user', content: 'hi' },
+      ],
+      [],
+      { targetTokens: 1024 }
+    )
     expect(result.messages[0]!.content).toContain(workspace)
     expect(result.messages[0]!.content).not.toContain('low-priority')
   })
   it('paginates tool discovery and does not lose tools beyond the first page', async () => {
     const focus = focusedTools('hi')
-    const pool = Array.from({ length: 50 }, (_, i) => ({ type: 'function' as const, function: { name: `tool_${i}`, description: 'test', parameters: {} } }))
+    const pool = Array.from({ length: 50 }, (_, i) => ({
+      type: 'function' as const,
+      function: { name: `tool_${i}`, description: 'test', parameters: {} },
+    }))
     focus.select(pool)
     const page = await focus.selector.execute({ offset: 32 }, { projectId: 'p' })
-    expect(page).toMatchObject({ total: 50, nextOffset: 48, available: expect.arrayContaining([expect.objectContaining({ name: 'tool_47' })]) })
+    expect(page).toMatchObject({
+      total: 50,
+      nextOffset: 48,
+      available: expect.arrayContaining([expect.objectContaining({ name: 'tool_47' })]),
+    })
     await focus.selector.execute({ names: ['tool_49'] }, { projectId: 'p' })
     expect(focus.select(pool).some(tool => tool.function.name === 'tool_49')).toBe(true)
   })

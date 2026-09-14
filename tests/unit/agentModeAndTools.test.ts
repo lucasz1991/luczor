@@ -288,6 +288,62 @@ describe('agent mode and tool reliability', () => {
     expect(retry.messages.filter(message => message.role === 'tool')).toHaveLength(1)
   })
 
+  it('allows one tool-format repair in each later round without replaying earlier effects', async () => {
+    const plain = {
+      content: '{"name":"project_get_state","arguments":{}}',
+      toolCalls: [],
+      rawToolCalls: [],
+      finishReason: 'stop',
+    }
+    const next = {
+      ...toolCallResult,
+      content: '',
+      finishReason: 'tool_calls',
+      requestId: 'request-2',
+      toolCalls: [{ id: 'call-2', name: 'project_get_state', arguments: {} }],
+      rawToolCalls: [
+        { id: 'call-2', type: 'function' as const, function: { name: 'project_get_state', arguments: '{}' } },
+      ],
+    }
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(plain)
+      .mockResolvedValueOnce({ ...toolCallResult, content: '', finishReason: 'tool_calls' })
+      .mockResolvedValueOnce(plain)
+      .mockResolvedValueOnce(next)
+      .mockResolvedValueOnce({
+        content: 'Beide Prüfungen abgeschlossen.',
+        toolCalls: [],
+        rawToolCalls: [],
+        finishReason: 'stop',
+      })
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      maxRounds: 3,
+      baseMessages: [{ role: 'user', content: 'Prüfe den Projektzustand zweimal mit Tools.' }],
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(result.interrupted).toBeUndefined()
+    expect(result.finalText).toBe('Beide Prüfungen abgeschlossen.')
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(5)
+    expect(mocks.execute).toHaveBeenCalledTimes(2)
+    expect(mocks.streamChatWithTools.mock.calls[1]![0].toolChoice).toBe('required')
+    expect(mocks.streamChatWithTools.mock.calls[3]![0].toolChoice).toBe('required')
+    const corrected = mocks.streamChatWithTools.mock.calls[3]![0] as InferenceRequest
+    expect(
+      corrected.messages.filter(
+        message =>
+          message.role === 'system' &&
+          message.content?.startsWith('Die vorige Antwort beschrieb einen Werkzeugaufruf nur als Text;')
+      )
+    ).toHaveLength(1)
+    expect(
+      mocks.streamChatWithTools.mock.calls[3]![0].messages.filter(
+        (message: { role: string }) => message.role === 'tool'
+      )
+    ).toHaveLength(1)
+  })
+
   it.each(['status', 'xml'] as const)('does not start a %s correction after cancellation during reset', async kind => {
     const controller = new AbortController()
     mocks.streamChatWithTools.mockResolvedValueOnce({
@@ -403,7 +459,7 @@ describe('agent mode and tool reliability', () => {
   })
   it('loads a requested local tool for the next round without executing it during selection', async () => {
     mocks.toOpenAITools.mockReturnValue(
-      ['project_get_state', 'fs_read'].map(name => ({
+      ['project_get_state', 'fs_read', ...Array.from({ length: 10 }, (_, index) => `extra_${index}`)].map(name => ({
         type: 'function',
         function: { name, description: name, parameters: { type: 'object' } },
       }))

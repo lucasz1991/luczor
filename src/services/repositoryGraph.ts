@@ -229,7 +229,15 @@ export async function buildLocalRepositoryContext(
       text,
       fragments: selected.flatMap(hit => {
         const snippet = snippetsById.get(hit.evidence_id)
-        return snippet ? [{ id: hit.evidence_id, score: hit.score, content: `Datei: ${snippet.relative_path}:${snippet.start_line}-${snippet.end_line}\nHash: ${snippet.content_hash}\n${snippet.content}` }] : []
+        return snippet
+          ? [
+              {
+                id: hit.evidence_id,
+                score: hit.score,
+                content: `Datei: ${snippet.relative_path}:${snippet.start_line}-${snippet.end_line}\nHash: ${snippet.content_hash}\n${snippet.content}`,
+              },
+            ]
+          : []
       }),
       hints: selected.map(hit => ({
         path: hit.relative_path,

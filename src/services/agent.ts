@@ -714,7 +714,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       applyRuntimeMode(externalMessages, currentMode())
       applyRuntimeTools(externalMessages, [], currentMode())
       // Assemble before approval/hash, never mutate an approved provider packet.
-      const fittedExternal = fitRequestContext(externalMessages, [], { targetTokens: 10000, summarizeWithoutReader: true })
+      const fittedExternal = fitRequestContext(externalMessages, [], {
+        targetTokens: 10000,
+        summarizeWithoutReader: true,
+      })
       externalMessages.splice(0, externalMessages.length, ...fittedExternal.messages)
       const approvedRequest = {
         messages: externalMessages,
@@ -862,7 +865,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   const toolOutcomes: ToolOutcomeRecord[] = []
   const toolRecovery = new ToolRecoveryGuard()
   let reasoningRetryUsed = false
-  let textToolRetryUsed = false
+  let textToolRetryRound = -1
   let statusEchoRetries = 0
   const guardTextTools = resolvedRoute.gateway.target === 'local_llama_cpp' && !allowsTextToolExample(latestUserMessage)
   const guardStatusEcho =
@@ -888,7 +891,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   }
   let nextToolChoice: ToolChoice = resolvedRoute.externalOneShot ? 'none' : (requestedToolChoice ?? 'auto')
   const inferenceGateway = resolvedRoute.gateway
-  const focused = inferenceGateway.target === 'local_llama_cpp' && !opts.workflowScope ? focusedTools(latestUserMessage, opts.toolAccess === 'none' ? undefined : () => messages) : undefined
+  const focused =
+    inferenceGateway.target === 'local_llama_cpp' && !opts.workflowScope
+      ? focusedTools(latestUserMessage, opts.toolAccess === 'none' ? undefined : () => messages)
+      : undefined
   if (focused) messages.splice(0, messages.length, ...cleanLocalHistory(messages))
   if (opts.workspaceScope && inferenceGateway.target !== 'local_llama_cpp') {
     throw new Error('Der Workspace-Modus verwendet ausschließlich das lokale Modell.')
@@ -1420,20 +1426,25 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         opts.onResponseReset?.({ round: round + 1 })
         publish('')
         opts.onBudget?.(null)
-        if (!textToolRetryUsed) {
-          textToolRetryUsed = true
+        if (textToolRetryRound !== round) {
+          // One repair per inference round. A later round may need the same
+          // model-format correction after genuine intervening tool progress.
+          textToolRetryRound = round
           // An ambiguous follow-up is not new execution authority; never force a tool for it.
           nextToolChoice =
             synthesisOnly || requestedToolChoice === 'none' ? 'none' : repairTextTools ? 'required' : 'auto'
-          messages.push({
+          const correction: WireMessage = {
             role: 'system',
             content:
               'Die vorige Antwort beschrieb einen Werkzeugaufruf nur als Text; kein Werkzeug wurde ausgeführt. ' +
               (nextToolChoice === 'required'
                 ? 'Erledige den bestehenden Auftrag durch einen echten strukturierten Aufruf eines bereitgestellten Werkzeugs. '
                 : 'Beantworte die Nutzerfrage. Ist der Auftrag unklar, frage nach. Nur bei einem bestehenden freigegebenen Auftrag dürfen verfügbare Werkzeuge strukturiert aufgerufen werden. ') +
-              'Kein XML, kein JSON-Codebeispiel und keine erfundenen Ergebnisse. Bereits erfolgreiche Aktionen nicht wiederholen.',
-          })
+              'Verwende für Aufrufe das Werkzeugformat der aktiven Chatvorlage, nicht ein Codebeispiel im Antworttext. Erfinde keine Ergebnisse. Bereits erfolgreiche Aktionen nicht wiederholen.',
+          }
+          if (!messages.some(message => message.role === 'system' && message.content === correction.content)) {
+            messages.push(correction)
+          }
           opts.onProgress?.({ phase: 'regenerating', round: round + 1, attempt: 1 })
           round-- // One bounded repair of this round, not another user/tool execution.
           continue
@@ -1603,8 +1614,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         throw new DOMException('Aborted', 'AbortError')
       }
       const selectedTool =
-        ['tools_select', 'context_read_history'].includes(call.name) && focused && availableTools.some(tool => tool.function.name === call.name)
-          ? call.name === 'tools_select' ? focused.selector : focused.reader
+        ['tools_select', 'context_read_history'].includes(call.name) &&
+        focused &&
+        availableTools.some(tool => tool.function.name === call.name)
+          ? call.name === 'tools_select'
+            ? focused.selector
+            : focused.reader
           : call.name === GOAL_REPORT_NAME
             ? goalReportTool
             : call.name === GOAL_READ_RESULT_NAME

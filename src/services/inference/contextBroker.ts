@@ -150,7 +150,8 @@ function canonical(value: string): string {
 }
 
 function compare(left: ScopedContextFragment, right: ScopedContextFragment): number {
-  const mandatory = (fragment: ScopedContextFragment) => ['project-identity', 'project-workspace', 'local-workspace-path', 'project-overall-goal'].includes(fragment.id)
+  const mandatory = (fragment: ScopedContextFragment) =>
+    ['project-identity', 'project-workspace', 'local-workspace-path', 'project-overall-goal'].includes(fragment.id)
   return (
     Number(mandatory(right)) - Number(mandatory(left)) ||
     Number(right.priority ?? 0) - Number(left.priority ?? 0) ||

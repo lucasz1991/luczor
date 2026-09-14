@@ -3943,6 +3943,11 @@ fn stream_completion_with_diagnostics(
         &mut body,
         model.artifact.as_ref().map(|a| a.sha256.as_str()),
     );
+    generation_safety::apply_required_tool_prefix(
+        &mut body,
+        model.artifact.as_ref().map(|a| a.sha256.as_str()),
+        &props,
+    );
     let tokenizer_client = local_http_client(Duration::from_secs(15), Duration::from_secs(15))?;
     let started = Instant::now();
     let mut measured_input = 0;
