@@ -91,7 +91,7 @@ function close() {
   display: grid;
   place-items: center;
   padding: 24px;
-  background: rgba(4, 6, 12, 0.64);
+  background: var(--overlay-bg, rgba(4, 6, 12, 0.64));
   backdrop-filter: blur(8px);
 }
 .tool-center-panel {
@@ -101,17 +101,17 @@ function close() {
   max-height: min(820px, calc(100vh - 32px));
   overflow: hidden;
   border: 1px solid var(--border-color, #384154);
-  border-radius: 18px;
+  border-radius: var(--r-xl, 18px);
   background: var(--surface-1, #171a22);
   color: var(--text-primary, #eef2ff);
-  box-shadow: 0 28px 100px #0009;
+  box-shadow: var(--shadow-panel, 0 28px 100px #0009);
 }
 .tool-center-header {
   display: flex;
   justify-content: space-between;
   gap: 24px;
   padding: 24px 26px 18px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  border-bottom: 1px solid var(--g-edge-2, rgba(255, 255, 255, 0.08));
 }
 .tool-center-kicker {
   font: 10px var(--font-mono, monospace);
@@ -133,8 +133,8 @@ function close() {
   width: 34px;
   height: 34px;
   border: 1px solid var(--border-color, #384154);
-  border-radius: 9px;
-  background: transparent;
+  border-radius: var(--r-pill, 9px);
+  background: var(--g-fill-1, transparent);
   color: inherit;
   font-size: 21px;
   cursor: pointer;
@@ -145,7 +145,7 @@ function close() {
   display: grid;
   gap: 14px;
 }
-.tool-section-heading {
+.tool-center-panel :deep(.tool-section-heading) {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -155,101 +155,101 @@ function close() {
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
-.tool-section-heading span {
+.tool-center-panel :deep(.tool-section-heading span) {
   display: inline-flex;
   align-items: center;
   gap: 7px;
 }
-.tool-section-heading small {
+.tool-center-panel :deep(.tool-section-heading small) {
   font-size: 9px;
   color: var(--text-faint, #6f788d);
 }
-.tool-approval-drawer,
-.tool-artifact-picker {
+.tool-center-panel :deep(.tool-approval-drawer),
+.tool-center-panel :deep(.tool-artifact-picker) {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
   padding: 10px 20px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid var(--g-edge-2, rgba(255, 255, 255, 0.06));
   font-size: 11px;
   color: var(--text-muted, #aeb7ca);
 }
-.tool-approval-drawer span {
+.tool-center-panel :deep(.tool-approval-drawer span) {
   color: var(--text-faint, #788298);
 }
-.tool-artifact-picker {
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 10px;
+.tool-center-panel :deep(.tool-artifact-picker) {
+  border: 1px solid var(--g-edge-2, rgba(255, 255, 255, 0.08));
+  border-radius: var(--r-md, 10px);
 }
-.tool-artifact-picker small {
+.tool-center-panel :deep(.tool-artifact-picker small) {
   margin-left: auto;
   color: var(--text-faint, #788298);
   font: 9px var(--font-mono, monospace);
 }
-.tool-artifact-picker button,
+.tool-center-panel :deep(.tool-artifact-picker button),
 .tool-center-footer button,
-.tool-stop {
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 7px;
+.tool-center-panel :deep(.tool-stop) {
+  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.14));
+  border-radius: var(--r-pill, 7px);
   padding: 5px 8px;
   background: transparent;
   color: inherit;
   font-size: 10px;
   cursor: pointer;
 }
-.tool-run-inspector,
-.model-control-panel,
+.tool-center-panel :deep(.tool-run-inspector),
+.tool-center-panel :deep(.model-control-panel),
 .tool-capabilities {
   padding: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.018);
+  border: 1px solid var(--g-edge-2, rgba(255, 255, 255, 0.08));
+  border-radius: var(--r-md, 12px);
+  background: var(--g-fill-1, rgba(255, 255, 255, 0.018));
 }
-.tool-run-row {
+.tool-center-panel :deep(.tool-run-row) {
   display: flex;
   align-items: center;
   justify-content: space-between;
   padding: 8px 0;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--g-edge-2, rgba(255, 255, 255, 0.06));
 }
-.tool-run-row div {
+.tool-center-panel :deep(.tool-run-row div) {
   display: grid;
   gap: 2px;
 }
-.tool-run-row small,
-.tool-empty {
+.tool-center-panel :deep(.tool-run-row small),
+.tool-center-panel :deep(.tool-empty) {
   font-size: 10px;
   color: var(--text-faint, #788298);
 }
-.tool-empty {
+.tool-center-panel :deep(.tool-empty) {
   margin: 0;
 }
-.tool-stop {
-  color: #fca5a5;
+.tool-center-panel :deep(.tool-stop) {
+  color: var(--ai-red, #fca5a5);
 }
-.model-control-grid {
+.tool-center-panel :deep(.model-control-grid) {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 9px;
 }
-.model-control-grid label {
+.tool-center-panel :deep(.model-control-grid label) {
   display: grid;
   gap: 5px;
   font-size: 10px;
   color: var(--text-muted, #aeb7ca);
 }
-.model-control-grid input,
-.model-control-grid select {
+.tool-center-panel :deep(.model-control-grid input),
+.tool-center-panel :deep(.model-control-grid select) {
   min-width: 0;
-  border: 1px solid rgba(255, 255, 255, 0.12);
-  border-radius: 7px;
+  border: 1px solid var(--border-soft, rgba(255, 255, 255, 0.12));
+  border-radius: var(--r-sm, 7px);
   padding: 7px;
-  background: rgba(0, 0, 0, 0.14);
+  background: var(--g-fill-2, rgba(0, 0, 0, 0.14));
   color: inherit;
   font: 11px var(--font-mono, monospace);
 }
-.model-control-wide {
+.tool-center-panel :deep(.model-control-wide) {
   grid-column: span 2;
 }
 .tool-capabilities-grid {
@@ -257,54 +257,54 @@ function close() {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
 }
-.tool-capability-card {
+.tool-center-panel :deep(.tool-capability-card) {
   display: flex;
   gap: 10px;
   padding: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.018);
+  border: 1px solid var(--g-edge-2, rgba(255, 255, 255, 0.08));
+  border-radius: var(--r-md, 10px);
+  background: var(--g-fill-1, rgba(255, 255, 255, 0.018));
 }
-.tool-capability-card__icon {
+.tool-center-panel :deep(.tool-capability-card__icon) {
   display: grid;
   place-items: center;
   width: 28px;
   height: 28px;
   flex: 0 0 28px;
   border-radius: 8px;
-  background: rgba(167, 139, 250, 0.12);
+  background: var(--cy-12, rgba(167, 139, 250, 0.12));
   color: var(--ai-accent, #a78bfa);
 }
-.tool-capability-card__body {
+.tool-center-panel :deep(.tool-capability-card__body) {
   min-width: 0;
 }
-.tool-capability-card__top {
+.tool-center-panel :deep(.tool-capability-card__top) {
   display: flex;
   justify-content: space-between;
   gap: 8px;
 }
-.tool-capability-card__top strong {
+.tool-center-panel :deep(.tool-capability-card__top strong) {
   font-size: 11px;
   font-weight: 600;
 }
-.tool-capability-card__top span {
+.tool-center-panel :deep(.tool-capability-card__top span) {
   font-size: 9px;
   color: var(--text-faint, #788298);
   white-space: nowrap;
 }
-.tool-capability-card small {
+.tool-center-panel :deep(.tool-capability-card small) {
   display: block;
   margin-top: 3px;
   color: var(--text-faint, #788298);
   font: 9px var(--font-mono, monospace);
 }
-.tool-capability-card p {
+.tool-center-panel :deep(.tool-capability-card p) {
   margin: 6px 0 0;
   color: var(--text-muted, #aeb7ca);
   font-size: 10px;
   line-height: 1.45;
 }
-.tool-capability-card[data-access='stopped'] {
+.tool-center-panel :deep(.tool-capability-card[data-access='stopped']) {
   opacity: 0.55;
 }
 .tool-center-footer {
@@ -312,7 +312,7 @@ function close() {
   justify-content: space-between;
   gap: 16px;
   padding: 12px 20px;
-  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  border-top: 1px solid var(--g-edge-2, rgba(255, 255, 255, 0.08));
   color: var(--text-faint, #788298);
   font-size: 10px;
 }
@@ -327,10 +327,10 @@ function close() {
   .tool-capabilities-grid {
     grid-template-columns: 1fr;
   }
-  .model-control-grid {
+  .tool-center-panel :deep(.model-control-grid) {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  .model-control-wide {
+  .tool-center-panel :deep(.model-control-wide) {
     grid-column: span 2;
   }
   .tool-center-footer {

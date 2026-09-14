@@ -36,7 +36,11 @@ const reason = computed(() => {
   const state = idleOptimizationStatus.value
   if (!idleOptimizationEnabled.value) return 'Ausgeschaltet'
   if (state?.phase === 'running')
-    return state.task === 'repository' ? 'Analysiert den lokalen Repository-Graphen' : state.task === 'memory' ? 'Analysiert Erinnerungen aus lokalem Speicher, SQL und Cognee' : 'Optimiert den Projektkontext'
+    return state.task === 'repository'
+      ? 'Analysiert den lokalen Repository-Graphen'
+      : state.task === 'memory'
+        ? 'Analysiert Erinnerungen aus lokalem Speicher, SQL und Cognee'
+        : 'Optimiert den Projektkontext'
   if (state?.phase === 'committing')
     return state.task === 'memory'
       ? 'Speichert den unbestätigten Erinnerungsvorschlag'
@@ -82,8 +86,8 @@ function startNow() {
       <div>
         <div class="lz-card__title">Kontext im Leerlauf optimieren</div>
         <p class="lz-hint">
-          Die lokale KI prüft Projektkontext, den lokalen Repository-Graphen und erreichbare Erinnerungen einschließlich SQL und Cognee.
-          Dein nächster Chat hat Vorrang.
+          Die lokale KI prüft Projektkontext, den lokalen Repository-Graphen und erreichbare Erinnerungen einschließlich
+          SQL und Cognee. Dein nächster Chat hat Vorrang.
         </p>
       </div>
       <button
@@ -105,13 +109,17 @@ function startNow() {
       >
     </p>
     <p v-if="idleMemoryMaintenance !== 'idle'" class="lz-hint" role="status">
-      {{ idleMemoryMaintenance === 'scheduled'
-        ? 'Cognee: Serveroptimierung eingereiht; Abschluss noch nicht bestätigt.'
-        : idleMemoryMaintenance === 'not_scheduled'
-          ? 'Cognee: Kein neuer Auftrag eingereiht (laufender Auftrag, Wartezeit oder deaktiviert).'
-          : 'Cognee: Serveroptimierung aktuell nicht erreichbar oder nicht freigegeben.' }}
+      {{
+        idleMemoryMaintenance === 'scheduled'
+          ? 'Cognee: Serveroptimierung eingereiht; Abschluss noch nicht bestätigt.'
+          : idleMemoryMaintenance === 'not_scheduled'
+            ? 'Cognee: Kein neuer Auftrag eingereiht (laufender Auftrag, Wartezeit oder deaktiviert).'
+            : 'Cognee: Serveroptimierung aktuell nicht erreichbar oder nicht freigegeben.'
+      }}
     </p>
-    <p class="lz-hint">Repository: {{ idleRepositoryStatus }}. Die KI verwendet den aktuellen lokalen Index und belegte Quellausschnitte.</p>
+    <p class="lz-hint">
+      Repository: {{ idleRepositoryStatus }}. Die KI verwendet den aktuellen lokalen Index und belegte Quellausschnitte.
+    </p>
     <button
       type="button"
       class="lz-btn lz-btn--ghost"
@@ -121,11 +129,12 @@ function startNow() {
       {{ requesting ? 'Startet…' : 'Nächste Prüfung jetzt starten' }}
     </button>
     <p class="lz-hint">
-      Nach 10 Minuten ohne Eingabe läuft die Hintergrundarbeit ohne Gesamtlaufzeitlimit in einzelnen KI-Prüfungen weiter.
-      Neue Themen folgen automatisch; unveränderte Daten werden regelmäßig erneut auf Änderungen geprüft.
-      Ein Chat stoppt die lokale KI-Prüfung und erhält das Modell nach dessen Freigabe. Danach beginnt die Leerlaufzeit neu.
+      Nach 10 Minuten ohne Eingabe läuft die Hintergrundarbeit ohne Gesamtlaufzeitlimit in einzelnen KI-Prüfungen
+      weiter. Neue Themen folgen automatisch; unveränderte Daten werden regelmäßig erneut auf Änderungen geprüft. Ein
+      Chat stoppt die lokale KI-Prüfung und erhält das Modell nach dessen Freigabe. Danach beginnt die Leerlaufzeit neu.
       Die Servereinstellung für Erinnerungen gilt weiterhin. Private KI-Vorschläge bleiben zur Prüfung auf diesem Gerät.
-      Cognee optimiert seine vorhandenen Serverdaten separat; ein eingereihter Serverauftrag läuft unabhängig vom lokalen Chat.
+      Cognee optimiert seine vorhandenen Serverdaten separat; ein eingereihter Serverauftrag läuft unabhängig vom
+      lokalen Chat.
     </p>
     <p v-if="error" role="alert">{{ error }}</p>
   </div>

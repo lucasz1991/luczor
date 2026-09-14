@@ -152,6 +152,12 @@ html[data-theme] #system-panel.system-status-panel[data-mode='dashboard'],
 html[data-theme] #system-panel.system-status-panel[data-native-window='true'] {
   border-radius: 0;
 }
+/* Tailwind's preflight zeroes every margin, which pins showModal() dialogs to the top-left corner. */
+html[data-theme] dialog.agent-hub[open],
+html[data-theme] dialog.planning-workspace[open],
+html[data-theme] dialog.wf-workspace[open] {
+  margin: auto;
+}
 html[data-theme] dialog.agent-hub[open]::backdrop,
 html[data-theme] dialog.planning-workspace[open]::backdrop,
 html[data-theme] dialog.wf-workspace[open]::backdrop {
@@ -494,6 +500,126 @@ html[data-theme] input:-webkit-autofill:focus {
   -webkit-box-shadow: 0 0 0 1000px var(--bg-sunken) inset;
   -webkit-text-fill-color: var(--text-primary);
   caret-color: var(--text-primary);
+}
+
+/* ---------- conversation: turn timeline + messages (design board §A) ---------- */
+/* Message header as a quiet eyebrow: uppercase author, mono timestamp. */
+html[data-theme] .ai-message > header {
+  margin-bottom: 12px;
+}
+html[data-theme] .ai-message > header strong {
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+html[data-theme] .ai-message > header time {
+  font-family: var(--font-mono);
+  color: var(--text-faint);
+}
+html[data-theme] .ai-message__avatar {
+  border-radius: var(--r-pill);
+  background: var(--g-bg-2);
+  border-color: var(--g-edge-2);
+  box-shadow: inset 0 1px 0 var(--g-edge);
+}
+/* Assistant turns hang off a thin accent rule instead of a box. */
+html[data-theme] .ai-message--assistant {
+  padding-left: 14px;
+  border-left: 1px solid var(--cy-22);
+}
+html[data-theme] .ai-message--assistant.is-running {
+  border-left-color: var(--cy-bright);
+}
+html[data-theme] .ai-message--user .ai-message__user-text {
+  max-width: 74%;
+}
+/* Timeline rows: hairline separators, no background, no radius; status in mono. */
+html[data-theme] .chat-turn-timeline__activity,
+html[data-theme] .ai-thinking .ai-trace__row,
+html[data-theme] .ai-tool summary {
+  border-radius: 0;
+  background: transparent;
+  padding-left: 2px;
+  padding-right: 2px;
+}
+html[data-theme] .chat-turn-timeline ol > li + li,
+html[data-theme] .ai-thinking .ai-trace__row + .ai-trace__row {
+  border-top: 1px solid var(--g-edge-2);
+}
+html[data-theme] .chat-turn-timeline ol {
+  gap: 0;
+}
+html[data-theme] .chat-turn-timeline__activity[data-status='running'],
+html[data-theme] .ai-tool[data-status='running'] summary,
+html[data-theme] .ai-tool summary:hover,
+html[data-theme] .ai-tool[open] summary {
+  background: transparent;
+}
+html[data-theme] .chat-turn-timeline__status,
+html[data-theme] .ai-trace__status,
+html[data-theme] .ai-tool__status {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+}
+html[data-theme] .ai-tool__capability,
+html[data-theme] .ai-tool__retention {
+  font-family: var(--font-mono);
+}
+html[data-theme] .ai-tool summary::after {
+  right: 2px;
+  left: 2px;
+}
+/* Working state: label row plus a full-width accent sweep underneath. */
+html[data-theme] .ai-loading {
+  display: flex;
+  flex-wrap: wrap;
+  row-gap: 8px;
+  width: 100%;
+}
+html[data-theme] .ai-loading .ai-time {
+  margin-left: auto;
+  color: var(--cy-bright);
+}
+html[data-theme] .ai-loading.is-active::after {
+  content: '';
+  flex-basis: 100%;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, transparent, var(--cy) 40%, var(--cy-bright) 60%, transparent);
+  background-size: 34% 100%;
+  background-repeat: no-repeat;
+  background-position-x: -34%;
+  animation: lg-sweep 1.9s var(--ease) infinite;
+}
+@keyframes lg-sweep {
+  to {
+    background-position-x: 134%;
+  }
+}
+/* Error / notice cards: red edge, faint tint, rounded. */
+html[data-theme] .ai-notice,
+html[data-theme] .wf-error,
+html[data-theme] .model-switch-alert,
+html[data-theme] .mini-error {
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--ai-red) 25%, transparent);
+  border-left: 3px solid var(--ai-red);
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--ai-red) 5%, transparent);
+}
+html[data-theme] .ai-notice {
+  border-color: color-mix(in srgb, var(--ai-orange) 25%, transparent);
+  border-left-color: var(--ai-orange);
+  background: color-mix(in srgb, var(--ai-orange) 5%, transparent);
+}
+html[data-theme] .wf-notice {
+  padding: 10px 14px;
+  border: 1px solid var(--g-edge-2);
+  border-left: 3px solid var(--cy);
+  border-radius: var(--r-sm);
+  background: var(--g-fill-1);
 }
 
 /* ---------- accessibility ---------- */

@@ -252,7 +252,7 @@ export class IdleContextOptimizer {
       this.publish({ phase: 'yielding', reason })
       controller.abort(aborted())
     }
-    const timeout = setTimeout(() => abort('timeout'), this.options.timeoutMs)
+    let timeout: ReturnType<typeof setTimeout> | undefined
     const monitorEligibility = () => {
       monitor = setTimeout(async () => {
         try {
@@ -292,7 +292,14 @@ export class IdleContextOptimizer {
         this.publish({ phase: 'paused', reason: 'invalid_context' })
         return
       }
-      const completedKey = JSON.stringify([job.boundary, job.principalId, job.scope, job.projectId, job.key])
+      const completedKey = JSON.stringify([
+        job.boundary,
+        job.principalId,
+        job.scope,
+        job.projectId,
+        job.key,
+        job.fingerprint,
+      ])
       if (this.completedFingerprints.get(completedKey) === job.fingerprint) {
         this.publish({ phase: 'paused', reason: 'unchanged_context' })
         return
@@ -304,8 +311,13 @@ export class IdleContextOptimizer {
         this.publish({ phase: 'paused', reason: 'boundary_changed' })
         return
       }
-      this.publish({ phase: 'running', task: job.task ?? (job.scope === 'project' ? 'context' : 'memory'), reason: null })
+      this.publish({
+        phase: 'running',
+        task: job.task ?? (job.scope === 'project' ? 'context' : 'memory'),
+        reason: null,
+      })
       monitorEligibility()
+      timeout = setTimeout(() => abort('timeout'), this.options.timeoutMs)
       const content = (await this.dependencies.runLocal(job, signal)).trim()
       signal.throwIfAborted()
       if (!content || content.length > MAX_CANDIDATE_CHARS) throw new Error('invalid_candidate')
@@ -339,9 +351,10 @@ export class IdleContextOptimizer {
       finished = true
       clearTimeout(timeout)
       if (monitor !== undefined) clearTimeout(monitor)
-      const delay = this.state.reason === 'candidate_ready'
-        ? (this.options.successfulIntervalMs ?? this.options.intervalMs)
-        : this.options.intervalMs
+      const delay =
+        this.state.reason === 'candidate_ready'
+          ? (this.options.successfulIntervalMs ?? this.options.intervalMs)
+          : this.options.intervalMs
       this.earliestCycle = Math.max(this.earliestCycle, this.now() + delay)
     }
   }

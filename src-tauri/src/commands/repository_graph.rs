@@ -7,12 +7,57 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex, OnceLock,
+};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, Runtime};
 use tree_sitter::{Language, Node, Parser};
 use uuid::Uuid;
 
 const MAX_FILES: usize = 100_000;
+type IndexCancellationKey = (String, String, String);
+static INDEX_CANCELLATIONS: OnceLock<Mutex<HashMap<IndexCancellationKey, Arc<AtomicBool>>>> =
+    OnceLock::new();
+
+fn index_cancellation(
+    principal: &str,
+    project: &str,
+    request: &str,
+) -> Result<Arc<AtomicBool>, String> {
+    validate_principal_id(principal)?;
+    validate_project_id(project)?;
+    Uuid::parse_str(request).map_err(|_| "Invalid index request ID.".to_string())?;
+    let mut entries = INDEX_CANCELLATIONS
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| "Index cancellation unavailable.".to_string())?;
+    let key = (
+        principal.to_string(),
+        project.to_string(),
+        request.to_string(),
+    );
+    if entries.len() >= 128 && !entries.contains_key(&key) {
+        return Err("Too many pending index requests.".into());
+    }
+    Ok(entries
+        .entry(key)
+        .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+        .clone())
+}
+
+#[tauri::command]
+pub fn local_graph_cancel_index(
+    window: crate::commands::CallerWebview,
+    principal_id: String,
+    project_id: String,
+    request_id: String,
+) -> Result<(), String> {
+    ensure_main_webview(&window)?;
+    index_cancellation(&principal_id, &project_id, &request_id)?.store(true, Ordering::Release);
+    Ok(())
+}
 const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_RUN_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_RUN_TIME: Duration = Duration::from_secs(15 * 60);
@@ -161,11 +206,25 @@ pub async fn local_graph_index(
     app: AppHandle,
     principal_id: String,
     project_id: String,
+    request_id: Option<String>,
 ) -> Result<GraphIndexResult, String> {
     ensure_main_webview(&window)?;
-    tauri::async_runtime::spawn_blocking(move || index_repository(&app, &principal_id, &project_id))
-        .await
-        .map_err(|error| format!("Repository indexing task failed: {error}"))?
+    let cancellation = request_id
+        .as_ref()
+        .map(|id| index_cancellation(&principal_id, &project_id, id))
+        .transpose()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let result =
+            index_repository_cancellable(&app, &principal_id, &project_id, cancellation.as_deref());
+        if let Some(id) = request_id {
+            if let Ok(mut entries) = INDEX_CANCELLATIONS.get_or_init(Default::default).lock() {
+                entries.remove(&(principal_id, project_id, id));
+            }
+        }
+        result
+    })
+    .await
+    .map_err(|error| format!("Repository indexing task failed: {error}"))?
 }
 
 #[tauri::command]
@@ -312,10 +371,20 @@ fn bind_repository<D: GraphDatabaseProvider>(
     })
 }
 
+#[cfg(test)]
 fn index_repository<D: GraphDatabaseProvider>(
     app: &D,
     principal_id: &str,
     project_id: &str,
+) -> Result<GraphIndexResult, String> {
+    index_repository_cancellable(app, principal_id, project_id, None)
+}
+
+fn index_repository_cancellable<D: GraphDatabaseProvider>(
+    app: &D,
+    principal_id: &str,
+    project_id: &str,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<GraphIndexResult, String> {
     validate_principal_id(principal_id)?;
     validate_project_id(project_id)?;
@@ -340,7 +409,7 @@ fn index_repository<D: GraphDatabaseProvider>(
         )
         .map_err(db_error)?;
 
-    match perform_index(app, &bound, &run_id) {
+    match perform_index(app, &bound, &run_id, cancellation) {
         Ok(result) => Ok(result),
         Err(error) => {
             if let Ok(connection) = open_database(app) {
@@ -369,6 +438,7 @@ fn perform_index<D: GraphDatabaseProvider>(
     app: &D,
     bound: &BoundRepository,
     run_id: &str,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<GraphIndexResult, String> {
     let started = Instant::now();
     let git = read_git_state(&bound.root_path);
@@ -394,6 +464,9 @@ fn perform_index<D: GraphDatabaseProvider>(
         .filter_entry(|entry| !is_hard_excluded(entry));
 
     for entry in builder.build() {
+        if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+            return Err("Repository indexing paused for foreground work.".into());
+        }
         if started.elapsed() > MAX_RUN_TIME {
             return Err("Repository indexing exceeded the 15 minute safety limit.".into());
         }
@@ -474,6 +547,9 @@ fn perform_index<D: GraphDatabaseProvider>(
     }
 
     let deleted = unseen.len();
+    if cancellation.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err("Repository indexing paused for foreground work.".into());
+    }
     for relative in unseen {
         delete_file(&tx, &bound.principal_id, &bound.repository_id, &relative)?;
     }
@@ -2850,6 +2926,16 @@ mod tests {
         assert!(alpha_index.symbols >= 3);
         assert_eq!(alpha_index.branch.as_deref(), Some("main"));
         assert_eq!(alpha_index.commit_sha.as_deref(), Some(CONTRACT_COMMIT_A));
+
+        let cancelled = AtomicBool::new(true);
+        let result = index_repository_cancellable(app, principal_alpha, project, Some(&cancelled));
+        assert!(result.unwrap_err().contains("paused for foreground"));
+        let connection = open_database(app).expect("read cancelled index");
+        let counts = repository_counts(&connection, principal_alpha, &alpha_binding.repository_id)
+            .expect("existing index survived");
+        assert_eq!(counts.0 as usize, alpha_index.files);
+        index_repository(app, principal_alpha, project)
+            .expect("resume indexing after cancellation");
 
         let alpha_status = graph_status(app, principal_alpha, project).expect("alpha ready status");
         assert_eq!(alpha_status.status, "ready");

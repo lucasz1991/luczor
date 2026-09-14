@@ -172,6 +172,7 @@ describe('idle optimizer lifecycle and invalidation', () => {
   it('treats actual keyboard and pointer input as activity without reacting to pointer movement', async () => {
     const harness = setup()
     await harness.mount()
+    fixture.phase = 'waiting'
     fixture.interrupt.mockClear()
     document.dispatchEvent(new Event('pointermove'))
     expect(fixture.interrupt).not.toHaveBeenCalled()
@@ -179,6 +180,12 @@ describe('idle optimizer lifecycle and invalidation', () => {
     document.dispatchEvent(new Event('keydown'))
     expect(fixture.interrupt).toHaveBeenCalledTimes(2)
     expect(fixture.interrupt).toHaveBeenLastCalledWith('activity')
+    fixture.phase = 'running'
+    fixture.interrupt.mockClear()
+    document.dispatchEvent(new Event('pointerdown'))
+    expect(fixture.interrupt).not.toHaveBeenCalled()
+    harness.sources.draft = 'A new chat request'
+    expect(fixture.interrupt).toHaveBeenCalledWith('activity')
   })
 
   it('pauses throughout the actual API identity-changing interval and retains ordinary busy state afterwards', async () => {

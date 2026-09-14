@@ -108,6 +108,28 @@ export async function repositoryGraphStatus(principalId: string, projectId: stri
   return invoke<RepositoryGraphStatus>('local_graph_status', { principalId, projectId })
 }
 
+/** Cancellation waits for the native transaction to roll back before returning. */
+export async function maintainRepositoryIndex(
+  principalId: string,
+  projectId: string,
+  signal: AbortSignal
+): Promise<void> {
+  signal.throwIfAborted()
+  const requestId = crypto.randomUUID()
+  let cancel: Promise<unknown> | undefined
+  const abort = () => {
+    cancel = invoke('local_graph_cancel_index', { principalId, projectId, requestId }).catch(() => undefined)
+  }
+  signal.addEventListener('abort', abort, { once: true })
+  try {
+    await invoke('local_graph_index', { principalId, projectId, requestId })
+    signal.throwIfAborted()
+  } finally {
+    signal.removeEventListener('abort', abort)
+    await cancel
+  }
+}
+
 export async function searchRepository(
   principalId: string,
   projectId: string,

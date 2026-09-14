@@ -25,7 +25,10 @@ export function useIdleOptimization(context: IdleOptimizationContext & { draft()
   const activity = () => optimizer.interrupt('activity')
   // A real idle period means no meaningful input, not merely an unchanged draft.
   // Deliberately avoid pointermove: hovering must not continuously postpone work.
-  const userInteraction = () => activity()
+  const userInteraction = () => {
+    if (['running', 'committing', 'yielding'].includes(optimizer.snapshot().phase)) return
+    activity()
+  }
   const interactionTarget = typeof document === 'undefined' ? null : document
   const changing = () => {
     identityChanging.value = true

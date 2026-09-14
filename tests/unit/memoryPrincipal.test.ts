@@ -97,6 +97,24 @@ describe('desktop memory account isolation', () => {
     vi.unstubAllGlobals()
   })
 
+  it('schedules maintenance using only the bound scope and rejects cancelled or foreign-account work', async () => {
+    await setServerEnabled(true)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const controller = new AbortController()
+    const options = { expectedPrincipalId: harness.currentSnapshot.principalId, signal: controller.signal }
+    harness.fetch.mockResolvedValue(jsonResponse({ ok: true, scheduled: true }))
+    expect(await memory.scheduleImprovement('user', options)).toBe('scheduled')
+    expect(JSON.parse(harness.fetch.mock.calls[0]![1].body)).toEqual({ scope: 'user' })
+    harness.fetch.mockClear()
+    await expect(memory.scheduleImprovement('user', { ...options, expectedPrincipalId: 'foreign' })).rejects.toThrow(
+      'account changed'
+    )
+    controller.abort()
+    await expect(memory.scheduleImprovement('user', options)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(harness.fetch).not.toHaveBeenCalled()
+  })
+
   it('persists explicit named priorities and debounces identical confirmed observations into one server write', async () => {
     await setServerEnabled(true)
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')

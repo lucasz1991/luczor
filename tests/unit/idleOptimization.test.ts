@@ -145,6 +145,7 @@ function fixture() {
     sharedRecall: vi.fn(async () => []),
     improve: vi.fn(async () => 'not_scheduled' as const),
     graphStatus: vi.fn(async () => ({ status: 'unbound' as const, files: 0, symbols: 0, edges: 0, skipped: 0 })),
+    graphIndex: vi.fn(async () => undefined),
     graphSearch: vi.fn(async () => ({ repository_id: 'repo-1', hits: [] })),
     graphSnippets: vi.fn(async () => ({ snippets: [], omitted: [] })),
     remember,
@@ -202,6 +203,59 @@ afterEach(() => {
 })
 
 describe('idle optimization integration', () => {
+  it('includes canonical SQL/Cognee evidence and schedules scoped maintenance without uploading private AI content', async () => {
+    const harness = fixture()
+    vi.mocked(harness.deps.sharedRecall).mockResolvedValue([
+      memory({ id: 'server-7', source: 'cognee_revalidated', content: 'Canonical server decision' }),
+    ])
+    harness.optimizer.start()
+    await vi.advanceTimersByTimeAsync(600_000)
+    expect(JSON.stringify(harness.stream.mock.calls[0]?.[0].messages)).toContain('Canonical server decision')
+    expect(harness.deps.improve).toHaveBeenCalledWith('project', {
+      projectId: 'project-1',
+      expectedPrincipalId: 'account-1',
+      signal: expect.any(AbortSignal),
+    })
+    expect(harness.remember.mock.calls[0]?.[0].visibility).toBe('private')
+    await harness.optimizer.stop()
+  })
+
+  it('updates and analyzes a bound repository after both memory scopes and keeps its proposal private', async () => {
+    const harness = fixture()
+    vi.mocked(harness.deps.graphStatus).mockResolvedValue({
+      status: 'ready',
+      files: 1,
+      symbols: 1,
+      edges: 0,
+      skipped: 0,
+    })
+    vi.mocked(harness.deps.graphSnippets).mockResolvedValue({
+      omitted: [],
+      snippets: [
+        {
+          evidence_id: 'e-1',
+          relative_path: 'src/example.ts',
+          content: 'class Example {}',
+          content_hash: 'hash-1',
+          start_line: 1,
+          end_line: 1,
+          redactions: 0,
+        },
+      ],
+    })
+    harness.optimizer.start()
+    await vi.advanceTimersByTimeAsync(602_000)
+    expect(harness.deps.graphIndex).toHaveBeenCalledWith('account-1', 'project-1', expect.any(AbortSignal))
+    expect(harness.stream).toHaveBeenCalledTimes(3)
+    expect(JSON.stringify(harness.stream.mock.calls[2]?.[0].messages)).toContain('class Example')
+    expect(harness.remember.mock.calls[2]?.[0]).toMatchObject({
+      visibility: 'private',
+      provenance: { repository_local_only: true },
+    })
+    expect(harness.deps.improve).toHaveBeenCalledTimes(2)
+    await harness.optimizer.stop()
+  })
+
   it('uses bounded local context and writes only private, unconfirmed, account-bound candidates', async () => {
     const harness = fixture()
     harness.recall.mockResolvedValue([

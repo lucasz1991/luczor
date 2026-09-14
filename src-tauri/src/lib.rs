@@ -158,6 +158,7 @@ pub fn run() {
             commands::device_key::memory_key_get_or_create,
             commands::repository_graph::local_graph_bind,
             commands::repository_graph::local_graph_index,
+            commands::repository_graph::local_graph_cancel_index,
             commands::repository_graph::local_graph_status,
             commands::repository_graph::local_graph_search,
             commands::repository_graph::local_graph_read_snippets,

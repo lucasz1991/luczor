@@ -144,6 +144,7 @@ const APP_COMMANDS: &[&str] = &[
     "memory_key_get_or_create",
     "local_graph_bind",
     "local_graph_index",
+    "local_graph_cancel_index",
     "local_graph_status",
     "local_graph_search",
     "local_graph_read_snippets",
