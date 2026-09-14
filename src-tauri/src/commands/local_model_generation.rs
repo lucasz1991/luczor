@@ -6,8 +6,8 @@ pub(super) const REPETITION: &str = "Local generation interrupted after repeated
 pub(super) const TOOL_CONTRACT: &str = "Local generation returned an invalid tool completion.";
 
 /// b10809's Qwen2.5 auto-parser can accept plain JSON as public content and
-/// wander before the first required XML tool marker. For this verified 3B
-/// artifact only, start a REQUIRED call at the template's tool boundary. The
+/// wander before the first required XML tool marker. For the locally verified
+/// Qwen 3B and WhiteRabbitNeo 7B artifacts, start a REQUIRED call at the template's boundary. The
 /// runtime still produces/validates structured tool_calls; no reply is parsed
 /// or executed here. Auto/none, other artifacts and other runtimes stay intact.
 pub(super) fn apply_required_tool_prefix(
@@ -15,8 +15,13 @@ pub(super) fn apply_required_tool_prefix(
     artifact_hash: Option<&str>,
     props: &Value,
 ) {
-    if artifact_hash != Some("d5c108dfbdac44c738e45a84d5624716cfb8522d1410f46a7108167ee4bd0cac")
-        || props["build_info"].as_str() != Some("b10809-5266f24da")
+    if !matches!(
+        artifact_hash,
+        Some(
+            "d5c108dfbdac44c738e45a84d5624716cfb8522d1410f46a7108167ee4bd0cac"
+                | "b19da8c6aacffdedc7bcd6b7f7d7d4db900f7d5c49f5473de18bb58111b432e5"
+        )
+    ) || props["build_info"].as_str() != Some("b10809-5266f24da")
         || body["tool_choice"].as_str() != Some("required")
         || !body["tools"]
             .as_array()
@@ -58,6 +63,8 @@ pub(super) fn apply_required_tool_prefix(
 mod prefix_tests {
     use super::*;
     const HASH: &str = "d5c108dfbdac44c738e45a84d5624716cfb8522d1410f46a7108167ee4bd0cac";
+    const WHITE_RABBIT_HASH: &str =
+        "b19da8c6aacffdedc7bcd6b7f7d7d4db900f7d5c49f5473de18bb58111b432e5";
     fn props() -> Value {
         json!({"build_info":"b10809-5266f24da","chat_template":"<|im_start|> <tool_call> </tool_call>"})
     }
@@ -133,6 +140,31 @@ mod prefix_tests {
             assert_eq!(body["continue_final_message"], true);
             let once = body.clone();
             apply_required_tool_prefix(&mut body, Some(HASH), &props());
+            assert_eq!(body, once);
+        }
+    }
+
+    #[test]
+    fn verified_white_rabbit_uses_required_repair_but_does_not_force_optional_tools() {
+        for choice in ["required", "auto", "none"] {
+            let mut body = request();
+            body["tool_choice"] = json!(choice);
+            body["messages"].as_array_mut().unwrap().push(
+                json!({"role":"system","content":"Repair format without repeating completed actions."}),
+            );
+            let before = body.clone();
+            apply_required_tool_prefix(&mut body, Some(WHITE_RABBIT_HASH), &props());
+            if choice != "required" {
+                assert_eq!(body, before);
+                continue;
+            }
+            assert_eq!(body["messages"][3]["content"], "<tool_call>\n");
+            assert_eq!(body["tools"], before["tools"]);
+            assert_eq!(body["max_tokens"], before["max_tokens"]);
+            assert_eq!(body["tool_choice"], "required");
+            assert_eq!(body["stop"], json!(["</tool_call>"]));
+            let once = body.clone();
+            apply_required_tool_prefix(&mut body, Some(WHITE_RABBIT_HASH), &props());
             assert_eq!(body, once);
         }
     }
