@@ -82,8 +82,10 @@
   --g-edge: rgba(255, 255, 255, 0.28);
   --g-edge-2: rgba(255, 255, 255, 0.1);
   --g-sheen: rgba(255, 255, 255, 0.16);
-  --g-bg: rgba(44, 44, 54, 0.38);
-  --g-bg-2: rgba(30, 30, 40, 0.34);
+  /* Glass stays readable over busy backgrounds (and over other apps, where a native window
+     gets no backdrop blur at all): mostly opaque, the blur only softens what little shows through. */
+  --g-bg: rgba(22, 22, 28, 0.9);
+  --g-bg-2: rgba(17, 17, 23, 0.86);
   --g-fill-1: rgba(255, 255, 255, 0.03);
   --g-fill-2: rgba(255, 255, 255, 0.05);
   --g-fill-3: rgba(255, 255, 255, 0.065);
@@ -137,7 +139,7 @@
   --dur: 240ms;
   --dur-slow: 420ms;
   --dur-morph: 520ms;
-  --blur: 36px;
+  --blur: 44px;
   --sidebar-w: 76px;
 
   /* Fallback names used by the dialog workspaces (agent hub, planning, workflows). */
@@ -190,8 +192,8 @@
   --g-edge: rgba(255, 255, 255, 0.95);
   --g-edge-2: rgba(26, 24, 38, 0.1);
   --g-sheen: rgba(255, 255, 255, 0.85);
-  --g-bg: rgba(255, 255, 255, 0.46);
-  --g-bg-2: rgba(255, 255, 255, 0.36);
+  --g-bg: rgba(250, 249, 246, 0.92);
+  --g-bg-2: rgba(244, 243, 239, 0.88);
   --g-fill-1: rgba(26, 24, 38, 0.035);
   --g-fill-2: rgba(26, 24, 38, 0.055);
   --g-fill-3: rgba(26, 24, 38, 0.075);
