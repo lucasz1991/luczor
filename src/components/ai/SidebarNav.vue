@@ -82,6 +82,26 @@ const sections: Record<
     event: 'devices',
   },
 }
+const activeSection = computed(() => sections[pane.value === 'projects' ? 'agents' : pane.value])
+function openSection(next: RailPane) {
+  switch (next) {
+    case 'agents':
+      emit('agents')
+      break
+    case 'planning':
+      emit('planning')
+      break
+    case 'workflows':
+      emit('workflows')
+      break
+    case 'cloud':
+      emit('cloudProjects')
+      break
+    case 'devices':
+      emit('devices')
+      break
+  }
+}
 const cloudItems = computed(() => props.items.filter(item => item.cloud))
 const query = ref('')
 const editingId = ref('')
@@ -247,10 +267,10 @@ const runLabels: Record<string, string> = {
     <div class="ai-sidebar__panel">
       <template v-if="pane !== 'projects'">
         <div class="ai-sidebar__section">
-          <span>{{ sections[pane].title }}</span>
+          <span>{{ activeSection.title }}</span>
         </div>
         <div class="ai-rail-pane">
-          <p class="ai-rail-pane__text">{{ sections[pane].text }}</p>
+          <p class="ai-rail-pane__text">{{ activeSection.text }}</p>
           <slot :name="pane">
             <nav v-if="pane === 'cloud'" class="ai-sidebar__items">
               <button
@@ -266,8 +286,8 @@ const runLabels: Record<string, string> = {
               <p v-if="!cloudItems.length" class="ai-empty">Noch kein Projekt wird abgeglichen.</p>
             </nav>
           </slot>
-          <button type="button" class="ai-rail-pane__open" @click="emit(sections[pane].event)">
-            <AiIcon :name="sections[pane].icon" :size="14" /><span>{{ sections[pane].action }}</span>
+          <button type="button" class="ai-rail-pane__open" @click="openSection(pane)">
+            <AiIcon :name="activeSection.icon" :size="14" /><span>{{ activeSection.action }}</span>
           </button>
         </div>
       </template>
