@@ -54,6 +54,36 @@ const innerSeries = computed<ResourceDialSeries[]>(() =>
       ]
     : props.meter.series.slice(3)
 )
+/* Sidebar tile: headline value, secondary reading and a sparkline of the total series. */
+const tile = computed(() => {
+  const total = props.meter.series[0]
+  const temperature = props.meter.series.find(series => series.key === 'temperature')
+  const model = props.meter.series[2]
+  const value = total?.value ?? null
+  const level = props.meter.disk
+    ? 'ok'
+    : temperature?.tone === 'danger' || (value !== null && value >= 90)
+      ? 'bad'
+      : temperature?.tone === 'warning' || (value !== null && value >= 75)
+        ? 'warn'
+        : 'ok'
+  const sub = props.meter.disk
+    ? `${gibibytes(props.meter.disk.used_bytes)} / ${gibibytes(props.meter.disk.total_bytes)} GiB`
+    : temperature
+      ? temperature.value === null
+        ? ''
+        : dialDisplay(temperature)
+      : model && model.value !== null
+        ? `Modell ${dialDisplay(model)}`
+        : ''
+  return {
+    value: value === null ? '—' : value.toLocaleString('de-DE', { maximumFractionDigits: 0 }),
+    unit: value === null ? '' : '%',
+    sub,
+    subTone: temperature?.tone ?? 'safe',
+    level,
+  }
+})
 function continuousColor(value: number | null, maximum = 100) {
   if (value === null) return 'var(--ai-muted)'
   const bounded = Math.min(maximum, Math.max(0, value))
@@ -66,13 +96,17 @@ function continuousColor(value: number | null, maximum = 100) {
 </script>
 
 <template>
-  <article class="resource" :class="{ 'is-compact': compact, 'is-stale': stale }">
+  <article
+    class="resource"
+    :class="{ 'is-compact': compact, 'is-stale': stale, 'is-tile': compact, 'is-card': !compact && view === 'circles' }"
+    :data-lvl="compact ? tile.level : undefined"
+  >
     <h5 :class="{ 'ai-sr-only': view === 'circles' || compact }">{{ meter.label }}</h5>
     <div v-if="view === 'circles' || compact" class="resource-dial-wrap">
       <div class="resource-bars">
         <svg
           class="resource-dial"
-          viewBox="0 0 120 120"
+          :viewBox="compact ? '0 0 120 102' : '0 0 120 120'"
           role="img"
           :aria-label="`${meter.label} Auslastungsverteilung`"
         >
@@ -123,18 +157,30 @@ function continuousColor(value: number | null, maximum = 100) {
               </circle>
             </g>
           </g>
-          <text x="60" y="58" text-anchor="middle">{{ meter.label }}</text>
-          <text v-if="innerSeries[0]" class="dial-reading" x="60" y="73" text-anchor="middle">
-            {{ dialDisplay(innerSeries[0]) }}
-          </text>
+          <template v-if="compact">
+            <text class="dial-total" x="60" y="60" text-anchor="middle">
+              {{ tile.value }}
+              <tspan v-if="tile.unit" class="dial-total__unit">{{ tile.unit }}</tspan>
+            </text>
+            <text v-if="tile.sub" class="dial-sub" :data-tone="tile.subTone" x="60" y="76" text-anchor="middle">
+              {{ tile.sub }}
+            </text>
+          </template>
+          <template v-else>
+            <text x="60" y="58" text-anchor="middle">{{ meter.label }}</text>
+            <text v-if="innerSeries[0]" class="dial-reading" x="60" y="73" text-anchor="middle">
+              {{ dialDisplay(innerSeries[0]) }}
+            </text>
+          </template>
         </svg>
-        <div class="usage-legend">
+        <div v-if="compact" class="tile-text" :title="meter.detail">{{ meter.label }}</div>
+        <div v-if="!compact" class="usage-legend">
           <span v-for="series in usage" :key="series.key" :data-scope="series.key">
             {{ series.label }} {{ dialDisplay(series) }}
           </span>
         </div>
         <div
-          v-for="series in innerSeries"
+          v-for="series in compact ? [] : innerSeries"
           :key="series.key"
           class="inner-meter"
           :style="{
@@ -173,7 +219,7 @@ function continuousColor(value: number | null, maximum = 100) {
         </g>
       </svg>
     </div>
-    <div v-if="meter.disk" class="resource-storage-note">
+    <div v-if="meter.disk && !compact" class="resource-storage-note">
       <span>{{ meter.disk.mount }} · {{ diskScopes(meter.disk) }}</span>
       <span>{{ gibibytes(meter.disk.used_bytes) }} / {{ gibibytes(meter.disk.total_bytes) }} GiB</span>
     </div>
@@ -241,13 +287,13 @@ function continuousColor(value: number | null, maximum = 100) {
   --scope-color: var(--ai-green);
 }
 [data-scope='app'] {
-  --scope-color: #b3a0f7;
+  --scope-color: var(--ai-accent);
 }
 [data-scope='model'] {
   --scope-color: var(--ai-orange);
 }
 [data-scope='capacity'] {
-  --scope-color: #8ba4ca;
+  --scope-color: var(--ai-info, #7aa7c7);
 }
 [data-scope='temperature-safe'] {
   --scope-color: var(--ai-green);
@@ -271,10 +317,6 @@ function continuousColor(value: number | null, maximum = 100) {
 }
 .resource.is-stale .resource__chart {
   opacity: 0.55;
-}
-.resource.is-compact .resource-dial-wrap {
-  width: min(100%, 112px);
-  min-height: 0;
 }
 @media (max-width: 480px) {
   .resource-dial-wrap {
@@ -328,9 +370,6 @@ function continuousColor(value: number | null, maximum = 100) {
   font-size: 10px;
   color: var(--scope-color);
 }
-.is-compact .resource-dial-wrap {
-  width: 100%;
-}
 .is-stale .resource-bars {
   opacity: 0.55;
 }
@@ -353,32 +392,145 @@ function continuousColor(value: number | null, maximum = 100) {
   stroke-width: 7;
   stroke-linecap: butt;
   transition:
-    stroke 0.25s ease,
-    stroke-dasharray 0.25s ease,
-    stroke-dashoffset 0.25s ease;
+    stroke 0.4s var(--ease, ease),
+    stroke-dasharray 0.7s var(--ease, ease),
+    stroke-dashoffset 0.7s var(--ease, ease);
 }
 .dial-track {
-  stroke: var(--ai-line);
+  stroke: var(--ai-line-strong);
+  opacity: 0.55;
 }
 .dial-value {
   stroke: var(--scope-color);
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--scope-color) 45%, transparent));
 }
 .resource-dial text {
   fill: var(--ai-ink);
   font: 600 12px var(--ai-font);
+  letter-spacing: 0.08em;
 }
 .resource-dial .dial-reading {
+  fill: var(--ai-muted);
+  font: 500 11px var(--font-mono, monospace);
+  letter-spacing: 0;
+}
+/* Tabs and full screen: every meter is a glass card around the layered dial. */
+.resource.is-card {
+  padding: 14px 14px 12px;
+  border: 1px solid var(--ai-line);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--ai-surface) 55%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ai-ink) 6%, transparent);
+  transition:
+    border-color 220ms var(--ease, ease),
+    transform 220ms var(--ease, ease),
+    box-shadow 220ms var(--ease, ease);
+}
+.resource.is-card:hover {
+  border-color: var(--ai-line-strong);
+  transform: translateY(-1px);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--ai-ink) 8%, transparent),
+    0 18px 36px -28px rgba(0, 0, 0, 0.6);
+}
+.resource.is-card .usage-legend {
+  margin-top: 4px;
+  padding-top: 8px;
+  border-top: 1px solid var(--ai-line);
+}
+.resource.is-card .usage-legend span,
+.resource.is-card .inner-meter-label {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: baseline;
+  gap: 0 8px;
+  color: var(--ai-muted);
+  font-variant-numeric: tabular-nums;
+}
+.resource.is-card .usage-legend span::before,
+.resource.is-card .inner-meter-label::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  margin-right: 2px;
+  border-radius: 50%;
+  background: var(--scope-color);
+}
+.resource.is-card .inner-meter-label > span {
+  color: var(--ai-ink);
+  font: 500 10px var(--font-mono, monospace);
+}
+/* Sidebar tile: the same layered ring at 58px next to label, mono value and secondary reading. */
+.resource.is-tile {
+  position: relative;
+  padding: 6px 8px 2px;
+  border: 1px solid var(--ai-line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ai-ink) 3.5%, transparent);
+  transition:
+    border-color 200ms var(--ease, ease),
+    background 200ms var(--ease, ease);
+}
+.resource.is-tile:hover {
+  border-color: var(--ai-line-strong);
+  background: color-mix(in srgb, var(--ai-ink) 5.5%, transparent);
+}
+.resource.is-tile .resource-dial-wrap {
+  width: 100%;
+  min-height: 0;
+}
+.resource.is-tile .resource-bars {
+  display: grid;
+  gap: 0;
+  padding: 0;
+}
+.resource.is-tile .resource-dial {
+  width: min(100%, 132px);
+  margin: 0 auto;
+}
+.resource.is-tile .resource-dial circle {
+  stroke-width: 8;
+}
+.resource.is-tile .dial-total {
+  fill: var(--ai-ink);
+  font: 600 20px var(--font-mono, monospace);
+  letter-spacing: -0.03em;
+}
+.resource.is-tile .dial-total__unit {
   fill: var(--ai-muted);
   font-size: 10px;
   font-weight: 400;
 }
-.is-compact .resource-bars {
-  gap: 3px;
-  padding: 0;
+.is-tile[data-lvl='warn'] .dial-total {
+  fill: var(--ai-orange);
 }
-.is-compact .usage-legend {
-  font-size: 8px;
-  gap: 2px;
+.is-tile[data-lvl='bad'] .dial-total {
+  fill: var(--ai-red);
+}
+.resource.is-tile .dial-sub {
+  fill: var(--ai-accent);
+  font: 400 8.5px var(--font-mono, monospace);
+}
+.resource.is-tile .dial-sub[data-tone='warning'] {
+  fill: var(--ai-orange);
+}
+.resource.is-tile .dial-sub[data-tone='danger'] {
+  fill: var(--ai-red);
+}
+.tile-text {
+  position: absolute;
+  top: 7px;
+  left: 9px;
+  color: var(--ai-faint);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  line-height: 1;
+  text-transform: uppercase;
+  pointer-events: none;
+}
+.is-tile.is-stale {
+  opacity: 0.6;
 }
 @media (prefers-reduced-motion: reduce) {
   .resource-dial circle {

@@ -113,13 +113,10 @@
 .ai-main-composer {
   padding: 14px 30px 20px;
 }
-.ai-workspace--system-mini .main-col :deep(.ai-chat__messages) {
-  padding-inline-start: 184px;
-  transition: padding-inline-start 180ms ease;
-}
-.ai-workspace--system-mini .main-col :deep(.chat-project-overlay) {
-  inset-inline-start: 166px;
-  transition: inset-inline-start 180ms ease;
+/* Mini system status is a full-height column beside the navigation; the conversation narrows to make room. */
+.ai-workspace--system-mini .main-col {
+  margin-inline-start: 176px;
+  transition: margin-inline-start 420ms var(--ease, ease);
 }
 .ai-welcome {
   padding: clamp(28px, 8vh, 100px) 0 34px;
@@ -327,11 +324,8 @@
   .ai-main-composer {
     padding: 8px 12px 14px;
   }
-  .ai-workspace--system-mini .main-col :deep(.ai-chat__messages) {
-    padding-inline-start: 166px;
-  }
-  .ai-workspace--system-mini .main-col :deep(.chat-project-overlay) {
-    inset-inline-start: 156px;
+  .ai-workspace--system-mini .main-col {
+    margin-inline-start: 160px;
   }
   .ai-welcome {
     padding-top: 30px;

@@ -91,6 +91,25 @@ const phase = computed(() => {
       return { label: 'Bereit', detail: 'Im Moment keine aktive Unterhaltung.', tone: 'neutral', moving: false }
   }
 })
+/* Sidebar column: model CPU/GPU history (series index 2 = model scope) and tool activity channels. */
+const modelCharts = computed(() =>
+  hardware.value
+    .filter(meter => meter.key === 'cpu' || meter.key === 'gpu')
+    .map(meter => ({ label: meter.label, path: meter.series[2]?.chart?.path ?? '' }))
+)
+const activityChannels = computed(() =>
+  (
+    [
+      ['audio', 'Audio'],
+      ['network', 'Netz'],
+      ['file', 'Datei'],
+      ['os', 'System'],
+    ] as const
+  )
+    // Keys are the closed activity-channel union above, not external input.
+    // eslint-disable-next-line security/detect-object-injection
+    .map(([key, label]) => ({ key, label, level: Math.min(1, Math.max(0, hud.activity[key])) }))
+)
 const stamp = computed(() =>
   metrics.lastUpdatedAt
     ? new Date(metrics.lastUpdatedAt).toLocaleTimeString('de-DE', {
@@ -213,7 +232,7 @@ const position = computed(() =>
           }}
         </p>
         <SystemMiniModelUsage
-          v-if="compact || section === 'all'"
+          v-if="section === 'all' && !compact"
           :metrics="compactModelUsage"
           :model-status="modelStatus"
           :running="metrics.sample?.model_running === true"
@@ -221,22 +240,6 @@ const position = computed(() =>
         <div class="resource-context">
           <span v-if="gpuProcessUnavailable">GPU-Prozessmessung teilweise nicht verfügbar.</span>
         </div>
-        <details class="resource-explanation">
-          <summary>Zuordnung der Werte</summary>
-          <p>
-            Der gemeinsame Außenbogen zeigt App, lokales Modell und System als berechneten Rest des Rechners. App
-            umfasst Luczor ohne den verwalteten Modellprozess. Fehlende Messungen bleiben unbekannt. RAM kann gemeinsam
-            genutzte Seiten enthalten; GPU zeigt die jeweils höchste Engine-Auslastung. Beide sind keine exakt additiven
-            Prozessbilanzen. Bei Summen über 100 % werden die Bogenlängen proportional verkleinert. Die Verlaufskurven
-            bleiben Einzelmessungen.
-          </p>
-          <p>
-            CPU und GPU zeigen innen die gemeldete Temperatur mit kontinuierlicher Farbe je Grad; ab 85 °C rot. RAM und
-            SSD zeigen innen die kontinuierlich eingefärbte Belegung. Der SSD-Außenbogen vergleicht aktive Zeit,
-            Lesezeit und Schreibzeit des Volumes. Diese Werte können sich überschneiden und sind keine Prozessanteile
-            von System, App und Modell. RAM- und SSD-Temperaturen sind nicht verfügbar.
-          </p>
-        </details>
       </div>
       <SystemMiniModelUsage
         v-if="section === 'localmodel' && !compact"
@@ -246,13 +249,38 @@ const position = computed(() =>
       />
       <p v-show="section === 'all' || section === 'localmodel'" class="resource-note">{{ modelStatus }}</p>
       <SystemActivityCharts
-        v-show="section === 'all' || section === 'memory' || section === 'network'"
-        :view="section === 'all' ? 'all' : section === 'memory' ? 'memory' : 'network'"
+        v-show="compact || section === 'all' || section === 'memory' || section === 'network'"
+        :view="compact || section === 'all' ? 'all' : section === 'memory' ? 'memory' : 'network'"
+        :compact="compact"
         :active="active && !collapsed"
         :native-network="metrics.sample?.network_local"
         :native-live="metrics.availability === 'live'"
         @indicators="flowIndicators = $event"
       />
+      <SystemMiniModelUsage
+        v-if="compact"
+        :metrics="compactModelUsage"
+        :model-status="modelStatus"
+        :running="metrics.sample?.model_running === true"
+        :charts="modelCharts"
+      />
+      <section v-if="compact" class="compact-tools" aria-label="Werkzeuge">
+        <div class="compact-tools__heading">
+          <span>Werkzeuge</span
+          ><strong :data-state="hud.killSwitch ? 'locked' : phase.moving ? 'active' : 'idle'">{{
+            hud.killSwitch ? 'Not-Aus' : phase.moving ? phase.label : 'Bereit'
+          }}</strong>
+        </div>
+        <div class="compact-tools__channels">
+          <div v-for="channel in activityChannels" :key="channel.key" :title="channel.label">
+            <span>{{ channel.label }}</span>
+            <i><b :style="{ width: `${Math.round(channel.level * 100)}%` }" /></i>
+          </div>
+        </div>
+        <p class="compact-tools__last" :title="hud.lastTool || undefined">
+          {{ hud.lastTool || 'Noch kein Tool ausgeführt' }}
+        </p>
+      </section>
       <div v-show="section === 'all' || section === 'details'" class="system-details-overview">
         <div class="connection-grid">
           <div v-for="connection in connections" :key="connection.label" class="connection">
@@ -455,24 +483,29 @@ const position = computed(() =>
 .resource-heading {
   display: flex;
   justify-content: space-between;
-  align-items: baseline;
+  align-items: center;
   gap: 12px;
   flex-wrap: wrap;
-  padding: 10px 0 22px;
+  padding: 8px 0 14px;
 }
 .resource-mode {
-  display: flex;
-  padding: 3px;
-  border-radius: 7px;
-  background: var(--ai-canvas);
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--ai-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ai-canvas) 70%, transparent);
 }
 .resource-mode button {
   border: 0;
-  border-radius: 5px;
-  padding: 5px 10px;
+  border-radius: 999px;
+  padding: 3px 10px;
   background: transparent;
-  color: var(--ai-muted);
-  font-size: 11px;
+  color: var(--ai-faint);
+  font-size: 10.5px;
+  transition:
+    background 200ms var(--ease, ease),
+    color 200ms var(--ease, ease);
 }
 .resource-mode button[aria-pressed='true'] {
   background: var(--ai-hover);
@@ -493,8 +526,8 @@ const position = computed(() =>
 }
 .resource-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 140px), 1fr));
-  gap: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 200px), 1fr));
+  gap: 12px;
 }
 .resource-note {
   margin: 12px 0 8px;
@@ -507,17 +540,85 @@ const position = computed(() =>
   color: var(--ai-muted);
   font-size: 10px;
 }
-.resource-explanation {
+.compact-tools {
+  display: grid;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 9px 10px 10px;
+  border: 1px solid var(--ai-line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ai-ink) 3.5%, transparent);
+}
+.compact-tools > * {
+  min-width: 0;
+}
+.compact-tools__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.compact-tools__heading > span {
+  flex-shrink: 0;
   color: var(--ai-muted);
-  font-size: 10px;
-  margin: 8px 0 18px;
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
-.resource-explanation summary {
-  cursor: pointer;
+.compact-tools__heading strong {
+  min-width: 0;
+  overflow: hidden;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--ai-hover);
+  color: var(--ai-muted);
+  font-size: 8.5px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.resource-explanation p {
-  line-height: 1.6;
-  margin: 8px 0;
+.compact-tools__heading strong[data-state='active'] {
+  background: color-mix(in srgb, var(--ai-accent) 16%, transparent);
+  color: var(--ai-accent);
+}
+.compact-tools__heading strong[data-state='locked'] {
+  background: color-mix(in srgb, var(--ai-red) 14%, transparent);
+  color: var(--ai-red);
+}
+.compact-tools__channels {
+  display: grid;
+  gap: 4px;
+}
+.compact-tools__channels > div {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  color: var(--ai-muted);
+  font-size: 9px;
+}
+.compact-tools__channels i {
+  display: block;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--ai-line);
+}
+.compact-tools__channels b {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--ai-accent);
+  transition: width 280ms var(--ease, ease);
+}
+.compact-tools__last {
+  margin: 0;
+  overflow: hidden;
+  color: var(--ai-ink);
+  font: 500 9.5px var(--font-mono, monospace);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .status-dashboard.is-compact .resource-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));

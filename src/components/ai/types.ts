@@ -8,6 +8,8 @@ export type ActivityStep = {
   detail?: string
   status: ActivityStatus
   capability?: string
+  /** Short, redacted preview of the leading string arguments (path, command, query). */
+  summary?: string
   model?: string
   provider?: string
   dataHandling?: 'syncable' | 'ephemeral'

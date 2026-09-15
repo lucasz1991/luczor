@@ -10,8 +10,9 @@ const props = withDefaults(
     nativeNetwork?: LocalNetworkCounters
     nativeLive: boolean
     view?: 'all' | 'memory' | 'network'
+    compact?: boolean
   }>(),
-  { view: 'memory', nativeNetwork: undefined }
+  { view: 'memory', nativeNetwork: undefined, compact: false }
 )
 type Indicator = 'ok' | 'active' | 'warning' | 'unknown'
 const emit = defineEmits<{ indicators: [value: { memory: Indicator; network: Indicator }] }>()
@@ -183,7 +184,7 @@ const visibleCards = computed(() =>
 )
 </script>
 <template>
-  <section class="activity-charts" aria-label="Speicher- und Datenverkehr">
+  <section class="activity-charts" :class="{ 'is-compact': compact }" aria-label="Speicher- und Datenverkehr">
     <div class="activity-charts__grid">
       <article v-for="card in visibleCards" :key="card.id" :class="`activity-chart activity-chart--${card.id}`">
         <header>
@@ -209,7 +210,7 @@ const visibleCards = computed(() =>
         <small>{{ card.detail }}</small>
       </article>
     </div>
-    <details class="activity-chart-info">
+    <details v-if="!compact" class="activity-chart-info">
       <summary>Zur Messung</summary>
       <p class="activity-chart-note">
         Messabstand ca. 3,5 s · Skalen je Diagramm automatisch. Gezählt werden Gedächtniszugriffe und HTTP-Nutzdaten der
@@ -293,7 +294,7 @@ const visibleCards = computed(() =>
   --line-color: var(--ai-green);
 }
 [data-line='1'] {
-  --line-color: #b3a0f7;
+  --line-color: var(--ai-accent);
 }
 .activity-chart dt i {
   width: 5px;
@@ -337,6 +338,75 @@ const visibleCards = computed(() =>
 }
 .activity-chart-note {
   margin: 14px 0 0;
+}
+/* Sidebar column: one card per row, tile look, small sparkline charts. */
+.activity-charts.is-compact {
+  padding: 6px 0 0;
+}
+.is-compact .activity-charts__grid {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
+.is-compact .activity-chart {
+  padding: 8px 10px 8px;
+  border: 1px solid var(--ai-line);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--ai-ink) 3.5%, transparent);
+  transition:
+    border-color 200ms var(--ease, ease),
+    background 200ms var(--ease, ease);
+}
+.is-compact .activity-chart:hover {
+  border-color: var(--ai-line-strong);
+  background: color-mix(in srgb, var(--ai-ink) 5.5%, transparent);
+}
+.is-compact .activity-chart h5 {
+  color: var(--ai-muted);
+  font-size: 9.5px;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.is-compact .activity-chart header {
+  flex-wrap: nowrap;
+}
+.is-compact .activity-chart header > span {
+  min-width: 0;
+  overflow: hidden;
+  font: 400 9px var(--font-mono, monospace);
+  color: var(--ai-accent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.is-compact .activity-chart dl {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px 8px;
+  margin: 6px 0 0;
+}
+.is-compact .activity-chart dl > div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px;
+  min-width: 0;
+}
+.is-compact .activity-chart dt {
+  font-size: 9px;
+}
+.is-compact .activity-chart dd {
+  overflow: hidden;
+  font: 500 10px var(--font-mono, monospace);
+  color: var(--ai-ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.is-compact .activity-chart svg {
+  height: 30px;
+  margin: 5px 0 0;
+}
+.is-compact .activity-chart small {
+  display: none;
 }
 @media (max-width: 480px) {
   .activity-charts__grid {

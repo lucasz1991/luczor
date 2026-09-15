@@ -1,5 +1,7 @@
 import type { ActivityStep, ActivityStatus } from '@/components/ai/types'
 import type { PendingToolCall } from '@/state/types'
+import { redactProviderSecrets } from '@/services/prompt/promptContextAssembler'
+import { getSafeRecordValue } from '@/services/safeRecord'
 
 /** Numeric transport progress only; no private reasoning, prompts or tool payloads. */
 export type AgentProgress = {
@@ -109,11 +111,24 @@ export function presentToolCall(call: PendingToolCall): ActivityStep {
     createdAt: call.createdAt,
     status: TOOL_STATUS[call.status],
     capability,
+    summary: toolArgumentSummary(call.args),
     model: typeof call.args.model === 'string' ? call.args.model.slice(0, 80) : undefined,
     provider: typeof call.args.provider === 'string' ? call.args.provider.slice(0, 48) : undefined,
     dataHandling: call.dataHandling,
     detail: call.status === 'proposed' && !call.requiresApproval ? 'Zur Ausführung vorbereitet' : undefined,
   }
+}
+/* The design board shows `tool  path/command` per row: pick the first short string arguments, never secrets. */
+const SUMMARY_KEYS = ['path', 'file', 'command', 'cmd', 'query', 'pattern', 'url', 'title', 'name', 'text', 'prompt']
+export function toolArgumentSummary(args: Record<string, unknown>): string | undefined {
+  const parts: string[] = []
+  for (const key of SUMMARY_KEYS) {
+    const value = getSafeRecordValue(args, key)
+    if (typeof value === 'string' && value.trim()) parts.push(value.replace(/\s+/g, ' ').trim())
+    if (parts.length >= 2) break
+  }
+  const joined = redactProviderSecrets(parts.join(' · '))
+  return joined ? (joined.length > 88 ? `${joined.slice(0, 88)}…` : joined) : undefined
 }
 export function activityLabel(activity: ChatActivity, waiting: boolean): string {
   if (activity.status === 'canceled') return 'Verarbeitung abgebrochen'

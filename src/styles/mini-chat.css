@@ -674,9 +674,9 @@ html.mini-window,
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 5px;
+  gap: 6px;
   flex: none;
-  width: 32px;
+  width: 40px;
   height: var(--mini-grip-h);
   padding: 8px 0;
   box-sizing: border-box;
@@ -685,8 +685,8 @@ html.mini-window,
 }
 .mini-grip__icon {
   position: relative;
-  width: 22px;
-  height: 22px;
+  width: 28px;
+  height: 28px;
   padding: 0 !important;
   cursor: pointer;
   display: grid;
@@ -918,6 +918,49 @@ html.mini-window,
 .mini-grip-panel__empty {
   color: var(--ai-faint);
 }
+.mini-grip-panel__caption {
+  margin: 10px 0 4px;
+  color: var(--ai-faint);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.mini-grip-panel__detail {
+  margin: 0 0 8px;
+  color: var(--ai-muted);
+  font: 10.5px var(--font-mono, monospace);
+  overflow-wrap: anywhere;
+}
+.mini-grip-panel__actions {
+  display: flex;
+  gap: 6px;
+}
+.mini-grip-panel__actions button {
+  flex: 1;
+  padding: 6px 8px;
+  border: 1px solid var(--ai-line);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ai-ink);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.mini-grip-panel__actions button.is-primary {
+  border-color: transparent;
+  background: var(--ai-accent);
+  color: var(--ai-canvas);
+}
+.mini-grip-panel__actions button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.mini-grip-panel__chats li[data-status='failed'] i {
+  background: var(--ai-red);
+}
+.mini-grip-panel__chats li[data-status='done'] i {
+  background: var(--ai-green);
+}
 .mini-grip-panel__chats {
   list-style: none;
   margin: 0;
@@ -960,17 +1003,6 @@ html.mini-window,
 
 .mini-grip:active {
   cursor: grabbing;
-}
-.mini-grip__hide {
-  opacity: 0;
-  transition: opacity 0.16s;
-}
-.mini-orb-dock:hover .mini-grip__hide,
-.mini-orb-dock:focus-within .mini-grip__hide {
-  opacity: 1;
-}
-.mini-grip__hide:hover {
-  color: var(--ai-red);
 }
 .mini-unread {
   position: absolute;

@@ -13,6 +13,7 @@ defineProps<{ tools: ActivityStep[] }>()
         <AiIcon :name="toolDisplayIcon(tool)" :size="15" class="ai-tool__icon" />
         <span class="ai-tool__identity">
           <span class="ai-tool__label">{{ toolDisplayLabel(tool.label) }}</span>
+          <small v-if="tool.summary" class="ai-tool__args" :title="tool.summary">{{ tool.summary }}</small>
           <small v-if="tool.provider || tool.model" class="ai-tool__route">
             {{ [tool.provider, tool.model].filter(Boolean).join(' · ') }}
           </small>

@@ -150,6 +150,13 @@ const toolStatus: Record<string, ActivityStatus> = {
 const tools = computed(() =>
   props.snapshot.tools.map(tool => ({ id: tool.id, label: tool.name, status: toolStatus[tool.status] ?? 'pending' }))
 )
+const toolStatusLabel: Record<string, string> = {
+  pending: 'wartet',
+  running: 'läuft',
+  done: 'fertig',
+  failed: 'fehlgeschlagen',
+  canceled: 'abgebrochen',
+}
 const sharedToolSessions = computed(() => {
   void toolSessionRevision.value
   const projectId = props.snapshot.project?.id
@@ -302,9 +309,6 @@ function collapse() {
   hoverPane.value = null
   resetConfirm.value = false
   showLegend.value = false
-}
-function hideFromGrip() {
-  if (!dragged) void windowAction('hide')
 }
 // Typing in a page that was only hover-opened must not lose the page when the pointer drifts away.
 function keepChatsOpen() {
@@ -588,7 +592,7 @@ onBeforeUnmount(() => {
           @pointerdown="beginDrag($event, true)"
           @click="pinPane('chats')"
         >
-          <AiIcon name="chat" :size="12" /><span v-if="decision || unread" class="mini-unread">{{
+          <AiIcon name="chat" :size="14" /><span v-if="decision || unread" class="mini-unread">{{
             decision ? '!' : '1'
           }}</span>
         </button>
@@ -605,7 +609,7 @@ onBeforeUnmount(() => {
           @pointerdown="beginDrag($event, true)"
           @click="pinPane('decision')"
         >
-          <AiIcon name="shield" :size="11" />
+          <AiIcon name="shield" :size="13" />
         </button>
         <button
           type="button"
@@ -624,7 +628,7 @@ onBeforeUnmount(() => {
           @pointerdown="beginDrag($event, true)"
           @click="pinPane('tools')"
         >
-          <AiIcon name="tool" :size="11" />
+          <AiIcon name="tool" :size="13" />
         </button>
         <button
           type="button"
@@ -639,18 +643,7 @@ onBeforeUnmount(() => {
           @pointerdown="beginDrag($event, true)"
           @click="pinPane('link')"
         >
-          <AiIcon name="link" :size="11" />
-        </button>
-        <!-- Hide lives in the same column, only revealed on hover — the capsule stays a clean icon stack. -->
-        <button
-          type="button"
-          class="mini-grip__icon mini-grip__hide"
-          aria-label="Mini-Chat ausblenden"
-          title="Ausblenden"
-          @pointerdown="beginDrag($event, true)"
-          @click="hideFromGrip"
-        >
-          <AiIcon name="close" :size="11" />
+          <AiIcon name="link" :size="13" />
         </button>
       </div>
       <!-- Hover fly-out: one pane per grip icon (hover switches, click pins) -->
@@ -1073,29 +1066,64 @@ onBeforeUnmount(() => {
               </dl>
             </template>
             <template v-else-if="activePane === 'decision'">
-              <p v-if="decision" class="mini-grip-panel__text">
-                <strong>{{ decision.title }}</strong>
-                {{ decision.description }}
-              </p>
+              <template v-if="decision">
+                <p class="mini-grip-panel__text">
+                  <strong>{{ decision.title }}</strong>
+                  {{ decision.description }}
+                </p>
+                <p v-if="decision.detail" class="mini-grip-panel__detail">{{ decision.detail }}</p>
+                <div class="mini-grip-panel__actions">
+                  <button type="button" class="is-primary" :disabled="disabled" @click="decide(true)">Freigeben</button>
+                  <button type="button" :disabled="disabled" @click="decide(false)">Ablehnen</button>
+                </div>
+              </template>
               <p v-else class="mini-grip-panel__empty">Keine Entscheidung offen.</p>
             </template>
             <template v-else-if="activePane === 'tools'">
+              <dl class="mini-grip-panel__kv">
+                <dt>Not-Aus</dt>
+                <dd :class="snapshot.hud.killSwitch ? 'is-error' : 'is-ok'">
+                  {{ snapshot.hud.killSwitch ? 'aktiv · Tools gesperrt' : 'aus' }}
+                </dd>
+                <dt>Sitzungen</dt>
+                <dd>{{ sharedToolSessions.length || 'keine' }}</dd>
+              </dl>
               <ul v-if="sharedToolSessions.length" class="mini-grip-panel__chats">
                 <li v-for="session in sharedToolSessions" :key="session.id" class="is-busy">
                   <i aria-hidden="true" /><span>{{ session.kind }}</span
                   ><small>{{ session.id.slice(0, 8) }}</small>
                 </li>
               </ul>
-              <p v-else class="mini-grip-panel__empty">Keine Tool-Sitzung aktiv.</p>
+              <p class="mini-grip-panel__caption">Letzte Werkzeuge</p>
+              <ul v-if="tools.length" class="mini-grip-panel__chats">
+                <li
+                  v-for="tool in tools.slice(-6).reverse()"
+                  :key="tool.id"
+                  :class="{ 'is-busy': tool.status === 'running' || tool.status === 'pending' }"
+                  :data-status="tool.status"
+                >
+                  <i aria-hidden="true" /><span>{{ tool.label }}</span
+                  ><small>{{ toolStatusLabel[tool.status] }}</small>
+                </li>
+              </ul>
+              <p v-else class="mini-grip-panel__empty">In diesem Chat wurde noch kein Werkzeug ausgeführt.</p>
             </template>
             <template v-else>
               <dl class="mini-grip-panel__kv">
                 <dt>Server</dt>
                 <dd :class="connectionError ? 'is-error' : 'is-ok'">{{ connectionError || 'Verbunden' }}</dd>
+                <dt>Projekt</dt>
+                <dd>{{ snapshot.project?.name || '–' }}</dd>
+                <dt>Modus</dt>
+                <dd>{{ snapshot.mode === 'observe' ? 'Beobachten' : 'Handeln' }}</dd>
+                <dt>Agent</dt>
+                <dd>{{ snapshot.agentMode ? 'aktiv' : 'aus' }}</dd>
+                <dt>Sprache</dt>
+                <dd>
+                  {{ snapshot.voice.recording ? 'nimmt auf' : snapshot.voice.wakeWord ? 'Wake-Word an' : 'aus' }}
+                </dd>
                 <dt>HUD</dt>
                 <dd>{{ snapshot.hud.status || '–' }}</dd>
-                <dt>Not-Aus</dt>
-                <dd>{{ snapshot.hud.killSwitch ? 'aktiv' : 'aus' }}</dd>
               </dl>
             </template>
           </div>

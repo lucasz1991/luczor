@@ -414,3 +414,23 @@ Append-only communication log. Source and runtime evidence override stale entrie
 ## 2026-09-14T20:06:34Z | Claude Code -> all | handoff
 
 - Message: Nudge: Icon-Spalte vertikal fixiert, Spring-Animation wie Artefakt, 12 Review-Fixes (hover/collapse, pointer-events, Icon-States, native Timing/Clipping, Rust resize fit). Verified: Prettier/ESLint/vue-tsc, Vitest mini 53/53, cargo fmt/check, Rust mini_chat 9/9; Browser-Endzustände gemessen (Pane war ausgeblendet, Animationsverlauf zuvor bestätigt). Next: nativer Tauri-Lauf für Fenster-Timing.
+
+## 2026-09-15T12:20:36Z | Claude Code -> all | handoff
+
+- Message: System status design port: Mini mode is now the design-board sidebar column (176px, model card + CPU/RAM/GPU/Disk tiles with mono value, temp/model sub-reading and sparkline; SystemResourceMeter tile variant, SystemMiniModelUsage restyled as mcard). Tabs/Vollbild keep the layered ring dials, now inside glass cards (hover lift, rounded legend with dots, mono readings, token-only colors so light/dark both work; app scope uses --ai-accent). View switch is a pill group. ai-workspace.css message padding widened to 206px for the column. Verified: vue-tsc, eslint, prettier, browser dark+light in Mini and Tabs (no metrics data in browser – dial fill only visible in Tauri build). Next: run in Tauri to check dial colors with live data and dashboard 4-up grid at >=1600px.
+
+## 2026-09-15T12:32:08Z | Claude Code -> all | handoff
+
+- Message: System status Mini: full-height sidebar column (fixed, top 0..bottom 0, left = sidebar width, flat right edge); .main-col gets margin-inline-start 176px (160px <=700px) so the chat narrows. Tiles keep the layered ring dial at full tile width with label/value/temperature below; compact Netzwerk block (Server/Gedächtnis state, pending, local request counters) and the Lokales-Modell card sit under the tiles. 'Zuordnung der Werte' explanation removed from JarvisHud. Verified: vue-tsc, eslint, prettier, browser Mini in dark (dial fill only with Tauri metrics). Uncommitted.
+
+## 2026-09-15T12:35:11Z | Claude Code -> all | handoff
+
+- Message: Mini system column now stacks: ring tiles (value+unit and temperature/model reading centred inside the ring, label below), SystemActivityCharts in new compact mode (Gedächtnis / externes Netz / lokale Verbindungen with sparkline charts), SystemMiniModelUsage with model CPU/GPU history chart (new charts prop), and a compact Werkzeuge card (status pill, activity channel bars audio/netz/datei/system, last tool). Verified vue-tsc/eslint/prettier + browser dark. Uncommitted.
+
+## 2026-09-15T12:40:31Z | Claude Code -> all | handoff
+
+- Message: Sidebar tiles: label top-left, ring viewBox cropped to 120x102 in compact (tile 117px instead of 138). Nudge: hide button removed (hideFromGrip gone), icons 28px in a 40px column with 13/14px glyphs; panes filled: Entscheidung with Freigeben/Ablehnen, Werkzeuge with Not-Aus, sessions and last tool calls (status labels), Verbindung with server/project/mode/agent/voice/HUD. Verified vue-tsc/eslint/prettier + browser hover. Uncommitted.
+
+## 2026-09-15T12:43:11Z | Claude Code -> all | handoff
+
+- Message: SidebarNav: every rail item now flies out its own pane in the collapsed sidebar column (pane state projects/agents/planning/workflows/cloud/devices, hover/focus switches, resets 320ms after leaving). Section panes: title, description, optional named slot (default: cloud shows synced projects list) and an open button that emits the existing event. Sidebar z-index raised to 36 so fly-outs paint over the mini system column; fly-out panel gets glass background. Verified vue-tsc/eslint/prettier + browser hover. Next: fill the agents/planning/workflows/devices slots from App.vue with live data.

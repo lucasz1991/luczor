@@ -353,6 +353,18 @@ const activeChatLabel = computed(() => {
   if (!message?.meta.activity) return 'Luczor arbeitet'
   return activityLabel(message.meta.activity, pendingApprovals.value.length > 0)
 })
+const copiedMessageId = ref('')
+let copiedTimer: ReturnType<typeof setTimeout> | undefined
+async function copyMessageText(message: Message) {
+  try {
+    await navigator.clipboard.writeText(message.content)
+    copiedMessageId.value = message.id
+    if (copiedTimer) clearTimeout(copiedTimer)
+    copiedTimer = setTimeout(() => (copiedMessageId.value = ''), 1600)
+  } catch {
+    /* Clipboard access can be denied in the webview; the button simply stays. */
+  }
+}
 function messageTools(message: Message) {
   const calls = getSafeRecordValue(state.pending?.toolCallsByProject ?? {}, message.projectId) ?? []
   const nextUser = messages.value.find(item => item.role === 'user' && item.ts > message.ts)
@@ -2838,9 +2850,16 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
               { 'is-running': messageRunActive(m) },
             ]"
           >
+            <button
+              type="button"
+              class="ai-message__copy"
+              :aria-label="m.role === 'user' ? 'Nachricht kopieren' : 'Antwort kopieren'"
+              @click="copyMessageText(m)"
+            >
+              <AiIcon name="copy" :size="11" />{{ copiedMessageId === m.id ? 'Kopiert' : 'Kopieren' }}
+            </button>
             <header>
-              <span v-if="m.role === 'assistant'" class="ai-message__avatar"><AiIcon :size="15" /></span
-              ><strong>{{ m.role === 'user' ? 'Du' : appearance.assistantName }}</strong
+              <strong>{{ m.role === 'user' ? 'Du' : appearance.assistantName }}</strong
               ><time>{{ formatChatTime(m.ts) }}</time
               ><span v-if="m.meta.inputSource && m.meta.inputSource !== 'keyboard'" class="ai-badge">Gesprochen</span
               ><span

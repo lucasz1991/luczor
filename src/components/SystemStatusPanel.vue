@@ -305,7 +305,7 @@ watch(displayMode, mode => emit('displayMode', mode), { immediate: true })
 }
 .system-status-panel__content {
   min-height: 0;
-  padding: 8px 24px 12px;
+  padding: 8px 20px 14px;
   overflow-y: auto;
   scrollbar-gutter: stable;
   overscroll-behavior: contain;
@@ -377,37 +377,84 @@ details[open] > summary .disclosure-arrow {
 </style>
 
 <style scoped>
+/* Mode switch: the design board's pill group (Mini · Tabs · Vollbild). */
 .system-view-switch {
-  display: flex;
-  gap: 4px;
-  padding: 7px 12px;
-  border-bottom: 1px solid var(--ai-line);
+  display: inline-flex;
+  gap: 2px;
+  align-self: flex-start;
+  margin: 8px 14px 0;
+  padding: 2px;
+  border: 1px solid var(--ai-line);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ai-canvas) 70%, transparent);
   flex-shrink: 0;
 }
 .system-view-switch button {
   border: 0;
-  border-radius: 5px;
+  border-radius: 999px;
   background: transparent;
-  color: var(--ai-muted);
-  padding: 4px 8px;
+  color: var(--ai-faint);
+  padding: 3px 9px;
   font: inherit;
+  font-size: 10px;
+  transition:
+    background 200ms var(--ease, ease),
+    color 200ms var(--ease, ease);
+}
+.system-view-switch button:hover:not([aria-pressed='true']) {
+  color: var(--ai-muted);
 }
 .system-view-switch button[aria-pressed='true'] {
   background: var(--ai-hover);
   color: var(--ai-ink);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ai-ink) 8%, transparent);
 }
+/* Mini = sidebar column beside the navigation: model card on top, metric tiles below. */
 .system-status-panel[data-mode='mini'] {
   --system-sidebar-width: 296px;
-  top: 82px;
+  top: 0;
   right: auto;
-  bottom: var(--system-composer-clearance, 142px);
-  left: calc(var(--system-sidebar-width) + 12px);
-  width: 154px;
+  bottom: 0;
+  left: var(--system-sidebar-width);
+  width: 176px;
   min-width: 0;
-  max-width: calc(100vw - var(--system-sidebar-width) - 24px);
+  max-width: calc(100vw - var(--system-sidebar-width));
   max-height: none;
+  height: 100dvh;
   resize: none;
-  border-radius: 10px;
+  border-width: 0 1px 0 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+[data-mode='mini'] .system-view-switch {
+  margin: 0 8px 4px;
+  align-self: stretch;
+  justify-content: center;
+}
+[data-mode='mini'] .system-view-switch button {
+  flex: 1;
+  padding: 2px 5px;
+  font-size: 9px;
+}
+[data-mode='mini'] .system-status-panel__header {
+  border-bottom: 0;
+}
+[data-mode='mini'] .system-status-panel__header h2 {
+  color: var(--ai-muted);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+[data-mode='mini'] :deep(.resource-grid) {
+  gap: 6px;
+}
+[data-mode='mini'] :deep(.compact-model-usage),
+[data-mode='mini'] :deep(.compact-tools) {
+  margin: 6px 0 0;
+}
+[data-mode='mini'] :deep(.status-overview) {
+  display: none;
 }
 .system-status-panel[data-mode='mini'][data-sidebar-collapsed='true'] {
   --system-sidebar-width: 56px;
@@ -471,9 +518,6 @@ details[open] > summary .disclosure-arrow {
 </style>
 
 <style scoped>
-[data-mode='mini'] :deep(.resource-dial-wrap) {
-  max-width: 112px;
-}
 [data-mode='mini'] .system-status-panel__header {
   min-height: 38px;
   padding: 5px 7px 5px 9px;
@@ -496,15 +540,16 @@ details[open] > summary .disclosure-arrow {
   font-size: 0;
 }
 [data-mode='mini'] .system-status-panel__content {
-  padding: 7px 9px;
+  padding: 4px 10px 12px;
+  overflow-x: hidden;
+  scrollbar-gutter: auto;
 }
 [data-mode='mini'] :deep(.resource-heading) {
-  padding: 0 0 8px;
+  display: none;
 }
 [data-mode='mini'] :deep(.resource-heading > span),
 [data-mode='mini'] :deep(.resource-mode),
-[data-mode='mini'] :deep(.resource-context),
-[data-mode='mini'] :deep(.resource-explanation) {
+[data-mode='mini'] :deep(.resource-context) {
   display: none;
 }
 [data-mode='mini'] :deep(.resource-storage-note) {
@@ -516,10 +561,10 @@ details[open] > summary .disclosure-arrow {
 }
 [data-mode='dashboard'] :deep(.resource-grid) {
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
+  gap: 14px;
 }
 [data-mode='dashboard'] :deep(.resource-dial-wrap) {
-  max-width: 132px;
+  max-width: 150px;
 }
 [data-mode='dashboard'] :deep(.activity-charts) {
   grid-column: 2;
@@ -533,9 +578,6 @@ details[open] > summary .disclosure-arrow {
 }
 [data-mode='dashboard'] :deep(.resource-heading) {
   padding-bottom: 10px;
-}
-[data-mode='dashboard'] :deep(.resource-explanation) {
-  margin-bottom: 0;
 }
 [data-mode='dashboard'] :deep(.model-analysis) {
   grid-row: 3 / span 2;
@@ -598,8 +640,8 @@ details[open] > summary .disclosure-arrow {
 @media (max-width: 700px) {
   .system-status-panel[data-mode='mini'] {
     --system-sidebar-width: 56px;
-    left: calc(var(--system-sidebar-width) + 8px);
-    width: min(148px, calc(100vw - var(--system-sidebar-width) - 16px));
+    left: var(--system-sidebar-width);
+    width: min(160px, calc(100vw - var(--system-sidebar-width)));
   }
 }
 </style>
