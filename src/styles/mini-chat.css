@@ -13,10 +13,9 @@ html.mini-window,
   /* Target size of the fully-opened chats page — shared by the outer fly-out (what animates)
      and the inner .mini-panel (what must NOT reflow while that animation runs). */
   --mini-chat-w: min(400px, calc(100vw - 56px));
-  /* The box grows around its own centre when a pane opens (see the JS-side clampPosition),
-     so the room available to a pane is the viewport height minus a margin on both edges. */
+  /* Never taller than the room above the (fixed) bottom edge — the icon column must not be pushed. */
   --mini-pad-v: 12px;
-  --mini-room-h: calc(100vh - 2 * var(--mini-pad-v));
+  --mini-room-h: calc(100vh - var(--mini-bottom, 0px) - var(--mini-pad-v));
   --mini-chat-h: min(580px, var(--mini-room-h));
   /* Lets the fly-out's `auto` height take part in the spring (no-op where unsupported). */
   interpolate-size: allow-keywords;
@@ -635,10 +634,9 @@ html.mini-window,
     inset 0 1px 0 rgba(255, 255, 255, 0.12),
     0 14px 30px -18px rgba(0, 0, 0, 0.8);
   overflow: hidden;
-  /* Icon column centers against whichever pane is open — the grip stays level with the open
-     content instead of pinned to the box's bottom edge (the box itself grows symmetrically
-     around its own centre, see the surface's clampPosition). */
-  align-items: center;
+  /* Grows around a fixed bottom edge; the icon column never moves. Opening a pane (including on
+     hover, before a drag even starts) must not shift the box — see the Vue component's `bottom`. */
+  align-items: flex-end;
   transition:
     border-radius 0.4s var(--ease, ease),
     box-shadow 0.5s var(--ease, ease),

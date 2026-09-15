@@ -101,4 +101,49 @@ describe('shared request budget and evidence retention', () => {
     expect(({} as Record<string, unknown>).polluted).toBeUndefined()
     expect(value.text.length).toBe(10000)
   })
+
+  it('retains complete long and Unicode file references under repeated compaction', () => {
+    const path = 'folder/'.repeat(185) + 'Bericht_e\u0301_Ä_📁_2026-09-13.md'
+    const name = 'Bericht_e\u0301_Ä_📁_2026-09-13.md'
+    const source = { entries: [{ path, name, content: 'large content '.repeat(3000) }] }
+    const first = compactToolOutput(source, 6000)
+    const second = compactToolOutput(first, 1800)
+    for (const result of [first, second]) {
+      const serialized = JSON.stringify(result)
+      expect(serialized).toContain(JSON.stringify(path))
+      expect(serialized).toContain(JSON.stringify(name))
+    }
+    expect(JSON.stringify(second).length).toBeLessThanOrEqual(1800)
+    expect(source.entries[0]!.path).toBe(path)
+  })
+
+  it('omits an unrepresentable file entry instead of clipping a path or escaped JSON', () => {
+    const path = 'folder/'.repeat(300) + 'report.md'
+    const result = compactToolOutput({ path, name: 'report.md', content: 'x'.repeat(10000) }, 900)
+    expect(result).toMatchObject({ truncated: true, projection: { omitted: true } })
+    expect(JSON.stringify(result)).not.toContain('folder/')
+    const escaped = compactToolOutput({ path: '\\'.repeat(700), content: 'x'.repeat(10000) }, 900)
+    expect(JSON.stringify(escaped)).not.toContain('excerpt')
+    expect(JSON.stringify(escaped).length).toBeLessThanOrEqual(900)
+  })
+
+  it('keeps historical structured tool excerpts valid and never slices a filename in prose', () => {
+    const path = 'folder/'.repeat(150) + 'ABSCHLUSSBERICHT_2026-09-13.md'
+    const history: WireMessage[] = [
+      { role: 'user', content: 'Read the report' },
+      { role: 'tool', name: 'fs_list', tool_call_id: 'old', content: JSON.stringify({ entries: [{ path }] }) },
+      { role: 'assistant', content: `The file is ${path}` },
+      { role: 'user', content: 'previous question' },
+      { role: 'assistant', content: 'x'.repeat(15000) },
+      { role: 'user', content: 'continue' },
+    ]
+    const result = fitRequestContext(history, [], { targetTokens: 1024, retrievalAvailable: true })
+    const note = result.messages.find(message => message.content.startsWith('[LUCZOR-HISTORY-NOTES]'))!
+    const records = JSON.parse(note.content.split('\n')[2]!) as { index: number; excerpt: string; truncated: boolean }[]
+    const tool = records.find(record => record.index === 1)!
+    expect(() => JSON.parse(tool.excerpt)).not.toThrow()
+    expect(tool.excerpt).not.toContain('folder/')
+    expect(records.find(record => record.index === 2)).toMatchObject({ excerpt: '', truncated: true })
+    expect(history[1]!.content).toContain(path)
+  })
 })

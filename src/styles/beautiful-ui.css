@@ -945,6 +945,10 @@
   min-height: 0;
   flex: 1;
   overflow-y: auto;
+  /* Explicit, not left to default: a lone `overflow-y: auto` makes overflow-x compute to `auto`
+     too (CSS Overflow spec), so any one too-wide line — a long URL, an inline code span, a
+     table — would make the whole chat scroll sideways instead of just wrapping or clipping. */
+  overflow-x: hidden;
   overscroll-behavior: contain;
   padding: 30px 36px;
   scroll-padding-bottom: 25px;
@@ -952,6 +956,7 @@
 .ai-thread {
   width: 100%;
   max-width: 740px;
+  min-width: 0;
   margin: 0 auto;
 }
 .ai-chat__composer {

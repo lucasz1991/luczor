@@ -50,6 +50,15 @@ export function readContextBudget(value: unknown): ContextBudgetReport | undefin
 // A conservative planning estimate, never substituted for native/provider usage.
 export const estimateContextTokens = (text: string) => Math.ceil(text.length / 3)
 
+// File references are identities, not prose. Never normalize Unicode or shorten
+// them into a different (potentially valid) file name during context projection.
+const referenceKey = /(?:path|paths|name|names|directory|directories|folder|uri|url)$/i
+function completeLineExcerpt(text: string, limit: number): string {
+  if (text.length <= limit) return text
+  const boundary = text.lastIndexOf('\n', Math.max(0, limit - 1))
+  return boundary >= 0 ? text.slice(0, boundary + 1) : ''
+}
+
 /** Return a valid JSON projection, with explicit omissions instead of broken JSON. */
 export function compactToolOutput(value: unknown, maxChars = 6000): unknown {
   const original = JSON.stringify(value) ?? 'null'
@@ -62,7 +71,7 @@ export function compactToolOutput(value: unknown, maxChars = 6000): unknown {
     if (typeof input === 'string') {
       const size = Math.min(allowance, 1200)
       allowance -= Math.min(input.length, size) + 16
-      return input.length <= size ? input : input.slice(0, size) + ' [Auszug; Rest gezielt nachlesen]'
+      return input.length <= size ? input : completeLineExcerpt(input, size) + ' [Auszug; Rest gezielt nachlesen]'
     }
     if (Array.isArray(input)) {
       const selected: unknown[] = []
@@ -74,10 +83,22 @@ export function compactToolOutput(value: unknown, maxChars = 6000): unknown {
     }
     if (input && typeof input === 'object') {
       const result: Record<string, unknown> = {}
+      const references = Object.entries(input).filter(([key]) => referenceKey.test(key))
+      const referenceCost = references.reduce((sum, [key, entry]) => sum + JSON.stringify({ [key]: entry }).length, 0)
+      if (referenceCost > allowance) {
+        // Omit this entire entry instead of leaving content associated with a
+        // partial path/name. The caller can retrieve the original tool result.
+        return { omitted: true, reason: 'Complete file reference exceeds context budget; retrieve the original.' }
+      }
+      for (const [key, entry] of references) {
+        allowance -= JSON.stringify({ [key]: entry }).length
+        Object.defineProperty(result, key, { value: entry, enumerable: true })
+      }
       const entries = Object.entries(input).sort(
         ([left], [right]) => Number(important.test(right)) - Number(important.test(left))
       )
       for (const [key, entry] of entries) {
+        if (referenceKey.test(key)) continue
         if (allowance < key.length + 64) break
         allowance -= key.length + 8
         // Use defineProperty so even arbitrary tool data named __proto__ remains data.
@@ -89,10 +110,8 @@ export function compactToolOutput(value: unknown, maxChars = 6000): unknown {
     return input
   }
   const result = { truncated: true, originalCharacters: original.length, projection: visit(value) }
-  // JSON escaping can exceed a character allowance; fall back without corrupting JSON.
-  return JSON.stringify(result).length <= maxChars
-    ? result
-    : { truncated: true, originalCharacters: original.length, excerpt: original.slice(0, Math.floor(maxChars / 3)) }
+  // Never slice serialized JSON: it can cut a filename, escape or surrogate pair.
+  return JSON.stringify(result).length <= maxChars ? result : { truncated: true, omitted: true }
 }
 
 export function contextBreakdown(messages: readonly WireMessage[], tools: readonly unknown[]) {
@@ -162,9 +181,13 @@ function archiveNote(
           ? 'Werkzeugbeleg'
           : 'Assistentenaussage, ungeprüft'
     let content = message.content
+    let structured = false
+    let compacted = false
     if (message.role === 'tool') {
       try {
         content = JSON.stringify(compactToolOutput(JSON.parse(content), perItem))
+        structured = true
+        compacted = content !== message.content
       } catch {
         /* text result */
       }
@@ -173,8 +196,8 @@ function archiveNote(
       index,
       type: label,
       ...(message.role === 'tool' ? { name: message.name, callId: message.tool_call_id } : {}),
-      excerpt: content.slice(0, perItem),
-      truncated: content.length > perItem,
+      excerpt: structured ? content : completeLineExcerpt(content, perItem),
+      truncated: compacted || content.length > perItem,
     }
   })
   return {

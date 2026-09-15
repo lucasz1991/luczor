@@ -191,60 +191,190 @@ export function toolDiscovery(tool: ToolDescriptor) {
     nodes: path,
   }
 }
-export function searchToolCatalog(pool: ToolDescriptor[], query = '', category = '') {
-  const stopWords = new Set([
-    'die',
-    'der',
-    'das',
-    'den',
-    'dem',
-    'ein',
-    'eine',
-    'einen',
-    'und',
-    'oder',
-    'mit',
-    'von',
-    'im',
-    'in',
-    'am',
-    'auf',
-    'bitte',
-    'mir',
-    'ich',
-    'du',
-    'the',
-    'a',
-    'an',
-    'and',
-    'or',
-    'with',
-    'please',
-    'for',
-    'to',
-    'me',
-  ])
-  const tokens = normalizeToolSearch(query)
+const stopWords = new Set([
+  'die',
+  'der',
+  'das',
+  'den',
+  'dem',
+  'ein',
+  'eine',
+  'einen',
+  'und',
+  'oder',
+  'mit',
+  'von',
+  'im',
+  'in',
+  'am',
+  'auf',
+  'bitte',
+  'mir',
+  'ich',
+  'du',
+  'the',
+  'a',
+  'an',
+  'and',
+  'or',
+  'with',
+  'please',
+  'for',
+  'to',
+  'me',
+])
+
+// Small, explicit query expansions, not generated instructions or permission metadata.
+const synonymGroups = [
+  'read lesen lies auslesen',
+  'list auflisten auflistung',
+  'search find suchen suche durchsuchen finden',
+  'write save speichern schreiben',
+  'delete remove loschen loeschen entfernen',
+  'open offnen oeffnen',
+  'close schliessen',
+  'cancel abbrechen abbruch',
+  'stop stoppen beenden',
+  'fill ausfullen ausfuellen',
+  'recall nachschlagen abrufen',
+  'remember merken',
+  'update andern aendern aktualisieren',
+  'create erstellen anlegen',
+  'device gerat geraet gerate geraete',
+  'file files datei dateien',
+  'folder ordner verzeichnis',
+  'local lokal lokale lokalen lokales',
+].map(group => [...new Set(group.split(' '))])
+const synonyms = new Map(synonymGroups.flatMap(group => group.map(word => [word, group] as const)))
+
+function searchWords(text: string): string[] {
+  // Parameter names such as invoiceNumber must also match "invoice number".
+  return normalizeToolSearch(text.replace(/([a-z0-9])([A-Z])/g, '$1 $2'))
     .split(' ')
-    .filter(word => word && !stopWords.has(word))
-  return pool
-    .map(tool => {
-      const meta = toolDiscovery(tool)
-      const words = normalizeToolSearch(
-        `${meta.name} ${meta.description} ${meta.keywords.join(' ')} ${meta.path.join(' ')}`
-      ).split(' ')
-      const score = tokens.reduce(
-        (sum, token) =>
-          sum + (words.some(word => word === token || (token.length >= 4 && word.startsWith(token))) ? 1 : 0),
-        0
-      )
-      return { tool, meta, score }
+    .filter(Boolean)
+}
+
+/** Index schema documentation only: never default/example/enum values or arguments. */
+function parameterDocumentation(schema: Record<string, unknown>): string {
+  const parts: string[] = []
+  const seen = new Set<object>()
+  let remaining = 8192
+  const add = (value: unknown) => {
+    if (typeof value !== 'string' || remaining <= 0) return
+    const part = value.slice(0, Math.min(1024, remaining))
+    parts.push(part)
+    remaining -= part.length
+  }
+  const visit = (value: unknown, depth: number) => {
+    if (!value || typeof value !== 'object' || depth > 8 || seen.size >= 128 || remaining <= 0 || seen.has(value))
+      return
+    seen.add(value)
+    const node = value as Record<string, unknown>
+    add(node.title)
+    add(node.description)
+    for (const children of [node.properties, node.$defs, node.definitions]) {
+      if (children && typeof children === 'object')
+        for (const [name, child] of Object.entries(children)) {
+          if (remaining <= 0 || seen.size >= 128) break
+          add(name)
+          visit(child, depth + 1)
+        }
+    }
+    visit(node.items, depth + 1)
+    visit(node.additionalProperties, depth + 1)
+    for (const children of [node.oneOf, node.anyOf, node.allOf])
+      if (Array.isArray(children)) for (const child of children.slice(0, 32)) visit(child, depth + 1)
+  }
+  visit(schema, 0)
+  return parts.join('\n')
+}
+
+type SearchDocument = {
+  name: string
+  description: string
+  parameters: string
+  words: Map<string, number>
+  sortedWords: string[]
+}
+// Tool metadata only, weakly held. No query/result cache, disk writes or account data.
+const searchDocuments = new WeakMap<ToolDescriptor, SearchDocument>()
+function searchDocument(tool: ToolDescriptor, meta: ReturnType<typeof toolDiscovery>): SearchDocument {
+  const name = tool.function.name
+  const description = (tool.function.description ?? '').slice(0, 8192)
+  const parameters = parameterDocumentation(tool.function.parameters)
+  const cached = searchDocuments.get(tool)
+  // Compare searchable contents, including in-place nested schema edits.
+  if (cached?.name === name && cached.description === description && cached.parameters === parameters) return cached
+  const words = new Map<string, number>()
+  const add = (text: string, weight: number) => {
+    for (const word of searchWords(text)) words.set(word, Math.max(weight, words.get(word) ?? 0))
+  }
+  add(name, 12)
+  add(description, 6)
+  add(parameters, 4)
+  for (const [index, node] of meta.nodes.entries()) {
+    // A declared domain (e.g. Local project folder) outweighs a passing mention
+    // of "local" in a cloud tool's description. Broad inherited aliases stay weak.
+    add(node.label, 10)
+    add(node.keywords.join(' '), index === meta.nodes.length - 1 ? 8 : 2)
+  }
+  const document = { name, description, parameters, words, sortedWords: [...words.keys()].sort() }
+  searchDocuments.set(tool, document)
+  return document
+}
+
+function wordScore(document: SearchDocument, token: string): number {
+  let best = document.words.get(token) ?? 0
+  for (const variant of synonyms.get(token) ?? [token]) {
+    const factor = variant === token ? 1 : 0.85
+    best = Math.max(best, (document.words.get(variant) ?? 0) * factor)
+    if (variant.length < 4 || best >= 12 * factor * 0.65) continue
+    // Find only the matching prefix range, rather than scanning every field word.
+    let low = 0
+    let high = document.sortedWords.length
+    while (low < high) {
+      const middle = (low + high) >>> 1
+      if (document.sortedWords.at(middle)! < variant) low = middle + 1
+      else high = middle
+    }
+    for (let index = low; index < document.sortedWords.length; index++) {
+      const word = document.sortedWords.at(index)!
+      if (!word.startsWith(variant)) break
+      best = Math.max(best, document.words.get(word)! * factor * 0.65)
+    }
+  }
+  return best
+}
+
+export function searchToolCatalog(pool: ToolDescriptor[], query = '', category = '') {
+  const boundedQuery = query.slice(0, 2048)
+  const tokens = [
+    ...new Set(searchWords(boundedQuery).filter(word => word.length <= 64 && !stopWords.has(word))),
+  ].slice(0, 32)
+  const mentionedIds = new Set(boundedQuery.toLowerCase().match(/[a-z][a-z0-9_]*/g) ?? [])
+  // Always build candidates from this call's pool. A cached document never supplies a tool.
+  const candidates = pool
+    .map(tool => ({ tool, meta: toolDiscovery(tool) }))
+    .filter(({ meta }) => !category || meta.category === category || meta.category.startsWith(`${category}/`))
+  if (!tokens.length) return candidates.map(row => ({ ...row, score: 0 }))
+  const scored = candidates.map(row => {
+    const document = searchDocument(row.tool, row.meta)
+    return { ...row, matches: tokens.map(token => wordScore(document, token)) }
+  })
+  const rarity = tokens.map(
+    (_, index) => 1 + Math.log(1 + scored.length / (1 + scored.filter(row => row.matches.at(index)! > 0).length))
+  )
+  return scored
+    .map(({ tool, meta, matches }) => {
+      const coverage = matches.filter(score => score > 0).length / tokens.length
+      const relevance = matches.reduce((sum, score, index) => sum + score * rarity.at(index)!, 0)
+      return {
+        tool,
+        meta,
+        score: (mentionedIds.has(tool.function.name.toLowerCase()) ? 1_000_000 : 0) + relevance * coverage ** 2,
+      }
     })
-    .filter(
-      item =>
-        (!category || item.meta.category === category || item.meta.category.startsWith(`${category}/`)) &&
-        (!tokens.length || item.score > 0)
-    )
+    .filter(row => row.score > 0)
     .sort((left, right) => right.score - left.score)
 }
 /** Only branches containing currently eligible tools; parents retain searchable aliases. */

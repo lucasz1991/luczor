@@ -113,14 +113,12 @@ const box = ref<HTMLElement | null>(null)
 const field = ref<HTMLTextAreaElement | null>(null)
 // The nudge is locked flush to a screen edge, like the design board's Nano nudge: dragging moves
 // it up/down along the edge and flips which edge it's on, it never floats free horizontally.
+// `bottom` is the ONLY thing that ever moves it — drag, arrow keys or reset. Hovering the chats
+// icon opens the full chat page (see chatsOpen below) before any drag motion even starts, so if
+// opening a pane also shifted the box, that shift would happen the instant a drag begins and throw
+// off the drag's own coordinate tracking. The box only ever grows upward from this fixed edge.
 const side = ref<'left' | 'right'>('right')
-// `bottom` is the nudge's actual resting spot — only drag, arrow keys and reset ever change it.
-// A pane opening taller than the collapsed grip must not move that spot; it only grows the box
-// around it (see `visualBottom` / clampPosition below), so closing the pane again always lands
-// back exactly where it started, even after growth got clamped against a screen edge.
 const bottom = ref(20)
-const visualBottom = ref(20)
-let collapsedHeight = 0
 let surfaceResize: ResizeObserver | undefined
 let peekTimer: ReturnType<typeof setTimeout> | undefined
 let drag: {
@@ -129,6 +127,7 @@ let drag: {
   bottom: number
   pointer: number
   nativeStarted: boolean
+  captureTarget: HTMLElement
 } | null = null
 let dragged = false
 const decision = computed(() => props.snapshot.decision ?? props.snapshot.mainDecision)
@@ -138,8 +137,8 @@ const surfaceStyle = computed(() => ({
   ...(props.native
     ? {}
     : side.value === 'left'
-      ? { left: '0px', bottom: `${visualBottom.value}px` }
-      : { right: '0px', bottom: `${visualBottom.value}px` }),
+      ? { left: '0px', bottom: `${bottom.value}px`, '--mini-bottom': `${bottom.value}px` }
+      : { right: '0px', bottom: `${bottom.value}px`, '--mini-bottom': `${bottom.value}px` }),
   ...(props.snapshot.appearance?.accent && /^#[0-9a-f]{6}$/i.test(props.snapshot.appearance.accent)
     ? { '--cy-bright': props.snapshot.appearance.accent }
     : {}),
@@ -286,30 +285,10 @@ function layout() {
     else apply()
   } else void nextTick(clampPosition)
 }
-// Nothing is hovered, pinned or otherwise open — the box is at its resting, collapsed height.
-const gripIdle = computed(() => !chatsOpen.value && !peekVisible.value && !gripHover.value && !pinnedPane.value)
 function clampPosition() {
   // Horizontal is always flush to an edge now; only the vertical position needs clamping.
   if (props.native || !box.value) return
-  const height = box.value.offsetHeight
-  // Self-calibrating baseline: whenever the box is actually collapsed, that height IS the resting
-  // size (covers font loading, first paint, responsive breakpoints — never hardcoded).
-  if (gripIdle.value || !collapsedHeight) collapsedHeight = height
-  const growth = Math.max(0, height - collapsedHeight)
-  // A pane opening taller than the grip grows the box around `bottom` (the nudge's real resting
-  // spot) — split between the top and bottom edge — instead of only ever pushing the top edge up.
-  // This only ever adjusts the transient `visualBottom`, never `bottom` itself, so a growth spurt
-  // that gets clamped against a screen edge never leaves the nudge's resting spot shifted once the
-  // pane closes again: growth returns to 0 and visualBottom snaps back to exactly `bottom`.
-  const target = bottom.value - growth / 2
-  visualBottom.value = Math.max(0, Math.min(target, window.innerHeight - height))
-}
-// Keeps the persisted rest position itself on-screen too — it's what the next drag or arrow-key
-// move starts from, so it must never drift past the edge just because a render got clamped.
-function clampRestBottom() {
-  if (props.native) return
-  const height = collapsedHeight || box.value?.offsetHeight || 0
-  bottom.value = Math.max(0, Math.min(bottom.value, window.innerHeight - height))
+  bottom.value = Math.max(0, Math.min(bottom.value, window.innerHeight - box.value.offsetHeight))
 }
 function clearPeek() {
   clearTimeout(peekTimer)
@@ -349,7 +328,6 @@ function resetPosition() {
   void windowAction('reset_position')
   side.value = 'right'
   bottom.value = 20
-  clampRestBottom()
   clampPosition()
 }
 function send(text = draft.value) {
@@ -427,14 +405,16 @@ async function openWorkflow(messageId: string, workflowId: number) {
 function beginDrag(event: PointerEvent) {
   if (event.button !== 0) return
   dragged = false
+  const captureTarget = event.currentTarget as HTMLElement
   drag = {
     startX: event.clientX,
     startY: event.clientY,
     bottom: bottom.value,
     pointer: event.pointerId,
     nativeStarted: false,
+    captureTarget,
   }
-  ;(event.currentTarget as HTMLElement).setPointerCapture(event.pointerId)
+  captureTarget.setPointerCapture(event.pointerId)
 }
 function moveDrag(event: PointerEvent) {
   if (!drag || drag.pointer !== event.pointerId) return
@@ -445,6 +425,13 @@ function moveDrag(event: PointerEvent) {
   if (props.native) {
     if (drag.nativeStarted) return
     drag.nativeStarted = true
+    // The OS-native drag needs to own the mouse from here on — holding onto the webview's own
+    // pointer capture can stop the OS from ever taking over, so hand it back first.
+    try {
+      drag.captureTarget.releasePointerCapture(event.pointerId)
+    } catch {
+      /* Already released — not fatal. */
+    }
     void invoke('mini_chat_drag')
       .catch(() => {
         windowError.value = 'Verschieben nicht möglich.'
@@ -467,7 +454,6 @@ function moveDrag(event: PointerEvent) {
 }
 function endDrag() {
   drag = null
-  clampRestBottom()
   setTimeout(() => {
     dragged = false
   }, 250)
@@ -485,7 +471,6 @@ function moveKey(event: KeyboardEvent) {
   if (event.key === 'ArrowRight') side.value = 'right'
   if (event.key === 'ArrowUp') bottom.value += 24
   if (event.key === 'ArrowDown') bottom.value -= 24
-  clampRestBottom()
   clampPosition()
 }
 watch([chatsOpen, peekVisible, gripHover, pinnedPane], layout)

@@ -124,7 +124,10 @@ export function focusedTools(objective: string, archive?: () => readonly WireMes
         preferred.push('os_environment', 'os_system_diagnostics', 'local_model_status')
       if (/erinner|memory/.test(text)) preferred.push('memory_recall', 'memory_remember')
       if (/workflow/.test(text)) preferred.push('workflow_list', 'workflow_get', 'workflow_run_start')
-      const exact = pool.filter(tool => text.includes(tool.function.name)).map(tool => tool.function.name)
+      // Preserve explicit IDs even beyond the bounded lexical query, without
+      // confusing fs_read with fs_read_extended through substring matching.
+      const mentionedIds = new Set(text.match(/[a-z][a-z0-9_]*/g) ?? [])
+      const exact = pool.filter(tool => mentionedIds.has(tool.function.name)).map(tool => tool.function.name)
       const matched = searchToolCatalog(pool, objective)
         .filter(item => item.score > 0)
         .map(item => item.tool.function.name)
