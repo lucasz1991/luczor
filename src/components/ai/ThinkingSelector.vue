@@ -70,7 +70,6 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocumentPoin
       <span class="ai-thinking-select__steps" aria-hidden="true">
         <i v-for="n in THINKING_TIERS.length" :key="n" :class="{ 'is-filled': n <= level }" />
       </span>
-      <span class="ai-thinking-select__label">{{ current.label }}</span>
       <AiIcon name="chevron" :size="11" class="ai-thinking-select__chevron" />
     </button>
     <div v-show="open" class="ai-thinking-select__menu" role="listbox" aria-label="Denkstufe">
@@ -105,9 +104,9 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocumentPoin
 .ai-thinking-select__trigger {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   height: 32px;
-  padding: 0 10px 0 12px;
+  padding: 0 10px;
   border: 1px solid transparent;
   border-radius: 999px;
   background: transparent;
@@ -144,9 +143,6 @@ onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocumentPoin
 }
 .ai-thinking-select__steps i.is-filled {
   background: var(--ai-accent, #ac95ea);
-}
-.ai-thinking-select__label {
-  white-space: nowrap;
 }
 .ai-thinking-select__chevron {
   width: 0;

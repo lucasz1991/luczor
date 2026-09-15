@@ -196,8 +196,9 @@ const TOOL_CONTRACT = [
 ] as const
 
 // Reviewed recovery contract: owned browser status/close, image capabilities and exact goal updates.
-const TOOL_SCHEMA_SHA256 = 'fdb400ded5d175aa1260c378e45ce930efb642187a24f7b6e9f544181cac4d18'
-const CORE_TOOL_SCHEMA_SHA256 = '42d69d28ea1c76e5eddc8d5e7719dffc721ad1aafa6804b93ebb516b75f3d911'
+// memory_recall now documents host-bound local/private versus external/shared retrieval.
+const TOOL_SCHEMA_SHA256 = '2424ecf9ae8add1b9bf2342bd5ad64f1da7864ac27898786158233a9b786c211'
+const CORE_TOOL_SCHEMA_SHA256 = '355c270130f92fc028aada9d7d6f93c2f82da43203724095246d30e13301f2eb'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {

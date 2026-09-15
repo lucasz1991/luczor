@@ -15,6 +15,12 @@ export type RepositoryBinding = {
 }
 
 export type RepositoryGraphStatus = {
+  lsp?: {
+    status: 'ready' | 'partial' | 'unavailable' | 'not_applicable' | 'error'
+    files: number
+    scanned: number
+    edges: number
+  }
   status: 'unbound' | 'unindexed' | 'indexing' | 'ready' | 'stale' | 'error'
   repository_id?: string
   display_name?: string
@@ -36,6 +42,7 @@ export type GraphSymbolRef = {
 }
 
 export type GraphSearchHit = {
+  relations?: string[]
   evidence_id: string
   relative_path: string
   language: string
@@ -214,7 +221,7 @@ export async function buildLocalRepositoryContext(
       if (!snippet) return []
       return [
         `Datei: ${snippet.relative_path}:${snippet.start_line}-${snippet.end_line}\n` +
-          `Hash: ${snippet.content_hash}\n` +
+          `Hash: ${snippet.content_hash}\n${(hit.relations ?? []).join('\n')}\n` +
           `\`\`\`${hit.language}\n${snippet.content}\n\`\`\``,
       ]
     })
@@ -234,7 +241,7 @@ export async function buildLocalRepositoryContext(
               {
                 id: hit.evidence_id,
                 score: hit.score,
-                content: `Datei: ${snippet.relative_path}:${snippet.start_line}-${snippet.end_line}\nHash: ${snippet.content_hash}\n${snippet.content}`,
+                content: `Datei: ${snippet.relative_path}:${snippet.start_line}-${snippet.end_line}\nHash: ${snippet.content_hash}\n${(hit.relations ?? []).join('\n')}\n${snippet.content}`,
               },
             ]
           : []

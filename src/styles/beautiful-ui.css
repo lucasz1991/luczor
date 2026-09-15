@@ -1317,6 +1317,45 @@ html[data-reduce-motion='1'] .ai-shimmer {
   outline: 2px solid var(--cy, #74c5d9);
   outline-offset: 2px;
 }
+/* Icon-only control mode: Beobachten/Handeln/Vollzugriff picked from a native select, dot shows the choice. */
+.ai-mode-select {
+  position: relative;
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: transparent;
+}
+.ai-mode-select:focus-within {
+  outline: 2px solid var(--cy, #74c5d9);
+  outline-offset: 2px;
+}
+.ai-mode-select__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-muted);
+}
+.ai-mode-select.is-act {
+  color: var(--success-soft);
+  background: var(--success-wash);
+  border-color: rgba(69, 214, 160, 0.28);
+}
+.ai-mode-select.is-act .ai-mode-select__dot {
+  background: var(--success-soft);
+}
+.ai-mode-select.is-unrestricted {
+  color: var(--danger-soft);
+  background: var(--danger-wash);
+  border-color: rgba(251, 113, 133, 0.32);
+}
+.ai-mode-select.is-unrestricted .ai-mode-select__dot {
+  background: var(--danger-soft);
+}
 .ai-route-mode__select {
   position: absolute;
   inset: 0;

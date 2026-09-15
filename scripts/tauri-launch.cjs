@@ -121,10 +121,14 @@ async function prepareManagedRuntime(args, env, strict) {
   return runtimeManifestMatches(readRuntimeManifest(), profile)
 }
 
-function dynamicTauriConfig(devUrl, includeManagedRuntime) {
+function dynamicTauriConfig(devUrl, includeManagedRuntime, includeLspRuntime = false) {
   const config = {}
   if (devUrl) config.build = { devUrl }
   if (includeManagedRuntime) config.bundle = { resources: { [managedRuntimeResource]: 'claude-agent/' } }
+  if (includeLspRuntime)
+    config.bundle = {
+      resources: { ...config.bundle?.resources, '../../.lmzdev/artifacts/runtime/repository-lsp/': 'repository-lsp/' },
+    }
   return config
 }
 
@@ -148,8 +152,19 @@ async function main() {
   let includeManagedRuntime = false
   if (!isHelp && ['dev', 'build', 'bundle'].includes(command)) {
     includeManagedRuntime = await prepareManagedRuntime(args, env, command !== 'dev')
+    const lsp = spawnSync(process.execPath, [path.join(__dirname, 'build-lsp-runtime.mjs')], {
+      cwd: appRoot,
+      env: { ...env, TAURI_ENV_TARGET_TRIPLE: targetTripleFromArgs(args, env) },
+      stdio: 'inherit',
+      windowsHide: true,
+    })
+    if (lsp.error || lsp.status !== 0) throw new Error('Repository LSP runtime preparation failed.')
   }
-  const config = dynamicTauriConfig(devUrl, includeManagedRuntime && command !== 'dev')
+  const config = dynamicTauriConfig(
+    devUrl,
+    includeManagedRuntime && command !== 'dev',
+    !isHelp && ['build', 'bundle'].includes(command)
+  )
   if (Object.keys(config).length > 0) {
     const separator = args.indexOf('--')
     args.splice(separator < 0 ? args.length : separator, 0, '--config', JSON.stringify(config))

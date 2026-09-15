@@ -4,6 +4,7 @@ import AiIcon from './AiIcon.vue'
 import ThinkingSelector from './ThinkingSelector.vue'
 import type { ThinkingTier } from '@/services/inference/thinking'
 import type { ChatRouteMode } from '@/services/inference/modelUsageSettings'
+import type { LuczorMode } from '@/services/openrouter.service'
 import VoiceInputSettings from './VoiceInputSettings.vue'
 import SearchList from './SearchList.vue'
 import type { SearchItem } from './types'
@@ -13,6 +14,10 @@ const props = withDefaults(
     thinkingTier?: ThinkingTier
     routeMode?: ChatRouteMode
     externalAllowed?: boolean
+    mode?: LuczorMode
+    modeTitle?: string
+    modeBusy?: boolean
+    allowUnrestricted?: boolean
     busy?: boolean
     recording?: boolean
     listening?: boolean
@@ -28,11 +33,16 @@ const props = withDefaults(
     externalAllowed: true,
     routeMode: 'local',
     thinkingTier: 'balanced',
+    mode: 'observe',
+    modeTitle: '',
+    modeBusy: false,
+    allowUnrestricted: false,
   }
 )
 const emit = defineEmits<{
   'update:thinkingTier': [value: ThinkingTier]
   'update:routeMode': [value: ChatRouteMode]
+  'update:mode': [value: LuczorMode]
   'update:modelValue': [value: string]
   input: []
   send: []
@@ -49,6 +59,11 @@ const emit = defineEmits<{
 function onRouteMode(event: Event): void {
   const value = (event.target as HTMLSelectElement).value
   if (value === 'local' || value === 'auto' || value === 'external') emit('update:routeMode', value)
+}
+/** Same pattern: the parent owns the confirmation flow for "unrestricted" and may leave `mode` unchanged. */
+function onMode(event: Event): void {
+  const value = (event.target as HTMLSelectElement).value
+  if (value === 'observe' || value === 'act' || value === 'unrestricted') emit('update:mode', value)
 }
 /** The mode permits model routes; delegation is chosen for the actual request. */
 const routeModeHint = computed(() => {
@@ -128,6 +143,20 @@ defineExpose({ focus: () => field.value?.focus() })
           <AiIcon name="folder" :size="13" />{{ contextLabel }}
         </button>
         <div class="ai-prompt__controls">
+          <label class="ai-mode-select" :class="`is-${mode}`" :title="modeTitle">
+            <span class="ai-mode-select__dot" aria-hidden="true" />
+            <select
+              class="ai-route-mode__select"
+              :value="mode"
+              :disabled="modeBusy"
+              aria-label="Steuerungsmodus wählen"
+              @change="onMode($event)"
+            >
+              <option value="observe">Beobachten</option>
+              <option value="act">Handeln</option>
+              <option v-if="allowUnrestricted" value="unrestricted">Vollzugriff</option>
+            </select>
+          </label>
           <slot name="heading-start" />
           <VoiceInputSettings
             class="voice-input-settings--composer"

@@ -46,6 +46,9 @@ function memoryFragment(record: MemoryRecord, index: number): PromptFragment {
       type: record.type,
       staleness: staleness(record),
       score: record.importance * 0.6 + record.confidence * 0.4,
+      source: record.source,
+      confidence: record.confidence,
+      writeIntent: record.writeIntent,
     },
   }
 }

@@ -97,6 +97,101 @@ describe('desktop memory account isolation', () => {
     vi.unstubAllGlobals()
   })
 
+  it('round-trips an active durable idle memory locally without leaking it to the shared provider path', async () => {
+    await setServerEnabled(true)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const saved = await memory.remember({
+      content: 'Nutzerwunsch: Antworten im Projekt kompakt halten.',
+      scope: 'project',
+      projectId: 'p1',
+      source: 'assistant',
+      writeIntent: 'system',
+      retention: 'durable',
+      visibility: 'private',
+      confidence: 0.35,
+      provenance: { source_memory_ids: ['chat-user-1'] },
+      tags: ['idle-optimization'],
+    })
+    expect(saved).toMatchObject({ status: 'active', retention: 'durable', confidence: 0.35 })
+    expect(saved.expiresAt).toBeUndefined()
+    const restarted = new LuczorMemoryService()
+    expect(await restarted.recallLocal({ scope: 'project', projectId: 'p1', query: 'kompakt' })).toEqual([
+      expect.objectContaining({
+        id: saved.id,
+        provenance: expect.objectContaining({ source_memory_ids: ['chat-user-1'] }),
+      }),
+    ])
+    expect(await restarted.listCandidates('p1')).toEqual([])
+    await restarted.flushPendingSync()
+    expect(harness.fetch).not.toHaveBeenCalled()
+  })
+
+  it('does not merge AI provenance or session retention into an identical confirmed durable fact', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const input = {
+      content: 'Kurze Antworten im Projekt bevorzugen.',
+      scope: 'project' as const,
+      projectId: 'p1',
+      visibility: 'private' as const,
+    }
+    const confirmed = await memory.remember({
+      ...input,
+      source: 'user',
+      writeIntent: 'confirmed',
+      retention: 'durable',
+      confidence: 0.9,
+    })
+    const derived = await memory.remember({
+      ...input,
+      source: 'assistant',
+      writeIntent: 'system',
+      retention: 'durable',
+      confidence: 0.35,
+    })
+    const temporary = await memory.remember({
+      ...input,
+      source: 'assistant',
+      writeIntent: 'system',
+      retention: 'session',
+      confidence: 0.35,
+    })
+    expect(new Set([confirmed.id, derived.id, temporary.id]).size).toBe(3)
+    const records = await memory.recallLocal({ scope: 'project', projectId: 'p1', query: 'Antworten' })
+    expect(records).toContainEqual(
+      expect.objectContaining({
+        id: confirmed.id,
+        source: 'user',
+        writeIntent: 'confirmed',
+        confidence: 0.9,
+        retention: 'durable',
+      })
+    )
+    // Identical content is still deduplicated during retrieval, preferring the
+    // stronger evidence. Storage must not mutate that evidence's attribution.
+    expect(records).toHaveLength(1)
+    expect(derived).toMatchObject({ source: 'assistant', confidence: 0.35, retention: 'durable' })
+  })
+
+  it('does not return candidate content after an account switch during local reading', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    await memory.remember({
+      content: 'An isolated chat observation',
+      scope: 'project',
+      projectId: 'p1',
+      source: 'user',
+      writeIntent: 'automatic',
+    })
+    harness.getVerifiedAccountSnapshot
+      .mockResolvedValueOnce(harness.currentSnapshot)
+      .mockResolvedValueOnce(accountSnapshot(2, 'key-b'))
+    expect(await memory.listCandidates('p1')).toEqual([])
+  })
+
   it('schedules maintenance using only the bound scope and rejects cancelled or foreign-account work', async () => {
     await setServerEnabled(true)
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')

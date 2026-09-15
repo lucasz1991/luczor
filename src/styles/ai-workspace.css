@@ -89,18 +89,6 @@
   font-size: 10px;
   color: var(--ai-faint);
 }
-.mode-toggle {
-  border-color: var(--ai-line);
-  background: var(--ai-surface);
-  border-radius: 7px;
-  font: 11px var(--ai-font);
-  box-shadow: none;
-  padding: 7px 10px;
-}
-.mode-toggle:hover {
-  background: var(--ai-hover);
-  box-shadow: none;
-}
 .icon-btn {
   width: 32px;
   height: 32px;
@@ -316,10 +304,6 @@
   }
   .header__title {
     font-size: 12px;
-  }
-  .mode-toggle {
-    font-size: 10px;
-    padding: 6px;
   }
   .ai-main-composer {
     padding: 8px 12px 14px;

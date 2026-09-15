@@ -100,6 +100,26 @@ afterEach(async () => {
 })
 
 describe('coordinated effect recovery', () => {
+  it('coalesces realtime wake-ups into an authenticated refresh and removes the listener on stop', async () => {
+    vi.useFakeTimers()
+    try {
+      mock.api.pending.mockResolvedValue({ data: [] })
+      mock.api.jobs.mockResolvedValue({ data: [] })
+      const execute = vi.fn()
+      const stop = await startCoordinationChannel(execute)
+      mock.api.heartbeat.mockClear()
+      for (let i = 0; i < 20; i++) window.dispatchEvent(new Event('luczor:coordination-wake'))
+      await vi.advanceTimersByTimeAsync(501)
+      expect(mock.api.heartbeat).toHaveBeenCalledTimes(1)
+      expect(execute).not.toHaveBeenCalled()
+      stop()
+      window.dispatchEvent(new Event('luczor:coordination-wake'))
+      await vi.advanceTimersByTimeAsync(1000)
+      expect(mock.api.heartbeat).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
   it('never treats a running server attempt with a missing native journal as new work', async () => {
     const execute = vi.fn()
     await startCoordinationChannel(execute)

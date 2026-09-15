@@ -46,6 +46,9 @@ describe('prompt context assembler', () => {
           type: 'preference',
           staleness: 'fresh',
           score: 0.91234,
+          source: 'assistant',
+          confidence: 0.35,
+          writeIntent: 'system',
           source_ref: 'must-not-leak',
         } as PromptFragment['provenance'],
       }),
@@ -55,6 +58,8 @@ describe('prompt context assembler', () => {
     expect(result.providerText).toContain('"trust":"untrusted_data"')
     expect(result.providerText).toContain('"recordId":"m-41"')
     expect(result.providerText).toContain('"score":0.9123')
+    expect(result.providerText).toContain('"confidence":0.35')
+    expect(result.providerText).toContain('"writeIntent":"system"')
     expect(result.providerText).not.toContain('source_ref')
     // JSON escaping prevents the memory from structurally closing the block.
     expect(result.providerText.match(/^\[LUCZOR-STARTKONTEXT-END\]$/gm)).toHaveLength(1)

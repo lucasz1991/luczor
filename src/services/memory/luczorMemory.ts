@@ -610,6 +610,10 @@ class OfflineMemoryStore {
           item.contentHash === record.contentHash &&
           item.dataset === record.dataset &&
           item.status === record.status &&
+          item.source === record.source &&
+          item.writeIntent === record.writeIntent &&
+          item.visibility === record.visibility &&
+          item.retention === record.retention &&
           item.featureKey === record.featureKey &&
           (!enqueueServer || sameSyncedWrite(item, record))
       )
@@ -1567,12 +1571,16 @@ export class LuczorMemoryService {
   }
 
   private async listCandidatesOperation(projectId: string, limit: number): Promise<MemoryRecord[]> {
+    if (!projectId.trim()) throw new Error('A project is required for memory candidates.')
     const snapshot = await this.operationSnapshot()
     const principalId = snapshot.principalId
-    return this.offline.candidates(
+    const records = await this.offline.candidates(
       this.context('project', { projectId }, principalId),
       Math.max(1, Math.min(30, limit))
     )
+    const current = await getVerifiedAccountSnapshot()
+    if ((current?.principalId ?? 'device-local') !== principalId) return []
+    return records
   }
 
   async forget(

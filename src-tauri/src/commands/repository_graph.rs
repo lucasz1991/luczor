@@ -16,6 +16,9 @@ use tauri::{AppHandle, Manager, Runtime};
 use tree_sitter::{Language, Node, Parser};
 use uuid::Uuid;
 
+#[path = "repository_graph_lsp.rs"]
+mod lsp;
+
 const MAX_FILES: usize = 100_000;
 type IndexCancellationKey = (String, String, String);
 static INDEX_CANCELLATIONS: OnceLock<Mutex<HashMap<IndexCancellationKey, Arc<AtomicBool>>>> =
@@ -93,6 +96,7 @@ pub struct GraphIndexResult {
 
 #[derive(Debug, Serialize)]
 pub struct GraphStatus {
+    lsp: Option<lsp::State>,
     status: String,
     repository_id: Option<String>,
     display_name: Option<String>,
@@ -116,6 +120,7 @@ pub struct GraphSymbolRef {
 
 #[derive(Debug, Serialize)]
 pub struct GraphSearchHit {
+    relations: Vec<String>,
     evidence_id: String,
     relative_path: String,
     language: String,
@@ -450,6 +455,9 @@ fn perform_index<D: GraphDatabaseProvider>(
     let mut skipped = 0usize;
     let mut unchanged = 0usize;
     let mut total_bytes = 0u64;
+    let mut lsp_sources = Vec::new();
+    let mut lsp_bytes = 0usize;
+    let mut lsp_limited = false;
 
     let mut builder = WalkBuilder::new(&bound.root_path);
     builder
@@ -523,6 +531,18 @@ fn perform_index<D: GraphDatabaseProvider>(
         };
         unseen.remove(&relative);
         let content_hash = sha256(content.as_bytes());
+        if lsp::supports(path) {
+            if lsp_sources.len() < 2048 && lsp_bytes + content.len() <= 32 * 1024 * 1024 {
+                lsp_bytes += content.len();
+                lsp_sources.push(lsp::Source {
+                    path: relative.clone(),
+                    content: content.clone(),
+                    hash: content_hash.clone(),
+                });
+            } else {
+                lsp_limited = true;
+            }
+        }
         if existing
             .get(&relative)
             .is_some_and(|value| value == &content_hash)
@@ -557,6 +577,8 @@ fn perform_index<D: GraphDatabaseProvider>(
         delete_file(&tx, &bound.principal_id, &bound.repository_id, &relative)?;
     }
 
+    lsp_sources.sort_by(|a, b| a.path.cmp(&b.path));
+    lsp::enrich(app, &tx, bound, &lsp_sources, lsp_limited, cancellation)?;
     let (file_count, symbol_count, edge_count) =
         repository_counts(&tx, &bound.principal_id, &bound.repository_id)?;
     tx.execute(
@@ -630,6 +652,7 @@ fn graph_status<D: GraphDatabaseProvider>(
             params![principal_id, project_id],
             |row| {
                 Ok(GraphStatus {
+                    lsp: None,
                     repository_id: row.get(0)?,
                     display_name: row.get(1)?,
                     status: row.get(2)?,
@@ -647,6 +670,7 @@ fn graph_status<D: GraphDatabaseProvider>(
         .optional()
         .map_err(db_error)?
         .unwrap_or(GraphStatus {
+            lsp: None,
             status: "unbound".into(),
             repository_id: None,
             display_name: None,
@@ -659,6 +683,9 @@ fn graph_status<D: GraphDatabaseProvider>(
             last_indexed_at: None,
             error: None,
         });
+    if let Some(repo) = status.repository_id.as_deref() {
+        status.lsp = lsp::state(&connection, principal_id, repo);
+    }
     if status.status == "ready" {
         let bound = load_binding(&connection, principal_id, project_id)?;
         let current = read_git_state(&bound.root_path);
@@ -752,6 +779,7 @@ fn search_repository<D: GraphDatabaseProvider>(
             reasons.insert(0, "symbol_exact".into());
         }
         hits.push(GraphSearchHit {
+            relations: lsp::relations(&connection, &bound, &relative_path)?,
             evidence_id,
             relative_path,
             language,
@@ -922,9 +950,27 @@ fn unbind_repository<D: GraphDatabaseProvider>(
 
 trait GraphDatabaseProvider {
     fn graph_database_path(&self) -> Result<PathBuf, String>;
+    fn lsp_runtime_root(&self) -> Option<PathBuf> {
+        None
+    }
 }
 
 impl<R: Runtime> GraphDatabaseProvider for AppHandle<R> {
+    fn lsp_runtime_root(&self) -> Option<PathBuf> {
+        let packaged = self.path().resource_dir().ok()?.join("repository-lsp");
+        if packaged.join("runtime.json").is_file() {
+            return Some(packaged);
+        }
+        #[cfg(debug_assertions)]
+        {
+            let development = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../.lmzdev/artifacts/runtime/repository-lsp");
+            if development.join("runtime.json").is_file() {
+                return Some(development);
+            }
+        }
+        None
+    }
     fn graph_database_path(&self) -> Result<PathBuf, String> {
         Ok(self
             .path()
@@ -998,7 +1044,8 @@ fn initialize_schema(connection: &Connection) -> Result<(), String> {
     if !derived_schema_is_principal_scoped(connection)? {
         rebuild_derived_schema(connection)?;
     }
-    create_derived_schema(connection)
+    create_derived_schema(connection)?;
+    lsp::initialize(connection)
 }
 
 fn quarantine_legacy_bindings(connection: &Connection) -> Result<(), String> {
@@ -2386,6 +2433,98 @@ mod tests {
 
     const CONTRACT_COMMIT_A: &str = "1111111111111111111111111111111111111111";
     const CONTRACT_COMMIT_B: &str = "2222222222222222222222222222222222222222";
+
+    #[test]
+    #[ignore = "Requires the managed LSP runtime; run build-lsp-runtime.mjs first"]
+    fn real_lsp_enrichment_is_hash_checked_cached_and_cancellable() {
+        struct LspDatabase(PathBuf);
+        impl GraphDatabaseProvider for LspDatabase {
+            fn graph_database_path(&self) -> Result<PathBuf, String> {
+                Ok(self.0.clone())
+            }
+            fn lsp_runtime_root(&self) -> Option<PathBuf> {
+                Some(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../.lmzdev/artifacts/runtime/repository-lsp"),
+                )
+            }
+        }
+        let harness = GraphContractHarness::new();
+        harness.seed_repository();
+        fs::write(
+            harness.repository.join("math.ts"),
+            "export function add(a: number, b: number) { return a + b }\n",
+        )
+        .unwrap();
+        fs::write(
+            harness.repository.join("main.ts"),
+            "import { add } from './math';\nexport const result = add(1, 2);\n",
+        )
+        .unwrap();
+        let db = LspDatabase(harness.database.path.clone());
+        let principal = "account:lsp-contract";
+        let project = "lsp-contract";
+        bind_repository(
+            &db,
+            principal,
+            project,
+            &harness.repository.to_string_lossy(),
+        )
+        .unwrap();
+        index_repository(&db, principal, project).unwrap();
+        let status = graph_status(&db, principal, project).unwrap();
+        let lsp = status.lsp.unwrap();
+        assert_eq!(lsp.status, "ready");
+        assert!(lsp.edges >= 1);
+        let connection = open_database(&db).unwrap();
+        let bound = load_binding(&connection, principal, project).unwrap();
+        let relations = lsp::relations(&connection, &bound, "main.ts").unwrap();
+        assert!(
+            relations.iter().any(|r| r.contains("math.ts:1 (add)")),
+            "{relations:?}"
+        );
+        index_repository(&db, principal, project).unwrap();
+        assert_eq!(
+            graph_status(&db, principal, project)
+                .unwrap()
+                .lsp
+                .unwrap()
+                .edges,
+            lsp.edges
+        );
+        fs::write(
+            harness.repository.join("math.ts"),
+            "export const unrelated = 1;\n",
+        )
+        .unwrap();
+        assert!(lsp::relations(&connection, &bound, "main.ts")
+            .unwrap()
+            .is_empty());
+        let cancelled = AtomicBool::new(true);
+        assert!(index_repository_cancellable(&db, principal, project, Some(&cancelled)).is_err());
+        let interrupt = Arc::new(AtomicBool::new(false));
+        let trigger = interrupt.clone();
+        let interrupter = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            trigger.store(true, Ordering::Release);
+        });
+        let interrupted_at = Instant::now();
+        assert!(index_repository_cancellable(&db, principal, project, Some(&interrupt)).is_err());
+        interrupter.join().unwrap();
+        assert!(interrupted_at.elapsed() < Duration::from_secs(6));
+        assert_eq!(
+            lsp::state(&connection, principal, &bound.repository_id)
+                .unwrap()
+                .edges,
+            lsp.edges
+        );
+        index_repository(&db, principal, project).unwrap();
+        assert!(lsp::relations(&connection, &bound, "main.ts")
+            .unwrap()
+            .is_empty());
+        let snapshots = harness.base.join("lsp-snapshots");
+        assert_eq!(fs::read_dir(snapshots).unwrap().count(), 0);
+    }
 
     struct GraphContractHarness {
         database: TestGraphDatabase,

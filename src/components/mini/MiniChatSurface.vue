@@ -114,7 +114,13 @@ const field = ref<HTMLTextAreaElement | null>(null)
 // The nudge is locked flush to a screen edge, like the design board's Nano nudge: dragging moves
 // it up/down along the edge and flips which edge it's on, it never floats free horizontally.
 const side = ref<'left' | 'right'>('right')
+// `bottom` is the nudge's actual resting spot — only drag, arrow keys and reset ever change it.
+// A pane opening taller than the collapsed grip must not move that spot; it only grows the box
+// around it (see `visualBottom` / clampPosition below), so closing the pane again always lands
+// back exactly where it started, even after growth got clamped against a screen edge.
 const bottom = ref(20)
+const visualBottom = ref(20)
+let collapsedHeight = 0
 let surfaceResize: ResizeObserver | undefined
 let peekTimer: ReturnType<typeof setTimeout> | undefined
 let drag: {
@@ -132,8 +138,8 @@ const surfaceStyle = computed(() => ({
   ...(props.native
     ? {}
     : side.value === 'left'
-      ? { left: '0px', bottom: `${bottom.value}px`, '--mini-bottom': `${bottom.value}px` }
-      : { right: '0px', bottom: `${bottom.value}px`, '--mini-bottom': `${bottom.value}px` }),
+      ? { left: '0px', bottom: `${visualBottom.value}px` }
+      : { right: '0px', bottom: `${visualBottom.value}px` }),
   ...(props.snapshot.appearance?.accent && /^#[0-9a-f]{6}$/i.test(props.snapshot.appearance.accent)
     ? { '--cy-bright': props.snapshot.appearance.accent }
     : {}),
@@ -280,10 +286,30 @@ function layout() {
     else apply()
   } else void nextTick(clampPosition)
 }
+// Nothing is hovered, pinned or otherwise open — the box is at its resting, collapsed height.
+const gripIdle = computed(() => !chatsOpen.value && !peekVisible.value && !gripHover.value && !pinnedPane.value)
 function clampPosition() {
   // Horizontal is always flush to an edge now; only the vertical position needs clamping.
   if (props.native || !box.value) return
-  bottom.value = Math.max(0, Math.min(bottom.value, window.innerHeight - box.value.offsetHeight))
+  const height = box.value.offsetHeight
+  // Self-calibrating baseline: whenever the box is actually collapsed, that height IS the resting
+  // size (covers font loading, first paint, responsive breakpoints — never hardcoded).
+  if (gripIdle.value || !collapsedHeight) collapsedHeight = height
+  const growth = Math.max(0, height - collapsedHeight)
+  // A pane opening taller than the grip grows the box around `bottom` (the nudge's real resting
+  // spot) — split between the top and bottom edge — instead of only ever pushing the top edge up.
+  // This only ever adjusts the transient `visualBottom`, never `bottom` itself, so a growth spurt
+  // that gets clamped against a screen edge never leaves the nudge's resting spot shifted once the
+  // pane closes again: growth returns to 0 and visualBottom snaps back to exactly `bottom`.
+  const target = bottom.value - growth / 2
+  visualBottom.value = Math.max(0, Math.min(target, window.innerHeight - height))
+}
+// Keeps the persisted rest position itself on-screen too — it's what the next drag or arrow-key
+// move starts from, so it must never drift past the edge just because a render got clamped.
+function clampRestBottom() {
+  if (props.native) return
+  const height = collapsedHeight || box.value?.offsetHeight || 0
+  bottom.value = Math.max(0, Math.min(bottom.value, window.innerHeight - height))
 }
 function clearPeek() {
   clearTimeout(peekTimer)
@@ -323,6 +349,7 @@ function resetPosition() {
   void windowAction('reset_position')
   side.value = 'right'
   bottom.value = 20
+  clampRestBottom()
   clampPosition()
 }
 function send(text = draft.value) {
@@ -395,9 +422,10 @@ async function openWorkflow(messageId: string, workflowId: number) {
   emit('action', { type: 'workflow_open', sessionId: props.snapshot.sessionId, messageId, workflowId })
   await windowAction('main')
 }
-function beginDrag(event: PointerEvent, orb = false) {
+// Repositioning happens only from the edge grip's icons now — not from the chat window's own
+// header, which used to double as a drag handle.
+function beginDrag(event: PointerEvent) {
   if (event.button !== 0) return
-  if (!orb && (event.target as Element).closest('button')) return
   dragged = false
   drag = {
     startX: event.clientX,
@@ -439,6 +467,7 @@ function moveDrag(event: PointerEvent) {
 }
 function endDrag() {
   drag = null
+  clampRestBottom()
   setTimeout(() => {
     dragged = false
   }, 250)
@@ -456,6 +485,7 @@ function moveKey(event: KeyboardEvent) {
   if (event.key === 'ArrowRight') side.value = 'right'
   if (event.key === 'ArrowUp') bottom.value += 24
   if (event.key === 'ArrowDown') bottom.value -= 24
+  clampRestBottom()
   clampPosition()
 }
 watch([chatsOpen, peekVisible, gripHover, pinnedPane], layout)
@@ -577,8 +607,16 @@ onBeforeUnmount(() => {
     >
       <!-- Edge grip: five icon pills in one glass capsule, like the design board's Nano nudge.
            Any icon both drags the capsule (pointer moves) and pins its pane (a plain click) —
-           chats pins into the full chat page, the others into their light status pane. -->
-      <div class="mini-grip" role="group" aria-label="Status im Überblick" :data-phase="status.phase">
+           chats pins into the full chat page, the others into their light status pane. This is
+           the only place the nudge can be repositioned from now — the chat window's own header
+           used to double as a drag handle, but that made the header easy to move by accident. -->
+      <div
+        class="mini-grip"
+        role="group"
+        aria-label="Status im Überblick"
+        :data-phase="status.phase"
+        @keydown="moveKey"
+      >
         <button
           type="button"
           class="mini-grip__icon"
@@ -589,7 +627,7 @@ onBeforeUnmount(() => {
           :aria-label="`Mini-Chat öffnen: ${chatsTitle}`"
           @pointerenter="hoverPane = 'chats'"
           @focus="hoverPane = 'chats'"
-          @pointerdown="beginDrag($event, true)"
+          @pointerdown="beginDrag"
           @click="pinPane('chats')"
         >
           <AiIcon name="chat" :size="14" /><span v-if="decision || unread" class="mini-unread">{{
@@ -606,7 +644,7 @@ onBeforeUnmount(() => {
           :aria-label="decision ? 'Entscheidung offen' : 'Keine Entscheidung offen'"
           @pointerenter="hoverPane = 'decision'"
           @focus="hoverPane = 'decision'"
-          @pointerdown="beginDrag($event, true)"
+          @pointerdown="beginDrag"
           @click="pinPane('decision')"
         >
           <AiIcon name="shield" :size="13" />
@@ -625,7 +663,7 @@ onBeforeUnmount(() => {
           "
           @pointerenter="hoverPane = 'tools'"
           @focus="hoverPane = 'tools'"
-          @pointerdown="beginDrag($event, true)"
+          @pointerdown="beginDrag"
           @click="pinPane('tools')"
         >
           <AiIcon name="tool" :size="13" />
@@ -640,7 +678,7 @@ onBeforeUnmount(() => {
           :aria-label="connectionError ? 'Verbindung fehlt' : 'Verbunden'"
           @pointerenter="hoverPane = 'link'"
           @focus="hoverPane = 'link'"
-          @pointerdown="beginDrag($event, true)"
+          @pointerdown="beginDrag"
           @click="pinPane('link')"
         >
           <AiIcon name="link" :size="13" />
@@ -649,15 +687,7 @@ onBeforeUnmount(() => {
       <!-- Hover fly-out: one pane per grip icon (hover switches, click pins) -->
       <div class="mini-grip-panel" :data-pane="activePane" :class="{ 'is-chat-open': chatsOpen }" aria-live="polite">
         <div v-if="chatsVisible" class="mini-panel" @focusin="keepChatsOpen">
-          <header class="mini-header" @pointerdown="beginDrag">
-            <span
-              class="mini-drag"
-              tabindex="0"
-              role="button"
-              aria-label="Mini-Chat verschieben, Pfeiltasten verwenden"
-              @keydown="moveKey"
-              ><AiIcon name="grid" :size="13"
-            /></span>
+          <header class="mini-header">
             <span class="ai-brand-mark"><AiIcon :size="18" /></span>
             <strong>{{ snapshot.appearance?.assistantName || 'Luczor' }} <span>Mini</span></strong
             ><span class="mini-temp">{{ contextName }}</span>

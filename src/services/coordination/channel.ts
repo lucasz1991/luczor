@@ -47,6 +47,14 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
   const controller = new AbortController()
   let unlisten: (() => void) | undefined
   let checking = false
+  let wakeTimer: ReturnType<typeof setTimeout> | undefined
+  const wake = () => {
+    if (!current() || wakeTimer) return
+    wakeTimer = setTimeout(() => {
+      wakeTimer = undefined
+      void tick()
+    }, 500)
+  }
   let retryAt = 0
   let identity: VerifiedAccountSnapshot | null = null
   const activeTasks = new Set<Promise<void>>()
@@ -59,6 +67,8 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
     ++channelGeneration
     controller.abort()
     unlisten?.()
+    if (wakeTimer) clearTimeout(wakeTimer)
+    window.removeEventListener('luczor:coordination-wake', wake)
     window.removeEventListener('luczor:api-identity-changing', stop)
     stopLan()
     ownExecutions.forEach(abort => abort.abort())
@@ -417,6 +427,7 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
     }
   }
   try {
+    window.addEventListener('luczor:coordination-wake', wake)
     unlisten = await listen('luczor://worker-tick', () => {
       void tick()
     })

@@ -142,6 +142,7 @@ function fixture() {
     policy: () => policy,
     gateway: vi.fn(async () => localGateway),
     recall,
+    candidates: vi.fn(async () => []),
     sharedRecall: vi.fn(async () => []),
     improve: vi.fn(async () => 'not_scheduled' as const),
     graphStatus: vi.fn(async () => ({ status: 'unbound' as const, files: 0, symbols: 0, edges: 0, skipped: 0 })),
@@ -203,6 +204,31 @@ afterEach(() => {
 })
 
 describe('idle optimization integration', () => {
+  it('consolidates bounded user chat observations locally with source IDs, without reusing assistant guesses', async () => {
+    const harness = fixture()
+    vi.mocked(harness.deps.candidates).mockResolvedValue([
+      memory({ id: 'chat-user', status: 'candidate', content: 'Bitte nutze kurze Antworten im Projekt.' }),
+      memory({ id: 'chat-ai', status: 'candidate', source: 'assistant', content: 'Unsupported assistant guess' }),
+      memory({ id: 'secret', status: 'candidate', sensitivity: 'secret', content: 'Excluded secret' }),
+    ])
+    harness.optimizer.start()
+    await vi.advanceTimersByTimeAsync(600_000)
+    const prompt = JSON.stringify(harness.stream.mock.calls[0]?.[0].messages)
+    expect(prompt).toContain('Bitte nutze kurze Antworten')
+    expect(prompt).toContain('candidate')
+    expect(prompt).not.toMatch(/Unsupported assistant guess|Excluded secret/)
+    expect(harness.remember.mock.calls[0]?.[0]).toMatchObject({
+      writeIntent: 'system',
+      retention: 'durable',
+      visibility: 'private',
+      provenance: { source_memory_ids: ['chat-user', 'memory-1'] },
+    })
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(harness.deps.candidates).toHaveBeenCalledOnce()
+    expect(JSON.stringify(harness.stream.mock.calls[1]?.[0].messages)).not.toContain('Bitte nutze kurze Antworten')
+    await harness.optimizer.stop()
+  })
+
   it('includes canonical SQL/Cognee evidence and schedules scoped maintenance without uploading private AI content', async () => {
     const harness = fixture()
     vi.mocked(harness.deps.sharedRecall).mockResolvedValue([
@@ -283,7 +309,11 @@ describe('idle optimization integration', () => {
         confidence: 0.35,
         type: 'context_optimization',
         tags: ['idle-optimization'],
-        provenance: { source_fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/), generated_locally: true },
+        provenance: {
+          source_fingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
+          source_memory_ids: ['memory-1'],
+          generated_locally: true,
+        },
       })
     )
     expect(harness.project?.summary).toBe('The verified project summary.')

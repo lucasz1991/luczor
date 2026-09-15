@@ -15,6 +15,9 @@ export type PromptFragmentProvenance = {
   type?: string
   staleness?: string
   score?: number
+  source?: string
+  confidence?: number
+  writeIntent?: string
 }
 
 export type PromptFragment = {
@@ -224,6 +227,9 @@ function sanitizeProvenance(value: PromptFragmentProvenance | undefined): Prompt
     type: safeLabel(value.type, 80),
     staleness: safeLabel(value.staleness, 40),
     score: safeScore(value.score),
+    source: safeLabel(value.source, 80),
+    confidence: safeScore(value.confidence),
+    writeIntent: safeLabel(value.writeIntent, 40),
   }
   return Object.values(provenance).some(item => item !== undefined) ? provenance : undefined
 }

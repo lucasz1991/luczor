@@ -70,6 +70,9 @@ test('uses another port without interrupting an existing server', async () => {
 })
 
 test('keeps optional resources out of dev and adds them only for a prepared bundle', () => {
+  assert.deepEqual(dynamicTauriConfig(undefined, false, true), {
+    bundle: { resources: { '../../.lmzdev/artifacts/runtime/repository-lsp/': 'repository-lsp/' } },
+  })
   assert.deepEqual(dynamicTauriConfig('http://127.0.0.1:1420', false), {
     build: { devUrl: 'http://127.0.0.1:1420' },
   })
@@ -79,6 +82,56 @@ test('keeps optional resources out of dev and adds them only for a prepared bund
     },
   })
 })
+
+test(
+  'real managed LSP resolves cross-file references without project configuration',
+  { skip: process.env.LUCZOR_LSP_SMOKE !== '1', timeout: 90000 },
+  () => {
+    const { spawnSync } = require('node:child_process')
+    const runtime = path.resolve(__dirname, '../../.lmzdev/artifacts/runtime/repository-lsp')
+    const snapshot = fs.mkdtempSync(path.join(os.tmpdir(), 'luczor-lsp-smoke-'))
+    try {
+      const output = spawnSync(
+        path.join(runtime, process.platform === 'win32' ? 'node.exe' : 'node'),
+        [path.join(runtime, 'worker.mjs'), snapshot],
+        {
+          input: JSON.stringify({
+            files: [
+              {
+                path: 'math.ts',
+                content: 'export function add(a: number, b: number) { return a + b }\n',
+                hash: 'fixture-a',
+              },
+              {
+                path: 'main.ts',
+                content: 'import { add } from "./math";\nexport const result = add(1, 2);\n',
+                hash: 'fixture-b',
+              },
+            ],
+          }),
+          encoding: 'utf8',
+          timeout: 75000,
+          windowsHide: true,
+        }
+      )
+      assert.equal(output.status, 0, output.stderr)
+      const result = JSON.parse(output.stdout)
+      assert.equal(result.status, 'ready')
+      assert.equal(result.scanned, 2)
+      assert.ok(
+        result.edges.some(
+          edge =>
+            edge.source === 'main.ts' && edge.target === 'math.ts' && edge.symbol === 'add' && edge.source_line === 2
+        ),
+        JSON.stringify(result)
+      )
+      assert.ok(result.edges.every(edge => ['math.ts', 'main.ts'].includes(edge.target)))
+    } finally {
+      assert.ok(snapshot.startsWith(path.join(os.tmpdir(), 'luczor-lsp-smoke-')))
+      fs.rmSync(snapshot, { recursive: true, force: true })
+    }
+  }
+)
 
 test('reads an explicit target without confusing cargo arguments', () => {
   assert.equal(targetTripleFromArgs(['build', '--target', 'x86_64-unknown-linux-gnu'], {}), 'x86_64-unknown-linux-gnu')

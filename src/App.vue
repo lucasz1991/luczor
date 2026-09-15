@@ -1162,14 +1162,14 @@ async function persistActiveMode(value: LuczorMode) {
 const modeConfirmationPending = ref(false)
 const modeConfirmationError = ref('')
 
-async function toggleMode() {
-  if (modeConfirmationPending.value) return
+/** Called with the mode picked in the composer's dropdown; "unrestricted" still needs confirmation. */
+async function selectMode(next: LuczorMode) {
+  if (modeConfirmationPending.value || next === mode.value) return
   modeConfirmationError.value = ''
   const previousMode = mode.value
-  const next: LuczorMode =
-    mode.value === 'observe' ? 'act' : mode.value === 'act' && allowUnrestricted.value ? 'unrestricted' : 'observe'
 
   if (next === 'unrestricted') {
+    if (!allowUnrestricted.value) return
     const ticket = executionGate.capture()
     modeConfirmationPending.value = true
     const confirmation = await requestConfirmation(
@@ -1193,19 +1193,16 @@ async function toggleMode() {
   void persistActiveMode(next)
 }
 
-const modeLabel = computed(() =>
-  mode.value === 'unrestricted' ? 'Vollzugriff' : mode.value === 'act' ? 'Handeln' : 'Beobachten'
-)
 const modeTitle = computed(() => {
   switch (mode.value) {
     case 'act':
       return allowUnrestricted.value
-        ? 'Handeln: Tools mit Bestätigung. Klicken für Vollzugriff.'
-        : 'Handeln: Tools mit Bestätigung. Vollzugriff ist administrativ deaktiviert; klicken für Beobachten.'
+        ? 'Handeln: Tools mit Bestätigung. Steuerungsmodus wählen.'
+        : 'Handeln: Tools mit Bestätigung. Vollzugriff ist administrativ deaktiviert.'
     case 'unrestricted':
-      return 'Vollzugriff: alle Tools OHNE Rückfrage. Klicken für Beobachten.'
+      return 'Vollzugriff: alle Tools OHNE Rückfrage. Steuerungsmodus wählen.'
     default:
-      return 'Beobachten: nur lesen. Klicken für Handeln.'
+      return 'Beobachten: nur lesen. Steuerungsmodus wählen.'
   }
 })
 
@@ -1471,6 +1468,15 @@ const activeChecklist = computed(() => getPlan(activeProjectId.value))
 const checklistDone = computed(
   () => activeChecklist.value.steps.filter(step => step.status === 'done' || step.status === 'skipped').length
 )
+/* The two topbar toggles share the overlay's scroll area, so only one panel is open at a time. */
+function toggleContextPanel() {
+  showContext.value = !showContext.value
+  if (showContext.value) showChecklist.value = false
+}
+function toggleChecklistPanel() {
+  showChecklist.value = !showChecklist.value
+  if (showChecklist.value) showContext.value = false
+}
 
 const toolAudit = computed(() => {
   const pid = activeProjectId.value
@@ -2569,7 +2575,6 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
     <main class="main-col">
       <div class="header">
         <div class="header__identity">
-          <span class="header__eyebrow">Aktiver Raum</span>
           <input
             v-if="editingProjectTitle"
             id="project-title-input"
@@ -2581,7 +2586,13 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             @keydown.enter.prevent="finishProjectTitleEdit"
             @keydown.esc.prevent="editingProjectTitle = false"
           />
-          <button v-else type="button" class="header__title" title="Projekt umbenennen" @click="beginProjectTitleEdit">
+          <button
+            v-else
+            type="button"
+            class="header__eyebrow"
+            title="Projekt umbenennen"
+            @click="beginProjectTitleEdit"
+          >
             {{ activeProject?.name }}
             <span
               v-if="projectActivity[activeProjectId]"
@@ -2590,24 +2601,9 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
               aria-label="KI arbeitet"
             />
           </button>
-          <div class="header__workspace">
-            {{ activeConversation?.title ?? 'Chat' }} ·
-            {{ activeWorkspace ? `@project · ${activeWorkspace.displayName}` : '@project · kein Ordner' }}
-          </div>
+          <div class="header__workspace">{{ activeConversation?.title ?? 'Chat' }}</div>
         </div>
 
-        <button
-          type="button"
-          class="mode-toggle"
-          :class="`is-${mode}`"
-          :title="modeTitle"
-          :aria-label="modeTitle"
-          :disabled="modeConfirmationPending"
-          @click="toggleMode"
-        >
-          <span class="mode-toggle__dot" />
-          {{ modeLabel }}
-        </button>
         <div class="header__tools">
           <button
             type="button"
@@ -2637,9 +2633,9 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             type="button"
             class="icon-btn"
             :class="{ 'is-on': showContext }"
-            title="Projektziele & Zusammenfassungen"
+            :title="`Projektziele & Zusammenfassungen · ${goalStats.done}/${goalStats.total} erledigt`"
             :aria-expanded="showContext"
-            @click="showContext = !showContext"
+            @click="toggleContextPanel"
           >
             <svg
               viewBox="0 0 24 24"
@@ -2654,6 +2650,18 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
               <path d="M9 11l3 3L22 4" />
               <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
             </svg>
+          </button>
+
+          <button
+            v-if="!!activePlanningSession || activeChecklist.steps.length > 0"
+            type="button"
+            class="icon-btn"
+            :class="{ 'is-on': showChecklist }"
+            :title="`Checkliste · ${checklistDone}/${activeChecklist.steps.length} erledigt`"
+            :aria-expanded="showChecklist"
+            @click="toggleChecklistPanel"
+          >
+            <AiIcon name="grid" :size="16" />
           </button>
 
           <button
@@ -2775,11 +2783,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             v-model:context-expanded="showContext"
             v-model:checklist-expanded="showChecklist"
             :project-id="activeProjectId"
-            :goal-count="goalStats.total"
-            :goals-done="goalStats.done"
             :has-checklist="!!activePlanningSession || activeChecklist.steps.length > 0"
-            :checklist-count="activeChecklist.steps.length"
-            :checklist-done="checklistDone"
           >
             <template #checklist>
               <section v-if="activePlanningSession" class="planning-status" aria-label="Aktueller Planungsstand">
@@ -3034,6 +3038,10 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           v-model:thinking-tier="thinkingTier"
           v-model:route-mode="chatRouteMode"
           :external-allowed="modelUsageSettings.externalEnabled"
+          :mode="mode"
+          :mode-title="modeTitle"
+          :mode-busy="modeConfirmationPending"
+          :allow-unrestricted="allowUnrestricted"
           :busy="conversationBusy"
           :recording="isRecording"
           :listening="listening"
@@ -3049,6 +3057,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           @voice-stop="voiceInputSession.stop()"
           @context="showContext = !showContext"
           @command="handlePromptCommand"
+          @update:mode="selectMode"
         >
           <template #heading-start>
             <AutonomousGoalControl
@@ -3147,6 +3156,20 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
               <span>
                 {{ localGraphStatus.files }} Dateien · {{ localGraphStatus.symbols }} Symbole ·
                 {{ localGraphStatus.edges }} Beziehungen
+              </span>
+              <span v-if="localGraphStatus.lsp" class="repo-graph-revision">
+                LSP TS/JS:
+                {{
+                  {
+                    ready: 'bereit',
+                    partial: 'teilweise analysiert',
+                    unavailable: 'Runtime fehlt',
+                    not_applicable: 'keine passenden Dateien',
+                    error: 'Analyse fehlgeschlagen',
+                  }[localGraphStatus.lsp.status]
+                }}
+                · {{ localGraphStatus.lsp.scanned }}/{{ localGraphStatus.lsp.files }} Dateien ·
+                {{ localGraphStatus.lsp.edges }} Referenzen
               </span>
               <span v-if="localGraphStatus.branch || localGraphStatus.commit_sha" class="repo-graph-revision">
                 {{ localGraphStatus.branch || 'detached' }} · {{ localGraphStatus.commit_sha?.slice(0, 10) }}

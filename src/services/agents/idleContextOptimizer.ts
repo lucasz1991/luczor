@@ -1,6 +1,6 @@
 /**
  * One bounded, tool-free optimization at a time. The integration supplies only
- * device-local context/inference and writes unconfirmed, private candidates.
+ * device-local inference and stores private, attributed AI memories.
  * Foreground admission waits for actual inference cancellation/cleanup, never
  * merely for an abort signal or a timeout race.
  */
@@ -13,6 +13,7 @@ export type IdleOptimizationJob = Readonly<{
   projectId?: string
   prompt: string
   task?: 'context' | 'memory' | 'repository'
+  sourceMemoryIds?: readonly string[]
 }>
 
 export type IdleOptimizationEligibility = Readonly<{

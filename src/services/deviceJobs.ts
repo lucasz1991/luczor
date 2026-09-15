@@ -382,6 +382,9 @@ async function connectRealtime(
       },
     })
     const channel = pusher.subscribe(channelName)
+    channel.bind('device.coordination.changed', () => {
+      if (current.isCurrent()) window.dispatchEvent(new Event('luczor:coordination-wake'))
+    })
     channel.bind('device.job.created', (job: DeviceJob) => {
       if (current.isCurrent()) void safeProcessJob(config.clientId, job, current)
     })

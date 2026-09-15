@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { MemoryRecord } from '@/services/memory/luczorMemory'
 
-const mocks = vi.hoisted(() => ({ recall: vi.fn(), analyze: vi.fn(), remember: vi.fn() }))
+const mocks = vi.hoisted(() => ({ recall: vi.fn(), recallLocal: vi.fn(), analyze: vi.fn(), remember: vi.fn() }))
 vi.mock('@/services/memory/luczorMemory', () => ({ luczorMemory: mocks }))
 
 import { memoryTools } from '@/services/tools/memory'
@@ -42,6 +42,9 @@ describe('provider-safe explicit memory recall tool', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.recall.mockResolvedValue([memory()])
+    mocks.recallLocal.mockResolvedValue([
+      memory({ source: 'assistant', writeIntent: 'system', confidence: 0.35, visibility: 'private' }),
+    ])
   })
 
   it('exposes one read-only ephemeral search without model-selected project or account identifiers', () => {
@@ -74,6 +77,8 @@ describe('provider-safe explicit memory recall tool', () => {
           content: 'Antworten kurz halten.',
           type: 'preference',
           source: 'user',
+          confidence: 0.9,
+          write_intent: 'explicit',
           priority: 'high',
           priority_label: 'Wichtig',
           tags: ['Stil'],
@@ -87,6 +92,24 @@ describe('provider-safe explicit memory recall tool', () => {
   it('retrieves user preferences without leaking or attaching the current project partition', async () => {
     await tool.execute({ query: 'Sprache', scope: 'user', limit: 20 }, CONTEXT)
     expect(mocks.recall).toHaveBeenCalledExactlyOnceWith({ query: 'Sprache', scope: 'user', limit: 20 })
+  })
+
+  it('retrieves private AI notes only for a host-selected local target and never forwards its query', async () => {
+    const result = await tool.execute({ query: 'Antwort' }, { ...CONTEXT, inferenceTarget: 'local' })
+    expect(mocks.recallLocal).toHaveBeenCalledExactlyOnceWith({
+      query: 'Antwort',
+      scope: 'project',
+      projectId: 'project-1',
+      limit: 6,
+    })
+    expect(mocks.recall).not.toHaveBeenCalled()
+    expect(result).toMatchObject({
+      memories: [expect.objectContaining({ source: 'assistant', confidence: 0.35, write_intent: 'system' })],
+    })
+    mocks.recallLocal.mockClear()
+    await tool.execute({ query: 'Antwort' }, { ...CONTEXT, inferenceTarget: 'external' })
+    expect(mocks.recallLocal).not.toHaveBeenCalled()
+    expect(mocks.recall).toHaveBeenCalledOnce()
   })
 
   it('accepts the grammar-compatible search boundary in both schema and execution', async () => {
