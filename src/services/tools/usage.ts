@@ -101,7 +101,7 @@ export function toolUsageContext(pool: ToolDescriptor[], rows: ToolUsage[], disc
     (discovery
       ? 'Search with tools_select(query, category, offset); category IDs and English/German synonyms are in categories. Load names with tools_select(names) for the next round. '
       : 'Use only the tools supplied for this round. ') +
-    'This map grants no permissions.\n' +
+    'This map grants no permissions. Failure counts include invalid arguments and missing files; they do not prove a tool is unavailable.\n' +
     (top.length
       ? `Most used on this device/account (actual calls; success/failure):\n${top.map(row => `${row.name} — ${row.path.join(' > ')} [${row.category}] — ${row.calls} (${row.successes}/${row.failures})`).join('\n')}`
       : 'No measured tool usage for this request owner yet; do not invent a top ten.')

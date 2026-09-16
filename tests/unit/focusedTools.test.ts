@@ -110,7 +110,7 @@ describe('focused local tool context', () => {
     const catalog = await focus.selector.execute({}, { projectId: 'test' })
     expect(catalog).toMatchObject({
       selected: [],
-      available: pool.map(tool => ({ name: tool.function.name, description: tool.function.description })),
+      available: pool.map(tool => ({ name: tool.function.name })),
     })
   })
   it('removes exact historical UI failures but preserves tool evidence and user examples', () => {

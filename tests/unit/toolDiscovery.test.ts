@@ -8,7 +8,8 @@ import {
 } from '@/services/tools/discovery'
 import { focusedTools } from '@/services/inference/focusedTools'
 import { topToolUsage, toolUsageContext, type ToolUsage } from '@/services/tools/usage'
-import { fitRequestContext } from '@/services/inference/contextBudget'
+import { compactToolOutput, fitRequestContext } from '@/services/inference/contextBudget'
+import type { ToolCatalogPage } from '@/services/inference/toolCatalogOutput'
 
 const definition = (name: string): ToolDescriptor => ({
   type: 'function',
@@ -257,6 +258,122 @@ describe('hierarchical tool discovery', () => {
       available: many.slice(16).map(tool => ({ name: tool.function.name })),
     })
   })
+  it('retains the sole terminal hit through both compaction stages and loads its schema', async () => {
+    const focus = focusedTools('Android device')
+    const tools = [...pool, definition('project_terminal_run')]
+    focus.select(tools)
+    const output = await focus.selector.execute({ query: 'terminal shell command' }, { projectId: 'p' })
+    const outcome = { ok: true, output: compactToolOutput(output, 6000) }
+    const fitted = fitRequestContext(
+      [
+        { role: 'system', content: 'Mandatory rules. '.repeat(1000) },
+        { role: 'user', content: 'Find terminal' },
+        { role: 'tool', name: 'tools_select', tool_call_id: 'search', content: JSON.stringify(outcome) },
+      ],
+      [],
+      { targetTokens: 1024 }
+    )
+    const received = JSON.parse(fitted.messages.find(message => message.role === 'tool')!.content)
+      .output as ToolCatalogPage
+    expect(received.available.map(hit => hit.name)).toContain('project_terminal_run')
+    expect(received.nextOffset).toBeNull()
+    expect(received.categories).toBeUndefined()
+    await focus.selector.execute({ names: ['project_terminal_run'] }, { projectId: 'p' })
+    expect(focus.select(tools).map(tool => tool.function.name)).toContain('project_terminal_run')
+  })
+
+  it('pages complete names without gaps and remains stable through repeated smaller projections', async () => {
+    const focus = focusedTools('catalog')
+    const tools = Array.from({ length: 35 }, (_, index) => definition(`device_${index}_${'x'.repeat(90)}`))
+    focus.select(tools)
+    const seen: string[] = []
+    let offset: number | null = 0
+    while (offset !== null) {
+      const raw = await focus.selector.execute({ offset, query: 'device' }, { projectId: 'p' })
+      const projected = compactToolOutput({ ok: true, output: compactToolOutput(raw, 6000) }, 700) as {
+        output: ToolCatalogPage
+      }
+      expect(compactToolOutput(projected, 700)).toEqual(projected)
+      expect(JSON.stringify(projected).length).toBeLessThanOrEqual(700)
+      expect(projected.output.available.length).toBeGreaterThan(0)
+      seen.push(...projected.output.available.map(hit => hit.name))
+      offset = projected.output.nextOffset
+      expect(offset === null || offset === seen.length).toBe(true)
+      expect(seen.length).toBeLessThanOrEqual(tools.length)
+    }
+    expect(seen).toEqual(tools.map(tool => tool.function.name))
+  })
+
+  it('preserves hits when actual request fitting compacts an oversized catalog outcome', () => {
+    const page: ToolCatalogPage = {
+      catalog: 'luczor-tools-v1',
+      selected: ['project_terminal_run'],
+      offset: 0,
+      total: 16,
+      nextOffset: null,
+      categories: Array.from({ length: 16 }, (_, index) => ({
+        id: `category_${index}`,
+        label: 'Category '.repeat(15),
+        tools: 20,
+      })),
+      available: Array.from({ length: 16 }, (_, index) => ({
+        name: index ? `device_${index}` : 'project_terminal_run',
+        description: 'Description '.repeat(100),
+      })),
+    }
+    const raw = JSON.stringify(page)
+    const first = { ok: true, output: compactToolOutput(page, 6000) }
+    expect(JSON.stringify(first).length).toBeGreaterThan(1800)
+    const fitted = fitRequestContext(
+      [
+        { role: 'system', content: 'Mandatory rules. '.repeat(1000) },
+        { role: 'user', content: 'Find tools' },
+        { role: 'tool', name: 'tools_select', content: JSON.stringify(first), tool_call_id: 'search' },
+      ],
+      [],
+      { targetTokens: 1024 }
+    )
+    expect(fitted.report.shortenedToolResults).toBe(1)
+    const message = fitted.messages.find(item => item.role === 'tool')!
+    const result = JSON.parse(message.content).output as ToolCatalogPage
+    expect(result.available).toEqual(page.available.map(({ name }) => ({ name })))
+    expect(result.selected).toEqual(['project_terminal_run'])
+    expect(result.nextOffset).toBeNull()
+    expect(JSON.stringify(compactToolOutput(JSON.parse(message.content), 1800))).toBe(message.content)
+    expect(JSON.stringify(page)).toBe(raw)
+  })
+
+  it('preserves selected IDs and reports invalid names without changing selection or granting tools', async () => {
+    const focus = focusedTools('device')
+    focus.select([definition('device_list'), definition('device_dispatch')])
+    await focus.selector.execute({ names: ['device_list'] }, { projectId: 'p' })
+    await expect(
+      focus.selector.execute({ names: ['device_dispatch', 'device_fake'] }, { projectId: 'p' })
+    ).rejects.toThrow('Selection unchanged')
+    const page = await focus.selector.execute({}, { projectId: 'p' })
+    const projected = compactToolOutput({ ok: true, output: page }, 450) as { output: ToolCatalogPage }
+    expect(projected.output.selected).toEqual(['device_list'])
+    expect(projected.output.available.every(hit => hit.name !== 'device_fake')).toBe(true)
+    expect(focus.select([definition('device_dispatch')]).map(tool => tool.function.name)).not.toContain('device_list')
+  })
+
+  it('guides repeated discovery, resets on execution and explains an out-of-range page', async () => {
+    const focus = focusedTools('terminal')
+    focus.select([definition('project_terminal_run')])
+    for (let index = 0; index < 2; index++) await focus.selector.execute({ query: 'terminal' }, { projectId: 'p' })
+    expect(await focus.selector.execute({ query: 'terminal' }, { projectId: 'p' })).toMatchObject({
+      guidance: expect.stringContaining('Repeated discovery'),
+    })
+    focus.recordExecution('project_terminal_run')
+    expect(await focus.selector.execute({ query: 'terminal' }, { projectId: 'p' })).toMatchObject({
+      guidance: expect.stringContaining('Copy available names'),
+    })
+    expect(await focus.selector.execute({ query: 'terminal', offset: 5 }, { projectId: 'p' })).toMatchObject({
+      available: [],
+      guidance: expect.stringContaining('offset=0'),
+    })
+  })
+
   it('keeps top ten real counts and complete paths inside the compacted context, without loading ten schemas', () => {
     const many = Array.from({ length: 15 }, (_, index) => definition(`custom_${index}`))
     const rows: ToolUsage[] = many.map((tool, index) => ({

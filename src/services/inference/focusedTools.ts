@@ -4,6 +4,7 @@ import { isRuntimeStatusEcho, explicitlyQuotesRuntimeStatus } from './localRespo
 import { allowsTextToolExample, isTextToolOutput, holdProtocolPrefix } from './textToolGuard'
 import { searchToolCatalog, toolCategoryMap, type ToolDescriptor } from '@/services/tools/discovery'
 import { topToolUsage, type ToolUsage } from '@/services/tools/usage'
+import { compactToolCatalog, type ToolCatalogPage } from './toolCatalogOutput'
 
 type Definition = ToolDescriptor
 
@@ -12,13 +13,14 @@ export function focusedTools(objective: string, archive?: () => readonly WireMes
   let requested: string[] = []
   let pool: Definition[] = []
   let usage: ToolUsage[] = []
+  let discoveryCalls = 0
   const selector: ToolDef = {
     name: 'tools_select',
     category: 'app',
     mutating: false,
     requiresApproval: false,
     description:
-      'Find tools by English keywords, German synonyms, or category path. Without filters, read root categories and the catalog. category from categories.id opens a deeper branch. Select at most six names for the next round; no action is executed.',
+      'Find tools by English keywords, German synonyms, or category path. Copy exact available names into names (max six) to load their schemas next round, then call those tools. Search alone executes nothing. Follow nextOffset exactly; null means no more hits. Without query, categories shows deeper branches.',
     parameters: {
       type: 'object',
       properties: {
@@ -31,11 +33,7 @@ export function focusedTools(objective: string, archive?: () => readonly WireMes
     },
     async execute(args) {
       const names = args.names ?? []
-      if (
-        !Array.isArray(names) ||
-        names.length > 6 ||
-        names.some(name => typeof name !== 'string' || !pool.some(tool => tool.function.name === name))
-      )
+      if (!Array.isArray(names) || names.length > 6 || names.some(name => typeof name !== 'string'))
         throw new Error('Nur verfügbare Werkzeugnamen auswählen (maximal sechs).')
       const offset = args.offset ?? 0
       if (
@@ -45,16 +43,26 @@ export function focusedTools(objective: string, archive?: () => readonly WireMes
         (args.category !== undefined && (typeof args.category !== 'string' || args.category.length > 160))
       )
         throw new Error('Ungültige Katalogsuche.')
+      discoveryCalls++
+      const unknown = names.filter(name => !pool.some(tool => tool.function.name === name))
+      if (unknown.length) {
+        const suggestions = searchToolCatalog(pool, unknown.join(' '))
+          .slice(0, 6)
+          .map(row => row.tool.function.name)
+        throw new Error(
+          `Unavailable names: ${unknown.map(name => String(name).slice(0, 80)).join(', ')}. Selection unchanged. ` +
+            `Search tools_select(query) or copy exact available IDs: ${suggestions.join(', ') || 'none matched'}. Do not guess names.`
+        )
+      }
       const category = String(args.category ?? '')
       const categories = toolCategoryMap(pool)
       if (category && !categories.some(node => node.id === category)) throw new Error('Kategorie nicht verfügbar.')
       if (names.length) requested = [...new Set(names as string[])]
       const matches = searchToolCatalog(pool, String(args.query ?? ''), category)
-      return {
+      const page: ToolCatalogPage = {
+        catalog: 'luczor-tools-v1',
         selected: requested,
-        categories: categories.filter(node => node.parent === (category || null)),
-        category,
-        topTools: topToolUsage(pool, usage),
+        offset: Number(offset),
         total: matches.length,
         nextOffset: Number(offset) + 16 < matches.length ? Number(offset) + 16 : null,
         available: matches.slice(Number(offset), Number(offset) + 16).map(({ tool, meta }) => ({
@@ -62,9 +70,23 @@ export function focusedTools(objective: string, archive?: () => readonly WireMes
           description: tool.function.description?.slice(0, 110),
           category: meta.category,
           path: meta.path,
-          keywords: meta.keywords,
         })),
+        ...(!args.query && !names.length
+          ? {
+              categories: categories
+                .filter(node => node.parent === (category || null))
+                .map(({ id, label, tools }) => ({ id, label, tools })),
+            }
+          : {}),
+        guidance: names.length
+          ? 'Selected schemas are available next round. Call the selected tool; selection itself performed no action.'
+          : Number(offset) >= matches.length && matches.length > 0
+            ? 'Offset exceeds results. Restart at offset=0; then use nextOffset exactly.'
+            : discoveryCalls >= 3
+              ? 'Repeated discovery without another tool call. Select exact available names, then call them. If no suitable tool exists, explain the missing capability; do not invent IDs.'
+              : 'Copy available names into tools_select(names), then call the selected tool. nextOffset=null ends this search.',
       }
+      return compactToolCatalog(page, 1500)
     },
   }
   const reader: ToolDef = {
@@ -106,6 +128,9 @@ export function focusedTools(objective: string, archive?: () => readonly WireMes
   return {
     selector,
     reader,
+    recordExecution(name: string) {
+      if (name !== selector.name && name !== reader.name) discoveryCalls = 0
+    },
     select(available: Definition[], statistics: ToolUsage[] = []): Definition[] {
       pool = available
       requested = requested.filter(name => pool.some(tool => tool.function.name === name))

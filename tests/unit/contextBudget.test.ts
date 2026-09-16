@@ -105,13 +105,14 @@ describe('shared request budget and evidence retention', () => {
   it('retains complete long and Unicode file references under repeated compaction', () => {
     const path = 'folder/'.repeat(185) + 'Bericht_e\u0301_Ä_📁_2026-09-13.md'
     const name = 'Bericht_e\u0301_Ä_📁_2026-09-13.md'
-    const source = { entries: [{ path, name, content: 'large content '.repeat(3000) }] }
+    const source = { entries: [{ path, name, file_ref: 'file_123456789abc', content: 'large content '.repeat(3000) }] }
     const first = compactToolOutput(source, 6000)
     const second = compactToolOutput(first, 1800)
     for (const result of [first, second]) {
       const serialized = JSON.stringify(result)
       expect(serialized).toContain(JSON.stringify(path))
       expect(serialized).toContain(JSON.stringify(name))
+      expect(serialized).toContain('file_123456789abc')
     }
     expect(JSON.stringify(second).length).toBeLessThanOrEqual(1800)
     expect(source.entries[0]!.path).toBe(path)

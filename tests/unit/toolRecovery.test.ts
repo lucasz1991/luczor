@@ -2,6 +2,47 @@ import { describe, expect, it } from 'vitest'
 import { ToolRecoveryGuard } from '@/services/tools/toolRecovery'
 
 describe('tool failure recovery', () => {
+  it('stops filename guessing while allowing an exactly observed path or file reference', () => {
+    const guard = new ToolRecoveryGuard()
+    const path = 'luczor_tooltest/ABSCHLUSSBERICHT_2026-09-13.md'
+    guard.record(
+      'fs_list',
+      {},
+      {
+        ok: true,
+        output: {
+          entries: [
+            { path, kind: 'file', file_ref: 'file_abc' },
+            { path: 'reports', kind: 'directory' },
+          ],
+        },
+      }
+    )
+    for (const wrong of ['ABSCHLUSSBERICHT_5-13.md', 'ABSCHLUSSBERICHRICHT_9-13-13.md']) {
+      const outcome = guard.record(
+        'fs_read',
+        { path: wrong },
+        { ok: false, error: 'Project path does not exist or cannot be inspected.' }
+      )
+      expect(outcome.output).toMatchObject({ recovery: { code: 'file_selection_required', next_tool: 'fs_list' } })
+    }
+    expect(guard.blocked('fs_read', { path: 'another-guess.md' })).toMatchObject({
+      ok: false,
+      output: { observed_files: [{ path, file_ref: 'file_abc' }] },
+    })
+    expect(guard.blocked('fs_read', { path: 'reports' })).toMatchObject({ ok: false })
+    expect(guard.blocked('fs_read', { path })).toBeUndefined()
+    expect(guard.blocked('fs_read', { file_ref: 'file_abc' })).toBeUndefined()
+    expect(guard.blocked('fs_read', { file_ref: 'file_abc', path: 'wrong' })).toMatchObject({ ok: false })
+    expect(guard.canOffer('fs_read')).toBe(true)
+    guard.record('fs_read', { file_ref: 'file_abc' }, { ok: false, error: 'file_reference_unavailable' })
+    expect(guard.blocked('fs_read', { file_ref: 'file_abc' })).toMatchObject({ ok: false })
+    guard.record('fs_stat', {}, { ok: true, output: { path, kind: 'file', file_ref: 'file_new' } })
+    expect(guard.blocked('fs_read', { file_ref: 'file_new' })).toBeUndefined()
+    expect(guard.blocked('fs_list', {})).toBeUndefined()
+    expect(new ToolRecoveryGuard().blocked('fs_read', { path: 'unseen.md' })).toBeUndefined()
+  })
+
   it('restores a browser path only after an actual successful cleanup, not an empty close or status read', () => {
     const guard = new ToolRecoveryGuard()
     for (let index = 0; index < 3; index++) {

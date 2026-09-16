@@ -37,6 +37,7 @@ vi.mock('@/services/executionGate', () => {
 })
 
 import { filesystemTools, workspaceRelativePath } from '@/services/tools/filesystem'
+import { FileReferences } from '@/services/tools/fileReferences'
 
 const CONTEXT = { projectId: 'project-1' }
 
@@ -125,6 +126,80 @@ describe('project-bound filesystem tools', () => {
     expect(() => workspaceRelativePath('E:\\private\\secret.txt')).toThrow('must be relative')
     expect(() => workspaceRelativePath('\\\\server\\share\\secret.txt')).toThrow('must be relative')
     expect(() => workspaceRelativePath('/etc/passwd')).toThrow('must be relative')
+  })
+
+  it('reads an observed file by reference without retyping its exact Unicode/date filename', async () => {
+    const path = 'luczor_tooltest/ABSCHLUSSBERICHT_2026-09-13_Ä_e\u0301.md'
+    mocks.invoke.mockResolvedValueOnce({
+      entries: [
+        { path, kind: 'file' },
+        { path: 'reports', kind: 'directory' },
+      ],
+    })
+    const listed = (await tool('fs_list').execute({}, CONTEXT)) as { entries: { file_ref?: string }[] }
+    expect(listed.entries[0]!.file_ref).toMatch(/^file_[a-f0-9]{12}$/)
+    expect(listed.entries[1]!.file_ref).toBeUndefined()
+    mocks.invoke.mockResolvedValueOnce({ path, content: 'verified text' })
+    const read = await tool('fs_read').execute({ file_ref: listed.entries[0]!.file_ref }, CONTEXT)
+    expect(mocks.invoke).toHaveBeenLastCalledWith('project_fs_read', { payload: expect.objectContaining({ path }) })
+    expect(mocks.invoke.mock.calls.at(-1)![1].payload).not.toHaveProperty('fileRef')
+    expect(read).toMatchObject({ path, content: 'verified text', file_ref: listed.entries[0]!.file_ref })
+  })
+
+  it.each(['fs_stat', 'fs_search'])('also supplies exact references from %s', async name => {
+    const file = { path: 'report.md', ...(name === 'fs_stat' ? { kind: 'file' } : { line: 1 }) }
+    mocks.invoke.mockResolvedValueOnce(name === 'fs_stat' ? file : { matches: [file] })
+    const result = (await tool(name).execute({ path: 'report.md', query: 'text' }, CONTEXT)) as {
+      file_ref?: string
+      matches?: { file_ref: string }[]
+    }
+    const reference = name === 'fs_stat' ? result.file_ref : result.matches![0]!.file_ref
+    expect(reference).toMatch(/^file_/)
+    await tool('fs_read').execute({ file_ref: reference }, CONTEXT)
+    expect(mocks.invoke).toHaveBeenLastCalledWith('project_fs_read', {
+      payload: expect.objectContaining({ path: 'report.md' }),
+    })
+  })
+
+  it('rejects mismatched, expired, rebound and cross-owner references before native reads', async () => {
+    mocks.invoke.mockResolvedValueOnce({ entries: [{ path: 'report.md', kind: 'file' }] })
+    const listed = (await tool('fs_list').execute({}, { ...CONTEXT, toolSessionId: 'run-a' })) as {
+      entries: { file_ref: string }[]
+    }
+    const file_ref = listed.entries[0]!.file_ref
+    mocks.invoke.mockClear()
+    await expect(
+      tool('fs_read').execute({ file_ref, path: 'other.md' }, { ...CONTEXT, toolSessionId: 'run-a' })
+    ).rejects.toThrow('file_reference_path_mismatch')
+    await expect(tool('fs_read').execute({ file_ref }, { ...CONTEXT, toolSessionId: 'run-b' })).rejects.toThrow(
+      'file_reference_unavailable'
+    )
+    await expect(
+      tool('fs_read').execute({ file_ref }, { projectId: 'other-project', toolSessionId: 'run-a' })
+    ).rejects.toThrow('file_reference_unavailable')
+    mocks.resolveWorkspacePrincipalId.mockResolvedValueOnce('other-account')
+    await expect(tool('fs_read').execute({ file_ref }, { ...CONTEXT, toolSessionId: 'run-a' })).rejects.toThrow(
+      'file_reference_unavailable'
+    )
+    mocks.getProjectWorkspace
+      .mockResolvedValueOnce({ rootPath: 'E:/rebound', updatedAt: 43, status: 'ready' })
+      .mockResolvedValueOnce({ rootPath: 'E:/rebound', updatedAt: 43, status: 'ready' })
+    await expect(tool('fs_read').execute({ file_ref }, { ...CONTEXT, toolSessionId: 'run-a' })).rejects.toThrow(
+      'file_reference_unavailable'
+    )
+    mocks.getRepositoryExternalPolicy.mockResolvedValueOnce('deny')
+    await expect(tool('fs_read').execute({ file_ref }, { ...CONTEXT, toolSessionId: 'run-a' })).rejects.toThrow(
+      'nicht an das externe Modell'
+    )
+    expect(mocks.invoke).not.toHaveBeenCalled()
+    const references = new FileReferences()
+    const ref = references.remember('scope', 'report.md')
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 3_600_001)
+    try {
+      expect(() => references.resolve('scope', ref)).toThrow('file_reference_unavailable')
+    } finally {
+      clock.mockRestore()
+    }
   })
 
   it('binds native reads to the captured execution generation and exact workspace version', async () => {

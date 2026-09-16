@@ -2198,6 +2198,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
             executionGate.assert(execution)
             signal.throwIfAborted()
             invokedAt = performance.now()
+            focused?.recordExecution(call.name)
             const result = await tool.execute(executionArguments, {
               projectId,
               signal,

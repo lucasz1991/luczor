@@ -1,4 +1,5 @@
 import type { WireMessage } from './types'
+import { compactToolCatalog } from './toolCatalogOutput'
 
 export type ContextBudgetReport = {
   estimatedInputTokens: number
@@ -52,7 +53,7 @@ export const estimateContextTokens = (text: string) => Math.ceil(text.length / 3
 
 // File references are identities, not prose. Never normalize Unicode or shorten
 // them into a different (potentially valid) file name during context projection.
-const referenceKey = /(?:path|paths|name|names|directory|directories|folder|uri|url)$/i
+const referenceKey = /(?:path|paths|name|names|directory|directories|folder|uri|url|file_ref)$/i
 function completeLineExcerpt(text: string, limit: number): string {
   if (text.length <= limit) return text
   const boundary = text.lastIndexOf('\n', Math.max(0, limit - 1))
@@ -61,6 +62,8 @@ function completeLineExcerpt(text: string, limit: number): string {
 
 /** Return a valid JSON projection, with explicit omissions instead of broken JSON. */
 export function compactToolOutput(value: unknown, maxChars = 6000): unknown {
+  const catalog = compactToolCatalog(value, maxChars)
+  if (catalog !== undefined) return catalog
   const original = JSON.stringify(value) ?? 'null'
   if (original.length <= maxChars) return value
   let allowance = Math.max(128, maxChars - 220)
