@@ -2406,6 +2406,9 @@ fn verify_configured_artifacts(
     if runtime_hash != runtime.sha256 {
         return Err("Configured llama.cpp runtime hash does not match the signed manifest.".into());
     }
+    // Repair missing dependencies for existing installations as well. Existing
+    // mismatched bytes fail closed; only signed files may be downloaded.
+    install::ensure_support_files(&runtime_path, runtime, cancel)?;
     let support_guards = gpu_runtime::verify_support_files(&runtime_path, runtime, cancel)?;
     #[cfg(target_os = "linux")]
     let storage_path = model_path.clone();
@@ -3618,8 +3621,10 @@ fn await_health(
 ) -> Result<(), String> {
     let client = local_http_client(Duration::from_secs(2), Duration::from_secs(2))?;
     let started = Instant::now();
-    let mut ram_guard =
-        resource_runtime::StartupMemoryGuard::new(runtime.resource_plan.total_ram_bytes());
+    let mut ram_guard = resource_runtime::StartupMemoryGuard::with_floor(
+        runtime.resource_plan.total_ram_bytes(),
+        runtime.resource_plan.ram_headroom_bytes(),
+    );
     let mut ram_snapshot = System::new();
     while started.elapsed() < timeout {
         if cancel.load(Ordering::SeqCst) {

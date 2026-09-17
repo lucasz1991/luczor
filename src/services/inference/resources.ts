@@ -473,9 +473,12 @@ export function onLocalRuntimeReleased(handler: () => void): void {
 }
 
 let systemCheckFlight: Promise<ResourceHardwareCheck> | undefined
-export async function checkLocalResourceHardware(): Promise<ResourceHardwareCheck> {
+export async function checkLocalResourceHardware(cleanup = false): Promise<ResourceHardwareCheck> {
+  if (!cleanup) {
+    return { hardware: await getLocalResourceHardware(), runtimeUnloaded: false, reasonCode: null }
+  }
   const pending = (systemCheckFlight ??= localResources.inspectIdle(async () => {
-    const result = await invoke<ResourceHardwareCheck>('local_model_resource_system_check')
+    const result = await invoke<ResourceHardwareCheck>('local_model_resource_system_check', { cleanup: true })
     if (result.runtimeUnloaded) releasedHandler?.()
     return result
   }))

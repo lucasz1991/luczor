@@ -45,21 +45,7 @@ pub(super) fn ensure(
         cancel,
     )?;
     validate_platform_binary(&binary)?;
-    if let Some(files) = &runtime.files {
-        for file in files {
-            if !file.name.ends_with(".so") {
-                return Err("The signed runtime libraries are not a Linux release.".into());
-            }
-            download(
-                &format!("{ASSET_BASE}/{}", file.sha256),
-                &runtime_dir.join(&file.name),
-                &file.sha256,
-                MAX_RUNTIME_BYTES,
-                None,
-                cancel,
-            )?;
-        }
-    }
+    ensure_support_files(&binary, runtime, cancel)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -77,6 +63,24 @@ pub(super) fn ensure(
     )?;
     super::persist_runtime_paths(app, &binary, &root)?;
     Ok((binary, model_path))
+}
+
+pub(super) fn ensure_support_files(
+    binary: &Path,
+    runtime: &RuntimeArtifact,
+    cancel: &AtomicBool,
+) -> Result<(), String> {
+    gpu_runtime::validate_runtime_metadata(runtime)?;
+    let directory = binary.parent().ok_or("Verified runtime directory is unavailable.")?;
+    for file in runtime.files.as_deref().unwrap_or_default() {
+        let suffix = if cfg!(windows) { ".dll" } else if cfg!(target_os = "linux") { ".so" } else { ".dylib" };
+        if !file.name.to_ascii_lowercase().ends_with(suffix) {
+            return Err("The signed runtime libraries do not match this platform.".into());
+        }
+        download(&format!("{ASSET_BASE}/{}", file.sha256), &directory.join(&file.name),
+            &file.sha256, MAX_RUNTIME_BYTES, None, cancel)?;
+    }
+    Ok(())
 }
 
 fn validate_platform_binary(path: &Path) -> Result<(), String> {

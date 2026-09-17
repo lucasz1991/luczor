@@ -495,9 +495,17 @@ fn reserve_system_check(
 pub async fn local_model_resource_system_check(
     window: crate::commands::CallerWebview,
     app: AppHandle,
+    cleanup: Option<bool>,
 ) -> Result<ResourceHardwareCheck, String> {
     ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(move || {
+        if cleanup != Some(true) {
+            return Ok(ResourceHardwareCheck {
+                hardware: Some(collect_hardware_snapshot(Some(&app))?),
+                runtime_unloaded: false,
+                reason_code: None,
+            });
+        }
         let id = Uuid::new_v4().to_string();
         let runtime = {
             let mut guard = state().lock().map_err(|_| "resource_system_check_failed")?;

@@ -13,6 +13,7 @@ export type LocalResourceSettingsClient = {
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, useId } from 'vue'
+import { openResourceRecovery } from '@/services/inference/resourceRecovery'
 import {
   MAXIMUM_RESOURCE_PERCENTAGES,
   percentageResourceConfig,
@@ -259,7 +260,7 @@ async function readSystemCheck(): Promise<HardwareSnapshot> {
         ? 'Eigene Modell-Runtime entladen. RAM und VRAM wurden danach neu gemessen; der nächste lokale Auftrag lädt das Modell wieder.'
         : 'Eigene Modell-Runtime entladen, Nachmessung fehlgeschlagen. Der nächste lokale Auftrag lädt das Modell wieder.'
       : result.hardware && !result.reasonCode
-        ? 'Keine eigene Modell-Runtime geladen. Verfügbarer RAM und VRAM wurden neu gemessen.'
+        ? 'Verfügbarer RAM und VRAM wurden ohne Bereinigung neu gemessen.'
         : ''
   if (!result.hardware || result.reasonCode) throw new Error(result.reasonCode ?? 'resource_system_check_failed')
   return result.hardware
@@ -433,6 +434,7 @@ onBeforeUnmount(() => {
   <section class="resource-settings" aria-label="Lokales Modell: Ressourcen">
     <header>
       <h4>Lokales Modell · dieses Gerät</h4>
+      <button type="button" @click="openResourceRecovery()">Speicher, Modell oder Berechnungsmodus wählen …</button>
       <p>Leistung automatisch abstimmen oder die verfügbaren Ressourcen selbst aufteilen.</p>
     </header>
     <p v-if="loading" role="status">Geräteeinstellungen werden gelesen …</p>
@@ -463,7 +465,7 @@ onBeforeUnmount(() => {
       </div>
       <p v-if="cleanupNotice && !loading && !checking" role="status">{{ cleanupNotice }}</p>
       <p v-if="loading || checking" role="status">
-        Eigene inaktive Modell-Runtime freigeben, danach CPU, RAM und Grafikkarten prüfen …
+        CPU, RAM und Grafikkarten messen …
       </p>
       <p v-else-if="!systemCheck" role="status">
         Keine vollständige Systemmessung verfügbar. Prozentregler bleiben gesperrt; deine bisherigen Einstellungen

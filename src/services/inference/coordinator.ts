@@ -42,6 +42,7 @@ import {
 } from '@/services/inference/tauriLocalRuntime'
 import type { ApprovedProxyConfig, InferenceGateway, InferenceRequest, WireMessage } from '@/services/inference/types'
 import { modelUsageSettings } from './modelUsageSettings'
+import { openResourceRecovery } from './resourceRecovery'
 
 export type ExternalTurnPackage = {
   /** Provider-safe messages assembled independently from local-only context. */
@@ -385,6 +386,7 @@ function preparationFailureReason(error: unknown): string {
   const reasons = new Map<string, string>([
     ['The server runtime does not match this Linux architecture.', 'runtime_platform_mismatch'],
     ['The signed runtime libraries are not a Linux release.', 'runtime_platform_mismatch'],
+    ['The signed runtime libraries do not match this platform.', 'runtime_platform_mismatch'],
     ['The server has not provided the signed Linux runtime or model resource.', 'runtime_download_unavailable'],
     ['The server has not provided the signed local runtime or model resource.', 'runtime_download_unavailable'],
     ['Model resource download failed.', 'runtime_download_failed'],
@@ -1113,10 +1115,12 @@ export class LocalInferenceCoordinator {
         externalOneShot: true,
       }
     }
+    const unavailableMessage = preferExternal
+      ? externalSpecialistUnavailableMessage(decision.reason)
+      : this.unavailableRouteMessage(settings, input.taskType, decision.reason, requiredCapability)
+    if (!preferExternal && decision.reason === 'local_only_blocked') openResourceRecovery(unavailableMessage)
     throw new LocalInferenceError(
-      preferExternal
-        ? externalSpecialistUnavailableMessage(decision.reason)
-        : this.unavailableRouteMessage(settings, input.taskType, decision.reason, requiredCapability),
+      unavailableMessage,
       decision.reason,
       false,
       false

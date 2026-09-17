@@ -16,9 +16,13 @@ pub(super) struct StartupMemoryGuard {
 }
 
 impl StartupMemoryGuard {
-    pub(super) fn new(total_ram: u64) -> Self {
+    pub(super) fn with_floor(total_ram: u64, protected_headroom: u64) -> Self {
         Self {
-            floor_bytes: (total_ram / 50).clamp(GIB / 2, GIB),
+            // Preserve the plan headroom plus a bounded staging margin for
+            // Windows/the desktop compositor during model startup.
+            floor_bytes: protected_headroom
+                .saturating_add(256 * 1024 * 1024)
+                .clamp(GIB / 2, total_ram.saturating_sub(GIB / 2).max(GIB / 2)),
             below_since: None,
             low_samples: 0,
         }
@@ -199,6 +203,10 @@ impl ResourcePlan {
 
     pub(super) fn total_ram_bytes(&self) -> u64 {
         self.total_ram_bytes
+    }
+
+    pub(super) fn ram_headroom_bytes(&self) -> u64 {
+        self.ram_headroom_bytes
     }
 }
 
@@ -879,13 +887,15 @@ mod tests {
     fn startup_ram_guard_stops_immediately_below_128_mib_without_rejecting_unknown_measurements() {
         let start = Instant::now();
         for available in [0, 6 * 1024 * 1024, GIB / 8 - 1] {
-            let mut guard = StartupMemoryGuard::new(32 * GIB);
+            let mut guard =
+                StartupMemoryGuard::with_floor(32 * GIB, (32 * GIB / 12).clamp(GIB, 4 * GIB));
             assert_eq!(
                 guard.observe(32 * GIB, available, start).unwrap_err(),
                 STARTUP_RAM_PRESSURE
             );
         }
-        let mut guard = StartupMemoryGuard::new(32 * GIB);
+        let mut guard =
+            StartupMemoryGuard::with_floor(32 * GIB, (32 * GIB / 12).clamp(GIB, 4 * GIB));
         assert!(guard.observe(32 * GIB, GIB / 8, start).is_ok());
         assert!(guard.observe(0, 0, start).is_ok());
     }
@@ -893,7 +903,7 @@ mod tests {
     #[test]
     fn startup_ram_guard_allows_transient_staging_but_rejects_sustained_critical_pressure() {
         let start = Instant::now();
-        let mut guard = StartupMemoryGuard::new(32 * GIB);
+        let mut guard = StartupMemoryGuard::with_floor(32 * GIB, 256 * 1024 * 1024);
         assert!(guard.observe(32 * GIB, 2 * GIB, start).is_ok());
         assert!(guard
             .observe(32 * GIB, GIB / 4, start + Duration::from_millis(200))
@@ -915,6 +925,20 @@ mod tests {
         assert!(guard
             .observe(0, 0, start + Duration::from_millis(2200))
             .is_ok());
+    }
+
+    #[test]
+    fn startup_ram_guard_preserves_plan_headroom_during_model_load() {
+        let start = Instant::now();
+        let mut guard = StartupMemoryGuard::with_floor(32 * GIB, 3 * GIB);
+        let below_floor = 3 * GIB + 256 * 1024 * 1024 - 1;
+        assert!(guard.observe(32 * GIB, below_floor, start).is_ok());
+        assert!(guard
+            .observe(32 * GIB, below_floor, start + Duration::from_millis(500))
+            .is_ok());
+        assert!(guard
+            .observe(32 * GIB, below_floor, start + Duration::from_millis(1600))
+            .is_err());
     }
 
     #[test]
