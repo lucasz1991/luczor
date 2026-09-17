@@ -26,6 +26,7 @@ const paths: Record<string, string> = {
   upload: 'M12 16V4m-5 5 5-5 5 5M4 20h16',
   'thumb-up': 'M7 10v11H3V10Zm0 1 5-8c3 0 2 5 2 7h5c2 0 2 1 2 2l-2 7c0 1-1 2-2 2H7',
   'thumb-down': 'M7 14V3H3v11Zm0-1 5 8c3 0 2-5 2-7h5c2 0 2-1 2-2l-2-7c0-1-1-2-2-2H7',
+  trash: 'M4 7h16M9 7V4h6v3m-9 0 1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13M10 11v6m4-6v6',
 }
 </script>
 <template>

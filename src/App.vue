@@ -925,6 +925,19 @@ function renameConversation(projectId: string, conversationId: string, title: st
   mutations.renameConversation(projectId, conversationId, title)
   scheduleSave(state)
 }
+async function deleteConversation(projectId: string, conversationId: string, title: string) {
+  void voiceInputSession.stop()
+  const confirmation = await requestConfirmation(
+    `„${title}“ wirklich löschen?\n\nDer Chat verschwindet aus der Liste; der Verlauf lässt sich hier nicht wiederherstellen.`
+  )
+  if (!confirmation.approved) {
+    if (confirmation.error) pushToast(confirmation.error, 'error')
+    return
+  }
+  mutations.deleteConversation(projectId, conversationId)
+  scheduleSave(state)
+  pushToast(`„${title}“ gelöscht.`, 'success')
+}
 
 async function addProject() {
   void voiceInputSession.stop()
@@ -2574,6 +2587,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       :active-chat-id="activeConversationId"
       @select-chat="selectConversation"
       @rename-chat="renameConversation"
+      @delete-chat="deleteConversation"
       @new-project-chat="
         projectId => {
           openProject(projectId)
@@ -3002,7 +3016,13 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       <!-- Only gated dictation reaches the composer; ambient speech is never shown. A one-off
            notice/error left once dictation has actually stopped becomes a toast instead (see the
            voiceInputView watcher above) — this bar only ever shows a still-active session now. -->
-      <div v-if="voiceInputView.mode" class="voice-input-status" role="status" aria-live="polite">
+      <div
+        v-if="voiceInputView.mode"
+        class="voice-input-status"
+        :class="{ 'is-error': !!voiceInputView.error }"
+        role="status"
+        aria-live="polite"
+      >
         <div>
           <strong>{{ voiceInputLabel }}</strong>
           <span>{{ voiceInputView.error || voiceInputView.notice }}</span>
@@ -3296,6 +3316,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       @display-mode="systemStatusDisplayMode = $event"
       @open-mini="miniChat.open()"
     />
+    <ToastHost />
   </div>
 </template>
 

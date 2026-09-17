@@ -20,7 +20,7 @@ pub(super) fn ensure(
     super::reject_runtime_reparse_points(&runtime_dir)?;
     fs::create_dir_all(&runtime_dir)
         .map_err(|_| "Cannot create local-model installation directory.")?;
-    if !root.join(format!("{}.gguf", artifact.sha256)).exists() {
+    if !root.join(format!("{}.gguf", model.id)).exists() {
         ensure_model_storage(
             &runtime_dir,
             artifact,
@@ -31,7 +31,11 @@ pub(super) fn ensure(
                 .saturating_add(MAX_RUNTIME_BYTES),
         )?;
     }
-    let binary = runtime_dir.join("llama-server");
+    let binary = runtime_dir.join(if cfg!(target_os = "windows") {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    });
     download(
         &format!("{ASSET_BASE}/{}", runtime.sha256),
         &binary,
@@ -40,7 +44,7 @@ pub(super) fn ensure(
         None,
         cancel,
     )?;
-    validate_linux_binary(&binary)?;
+    validate_platform_binary(&binary)?;
     if let Some(files) = &runtime.files {
         for file in files {
             if !file.name.ends_with(".so") {
@@ -62,7 +66,7 @@ pub(super) fn ensure(
         fs::set_permissions(&binary, fs::Permissions::from_mode(0o700))
             .map_err(|_| "Cannot make verified local runtime executable.")?;
     }
-    let model_path = root.join(format!("{}.gguf", artifact.sha256));
+    let model_path = root.join(format!("{}.gguf", model.id));
     download(
         &artifact.url,
         &model_path,
@@ -71,29 +75,36 @@ pub(super) fn ensure(
         Some(artifact.size_bytes),
         cancel,
     )?;
+    super::persist_runtime_paths(app, &binary, &root)?;
     Ok((binary, model_path))
 }
 
-fn validate_linux_binary(path: &Path) -> Result<(), String> {
+fn validate_platform_binary(path: &Path) -> Result<(), String> {
     let mut header = [0u8; 20];
     File::open(path)
         .and_then(|mut file| file.read_exact(&mut header))
-        .map_err(|_| "Cannot read installed Linux runtime.")?;
-    let machine = u16::from_le_bytes([header[18], header[19]]);
-    let expected = if cfg!(target_arch = "x86_64") {
-        62
-    } else if cfg!(target_arch = "aarch64") {
-        183
+        .map_err(|_| "Cannot read installed local runtime.")?;
+    if cfg!(target_os = "windows") {
+        if &header[..2] != b"MZ" {
+            return Err("The server runtime does not match this Windows platform.".into());
+        }
     } else {
-        0
-    };
-    if &header[..4] != b"\x7fELF"
-        || header[4] != 2
-        || header[5] != 1
-        || expected == 0
-        || machine != expected
-    {
-        return Err("The server runtime does not match this Linux architecture.".into());
+        let machine = u16::from_le_bytes([header[18], header[19]]);
+        let expected = if cfg!(target_arch = "x86_64") {
+            62
+        } else if cfg!(target_arch = "aarch64") {
+            183
+        } else {
+            0
+        };
+        if &header[..4] != b"\x7fELF"
+            || header[4] != 2
+            || header[5] != 1
+            || expected == 0
+            || machine != expected
+        {
+            return Err("The server runtime does not match this Linux architecture.".into());
+        }
     }
     Ok(())
 }
@@ -144,7 +155,7 @@ fn download(
             .map_err(|_| "Model resource download failed.")?;
         if response.status() != reqwest::StatusCode::OK {
             return Err(
-                "The server has not provided the signed Linux runtime or model resource.".into(),
+                "The server has not provided the signed local runtime or model resource.".into(),
             );
         }
         if response.content_length().is_some_and(|size| size > limit) {
@@ -219,16 +230,20 @@ mod tests {
         )
         .is_err());
         fs::write(&path, [0u8; 20]).unwrap();
-        assert!(validate_linux_binary(&path).is_err());
-        let mut elf = [0u8; 20];
-        elf[..6].copy_from_slice(b"\x7fELF\x02\x01");
-        elf[18] = if cfg!(target_arch = "x86_64") {
-            62
+        assert!(validate_platform_binary(&path).is_err());
+        let mut binary = [0u8; 20];
+        if cfg!(target_os = "windows") {
+            binary[..2].copy_from_slice(b"MZ");
         } else {
-            183
-        };
-        fs::write(&path, elf).unwrap();
-        assert!(validate_linux_binary(&path).is_ok());
+            binary[..6].copy_from_slice(b"\x7fELF\x02\x01");
+            binary[18] = if cfg!(target_arch = "x86_64") {
+                62
+            } else {
+                183
+            };
+        }
+        fs::write(&path, binary).unwrap();
+        assert!(validate_platform_binary(&path).is_ok());
         cancel.store(true, Ordering::SeqCst);
         assert!(download("https://invalid.invalid", &path, &hash, 4, None, &cancel).is_err());
         fs::remove_dir_all(root).unwrap();

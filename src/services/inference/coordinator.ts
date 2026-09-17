@@ -386,6 +386,7 @@ function preparationFailureReason(error: unknown): string {
     ['The server runtime does not match this Linux architecture.', 'runtime_platform_mismatch'],
     ['The signed runtime libraries are not a Linux release.', 'runtime_platform_mismatch'],
     ['The server has not provided the signed Linux runtime or model resource.', 'runtime_download_unavailable'],
+    ['The server has not provided the signed local runtime or model resource.', 'runtime_download_unavailable'],
     ['Model resource download failed.', 'runtime_download_failed'],
     ['Model download interrupted.', 'runtime_download_failed'],
     ['Cannot create local-model installation directory.', 'runtime_installation_failed'],

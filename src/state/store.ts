@@ -314,6 +314,31 @@ export const mutations = {
     chat.updatedAt = now()
   },
 
+  /** Soft-delete: archived chats drop out of every list/selection filter but their messages stay
+   * for potential recovery, matching how projects are archived elsewhere in this store. */
+  deleteConversation(projectId: AppTypes.Id, conversationId: AppTypes.Id) {
+    const chat = state.conversations?.find(
+      item => item.id === conversationId && item.projectId === projectId && !item.archivedAt
+    )
+    if (!chat) return
+    state.global.ui!.lastConversationByProject ??= {}
+    const wasActive = getSafeRecordValue(state.global.ui!.lastConversationByProject!, projectId) === conversationId
+    // Line up the replacement selection BEFORE archiving: getActiveConversationId() runs
+    // migrateConversations() as a read-time side effect, and some computed reactively re-reads it
+    // the instant `archivedAt` changes below. If that happened while this was still "the selected
+    // chat" with nothing else to fall back on, migrateConversations' own "always keep one active
+    // chat" safety net would silently un-archive it again before this function even returns.
+    if (wasActive) {
+      const fallback = state.conversations?.find(
+        item => item.projectId === projectId && !item.archivedAt && item.id !== conversationId
+      )
+      if (fallback) setSafeRecordValue(state.global.ui!.lastConversationByProject!, projectId, fallback.id)
+      else this.createConversation(projectId)
+    }
+    chat.archivedAt = now()
+    chat.updatedAt = now()
+  },
+
   getConversationMessages(
     projectId: AppTypes.Id,
     conversationId: AppTypes.Id,

@@ -90,7 +90,7 @@ const IDLE_CONTEXT_USE_CASE: &str = "context.optimize";
 const IDLE_RESIDENT_UNAVAILABLE: &str =
     "Background local optimization requires an already resident model in the same scope.";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RuntimePathConfig {
     version: u32,
@@ -2385,7 +2385,7 @@ fn verify_configured_artifacts(
             .map_err(|_| "Local-model data directory unavailable.")?
             .join("local-model/runtime-paths.json")
             .exists();
-    let (runtime_path, model_path) = if cfg!(target_os = "linux") && !paths_configured {
+    let (runtime_path, model_path) = if !paths_configured {
         install::ensure(app, model, cancel)?
     } else {
         configured_paths(app, model, catalog_binding)?
@@ -2721,6 +2721,55 @@ fn read_runtime_path_config(path: &Path) -> Result<RuntimePathConfig, String> {
         return Err("Local-model runtime path configuration version is unsupported.".into());
     }
     Ok(config)
+}
+
+/// Persist paths produced by the signed installer so later launches reuse the
+/// verified local resources without requiring process environment variables.
+pub(super) fn persist_runtime_paths(
+    app: &AppHandle,
+    runtime_path: &Path,
+    model_directory: &Path,
+) -> Result<(), String> {
+    let config_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Local-model configuration directory is unavailable.")?
+        .join("local-model")
+        .join("runtime-paths.json");
+    reject_runtime_reparse_points(&config_path)?;
+    let parent = config_path
+        .parent()
+        .ok_or("Local-model configuration directory is unavailable.")?;
+    fs::create_dir_all(parent).map_err(|_| "Cannot create local-model configuration directory.")?;
+    reject_runtime_reparse_points(parent)?;
+    let config = serde_json::to_vec(&RuntimePathConfig {
+        version: 1,
+        runtime_path: runtime_path.to_path_buf(),
+        model_directory: model_directory.to_path_buf(),
+    })
+    .map_err(|_| "Cannot encode local-model runtime paths.")?;
+    let temporary = config_path.with_extension(format!("json-{}", Uuid::new_v4()));
+    reject_runtime_reparse_points(&temporary)?;
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|_| "Cannot create local-model runtime path configuration.")?;
+        file.write_all(&config)
+            .map_err(|_| "Cannot write local-model runtime path configuration.")?;
+        file.sync_all()
+            .map_err(|_| "Cannot persist local-model runtime path configuration.")?;
+        drop(file);
+        match fs::rename(&temporary, &config_path) {
+            Ok(()) => Ok(()),
+            // Two concurrent starts may race; the first complete file wins.
+            Err(_) if config_path.exists() => Ok(()),
+            Err(_) => Err("Cannot publish local-model runtime path configuration.".into()),
+        }
+    })();
+    let _ = fs::remove_file(&temporary);
+    result
 }
 
 fn reject_runtime_reparse_points(path: &Path) -> Result<(), String> {

@@ -268,6 +268,12 @@ const windowRank = (size: WindowSize) => (size === 'expand' ? 2 : size === 'peek
 let windowSize: WindowSize = 'collapse'
 function layout() {
   if (props.native) {
+    // A pointer is down on the grip (about to drag, or already dragging): resize() always ends
+    // in set_position(), flush to the nearest edge with the bottom pinned. Hovering the icon to
+    // grab it already flips this to "peek" reactively, and if that resize lands while the OS-level
+    // drag from start_dragging() is moving the window, it snaps straight back — the drag looks
+    // like it does nothing. Stay out of the way until the drag (if any) is over, then catch up.
+    if (drag) return
     // Hovering the chats icon already grows the window to full size, same as pinning it; a pinned
     // light pane keeps the peek size after the pointer leaves.
     const action: WindowSize = chatsOpen.value
@@ -441,6 +447,10 @@ function moveDrag(event: PointerEvent) {
         // The native OS drag has already ended by the time this settles; flush the window
         // to whichever edge it ended up nearest to and mirror the capsule onto that side.
         void snapNativeEdge()
+        // layout() was refusing to resize/reposition the whole time a drag could have been in
+        // progress (see the `if (drag) return` guard there) — catch up on whatever peek/expand
+        // state is current now that the window has actually landed.
+        layout()
         setTimeout(() => {
           dragged = false
         }, 250)

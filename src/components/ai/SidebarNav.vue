@@ -10,6 +10,7 @@ const emit = defineEmits<{
   select: [id: string]
   selectChat: [projectId: string, conversationId: string]
   renameChat: [projectId: string, conversationId: string, title: string]
+  deleteChat: [projectId: string, conversationId: string, title: string]
   newProjectChat: [projectId: string]
   rename: [id: string, name: string]
   newChat: []
@@ -389,6 +390,15 @@ const runLabels: Record<string, string> = {
                 >
                   <AiIcon name="settings" :size="11" />
                 </button>
+                <button
+                  v-if="editingChat !== chat.id"
+                  type="button"
+                  class="ai-sidebar__chat-edit ai-sidebar__chat-delete"
+                  :aria-label="`Chat ${chat.label} löschen`"
+                  @click="emit('deleteChat', item.id, chat.id, chat.label)"
+                >
+                  <AiIcon name="trash" :size="11" />
+                </button>
               </div>
               <button type="button" class="ai-sidebar__chat-new" @click="emit('newProjectChat', item.id)">
                 <AiIcon name="plus" :size="12" /> Neuer Chat im Projekt
@@ -650,6 +660,11 @@ const runLabels: Record<string, string> = {
 .ai-sidebar__chat-row:hover .ai-sidebar__chat-edit,
 .ai-sidebar__chat-edit:focus-visible {
   opacity: 0.7;
+}
+.ai-sidebar__chat-delete:hover,
+.ai-sidebar__chat-delete:focus-visible {
+  color: var(--ai-red, #e06c75);
+  opacity: 1;
 }
 .ai-sidebar__chat-new {
   display: flex;

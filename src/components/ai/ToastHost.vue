@@ -14,11 +14,7 @@ const ICONS: Record<ToastKind, string> = { success: 'check', error: 'close', inf
         <button type="button" class="app-toast__close" aria-label="Meldung schließen" @click="dismissToast(toast.id)">
           <AiIcon name="close" :size="11" />
         </button>
-        <span
-          v-if="toast.duration > 0"
-          class="app-toast__bar"
-          :style="{ animationDuration: `${toast.duration}ms` }"
-        />
+        <span v-if="toast.duration > 0" class="app-toast__bar" :style="{ animationDuration: `${toast.duration}ms` }" />
       </div>
     </TransitionGroup>
   </div>
