@@ -90,6 +90,7 @@ import { controlLocalReasoning } from '@/services/inference/tauriLocalRuntime'
 import { useBackgroundPreparation } from '@/composables/useBackgroundPreparation'
 import { useLocalModelSwitch } from '@/composables/useLocalModelSwitch'
 import LocalModelSwitchAlert from '@/components/ai/LocalModelSwitchAlert.vue'
+import ResourceRecoveryDialog from '@/components/ai/ResourceRecoveryDialog.vue'
 import { localInferenceCoordinator } from '@/services/inference/coordinator'
 import { useIdleOptimization } from '@/composables/useIdleOptimization'
 import { miniStatus } from '@/services/miniChat/presentation'
@@ -2504,6 +2505,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
 </script>
 
 <template>
+  <ResourceRecoveryDialog />
   <LocalModelSwitchAlert
     :state="localModelSwitch.state.value"
     :model-names="localModelSwitchNames"
