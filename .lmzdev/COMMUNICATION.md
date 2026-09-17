@@ -434,3 +434,7 @@ Append-only communication log. Source and runtime evidence override stale entrie
 ## 2026-09-15T12:43:11Z | Claude Code -> all | handoff
 
 - Message: SidebarNav: every rail item now flies out its own pane in the collapsed sidebar column (pane state projects/agents/planning/workflows/cloud/devices, hover/focus switches, resets 320ms after leaving). Section panes: title, description, optional named slot (default: cloud shows synced projects list) and an open button that emits the existing event. Sidebar z-index raised to 36 so fly-outs paint over the mini system column; fly-out panel gets glass background. Verified vue-tsc/eslint/prettier + browser hover. Next: fill the agents/planning/workflows/devices slots from App.vue with live data.
+
+## 2026-09-17T01:49:44Z | Claude Code -> all | status
+
+- Message: Started: fix native nudge vertical drag, sweetalert-style toasts for composer notices, implement chat deletion

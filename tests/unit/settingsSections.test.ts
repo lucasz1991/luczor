@@ -2,6 +2,7 @@ import { createSSRApp, type Component } from 'vue'
 import { renderToString } from '@vue/server-renderer'
 import { describe, expect, it, vi } from 'vitest'
 import AppearanceSettingsSection from '@/components/settings/AppearanceSettingsSection.vue'
+import AccountConnection from '@/components/settings/AccountConnection.vue'
 import ChatSettingsSection from '@/components/settings/ChatSettingsSection.vue'
 import ExecutionSettingsSection from '@/components/settings/ExecutionSettingsSection.vue'
 import VoiceSettingsSection from '@/components/settings/VoiceSettingsSection.vue'
@@ -17,6 +18,19 @@ function emittedEvents(component: Component): string[] {
 }
 
 describe('settings section contracts', () => {
+  it('explains automatic browser adoption and exposes a current-device logout action', async () => {
+    const html = await render(AccountConnection, {
+      baseUrl: 'https://luczor.example.test',
+      clientId: 'desktop-1',
+      connected: true,
+    })
+
+    expect(html).toContain('Konto wechseln')
+    expect(html).toContain('Abmelden')
+    expect(html).toContain('Auf diesem Gerät angemeldet.')
+    expect(emittedEvents(AccountConnection)).toEqual(expect.arrayContaining(['connected', 'logout']))
+  })
+
   it('offers model and context preparation enabled by default with independent controls', async () => {
     const html = await render(ExecutionSettingsSection, { autoExecuteMutatingTools: false })
     expect(html).toContain('Lokales Modell bereithalten')

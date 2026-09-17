@@ -4,6 +4,7 @@ import {
   createCorrelationId,
   fetchBoundedResponseWithTimeout,
   fetchWithTimeout,
+  LuczorApi,
   readBoundedResponseText,
   requestWithConfig,
 } from '@/services/api/luczorApi'
@@ -16,6 +17,28 @@ describe('Luczor API transport boundaries', () => {
 
   it('creates a Laravel-compatible UUID correlation id', () => {
     expect(createCorrelationId()).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+  })
+
+  it('revokes the currently authenticated desktop key through the fixed account endpoint', async () => {
+    const fetchMock = vi.fn(async () => new Response('{"status":"revoked"}', { status: 200 }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(
+      LuczorApi.logoutCurrentDevice({
+        baseUrl: 'https://bound.example.test',
+        deviceKey: 'synthetic-test-device-key',
+        clientId: 'desktop-1',
+      })
+    ).resolves.toEqual({ status: 'revoked' })
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://bound.example.test/api/v1/auth/device/logout',
+      expect.objectContaining({
+        method: 'POST',
+        redirect: 'error',
+        headers: expect.objectContaining({ Authorization: 'Bearer synthetic-test-device-key' }),
+      })
+    )
   })
 
   it('accepts an exact response boundary', async () => {

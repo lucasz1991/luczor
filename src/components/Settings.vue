@@ -20,6 +20,7 @@ import { pushAllToServer, pullServerDefaults } from '@/services/api/sync'
 import {
   APP_NOTIFICATION_CATEGORIES,
   getApiConfig,
+  LuczorApi,
   DEFAULT_BASE_URL,
   type AppNotificationCategory,
   type NotificationCategoryPreferences,
@@ -471,6 +472,25 @@ async function acceptAccountKey(key: string) {
   await testServer()
 }
 
+async function logoutAccount() {
+  if (ui.serverBusy || !settings.luczor_device_key.trim()) return
+  ui.serverResult = null
+  ui.serverBusy = true
+  try {
+    await LuczorApi.logoutCurrentDevice()
+    settings.luczor_device_key = ''
+    await persistServerConfig(false)
+    ui.serverResult = { ok: true, message: 'Auf diesem Gerät und auf dem Server abgemeldet.' }
+  } catch (error: unknown) {
+    ui.serverResult = {
+      ok: false,
+      message: error instanceof Error ? error.message : 'Die Abmeldung konnte nicht sicher abgeschlossen werden.',
+    }
+  } finally {
+    ui.serverBusy = false
+  }
+}
+
 async function pullDefaults() {
   ui.serverResult = null
   ui.serverBusy = true
@@ -738,7 +758,10 @@ function iconPath(kind: string) {
                 <AccountConnection
                   :base-url="settings.luczor_api_base_url"
                   :client-id="ui.clientId || ''"
+                  :connected="!!settings.luczor_device_key.trim()"
+                  :logout-busy="ui.serverBusy"
                   @connected="acceptAccountKey"
+                  @logout="logoutAccount"
                 />
                 <div class="lz-section__head">
                   <h3>Luczor Server (Admin API)</h3>

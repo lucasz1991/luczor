@@ -15,6 +15,7 @@
 //   POST /sync/push                   (sync.write)
 //   GET  /sync/pull?since=ISO         (sync.read)
 //   POST /agent-events                (brain.write)
+//   POST /auth/device/logout          (settings.read; revokes the current key)
 
 import { Store } from '@tauri-apps/plugin-store'
 import { loadDeviceKey, saveDeviceKey } from '@/services/secureDeviceKey'
@@ -730,6 +731,10 @@ export const LuczorApi = {
       '/runtime-settings'
     ),
   voiceManifest: () => request<VoiceManifestResponse>('/voice/manifest'),
+  logoutCurrentDevice: (config?: LuczorApiConfigSnapshot) =>
+    config
+      ? requestWithConfig<{ status: 'revoked' }>('/auth/device/logout', { method: 'POST' }, config)
+      : request<{ status: 'revoked' }>('/auth/device/logout', { method: 'POST' }),
   pollDebugRequest: async (config?: LuczorApiConfigSnapshot) => {
     const cfg = config ?? (await getApiConfig())
     return request<{ data: { id: string; requested_at: string } | null }>(

@@ -8,6 +8,8 @@ import Settings from './components/Settings.vue'
 import DeviceClusterPanel from './components/DeviceClusterPanel.vue'
 import { modelUsageSettings, type ChatRouteMode } from '@/services/inference/modelUsageSettings'
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
+import ToastHost from './components/ai/ToastHost.vue'
+import { pushToast } from '@/services/toast'
 import type { SystemStatusDisplayMode } from '@/features/system-status/model'
 import AgentTeamResults from './components/ai/AgentTeamResults.vue'
 import { localAssistantProfilePrompt, refreshAssistantProfile } from '@/services/assistantProfile'
@@ -1022,6 +1024,25 @@ function stopAllVoice() {
   stopVoiceOutput()
 }
 const claimVoiceInput = useVoiceInputOwnership(stopAllVoice)
+// A one-off message left behind once dictation has actually stopped (confirmation, or a failure
+// from fail()) doesn't need its own dismiss-it-yourself bar above the composer — it's a toast.
+// While a mode is still active, notice/error stay inline next to the live recording controls.
+watch(
+  () => (voiceInputView.value.mode ? '' : voiceInputView.value.error || voiceInputView.value.notice),
+  message => {
+    if (!message) return
+    pushToast(message, voiceInputView.value.error ? 'error' : 'success')
+    void voiceInputSession.stop()
+  }
+)
+watch(
+  () => (speechPending.value ? '' : speechError.value),
+  message => {
+    if (!message) return
+    pushToast(message, 'error')
+    speechError.value = ''
+  }
+)
 
 async function startConfiguredVoice(mode: 'push_to_talk' | 'hands_free') {
   await voiceInputSession.start(mode)
@@ -2978,29 +2999,25 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
         />
       </div>
 
-      <!-- Only gated dictation reaches the composer; ambient speech is never shown. -->
-      <div
-        v-if="voiceInputView.mode || voiceInputView.notice || voiceInputView.error"
-        class="voice-input-status"
-        :class="{ 'is-error': !!voiceInputView.error }"
-        role="status"
-        aria-live="polite"
-      >
+      <!-- Only gated dictation reaches the composer; ambient speech is never shown. A one-off
+           notice/error left once dictation has actually stopped becomes a toast instead (see the
+           voiceInputView watcher above) — this bar only ever shows a still-active session now. -->
+      <div v-if="voiceInputView.mode" class="voice-input-status" role="status" aria-live="polite">
         <div>
-          <strong v-if="voiceInputView.mode">{{ voiceInputLabel }}</strong>
+          <strong>{{ voiceInputLabel }}</strong>
           <span>{{ voiceInputView.error || voiceInputView.notice }}</span>
         </div>
         <button
-          v-if="voiceInputView.mode"
           type="button"
           @click="voiceInputSession.stop('Aufnahme gestoppt. Der bisherige Text bleibt zum Prüfen stehen.')"
         >
           Aufnahme abbrechen
         </button>
-        <button v-else type="button" @click="voiceInputSession.stop()">Schließen</button>
       </div>
 
-      <div v-if="speechPending || speechError" class="speech-output" aria-live="polite">
+      <!-- A read-aloud failure becomes a toast too (see the speechError watcher above); this bar
+           only ever shows while playback is actually running. -->
+      <div v-if="speechPending" class="speech-output" aria-live="polite">
         <ReadAloudText
           v-if="
             readAlongState &&
@@ -3008,9 +3025,8 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           "
           :playback="readAlongState"
         />
-        <span v-else>{{ speechError || speechOutputLabel }}</span>
-        <button v-if="speechPending" type="button" @click="stopVoiceOutput">Vorlesen stoppen</button>
-        <button v-else type="button" @click="speechError = ''">Schließen</button>
+        <span v-else>{{ speechOutputLabel }}</span>
+        <button type="button" @click="stopVoiceOutput">Vorlesen stoppen</button>
       </div>
 
       <div ref="composerShell" class="ai-main-composer">

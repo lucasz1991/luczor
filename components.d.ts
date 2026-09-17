@@ -80,6 +80,7 @@ declare module 'vue' {
     ThinkingSelector: typeof import('./src/components/ai/ThinkingSelector.vue')['default']
     ThinkingSettings: typeof import('./src/components/settings/ThinkingSettings.vue')['default']
     ThinkingState: typeof import('./src/components/ai/ThinkingState.vue')['default']
+    ToastHost: typeof import('./src/components/ai/ToastHost.vue')['default']
     TokenCounter: typeof import('./src/components/ai/TokenCounter.vue')['default']
     ToolApprovalDrawer: typeof import('./src/components/tools/ToolApprovalDrawer.vue')['default']
     ToolArtifactPicker: typeof import('./src/components/tools/ToolArtifactPicker.vue')['default']
