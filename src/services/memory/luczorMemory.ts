@@ -8,6 +8,7 @@ import { projectExternalIdForServer } from '@/services/cloudProjectAccess'
 import { memoryImportance, memoryPriority, MEMORY_PRIORITIES, type MemoryPriority } from './memoryPriority'
 import { analyzeMemoryRecords, type MemoryAnalysis } from './memoryAnalysis'
 import { trackMemoryActivity } from './activity'
+import { trackMemoryUsage } from './usage'
 import {
   DEFAULT_FETCH_TIMEOUT_MS,
   fetchBoundedResponseWithTimeout,
@@ -1008,6 +1009,10 @@ class OfflineMemoryStore {
     return (await this.load()).outbox.filter(event => event.principalId === principalId).length
   }
 
+  async inspect(principalId: string): Promise<MemoryRecord[]> {
+    return (await this.load()).records.filter(record => record.principalId === principalId)
+  }
+
   /**
    * One safe upgrade path for pre-v2 partitions: only the principal derived
    * from the currently authenticated Device Key may be moved. Unknown legacy
@@ -1295,7 +1300,7 @@ export class LuczorMemoryService {
   }
 
   async remember(input: RememberInput): Promise<MemoryRecord> {
-    return trackMemoryActivity('write', () => this.rememberOperation(input))
+    return trackMemoryUsage('save', () => trackMemoryActivity('write', () => this.rememberOperation(input)))
   }
 
   private async rememberOperation(input: RememberInput): Promise<MemoryRecord> {
@@ -1476,7 +1481,14 @@ export class LuczorMemoryService {
   }
 
   async recall(query: RecallQuery): Promise<MemoryRecord[]> {
-    return trackMemoryActivity('read', markFailed => this.recallOperation(query, markFailed))
+    return trackMemoryUsage('sharedRecall', markUsageFailed =>
+      trackMemoryActivity('read', markFailed =>
+        this.recallOperation(query, () => {
+          markFailed()
+          markUsageFailed()
+        })
+      )
+    )
   }
 
   private async recallOperation(query: RecallQuery, markFailed: () => void): Promise<MemoryRecord[]> {
@@ -1520,7 +1532,14 @@ export class LuczorMemoryService {
 
   /** Device-only retrieval. No query, private record or result is sent to the context server. */
   async recallLocal(query: RecallQuery): Promise<MemoryRecord[]> {
-    return trackMemoryActivity('read', markFailed => this.recallLocalOperation(query, markFailed))
+    return trackMemoryUsage('localRecall', markUsageFailed =>
+      trackMemoryActivity('read', markFailed =>
+        this.recallLocalOperation(query, () => {
+          markFailed()
+          markUsageFailed()
+        })
+      )
+    )
   }
 
   private async recallLocalOperation(query: RecallQuery, markFailed: () => void): Promise<MemoryRecord[]> {
@@ -1715,6 +1734,67 @@ export class LuczorMemoryService {
   async pendingSyncCount(): Promise<number> {
     const snapshot = await this.operationSnapshot()
     return this.offline.pending(snapshot.principalId)
+  }
+
+  /** Read-only, account-bound inventory. Inspector reads never count as AI retrieval. */
+  async inspectLocal(options: { projectId?: string; query?: string; offset?: number; limit?: number } = {}) {
+    const snapshot = await this.operationSnapshot()
+    const all = await this.offline.inspect(snapshot.principalId)
+    const projectId = options.projectId
+      ? projectExternalIdForServer(options.projectId, snapshot.principalId)
+      : undefined
+    const query = (options.query ?? '').slice(0, 256).toLocaleLowerCase('de')
+    const records = all
+      .filter(
+        record =>
+          (!projectId || record.projectId === projectId) &&
+          (!query ||
+            `${record.sensitivity === 'normal' ? record.content : ''} ${record.type} ${record.scope}`
+              .toLocaleLowerCase('de')
+              .includes(query))
+      )
+      .sort((left, right) => right.updatedAt - left.updatedAt || left.id.localeCompare(right.id))
+    const offset = Math.max(0, Math.floor(options.offset ?? 0) || 0)
+    const limit = Math.max(1, Math.min(200, Math.floor(options.limit ?? 120) || 120))
+    const pending = await this.offline.pending(snapshot.principalId)
+    const current = await getVerifiedAccountSnapshot()
+    if ((current?.principalId ?? 'device-local') !== snapshot.principalId) throw new Error('Account changed')
+    const knownIds = new Set(all.map(record => record.id))
+    return {
+      total: all.length,
+      filtered: records.length,
+      offset,
+      pending,
+      active: all.filter(record => record.status === 'active').length,
+      candidates: all.filter(record => record.status === 'candidate').length,
+      synced: all.filter(record => record.synced).length,
+      records: records.slice(offset, offset + limit).map(record => ({
+        id: record.id,
+        content:
+          record.sensitivity === 'normal' && !containsSensitiveMemoryData(record.content)
+            ? record.content.slice(0, 4000)
+            : '[Geschützter Inhalt]',
+        ...(record.content.length > 4000 ? { truncated: true } : {}),
+        ...(record.expiresAt ? { expiresAt: record.expiresAt } : {}),
+        ...(Array.isArray(record.provenance?.source_memory_ids)
+          ? {
+              sourceIds: record.provenance.source_memory_ids
+                .filter((id): id is string => typeof id === 'string' && knownIds.has(id) && id !== record.id)
+                .slice(0, 64),
+            }
+          : {}),
+        scope: record.scope,
+        type: record.type,
+        status: record.status,
+        source: record.source,
+        projectId: record.projectId,
+        visibility: record.visibility,
+        retention: record.retention,
+        confidence: record.confidence,
+        updatedAt: record.updatedAt,
+        synced: !!record.synced,
+      })),
+    }
   }
 
   async memoryHealth(): Promise<boolean | null> {

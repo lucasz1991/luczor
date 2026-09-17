@@ -11,4 +11,5 @@ commands.allow = [
     "local_model_status",
     "system_status_window_set_mode",
     "system_status_window_close",
+    "system_status_open_memory",
 ]

@@ -126,9 +126,16 @@ let drag: {
   startY: number
   bottom: number
   pointer: number
-  nativeStarted: boolean
+  /** Native: screen-space y of the last step already handed to the window (CSS px). */
+  lastScreenY: number
   captureTarget: HTMLElement
 } | null = null
+// Native drag steps are serialized: each pointermove adds to the pending delta, one IPC call is
+// in flight at a time, and whatever accumulated while it ran goes out as the next step.
+let nativeMoveChain: Promise<void> = Promise.resolve()
+let nativeMovePending = 0
+let nativeMovePointerX = 0
+let nativeMoveQueued = false
 let dragged = false
 const decision = computed(() => props.snapshot.decision ?? props.snapshot.mainDecision)
 const status = computed(() => miniStatus(props.snapshot, unread.value))
@@ -417,10 +424,29 @@ function beginDrag(event: PointerEvent) {
     startY: event.clientY,
     bottom: bottom.value,
     pointer: event.pointerId,
-    nativeStarted: false,
+    lastScreenY: event.screenY,
     captureTarget,
   }
   captureTarget.setPointerCapture(event.pointerId)
+}
+function queueNativeMove(dy: number, pointerX: number) {
+  nativeMovePending += dy
+  nativeMovePointerX = pointerX
+  if (nativeMoveQueued) return
+  nativeMoveQueued = true
+  nativeMoveChain = nativeMoveChain.then(async () => {
+    nativeMoveQueued = false
+    const step = nativeMovePending
+    nativeMovePending = 0
+    if (!step) return
+    try {
+      const edge = await invoke<string>('mini_chat_drag_by', { dy: step, pointerX: nativeMovePointerX })
+      side.value = edge === 'left' ? 'left' : 'right'
+      windowError.value = ''
+    } catch {
+      windowError.value = 'Verschieben nicht möglich.'
+    }
+  })
 }
 function moveDrag(event: PointerEvent) {
   if (!drag || drag.pointer !== event.pointerId) return
@@ -429,32 +455,14 @@ function moveDrag(event: PointerEvent) {
   if (Math.hypot(dx, dy) < 5 && !dragged) return
   dragged = true
   if (props.native) {
-    if (drag.nativeStarted) return
-    drag.nativeStarted = true
-    // The OS-native drag needs to own the mouse from here on — holding onto the webview's own
-    // pointer capture can stop the OS from ever taking over, so hand it back first.
-    try {
-      drag.captureTarget.releasePointerCapture(event.pointerId)
-    } catch {
-      /* Already released — not fatal. */
-    }
-    void invoke('mini_chat_drag')
-      .catch(() => {
-        windowError.value = 'Verschieben nicht möglich.'
-      })
-      .finally(() => {
-        drag = null
-        // The native OS drag has already ended by the time this settles; flush the window
-        // to whichever edge it ended up nearest to and mirror the capsule onto that side.
-        void snapNativeEdge()
-        // layout() was refusing to resize/reposition the whole time a drag could have been in
-        // progress (see the `if (drag) return` guard there) — catch up on whatever peek/expand
-        // state is current now that the window has actually landed.
-        layout()
-        setTimeout(() => {
-          dragged = false
-        }, 250)
-      })
+    // The window is moved from here, step by step, instead of handing the mouse to the OS move
+    // loop (start_dragging): that handoff needs the webview's pointer capture released and then
+    // races the hover-triggered peek resize, which on Windows left the window sitting still.
+    // Screen coordinates stay valid while the window slides underneath the pointer, so each
+    // step is simply the pointer's travel since the previous one.
+    const stepY = event.screenY - drag.lastScreenY
+    drag.lastScreenY = event.screenY
+    queueNativeMove(stepY, event.screenX)
   } else {
     bottom.value = drag.bottom - dy
     // Live-flip which edge the nudge sits on as it crosses the screen's midline, same as dragging it in the design board.
@@ -463,7 +471,16 @@ function moveDrag(event: PointerEvent) {
   }
 }
 function endDrag() {
+  const wasNativeDrag = props.native && !!drag && dragged
   drag = null
+  if (wasNativeDrag) {
+    // Let the last queued step land, then flush against the nearest edge and let layout() catch
+    // up on the peek/expand state it held back while the pointer was down.
+    nativeMoveChain = nativeMoveChain.then(async () => {
+      await snapNativeEdge()
+      layout()
+    })
+  }
   setTimeout(() => {
     dragged = false
   }, 250)

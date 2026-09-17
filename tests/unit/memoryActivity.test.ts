@@ -138,6 +138,41 @@ describe('memory activity counters', () => {
 })
 
 describe('memory facade instrumentation', () => {
+  it('inspects local records without inflating AI usage or sending queries', async () => {
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { snapshotMemoryActivity } = await import('@/services/memory/activity')
+    const memory = new LuczorMemoryService()
+    await memory.remember({ content: 'Navigation links', projectId: 'p1', writeIntent: 'confirmed' })
+    await memory.remember({ content: 'Editor rechts', projectId: 'p2', writeIntent: 'confirmed' })
+    const before = snapshotMemoryActivity()
+    const page = await memory.inspectLocal({ query: 'Navigation', limit: 1 })
+    expect(page.total).toBe(2)
+    expect(page.filtered).toBe(1)
+    expect(page.records[0]).toMatchObject({ content: 'Navigation links', projectId: 'p1' })
+    expect(page.records[0]).not.toHaveProperty('meta')
+    expect(page.records[0]).not.toHaveProperty('principalId')
+    expect(snapshotMemoryActivity()).toEqual(before)
+    expect((await memory.inspectLocal({ offset: 2 })).records).toEqual([])
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('separates graph and memory usage, drops failed fallback and resets late counters', async () => {
+    const { memoryUsageSnapshot, resetMemoryUsage, trackMemoryUsage } = await import('@/services/memory/usage')
+    const pending = deferred<string[]>()
+    const work = trackMemoryUsage('graphSearch', () => pending.promise)
+    expect(memoryUsageSnapshot().find(row => row.kind === 'graphSearch')?.active).toBe(1)
+    resetMemoryUsage()
+    pending.resolve(['PRIVATE_QUERY_RESULT'])
+    await work
+    expect(memoryUsageSnapshot().find(row => row.kind === 'graphSearch')).toMatchObject({ completed: 0, active: 0 })
+    await trackMemoryUsage('localRecall', async markFailed => {
+      markFailed()
+      return []
+    })
+    expect(memoryUsageSnapshot().find(row => row.kind === 'localRecall')).toMatchObject({ failed: 1, completed: 0 })
+    expect(JSON.stringify(memoryUsageSnapshot())).not.toContain('PRIVATE_QUERY_RESULT')
+  })
+
   it('counts one logical write and one recall despite encryption and local reconciliation reads', async () => {
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
     const { snapshotMemoryActivity } = await import('@/services/memory/activity')

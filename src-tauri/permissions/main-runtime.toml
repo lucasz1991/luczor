@@ -91,6 +91,7 @@ commands.allow = [
     "local_graph_index",
     "local_graph_cancel_index",
     "local_graph_status",
+    "local_graph_inspect",
     "local_graph_search",
     "local_graph_read_snippets",
     "local_graph_unbind",

@@ -22,6 +22,7 @@ const emit = defineEmits<{
   workflows: []
   cloudProjects: []
   devices: []
+  memory: []
   'update:collapsed': [value: boolean]
 }>()
 /* Every rail item flies out its own column while collapsed (projects stays the default). */
@@ -249,6 +250,15 @@ const runLabels: Record<string, string> = {
         @click="emit('devices')"
       >
         <AiIcon name="panel" /><span>Geräteverbund</span>
+      </button>
+      <button
+        class="ai-sidebar__action"
+        type="button"
+        title="Gedächtnis und 3D-Graph"
+        aria-label="Gedächtnis und 3D-Graph"
+        @click="emit('memory')"
+      >
+        <AiIcon name="spark" /><span>Gedächtnis</span>
       </button>
       <footer>
         <button

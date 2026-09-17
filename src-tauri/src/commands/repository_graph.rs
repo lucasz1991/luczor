@@ -262,6 +262,120 @@ pub async fn local_graph_search(
     .map_err(|error| format!("Repository search task failed: {error}"))?
 }
 
+#[derive(Debug, Serialize)]
+pub struct GraphInspection {
+    total: usize,
+    offset: usize,
+    files: Vec<GraphInspectionFile>,
+}
+#[derive(Debug, Serialize)]
+struct GraphInspectionFile {
+    id: String,
+    path: String,
+    language: String,
+    symbols: Vec<GraphSymbolRef>,
+    relations: Vec<GraphInspectionRelation>,
+    truncated: bool,
+}
+#[derive(Debug, Serialize)]
+struct GraphInspectionRelation {
+    kind: String,
+    target: String,
+}
+
+/// Metadata only; no source-code reads, model calls or re-indexing from the inspector.
+#[tauri::command]
+pub async fn local_graph_inspect(
+    window: crate::commands::CallerWebview,
+    app: AppHandle,
+    principal_id: String,
+    project_id: String,
+    query: String,
+    offset: usize,
+) -> Result<GraphInspection, String> {
+    ensure_main_webview(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        inspect_graph(&app, &principal_id, &project_id, &query, offset)
+    })
+    .await
+    .map_err(|_| "Graph inspection task failed.".to_string())?
+}
+
+fn inspect_graph<D: GraphDatabaseProvider>(
+    app: &D,
+    principal: &str,
+    project: &str,
+    query: &str,
+    offset: usize,
+) -> Result<GraphInspection, String> {
+    validate_principal_id(principal)?;
+    validate_project_id(project)?;
+    if query.chars().count() > 256 || offset > MAX_FILES {
+        return Err("Invalid graph page.".into());
+    }
+    let connection = open_database(app)?;
+    let bound = load_binding(&connection, principal, project)?;
+    let total: i64 = connection.query_row("SELECT COUNT(*) FROM repository_files WHERE principal_id=?1 AND repository_id=?2 AND instr(lower(relative_path), lower(?3))>0", params![principal, bound.repository_id, query], |r| r.get(0)).map_err(db_error)?;
+    let mut statement = connection.prepare("SELECT id, evidence_id, relative_path, language FROM repository_files WHERE principal_id=?1 AND repository_id=?2 AND instr(lower(relative_path), lower(?3))>0 ORDER BY relative_path LIMIT 40 OFFSET ?4").map_err(db_error)?;
+    let rows = statement
+        .query_map(
+            params![principal, bound.repository_id, query, offset as i64],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .map_err(db_error)?;
+    let mut files = Vec::new();
+    for row in rows {
+        let (file_id, id, path, language) = row.map_err(db_error)?;
+        let mut symbols_query = connection.prepare("SELECT name,kind,start_line,end_line FROM repository_symbols WHERE file_id=?1 ORDER BY id LIMIT 13").map_err(db_error)?;
+        let mut symbols = symbols_query
+            .query_map([file_id], |r| {
+                Ok(GraphSymbolRef {
+                    name: r.get(0)?,
+                    kind: r.get(1)?,
+                    start_line: r.get::<_, i64>(2)? as usize,
+                    end_line: r.get::<_, i64>(3)? as usize,
+                })
+            })
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        let mut edges_query = connection.prepare("SELECT edge_kind,substr(target,1,2048) FROM repository_edges WHERE file_id=?1 ORDER BY id LIMIT 13").map_err(db_error)?;
+        let mut relations = edges_query
+            .query_map([file_id], |r| {
+                Ok(GraphInspectionRelation {
+                    kind: r.get(0)?,
+                    target: r.get(1)?,
+                })
+            })
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        let truncated = symbols.len() > 12 || relations.len() > 12;
+        symbols.truncate(12);
+        relations.truncate(12);
+        files.push(GraphInspectionFile {
+            id,
+            path,
+            language,
+            symbols,
+            relations,
+            truncated,
+        });
+    }
+    Ok(GraphInspection {
+        total: total as usize,
+        offset,
+        files,
+    })
+}
+
 #[tauri::command]
 pub async fn local_graph_read_snippets(
     window: crate::commands::CallerWebview,
@@ -2531,6 +2645,56 @@ mod tests {
         base: PathBuf,
         repository: PathBuf,
         outside: PathBuf,
+    }
+
+    #[test]
+    fn graph_inspector_is_bounded_scoped_and_metadata_only() {
+        let harness = GraphContractHarness::new();
+        harness.seed_repository();
+        bind_repository(
+            harness.database(),
+            "account:inspector",
+            "project",
+            &harness.repository.to_string_lossy(),
+        )
+        .unwrap();
+        index_repository(harness.database(), "account:inspector", "project").unwrap();
+        let page =
+            inspect_graph(harness.database(), "account:inspector", "project", "", 0).unwrap();
+        assert!(page.total >= 2);
+        assert!(page.files.len() <= 40);
+        assert!(page
+            .files
+            .iter()
+            .all(|file| file.symbols.len() <= 12 && file.relations.len() <= 12));
+        let serialized = serde_json::to_string(&page).unwrap();
+        assert!(!serialized.contains("contract-secret-never-egress"));
+        assert!(!serialized.contains("content_hash"));
+        assert!(inspect_graph(harness.database(), "account:other", "project", "", 0).is_err());
+        let filtered = inspect_graph(
+            harness.database(),
+            "account:inspector",
+            "project",
+            "helper.ts",
+            0,
+        )
+        .unwrap();
+        assert_eq!(filtered.total, 1);
+        assert_eq!(filtered.files[0].path, "src/helper.ts");
+        assert!(
+            inspect_graph(harness.database(), "account:inspector", "project", "", 100)
+                .unwrap()
+                .files
+                .is_empty()
+        );
+        assert!(inspect_graph(
+            harness.database(),
+            "account:inspector",
+            "project",
+            &"x".repeat(257),
+            0
+        )
+        .is_err());
     }
 
     impl GraphContractHarness {

@@ -22,7 +22,19 @@ defineProps<{ tools: ActivityStep[] }>()
         <AiIcon name="chevron" :size="12" class="ai-tool__chevron" />
       </summary>
       <div class="ai-tool__body">
-        <p v-if="tool.detail" class="ai-tool__detail">{{ tool.detail }}</p>
+        <!-- Request and response side by side with the metadata: the debug view for a tool call. -->
+        <section v-if="tool.request" class="ai-tool__io">
+          <header><span>Anfrage</span><small>Argumente, redigiert</small></header>
+          <pre>{{ tool.request }}</pre>
+        </section>
+        <section v-if="tool.response" class="ai-tool__io" :data-ok="tool.responseOk">
+          <header>
+            <span>{{ tool.responseOk === false ? 'Fehler' : 'Antwort' }}</span>
+            <small>{{ tool.dataHandling === 'ephemeral' ? 'temporär, nur lokal' : 'Ergebnis' }}</small>
+          </header>
+          <pre>{{ tool.response }}</pre>
+        </section>
+        <p v-else-if="tool.detail" class="ai-tool__detail">{{ tool.detail }}</p>
         <dl class="ai-tool__metadata">
           <div>
             <dt>Tool</dt>
@@ -182,6 +194,44 @@ defineProps<{ tools: ActivityStep[] }>()
   color: var(--ai-muted);
   font-size: 12px;
   line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.ai-tool__io {
+  margin: 0 0 10px;
+  border: 1px solid var(--ai-line);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--ai-ink) 3%, transparent);
+  overflow: hidden;
+}
+.ai-tool__io header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--ai-line);
+  font: 500 9.5px var(--ai-font);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ai-muted);
+}
+.ai-tool__io header small {
+  font: 10px var(--font-mono, monospace);
+  letter-spacing: 0;
+  text-transform: none;
+  color: var(--ai-faint);
+}
+.ai-tool__io[data-ok='false'] header span {
+  color: var(--ai-red);
+}
+.ai-tool__io pre {
+  max-height: 260px;
+  margin: 0;
+  padding: 8px 10px 10px;
+  overflow: auto;
+  color: var(--ai-muted);
+  font: 11px/1.6 var(--font-mono, monospace);
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }

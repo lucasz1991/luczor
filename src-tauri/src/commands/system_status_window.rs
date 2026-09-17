@@ -1,7 +1,7 @@
 //! Native, movable Systemstatus window. It receives only read-only telemetry commands.
 use super::{ensure_main_webview, ensure_webview_label};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder};
 
 pub const SYSTEM_STATUS_LABEL: &str = "luczor-system-status";
 
@@ -95,6 +95,22 @@ pub fn system_status_window_set_mode(
 pub fn system_status_window_close(window: crate::commands::CallerWebview) -> Result<(), String> {
     ensure_webview_label(window.label(), SYSTEM_STATUS_LABEL)?;
     window.close().map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn system_status_open_memory(
+    window: crate::commands::CallerWebview,
+    app: AppHandle,
+) -> Result<(), String> {
+    ensure_webview_label(window.label(), SYSTEM_STATUS_LABEL)?;
+    let main = app
+        .get_webview_window("main")
+        .ok_or("Hauptfenster nicht verfügbar.")?;
+    main.emit("luczor-memory-explorer-open", ())
+        .map_err(|error| error.to_string())?;
+    main.show().map_err(|error| error.to_string())?;
+    main.unminimize().map_err(|error| error.to_string())?;
+    main.set_focus().map_err(|error| error.to_string())
 }
 
 #[cfg(test)]

@@ -2377,15 +2377,24 @@ fn verify_configured_artifacts(
         .runtime
         .as_ref()
         .ok_or("Runtime metadata is unavailable.")?;
-    let paths_configured = std::env::var_os("LUCZOR_LLAMA_CPP_BIN").is_some()
-        || std::env::var_os("LUCZOR_LOCAL_MODEL_DIR").is_some()
-        || app
-            .path()
-            .app_data_dir()
-            .map_err(|_| "Local-model data directory unavailable.")?
-            .join("local-model/runtime-paths.json")
-            .exists();
-    let (runtime_path, model_path) = if !paths_configured {
+    let local_root = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Local-model data directory unavailable.")?
+        .join("local-model");
+    let config_path = local_root.join("runtime-paths.json");
+    let environment_override = std::env::var_os("LUCZOR_LLAMA_CPP_BIN").is_some()
+        || std::env::var_os("LUCZOR_LOCAL_MODEL_DIR").is_some();
+    // Only the installer's exact layout opts into automatic maintenance. Manual
+    // paths and partial environment overrides still follow their strict checks.
+    let managed = !environment_override
+        && config_path.exists()
+        && is_managed_runtime_config(
+            &read_runtime_path_config(&config_path)?,
+            &local_root.join("installed"),
+        );
+    let (runtime_path, model_path) = if !environment_override && (!config_path.exists() || managed)
+    {
         install::ensure(app, model, cancel)?
     } else {
         configured_paths(app, model, catalog_binding)?
@@ -2764,15 +2773,46 @@ pub(super) fn persist_runtime_paths(
         file.sync_all()
             .map_err(|_| "Cannot persist local-model runtime path configuration.")?;
         drop(file);
-        match fs::rename(&temporary, &config_path) {
-            Ok(()) => Ok(()),
-            // Two concurrent starts may race; the first complete file wins.
-            Err(_) if config_path.exists() => Ok(()),
-            Err(_) => Err("Cannot publish local-model runtime path configuration.".into()),
+        if config_path.exists() {
+            let existing = read_runtime_path_config(&config_path)?;
+            if !is_managed_runtime_config(&existing, &parent.join("installed")) {
+                return Err("Explicit runtime paths changed during installation; retry with the saved configuration.".into());
+            }
+            resource_config::atomic_replace(&temporary, &config_path)
+        } else {
+            // No overwrite if a manual configuration appeared concurrently.
+            fs::hard_link(&temporary, &config_path)
+                .map_err(|_| "Cannot publish local-model runtime path configuration.".into())
         }
     })();
     let _ = fs::remove_file(&temporary);
     result
+}
+
+fn is_managed_runtime_config(config: &RuntimePathConfig, root: &Path) -> bool {
+    let Some(directory) = config.runtime_path.parent() else {
+        return false;
+    };
+    config.model_directory == root
+        && directory.parent() == Some(root)
+        && directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|hash| {
+                hash.len() == 64
+                    && hash
+                        .bytes()
+                        .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+            })
+        && config
+            .runtime_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            == Some(if cfg!(windows) {
+                "llama-server.exe"
+            } else {
+                "llama-server"
+            })
 }
 
 fn reject_runtime_reparse_points(path: &Path) -> Result<(), String> {

@@ -97,6 +97,22 @@ describe('desktop memory account isolation', () => {
     vi.unstubAllGlobals()
   })
 
+  it('keeps the inspector account-scoped and rejects a late identity switch', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    await memory.remember({ content: 'Only account one', projectId: 'p1', writeIntent: 'confirmed' })
+    harness.currentSnapshot = accountSnapshot(2, 'key-b')
+    expect((await memory.inspectLocal()).records).toEqual([])
+    harness.currentSnapshot = accountSnapshot(1, 'key-a')
+    expect((await memory.inspectLocal()).records[0]?.content).toBe('Only account one')
+    harness.getVerifiedAccountSnapshot
+      .mockResolvedValueOnce(accountSnapshot(1, 'key-a'))
+      .mockResolvedValueOnce(accountSnapshot(2, 'key-b'))
+    await expect(memory.inspectLocal()).rejects.toThrow('Account changed')
+    expect(harness.fetch).not.toHaveBeenCalled()
+  })
+
   it('round-trips an active durable idle memory locally without leaking it to the shared provider path', async () => {
     await setServerEnabled(true)
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')

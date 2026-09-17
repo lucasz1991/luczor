@@ -8,6 +8,7 @@ import type { LocalResourceSettingsClient } from '@/components/LocalResourceSett
 import source from '@/components/LocalResourceSettings.vue?raw'
 import * as ResourceApi from '@/services/inference/resources'
 import * as SystemCheckApi from '@/services/inference/resourceSystemCheck'
+import * as RecoveryApi from '@/services/inference/resourceRecovery'
 import { DEFAULT_LOCAL_RESOURCE_CONFIG, type LocalResourceConfigState } from '@/services/inference/resources'
 import type { HardwareSnapshot } from '@/services/inference/capacity'
 
@@ -30,6 +31,7 @@ runInNewContext(
       if (id === 'vue') return VueRuntime
       if (id === '@/services/inference/resources') return ResourceApi
       if (id === '@/services/inference/resourceSystemCheck') return SystemCheckApi
+      if (id === '@/services/inference/resourceRecovery') return RecoveryApi
       throw new Error(`Unexpected test module: ${id}`)
     },
   }

@@ -8,7 +8,11 @@ import Settings from './components/Settings.vue'
 import DeviceClusterPanel from './components/DeviceClusterPanel.vue'
 import { modelUsageSettings, type ChatRouteMode } from '@/services/inference/modelUsageSettings'
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
+import MemoryExplorerPage from '@/features/memory/MemoryExplorerPage.vue'
+import { useMemoryObservatoryHost } from '@/features/memory/observatory'
 import ToastHost from './components/ai/ToastHost.vue'
+import ContextInspector from './components/ContextInspector.vue'
+import type { ContextSnapshot } from '@/services/contextInspector'
 import { pushToast } from '@/services/toast'
 import type { SystemStatusDisplayMode } from '@/features/system-status/model'
 import AgentTeamResults from './components/ai/AgentTeamResults.vue'
@@ -693,6 +697,12 @@ const activeProjectId = computed<string>({
 })
 
 const activeProject = computed(() => projects.value.find(p => p.id === activeProjectId.value))
+const showMemoryExplorer = ref(false)
+function openMemoryExplorer() {
+  showMemoryExplorer.value = true
+  showSystemPanel.value = false
+}
+useMemoryObservatoryHost(() => activeProject.value, openMemoryExplorer)
 const activeConversationId = computed(() => mutations.getActiveConversationId(activeProjectId.value))
 const activeConversation = computed(() => state.conversations?.find(chat => chat.id === activeConversationId.value))
 const interruptedRun = computed(() => {
@@ -1624,6 +1634,187 @@ type CapturedChatTurn = {
   expectedLocalModelId: string | null
   inputSource: ComposerInputSource
 }
+/** Everything a turn hands to the model besides the chat history itself — shared by send() and by
+ * the context inspector's preview, so what the panel shows before sending is what actually goes out. */
+async function collectContextFragments(opts: {
+  pid: string
+  conversationId: string
+  text: string
+  taskType: string
+  project: Project | undefined
+  workspace: ProjectWorkspaceBinding | null
+  ticket: ExecutionTicket
+}): Promise<{ fragments: PromptFragment[]; promptContext: PromptContextDetails }> {
+  const { pid, conversationId, text, taskType, project: prj, workspace, ticket } = opts
+  const contextFragments: PromptFragment[] = []
+  const recentToolContext = buildRecentToolOutcomeContext(
+    mutations.getConversationMessages(pid, conversationId, { includeHidden: true })
+  )
+  if (recentToolContext) {
+    contextFragments.push({
+      id: 'recent-tool-outcomes',
+      source: 'tool',
+      trust: 'untrusted_data',
+      scope: 'session',
+      egress: 'allowed',
+      priority: 60,
+      content: recentToolContext,
+    })
+  }
+
+  // Keep the active plan in front of the model across turns.
+  const detailedPlan = planningHub.get(pid)
+  const planContext = detailedPlan?.plan
+    ? JSON.stringify({ revision: detailedPlan.revision, status: detailedPlan.status, plan: detailedPlan.plan })
+    : buildPlanContext(pid)
+  if (planContext) {
+    contextFragments.push({
+      id: 'active-plan',
+      source: 'project',
+      trust: 'untrusted_data',
+      scope: 'project',
+      egress: detailedPlan?.plan ? 'local_only' : 'allowed',
+      priority: 80,
+      content: planContext,
+    })
+  }
+
+  // Build one deterministic, bounded and redacted provider context. Absolute
+  // workspace paths remain local; providers only ever receive @project.
+  let promptContext: PromptContextDetails = { text: '', taskType }
+  const memoryPrefs = await getMemoryPrefs().catch(() => ({ inject: true, injectCount: 5 }))
+  try {
+    if (prj) {
+      const startContext = await backgroundPreparation.projectContext(prj, workspace, memoryPrefs, ticket)
+      contextFragments.push(...startContext.sourceFragments)
+    }
+  } catch (error) {
+    console.warn('[prompt] start context skipped:', error)
+  }
+
+  // Add query-specific Memory/Repository retrieval. Repository snippets enter
+  // only after a fresh per-turn approval when the local policy requires it.
+  try {
+    if (memoryPrefs.inject) {
+      promptContext = await buildLocalPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType)
+      if (promptContext.fragments?.length) {
+        contextFragments.push(...promptContext.fragments)
+      } else if (promptContext.text) {
+        contextFragments.push({
+          id: 'query-context',
+          source: 'repository',
+          trust: 'untrusted_data',
+          scope: 'project',
+          egress: 'local_only',
+          priority: 75,
+          content: promptContext.text,
+        })
+      }
+    }
+  } catch (e) {
+    console.warn('[memory] context injection skipped:', e)
+  }
+  if (workspace?.rootPath)
+    contextFragments.push({
+      id: 'local-workspace-path',
+      source: 'project',
+      trust: 'policy',
+      scope: 'workspace',
+      egress: 'local_only',
+      priority: 100,
+      content: `Lokaler Projektordner: ${workspace.rootPath}`,
+    })
+  return { fragments: contextFragments, promptContext }
+}
+const lastRunContext = ref<ContextSnapshot | null>(null)
+const contextTab = ref<'start' | 'run' | 'project'>('start')
+/** Tool calls that belong to the run the inspector is showing. */
+const lastRunTools = computed(() => {
+  const run = lastRunContext.value
+  if (!run?.messageId) return []
+  const message = mutations.getProjectMessages(run.projectId).find(item => item.id === run.messageId)
+  return message ? messageTools(message) : []
+})
+const contextPreview = ref<ContextSnapshot | null>(null)
+const contextPreviewBusy = ref(false)
+const contextPreviewError = ref('')
+let contextPreviewTimer: ReturnType<typeof setTimeout> | undefined
+let contextPreviewGeneration = 0
+/** Assemble the start context for the current draft exactly like send() would, without sending. */
+async function refreshContextPreview() {
+  const generation = ++contextPreviewGeneration
+  const pid = activeProjectId.value
+  const conversationId = activeConversationId.value
+  const text = input.value.trim()
+  const prj = projects.value.find(project => project.id === pid)
+  const workspace = activeWorkspace.value?.projectId === pid ? { ...activeWorkspace.value } : null
+  contextPreviewBusy.value = true
+  contextPreviewError.value = ''
+  try {
+    const taskType = inferTaskType(text)
+    const gathered = await collectContextFragments({
+      pid,
+      conversationId,
+      text,
+      taskType,
+      project: prj,
+      workspace,
+      ticket: executionGate.capture(),
+    })
+    // Preview only: without the native bridge (browser preview) the account lookup is unavailable,
+    // so fall back to a device-local scope rather than showing nothing.
+    const accountScope = await getVerifiedAccountSnapshot().catch(() => null)
+    const principalId = accountScope?.principalId ?? (await resolveWorkspacePrincipalId().catch(() => 'device-local'))
+    const scopeKey: ContextScopeKey = {
+      principalId,
+      serverInstance: accountScope?.serverInstance ?? 'device-local',
+      projectId: pid,
+      workspaceBindingId: JSON.stringify([workspace?.rootPath ?? '', workspace?.updatedAt ?? '']),
+      sessionId: 'preview',
+      taskType,
+    }
+    const packages = await buildTargetContextPackages({
+      scopeKey,
+      fragments: gathered.fragments.map(fragment => ({
+        ...fragment,
+        scope: scopeKey,
+        lifecycle: 'active',
+        sensitivity: 'normal',
+        audiences: ['local_model', 'external_provider'],
+        contentHash: '',
+      })),
+      budget: { maxChars: 6_000, maxFragments: 12, maxFragmentChars: 1_200 },
+    })
+    if (generation !== contextPreviewGeneration) return
+    contextPreview.value = {
+      kind: 'preview',
+      at: Date.now(),
+      projectId: pid,
+      conversationId,
+      taskType,
+      prompt: text,
+      fragments: gathered.fragments,
+      local: packages.local,
+      external: packages.external,
+    }
+  } catch (error) {
+    if (generation !== contextPreviewGeneration) return
+    contextPreviewError.value = error instanceof Error ? error.message : 'Kontextvorschau nicht verfügbar.'
+  } finally {
+    if (generation === contextPreviewGeneration) contextPreviewBusy.value = false
+  }
+}
+// Only while the panel is open: retrieval isn't free, and the draft changes on every keystroke.
+watch(
+  () => [showContext.value, input.value, activeProjectId.value, activeConversationId.value] as const,
+  ([open]) => {
+    clearTimeout(contextPreviewTimer)
+    if (!open) return
+    contextPreviewTimer = setTimeout(() => void refreshContextPreview(), 600)
+  },
+  { immediate: true }
+)
+
 async function send(
   automaticVoice = false,
   resume?: { checkpoint: AgentCheckpoint; messageId: string },
@@ -1828,75 +2019,17 @@ async function executeChatTurn(
       summarizeWithoutReader: true,
     }).messages
 
-    const contextFragments: PromptFragment[] = []
-    const recentToolContext = buildRecentToolOutcomeContext(
-      mutations.getConversationMessages(pid, conversationId, { includeHidden: true })
-    )
-    if (recentToolContext) {
-      contextFragments.push({
-        id: 'recent-tool-outcomes',
-        source: 'tool',
-        trust: 'untrusted_data',
-        scope: 'session',
-        egress: 'allowed',
-        priority: 60,
-        content: recentToolContext,
-      })
-    }
-
-    // Keep the active plan in front of the model across turns.
-    const detailedPlan = planningHub.get(pid)
-    const planContext = detailedPlan?.plan
-      ? JSON.stringify({ revision: detailedPlan.revision, status: detailedPlan.status, plan: detailedPlan.plan })
-      : buildPlanContext(pid)
-    if (planContext) {
-      contextFragments.push({
-        id: 'active-plan',
-        source: 'project',
-        trust: 'untrusted_data',
-        scope: 'project',
-        egress: detailedPlan?.plan ? 'local_only' : 'allowed',
-        priority: 80,
-        content: planContext,
-      })
-    }
-
-    // Build one deterministic, bounded and redacted provider context. Absolute
-    // workspace paths remain local; providers only ever receive @project.
-    let promptContext: PromptContextDetails = { text: '', taskType }
-    const memoryPrefs = await getMemoryPrefs().catch(() => ({ inject: true, injectCount: 5 }))
-    try {
-      if (prj) {
-        const startContext = await backgroundPreparation.projectContext(prj, workspace, memoryPrefs, turnExecution)
-        contextFragments.push(...startContext.sourceFragments)
-      }
-    } catch (error) {
-      console.warn('[prompt] start context skipped:', error)
-    }
-
-    // Add query-specific Memory/Repository retrieval. Repository snippets enter
-    // only after a fresh per-turn approval when the local policy requires it.
-    try {
-      if (memoryPrefs.inject) {
-        promptContext = await buildLocalPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType)
-        if (promptContext.fragments?.length) {
-          contextFragments.push(...promptContext.fragments)
-        } else if (promptContext.text) {
-          contextFragments.push({
-            id: 'query-context',
-            source: 'repository',
-            trust: 'untrusted_data',
-            scope: 'project',
-            egress: 'local_only',
-            priority: 75,
-            content: promptContext.text,
-          })
-        }
-      }
-    } catch (e) {
-      console.warn('[memory] context injection skipped:', e)
-    }
-
+    const gathered = await collectContextFragments({
+      pid,
+      conversationId,
+      text,
+      taskType,
+      project: prj,
+      workspace,
+      ticket: turnExecution,
+    })
+    const contextFragments = gathered.fragments
+    const promptContext = gathered.promptContext
     const accountScope = await getVerifiedAccountSnapshot()
     executionGate.assert(turnExecution)
     if ((accountScope?.principalId ?? (await resolveWorkspacePrincipalId())) !== captured.principalId)
@@ -1918,16 +2051,6 @@ async function executeChatTurn(
       return []
     })
     executionGate.assert(turnExecution)
-    if (workspace?.rootPath)
-      contextFragments.push({
-        id: 'local-workspace-path',
-        source: 'project',
-        trust: 'policy',
-        scope: 'workspace',
-        egress: 'local_only',
-        priority: 100,
-        content: `Lokaler Projektordner: ${workspace.rootPath}`,
-      })
     const packages = await buildTargetContextPackages({
       scopeKey,
       fragments: contextFragments.map(fragment => ({
@@ -1940,6 +2063,18 @@ async function executeChatTurn(
       })),
       budget: { maxChars: 6_000, maxFragments: 12, maxFragmentChars: 1_200 },
     })
+    lastRunContext.value = {
+      kind: 'run',
+      at: Date.now(),
+      projectId: pid,
+      conversationId,
+      messageId: assistant.id,
+      taskType,
+      prompt: text,
+      fragments: contextFragments,
+      local: packages.local,
+      external: packages.external,
+    }
     const assistantProfile = await refreshAssistantProfile()
     executionGate.assert(turnExecution)
     const localProfilePrompt = localAssistantProfilePrompt(assistantProfile, text, taskType)
@@ -2607,9 +2742,16 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       @workflows="openWorkflows()"
       @cloud-projects="showCloudProjects = true"
       @devices="showDeviceCluster = true"
+      @memory="openMemoryExplorer"
     />
 
-    <main class="main-col">
+    <MemoryExplorerPage
+      v-if="showMemoryExplorer"
+      :projects="projects"
+      :project-id="activeProjectId"
+      @close="showMemoryExplorer = false"
+    />
+    <main v-show="!showMemoryExplorer" class="main-col">
       <div class="header">
         <div class="header__identity">
           <input
@@ -3136,8 +3278,42 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           </svg>
         </button>
       </div>
+      <div class="context-col__tabs" role="tablist" aria-label="Kontextansichten">
+        <button type="button" role="tab" :aria-selected="contextTab === 'start'" @click="contextTab = 'start'">
+          Startkontext
+        </button>
+        <button type="button" role="tab" :aria-selected="contextTab === 'run'" @click="contextTab = 'run'">
+          Aktueller Lauf
+        </button>
+        <button type="button" role="tab" :aria-selected="contextTab === 'project'" @click="contextTab = 'project'">
+          Projekt
+        </button>
+      </div>
       <div class="context-col__body">
-        <div class="info-strip">
+        <div v-if="contextTab === 'start'" class="context-col__pane">
+          <p class="context-col__lead">
+            Das bekommt das Modell mit deiner nächsten Nachricht – zusammengestellt aus dem aktuellen Entwurf, noch
+            bevor du sendest.
+          </p>
+          <ContextInspector
+            :snapshot="contextPreview"
+            :busy="contextPreviewBusy"
+            :error="contextPreviewError"
+            empty-hint="Der Startkontext wird zusammengestellt …"
+          />
+        </div>
+        <div v-else-if="contextTab === 'run'" class="context-col__pane">
+          <p class="context-col__lead">
+            Was der letzte Auftrag dieses Projekts tatsächlich erhalten hat – Fragmente, Erinnerungen und die
+            Werkzeugaufrufe mit ihren Ergebnissen.
+          </p>
+          <ContextInspector
+            :snapshot="lastRunContext && lastRunContext.projectId === activeProjectId ? lastRunContext : null"
+            :tools="lastRunTools"
+            empty-hint="In dieser Sitzung wurde noch kein Auftrag gesendet."
+          />
+        </div>
+        <div v-else class="info-strip">
           <div class="info-block">
             <div class="info-head">
               <span class="tac-label">Projektziele</span>
@@ -3317,6 +3493,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       @close="showSystemPanel = false"
       @display-mode="systemStatusDisplayMode = $event"
       @open-mini="miniChat.open()"
+      @open-memory="openMemoryExplorer"
     />
     <ToastHost />
   </div>

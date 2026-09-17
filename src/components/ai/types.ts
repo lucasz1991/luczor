@@ -10,6 +10,11 @@ export type ActivityStep = {
   capability?: string
   /** Short, redacted preview of the leading string arguments (path, command, query). */
   summary?: string
+  /** Full (redacted, bounded) request arguments — for the chip's debug view, never for prompts. */
+  request?: string
+  /** Full (redacted, bounded) tool output or error, same purpose. */
+  response?: string
+  responseOk?: boolean
   model?: string
   provider?: string
   dataHandling?: 'syncable' | 'ephemeral'

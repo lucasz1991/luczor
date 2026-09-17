@@ -6,4 +6,4 @@ commands.allow = ["mini_chat_open", "mini_chat_publish"]
 [[permission]]
 identifier = "mini-chat-client"
 description = "Mini view can send typed user actions, read its display snapshot and operate only its own window."
-commands.allow = ["mini_chat_action", "mini_chat_snapshot", "mini_chat_drag", "mini_chat_snap", "mini_chat_window", "open_url", "voice_input_store", "voice_input_claim", "voice_input_status", "voice_input_stt"]
+commands.allow = ["mini_chat_action", "mini_chat_snapshot", "mini_chat_drag", "mini_chat_drag_by", "mini_chat_snap", "mini_chat_window", "open_url", "voice_input_store", "voice_input_claim", "voice_input_status", "voice_input_stt"]

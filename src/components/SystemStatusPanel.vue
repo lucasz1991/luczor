@@ -14,6 +14,8 @@ import LocalModelStatus from './LocalModelStatus.vue'
 import AssistantProfileStatus from './AssistantProfileStatus.vue'
 import AiIcon from './ai/AiIcon.vue'
 import SystemStopButton from './SystemStopButton.vue'
+import MemoryStatusDetails from '@/features/memory/MemoryStatusDetails.vue'
+import { useMemoryStatus } from '@/features/memory/observatory'
 
 const props = withDefaults(
   defineProps<{
@@ -33,7 +35,8 @@ const props = withDefaults(
     sidebarCollapsed: false,
   }
 )
-const emit = defineEmits<{ close: []; openMini: []; displayMode: [mode: SystemStatusDisplayMode] }>()
+const emit = defineEmits<{ close: []; openMini: []; openMemory: []; displayMode: [mode: SystemStatusDisplayMode] }>()
+useMemoryStatus(() => props.active && props.nativeWindow, true)
 const {
   activeSection,
   content,
@@ -155,6 +158,12 @@ watch(displayMode, mode => emit('displayMode', mode), { immediate: true })
         @indicators="indicators = $event"
       />
       <LocalModelAnalysis v-show="displayMode === 'dashboard' || activeSection === 'localmodel'" />
+      <MemoryStatusDetails
+        v-if="active && (displayMode === 'dashboard' || activeSection === 'memory')"
+        :active="active"
+        :secondary="nativeWindow"
+        @open="emit('openMemory')"
+      />
       <div
         v-show="displayMode === 'dashboard' || activeSection === 'localmodel' || activeSection === 'details'"
         class="system-status-panel__details"

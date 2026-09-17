@@ -78,7 +78,9 @@ onBeforeUnmount(() => {
     <template v-if="state.phase === 'failed'">
       <p>Die Bereitschaft wurde nicht bestätigt. Details stehen unter Systemstatus → Lokales Modell.</p>
       <button type="button" class="model-switch-alert__retry" @click="emit('retry')">Erneut vorbereiten</button>
-      <button type="button" class="model-switch-alert__retry" @click="openResourceRecovery()">Speicher, Modell oder Modus wählen</button>
+      <button type="button" class="model-switch-alert__retry" @click="openResourceRecovery()">
+        Speicher, Modell oder Modus wählen
+      </button>
     </template>
   </aside>
 </template>

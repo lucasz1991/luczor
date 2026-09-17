@@ -3,6 +3,11 @@ import { localModelDiagnostics } from '@/services/inference/localModelDiagnostic
 import { createApp, h, ref } from 'vue'
 import { mockIPC } from '@tauri-apps/api/mocks'
 import SystemStatusPanel from '@/components/SystemStatusPanel.vue'
+import MemoryExplorerPage from '@/features/memory/MemoryExplorerPage.vue'
+import { memoryExplorerData } from '@/features/memory/explorerData'
+import { memoryStatus } from '@/features/memory/observatory'
+import { memoryUsageSnapshot } from '@/services/memory/usage'
+import { snapshotMemoryActivity } from '@/services/memory/activity'
 import { hud, type HudStatus } from '@/state/hud'
 import { appearance } from '@/services/appearance'
 import { trackMemoryActivity } from '@/services/memory/activity'
@@ -12,6 +17,87 @@ import '@/styles/theme.css'
 import '@/styles/beautiful-ui.css'
 
 const open = ref(true)
+const explorer = ref(false)
+const narrow = ref(false)
+memoryExplorerData.account = async () => ({ principalId: 'synthetic-preview' })
+memoryExplorerData.inventory = async (options = {}) => {
+  const records = Array.from({ length: 86 }, (_, index) => ({
+    id: `synthetic-${index}`,
+    content:
+      index === 0
+        ? 'Projektentscheidungen mit nachvollziehbarer Quelle speichern.'
+        : `Synthetische Projekterinnerung ${index + 1}`,
+    scope: 'project' as const,
+    type: index % 2 ? 'fact' : 'decision',
+    status: 'active' as const,
+    source: index % 2 ? 'assistant' : 'user',
+    projectId: 'preview',
+    visibility: 'private' as const,
+    retention: 'durable' as const,
+    confidence: 0.8,
+    updatedAt: Date.now(),
+    synced: index % 3 === 0,
+  })).filter(record => !options.query || record.content.toLowerCase().includes(options.query.toLowerCase()))
+  return {
+    total: 86,
+    filtered: records.length,
+    offset: options.offset ?? 0,
+    pending: 3,
+    active: 86,
+    candidates: 0,
+    synced: 29,
+    records: records.slice(options.offset ?? 0, (options.offset ?? 0) + (options.limit ?? 80)),
+  }
+}
+memoryExplorerData.graph = async (_principal, _project, query = '', offset = 0) => ({
+  total: query && !'src/memory.ts'.includes(query) ? 0 : 1,
+  offset,
+  files:
+    query && !'src/memory.ts'.includes(query)
+      ? []
+      : [
+          {
+            id: 'synthetic-file',
+            path: 'src/memory.ts',
+            language: 'typescript',
+            symbols: [{ name: 'recall', kind: 'function', start_line: 8, end_line: 20 }],
+            relations: [
+              { kind: 'import', target: './repositoryGraph' },
+              { kind: 'call', target: 'readLocalMemory' },
+            ],
+            truncated: false,
+          },
+        ],
+})
+memoryExplorerData.recall = async () => []
+memoryStatus.value = {
+  at: Date.now(),
+  inventoryAt: Date.now(),
+  projectId: 'preview',
+  projectName: 'Synthetisches Luczor-Projekt',
+  activity: snapshotMemoryActivity(),
+  usage: memoryUsageSnapshot().map((row, index) => ({
+    ...row,
+    completed: 12 + index,
+    results: 8 + index,
+    lastAt: Date.now(),
+    lastMs: 42,
+  })),
+  inventory: { total: 86, active: 80, candidates: 6, pending: 3, synced: 29 },
+  graph: {
+    status: 'ready',
+    files: 238,
+    symbols: 1042,
+    edges: 623,
+    skipped: 14,
+    last_indexed_at: Math.floor(Date.now() / 1000),
+    lsp: { status: 'partial', files: 90, scanned: 60, edges: 215 },
+  },
+  preferences: { inject: true, injectCount: 5, autoRemember: true },
+  idle: { phase: 'paused', task: 'memory', completed: 4, nextCheckAt: null },
+  maintenance: 'scheduled',
+  profile: { source: 'admin', persona: true, skills: 6 },
+}
 const waiting = ref(false)
 const fail = ref(false)
 const unavailableGpu = ref(false)
@@ -91,6 +177,13 @@ createApp({
       [
         h('p', 'Synthetische Vorschau · keine echten Gerätewerte'),
         h('div', { style: 'display:flex;gap:8px;flex-wrap:wrap;max-width:480px' }, [
+          button('3D-Gedächtnis', () => {
+            explorer.value = true
+            open.value = false
+          }),
+          button(narrow.value ? 'Breite Ansicht' : 'Schmale Ansicht', () => {
+            narrow.value = !narrow.value
+          }),
           button(open.value ? 'Panel schließen' : 'Systemstatus öffnen', () => {
             open.value = !open.value
           }),
@@ -158,11 +251,35 @@ createApp({
           }),
         ]),
         h('p', { 'data-testid': 'fixture-counters' }, `Abfragen: ${reads.value} · Mini-Aufrufe: ${miniRequests.value}`),
+        explorer.value
+          ? h(
+              'div',
+              {
+                style: narrow.value
+                  ? 'width:390px;max-width:100%;height:85vh;overflow:auto'
+                  : 'width:100%;height:85vh;overflow:auto',
+              },
+              [
+                h(MemoryExplorerPage, {
+                  projects: [{ id: 'preview', name: 'Synthetisches Projekt' }],
+                  projectId: 'preview',
+                  onClose: () => {
+                    explorer.value = false
+                    open.value = true
+                  },
+                }),
+              ]
+            )
+          : null,
         h(SystemStatusPanel, {
           active: open.value,
           assistantPhase: waiting.value ? 'waiting' : undefined,
           projectName: 'Luczor Workspace',
           onClose: () => {
+            open.value = false
+          },
+          onOpenMemory: () => {
+            explorer.value = true
             open.value = false
           },
           onOpenMini: () => {

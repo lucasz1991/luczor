@@ -513,6 +513,25 @@ pub fn mini_chat_drag(window: crate::commands::CallerWebview) -> Result<(), Stri
     window.start_dragging().map_err(|e| e.to_string())
 }
 
+/// One step of a frontend-driven drag: the webview sends the pointer's vertical delta (CSS px)
+/// and its absolute screen x (CSS px); the window slides by that delta along whichever edge the
+/// pointer is nearest to, staying flush and clamped to the monitor. Returns the edge it sits on.
+/// Unlike `start_dragging`, this never hands the mouse to the OS move loop, so nothing in the
+/// webview's pointer sequence gets cancelled mid-drag.
+#[tauri::command]
+pub fn mini_chat_drag_by(
+    window: crate::commands::CallerWebview,
+    dy: f64,
+    pointer_x: f64,
+) -> Result<String, String> {
+    ensure_webview_label(window.label(), MINI_LABEL)?;
+    let scale = window.scale_factor().map_err(|e| e.to_string())?;
+    let (area_left, _, area_width, _) = work_area(&window)?;
+    let edge = edge_side(pointer_x * scale, area_left, area_width);
+    snap_to_edge(&window, edge, (dy * scale).round() as i32)?;
+    Ok(edge.as_str().to_string())
+}
+
 /// Called by the frontend once a native drag settles (its own move events go quiet). Flushes the
 /// window against whichever screen edge it ended up nearest to and reports that edge, so the
 /// capsule can mirror its rounded corners and fly-out direction onto the correct side.

@@ -464,9 +464,7 @@ onBeforeUnmount(() => {
         </button>
       </div>
       <p v-if="cleanupNotice && !loading && !checking" role="status">{{ cleanupNotice }}</p>
-      <p v-if="loading || checking" role="status">
-        CPU, RAM und Grafikkarten messen …
-      </p>
+      <p v-if="loading || checking" role="status">CPU, RAM und Grafikkarten messen …</p>
       <p v-else-if="!systemCheck" role="status">
         Keine vollständige Systemmessung verfügbar. Prozentregler bleiben gesperrt; deine bisherigen Einstellungen
         bleiben erhalten.

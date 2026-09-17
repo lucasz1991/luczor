@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-system-status-open-memory"
+description = "Enables the system_status_open_memory command without any pre-configured scope."
+commands.allow = ["system_status_open_memory"]
+
+[[permission]]
+identifier = "deny-system-status-open-memory"
+description = "Denies the system_status_open_memory command without any pre-configured scope."
+commands.deny = ["system_status_open_memory"]

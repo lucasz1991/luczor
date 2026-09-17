@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, ref, watch, watchEffect } from 'vue'
 import { snapshotMemoryActivity } from '@/services/memory/activity'
+import { memoryStatus } from '@/features/memory/observatory'
 import { snapshotNetworkActivity } from '@/services/networkActivity'
 import type { LocalNetworkCounters } from '@/services/systemMetrics'
 
@@ -21,7 +22,11 @@ function snapshot() {
   const native = props.nativeLive ? props.nativeNetwork : undefined
   return {
     at: Date.now(),
-    memory: snapshotMemoryActivity(),
+    memory: window.location.hash.startsWith('#system-status')
+      ? memoryStatus.value && Date.now() - memoryStatus.value.at < 7000
+        ? memoryStatus.value.activity
+        : null
+      : snapshotMemoryActivity(),
     external: network.external,
     unknown: network.unknown,
     local: native
@@ -58,8 +63,8 @@ function sample() {
   if (before) {
     history.value.push({
       at: next.at,
-      read: rate(next.memory.reads, before.memory.reads),
-      write: rate(next.memory.writes, before.memory.writes),
+      read: rate(next.memory?.reads, before.memory?.reads),
+      write: rate(next.memory?.writes, before.memory?.writes),
       externalIn: rate(next.external.receivedBytes, before.external.receivedBytes),
       externalOut: rate(next.external.sentBytes, before.external.sentBytes),
       localIn: rate(next.local?.receivedBytes, before.local?.receivedBytes),
@@ -90,12 +95,12 @@ const latest = computed(() => history.value.at(-1))
 watchEffect(() =>
   emit('indicators', {
     memory:
-      current.value.memory.activeReads + current.value.memory.activeWrites > 0 ||
+      (current.value.memory?.activeReads ?? 0) + (current.value.memory?.activeWrites ?? 0) > 0 ||
       (latest.value?.read ?? 0) + (latest.value?.write ?? 0) > 0
         ? 'active'
-        : current.value.memory.failedReads + current.value.memory.failedWrites > 0
+        : (current.value.memory?.failedReads ?? 0) + (current.value.memory?.failedWrites ?? 0) > 0
           ? 'warning'
-          : current.value.memory.reads + current.value.memory.writes > 0
+          : (current.value.memory?.reads ?? 0) + (current.value.memory?.writes ?? 0) > 0
             ? 'ok'
             : 'unknown',
     network:
@@ -142,13 +147,17 @@ const cards = computed(() => [
   {
     id: 'memory',
     label: 'Gedächtnis',
-    hint: `${current.value.memory.activeReads + current.value.memory.activeWrites} Zugriffe aktiv`,
+    hint: current.value.memory
+      ? `${current.value.memory.activeReads + current.value.memory.activeWrites} Zugriffe aktiv`
+      : 'Hauptfenster nicht verbunden',
     values: [
       { label: 'Lesen', value: operations(latest.value?.read) },
       { label: 'Schreiben', value: operations(latest.value?.write) },
     ],
     paths: plot(['read', 'write']),
-    detail: `${current.value.memory.reads} gelesen · ${current.value.memory.writes} geschrieben · ${current.value.memory.failedReads + current.value.memory.failedWrites} fehlgeschlagen`,
+    detail: current.value.memory
+      ? `${current.value.memory.reads} gelesen · ${current.value.memory.writes} geschrieben · ${current.value.memory.failedReads + current.value.memory.failedWrites} fehlgeschlagen`
+      : 'Keine aktuellen Messwerte',
   },
   {
     id: 'external',

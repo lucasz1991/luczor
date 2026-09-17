@@ -942,6 +942,14 @@ mod tests {
     }
 
     #[test]
+    fn startup_guard_handles_unknown_or_tiny_total_without_panicking() {
+        for total in [0, 1, GIB / 2, GIB] {
+            let mut guard = StartupMemoryGuard::with_floor(total, 3 * GIB);
+            assert!(guard.observe(0, 0, Instant::now()).is_ok());
+        }
+    }
+
+    #[test]
     #[ignore = "read-only resource-plan sample of the current hardware; run explicitly"]
     fn resource_plan_live_readonly() {
         let hardware = sample_hardware().unwrap();

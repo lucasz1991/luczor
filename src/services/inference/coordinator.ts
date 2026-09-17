@@ -1119,12 +1119,7 @@ export class LocalInferenceCoordinator {
       ? externalSpecialistUnavailableMessage(decision.reason)
       : this.unavailableRouteMessage(settings, input.taskType, decision.reason, requiredCapability)
     if (!preferExternal && decision.reason === 'local_only_blocked') openResourceRecovery(unavailableMessage)
-    throw new LocalInferenceError(
-      unavailableMessage,
-      decision.reason,
-      false,
-      false
-    )
+    throw new LocalInferenceError(unavailableMessage, decision.reason, false, false)
   }
 
   private async prepareIfEligible(modelId: string, generation = this.generation, allowDegraded = false): Promise<void> {

@@ -71,14 +71,28 @@ pub(super) fn ensure_support_files(
     cancel: &AtomicBool,
 ) -> Result<(), String> {
     gpu_runtime::validate_runtime_metadata(runtime)?;
-    let directory = binary.parent().ok_or("Verified runtime directory is unavailable.")?;
+    let directory = binary
+        .parent()
+        .ok_or("Verified runtime directory is unavailable.")?;
     for file in runtime.files.as_deref().unwrap_or_default() {
-        let suffix = if cfg!(windows) { ".dll" } else if cfg!(target_os = "linux") { ".so" } else { ".dylib" };
+        let suffix = if cfg!(windows) {
+            ".dll"
+        } else if cfg!(target_os = "linux") {
+            ".so"
+        } else {
+            ".dylib"
+        };
         if !file.name.to_ascii_lowercase().ends_with(suffix) {
             return Err("The signed runtime libraries do not match this platform.".into());
         }
-        download(&format!("{ASSET_BASE}/{}", file.sha256), &directory.join(&file.name),
-            &file.sha256, MAX_RUNTIME_BYTES, None, cancel)?;
+        download(
+            &format!("{ASSET_BASE}/{}", file.sha256),
+            &directory.join(&file.name),
+            &file.sha256,
+            MAX_RUNTIME_BYTES,
+            None,
+            cancel,
+        )?;
     }
     Ok(())
 }
@@ -213,6 +227,71 @@ fn download(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn support_install_checks_platform_names_hashes_and_existing_cache() {
+        let root = std::env::temp_dir().join(format!("luczor-support-test-{}", Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let name = if cfg!(windows) {
+            "llama-server-impl.dll"
+        } else {
+            "libllama.so"
+        };
+        let bytes = b"non executable test fixture";
+        fs::write(root.join(name), bytes).unwrap();
+        let mut runtime = RuntimeArtifact {
+            id: "llama.cpp".into(),
+            version: "test".into(),
+            sha256: "a".repeat(64),
+            min_context_tokens: 1024,
+            max_context_tokens: 8192,
+            backend: Some("auto".into()),
+            files: Some(vec![RuntimeSupportFile {
+                name: name.into(),
+                sha256: format!("{:x}", Sha256::digest(bytes)),
+            }]),
+        };
+        let cancel = AtomicBool::new(false);
+        let binary = root.join("never-executed");
+        assert!(ensure_support_files(&binary, &runtime, &cancel).is_ok());
+        fs::write(root.join(name), b"tampered").unwrap();
+        assert!(ensure_support_files(&binary, &runtime, &cancel)
+            .unwrap_err()
+            .contains("checksum"));
+        runtime.files.as_mut().unwrap()[0].name = "../outside.dll".into();
+        assert!(ensure_support_files(&binary, &runtime, &cancel).is_err());
+        runtime.files.as_mut().unwrap()[0].name = if cfg!(windows) {
+            "libllama.so"
+        } else {
+            "llama.dll"
+        }
+        .into();
+        assert!(ensure_support_files(&binary, &runtime, &cancel)
+            .unwrap_err()
+            .contains("platform"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn automatic_maintenance_only_accepts_exact_owned_layout() {
+        let root = std::env::temp_dir().join("luczor-owned-layout");
+        let executable = if cfg!(windows) {
+            "llama-server.exe"
+        } else {
+            "llama-server"
+        };
+        let mut config = RuntimePathConfig {
+            version: 1,
+            model_directory: root.clone(),
+            runtime_path: root.join("a".repeat(64)).join(executable),
+        };
+        assert!(is_managed_runtime_config(&config, &root));
+        config.runtime_path = root.join("manual").join(executable);
+        assert!(!is_managed_runtime_config(&config, &root));
+        config.runtime_path = root.join("a".repeat(64)).join(executable);
+        config.model_directory = root.join("custom-models");
+        assert!(!is_managed_runtime_config(&config, &root));
+    }
 
     #[test]
     fn cache_requires_hash_size_and_rejects_wrong_architecture() {

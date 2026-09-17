@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { Store } from '@tauri-apps/plugin-store'
+import { trackMemoryUsage } from './memory/usage'
 
 const SETTINGS_FILE = 'luczor.settings.json'
 
@@ -109,7 +110,7 @@ export async function indexRepository(
   branch?: string
   commit_sha?: string
 }> {
-  return invoke('local_graph_index', { principalId, projectId })
+  return trackMemoryUsage('graphIndex', () => invoke('local_graph_index', { principalId, projectId }))
 }
 
 export async function repositoryGraphStatus(principalId: string, projectId: string): Promise<RepositoryGraphStatus> {
@@ -130,7 +131,7 @@ export async function maintainRepositoryIndex(
   }
   signal.addEventListener('abort', abort, { once: true })
   try {
-    await invoke('local_graph_index', { principalId, projectId, requestId })
+    await trackMemoryUsage('graphIndex', () => invoke('local_graph_index', { principalId, projectId, requestId }))
     signal.throwIfAborted()
   } finally {
     signal.removeEventListener('abort', abort)
@@ -144,7 +145,9 @@ export async function searchRepository(
   query: string,
   limit = 8
 ): Promise<GraphSearchResult> {
-  return invoke<GraphSearchResult>('local_graph_search', { principalId, projectId, query, limit })
+  return trackMemoryUsage('graphSearch', () =>
+    invoke<GraphSearchResult>('local_graph_search', { principalId, projectId, query, limit })
+  )
 }
 
 export async function readRepositorySnippets(
@@ -153,7 +156,30 @@ export async function readRepositorySnippets(
   evidenceIds: string[],
   maxTotalBytes = 32 * 1024
 ): Promise<{ snippets: GraphSnippet[]; omitted: Array<{ evidence_id: string; reason: string }> }> {
-  return invoke('local_graph_read_snippets', { principalId, projectId, evidenceIds, maxTotalBytes })
+  return trackMemoryUsage('graphRead', () =>
+    invoke('local_graph_read_snippets', { principalId, projectId, evidenceIds, maxTotalBytes })
+  )
+}
+
+export type RepositoryGraphPage = {
+  total: number
+  offset: number
+  files: Array<{
+    id: string
+    path: string
+    language: string
+    symbols: GraphSymbolRef[]
+    relations: Array<{ kind: string; target: string }>
+    truncated: boolean
+  }>
+}
+export function inspectRepositoryGraph(
+  principalId: string,
+  projectId: string,
+  query = '',
+  offset = 0
+): Promise<RepositoryGraphPage> {
+  return invoke('local_graph_inspect', { principalId, projectId, query, offset })
 }
 
 export async function unbindRepository(principalId: string, projectId: string, deleteIndex = true): Promise<void> {
