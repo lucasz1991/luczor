@@ -97,6 +97,137 @@ describe('desktop memory account isolation', () => {
     vi.unstubAllGlobals()
   })
 
+  it('commits maintenance with source CAS, restart persistence and no old-text archive', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService, isMaintenanceWrite } = await import('@/services/memory/luczorMemory')
+    const { memoryRevision, MAINTENANCE_POLICY } = await import('@/services/memory/maintenance')
+    const memory = new LuczorMemoryService()
+    const principalId = harness.currentSnapshot.principalId
+    const original = await memory.remember({
+      content: 'Original private text',
+      projectId: 'p1',
+      visibility: 'private',
+      writeIntent: 'confirmed',
+    })
+    expect(isMaintenanceWrite(harness.files.get('luczor.memory.json')?.get('state_v3_encrypted'))).toBe(false)
+    await memory.updateMaintenance(principalId, journal => {
+      journal.consent = { automaticRewrite: true, installedModelStart: false }
+      // Synthetic gate fixture. Production gates are issued only by the real-model evaluator.
+      journal.quality = {
+        policy: MAINTENANCE_POLICY,
+        modelId: 'fixture',
+        catalogHash: 'catalog',
+        passed: true,
+        at: Date.now(),
+        reason: 'test',
+      }
+      journal.jobs = [
+        {
+          id: 'job',
+          revision: 'r1',
+          projectId: 'p1',
+          kind: 'memory',
+          sources: [],
+          status: 'running',
+          attempts: 0,
+          nextAttemptAt: 0,
+          updatedAt: 0,
+        },
+      ]
+    })
+    const input = {
+      principalId,
+      jobId: 'job',
+      revision: 'r1',
+      modelId: 'fixture',
+      catalogHash: 'catalog',
+      sources: [
+        { id: original.id, kind: 'memory' as const, revision: memoryRevision(original), content: original.content },
+      ],
+      changes: {
+        operations: [
+          {
+            operation: 'rewrite' as const,
+            targets: [original.id],
+            sources: [original.id],
+            content: 'Consolidated private text',
+            reason: 'Test',
+          },
+        ],
+      },
+      signal: new AbortController().signal,
+      validate: async () => undefined,
+    }
+    await expect(
+      memory.applyMaintenance({ ...input, sources: [{ ...input.sources[0]!, revision: 'stale' }] })
+    ).rejects.toThrow('stale_source')
+    expect(
+      (await memory.maintenanceSnapshot(principalId)).records.some(record => record.content === original.content)
+    ).toBe(true)
+    await memory.applyMaintenance(input)
+    expect(isMaintenanceWrite()).toBe(false)
+    // Native Store events may arrive after the save Promise; the nonce still identifies an own write.
+    expect(isMaintenanceWrite(harness.files.get('luczor.memory.json')?.get('state_v3_encrypted'))).toBe(true)
+    const restarted = new LuczorMemoryService()
+    const snapshot = await restarted.maintenanceSnapshot(principalId)
+    expect(snapshot.journal.jobs[0]?.status).toBe('completed')
+    expect(snapshot.journal.receipts[0]?.changed).toBe(1)
+    const inventory = await restarted.inspectLocal()
+    expect(inventory.records.some(record => record.content === original.content)).toBe(false)
+    expect(inventory.records[0]).toMatchObject({
+      content: 'Consolidated private text',
+      visibility: 'private',
+      source: 'assistant',
+    })
+    await expect(restarted.applyMaintenance(input)).rejects.toThrow('stale_job')
+  })
+
+  it('rejects autonomous writes without account consent and actual-model quality gate', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { memoryRevision } = await import('@/services/memory/maintenance')
+    const memory = new LuczorMemoryService()
+    const principalId = harness.currentSnapshot.principalId
+    const record = await memory.remember({
+      content: 'Keep this fact',
+      visibility: 'private',
+      projectId: 'p1',
+      writeIntent: 'confirmed',
+    })
+    await memory.updateMaintenance(principalId, journal => {
+      journal.jobs = [
+        {
+          id: 'job',
+          revision: 'r1',
+          kind: 'memory',
+          sources: [],
+          status: 'running',
+          attempts: 0,
+          nextAttemptAt: 0,
+          updatedAt: 0,
+        },
+      ]
+    })
+    await expect(
+      memory.applyMaintenance({
+        principalId,
+        jobId: 'job',
+        revision: 'r1',
+        modelId: 'unverified',
+        catalogHash: 'catalog',
+        sources: [{ id: record.id, revision: memoryRevision(record), kind: 'memory', content: record.content }],
+        changes: {
+          operations: [
+            { operation: 'rewrite', targets: [record.id], sources: [record.id], content: 'Changed', reason: 'Test' },
+          ],
+        },
+        signal: new AbortController().signal,
+        validate: async () => undefined,
+      })
+    ).rejects.toThrow('quality_gate_required')
+    expect((await memory.inspectLocal()).records[0]?.content).toBe('Keep this fact')
+  })
+
   it('keeps the inspector account-scoped and rejects a late identity switch', async () => {
     await setServerEnabled(false)
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')

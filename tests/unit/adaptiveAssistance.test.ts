@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createAdaptiveAssistance, type AssistanceTask } from '@/services/agents/adaptiveAssistance'
 import { validateToolArguments } from '@/services/tools/validateArguments'
+import { teamMessages } from '@/services/agents/chatCheckpoint'
 
 function deferred<T = unknown>() {
   let resolve!: (value: T) => void
@@ -45,6 +46,69 @@ function fixture(
 
 afterEach(() => vi.restoreAllMocks())
 describe('bounded adaptive assistance lifetime', () => {
+  it.each([
+    [undefined, 'agent_result_missing'],
+    [{ output: '  ' }, 'agent_result_empty'],
+    [{ output: 'Partial evidence', ok: false }, 'agent_result_failed'],
+    [{ output: 'Partial evidence', status: 'failed' }, 'agent_result_failed'],
+    [{ output: 'Partial evidence', incomplete: true }, 'agent_result_incomplete'],
+    [{ output: 'Partial evidence', finishReason: 'length' }, 'agent_result_incomplete'],
+  ])('does not treat invalid or partial result %j as completed', async (output, code) => {
+    const state = fixture(vi.fn(async () => output))
+    await state.delegate('Check evidence')
+    const results = await state.manager.collect()
+    expect(results[0]).toMatchObject({ ok: false, status: 'failed', error: expect.stringContaining(String(code)) })
+    expect(state.manager.summaries.every(item => item.incomplete)).toBe(true)
+    state.manager.dispose()
+  })
+
+  it('cancels only one job, discards its late reply and leaves the other result collectable', async () => {
+    const first = deferred(),
+      second = deferred()
+    const state = fixture(vi.fn(async task => (task.task === 'First job' ? first.promise : second.promise)))
+    const one = await state.delegate('First job'),
+      two = await state.delegate('Second job')
+    await expect(state.call('agent_assist_stop', { job_id: 'foreign' })).rejects.toThrow('dieser Anfrage')
+    expect(await state.call('agent_assist_stop', { job_id: one.job_id })).toMatchObject({
+      status: 'cancelled',
+      stop_requested: true,
+    })
+    first.resolve({ output: 'Stale result' })
+    second.resolve({ output: 'Usable evidence' })
+    const results = await state.manager.collect()
+    expect(results).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ job_id: one.job_id, status: 'cancelled', ok: false }),
+        expect.objectContaining({ job_id: two.job_id, status: 'completed', output: { output: 'Usable evidence' } }),
+      ])
+    )
+    expect(state.manager.summaries.map(item => item.output)).toEqual(['Usable evidence'])
+    expect(state.abort.signal.aborted).toBe(false)
+    expect(await state.call('agent_assist_stop', { job_id: two.job_id })).toMatchObject({
+      status: 'completed',
+      stop_requested: false,
+    })
+    state.manager.dispose()
+  })
+
+  it('preserves exact Unicode file references and valid tool JSON across team handoffs', () => {
+    const path = 'reports/Prüfung-e\u0301-2026-09-17.md'
+    const source = [
+      {
+        role: 'tool' as const,
+        name: 'fs_read',
+        tool_call_id: 'read1',
+        content: JSON.stringify({ path, file_ref: 'file_abc', content: 'Evidence\n'.repeat(1000) }),
+      },
+    ]
+    const original = source[0]!.content
+    const handoff = teamMessages(source)
+    const projected = JSON.parse(handoff[0]!.content)
+    expect(projected.projection.path).toBe(path)
+    expect(projected.projection.file_ref).toBe('file_abc')
+    expect(handoff[0]).toMatchObject({ role: 'tool', tool_call_id: 'read1' })
+    expect(source[0]!.content).toBe(original)
+  })
   it('returns external jobs immediately, allows independent overlap and collects each result once', async () => {
     const first = deferred(),
       second = deferred()
@@ -60,7 +124,9 @@ describe('bounded adaptive assistance lifetime', () => {
     first.resolve({ output: 'First result' })
     expect(await waiting).toMatchObject({ status: 'completed', output: { output: 'First result' } })
     second.resolve({ output: 'Second result' })
-    expect(await fixtureState.manager.collect()).toEqual([expect.objectContaining({ job_id: two.job_id, status: 'completed' })])
+    expect(await fixtureState.manager.collect()).toEqual([
+      expect.objectContaining({ job_id: two.job_id, status: 'completed' }),
+    ])
     expect(await fixtureState.manager.collect()).toEqual([])
     expect(fixtureState.manager.hasUncollected()).toBe(false)
     fixtureState.manager.dispose()
@@ -144,7 +210,9 @@ describe('bounded adaptive assistance lifetime', () => {
     const fixtureState = fixture()
     await expect(fixtureState.delegate('x')).rejects.toThrow('Textlänge')
     await expect(fixtureState.delegate('Unknown target', 'other')).rejects.toThrow('Wert nicht erlaubt')
-    await expect(fixtureState.delegate('Many tools', 'local', Array(7).fill('project_get_state'))).rejects.toThrow('Listenlänge')
+    await expect(fixtureState.delegate('Many tools', 'local', Array(7).fill('project_get_state'))).rejects.toThrow(
+      'Listenlänge'
+    )
     expect(fixtureState.execute).not.toHaveBeenCalled()
     fixtureState.manager.dispose()
   })

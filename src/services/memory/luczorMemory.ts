@@ -8,7 +8,17 @@ import { projectExternalIdForServer } from '@/services/cloudProjectAccess'
 import { memoryImportance, memoryPriority, MEMORY_PRIORITIES, type MemoryPriority } from './memoryPriority'
 import { analyzeMemoryRecords, type MemoryAnalysis } from './memoryAnalysis'
 import { trackMemoryActivity } from './activity'
-import { trackMemoryUsage } from './usage'
+import { trackMemoryUsage, type MemoryUsageOrigin } from './usage'
+import {
+  emptyMaintenanceJournal,
+  maintenanceEligible,
+  memoryRevision,
+  MAINTENANCE_POLICY,
+  type MaintenanceJournal,
+  type MaintenanceSource,
+  type MemoryChangeSet,
+  type PreparedContextArtifact,
+} from './maintenance'
 import {
   DEFAULT_FETCH_TIMEOUT_MS,
   fetchBoundedResponseWithTimeout,
@@ -23,6 +33,17 @@ const PLAINTEXT_STATE_KEY = 'state_v2'
 const LEGACY_KEY = 'records_v1'
 const MAX_RECORDS = 5_000
 const MAX_MEMORY_RESPONSE_BYTES = 1024 * 1024
+let maintenanceWrites = 0
+const maintenanceNonces = new Set<string>()
+export function isMaintenanceWrite(value?: unknown): boolean {
+  if (maintenanceWrites > 0) return true
+  try {
+    const envelope = typeof value === 'string' ? JSON.parse(value) : null
+    return typeof envelope?.iv === 'string' && maintenanceNonces.has(envelope.iv)
+  } catch {
+    return false
+  }
+}
 
 export type MemoryScope =
   'device' | 'private' | 'user' | 'project' | 'workspace' | 'skill' | 'agent' | 'session' | 'global'
@@ -95,6 +116,7 @@ export type RememberInput = {
 }
 
 export type RecallQuery = {
+  origin?: MemoryUsageOrigin
   query: string
   scope?: MemoryScope
   projectId?: string
@@ -140,6 +162,7 @@ type MemoryState = {
   records: MemoryRecord[]
   outbox: MemoryOutboxEvent[]
   tombstones: MemoryTombstone[]
+  maintenance?: Record<string, MaintenanceJournal>
 }
 
 type WritePlan = {
@@ -571,13 +594,18 @@ class OfflineMemoryStore {
     }
   }
 
-  private async save(state: MemoryState): Promise<void> {
+  private async save(state: MemoryState, maintenance = false): Promise<void> {
     const store = await Store.load(MEMORY_FILE)
-    await this.saveToStore(store, normalizeState(state))
+    await this.saveToStore(store, normalizeState(state), maintenance)
   }
 
-  private async saveToStore(store: Store, state: MemoryState): Promise<void> {
-    await store.set(ENCRYPTED_STATE_KEY, await encryptMemoryState(state, await this.key()))
+  private async saveToStore(store: Store, state: MemoryState, maintenance = false): Promise<void> {
+    const encrypted = await encryptMemoryState(state, await this.key())
+    if (maintenance) {
+      maintenanceNonces.add((JSON.parse(encrypted) as { iv: string }).iv)
+      if (maintenanceNonces.size > 32) maintenanceNonces.delete(maintenanceNonces.values().next().value!)
+    }
+    await store.set(ENCRYPTED_STATE_KEY, encrypted)
     await store.delete(PLAINTEXT_STATE_KEY)
     await store.delete(LEGACY_KEY)
     await store.save()
@@ -588,11 +616,11 @@ class OfflineMemoryStore {
     return this.encryptionKey
   }
 
-  private mutate<T>(operation: (state: MemoryState) => T | Promise<T>): Promise<T> {
+  private mutate<T>(operation: (state: MemoryState) => T | Promise<T>, maintenance = false): Promise<T> {
     const next = this.writes.then(async () => {
       const state = await this.load()
       const result = await operation(state)
-      await this.save(state)
+      await this.save(state, maintenance)
       return result
     })
     this.writes = next.then(
@@ -600,6 +628,43 @@ class OfflineMemoryStore {
       () => undefined
     )
     return next
+  }
+
+  async maintenanceSnapshot(principalId: string) {
+    await this.writes
+    const state = await this.load()
+    return {
+      journal:
+        (state.maintenance && Object.hasOwn(state.maintenance, principalId)
+          ? (Reflect.get(state.maintenance, principalId) as MaintenanceJournal)
+          : undefined) ?? emptyMaintenanceJournal(),
+      records: state.records.filter(
+        record => record.principalId === principalId && maintenanceEligible(record, Date.now(), true)
+      ),
+    }
+  }
+
+  async maintenanceTransaction<T>(
+    principalId: string,
+    operation: (journal: MaintenanceJournal, state: MemoryState) => Promise<T>
+  ): Promise<T> {
+    maintenanceWrites++
+    return this.mutate(async state => {
+      state.maintenance ??= {}
+      const journal =
+        (Object.hasOwn(state.maintenance, principalId)
+          ? (Reflect.get(state.maintenance, principalId) as MaintenanceJournal)
+          : undefined) ?? emptyMaintenanceJournal()
+      Object.defineProperty(state.maintenance, principalId, {
+        value: journal,
+        writable: true,
+        enumerable: true,
+        configurable: true,
+      })
+      return operation(journal, state)
+    }, true).finally(() => {
+      maintenanceWrites--
+    })
   }
 
   async remember(record: MemoryRecord, enqueueServer: boolean): Promise<MemoryRecord> {
@@ -839,6 +904,12 @@ class OfflineMemoryStore {
       state.records = state.records.filter(
         item => !(item.principalId === context.principalId && item.dataset === context.dataset && item.id === recordId)
       )
+      if (state.maintenance && Object.hasOwn(state.maintenance, context.principalId)) {
+        const journal = Reflect.get(state.maintenance, context.principalId) as MaintenanceJournal
+        journal.artifacts = journal.artifacts.filter(
+          artifact => !artifact.sources.some(source => source.id === recordId)
+        )
+      }
       const needsRemoteDelete = !record || record.synced || !!record.serverId || record.visibility !== 'private'
       const hasDelete = state.outbox.some(
         event =>
@@ -1049,7 +1120,7 @@ class ServerMemoryBackend {
     private clientId: string
   ) {}
 
-  private async call<T>(path: string, body: unknown): Promise<T> {
+  private async call<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
     const { response, text } = await fetchBoundedResponseWithTimeout(
       `${this.baseUrl}/api/v1${path}`,
       {
@@ -1061,6 +1132,7 @@ class ServerMemoryBackend {
         },
         body: JSON.stringify(body),
         redirect: 'error',
+        signal,
       },
       DEFAULT_FETCH_TIMEOUT_MS,
       MAX_MEMORY_RESPONSE_BYTES
@@ -1238,6 +1310,19 @@ class ServerMemoryBackend {
     })
   }
 
+  maintenance<T>(
+    context: MemoryContext,
+    action: 'status' | 'sources' | 'apply' | 'receipt',
+    data: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<{ data: T }> {
+    return this.call(
+      `/memory/maintenance/${action}`,
+      { ...data, scope: context.scope, project_id: context.projectId },
+      signal
+    )
+  }
+
   analyze(context: MemoryContext): Promise<{ data: MemoryAnalysis }> {
     return this.call('/memory/analyze', {
       scope: context.scope,
@@ -1259,6 +1344,231 @@ export class LuczorMemoryService {
     if (typeof window !== 'undefined') {
       window.addEventListener('online', () => void this.flushPendingSync())
     }
+  }
+
+  /** Main-view worker only. Private source text never enters the settings store or detached windows. */
+  async maintenanceSnapshot(expectedPrincipalId: string) {
+    if ((await this.operationSnapshot()).principalId !== expectedPrincipalId) throw new Error('scope_changed')
+    const result = await this.offline.maintenanceSnapshot(expectedPrincipalId)
+    if ((await this.operationSnapshot()).principalId !== expectedPrincipalId) throw new Error('scope_changed')
+    return result
+  }
+
+  async sharedMaintenance<T>(
+    principalId: string,
+    scope: 'user' | 'project',
+    projectId: string | undefined,
+    action: 'status' | 'sources' | 'apply' | 'receipt',
+    data: Record<string, unknown>,
+    signal: AbortSignal
+  ): Promise<T> {
+    signal.throwIfAborted()
+    const snapshot = await this.operationSnapshot()
+    if (snapshot.principalId !== principalId) throw new Error('scope_changed')
+    const backend = await this.server(snapshot)
+    if (!backend) throw new Error('server_disabled')
+    if (action === 'apply') {
+      const { journal } = await this.maintenanceSnapshot(principalId)
+      if (
+        !journal.consent?.automaticRewrite ||
+        !journal.quality?.passed ||
+        journal.quality.modelId !== data.model_id ||
+        journal.quality.policy !== MAINTENANCE_POLICY ||
+        containsSensitiveMemoryData(data)
+      )
+        throw new Error('shared_write_gate')
+      data = {
+        ...data,
+        consent: true,
+        quality: { passed: true, policy: journal.quality.policy, model_id: journal.quality.modelId },
+      }
+    }
+    signal.throwIfAborted()
+    const result = await backend.maintenance<T>(this.context(scope, { projectId }, principalId), action, data, signal)
+    signal.throwIfAborted()
+    if ((await this.operationSnapshot()).principalId !== principalId) throw new Error('scope_changed')
+    return result.data
+  }
+
+  async updateMaintenance<T>(principalId: string, update: (journal: MaintenanceJournal) => T | Promise<T>): Promise<T> {
+    return this.offline.maintenanceTransaction(principalId, async journal => {
+      if ((await getVerifiedAccountSnapshot())?.principalId !== principalId) throw new Error('scope_changed')
+      const result = await update(journal)
+      if ((await getVerifiedAccountSnapshot())?.principalId !== principalId) throw new Error('scope_changed')
+      return result
+    })
+  }
+
+  async acknowledgeSharedMaintenance(
+    principalId: string,
+    retired: Array<{ external_id: string; version_id: number }>
+  ): Promise<void> {
+    await this.offline.maintenanceTransaction(principalId, async (journal, state) => {
+      if ((await getVerifiedAccountSnapshot())?.principalId !== principalId) throw new Error('scope_changed')
+      const removed = new Set<string>()
+      for (const record of state.records) {
+        if (
+          record.principalId !== principalId ||
+          !record.synced ||
+          state.outbox.some(event => event.recordId === record.id)
+        )
+          continue
+        if (
+          !retired.some(
+            item =>
+              item.version_id === record.serverVersionId &&
+              (item.external_id === record.id || item.external_id === record.serverId)
+          )
+        )
+          continue
+        removed.add(record.id)
+        state.tombstones.push({
+          principalId,
+          recordId: record.id,
+          serverId: record.serverId,
+          scope: record.scope,
+          projectId: record.projectId,
+          createdAt: Date.now(),
+        })
+      }
+      state.records = state.records.filter(record => record.principalId !== principalId || !removed.has(record.id))
+      journal.artifacts = journal.artifacts.filter(artifact => !artifact.sources.some(source => removed.has(source.id)))
+    })
+  }
+
+  /** One encrypted store commit includes results, source-CAS, receipts and completion; no old-text archive. */
+  async applyMaintenance(input: {
+    principalId: string
+    jobId: string
+    revision: string
+    modelId: string
+    catalogHash: string
+    sources: MaintenanceSource[]
+    artifact?: PreparedContextArtifact
+    changes?: MemoryChangeSet
+    signal: AbortSignal
+    validate(): Promise<void>
+  }): Promise<void> {
+    await this.offline.maintenanceTransaction(input.principalId, async (journal, state) => {
+      input.signal.throwIfAborted()
+      await input.validate()
+      if ((await getVerifiedAccountSnapshot())?.principalId !== input.principalId) throw new Error('scope_changed')
+      const job = journal.jobs.find(item => item.id === input.jobId && item.revision === input.revision)
+      if (!job || job.status !== 'running') throw new Error('stale_job')
+      const records = state.records.filter(record => record.principalId === input.principalId)
+      for (const source of input.sources.filter(item => item.kind === 'memory')) {
+        const record = records.find(item => item.id === source.id)
+        if (
+          !record ||
+          !maintenanceEligible(record, Date.now(), !!input.artifact) ||
+          memoryRevision(record) !== source.revision ||
+          state.tombstones.some(item => item.principalId === input.principalId && item.recordId === source.id)
+        )
+          throw new Error('stale_source')
+      }
+      let changed = 0
+      let conflicts = 0
+      for (const operation of input.changes?.operations ?? []) {
+        if (operation.operation === 'noop') continue
+        // New authority is account-local and model/policy-bound, never migrated from the old idle toggle.
+        if (
+          !journal.consent?.automaticRewrite ||
+          !journal.quality?.passed ||
+          journal.quality.modelId !== input.modelId ||
+          journal.quality.catalogHash !== input.catalogHash ||
+          journal.quality.policy !== MAINTENANCE_POLICY
+        )
+          throw new Error('quality_gate_required')
+        if (containsSensitiveMemoryData(operation.content)) throw new Error('sensitive_candidate')
+        const sources = operation.sources.map(id => records.find(record => record.id === id))
+        if (sources.some(record => !record)) throw new Error('invalid_source')
+        const original = sources[0]!
+        if (sources.some(record => record!.dataset !== original.dataset || record!.scope !== original.scope))
+          throw new Error('scope_merge_forbidden')
+        const targets = operation.targets.map(id => records.find(record => record.id === id))
+        if (
+          targets.some(
+            record =>
+              !record ||
+              record.visibility !== 'private' ||
+              record.serverId ||
+              record.serverVersionId ||
+              record.synced ||
+              state.outbox.some(event => event.recordId === record.id)
+          )
+        )
+          throw new Error('adapter_write_unsupported')
+        const now = Date.now()
+        const id = uid()
+        const derived: MemoryRecord = {
+          ...original,
+          id,
+          content: operation.content,
+          contentHash: await sha256(operation.content.replace(/\s+/g, ' ')),
+          serverId: undefined,
+          serverVersionId: undefined,
+          expectedPreviousServerVersionId: undefined,
+          requiresServerVersionRefresh: undefined,
+          synced: false,
+          syncError: undefined,
+          visibility: 'private',
+          source: 'assistant',
+          writeIntent: 'inferred',
+          status: 'active',
+          confidence: Math.min(0.35, ...sources.map(source => source!.confidence)),
+          expiresAt: sources.some(source => source!.expiresAt)
+            ? Math.min(...sources.map(source => source!.expiresAt ?? Infinity))
+            : undefined,
+          retention: sources.some(source => source!.retention === 'session') ? 'session' : 'durable',
+          type: operation.operation === 'conflict' ? 'memory_conflict' : 'memory_consolidation',
+          tags: ['maintenance-derived'],
+          createdAt: now,
+          updatedAt: now,
+          featureKey: undefined,
+          provenance: {
+            generated_locally: true,
+            maintenance_policy: MAINTENANCE_POLICY,
+            reviewed_locally: true,
+            source_memory_ids: operation.sources,
+            source_revisions: input.sources.map(({ content: _content, ...ref }) => ref),
+            reason: operation.reason,
+            model_id: input.modelId,
+          },
+          meta: undefined,
+        }
+        for (const target of targets) {
+          state.records = state.records.filter(
+            record => record.principalId !== input.principalId || record.id !== target!.id
+          )
+          journal.artifacts = journal.artifacts.filter(
+            artifact => !artifact.sources.some(source => source.id === target!.id)
+          )
+          state.tombstones.push({
+            principalId: input.principalId,
+            recordId: target!.id,
+            scope: target!.scope,
+            projectId: target!.projectId,
+            createdAt: now,
+          })
+        }
+        state.records.push(derived)
+        changed += targets.length || 1
+        if (operation.operation === 'conflict') conflicts++
+      }
+      if (input.artifact) {
+        if (containsSensitiveMemoryData(input.artifact.content)) throw new Error('sensitive_candidate')
+        journal.artifacts = [...journal.artifacts.filter(item => item.id !== input.artifact!.id), input.artifact]
+      }
+      input.signal.throwIfAborted()
+      await input.validate()
+      if ((await getVerifiedAccountSnapshot())?.principalId !== input.principalId) throw new Error('scope_changed')
+      job.status = 'completed'
+      job.updatedAt = Date.now()
+      journal.receipts = [
+        ...journal.receipts,
+        { id: job.id, revision: job.revision, at: Date.now(), modelId: input.modelId, changed, conflicts },
+      ].slice(-2000)
+    })
   }
 
   private async operationSnapshot(): Promise<MemoryOperationSnapshot> {
@@ -1481,13 +1791,16 @@ export class LuczorMemoryService {
   }
 
   async recall(query: RecallQuery): Promise<MemoryRecord[]> {
-    return trackMemoryUsage('sharedRecall', markUsageFailed =>
-      trackMemoryActivity('read', markFailed =>
-        this.recallOperation(query, () => {
-          markFailed()
-          markUsageFailed()
-        })
-      )
+    return trackMemoryUsage(
+      'sharedRecall',
+      markUsageFailed =>
+        trackMemoryActivity('read', markFailed =>
+          this.recallOperation(query, () => {
+            markFailed()
+            markUsageFailed()
+          })
+        ),
+      query.origin
     )
   }
 
@@ -1532,13 +1845,16 @@ export class LuczorMemoryService {
 
   /** Device-only retrieval. No query, private record or result is sent to the context server. */
   async recallLocal(query: RecallQuery): Promise<MemoryRecord[]> {
-    return trackMemoryUsage('localRecall', markUsageFailed =>
-      trackMemoryActivity('read', markFailed =>
-        this.recallLocalOperation(query, () => {
-          markFailed()
-          markUsageFailed()
-        })
-      )
+    return trackMemoryUsage(
+      'localRecall',
+      markUsageFailed =>
+        trackMemoryActivity('read', markFailed =>
+          this.recallLocalOperation(query, () => {
+            markFailed()
+            markUsageFailed()
+          })
+        ),
+      query.origin
     )
   }
 
@@ -1871,6 +2187,7 @@ function normalizeState(state: MemoryState): MemoryState {
 
   return {
     version: 2,
+    maintenance: state.maintenance ?? {},
     records: [...recentRecords, ...protectedRecords].filter(
       (record, index, all) => all.findIndex(candidate => candidate.id === record.id) === index
     ),

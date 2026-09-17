@@ -1,4 +1,21 @@
 export type MemoryUsageKind = 'localRecall' | 'sharedRecall' | 'save' | 'graphSearch' | 'graphRead' | 'graphIndex'
+export type MemoryUsageOrigin = 'chat' | 'idle' | 'inspector'
+export type MemoryUsageStage = 'retrieved' | 'included' | 'evaluated'
+const origins: MemoryUsageOrigin[] = ['chat', 'idle', 'inspector']
+const events = new Map<string, number>()
+export function recordMemoryUsageEvent(origin: MemoryUsageOrigin, stage: MemoryUsageStage, count: number) {
+  if (!Number.isFinite(count) || count <= 0) return
+  const key = `${origin}:${stage}`
+  events.set(key, (events.get(key) ?? 0) + Math.floor(count))
+}
+export function memoryUsageEvents() {
+  return origins.map(origin => ({
+    origin,
+    retrieved: events.get(`${origin}:retrieved`) ?? 0,
+    included: events.get(`${origin}:included`) ?? 0,
+    evaluated: events.get(`${origin}:evaluated`) ?? 0,
+  }))
+}
 export type UsageCounter = {
   completed: number
   failed: number
@@ -13,6 +30,7 @@ let generation = 0
 const counters = new Map(kinds.map(kind => [kind, empty()]))
 export function resetMemoryUsage() {
   generation++
+  events.clear()
   for (const kind of kinds) counters.set(kind, empty())
 }
 if (typeof window !== 'undefined') window.addEventListener('luczor:api-identity-changing', resetMemoryUsage)
@@ -22,7 +40,8 @@ export function memoryUsageSnapshot() {
 /** Only counters and timings survive. No query, path, content, identity or error text. */
 export async function trackMemoryUsage<T>(
   kind: MemoryUsageKind,
-  work: (markFailed: () => void) => Promise<T>
+  work: (markFailed: () => void) => Promise<T>,
+  origin: MemoryUsageOrigin = 'chat'
 ): Promise<T> {
   const epoch = generation
   const counter = counters.get(kind)!
@@ -44,6 +63,8 @@ export async function trackMemoryUsage<T>(
             ? result.snippets
             : null
       counter.results += Array.isArray(items) ? items.length : 0
+      if (kind !== 'save' && kind !== 'graphIndex' && Array.isArray(items))
+        recordMemoryUsageEvent(origin, 'retrieved', items.length)
     }
     return result
   } catch (error) {

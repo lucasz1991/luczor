@@ -5,6 +5,7 @@ import { memoryExplorerData } from './explorerData'
 import { assistantProfileState } from '@/services/assistantProfile'
 import MemoryGraphView from './MemoryGraphView.vue'
 import { buildMemoryGraph, MEMORY_SYSTEMS, type MemoryInventory, type MemoryNode } from './graph'
+import type { PreparedContextArtifact } from '@/services/memory/maintenance'
 const props = defineProps<{ projects: Array<{ id: string; name: string }>; projectId: string }>()
 const emit = defineEmits<{ close: [] }>()
 const heading = ref<HTMLElement | null>(null)
@@ -15,6 +16,7 @@ const selected = ref('system:0')
 const inventory = shallowRef<MemoryInventory | null>(null)
 const repo = shallowRef<RepositoryGraphPage | null>(null)
 const remote = shallowRef<MemoryNode[]>([])
+const artifacts = shallowRef<PreparedContextArtifact[]>([])
 const offset = ref(0),
   repoOffset = ref(0)
 const loading = ref(false),
@@ -29,6 +31,7 @@ function clear() {
   inventory.value = null
   repo.value = null
   remote.value = []
+  artifacts.value = []
   selected.value = 'system:0'
   notice.value = ''
   remoteNotice.value = ''
@@ -56,16 +59,18 @@ async function load() {
   repo.value = null
   try {
     const account = await memoryExplorerData.account()
-    const [memories, graph] = await Promise.allSettled([
+    const [memories, graph, contexts] = await Promise.allSettled([
       memoryExplorerData.inventory({ query: query.value, offset: offset.value, limit: 80 }),
       account && project.value
         ? memoryExplorerData.graph(account.principalId, project.value, query.value, repoOffset.value)
         : Promise.reject(new Error('No verified project')),
+      account ? memoryExplorerData.artifacts(account.principalId, project.value) : [],
     ])
     const current = await memoryExplorerData.account()
     if (disposed || epoch !== request || current?.principalId !== account?.principalId) return
     inventory.value = memories.status === 'fulfilled' ? memories.value : null
     repo.value = graph.status === 'fulfilled' ? graph.value : null
+    artifacts.value = contexts.status === 'fulfilled' ? contexts.value : []
     const messages = []
     if (memories.status === 'rejected') messages.push('Lokale Erinnerungen nicht verfügbar.')
     if (graph.status === 'rejected')
@@ -89,6 +94,7 @@ async function sharedSearch() {
     const account = await memoryExplorerData.account()
     if (!account) throw new Error('No verified account')
     const records = await memoryExplorerData.recall({
+      origin: 'inspector',
       scope: 'project',
       projectId: project.value,
       query: query.value.slice(0, 256),
@@ -112,7 +118,7 @@ async function sharedSearch() {
   }
 }
 const graph = computed(() => {
-  const data = buildMemoryGraph(inventory.value, repo.value, assistantProfileState.profile)
+  const data = buildMemoryGraph(inventory.value, repo.value, assistantProfileState.profile, artifacts.value)
   data.nodes.push(...remote.value)
   data.edges.push(
     ...remote.value.map(node => ({ from: 'system:3', to: node.id, kind: 'Abrufzuordnung', grouping: true }))

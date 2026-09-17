@@ -28,6 +28,15 @@ const states: Record<string, string> = {
   yielding: 'Gibt Chat Vorrang',
   cooldown: 'Warteintervall',
   stopped: 'Gestoppt',
+  idle: 'Wartet',
+  preparing: 'Modellstart',
+  generating: 'KI verarbeitet',
+  verifying: 'KI prüft',
+  not_evaluated: 'Modelltest fehlt',
+  passed: 'Modelltest bestanden',
+  evaluation_running: 'Modelltest läuft',
+  quality_regression: 'Qualitätsprüfung nicht bestanden',
+  review_failure: 'Umschreiben nach Prüfverletzung pausiert',
 }
 const time = (at: number | null | undefined) => (at ? new Date(at).toLocaleTimeString('de-DE') : 'Noch nicht')
 async function open() {
@@ -89,6 +98,10 @@ async function open() {
         {{ snapshot.preferences ? (snapshot.preferences.autoRemember ? 'an' : 'aus') : 'unbekannt' }}
       </p>
       <div class="memory-table-wrap">
+        <p v-for="row in snapshot.usageEvents" :key="row.origin">
+          {{ row.origin === 'chat' ? 'Chat' : row.origin === 'idle' ? 'Idle-Pflege' : 'Inspektion' }}:
+          {{ row.retrieved }} abgerufen · {{ row.included }} im Kontextpaket · {{ row.evaluated }} geprüft
+        </p>
         <table>
           <caption>
             Zugriffe seit Start des Hauptfensters / Kontowechsel. Abruf ist kein Beleg für Nutzung in der Antwort.
@@ -118,6 +131,20 @@ async function open() {
         </table>
       </div>
       <section class="memory-index">
+        <p v-for="run in snapshot.providerRuns" :key="run.id">
+          Cognee #{{ run.id }}: {{ run.status }} · {{ run.phase }}
+          <template v-if="run.draining"> · Serverlauf läuft unabhängig weiter; nicht pausiert</template>
+          <template v-if="run.failed"> · Fehler gemeldet</template>
+          <template v-if="run.run_id"> · Lauf {{ run.run_id }}</template>
+        </p>
+        <p v-if="snapshot.care" role="status">
+          Pflege: {{ states[snapshot.care.stage] ?? snapshot.care.stage }} · {{ snapshot.care.queued }} wartend ·
+          {{ snapshot.care.checked }} Quellen geprüft · {{ snapshot.care.changed }} geändert ·
+          {{ snapshot.care.conflicts }} Konflikte · {{ snapshot.care.blocked }} blockiert ·
+          {{ snapshot.care.waitingForGate ?? 0 }} warten auf Freigabe. Modell auf diesem Gerät:
+          {{ snapshot.care.modelId || 'noch keines' }} · Qualitätsfreigabe:
+          {{ states[snapshot.care.quality] ?? snapshot.care.quality }}
+        </p>
         <h4>Repository-Graph · {{ states[snapshot.graph?.status ?? ''] ?? 'Nicht verfügbar' }}</h4>
         <div class="memory-index__flow" aria-label="Index-Bestand, keine gemessene Auslastung">
           <span

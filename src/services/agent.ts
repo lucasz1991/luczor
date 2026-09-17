@@ -1,4 +1,5 @@
 import { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
+import { RESEARCH_HANDOFF_INSTRUCTIONS } from '@/services/agents/researchHarness'
 import {
   isTextToolOutput,
   allowsTextToolExample,
@@ -956,7 +957,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
                 ...opts.baseMessages,
                 {
                   role: 'user',
-                  content: `Abgegrenzter Teilauftrag: ${task.task}\nLiefere nur das angefragte Ergebnis. Keine weiteren Agenten starten.`,
+                  content: `Abgegrenzter Teilauftrag: ${task.task}\nLiefere nur das angefragte Ergebnis. Keine weiteren Agenten starten.\n${task.role === 'research' ? RESEARCH_HANDOFF_INSTRUCTIONS : ''}`,
                 },
               ],
               agentMode: false,

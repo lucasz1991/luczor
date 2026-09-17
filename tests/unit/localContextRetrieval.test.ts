@@ -10,6 +10,7 @@ vi.mock('@/services/accountPrincipal', () => ({ getVerifiedAccountSnapshot: mock
 vi.mock('@/services/memory/luczorMemory', () => ({ luczorMemory: { recallLocal: mocks.recall } }))
 vi.mock('@/services/projectWorkspace', () => ({ resolveWorkspacePrincipalId: mocks.workspacePrincipal }))
 vi.mock('@/services/repositoryGraph', () => ({ buildLocalRepositoryContext: mocks.repository }))
+vi.mock('@/services/memory/preparedContext', () => ({ preparedContextFragments: async () => [] }))
 vi.mock('@/services/api/luczorApi', () => ({
   DEFAULT_FETCH_TIMEOUT_MS: 5000,
   fetchBoundedResponseWithTimeout: mocks.fetch,
@@ -34,7 +35,8 @@ describe('local query retrieval', () => {
       'coding.agent',
       7,
       false,
-      'local'
+      'local',
+      'chat'
     )
     expect(result.text).toContain('Local repository snippet')
     expect(result.text).toContain('Confirmed local preference')
@@ -60,7 +62,8 @@ describe('local query retrieval', () => {
       'coding.agent',
       7,
       false,
-      'local'
+      'local',
+      'chat'
     )
     expect(result.text).toContain('Local repository snippet')
     expect(mocks.fetch).not.toHaveBeenCalled()
@@ -96,6 +99,20 @@ describe('local query retrieval', () => {
       'user-1',
       'private-1',
     ])
+  })
+  it('attributes inspector reads to inspection rather than chat use', async () => {
+    await buildLocalPromptContextDetails('p1', 'question', 5, 'coding.agent', 'inspector')
+    expect(mocks.repository).toHaveBeenCalledWith(
+      'account-a',
+      'p1',
+      'question',
+      'coding.agent',
+      7,
+      false,
+      'local',
+      'inspector'
+    )
+    expect(mocks.recall.mock.calls.every(([request]) => request.origin === 'inspector')).toBe(true)
   })
   it('rejects a result if the account changes while retrieval is pending', async () => {
     mocks.account

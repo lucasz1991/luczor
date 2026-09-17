@@ -16,7 +16,7 @@ const stored = vi.hoisted(() => ({ get: vi.fn(), set: vi.fn(), save: vi.fn() }))
 vi.mock('@tauri-apps/plugin-store', () => ({ Store: { load: vi.fn(async () => stored) } }))
 
 import {
-  createIdleOptimization,
+  createLegacyIdleOptimization as createIdleOptimization,
   idleOptimizationDependencies,
   idleOptimizationEnabled,
   loadIdleOptimizationSetting,
@@ -134,6 +134,7 @@ function fixture() {
   const recall = vi.fn<typeof idleOptimizationDependencies.recall>(async () => [memory()])
   const remember = vi.fn<typeof idleOptimizationDependencies.remember>(async () => memory({ status: 'active' }))
   const deps: typeof idleOptimizationDependencies = {
+    prepare: vi.fn(async () => 'local-1'),
     native: () => true,
     account: vi.fn(async () => account),
     preferences: vi.fn(async () => preferences),

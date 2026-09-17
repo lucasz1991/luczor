@@ -8,4 +8,8 @@ export const memoryExplorerData = {
   inventory: luczorMemory.inspectLocal.bind(luczorMemory),
   graph: inspectRepositoryGraph,
   recall: luczorMemory.recall.bind(luczorMemory),
+  artifacts: async (principalId: string, projectId: string) =>
+    (await luczorMemory.maintenanceSnapshot(principalId)).journal.artifacts
+      .filter(artifact => !artifact.projectId || artifact.projectId === projectId)
+      .slice(-80),
 }

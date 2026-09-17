@@ -13,6 +13,8 @@ import {
 } from '@/services/api/luczorApi'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { luczorMemory, type MemoryRecord } from '@/services/memory/luczorMemory'
+import { preparedContextFragments } from '@/services/memory/preparedContext'
+import type { MemoryUsageOrigin } from '@/services/memory/usage'
 import { resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
 import { buildLocalRepositoryContext, type LocalRepositoryContext } from '@/services/repositoryGraph'
 
@@ -84,7 +86,8 @@ export async function buildLocalPromptContextDetails(
   projectId: string,
   query: string,
   limit = 5,
-  taskType = inferTaskType(query)
+  taskType = inferTaskType(query),
+  origin: MemoryUsageOrigin = 'chat'
 ): Promise<PromptContextDetails> {
   const account = await getVerifiedAccountSnapshot()
   const principalId = account?.principalId ?? (await resolveWorkspacePrincipalId())
@@ -96,21 +99,24 @@ export async function buildLocalPromptContextDetails(
     taskType,
     Math.min(8, memoryLimit + 2),
     false,
-    'local'
+    'local',
+    origin
   ).catch(() => null)
   const groupsPromise = Promise.all([
-    luczorMemory.recallLocal({ scope: 'project', projectId, query, limit: memoryLimit }),
-    luczorMemory.recallLocal({ scope: 'user', query, limit: Math.min(2, memoryLimit) }),
-    luczorMemory.recallLocal({ scope: 'private', projectId, query, limit: Math.min(2, memoryLimit) }),
+    luczorMemory.recallLocal({ scope: 'project', projectId, query, limit: memoryLimit, origin }),
+    luczorMemory.recallLocal({ scope: 'user', query, limit: Math.min(2, memoryLimit), origin }),
+    luczorMemory.recallLocal({ scope: 'private', projectId, query, limit: Math.min(2, memoryLimit), origin }),
   ])
   // Optional graph failure must not suppress independent user/project memory.
   const [repository, groups] = await Promise.all([repositoryPromise, groupsPromise])
+  const prepared = await preparedContextFragments(projectId, query, origin).catch(() => [])
   const current = await getVerifiedAccountSnapshot()
   if (current?.principalId !== account?.principalId || current?.serverInstance !== account?.serverInstance)
     throw new Error('Konto während des lokalen Kontextabrufs geändert.')
   const memories = selectLocalMemories(groups, memoryLimit)
   return {
     fragments: [
+      ...prepared,
       ...(
         repository?.fragments ?? (repository?.text ? [{ id: 'repository', content: repository.text, score: 0 }] : [])
       ).map(fragment => ({

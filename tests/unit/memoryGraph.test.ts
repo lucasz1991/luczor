@@ -38,7 +38,7 @@ describe('memory explorer evidence model', () => {
       },
       { revision: '1', skills: [], persona: { name: 'Luczor', slug: 'luczor', prompt: 'PRIVATE_SYSTEM_PROMPT' } }
     )
-    expect(graph.nodes.filter(node => node.kind === 'System')).toHaveLength(4)
+    expect(graph.nodes.filter(node => node.kind === 'System')).toHaveLength(5)
     expect(graph.edges.filter(edge => !edge.grouping)).toEqual([
       { from: 'file:file', to: 'file:file:relation:0', kind: 'import' },
     ])

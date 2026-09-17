@@ -18,7 +18,10 @@ type SystemStatusControllerProps = {
 }
 
 export function useSystemStatusController(props: SystemStatusControllerProps, close: () => void) {
-  const displayMode = ref<SystemStatusDisplayMode>(props.initialDisplayMode)
+  // In-app the panel is the sidebar column ("mini") — Tabs/Vollbild hand over to the detached
+  // native window instead, so that's what every in-app open starts with. The native window keeps
+  // the mode it was opened in.
+  const displayMode = ref<SystemStatusDisplayMode>(props.nativeWindow ? props.initialDisplayMode : 'mini')
   const activeSection = ref<SystemStatusSection>('resources')
   const indicators = ref<SystemStatusIndicators>(emptySystemStatusIndicators())
   const panel = ref<HTMLElement | null>(null)
@@ -123,6 +126,7 @@ export function useSystemStatusController(props: SystemStatusControllerProps, cl
         return
       }
       previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null
+      if (!props.nativeWindow) applyDisplayMode('mini')
       await nextTick()
       if (props.active) panel.value?.focus({ preventScroll: true })
     },

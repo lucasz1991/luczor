@@ -1,15 +1,17 @@
 import type { RepositoryGraphPage } from '@/services/repositoryGraph'
 import type { LuczorMemoryService } from '@/services/memory/luczorMemory'
 import type { AssistantProfile } from '@/services/assistantProfileTypes'
+import type { PreparedContextArtifact } from '@/services/memory/maintenance'
 export type MemoryInventory = Awaited<ReturnType<LuczorMemoryService['inspectLocal']>>
 export type MemoryNode = { id: string; label: string; system: string; kind: string; detail: string }
 export type MemoryEdge = { from: string; to: string; kind: string; grouping?: boolean }
 export type MemoryGraph = { nodes: MemoryNode[]; edges: MemoryEdge[] }
-export const MEMORY_SYSTEMS = ['Erinnerungen', 'Persönlichkeit', 'Repo-Graph', 'SQL / Cognee']
+export const MEMORY_SYSTEMS = ['Erinnerungen', 'Persönlichkeit', 'Repo-Graph', 'SQL / Cognee', 'Kontextpakete']
 export function buildMemoryGraph(
   inventory: MemoryInventory | null,
   repo: RepositoryGraphPage | null,
-  profile: AssistantProfile
+  profile: AssistantProfile,
+  artifacts: PreparedContextArtifact[] = []
 ): MemoryGraph {
   const nodes: MemoryNode[] = MEMORY_SYSTEMS.map((system, index) => ({
     id: `system:${index}`,
@@ -22,6 +24,35 @@ export function buildMemoryGraph(
         : 'Gestrichelte Linien zeigen die Zugehörigkeit, keine semantische Beziehung.',
   }))
   const edges: MemoryEdge[] = []
+  for (const artifact of artifacts) {
+    const id = `artifact:${artifact.id}`
+    nodes.push({
+      id,
+      label: artifact.content.slice(0, 72),
+      system: 'Kontextpakete',
+      kind: 'Geprüfte KI-Ableitung',
+      detail: `${artifact.content}\n\nNur lokal · Modell: ${artifact.modelId}\nErstellt: ${new Date(artifact.createdAt).toLocaleString('de-DE')}\nDie Quellen werden vor Chat-Nutzung erneut geprüft; diese Ansicht ist ein Speicherauszug.`,
+    })
+    edges.push({ from: 'system:4', to: id, kind: 'Kontextzuordnung', grouping: true })
+    for (const source of artifact.sources) {
+      const from =
+        source.kind === 'memory'
+          ? `memory:${source.id}`
+          : source.kind === 'repository'
+            ? `file:${source.id}`
+            : `source:${source.kind}:${source.id}`
+      if (!nodes.some(node => node.id === from) && source.kind !== 'memory' && source.kind !== 'repository') {
+        nodes.push({
+          id: from,
+          label: source.id,
+          system: 'Kontextpakete',
+          kind: `Quelle (${source.kind})`,
+          detail: 'Quellenreferenz, kein gespeicherter Originalvolltext.',
+        })
+      }
+      edges.push({ from, to: id, kind: 'Belegte Ableitung' })
+    }
+  }
   const visibleMemoryIds = new Set((inventory?.records ?? []).map(record => record.id))
   for (const record of inventory?.records ?? []) {
     const id = `memory:${record.id}`

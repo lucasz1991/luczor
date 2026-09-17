@@ -70,6 +70,19 @@ memoryExplorerData.graph = async (_principal, _project, query = '', offset = 0) 
         ],
 })
 memoryExplorerData.recall = async () => []
+memoryExplorerData.artifacts = async () => [
+  {
+    id: 'project:preview',
+    projectId: 'preview',
+    kind: 'context',
+    content: 'Geprüfte Projektorientierung: Nur lesender Zugriff. Offene Freigaben bleiben offen.',
+    sources: [{ id: 'synthetic-file', kind: 'repository', revision: 'synthetic-hash' }],
+    revision: 'synthetic-revision',
+    createdAt: Date.now(),
+    modelId: 'Synthetisches lokales Modell',
+    localOnly: true,
+  },
+]
 memoryStatus.value = {
   at: Date.now(),
   inventoryAt: Date.now(),

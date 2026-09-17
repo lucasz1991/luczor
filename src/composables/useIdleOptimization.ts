@@ -10,6 +10,7 @@ import {
   type IdleOptimizationContext,
 } from '@/services/agents/idleOptimization'
 import { localResources } from '@/services/inference/resources'
+import { isMaintenanceWrite } from '@/services/memory/luczorMemory'
 
 export function useIdleOptimization(context: IdleOptimizationContext & { draft(): string }) {
   const identityChanging = ref(false)
@@ -54,7 +55,8 @@ export function useIdleOptimization(context: IdleOptimizationContext & { draft()
     try {
       const memory = await Store.load('luczor.memory.json')
       const settings = await Store.load('luczor.settings.json')
-      const disposeMemory = await memory.onChange(() => {
+      const disposeMemory = await memory.onChange((_key, value) => {
+        if (isMaintenanceWrite(value)) return
         if (optimizer.snapshot().phase !== 'committing') optimizer.interrupt('memory_changed')
       })
       if (disposed) {

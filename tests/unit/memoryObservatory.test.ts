@@ -24,7 +24,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 vi.mock('@/services/accountPrincipal', () => ({ getVerifiedAccountSnapshot: harness.account }))
 vi.mock('@/services/memory/luczorMemory', () => ({
-  luczorMemory: { inspectLocal: harness.inspect },
+  luczorMemory: { inspectLocal: harness.inspect, sharedMaintenance: vi.fn(async () => []) },
   getMemoryPrefs: async () => ({ inject: true, injectCount: 5, autoRemember: true }),
 }))
 vi.mock('@/services/repositoryGraph', () => ({ repositoryGraphStatus: harness.graph }))

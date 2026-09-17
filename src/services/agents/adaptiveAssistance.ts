@@ -1,6 +1,7 @@
 import type { ToolDef } from '@/services/tools/types'
 import type { SpecialistOutcome } from './externalSpecialists'
 import type { TokenUsage } from '@/services/tokenUsage'
+import { assistanceCompletionIssue } from './researchHarness'
 
 export type AssistanceTask = {
   task: string
@@ -12,7 +13,8 @@ export type AssistanceTask = {
 type Job = {
   id: string
   task: AssistanceTask
-  status: 'running' | 'completed' | 'failed'
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
+  controller: AbortController
   output?: unknown
   error?: string
   delivered: boolean
@@ -33,13 +35,15 @@ export function createAdaptiveAssistance(input: {
   const summaries: SpecialistOutcome[] = []
   let localTail: Promise<unknown> = Promise.resolve()
   const result = (job: Job) => ({
-    ok: job.status !== 'failed',
+    ok: job.status !== 'failed' && job.status !== 'cancelled',
     job_id: job.id,
     target: job.task.target,
     role: job.task.role,
     status: job.status,
     output: job.output,
     error: job.error,
+    verification:
+      'Parent must verify findings and evidence; completed means a nonempty result, not factual validation.',
   })
   const tools: ToolDef[] = [
     {
@@ -49,7 +53,7 @@ export function createAdaptiveAssistance(input: {
       requiresApproval: false,
       effects: ['read'],
       description:
-        'Delegate one clearly bounded subtask if useful. Simple requests should be answered directly. External jobs return immediately so you can continue other work; local jobs complete sequentially. Collect results with agent_assist_status before your final answer. Never delegate the same work twice.',
+        'Delegate one independent, bounded subtask with a question, scope and expected evidence. Answer simple requests directly. External jobs return immediately; local jobs run sequentially. Collect with agent_assist_status, verify evidence before synthesis, and use agent_assist_stop for obsolete jobs. Never delegate the same work twice. For external jobs task is only a local label: choose relevant context_indices; no new local text is exported.',
       parameters: {
         type: 'object',
         additionalProperties: false,
@@ -75,7 +79,7 @@ export function createAdaptiveAssistance(input: {
       },
       async execute(args) {
         signal.throwIfAborted()
-        const task = { ...args, tools: args.tools ?? [] } as AssistanceTask
+        const task = structuredClone({ ...args, tools: args.tools ?? [] }) as AssistanceTask
         if (jobs.size >= 4) throw new Error('Maximal vier gezielte Teilaufträge pro Anfrage.')
         if (task.target === 'external' && !input.externalAllowed())
           throw new Error('Dieser Kontext ist nicht für externe Agenten freigegeben. Bearbeite den Auftrag lokal.')
@@ -90,12 +94,13 @@ export function createAdaptiveAssistance(input: {
           id: crypto.randomUUID(),
           task,
           status: 'running',
+          controller: new AbortController(),
           delivered: false,
           promise: Promise.resolve(),
         }
         jobs.set(job.id, job)
         const timeout = AbortSignal.timeout(5 * 60_000)
-        const jobSignal = AbortSignal.any([signal, timeout])
+        const jobSignal = AbortSignal.any([signal, timeout, job.controller.signal])
         let abort: () => void = () => {}
         const stopped = new Promise<never>((_, reject) => {
           abort = () => reject(new DOMException('Teilauftrag unterbrochen.', 'AbortError'))
@@ -112,20 +117,27 @@ export function createAdaptiveAssistance(input: {
             jobSignal.throwIfAborted()
             job.output = output
             job.status = 'completed'
+            const issue = assistanceCompletionIssue(output)
+            if (issue) {
+              job.status = 'failed'
+              job.error = `${issue}: Teilauftrag nicht vollständig; vorhandenen Zwischenstand prüfen.`
+            }
             if (
+              task.target === 'external' &&
               output &&
               typeof output === 'object' &&
-              (('incomplete' in output && output.incomplete === true) ||
-                ('status' in output && output.status === 'incomplete'))
-            ) {
-              job.status = 'failed'
-              job.error = 'Der Teilauftrag hat ein Zwischenergebnis geliefert und ist noch nicht abgeschlossen.'
-            }
-            if (task.target === 'external') summaries.push(output as SpecialistOutcome)
+              'output' in output &&
+              typeof output.output === 'string'
+            )
+              summaries.push({ ...output, ...(issue ? { incomplete: true } : {}) } as SpecialistOutcome)
           })
           .catch(error => {
-            job.status = 'failed'
-            job.error = error instanceof Error ? error.message : String(error)
+            job.status = job.controller.signal.aborted ? 'cancelled' : 'failed'
+            job.error = job.controller.signal.aborted
+              ? 'agent_job_cancelled'
+              : error instanceof Error
+                ? error.message
+                : String(error)
           })
           .finally(() => jobSignal.removeEventListener('abort', abort))
         if (task.target === 'local') {
@@ -163,6 +175,32 @@ export function createAdaptiveAssistance(input: {
       },
     },
   ]
+  tools.push({
+    name: 'agent_assist_stop',
+    category: 'app',
+    mutating: false,
+    requiresApproval: false,
+    effects: ['read'],
+    description:
+      'Cancel one child job belonging to this parent request. Other jobs and the parent continue. Late results are discarded. Cancellation does not undo prior effects.',
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { job_id: { type: 'string', minLength: 1, maxLength: 80 } },
+      required: ['job_id'],
+    },
+    async execute(args) {
+      signal.throwIfAborted()
+      const job = jobs.get(String(args.job_id))
+      if (!job) throw new Error('Teilauftrag gehört nicht zu dieser Anfrage.')
+      if (job.status === 'running') {
+        job.controller.abort()
+        await job.promise
+      }
+      signal.throwIfAborted()
+      return { job_id: job.id, status: job.status, stop_requested: job.controller.signal.aborted }
+    },
+  })
   return {
     tools,
     summaries,

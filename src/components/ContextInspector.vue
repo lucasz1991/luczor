@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import AiIcon from './ai/AiIcon.vue'
-import type { ToolChip } from './ai/types'
+import type { ActivityStep as ToolChip } from './ai/types'
 import { statusLabels } from './ai/types'
 import { estimatePromptTokens, type PromptFragment } from '@/services/prompt/promptContextAssembler'
 import {

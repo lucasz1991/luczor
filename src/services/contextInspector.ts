@@ -72,7 +72,7 @@ export function fragmentTitle(fragment: PromptFragment): string {
     'query-context': 'Treffer zur Anfrage',
     'local-workspace-path': 'Lokaler Projektpfad',
   }
-  if (known[fragment.id]) return known[fragment.id]
+  if (known[fragment.id]) return known[fragment.id]!
   if (fragment.id.startsWith('memory-')) {
     const type = fragment.provenance?.type
     return type ? `Erinnerung · ${type}` : 'Erinnerung'

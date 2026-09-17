@@ -1,6 +1,8 @@
 import { shallowRef } from 'vue'
 import { Store } from '@tauri-apps/plugin-store'
 import type { Project } from '@/state/types'
+import type { Message } from '@/state/types'
+import { createMaintenanceWorker } from './idleMaintenanceWorker'
 import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { executionGate } from '@/services/executionGate'
 import { getMemoryPrefs, luczorMemory } from '@/services/memory/luczorMemory'
@@ -54,7 +56,12 @@ export async function saveIdleOptimizationSetting(enabled: boolean): Promise<voi
   idleOptimizationEnabled.value = enabled
 }
 
-export type IdleOptimizationContext = { project(): Project | undefined; busy(): boolean }
+export type IdleOptimizationContext = {
+  project(): Project | undefined
+  projects?(): Project[]
+  messages?(): Message[]
+  busy(): boolean
+}
 export const idleOptimizationDependencies = {
   native: () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window,
   account: getVerifiedAccountSnapshot,
@@ -62,6 +69,7 @@ export const idleOptimizationDependencies = {
   status: readLocalModelStatus,
   metrics: readSystemMetrics,
   policy: () => localInferenceCoordinator.status(),
+  prepare: (signal: AbortSignal) => localInferenceCoordinator.prepareInstalledOptimizationModel(signal),
   gateway: (projectId: string, modelId: string) =>
     localInferenceCoordinator.residentOptimizationGateway(projectId, modelId),
   recall: luczorMemory.recallLocal.bind(luczorMemory),
@@ -78,6 +86,11 @@ export const idleOptimizationDependencies = {
 
 /** Private local data stays on-device. Shared retrieval uses the same SQL/Cognee path as memory_recall. */
 export function createIdleOptimization(context: IdleOptimizationContext, deps = idleOptimizationDependencies) {
+  return createMaintenanceWorker(context, deps, () => idleOptimizationEnabled.value)
+}
+
+/** Retained temporarily for migration regression tests; never mounted by the app. */
+export function createLegacyIdleOptimization(context: IdleOptimizationContext, deps = idleOptimizationDependencies) {
   let projectNext = true
   let topicIndex = 0
   let repositoryNext = false

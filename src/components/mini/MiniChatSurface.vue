@@ -129,6 +129,7 @@ let drag: {
   /** Native: screen-space y of the last step already handed to the window (CSS px). */
   lastScreenY: number
   captureTarget: HTMLElement
+  clickTarget: HTMLElement | null
 } | null = null
 // Native drag steps are serialized: each pointermove adds to the pending delta, one IPC call is
 // in flight at a time, and whatever accumulated while it ran goes out as the next step.
@@ -415,6 +416,11 @@ async function openWorkflow(messageId: string, workflowId: number) {
 }
 // Repositioning happens only from the edge grip's icons now — not from the chat window's own
 // header, which used to double as a drag handle.
+// Bound on the whole icon column, so the nudge can be grabbed anywhere on it — between and
+// around the icons too, not only on the 28px pills. The column takes pointer capture right on
+// pointerdown: the surface around the dock is pointer-events:none, so a fast first movement that
+// already leaves the dock would otherwise never reach moveDrag. Capture retargets pointerup to the
+// column, which is what would swallow the icons' click — so endDrag replays the click itself.
 function beginDrag(event: PointerEvent) {
   if (event.button !== 0) return
   dragged = false
@@ -426,8 +432,13 @@ function beginDrag(event: PointerEvent) {
     pointer: event.pointerId,
     lastScreenY: event.screenY,
     captureTarget,
+    clickTarget: (event.target as Element).closest<HTMLElement>('.mini-grip__icon'),
   }
-  captureTarget.setPointerCapture(event.pointerId)
+  try {
+    captureTarget.setPointerCapture(event.pointerId)
+  } catch {
+    /* Not capturable (synthetic pointer) — moves still bubble while the pointer is over the dock. */
+  }
 }
 function queueNativeMove(dy: number, pointerX: number) {
   nativeMovePending += dy
@@ -470,9 +481,19 @@ function moveDrag(event: PointerEvent) {
     clampPosition()
   }
 }
-function endDrag() {
+function endDrag(event?: PointerEvent) {
   const wasNativeDrag = props.native && !!drag && dragged
+  const clickTarget = drag && !dragged && event?.type === 'pointerup' ? drag.clickTarget : null
+  if (drag && event) {
+    try {
+      drag.captureTarget.releasePointerCapture(event.pointerId)
+    } catch {
+      /* Already released. */
+    }
+  }
   drag = null
+  // A press that never travelled is a click on the icon it started on (see beginDrag).
+  clickTarget?.click()
   if (wasNativeDrag) {
     // Let the last queued step land, then flush against the nearest edge and let layout() catch
     // up on the peek/expand state it held back while the pointer was down.
@@ -628,6 +649,7 @@ onBeforeUnmount(() => {
         aria-label="Status im Überblick"
         :data-phase="status.phase"
         @keydown="moveKey"
+        @pointerdown="beginDrag"
       >
         <button
           type="button"
@@ -639,7 +661,6 @@ onBeforeUnmount(() => {
           :aria-label="`Mini-Chat öffnen: ${chatsTitle}`"
           @pointerenter="hoverPane = 'chats'"
           @focus="hoverPane = 'chats'"
-          @pointerdown="beginDrag"
           @click="pinPane('chats')"
         >
           <AiIcon name="chat" :size="14" /><span v-if="decision || unread" class="mini-unread">{{
@@ -656,7 +677,6 @@ onBeforeUnmount(() => {
           :aria-label="decision ? 'Entscheidung offen' : 'Keine Entscheidung offen'"
           @pointerenter="hoverPane = 'decision'"
           @focus="hoverPane = 'decision'"
-          @pointerdown="beginDrag"
           @click="pinPane('decision')"
         >
           <AiIcon name="shield" :size="13" />
@@ -675,7 +695,6 @@ onBeforeUnmount(() => {
           "
           @pointerenter="hoverPane = 'tools'"
           @focus="hoverPane = 'tools'"
-          @pointerdown="beginDrag"
           @click="pinPane('tools')"
         >
           <AiIcon name="tool" :size="13" />
@@ -690,7 +709,6 @@ onBeforeUnmount(() => {
           :aria-label="connectionError ? 'Verbindung fehlt' : 'Verbunden'"
           @pointerenter="hoverPane = 'link'"
           @focus="hoverPane = 'link'"
-          @pointerdown="beginDrag"
           @click="pinPane('link')"
         >
           <AiIcon name="link" :size="13" />

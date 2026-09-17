@@ -106,7 +106,8 @@ import {
   type ChatActivity,
 } from '@/services/chatActivity'
 import { presentLocalToolResult } from '@/services/toolProgressPresentation'
-import type { Message } from '@/state/types'
+import type { Message, Project } from '@/state/types'
+import { recordMemoryUsageEvent } from '@/services/memory/usage'
 import { type LuczorMode, type WireMessage } from './services/openrouter.service'
 import {
   runAgent,
@@ -1637,6 +1638,7 @@ type CapturedChatTurn = {
 /** Everything a turn hands to the model besides the chat history itself — shared by send() and by
  * the context inspector's preview, so what the panel shows before sending is what actually goes out. */
 async function collectContextFragments(opts: {
+  origin?: 'chat' | 'inspector'
   pid: string
   conversationId: string
   text: string
@@ -1696,7 +1698,7 @@ async function collectContextFragments(opts: {
   // only after a fresh per-turn approval when the local policy requires it.
   try {
     if (memoryPrefs.inject) {
-      promptContext = await buildLocalPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType)
+      promptContext = await buildLocalPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType, opts.origin)
       if (promptContext.fragments?.length) {
         contextFragments.push(...promptContext.fragments)
       } else if (promptContext.text) {
@@ -1760,6 +1762,7 @@ async function refreshContextPreview() {
       project: prj,
       workspace,
       ticket: executionGate.capture(),
+      origin: 'inspector',
     })
     // Preview only: without the native bridge (browser preview) the account lookup is unavailable,
     // so fall back to a device-local scope rather than showing nothing.
@@ -2308,6 +2311,18 @@ async function executeChatTurn(
     if (continuation || interrupted)
       await handle.interrupt('Fortschritt gesichert. Aktuellen Zustand prüfen und weiterarbeiten.')
     applyStreamedContent(pid, assistant.id, finalText, true)
+    if (inferenceTarget) {
+      const packet = inferenceTarget === 'local_llama_cpp' ? packages.local : packages.external
+      recordMemoryUsageEvent(
+        'chat',
+        'included',
+        packet.selected.filter(item =>
+          contextFragments.some(
+            fragment => fragment.id === item.id && ['memory', 'repository'].includes(fragment.source)
+          )
+        ).length
+      )
+    }
     finishChatActivity(chatActivities.value[assistant.id]!, interrupted ? 'failed' : 'done')
     // Attach the server-reported routing metadata to the assistant message.
     {
@@ -2607,6 +2622,8 @@ const backgroundPreparation = useBackgroundPreparation({
   draft: () => input.value,
 })
 useIdleOptimization({
+  projects: () => state.projects,
+  messages: () => state.messages,
   project: () => activeProject.value,
   busy: () => localModelSwitch.pending.value || chatRuns.hasLive() || conversationBusy.value || hud.killSwitch,
   draft: () => input.value,

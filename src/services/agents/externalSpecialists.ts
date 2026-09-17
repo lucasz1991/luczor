@@ -1,4 +1,5 @@
 import { specialistContextTools } from './specialistContextTools'
+import { RESEARCH_HANDOFF_INSTRUCTIONS } from './researchHarness'
 import { fitRequestContext } from '@/services/inference/contextBudget'
 import { openToolUsage, toolUsageContext } from '@/services/tools/usage'
 import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
@@ -48,8 +49,7 @@ export type TeamPacketApproval = {
 }
 const instructions: Record<SpecialistRole, string> = {
   planning: 'Erstelle einen umsetzbaren Plan mit Abhängigkeiten, Risiken und nachprüfbaren Abnahmekriterien.',
-  research:
-    'Analysiere benötigte Informationen, Optionen und offene Fragen. Kennzeichne Wissen ohne aktuelle Quellenprüfung; erfinde keine Recherchebelege.',
+  research: RESEARCH_HANDOFF_INSTRUCTIONS,
   coding:
     'Entwirf eine konkrete technische Lösung, sinnvolle kleine Arbeitsschritte und bei ausreichenden Angaben Codevorschläge.',
   review:

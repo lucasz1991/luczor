@@ -1148,8 +1148,42 @@ pub async fn local_model_prepare(
     catalog_binding: CatalogBindingInput,
     resident_only: Option<bool>,
     resource_revision: Option<u64>,
+    request_id: Option<String>,
+    installed_only: Option<bool>,
 ) -> Result<NativeReadiness, String> {
     ensure_main_webview(&window)?;
+    if installed_only.unwrap_or(false) {
+        let operation_id = request_id
+            .filter(|id| safe_id(id))
+            .ok_or("Idle preparation needs a request id.")?;
+        {
+            let mut guard = state()
+                .lock()
+                .map_err(|_| "Local model manager is unavailable.")?;
+            resource_config::ensure_loaded(&app, &mut guard)?;
+        }
+        // Claim before yielding to the blocking pool: cancellation cannot race an unregistered start.
+        let (catalog, model, cancel) = claim_prepare_operation(
+            &model_release_id,
+            &operation_id,
+            &catalog_binding,
+            resource_revision,
+        )?;
+        return tauri::async_runtime::spawn_blocking(move || {
+            finish_prepare_release(
+                &app,
+                &operation_id,
+                &catalog_binding,
+                catalog,
+                model,
+                cancel,
+                resident_only.unwrap_or(false),
+                true,
+            )
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+    }
     tauri::async_runtime::spawn_blocking(move || {
         let started = Instant::now();
         let result = prepare_release(
@@ -2156,6 +2190,29 @@ fn prepare_release(
     }
     let (catalog, model, cancel) =
         claim_prepare_operation(model_id, &operation_id, catalog_binding, resource_revision)?;
+    finish_prepare_release(
+        app,
+        &operation_id,
+        catalog_binding,
+        catalog,
+        model,
+        cancel,
+        resident_only,
+        false,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn finish_prepare_release(
+    app: &AppHandle,
+    operation_id: &str,
+    catalog_binding: &CatalogBindingInput,
+    catalog: VerifiedCatalog,
+    model: ModelRelease,
+    cancel: Arc<AtomicBool>,
+    resident_only: bool,
+    installed_only: bool,
+) -> Result<NativeReadiness, String> {
     let result = prepare_release_inner(
         app,
         catalog,
@@ -2164,6 +2221,7 @@ fn prepare_release(
         catalog_binding,
         cancel.clone(),
         resident_only,
+        installed_only,
     );
     let outcome = if cancel.load(Ordering::SeqCst) {
         RequestOutcome::Cancelled
@@ -2252,6 +2310,7 @@ fn prepare_release_inner(
     catalog_binding: &CatalogBindingInput,
     cancel: Arc<AtomicBool>,
     resident_only: bool,
+    installed_only: bool,
 ) -> Result<NativeReadiness, String> {
     let artifact = model
         .artifact
@@ -2267,7 +2326,15 @@ fn prepare_release_inner(
     if !refresh_resident_runtime(&model, operation_id, catalog_binding, &cancel)? {
         require_cold_start_allowed(resident_only)?;
         validate_capacity(&model)?;
-        ensure_runtime(app, &model, None, operation_id, catalog_binding, &cancel)?;
+        ensure_runtime_policy(
+            app,
+            &model,
+            None,
+            operation_id,
+            catalog_binding,
+            &cancel,
+            installed_only,
+        )?;
         run_signed_benchmark(&model, operation_id, catalog_binding, &cancel)?;
     }
     let verified_at = now_ms()?;
@@ -2368,6 +2435,7 @@ fn verify_configured_artifacts(
     model: &ModelRelease,
     catalog_binding: &CatalogBindingInput,
     cancel: &AtomicBool,
+    installed_only: bool,
 ) -> Result<VerifiedArtifactFiles, String> {
     let artifact = model
         .artifact
@@ -2393,12 +2461,12 @@ fn verify_configured_artifacts(
             &read_runtime_path_config(&config_path)?,
             &local_root.join("installed"),
         );
-    let (runtime_path, model_path) = if !environment_override && (!config_path.exists() || managed)
-    {
-        install::ensure(app, model, cancel)?
-    } else {
-        configured_paths(app, model, catalog_binding)?
-    };
+    let (runtime_path, model_path) =
+        if !installed_only && !environment_override && (!config_path.exists() || managed) {
+            install::ensure(app, model, cancel)?
+        } else {
+            configured_paths(app, model, catalog_binding)?
+        };
     let (model_guard, model_hash) = verified_artifact_guard(&model_path, cancel)?;
     let (runtime_guard, runtime_hash) = verified_artifact_guard(&runtime_path, cancel)?;
     if model_guard
@@ -2417,7 +2485,9 @@ fn verify_configured_artifacts(
     }
     // Repair missing dependencies for existing installations as well. Existing
     // mismatched bytes fail closed; only signed files may be downloaded.
-    install::ensure_support_files(&runtime_path, runtime, cancel)?;
+    if !installed_only {
+        install::ensure_support_files(&runtime_path, runtime, cancel)?;
+    }
     let support_guards = gpu_runtime::verify_support_files(&runtime_path, runtime, cancel)?;
     #[cfg(target_os = "linux")]
     let storage_path = model_path.clone();
@@ -3196,6 +3266,26 @@ fn ensure_runtime(
     catalog_binding: &CatalogBindingInput,
     cancel: &Arc<AtomicBool>,
 ) -> Result<(), String> {
+    ensure_runtime_policy(
+        app,
+        model,
+        scope_digest,
+        operation_id,
+        catalog_binding,
+        cancel,
+        false,
+    )
+}
+
+fn ensure_runtime_policy(
+    app: &AppHandle,
+    model: &ModelRelease,
+    scope_digest: Option<&str>,
+    operation_id: &str,
+    catalog_binding: &CatalogBindingInput,
+    cancel: &Arc<AtomicBool>,
+    installed_only: bool,
+) -> Result<(), String> {
     let mut previous_runtime = {
         let mut guard = state()
             .lock()
@@ -3235,6 +3325,7 @@ fn ensure_runtime(
         operation_id,
         catalog_binding,
         cancel,
+        installed_only,
     )?);
     let should_install = {
         let mut guard = state()
@@ -3266,10 +3357,12 @@ fn start_runtime(
     operation_id: &str,
     catalog_binding: &CatalogBindingInput,
     cancel: &AtomicBool,
+    installed_only: bool,
 ) -> Result<ManagedRuntime, String> {
     validate_capacity(model)?;
     // Every process replacement retains the signed hashes and immutable read guards.
-    let artifacts = verify_configured_artifacts(app, model, catalog_binding, cancel)?;
+    let artifacts =
+        verify_configured_artifacts(app, model, catalog_binding, cancel, installed_only)?;
     let model_storage = ensure_model_storage(
         {
             #[cfg(target_os = "linux")]

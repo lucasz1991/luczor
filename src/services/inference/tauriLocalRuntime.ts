@@ -247,6 +247,47 @@ export async function prepareNativeLocalModel(
 }
 
 /** Actual OpenAI-compatible llama.cpp path; endpoint, API key and files stay native. */
+export async function prepareInstalledNativeLocalModel(
+  modelReleaseId: string,
+  catalogBinding: LocalCatalogBinding,
+  signal: AbortSignal
+): Promise<LocalReadinessEvidence> {
+  signal.throwIfAborted()
+  if (!isTauri()) throw new Error('native_required')
+  const resourceRevision = (await localResources.get()).appliedRevision
+  signal.throwIfAborted()
+  const requestId = `idle-prepare-${crypto.randomUUID()}`
+  let cancellation: Promise<unknown> | undefined
+  let settled = false
+  const abort = () => {
+    cancellation ??= (async () => {
+      do {
+        await invoke('local_model_cancel', { requestId, catalogBinding }).catch(() => undefined)
+        if (!settled) await new Promise(resolve => setTimeout(resolve, 100))
+      } while (!settled)
+    })()
+  }
+  // Invoke queues the claim before a later abort queues its matching cancellation.
+  const preparation = invoke<LocalReadinessEvidence>('local_model_prepare', {
+    modelReleaseId,
+    catalogBinding,
+    resourceRevision,
+    requestId,
+    installedOnly: true,
+  })
+  signal.addEventListener('abort', abort, { once: true })
+  if (signal.aborted) abort()
+  try {
+    const result = await preparation
+    signal.throwIfAborted()
+    return result
+  } finally {
+    settled = true
+    signal.removeEventListener('abort', abort)
+    await cancellation
+  }
+}
+
 export class TauriLocalRuntimeTransport implements LocalRuntimeTransport {
   prepare(
     modelReleaseId: string,

@@ -4,10 +4,11 @@ import { invoke } from '@tauri-apps/api/core'
 import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { luczorMemory, getMemoryPrefs } from '@/services/memory/luczorMemory'
 import { snapshotMemoryActivity, type MemoryActivitySnapshot } from '@/services/memory/activity'
-import { memoryUsageSnapshot } from '@/services/memory/usage'
+import { memoryUsageSnapshot, memoryUsageEvents } from '@/services/memory/usage'
 import { repositoryGraphStatus, type RepositoryGraphStatus } from '@/services/repositoryGraph'
 import { idleOptimizationStatus, idleMemoryMaintenance } from '@/services/agents/idleOptimization'
 import { assistantProfileState } from '@/services/assistantProfile'
+import { maintenanceProgress } from '@/services/agents/idleMaintenanceWorker'
 
 export type MemoryStatusSnapshot = {
   at: number
@@ -16,6 +17,7 @@ export type MemoryStatusSnapshot = {
   projectName: string
   activity: MemoryActivitySnapshot
   usage: ReturnType<typeof memoryUsageSnapshot>
+  usageEvents?: ReturnType<typeof memoryUsageEvents>
   inventory: { total: number; active: number; candidates: number; pending: number; synced: number } | null
   graph: Pick<
     RepositoryGraphStatus,
@@ -24,6 +26,25 @@ export type MemoryStatusSnapshot = {
   preferences: Awaited<ReturnType<typeof getMemoryPrefs>> | null
   idle: { phase: string; task: string | null; completed: number; nextCheckAt: number | null } | null
   maintenance: string
+  care?: {
+    stage: string
+    queued: number
+    checked: number
+    changed: number
+    conflicts: number
+    blocked: number
+    waitingForGate?: number
+    quality: string
+    modelId: string
+  }
+  providerRuns?: Array<{
+    id: string
+    run_id?: string | null
+    status: string
+    phase: string
+    draining: boolean
+    failed: boolean
+  }>
   profile: { source: string; skills: number; persona: boolean }
 }
 const REQUEST = 'luczor-memory-status-request'
@@ -56,10 +77,22 @@ export function useMemoryObservatoryHost(project: () => { id: string; name: stri
       let data = memoryStatus.value
       if (!data || Date.now() - data.inventoryAt > 30_000 || data.projectId !== (selected?.id ?? '')) {
         const account = await getVerifiedAccountSnapshot()
-        const [inventory, graph, preferences] = await Promise.all([
+        const [inventory, graph, preferences, providerRuns] = await Promise.all([
           luczorMemory.inspectLocal({ limit: 1 }).catch(() => null),
           selected && account ? repositoryGraphStatus(account.principalId, selected.id).catch(() => null) : null,
           getMemoryPrefs().catch(() => null),
+          selected && account
+            ? luczorMemory
+                .sharedMaintenance<NonNullable<MemoryStatusSnapshot['providerRuns']>>(
+                  account.principalId,
+                  'project',
+                  selected.id,
+                  'status',
+                  {},
+                  AbortSignal.timeout(10_000)
+                )
+                .catch(() => [])
+            : [],
         ])
         const current = await getVerifiedAccountSnapshot()
         if (
@@ -97,6 +130,7 @@ export function useMemoryObservatoryHost(project: () => { id: string; name: stri
               }
             : null,
           preferences,
+          providerRuns,
           idle: null,
           maintenance: 'idle',
           profile: { source: '', skills: 0, persona: false },
@@ -109,10 +143,12 @@ export function useMemoryObservatoryHost(project: () => { id: string; name: stri
         at: Date.now(),
         activity: snapshotMemoryActivity(),
         usage: memoryUsageSnapshot(),
+        usageEvents: memoryUsageEvents(),
         idle: idle
           ? { phase: idle.phase, task: idle.task, completed: idle.completed, nextCheckAt: idle.nextCheckAt }
           : null,
         maintenance: idleMemoryMaintenance.value,
+        care: { ...maintenanceProgress.value, projectId: undefined } as MemoryStatusSnapshot['care'],
         profile: {
           source: assistantProfileState.source,
           skills: assistantProfileState.profile.skills.length,

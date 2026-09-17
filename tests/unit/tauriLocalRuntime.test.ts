@@ -17,9 +17,11 @@ import {
   beginNativeManifestAcceptance,
   getNativeHardwareSnapshot,
   prepareNativeLocalModel,
+  prepareInstalledNativeLocalModel,
   TauriLocalRuntimeTransport,
   controlLocalReasoning,
 } from '@/services/inference/tauriLocalRuntime'
+import { localResources } from '@/services/inference/resources'
 
 const catalogBinding = {
   acceptanceSessionId: '00000000-0000-4000-8000-000000000001',
@@ -50,6 +52,53 @@ const failureDiagnostic = {
 } as const
 
 describe('Tauri local runtime catalog boundary', () => {
+  it('starts installed-only preparation with request-scoped cancellation and waits for actual native release', async () => {
+    const resources = vi.spyOn(localResources, 'get').mockResolvedValue({ appliedRevision: 7 } as never)
+    let finish!: (value: unknown) => void
+    tauri.invoke.mockImplementation(command =>
+      command === 'local_model_prepare'
+        ? new Promise(resolve => {
+            finish = resolve
+          })
+        : Promise.resolve()
+    )
+    const controller = new AbortController()
+    let released = false
+    const pending = prepareInstalledNativeLocalModel('model-1', catalogBinding, controller.signal).then(
+      () => {
+        released = true
+      },
+      () => {
+        released = true
+      }
+    )
+    await vi.waitFor(() =>
+      expect(tauri.invoke).toHaveBeenCalledWith(
+        'local_model_prepare',
+        expect.objectContaining({
+          modelReleaseId: 'model-1',
+          catalogBinding,
+          resourceRevision: 7,
+          installedOnly: true,
+          requestId: expect.stringMatching(/^idle-prepare-/u),
+        })
+      )
+    )
+    controller.abort()
+    await Promise.resolve()
+    expect(released).toBe(false)
+    expect(tauri.invoke).toHaveBeenCalledWith(
+      'local_model_cancel',
+      expect.objectContaining({ catalogBinding, requestId: expect.stringMatching(/^idle-prepare-/u) })
+    )
+    finish({})
+    await pending
+    expect(released).toBe(true)
+    expect(
+      tauri.invoke.mock.calls.every(([command]) => ['local_model_prepare', 'local_model_cancel'].includes(command))
+    ).toBe(true)
+    resources.mockRestore()
+  })
   it('binds live controls to active catalog and generation, drops late progress, and removes the old implicit 2048 cap', async () => {
     let finish!: (value: unknown) => void
     let channel!: { onmessage: (event: unknown) => void }

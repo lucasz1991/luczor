@@ -1,4 +1,5 @@
 import type { WireMessage } from '@/services/inference/types'
+import { compactToolOutput } from '@/services/inference/contextBudget'
 
 export type ToolOutcome = { ok: boolean; output?: unknown; error?: string }
 export type PendingTaskCreateVerification = {
@@ -63,12 +64,18 @@ export function teamMessages(messages: WireMessage[]): WireMessage[] {
   return messages
     .filter((message, index) => message.role === 'system' || index >= latestUser)
     .map(message => {
-      if (message.role === 'tool' && message.content.length > 1200)
+      if (message.role === 'tool' && message.content.length > 1200) {
+        let value: unknown = message.content
+        try {
+          value = JSON.parse(message.content)
+        } catch {
+          /* plain tool text */
+        }
         return {
           ...message,
-          content:
-            message.content.slice(0, 1200) + '\n[Auszug für Agentenübergabe; fehlende Details gezielt erneut lesen.]',
+          content: JSON.stringify(compactToolOutput(value, 1200)),
         }
+      }
       return structuredClone(message)
     })
 }

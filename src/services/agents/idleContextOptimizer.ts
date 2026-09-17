@@ -30,6 +30,7 @@ export type IdleContextOptimizerDependencies = {
   runLocal(job: IdleOptimizationJob, signal: AbortSignal): Promise<string>
   /** Must bind writes to job.principalId and preserve existing facts/project summaries. */
   commitCandidate(job: IdleOptimizationJob, content: string, signal: AbortSignal): Promise<void>
+  settled?(job: IdleOptimizationJob, success: boolean, interrupted: boolean): Promise<void>
   now?(): number
 }
 
@@ -254,6 +255,8 @@ export class IdleContextOptimizer {
       controller.abort(aborted())
     }
     let timeout: ReturnType<typeof setTimeout> | undefined
+    let selectedJob: IdleOptimizationJob | undefined
+    let success = false
     const monitorEligibility = () => {
       monitor = setTimeout(async () => {
         try {
@@ -275,7 +278,12 @@ export class IdleContextOptimizer {
         this.publish({ phase: 'paused', task: null, reason: eligibility.reason ?? 'runtime_unavailable' })
         return
       }
+      jobBoundary = eligibility.boundary
+      this.publish({ phase: 'running', task: null, reason: 'gathering_sources' })
+      monitorEligibility()
+      timeout = setTimeout(() => abort('timeout'), this.options.timeoutMs)
       const job = await this.dependencies.nextJob(eligibility.boundary, signal)
+      selectedJob = job ?? undefined
       signal.throwIfAborted()
       if (!job) {
         this.publish({ phase: 'paused', task: null, reason: 'no_context' })
@@ -317,8 +325,6 @@ export class IdleContextOptimizer {
         task: job.task ?? (job.scope === 'project' ? 'context' : 'memory'),
         reason: null,
       })
-      monitorEligibility()
-      timeout = setTimeout(() => abort('timeout'), this.options.timeoutMs)
       const content = (await this.dependencies.runLocal(job, signal)).trim()
       signal.throwIfAborted()
       if (!content || content.length > MAX_CANDIDATE_CHARS) throw new Error('invalid_candidate')
@@ -330,6 +336,7 @@ export class IdleContextOptimizer {
       }
       this.publish({ phase: 'committing' })
       await this.dependencies.commitCandidate(job, content, signal)
+      success = true
       signal.throwIfAborted()
       this.completedFingerprints.delete(completedKey)
       this.completedFingerprints.set(completedKey, job.fingerprint)
@@ -352,6 +359,13 @@ export class IdleContextOptimizer {
       finished = true
       clearTimeout(timeout)
       if (monitor !== undefined) clearTimeout(monitor)
+      if (selectedJob) {
+        try {
+          await this.dependencies.settled?.(selectedJob, success, signal.aborted)
+        } catch {
+          /* A future pass recovers a stale lease. */
+        }
+      }
       const delay =
         this.state.reason === 'candidate_ready'
           ? (this.options.successfulIntervalMs ?? this.options.intervalMs)

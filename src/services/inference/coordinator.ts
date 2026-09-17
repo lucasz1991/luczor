@@ -36,6 +36,7 @@ import {
   getNativeLocalModelStatus,
   recoverNativeModelMemory,
   prepareNativeLocalModel,
+  prepareInstalledNativeLocalModel,
   tauriManifestVerifier,
   TauriLocalRuntimeTransport,
   type NativeLocalModelStatus,
@@ -230,6 +231,7 @@ export type LocalInferenceCoordinatorDependencies = {
   recoverMemory?: () => Promise<HardwareSnapshot>
   nativeStatus?: () => Promise<NativeLocalModelStatus>
   prepareModel: (modelReleaseId: string, catalogBinding: LocalCatalogBinding) => Promise<LocalReadinessEvidence>
+  prepareInstalledModel?: typeof prepareInstalledNativeLocalModel
   accountSnapshot: () => Promise<VerifiedAccountSnapshot | null>
   manifestSession: (acceptanceGeneration: number) => Promise<string>
   manager: LocalModelManager
@@ -957,7 +959,56 @@ export class LocalInferenceCoordinator {
     }
   }
 
-  /** Local idle work never refreshes a catalog, prepares a runtime or selects a fallback. */
+  /** Idle preparation uses the accepted signed catalog and installed artifacts only; never downloads. */
+  async prepareInstalledOptimizationModel(signal: AbortSignal): Promise<string> {
+    const generation = this.generation
+    this.requireActiveGeneration(generation)
+    signal.throwIfAborted()
+    const manifest = this.manifest!
+    const binding = this.catalogBinding!
+    const resourceEpoch = this.resourceEpoch
+    const prepare = this.dependencies.prepareInstalledModel
+    if (!prepare || this.preparation) throw new Error('idle_preparation_unavailable')
+    const ids = [...new Set([manifest.routing.defaultModelId, ...manifest.routing.fallbackModelIds])]
+    ids.sort(
+      (left, right) =>
+        Number(!!this.assessments.get(right)?.memory?.resident) - Number(!!this.assessments.get(left)?.memory?.resident)
+    )
+    for (const id of ids) {
+      signal.throwIfAborted()
+      const model = manifest.models.find(item => item.id === id)
+      if (
+        !model ||
+        !isExecutableLocalModel(model) ||
+        !model.capabilities.includes('chat') ||
+        this.assessments.get(id)?.status !== 'eligible'
+      )
+        continue
+      if (['busy', 'cooldown', 'error'].includes(this.dependencies.manager.getHealth(model).state)) continue
+      const preparation = { modelId: id, generation }
+      this.preparation = preparation
+      try {
+        const evidence = await prepare(id, binding, signal)
+        signal.throwIfAborted()
+        this.requireActiveGeneration(generation)
+        if (
+          this.resourceEpoch !== resourceEpoch ||
+          this.catalogBinding !== binding ||
+          !hasVerifiedLocalReadiness(model, evidence, manifest.payloadSha256, this.dependencies.now().getTime())
+        )
+          throw new Error('stale_preparation')
+        this.readiness.set(id, evidence)
+        return id
+      } catch {
+        signal.throwIfAborted()
+        this.requireActiveGeneration(generation)
+      } finally {
+        if (this.preparation === preparation) this.preparation = undefined
+      }
+    }
+    throw new Error('installed_model_unavailable')
+  }
+
   async residentOptimizationGateway(projectId: string, modelId: string): Promise<InferenceGateway> {
     const generation = this.generation
     this.requireActiveGeneration(generation)
@@ -1465,6 +1516,7 @@ export const localInferenceCoordinator = new LocalInferenceCoordinator({
   recoverMemory: recoverNativeModelMemory,
   nativeStatus: getNativeLocalModelStatus,
   prepareModel: prepareNativeLocalModel,
+  prepareInstalledModel: prepareInstalledNativeLocalModel,
   accountSnapshot: getVerifiedAccountSnapshot,
   manifestSession: beginNativeManifestAcceptance,
   manager: defaultManager,

@@ -1,6 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
 import { Store } from '@tauri-apps/plugin-store'
-import { trackMemoryUsage } from './memory/usage'
+import { trackMemoryUsage, type MemoryUsageOrigin } from './memory/usage'
 
 const SETTINGS_FILE = 'luczor.settings.json'
 
@@ -131,7 +131,11 @@ export async function maintainRepositoryIndex(
   }
   signal.addEventListener('abort', abort, { once: true })
   try {
-    await trackMemoryUsage('graphIndex', () => invoke('local_graph_index', { principalId, projectId, requestId }))
+    await trackMemoryUsage(
+      'graphIndex',
+      () => invoke('local_graph_index', { principalId, projectId, requestId }),
+      'idle'
+    )
     signal.throwIfAborted()
   } finally {
     signal.removeEventListener('abort', abort)
@@ -143,10 +147,13 @@ export async function searchRepository(
   principalId: string,
   projectId: string,
   query: string,
-  limit = 8
+  limit = 8,
+  origin: MemoryUsageOrigin = 'chat'
 ): Promise<GraphSearchResult> {
-  return trackMemoryUsage('graphSearch', () =>
-    invoke<GraphSearchResult>('local_graph_search', { principalId, projectId, query, limit })
+  return trackMemoryUsage(
+    'graphSearch',
+    () => invoke<GraphSearchResult>('local_graph_search', { principalId, projectId, query, limit }),
+    origin
   )
 }
 
@@ -154,10 +161,13 @@ export async function readRepositorySnippets(
   principalId: string,
   projectId: string,
   evidenceIds: string[],
-  maxTotalBytes = 32 * 1024
+  maxTotalBytes = 32 * 1024,
+  origin: MemoryUsageOrigin = 'chat'
 ): Promise<{ snippets: GraphSnippet[]; omitted: Array<{ evidence_id: string; reason: string }> }> {
-  return trackMemoryUsage('graphRead', () =>
-    invoke('local_graph_read_snippets', { principalId, projectId, evidenceIds, maxTotalBytes })
+  return trackMemoryUsage(
+    'graphRead',
+    () => invoke('local_graph_read_snippets', { principalId, projectId, evidenceIds, maxTotalBytes }),
+    origin
   )
 }
 
@@ -216,7 +226,8 @@ export async function buildLocalRepositoryContext(
   taskType: string,
   limit = 6,
   approvedForTurn = false,
-  target: 'local' | 'external' = 'external'
+  target: 'local' | 'external' = 'external',
+  origin: MemoryUsageOrigin = 'chat'
 ): Promise<LocalRepositoryContext> {
   const policy = await getRepositoryExternalPolicy()
   const empty = (requiresApproval = false): LocalRepositoryContext => ({
@@ -230,7 +241,7 @@ export async function buildLocalRepositoryContext(
   try {
     const status = await repositoryGraphStatus(principalId, projectId)
     if (status.status !== 'ready') return empty()
-    const result = await searchRepository(principalId, projectId, query, limit)
+    const result = await searchRepository(principalId, projectId, query, limit, origin)
     if (!result.hits.length) return empty()
     if (target !== 'local' && !canShareRepositoryContext(policy, approvedForTurn)) return empty(policy === 'ask')
 
@@ -239,7 +250,8 @@ export async function buildLocalRepositoryContext(
       principalId,
       projectId,
       selected.map(hit => hit.evidence_id),
-      32 * 1024
+      32 * 1024,
+      origin
     )
     const snippetsById = new Map(materialized.snippets.map(snippet => [snippet.evidence_id, snippet]))
     const sections = selected.flatMap(hit => {

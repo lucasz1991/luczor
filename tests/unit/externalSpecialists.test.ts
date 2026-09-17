@@ -144,6 +144,10 @@ describe('external role packets', () => {
     await expect(prepared.execute('coding', new AbortController().signal, vi.fn())).rejects.toThrow('nicht verfügbar')
     expect(fixtureData.approve).not.toHaveBeenCalled()
     await prepared.execute('research', new AbortController().signal, vi.fn())
+    const researchPrompt = fixtureData.stream.mock.calls[0]![0].messages[0]!.content
+    expect(researchPrompt).toContain('not live web research')
+    expect(researchPrompt).toContain('contradictions, and remaining questions')
+    expect(researchPrompt).toContain('never invent citations')
     expect(fixtureData.approve.mock.calls[0]![0].packets.map(packet => packet.role)).toEqual(['research', 'review'])
   })
   it('reports every unavailable role before approval when no external model is usable', async () => {

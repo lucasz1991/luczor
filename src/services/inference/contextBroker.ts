@@ -203,7 +203,17 @@ export async function buildScopedContextPackage(request: ContextBrokerRequest): 
       continue
     }
 
-    const content = sanitizeContent(fragment.content, budget.maxFragmentChars, request.target)
+    // A verified artifact is atomic: silently cutting its tail could drop a restriction or reference.
+    const prepared = fragment.id.startsWith('prepared:')
+    if (prepared && fragment.content.length > budget.maxChars) {
+      omitted.push({ id: fragment.id, reason: 'budget' })
+      continue
+    }
+    const content = sanitizeContent(
+      fragment.content,
+      prepared ? budget.maxChars : budget.maxFragmentChars,
+      request.target
+    )
     if (!content) {
       omitted.push({ id: fragment.id, reason: 'empty' })
       continue
