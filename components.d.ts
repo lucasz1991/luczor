@@ -60,6 +60,7 @@ declare module 'vue' {
     PlanningWorkspace: typeof import('./src/components/planning/PlanningWorkspace.vue')['default']
     PlanPanel: typeof import('./src/components/PlanPanel.vue')['default']
     PrivacyDiagnosticsSettings: typeof import('./src/components/PrivacyDiagnosticsSettings.vue')['default']
+    ProjectSettingsModal: typeof import('./src/components/ProjectSettingsModal.vue')['default']
     PromptBar: typeof import('./src/components/ai/PromptBar.vue')['default']
     ReadAloudText: typeof import('./src/components/ai/ReadAloudText.vue')['default']
     RecommendationCard: typeof import('./src/components/ai/RecommendationCard.vue')['default']

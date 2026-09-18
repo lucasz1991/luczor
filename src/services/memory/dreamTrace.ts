@@ -7,15 +7,7 @@ import { shallowRef } from 'vue'
  * Only identifiers, short labels and reasons are kept – never full memory text.
  */
 export type DreamStage =
-  | 'scanning'
-  | 'selecting'
-  | 'preparing'
-  | 'generating'
-  | 'verifying'
-  | 'committing'
-  | 'done'
-  | 'failed'
-  | 'interrupted'
+  'scanning' | 'selecting' | 'preparing' | 'generating' | 'verifying' | 'committing' | 'done' | 'failed' | 'interrupted'
 
 export type DreamOperation = 'read' | 'keep' | 'rewrite' | 'merge' | 'conflict' | 'remove' | 'create' | 'artifact'
 
@@ -74,8 +66,7 @@ const patch = (changes: Partial<DreamTrace>) => {
   dreamTrace.value = { ...dreamTrace.value, ...changes }
 }
 
-const label = (value: string | undefined) =>
-  value ? value.replace(/\s+/g, ' ').trim().slice(0, MAX_LABEL) : undefined
+const label = (value: string | undefined) => (value ? value.replace(/\s+/g, ' ').trim().slice(0, MAX_LABEL) : undefined)
 
 export function dreamTargetLabel(target: DreamTarget): string {
   return target.label ?? target.id

@@ -79,6 +79,7 @@ import SelectionActions from './components/ai/SelectionActions.vue'
 import AiIcon from './components/ai/AiIcon.vue'
 import MiniChatSurface from './components/mini/MiniChatSurface.vue'
 import ToolCenterPanel from './components/tools/ToolCenterPanel.vue'
+import ProjectSettingsModal from './components/ProjectSettingsModal.vue'
 import BrowserPanel from './components/browser/BrowserPanel.vue'
 import { browserPanel } from '@/services/browserPanel'
 import { useMiniChatHost } from '@/composables/useMiniChatHost'
@@ -205,6 +206,12 @@ const showCloudProjects = ref(false)
 const showPlanning = ref(false)
 const showWorkflows = ref(false)
 const showToolCenter = ref(false)
+const showProjectSettings = ref(false)
+const projectSettingsTab = ref<'folder' | 'graph' | 'display'>('folder')
+function openProjectSettings(tab: 'folder' | 'graph' | 'display' = 'folder') {
+  projectSettingsTab.value = tab
+  showProjectSettings.value = true
+}
 const appReady = ref(false)
 const appInitialized = ref(false)
 const appQuitting = ref(false)
@@ -1440,6 +1447,31 @@ async function bindCurrentProjectWorkspace() {
   }
 }
 
+/** Re-points an already bound project at another folder; the old graph index is dropped first. */
+async function changeProjectWorkspace() {
+  if (workspaceBusy.value || localGraphBusy.value || !activeWorkspace.value) return
+  const projectId = activeProjectId.value
+  const previous = activeWorkspace.value
+  workspaceBusy.value = true
+  workspaceMessage.value = ''
+  try {
+    const rootPath = await selectProjectWorkspaceDirectory('Anderen Ordner mit diesem Projekt verknüpfen')
+    if (!rootPath || rootPath === previous.rootPath || activeProjectId.value !== projectId) return
+    const principalId = await requireRepositoryPrincipalId()
+    await unbindRepository(principalId, projectId, true)
+    const workspace = await bindProjectWorkspace(projectId, rootPath)
+    activeWorkspace.value = workspace
+    workspaceMessage.value = 'Der Projektordner wurde gewechselt.'
+    localGraphMessage.value = ''
+    if (workspace.isGitRepository) await bindAndIndexWorkspace(workspace)
+  } catch (error) {
+    workspaceMessage.value = error instanceof Error ? error.message : String(error)
+  } finally {
+    workspaceBusy.value = false
+    await Promise.all([refreshActiveWorkspace(), refreshLocalGraphStatus()])
+  }
+}
+
 async function reindexRepository() {
   if (localGraphBusy.value || !activeWorkspace.value?.isGitRepository) return
   localGraphBusy.value = true
@@ -1490,7 +1522,8 @@ async function removeRepositoryBinding() {
   }
 }
 
-async function saveRepositoryPolicy() {
+async function saveRepositoryPolicy(next?: RepositoryExternalPolicy) {
+  if (next) repositoryExternalPolicy.value = next
   const settings = await Store.load('luczor.settings.json')
   await settings.set('repository_external_policy', repositoryExternalPolicy.value)
   await settings.save()
@@ -2715,6 +2748,31 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
     :kill-switch="hud.killSwitch"
     @update:open="showToolCenter = $event"
   />
+  <ProjectSettingsModal
+    :open="showProjectSettings"
+    :initial-tab="projectSettingsTab"
+    :project="activeProject"
+    :workspace="activeWorkspace"
+    :workspace-busy="workspaceBusy"
+    :workspace-message="workspaceMessage"
+    :graph-status="localGraphStatus"
+    :graph-busy="localGraphBusy"
+    :graph-message="localGraphMessage"
+    :policy="repositoryExternalPolicy"
+    @update:open="showProjectSettings = $event"
+    @bind="bindCurrentProjectWorkspace"
+    @change-folder="changeProjectWorkspace"
+    @reindex="reindexRepository"
+    @unbind="removeRepositoryBinding"
+    @update:policy="saveRepositoryPolicy($event)"
+    @rename="renameProject(activeProjectId, $event)"
+    @open-memory="
+      () => {
+        showProjectSettings = false
+        openMemoryExplorer()
+      }
+    "
+  />
   <Teleport to="body">
     <MiniChatSurface
       v-if="miniChat.browserVisible.value"
@@ -2767,6 +2825,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       :projects="projects"
       :project-id="activeProjectId"
       @close="showMemoryExplorer = false"
+      @settings="openProjectSettings('display')"
     />
     <main v-show="!showMemoryExplorer" class="main-col">
       <div class="header">
@@ -2824,6 +2883,29 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             <AiIcon name="tool" :size="16" />
           </button>
           <p v-if="modeConfirmationError" class="repo-graph-message" role="alert">{{ modeConfirmationError }}</p>
+
+          <button
+            type="button"
+            class="icon-btn"
+            :class="{ 'is-on': showProjectSettings }"
+            title="Projekteinstellungen · Ordner, Graph-Erkennung, Darstellung"
+            aria-label="Projekteinstellungen öffnen"
+            @click="openProjectSettings('folder')"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              width="16"
+              height="16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path d="M3 6h7l2 3h9v11H3Z" />
+              <path d="M12 12v6M9 15h6" />
+            </svg>
+          </button>
 
           <button
             type="button"
@@ -3365,6 +3447,14 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
               <span class="info-stat" :class="`is-${activeWorkspace?.status ?? 'unbound'}`">
                 {{ activeWorkspace?.status === 'ready' ? 'bereit' : (activeWorkspace?.status ?? 'nicht zugeordnet') }}
               </span>
+              <button
+                type="button"
+                class="info-head__action"
+                title="Projekteinstellungen öffnen"
+                @click="openProjectSettings('folder')"
+              >
+                Einstellungen
+              </button>
             </div>
 
             <div v-if="activeWorkspace" class="repo-graph-summary workspace-summary">
@@ -3409,7 +3499,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
 
             <label v-if="activeWorkspace?.isGitRepository" class="repo-graph-field">
               <span>Code an externe Modelle</span>
-              <select v-model="repositoryExternalPolicy" @change="saveRepositoryPolicy">
+              <select v-model="repositoryExternalPolicy" @change="saveRepositoryPolicy()">
                 <option value="deny">Nie übertragen</option>
                 <option value="ask">Nur nach Freigabe</option>
                 <option value="allow_selected">Ausgewählte Treffer erlauben</option>

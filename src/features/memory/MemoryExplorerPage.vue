@@ -63,7 +63,11 @@ function markTransient(previous: MemoryNode[], next: MemoryNode[]) {
   const born = new Set(next.filter(node => node.kind !== 'System' && !before.has(node.id)).map(node => node.id))
   const ghosts = previous
     .filter(node => node.kind !== 'System' && !after.has(node.id) && node.system === 'Erinnerungen')
-    .map(node => ({ ...node, state: 'removed' as const, detail: `${node.detail}\n\nDurch die Leerlauf-Pflege ersetzt.` }))
+    .map(node => ({
+      ...node,
+      state: 'removed' as const,
+      detail: `${node.detail}\n\nDurch die Leerlauf-Pflege ersetzt.`,
+    }))
   if (!born.size && !ghosts.length) return
   transient.value = { born, ghosts, until: Date.now() + 8000 }
   if (transientTimer) clearTimeout(transientTimer)

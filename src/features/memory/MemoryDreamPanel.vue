@@ -7,6 +7,7 @@ import {
   DREAM_STAGE_LABELS,
   dreamTargetLabel,
   type DreamRun,
+  type DreamStep,
   type DreamTarget,
   type DreamTrace,
 } from '@/services/memory/dreamTrace'
@@ -63,6 +64,8 @@ const phaseLabel = computed(() => {
 })
 const reasonLabel = computed(() => {
   const reason = status.value?.reason ?? props.trace.lastSkip?.reason
+  // `reason` comes from the optimizer's fixed reason codes, not from user input.
+  // eslint-disable-next-line security/detect-object-injection
   return reason ? (REASONS[reason] ?? reason) : ''
 })
 const countdown = computed(() => {
@@ -94,8 +97,16 @@ function duration(item: DreamRun) {
   const seconds = Math.max(0, Math.round((end - item.startedAt) / 1000))
   return seconds >= 60 ? `${Math.floor(seconds / 60)} min ${seconds % 60} s` : `${seconds} s`
 }
+/** Stage label plus detail, without repeating a title that already names the stage. */
+function stepSubtitle(step: DreamStep): string {
+  const stage = DREAM_STAGE_LABELS[step.stage]
+  return [stage !== step.title ? stage : '', step.detail ?? ''].filter(Boolean).join(' · ')
+}
+/** Counts affected entries, not decision rows: one merge over two memories reads as two. */
 function decisionCount(item: DreamRun, op: string) {
-  return item.decisions.filter(decision => decision.op === op).length
+  return item.decisions
+    .filter(decision => decision.op === op)
+    .reduce((sum, decision) => sum + Math.max(1, decision.targets.length), 0)
 }
 
 async function startDream() {
@@ -181,10 +192,22 @@ async function stopDreaming() {
     <p v-if="message" role="status" class="dream-panel__message" :data-tone="messageTone">{{ message }}</p>
 
     <dl class="dream-panel__stats" aria-label="Pflegezustand">
-      <div><dt>Abgeschlossen</dt><dd>{{ status?.completed ?? 0 }}</dd></div>
-      <div><dt>Warteschlange</dt><dd>{{ trace.scan?.queued ?? maintenanceProgress.queued }}</dd></div>
-      <div><dt>Geprüft</dt><dd>{{ maintenanceProgress.checked }}</dd></div>
-      <div><dt>Geändert</dt><dd>{{ maintenanceProgress.changed }}</dd></div>
+      <div>
+        <dt>Abgeschlossen</dt>
+        <dd>{{ status?.completed ?? 0 }}</dd>
+      </div>
+      <div>
+        <dt>Warteschlange</dt>
+        <dd>{{ trace.scan?.queued ?? maintenanceProgress.queued }}</dd>
+      </div>
+      <div>
+        <dt>Geprüft</dt>
+        <dd>{{ maintenanceProgress.checked }}</dd>
+      </div>
+      <div>
+        <dt>Geändert</dt>
+        <dd>{{ maintenanceProgress.changed }}</dd>
+      </div>
       <div>
         <dt>Modell</dt>
         <dd class="dream-panel__mono">{{ run?.modelId || maintenanceProgress.modelId || '—' }}</dd>
@@ -210,7 +233,7 @@ async function stopDreaming() {
         >
           <span class="dream-panel__step-dot" aria-hidden="true" />
           <span class="dream-panel__step-title">{{ step.title }}</span>
-          <small>{{ DREAM_STAGE_LABELS[step.stage] }}<template v-if="step.detail"> · {{ step.detail }}</template></small>
+          <small v-if="stepSubtitle(step)">{{ stepSubtitle(step) }}</small>
           <time>{{ time(step.at) }}</time>
         </li>
       </ol>
@@ -248,7 +271,11 @@ async function stopDreaming() {
       Repository-Graphen, verdichtet Belegtes und ersetzt Doppeltes – jeder Schritt erscheint hier und in der Karte.
     </p>
 
-    <details v-if="trace.history.length > (run && !run.endedAt ? 0 : 1)" class="dream-panel__history" :open="showHistory">
+    <details
+      v-if="trace.history.length > (run && !run.endedAt ? 0 : 1)"
+      class="dream-panel__history"
+      :open="showHistory"
+    >
       <summary @click.prevent="showHistory = !showHistory">Frühere Träume ({{ trace.history.length }})</summary>
       <ul>
         <li v-for="item in trace.history" :key="item.id">

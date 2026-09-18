@@ -237,7 +237,12 @@ onBeforeUnmount(() => {
           class="halo"
         />
         <circle :cx="point.left" :cy="point.top" :r="point.radius" class="node" />
-        <text v-if="showLabel(point)" :x="point.left + 15" :y="point.top - 12" :class="{ minor: point.kind !== 'System' }">
+        <text
+          v-if="showLabel(point)"
+          :x="point.left + 15"
+          :y="point.top - 12"
+          :class="{ minor: point.kind !== 'System' }"
+        >
           {{
             point.label.length > (point.kind === 'System' ? 48 : 30)
               ? point.label.slice(0, point.kind === 'System' ? 48 : 30) + '…'
