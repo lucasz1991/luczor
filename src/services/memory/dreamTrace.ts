@@ -122,6 +122,16 @@ export function beginDreamRun(input: {
             },
           ]
         : []),
+      ...(dreamTrace.value.offload?.active
+        ? [
+            {
+              at: dreamTrace.value.offload.at,
+              stage: 'preparing' as const,
+              title: 'Notfall-Auslagerung',
+              detail: `RAM ${dreamTrace.value.offload.freeRamMiB} MiB frei · Auslagerungsdatei ${dreamTrace.value.offload.swapFreeMiB} MiB frei · langsamer`,
+            },
+          ]
+        : []),
       { at: now, stage: 'selecting', title: 'Auftrag gewählt', detail: label(input.reason) },
     ],
     decisions: input.sources.length

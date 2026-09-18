@@ -352,7 +352,9 @@ export function createMaintenanceWorker(
           if (!idleEmergencyOffload.value || freeRamMiB < floorMiB) return no('memory_pressure')
           if (!(metrics.swap_total_mb && metrics.swap_total_mb > 0)) return no('no_swap')
           if (swapFreeMiB < 2048) return no('memory_pressure')
-          if (!offloading) recordDreamStep('preparing', 'Notfall-Auslagerung', `RAM ${Math.round(freeRamMiB)} MiB frei`)
+          // Mid-run activation lands in the step list directly; before a run, beginDreamRun() folds it in.
+          if (!offloading && running)
+            recordDreamStep('preparing', 'Notfall-Auslagerung', `RAM ${Math.round(freeRamMiB)} MiB frei`)
           offloading = true
           recordDreamOffload({ active: true, freeRamMiB: Math.round(freeRamMiB), swapFreeMiB: Math.round(swapFreeMiB) })
           // Smaller bundles keep the KV cache and the prompt working set small while paging.

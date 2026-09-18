@@ -20,6 +20,8 @@ const props = withDefaults(
     selected: string
     dream?: DreamView | null
     display?: MemoryGraphDisplay
+    /** Emergency offload is active: the pass runs slowly on the page file. */
+    offloading?: boolean
   }>(),
   { dream: null, display: () => ({ ...DEFAULT_MEMORY_GRAPH_DISPLAY }) }
 )
@@ -174,7 +176,7 @@ onBeforeUnmount(() => {
     <Transition name="dream-chip">
       <div v-if="dreaming" class="memory-graph__dream" role="status">
         <span class="memory-graph__dream-dot" aria-hidden="true" />
-        Träumt · {{ dreamStage || 'Leerlauf-Pflege' }}
+        Träumt · {{ dreamStage || 'Leerlauf-Pflege' }}<template v-if="offloading"> · langsam (Auslagerung)</template>
       </div>
     </Transition>
     <svg

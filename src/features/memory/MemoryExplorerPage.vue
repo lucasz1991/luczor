@@ -286,6 +286,7 @@ onBeforeUnmount(() => {
           :selected="selected"
           :dream="dream"
           :display="memoryGraphDisplay"
+          :offloading="!!dreamTrace.offload?.active"
           @select="selected = $event"
         />
         <MemoryDreamPanel :dream="dream" :trace="dreamTrace" :project-id="project" @focus="focusDreamTarget" />

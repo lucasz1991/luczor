@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ProjectWorkspaceBinding } from '@/services/projectWorkspace'
 import type { RepositoryExternalPolicy, RepositoryGraphStatus } from '@/services/repositoryGraph'
 import { idleOptimizationEnabled, saveIdleOptimizationSetting } from '@/services/agents/idleOptimization'
+import { idleEmergencyOffload, saveIdleEmergencyOffloadSetting } from '@/services/agents/idleOffloadSetting'
 import {
   loadMemoryGraphDisplay,
   memoryGraphDisplay,
@@ -110,6 +111,18 @@ async function toggleIdle() {
     idleError.value = 'Die Einstellung konnte nicht gespeichert werden.'
   } finally {
     savingIdle.value = false
+  }
+}
+const savingOffload = ref(false)
+async function toggleOffload() {
+  savingOffload.value = true
+  idleError.value = ''
+  try {
+    await saveIdleEmergencyOffloadSetting(!idleEmergencyOffload.value)
+  } catch {
+    idleError.value = 'Die Einstellung konnte nicht gespeichert werden.'
+  } finally {
+    savingOffload.value = false
   }
 }
 const display = computed(() => memoryGraphDisplay.value)
@@ -440,6 +453,28 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                       :disabled="savingIdle"
                       aria-label="Leerlauf-Pflege"
                       @click="toggleIdle"
+                    >
+                      <span />
+                    </button>
+                  </div>
+                  <div class="lz-row">
+                    <div>
+                      <div class="lz-card__title">Notfall-Auslagerung auf den Datenträger</div>
+                      <p class="lz-hint">
+                        Wird beim Träumen der Arbeitsspeicher knapp, läuft der Durchgang weiter über die
+                        Auslagerungsdatei (SSD): Modellgewichte per Speicherabbildung, kleinere Quellenbündel. Deutlich
+                        langsamer, greift nur bei RAM-Mangel und lässt mindestens 3 % des RAM für den Desktop frei.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      class="lz-switch"
+                      :class="{ 'is-on': idleEmergencyOffload }"
+                      role="switch"
+                      :aria-checked="idleEmergencyOffload"
+                      :disabled="savingOffload"
+                      aria-label="Notfall-Auslagerung"
+                      @click="toggleOffload"
                     >
                       <span />
                     </button>

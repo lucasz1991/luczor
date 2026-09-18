@@ -304,6 +304,12 @@ async function stopDreaming() {
       </div>
     </header>
     <p v-if="message" role="status" class="dream-panel__message" :data-tone="messageTone">{{ message }}</p>
+    <p v-if="trace.offload?.active" class="dream-panel__offload" role="status">
+      <span class="dream-panel__offload-dot" aria-hidden="true" />
+      Notfall-Auslagerung aktiv: RAM knapp ({{ trace.offload.freeRamMiB.toLocaleString('de-DE') }} MiB frei) – der Traum
+      läuft langsamer über die Auslagerungsdatei ({{ trace.offload.swapFreeMiB.toLocaleString('de-DE') }} MiB frei) mit
+      kleineren Quellenbündeln.
+    </p>
 
     <dl class="dream-panel__stats" aria-label="Pflegezustand">
       <div>
@@ -480,6 +486,27 @@ async function stopDreaming() {
 }
 .dream-panel__message[data-tone='error'] {
   border-left-color: var(--ai-orange, #e6a23c);
+}
+.dream-panel__offload {
+  margin: 0;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--ai-orange, #e6a23c) 45%, transparent);
+  background: color-mix(in srgb, var(--ai-orange, #e6a23c) 10%, var(--ai-page));
+  font-size: 12px;
+  line-height: 1.5;
+}
+.dream-panel__offload-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: var(--ai-orange, #e6a23c);
+  animation: dream-dot 1.8s ease-out infinite;
 }
 .dream-panel__stats {
   margin: 0;
