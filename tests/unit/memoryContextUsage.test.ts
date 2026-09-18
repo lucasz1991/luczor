@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it } from 'vitest'
 import { buildTargetContextPackages } from '@/services/inference/contextBroker'
 import { createContextUsageObserver } from '@/services/memory/contextUsage'
-import { activeMemoryLinks, memoryLinkNodeId, resetModelActivityForTests } from '@/services/memory/modelActivity'
+import {
+  activeMemoryLinks,
+  memoryLinkNodeId,
+  recordMemoryLinks,
+  resetModelActivityForTests,
+} from '@/services/memory/modelActivity'
 import { memoryUsageEvents, resetMemoryUsage } from '@/services/memory/usage'
 import type { PromptFragment } from '@/services/prompt/promptContextAssembler'
 
@@ -39,6 +44,14 @@ async function setup(fragments: PromptFragment[]) {
 const included = () => memoryUsageEvents().find(row => row.origin === 'chat')!.included
 
 describe('actual submitted memory context attribution', () => {
+  it('does not overwrite a recent real write with the next request observation', async () => {
+    const { packages, observe } = await setup([memory('one')])
+    recordMemoryLinks(['one'], 'updated', 'chat')
+    observe({ target: 'local_llama_cpp', messages: [{ role: 'system', content: packages.local.text }] })
+    expect(activeMemoryLinks()).toMatchObject([{ id: 'one', state: 'updated' }])
+    observe({ target: 'local_llama_cpp', messages: [] })
+    expect(activeMemoryLinks()).toMatchObject([{ id: 'one', state: 'updated' }])
+  })
   beforeEach(() => {
     resetMemoryUsage()
     resetModelActivityForTests()

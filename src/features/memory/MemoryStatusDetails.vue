@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useMemoryStatus, openMemoryExplorerFromStatus } from './observatory'
+import { repositoryLspDetail } from '@/services/repositoryLspStatus'
 const props = defineProps<{ active: boolean; secondary?: boolean }>()
 const emit = defineEmits<{ open: [] }>()
 const openError = ref('')
@@ -177,6 +178,7 @@ async function open() {
             {{ snapshot.graph.lsp.edges }} Verweise</template
           >
         </p>
+        <p v-if="repositoryLspDetail(snapshot.graph?.lsp)">{{ repositoryLspDetail(snapshot.graph?.lsp) }}</p>
       </section>
       <p>
         Persönlichkeit: {{ snapshot.profile.source === 'admin' ? 'Admin-Profil' : 'Lokaler Entwurf' }} ·

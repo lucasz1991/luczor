@@ -71,7 +71,12 @@ export function recordMemoryLinks(
     const previous = links.get(key)
     // A write or removal must not be downgraded by a recall that races in afterwards.
     if (previous && previous.state === 'removed' && state !== 'removed') continue
-    if (previous && (previous.state === 'written' || previous.state === 'updated') && state === 'recalled') continue
+    if (
+      previous &&
+      (previous.state === 'written' || previous.state === 'updated') &&
+      ['recalled', 'included', 'omitted'].includes(state)
+    )
+      continue
     links.set(key, { id, state, origin, at: now, ...(kind === 'artifact' ? { kind } : {}) })
     changed = true
   }

@@ -18,6 +18,12 @@ pub(super) struct State {
     #[serde(default)]
     pub next_symbol: usize,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(default)]
+    pub failed_files: usize,
     pub scanned: usize,
     pub files: usize,
     pub edges: usize,
@@ -37,6 +43,12 @@ struct ResultSet {
     next_file: usize,
     next_symbol: usize,
     status: String,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    phase: Option<String>,
+    #[serde(default)]
+    failed_files: usize,
     scanned: usize,
     edges: Vec<Edge>,
 }
@@ -86,7 +98,7 @@ pub(super) fn enrich<D: GraphDatabaseProvider>(
 ) -> Result<(), String> {
     let fingerprint = sha256(
         format!(
-            "lsp-v1-5.3.0|{}|{}",
+            "lsp-v2-5.3.0|{}|{}",
             limited,
             sources
                 .iter()
@@ -98,14 +110,25 @@ pub(super) fn enrich<D: GraphDatabaseProvider>(
     );
     let previous: Option<String> = tx.query_row("SELECT fingerprint FROM repository_lsp_state WHERE principal_id=?1 AND repository_id=?2", params![bound.principal_id, bound.repository_id], |r| r.get(0)).optional().map_err(db_error)?;
     let same_snapshot = previous.as_deref() == Some(&fingerprint);
-    let resume = state(tx, &bound.principal_id, &bound.repository_id)
+    let mut resume = state(tx, &bound.principal_id, &bound.repository_id)
         .filter(|_| same_snapshot)
         .unwrap_or_default();
     if same_snapshot && resume.complete {
         return Ok(());
     }
+    // A later explicit/index-maintenance pass retries incomplete file analysis;
+    // an exhausted cursor must never silently turn prior failures into ready.
+    if resume.next_file >= sources.len() && resume.failed_files > 0 {
+        resume.next_file = 0;
+        resume.next_symbol = 0;
+        resume.scanned = 0;
+        resume.failed_files = 0;
+    }
     let mut current = State {
         status: "unavailable".into(),
+        reason: Some("lsp_runtime_missing".into()),
+        phase: Some("runtime".into()),
+        failed_files: resume.failed_files,
         files: sources.len(),
         next_file: resume.next_file,
         next_symbol: resume.next_symbol,
@@ -116,20 +139,24 @@ pub(super) fn enrich<D: GraphDatabaseProvider>(
     let mut edges = Vec::new();
     if sources.is_empty() {
         current.status = "not_applicable".into();
+        current.reason = None;
+        current.phase = None;
     } else if let Some(root) = app.lsp_runtime_root() {
         let run = || -> Result<ResultSet, String> {
-            let bytes = fs::read(root.join("runtime.json")).map_err(|_| "LSP manifest missing")?;
+            let bytes = fs::read(root.join("runtime.json")).map_err(|_| "lsp_runtime_missing")?;
             if bytes.len() > 256 * 1024 {
-                return Err("LSP manifest too large".into());
+                return Err("lsp_runtime_invalid".into());
             }
             let manifest: serde_json::Value =
-                serde_json::from_slice(&bytes).map_err(|_| "Invalid LSP manifest")?;
+                serde_json::from_slice(&bytes).map_err(|_| "lsp_runtime_invalid")?;
             if manifest["version"] != 1
                 || manifest["provider"] != "typescript-language-server@5.3.0"
             {
-                return Err("LSP version mismatch".into());
+                return Err("lsp_runtime_invalid".into());
             }
-            let hashes = manifest["hashes"].as_object().ok_or("LSP hashes missing")?;
+            let hashes = manifest["hashes"]
+                .as_object()
+                .ok_or("lsp_runtime_invalid")?;
             let node = if cfg!(windows) { "node.exe" } else { "node" };
             for required in [
                 node,
@@ -138,32 +165,32 @@ pub(super) fn enrich<D: GraphDatabaseProvider>(
                 "typescript-language-server/lib/cli.mjs",
             ] {
                 if !hashes.contains_key(required) {
-                    return Err("LSP runtime incomplete".into());
+                    return Err("lsp_runtime_missing".into());
                 }
             }
             for (path, expected) in hashes {
                 if Path::new(path).is_absolute() || path.split(['/', '\\']).any(|p| p == "..") {
-                    return Err("Invalid LSP runtime path".into());
+                    return Err("lsp_runtime_invalid".into());
                 }
-                if sha256(&fs::read(root.join(path)).map_err(|_| "LSP runtime file missing")?)
+                if sha256(&fs::read(root.join(path)).map_err(|_| "lsp_runtime_missing")?)
                     != expected.as_str().unwrap_or("")
                 {
-                    return Err("LSP integrity check failed".into());
+                    return Err("lsp_integrity_failed".into());
                 }
             }
             let parent = app
                 .graph_database_path()?
                 .parent()
-                .ok_or("LSP snapshot parent missing")?
+                .ok_or("lsp_snapshot_failed")?
                 .join("lsp-snapshots");
-            fs::create_dir_all(&parent).map_err(|_| "Cannot create LSP snapshot parent")?;
+            fs::create_dir_all(&parent).map_err(|_| "lsp_snapshot_failed")?;
             let snapshot = Snapshot(parent.join(Uuid::new_v4().to_string()));
-            fs::create_dir(&snapshot.0).map_err(|_| "Cannot create LSP snapshot")?;
+            fs::create_dir(&snapshot.0).map_err(|_| "lsp_snapshot_failed")?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
                 fs::set_permissions(&snapshot.0, fs::Permissions::from_mode(0o700))
-                    .map_err(|_| "Cannot protect LSP snapshot")?;
+                    .map_err(|_| "lsp_snapshot_failed")?;
             }
             let mut command = Command::new(root.join(node));
             command
@@ -183,22 +210,35 @@ pub(super) fn enrich<D: GraphDatabaseProvider>(
             let output = super::super::process::run_bounded_command_scoped(
                 command,
                 Some(
-                    serde_json::to_vec(&serde_json::json!({ "files": sources, "next_file": resume.next_file, "next_symbol": resume.next_symbol }))
-                        .map_err(|_| "LSP input invalid")?,
+                    serde_json::to_vec(&serde_json::json!({ "files": sources, "next_file": resume.next_file, "next_symbol": resume.next_symbol, "scanned": resume.scanned, "failed_files": resume.failed_files }))
+                        .map_err(|_| "lsp_input_invalid")?,
                 ),
                 Duration::from_secs(70),
                 4 * 1024 * 1024,
                 None,
                 Some(&check),
-            )?;
-            if !output.success || output.stdout_truncated {
-                return Err("LSP worker failed or exceeded limits".into());
+            ).map_err(|_| "lsp_worker_start_failed")?;
+            if output.timed_out {
+                return Err("lsp_worker_timeout".into());
             }
-            serde_json::from_str(&output.stdout).map_err(|_| "Invalid LSP response".into())
+            if output.stdout_truncated {
+                return Err("lsp_response_limit".into());
+            }
+            if !output.success {
+                return Err("lsp_worker_failed".into());
+            }
+            serde_json::from_str(&output.stdout).map_err(|_| "lsp_protocol_error".into())
         };
         match run() {
             Ok(result) => {
                 current.complete = result.status == "ready";
+                current.reason = result.reason.as_deref().map(safe_reason).map(str::to_owned);
+                current.phase = result
+                    .phase
+                    .as_deref()
+                    .and_then(safe_phase)
+                    .map(str::to_owned);
+                current.failed_files = result.failed_files.min(sources.len());
                 current.next_file = result.next_file.min(sources.len());
                 current.next_symbol = result.next_symbol;
                 current.status = if result.status == "error" {
@@ -210,9 +250,15 @@ pub(super) fn enrich<D: GraphDatabaseProvider>(
                 }
                 .into();
                 current.scanned = result.scanned.min(sources.len());
+                if limited && current.reason.is_none() {
+                    current.reason = Some("lsp_source_limit".into());
+                }
                 edges = result.edges;
             }
-            Err(_) => current.status = "error".into(),
+            Err(error) => {
+                current.status = "error".into();
+                current.reason = Some(safe_reason(&error).into());
+            }
         }
     }
     if cancellation.is_some_and(|c| c.load(Ordering::Acquire)) {
@@ -242,6 +288,61 @@ pub(super) fn enrich<D: GraphDatabaseProvider>(
     }
     tx.execute("INSERT INTO repository_lsp_state(principal_id,repository_id,fingerprint,state) VALUES(?1,?2,?3,?4) ON CONFLICT(principal_id,repository_id) DO UPDATE SET fingerprint=excluded.fingerprint,state=excluded.state", params![bound.principal_id, bound.repository_id, fingerprint, serde_json::to_string(&current).map_err(|_| "Invalid LSP state")?]).map_err(db_error)?;
     Ok(())
+}
+
+// Never publish worker stderr, paths, repository text or arbitrary error messages.
+fn safe_reason(value: &str) -> &str {
+    match value {
+        "lsp_runtime_missing"
+        | "lsp_runtime_invalid"
+        | "lsp_integrity_failed"
+        | "lsp_snapshot_failed"
+        | "lsp_input_invalid"
+        | "lsp_worker_start_failed"
+        | "lsp_worker_timeout"
+        | "lsp_worker_failed"
+        | "lsp_response_limit"
+        | "lsp_protocol_error"
+        | "lsp_server_start_failed"
+        | "lsp_server_exited"
+        | "lsp_request_timeout"
+        | "lsp_request_rejected"
+        | "lsp_capability_missing"
+        | "lsp_batch_limit"
+        | "lsp_source_limit"
+        | "lsp_file_failures" => value,
+        _ => "lsp_analysis_failed",
+    }
+}
+
+fn safe_phase(value: &str) -> Option<&str> {
+    match value {
+        "runtime" | "initialize" | "symbols" | "references" | "complete" => Some(value),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod diagnostics_tests {
+    use super::*;
+    #[test]
+    fn diagnostics_are_codes_only_and_old_states_remain_readable() {
+        assert_eq!(safe_reason("lsp_request_timeout"), "lsp_request_timeout");
+        assert_eq!(
+            safe_reason("lsp_private_path_secret"),
+            "lsp_analysis_failed"
+        );
+        assert_eq!(
+            safe_reason("C:/private/file.ts: SECRET"),
+            "lsp_analysis_failed"
+        );
+        assert_eq!(safe_phase("references"), Some("references"));
+        assert_eq!(safe_phase("PRIVATE_SOURCE"), None);
+        let old: State =
+            serde_json::from_str(r#"{"status":"ready","scanned":2,"files":2,"edges":1}"#).unwrap();
+        assert_eq!(old.failed_files, 0);
+        assert!(old.reason.is_none());
+    }
 }
 
 pub(super) fn relations(

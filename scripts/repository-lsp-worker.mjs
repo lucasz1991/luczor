@@ -62,16 +62,35 @@ const server = spawn(
 let sequence = 0
 let buffer = Buffer.alloc(0)
 const pending = new Map()
+let serverFailure
+function failServer(reason) {
+  serverFailure ??= reason
+  for (const item of pending.values()) {
+    clearTimeout(item.timer)
+    item.reject(new Error(serverFailure))
+  }
+  pending.clear()
+}
+server.on('error', () => failServer('lsp_server_start_failed'))
+server.on('exit', () => failServer('lsp_server_exited'))
+server.stdin.on('error', () => failServer('lsp_server_exited'))
 function send(message) {
+  if (serverFailure) throw new Error(serverFailure)
   const body = JSON.stringify({ jsonrpc: '2.0', ...message })
   server.stdin.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`)
 }
 function request(method, params, timeout = 8000) {
   return new Promise((resolve, reject) => {
+    if (serverFailure) return reject(new Error(serverFailure))
     const id = ++sequence
     const timer = setTimeout(() => {
       pending.delete(id)
-      reject(new Error('LSP request timeout'))
+      try {
+        send({ method: '$/cancelRequest', params: { id } })
+      } catch {
+        /* The original, bounded request failure remains authoritative. */
+      }
+      reject(new Error('lsp_request_timeout'))
     }, timeout)
     pending.set(id, { resolve, reject, timer })
     send({ id, method, params })
@@ -80,6 +99,7 @@ function request(method, params, timeout = 8000) {
 server.stdout.on('data', chunk => {
   buffer = Buffer.concat([buffer, chunk])
   if (buffer.length > 8 * 1024 * 1024) {
+    failServer('lsp_response_limit')
     server.kill()
     return
   }
@@ -88,12 +108,20 @@ server.stdout.on('data', chunk => {
     if (end < 0) return
     const match = /Content-Length: (\d+)/iu.exec(buffer.subarray(0, end).toString())
     if (!match) {
+      failServer('lsp_protocol_error')
       server.kill()
       return
     }
     const length = Number(match[1])
     if (buffer.length < end + 4 + length) return
-    const message = JSON.parse(buffer.subarray(end + 4, end + 4 + length).toString())
+    let message
+    try {
+      message = JSON.parse(buffer.subarray(end + 4, end + 4 + length).toString())
+    } catch {
+      failServer('lsp_protocol_error')
+      server.kill()
+      return
+    }
     buffer = buffer.subarray(end + 4 + length)
     if (message.method && message.id !== undefined) {
       // No edits, execution, configuration plugins, or server-initiated reads.
@@ -105,14 +133,17 @@ server.stdout.on('data', chunk => {
       const item = pending.get(message.id)
       pending.delete(message.id)
       clearTimeout(item.timer)
-      if (message.error) item.reject(new Error('LSP request rejected'))
+      if (message.error) item.reject(new Error('lsp_request_rejected'))
       else item.resolve(message.result)
     }
   }
 })
 const result = {
   status: 'ready',
-  scanned: input.next_file || 0,
+  reason: undefined,
+  phase: 'initialize',
+  scanned: input.scanned ?? input.next_file ?? 0,
+  failed_files: input.failed_files || 0,
   next_file: input.next_file || 0,
   next_symbol: input.next_symbol || 0,
   edges: [],
@@ -136,91 +167,139 @@ try {
     15000
   )
   if (!initialized.capabilities?.referencesProvider || !initialized.capabilities?.documentSymbolProvider)
-    throw new Error('LSP reference capability missing')
+    throw new Error('lsp_capability_missing')
   send({ method: 'initialized', params: {} })
   const deadline = Date.now() + 45000
   let symbolsSeen = 0
   const unique = new Set()
   const entries = [...allowed]
+  let coldProject = true
   outer: for (let fileIndex = result.next_file; fileIndex < entries.length; fileIndex++) {
     const [uri, file] = entries[fileIndex]
     if (Date.now() > deadline || symbolsSeen >= 500) {
       result.status = 'partial'
+      result.reason = 'lsp_batch_limit'
       break
     }
-    send({
-      method: 'textDocument/didOpen',
-      params: {
-        textDocument: {
-          uri,
-          languageId: /\.tsx?$/u.test(file.path) ? 'typescript' : 'javascript',
-          version: 1,
-          text: file.content,
+    result.phase = 'symbols'
+    try {
+      send({
+        method: 'textDocument/didOpen',
+        params: {
+          textDocument: {
+            uri,
+            languageId: /\.tsx$/u.test(file.path)
+              ? 'typescriptreact'
+              : /\.jsx$/u.test(file.path)
+                ? 'javascriptreact'
+                : /\.[cm]?ts$/u.test(file.path)
+                  ? 'typescript'
+                  : 'javascript',
+            version: 1,
+            text: file.content,
+          },
         },
-      },
-    })
-    const symbols = (await request('textDocument/documentSymbol', { textDocument: { uri } })) || []
-    const flat = []
-    function collect(items) {
-      for (const item of items) {
-        if ([5, 6, 9, 12, 13, 14].includes(item.kind)) flat.push(item)
-        if (item.children) collect(item.children)
-      }
-    }
-    collect(symbols)
-    for (let symbolIndex = result.next_symbol; symbolIndex < flat.length; symbolIndex++) {
-      const symbol = flat[symbolIndex]
-      if (Date.now() > deadline || symbolsSeen++ >= 500) {
-        result.status = 'partial'
-        break outer
-      }
-      const position = symbol.selectionRange?.start || symbol.location?.range?.start
-      if (!position) {
-        result.next_symbol = symbolIndex + 1
-        continue
-      }
-      const references =
-        (await request('textDocument/references', {
-          textDocument: { uri },
-          position,
-          context: { includeDeclaration: false },
-        })) || []
-      for (const ref of references) {
-        const source = byPath.get(uriKey(ref.uri))
-        if (!source || source.path === file.path) continue
-        const edge = {
-          source: source.path,
-          target: file.path,
-          symbol: symbol.name,
-          source_line: ref.range.start.line + 1,
-          target_line: position.line + 1,
+      })
+      // didOpen loads the complete safe snapshot into a fresh tsserver. Its first
+      // semantic request needs a cold-project budget, not the normal warm 8s.
+      const symbols =
+        (await request(
+          'textDocument/documentSymbol',
+          { textDocument: { uri } },
+          Math.max(1, Math.min(coldProject ? 30000 : 8000, deadline - Date.now()))
+        )) || []
+      coldProject = false
+      const flat = []
+      function collect(items) {
+        for (const item of items) {
+          if ([5, 6, 9, 12, 13, 14].includes(item.kind)) flat.push(item)
+          if (item.children) collect(item.children)
         }
-        const key = JSON.stringify(edge)
-        if (!unique.has(key)) {
-          unique.add(key)
-          result.edges.push(edge)
-        }
-        if (result.edges.length >= 10000) {
-          result.next_symbol = symbolIndex + 1
+      }
+      collect(symbols)
+      for (let symbolIndex = result.next_symbol; symbolIndex < flat.length; symbolIndex++) {
+        const symbol = flat[symbolIndex]
+        if (Date.now() > deadline || symbolsSeen++ >= 500) {
           result.status = 'partial'
+          result.reason = 'lsp_batch_limit'
           break outer
         }
+        const position = symbol.selectionRange?.start || symbol.location?.range?.start
+        if (!position) {
+          result.next_symbol = symbolIndex + 1
+          continue
+        }
+        result.phase = 'references'
+        const references =
+          (await request(
+            'textDocument/references',
+            {
+              textDocument: { uri },
+              position,
+              context: { includeDeclaration: false },
+            },
+            Math.max(1, Math.min(8000, deadline - Date.now()))
+          )) || []
+        for (const ref of references) {
+          const source = byPath.get(uriKey(ref.uri))
+          if (!source || source.path === file.path) continue
+          const edge = {
+            source: source.path,
+            target: file.path,
+            symbol: symbol.name,
+            source_line: ref.range.start.line + 1,
+            target_line: position.line + 1,
+          }
+          const key = JSON.stringify(edge)
+          if (!unique.has(key)) {
+            unique.add(key)
+            result.edges.push(edge)
+          }
+          if (result.edges.length >= 10000) {
+            result.next_symbol = symbolIndex + 1
+            result.status = 'partial'
+            result.reason = 'lsp_batch_limit'
+            break outer
+          }
+        }
+        result.next_symbol = symbolIndex + 1
       }
-      result.next_symbol = symbolIndex + 1
+      result.scanned++
+    } catch (error) {
+      // A rejected or slow file is not evidence that every other file failed.
+      // Retain verified edges and advance, but never label this snapshot ready.
+      if (serverFailure) throw error
+      result.failed_files++
+      result.status = 'partial'
+      result.reason = ['lsp_request_timeout', 'lsp_request_rejected'].includes(error?.message)
+        ? error.message
+        : 'lsp_analysis_failed'
+    } finally {
+      if (!serverFailure) send({ method: 'textDocument/didClose', params: { textDocument: { uri } } })
     }
-    result.scanned++
     result.next_file = fileIndex + 1
     result.next_symbol = 0
   }
-} catch {
+  if (result.failed_files && result.status === 'ready') {
+    result.status = 'partial'
+    result.reason = 'lsp_file_failures'
+  }
+  if (result.status === 'ready') result.phase = 'complete'
+} catch (error) {
   result.status = 'error'
+  // Codes only: server messages may contain source text, paths or secrets.
+  result.reason = /^lsp_[a-z_]+$/u.test(error?.message) ? error.message : 'lsp_analysis_failed'
 } finally {
   try {
     await request('shutdown', null, 1000)
   } catch {
     /* Native owner kills the full tree. */
   }
-  send({ method: 'exit' })
+  try {
+    send({ method: 'exit' })
+  } catch {
+    /* Already stopped. */
+  }
   server.kill()
   for (const item of pending.values()) clearTimeout(item.timer)
   process.stdout.write(JSON.stringify(result))

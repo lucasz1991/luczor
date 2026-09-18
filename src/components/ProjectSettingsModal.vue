@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { ProjectWorkspaceBinding } from '@/services/projectWorkspace'
 import type { RepositoryExternalPolicy, RepositoryGraphStatus } from '@/services/repositoryGraph'
+import { repositoryLspDetail } from '@/services/repositoryLspStatus'
 import { idleOptimizationEnabled, saveIdleOptimizationSetting } from '@/services/agents/idleOptimization'
 import { idleEmergencyOffload, saveIdleEmergencyOffloadSetting } from '@/services/agents/idleOffloadSetting'
 import {
@@ -388,6 +389,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                       <dd v-else>noch nicht ausgeführt</dd>
                     </div>
                   </dl>
+                  <p v-if="repositoryLspDetail(graphStatus.lsp)" class="lz-hint" role="status">
+                    {{ repositoryLspDetail(graphStatus.lsp) }}
+                  </p>
+                  <p
+                    v-if="graphStatus.lsp && ['error', 'partial', 'unavailable'].includes(graphStatus.lsp.status)"
+                    class="lz-hint"
+                  >
+                    Datei-/Symbolindex und LSP-Referenzen sind getrennte Analysen. Ein bereiter Basisindex bedeutet
+                    nicht, dass alle LSP-Beziehungen ermittelt wurden.
+                  </p>
                   <p v-if="workspace && !workspace.isGitRepository" class="lz-hint">
                     Die Graph-Erkennung setzt ein Git-Repository voraus. Dieser Ordner ist ein normaler Projektordner;
                     <span class="mono">@project</span> funktioniert trotzdem.

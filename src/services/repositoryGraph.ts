@@ -21,6 +21,9 @@ export type RepositoryGraphStatus = {
     files: number
     scanned: number
     edges: number
+    reason?: string
+    phase?: string
+    failed_files?: number
   }
   status: 'unbound' | 'unindexed' | 'indexing' | 'ready' | 'stale' | 'error'
   repository_id?: string
@@ -31,6 +34,7 @@ export type RepositoryGraphStatus = {
   skipped: number
   branch?: string
   commit_sha?: string
+  /** Native SQLite Unix timestamp in seconds, not JavaScript milliseconds. */
   last_indexed_at?: number
   error?: string
 }
