@@ -21,6 +21,7 @@ import {
 import { publicAnswerText } from '@/services/publicAnswerStream'
 import { IdleContextOptimizer, type IdleOptimizationJob } from './idleContextOptimizer'
 import type { idleOptimizationDependencies } from './idleOptimization'
+import { idleEmergencyOffload } from './idleOffloadSetting'
 import {
   MAINTENANCE_EVALUATION,
   evaluationAnswerPrompt,
@@ -35,6 +36,7 @@ import {
   endDreamRun,
   recordDreamDecision,
   recordDreamModel,
+  recordDreamOffload,
   recordDreamScan,
   recordDreamSkip,
   recordDreamStep,
@@ -118,6 +120,8 @@ export function createMaintenanceWorker(
   let sharedPrincipal = ''
   /** Source budget per job, fitted to the resident model's context window (native idle work cannot grow it). */
   let batchChars = maintenanceBatchChars(undefined)
+  /** True while the current pass runs below the normal RAM reserve on the page file (emergency offload). */
+  let offloading = false
   let lastFailure = ''
   const failureCode = (error: unknown) => {
     if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') return error.code
@@ -337,11 +341,26 @@ export function createMaintenanceWorker(
         if (!prefs.autoRemember) return no('memory_disabled')
         if (status.resourceConfig?.pending) return no('resource_switch')
         const reserve = Math.max(4096, (status.resourceConfig?.applied.ramReserveBytes ?? 0) / 1048576)
-        if (
-          !Number.isFinite(metrics.ram_total_mb - metrics.ram_used_mb) ||
-          metrics.ram_total_mb - metrics.ram_used_mb < reserve
-        )
-          return no('memory_pressure')
+        const freeRamMiB = metrics.ram_total_mb - metrics.ram_used_mb
+        if (!Number.isFinite(freeRamMiB)) return no('memory_pressure')
+        if (freeRamMiB < reserve) {
+          // Emergency offload: keep dreaming on the page file / SSD instead of aborting, but only
+          // with a hard floor of physical RAM left for the desktop and with real swap headroom.
+          // Model starts under pressure already pick the native memory-saving profile (mmap/buffered).
+          const swapFreeMiB = Math.max(0, (metrics.swap_total_mb ?? 0) - (metrics.swap_used_mb ?? 0))
+          const floorMiB = Math.max(768, Math.floor(metrics.ram_total_mb * 0.03))
+          if (!idleEmergencyOffload.value || freeRamMiB < floorMiB) return no('memory_pressure')
+          if (!(metrics.swap_total_mb && metrics.swap_total_mb > 0)) return no('no_swap')
+          if (swapFreeMiB < 2048) return no('memory_pressure')
+          if (!offloading) recordDreamStep('preparing', 'Notfall-Auslagerung', `RAM ${Math.round(freeRamMiB)} MiB frei`)
+          offloading = true
+          recordDreamOffload({ active: true, freeRamMiB: Math.round(freeRamMiB), swapFreeMiB: Math.round(swapFreeMiB) })
+          // Smaller bundles keep the KV cache and the prompt working set small while paging.
+          batchChars = Math.max(2_500, Math.floor(batchChars / 2))
+        } else if (offloading || running) {
+          offloading = false
+          recordDreamOffload({ active: false, freeRamMiB: Math.round(freeRamMiB), swapFreeMiB: 0 })
+        }
         // A user-started pass tolerates a busy CPU; scheduled passes stay strictly idle-only.
         if (!running && !manual && (!Number.isFinite(metrics.cpu_percent) || metrics.cpu_percent > 75))
           return no('cpu_pressure')

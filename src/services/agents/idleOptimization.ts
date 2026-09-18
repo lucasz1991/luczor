@@ -3,6 +3,7 @@ import { Store } from '@tauri-apps/plugin-store'
 import type { Project } from '@/state/types'
 import type { Message } from '@/state/types'
 import { createMaintenanceWorker } from './idleMaintenanceWorker'
+import { loadIdleEmergencyOffloadSetting } from './idleOffloadSetting'
 import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { executionGate } from '@/services/executionGate'
 import { getMemoryPrefs, luczorMemory } from '@/services/memory/luczorMemory'
@@ -25,6 +26,12 @@ import {
 
 export const IDLE_OPTIMIZATION_KEY = 'local_idle_context_optimization'
 export const idleOptimizationEnabled = shallowRef(false)
+export {
+  IDLE_EMERGENCY_OFFLOAD_KEY,
+  idleEmergencyOffload,
+  loadIdleEmergencyOffloadSetting,
+  saveIdleEmergencyOffloadSetting,
+} from './idleOffloadSetting'
 export const idleOptimizationStatus = shallowRef<IdleContextOptimizerSnapshot | null>(null)
 export const idleMemoryMaintenance = shallowRef<'idle' | 'scheduled' | 'not_scheduled' | 'unavailable'>('idle')
 export const idleRepositoryStatus = shallowRef('Noch nicht geprüft')
@@ -62,6 +69,7 @@ export async function loadIdleOptimizationSetting(): Promise<void> {
   const saved = await store.get<unknown>(IDLE_OPTIMIZATION_KEY)
   // A missing device preference uses the default; malformed persisted values never enable background work.
   idleOptimizationEnabled.value = saved == null || saved === true
+  await loadIdleEmergencyOffloadSetting().catch(() => undefined)
 }
 export async function saveIdleOptimizationSetting(enabled: boolean): Promise<void> {
   const store = await Store.load('luczor.settings.json')

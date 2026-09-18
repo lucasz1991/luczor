@@ -46,6 +46,8 @@ export type DreamTrace = {
   lastSkip: { at: number; reason: string } | null
   /** Bounded scan summary from the last work-list pass. */
   scan: { at: number; work: number; queued: number; blocked: number; waitingForGate: number } | null
+  /** Emergency offload state: RAM is below the normal reserve and the pass leans on the page file. */
+  offload: { at: number; active: boolean; freeRamMiB: number; swapFreeMiB: number } | null
 }
 
 const MAX_HISTORY = 12
@@ -53,7 +55,7 @@ const MAX_STEPS = 60
 const MAX_DECISIONS = 120
 const MAX_LABEL = 72
 
-const empty = (): DreamTrace => ({ current: null, history: [], lastSkip: null, scan: null })
+const empty = (): DreamTrace => ({ current: null, history: [], lastSkip: null, scan: null, offload: null })
 
 export const dreamTrace = shallowRef<DreamTrace>(empty())
 
@@ -81,6 +83,12 @@ export function recordDreamSkip(reason: string): void {
 
 export function recordDreamScan(scan: Omit<NonNullable<DreamTrace['scan']>, 'at'>): void {
   patch({ scan: { at: Date.now(), ...scan } })
+}
+
+export function recordDreamOffload(state: Omit<NonNullable<DreamTrace['offload']>, 'at'>): void {
+  const last = dreamTrace.value.offload
+  if (last && last.active === state.active && !state.active) return
+  patch({ offload: { at: Date.now(), ...state } })
 }
 
 export function beginDreamRun(input: {
@@ -256,7 +264,8 @@ export const DREAM_SKIP_LABELS: Record<string, string> = {
   memory_disabled: 'Automatisches Erinnern ist ausgeschaltet',
   runtime_unavailable: 'Lokales Modell nicht bereit',
   resource_switch: 'Ressourcenwechsel läuft',
-  memory_pressure: 'Zu wenig freier Arbeitsspeicher',
+  memory_pressure: 'Zu wenig freier Arbeitsspeicher – auch für die Notfall-Auslagerung',
+  no_swap: 'Keine Auslagerungsdatei verfügbar – Notfall-Auslagerung nicht möglich',
   cpu_pressure: 'CPU ist ausgelastet',
   boundary_changed: 'Konto, Projekt oder Sitzung haben gewechselt',
   model_start_consent_required: 'Modellstart im Leerlauf braucht Zustimmung',

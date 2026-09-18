@@ -102,6 +102,46 @@ describe('mounted persistent maintenance worker', () => {
     expect(testCase.stream).toHaveBeenCalledTimes(2)
     await restarted.stop()
   })
+  it('keeps dreaming on the page file under RAM pressure, but refuses without swap or below the floor', async () => {
+    const { dreamTrace, resetDreamTraceForTests } = await import('@/services/memory/dreamTrace')
+    const { idleEmergencyOffload } = await import('@/services/agents/idleOffloadSetting')
+    resetDreamTraceForTests()
+    const testCase = setup()
+    // 2 GiB free of 16 GiB: below the 4 GiB reserve, above the 3 % floor, with a page file to lean on.
+    testCase.deps.metrics = async () =>
+      ({ ram_total_mb: 16000, ram_used_mb: 14000, swap_total_mb: 32000, swap_used_mb: 4000, cpu_percent: 5 }) as never
+    const offloaded = testCase.create()
+    await run(offloaded)
+    expect(testCase.stream).toHaveBeenCalledTimes(2)
+    expect(fixture.writes).toHaveLength(1)
+    expect(dreamTrace.value.history[0]?.steps.some(step => step.title === 'Notfall-Auslagerung')).toBe(true)
+    await offloaded.stop()
+
+    fixture.journal = emptyMaintenanceJournal()
+    testCase.stream.mockClear()
+    testCase.deps.metrics = async () => ({ ram_total_mb: 16000, ram_used_mb: 14000, cpu_percent: 5 }) as never
+    const noSwap = testCase.create()
+    await run(noSwap)
+    expect(noSwap.snapshot().reason).toBe('no_swap')
+    expect(testCase.stream).not.toHaveBeenCalled()
+    await noSwap.stop()
+
+    testCase.deps.metrics = async () =>
+      ({ ram_total_mb: 16000, ram_used_mb: 15700, swap_total_mb: 32000, swap_used_mb: 4000, cpu_percent: 5 }) as never
+    const floor = testCase.create()
+    await run(floor)
+    expect(floor.snapshot().reason).toBe('memory_pressure')
+    await floor.stop()
+
+    idleEmergencyOffload.value = false
+    testCase.deps.metrics = async () =>
+      ({ ram_total_mb: 16000, ram_used_mb: 14000, swap_total_mb: 32000, swap_used_mb: 4000, cpu_percent: 5 }) as never
+    const disabled = testCase.create()
+    await run(disabled)
+    expect(disabled.snapshot().reason).toBe('memory_pressure')
+    await disabled.stop()
+    idleEmergencyOffload.value = true
+  })
   it('rejects a changed project revision before storing the generated artifact', async () => {
     const testCase = setup()
     const original = testCase.stream.getMockImplementation()!

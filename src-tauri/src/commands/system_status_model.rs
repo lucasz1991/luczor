@@ -10,6 +10,10 @@ pub struct SystemMetrics {
     pub ram_percent: f32,
     pub ram_used_mb: u64,
     pub ram_total_mb: u64,
+    /// Page file / swap capacity. Zero when the OS reports none; the emergency
+    /// offload for idle memory maintenance refuses to run without it.
+    pub swap_total_mb: u64,
+    pub swap_used_mb: u64,
     pub gpu_percent: Option<f32>,
     pub cpu_temp_c: Option<f32>,
     pub cpu_temp_source: &'static str,

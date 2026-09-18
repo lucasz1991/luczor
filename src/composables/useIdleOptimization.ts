@@ -11,6 +11,7 @@ import {
   type IdleOptimizationContext,
 } from '@/services/agents/idleOptimization'
 import { MEMORY_GRAPH_DISPLAY_KEY } from '@/features/memory/graphDisplay'
+import { IDLE_EMERGENCY_OFFLOAD_KEY } from '@/services/agents/idleOffloadSetting'
 import { localResources } from '@/services/inference/resources'
 import { isMaintenanceWrite } from '@/services/memory/luczorMemory'
 
@@ -71,7 +72,8 @@ export function useIdleOptimization(context: IdleOptimizationContext & { draft()
       unlistenStores.push(disposeMemory)
       const disposeSettings = await settings.onChange(key => {
         // The enable toggle and pure display preferences must not cancel the pass they just requested.
-        if (key !== IDLE_OPTIMIZATION_KEY && key !== MEMORY_GRAPH_DISPLAY_KEY) optimizer.interrupt('settings_changed')
+        if (key !== IDLE_OPTIMIZATION_KEY && key !== IDLE_EMERGENCY_OFFLOAD_KEY && key !== MEMORY_GRAPH_DISPLAY_KEY)
+          optimizer.interrupt('settings_changed')
         void loadIdleOptimizationSetting().catch(() => {
           idleOptimizationEnabled.value = false
         })

@@ -378,6 +378,8 @@ pub(crate) fn collect_system_metrics_for_app(
         ram_percent: clamp_percent(ram_percent),
         ram_used_mb: used_memory / 1024 / 1024,
         ram_total_mb: total_memory / 1024 / 1024,
+        swap_total_mb: system.total_swap() / 1024 / 1024,
+        swap_used_mb: system.used_swap() / 1024 / 1024,
         gpu_percent: engine_gpu_percent.or(gpu_percent).map(clamp_percent),
         cpu_temp_c,
         cpu_temp_source: if cpu_temp_c.is_none() {

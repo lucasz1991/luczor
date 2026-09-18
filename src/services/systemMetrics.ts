@@ -29,6 +29,9 @@ export type SystemMetrics = {
   ram_percent: number
   ram_used_mb: number
   ram_total_mb: number
+  /** Page file / swap capacity; absent on older native builds. */
+  swap_total_mb?: number
+  swap_used_mb?: number
   gpu_percent: number | null
   gpu_source?: 'windows_engine' | 'nvml' | 'unavailable'
   cpu_temp_c: number | null
