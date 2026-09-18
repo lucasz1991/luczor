@@ -1068,7 +1068,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         ].includes(error.code))
     const retainedMutationCount = completedMutations.size
     if (resetHistory) {
-      const objective = continuation.objective.slice(0, 6_000)
+      const objective = continuation.objective
       const toolStatus = toolOutcomes
         .slice(-20)
         .map(item => `${item.name}: ${item.outcome.ok ? 'erfolgreich' : 'fehlgeschlagen'}`)
@@ -1090,7 +1090,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         {
           role: 'user',
           content: [
-            `Setze den begonnenen Auftrag fort: ${objective}${continuation.objective.length > objective.length ? '…' : ''}`,
+            `Setze den begonnenen Auftrag fort: ${objective}`,
             'Die vorherige lokale Nachrichtenstruktur wurde nach einer Laufzeitstörung zurückgesetzt. Lies den aktuellen Projekt- und Aufgabenstand erneut ein, bevor du weitere Änderungen ausführst.',
             `Bisherige Toolbilanz: ${toolSuccesses} erfolgreich, ${toolFailures} fehlgeschlagen.${toolStatus ? ` ${toolStatus}.` : ''}`,
             verificationStatus ? `Offene Schreibverifikation: ${verificationStatus}.` : '',
@@ -1116,6 +1116,9 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           : [
               publicControlPartial,
               `Die lokale Modellrunde ${round} wurde vor dem Abschluss unterbrochen: ${interruption.message}`,
+              interruption.code === 'runtime_context_exceeded'
+                ? 'Aktuelle Tool-Ergebnisse wurden nicht abgeschnitten. Für die Fortsetzung bitte kleinere Dateiabschnitte, engere Suchfilter oder die Seitennavigation des jeweiligen Werkzeugs verwenden.'
+                : '',
               diagnostic
                 ? `Diagnose: ${interruption.code}; Abschluss: ${diagnostic.finishReason}; Dauer: ${(diagnostic.durationMs / 1000).toFixed(1)} s; öffentliche Zeichen: ${diagnostic.receivedCharacters}${diagnostic.outputTokens !== undefined ? `; gemeldete Ausgabetokens: ${diagnostic.outputTokens}` : ''}.`
                 : '',

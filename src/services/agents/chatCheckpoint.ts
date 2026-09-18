@@ -1,5 +1,4 @@
 import type { WireMessage } from '@/services/inference/types'
-import { compactToolOutput } from '@/services/inference/contextBudget'
 
 export type ToolOutcome = { ok: boolean; output?: unknown; error?: string }
 export type PendingTaskCreateVerification = {
@@ -52,7 +51,7 @@ export function mutationKey(name: string, args: Record<string, unknown>): string
   return JSON.stringify([name, canonical(args)])
 }
 
-/** Keep a bounded handoff copy; executable arguments and the archive remain untouched. */
+/** Limit handoff to the current round, preserving its complete evidence. */
 export function teamMessages(messages: WireMessage[]): WireMessage[] {
   let latestUser = -1
   for (let index = messages.length - 1; index >= 0; index--) {
@@ -63,19 +62,5 @@ export function teamMessages(messages: WireMessage[]): WireMessage[] {
   }
   return messages
     .filter((message, index) => message.role === 'system' || index >= latestUser)
-    .map(message => {
-      if (message.role === 'tool' && message.content.length > 1200) {
-        let value: unknown = message.content
-        try {
-          value = JSON.parse(message.content)
-        } catch {
-          /* plain tool text */
-        }
-        return {
-          ...message,
-          content: JSON.stringify(compactToolOutput(value, 1200)),
-        }
-      }
-      return structuredClone(message)
-    })
+    .map(message => structuredClone(message))
 }

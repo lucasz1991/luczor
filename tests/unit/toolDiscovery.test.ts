@@ -333,7 +333,7 @@ describe('hierarchical tool discovery', () => {
       [],
       { targetTokens: 1024 }
     )
-    expect(fitted.report.shortenedToolResults).toBe(1)
+    expect(fitted.report.shortenedToolResults).toBe(0)
     const message = fitted.messages.find(item => item.role === 'tool')!
     const result = JSON.parse(message.content).output as ToolCatalogPage
     expect(result.available).toEqual(page.available.map(({ name }) => ({ name })))
