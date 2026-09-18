@@ -238,7 +238,6 @@ export function fitRequestContext(
   const total = () =>
     Object.values(contextBreakdown(messages, tools)).reduce((sum, value) => sum + value, 0) + messages.length * 8
   const removed: number[] = []
-  let shortened = 0
   // First compact old complete user rounds. Systems (authority) are never removed.
   const userIndices = source.flatMap((message, i) => (message.role === 'user' ? [i] : []))
   const lastUser = userIndices.at(-1) ?? -1
@@ -292,20 +291,9 @@ export function fitRequestContext(
       )
     }
   }
-  if (total() > target) {
-    for (const message of messages) {
-      if (message.role !== 'tool' || message.content.length <= 1800) continue
-      let value: unknown = message.content
-      try {
-        value = JSON.parse(message.content)
-      } catch {
-        /* plain tool text */
-      }
-      message.content = JSON.stringify(compactToolOutput(value, 1800))
-      shortened++
-      if (total() <= target) break
-    }
-  }
+  // Current evidence is indivisible. A planning target is not permission to
+  // shorten tool responses; native tokenization/growth decides actual capacity.
+  // Only historical archive notes above contain explicitly labeled excerpts.
   const categories = contextBreakdown(messages, tools)
   const estimatedInputTokens = total()
   return {
@@ -316,7 +304,7 @@ export function fitRequestContext(
       targetTokens: target,
       overTarget: estimatedInputTokens > target,
       summarizedMessages: removed.length,
-      shortenedToolResults: shortened,
+      shortenedToolResults: 0,
     },
   }
 }

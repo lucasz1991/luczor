@@ -106,10 +106,26 @@ function audienceFor(target: InferenceTarget): ContextAudience {
 }
 
 export function sanitizeTextForInferenceTarget(value: string, target: InferenceTarget): string {
-  const withoutSecrets = redactProviderSecrets(String(value ?? ''))
-  return (target === 'laravel_proxy' ? redactAbsoluteFilesystemPaths(withoutSecrets) : withoutSecrets)
-    .replace(/\0/g, '')
-    .trim()
+  const text = String(value ?? '')
+  const sanitize = (input: string) => {
+    const withoutSecrets = redactProviderSecrets(input)
+    return target === 'laravel_proxy' ? redactAbsoluteFilesystemPaths(withoutSecrets) : withoutSecrets
+  }
+  try {
+    JSON.parse(text)
+  } catch {
+    return sanitize(text)
+  }
+  // Sanitize decoded JSON string values, not escape syntax. Leave unchanged
+  // tokens (and number precision/formatting) byte-identical. JSON escaping is
+  // applied once only when a value actually needs redaction.
+  const sanitized = text.replace(/"(?:[^"\\]|\\[\s\S])*"/g, token => {
+    const decoded = JSON.parse(token) as string
+    const result = sanitize(decoded)
+    return result === decoded ? token : JSON.stringify(result)
+  })
+  // Field-based credentials (e.g. "password":"...") need the key as well.
+  return redactProviderSecrets(sanitized)
 }
 
 /** Sanitizes the complete wire history, including tool-call arguments, for its actual target. */
@@ -136,17 +152,9 @@ export function sanitizeInferenceMessagesForTarget(
   })
 }
 
-function sanitizeContent(value: string, maxChars: number, target: InferenceTarget): string {
-  return sanitizeTextForInferenceTarget(value, target).slice(0, maxChars)
-}
-
 async function sha256(value: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')
-}
-
-function canonical(value: string): string {
-  return value.normalize('NFKC').replace(/\s+/g, ' ').trim().toLocaleLowerCase('de-DE')
 }
 
 function compare(left: ScopedContextFragment, right: ScopedContextFragment): number {
@@ -203,22 +211,20 @@ export async function buildScopedContextPackage(request: ContextBrokerRequest): 
       continue
     }
 
-    // A verified artifact is atomic: silently cutting its tail could drop a restriction or reference.
+    // All records are atomic, not only prepared artifacts. Cutting a filename,
+    // JSON escape or final restriction silently changes the evidence.
     const prepared = fragment.id.startsWith('prepared:')
-    if (prepared && fragment.content.length > budget.maxChars) {
+    const content = sanitizeTextForInferenceTarget(fragment.content, request.target)
+    if (content.length > (prepared ? budget.maxChars : budget.maxFragmentChars)) {
       omitted.push({ id: fragment.id, reason: 'budget' })
       continue
     }
-    const content = sanitizeContent(
-      fragment.content,
-      prepared ? budget.maxChars : budget.maxFragmentChars,
-      request.target
-    )
     if (!content) {
       omitted.push({ id: fragment.id, reason: 'empty' })
       continue
     }
-    const fingerprint = canonical(content)
+    // Case, whitespace and Unicode normalization can distinguish real files.
+    const fingerprint = content
     if (seen.has(fingerprint)) {
       omitted.push({ id: fragment.id, reason: 'duplicate' })
       continue

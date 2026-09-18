@@ -29,17 +29,31 @@ export const idleOptimizationStatus = shallowRef<IdleContextOptimizerSnapshot | 
 export const idleMemoryMaintenance = shallowRef<'idle' | 'scheduled' | 'not_scheduled' | 'unavailable'>('idle')
 export const idleRepositoryStatus = shallowRef('Noch nicht geprüft')
 let requestIdleOptimizationNow: (() => boolean) | null = null
+let idleOptimizationBlockerNow: (() => IdleOptimizationBlocker) | null = null
+export type IdleOptimizationBlocker = 'unmounted' | 'disabled' | 'active' | 'foreground' | null
 
 /** Lets the settings UI request one safe pass without owning an optimizer instance. */
 export function requestIdleOptimization(): boolean {
   return requestIdleOptimizationNow?.() ?? false
 }
 
+/** Why a manual request would be refused right now (null = can start). */
+export function idleOptimizationBlocker(): IdleOptimizationBlocker {
+  return idleOptimizationBlockerNow ? idleOptimizationBlockerNow() : 'unmounted'
+}
+
 /** App lifecycle bridge; only the mounted optimizer may accept a manual request. */
-export function registerIdleOptimizationRequest(request: () => boolean): () => void {
+export function registerIdleOptimizationRequest(
+  request: () => boolean,
+  blocker?: () => IdleOptimizationBlocker
+): () => void {
   requestIdleOptimizationNow = request
+  idleOptimizationBlockerNow = blocker ?? null
   return () => {
-    if (requestIdleOptimizationNow === request) requestIdleOptimizationNow = null
+    if (requestIdleOptimizationNow === request) {
+      requestIdleOptimizationNow = null
+      idleOptimizationBlockerNow = null
+    }
   }
 }
 

@@ -14,6 +14,8 @@ export type IdleOptimizationJob = Readonly<{
   prompt: string
   task?: 'context' | 'memory' | 'repository'
   sourceMemoryIds?: readonly string[]
+  /** True when the user started this pass explicitly; integrations may relax idle-only gates. */
+  manual?: boolean
 }>
 
 export type IdleOptimizationEligibility = Readonly<{
@@ -23,8 +25,8 @@ export type IdleOptimizationEligibility = Readonly<{
 }>
 
 export type IdleContextOptimizerDependencies = {
-  /** running=true must not interpret this optimizer's own occupied slot as foreign work. */
-  inspect(signal: AbortSignal, running: boolean): Promise<IdleOptimizationEligibility>
+  /** running=true must not interpret this optimizer's own occupied slot as foreign work; manual marks a user-started pass. */
+  inspect(signal: AbortSignal, running: boolean, manual?: boolean): Promise<IdleOptimizationEligibility>
   nextJob(boundary: string, signal: AbortSignal): Promise<IdleOptimizationJob | null>
   /** Must settle only after native stream cancellation and the background resource lease settle. */
   runLocal(job: IdleOptimizationJob, signal: AbortSignal): Promise<string>
@@ -53,6 +55,8 @@ export type IdleContextOptimizerSnapshot = Readonly<{
   completed: number
   lastCompletedAt: number | null
   nextCheckAt: number | null
+  /** The current or pending pass was requested by the user. */
+  manual: boolean
 }>
 
 const DEFAULTS: IdleContextOptimizerOptions = {
@@ -98,6 +102,7 @@ export class IdleContextOptimizer {
   private active?: { controller: AbortController; promise: Promise<void> }
   private lastActivity: number
   private earliestCycle = 0
+  private manualPending = false
   private state: IdleContextOptimizerSnapshot = {
     enabled: false,
     phase: 'stopped',
@@ -107,6 +112,7 @@ export class IdleContextOptimizer {
     completed: 0,
     lastCompletedAt: null,
     nextCheckAt: null,
+    manual: false,
   }
 
   constructor(
@@ -170,10 +176,20 @@ export class IdleContextOptimizer {
     // not consistently dispatch a newly registered zero-delay timeout.
     this.lastActivity = this.now() - this.options.idleDelayMs + 1
     this.earliestCycle = this.now()
+    // The request survives interrupts (settings echo, focus changes) until a cycle consumes it.
+    this.manualPending = true
     this.clearTimer()
-    this.publish({ phase: 'waiting', task: null, reason: 'manual_requested' })
+    this.publish({ phase: 'waiting', task: null, reason: 'manual_requested', manual: true })
     this.schedule()
     return true
+  }
+
+  /** Why requestNow() would be refused right now, or null when it can start. */
+  manualBlocker(): 'disabled' | 'active' | 'foreground' | null {
+    if (!this.state.enabled) return 'disabled'
+    if (this.active) return 'active'
+    if (this.state.foregroundJobs) return 'foreground'
+    return null
   }
 
   /** Prompt typing, account/project changes and emergency-stop changes reset the idle grace. */
@@ -220,7 +236,9 @@ export class IdleContextOptimizer {
 
   private schedule(): void {
     if (!this.state.enabled || this.active || this.state.foregroundJobs || this.timer !== undefined) return
-    const at = Math.max(this.now(), this.lastActivity + this.options.idleDelayMs, this.earliestCycle)
+    const at = this.manualPending
+      ? this.now() + 1
+      : Math.max(this.now(), this.lastActivity + this.options.idleDelayMs, this.earliestCycle)
     this.publish({ nextCheckAt: at })
     this.timer = setTimeout(
       () => {
@@ -228,15 +246,18 @@ export class IdleContextOptimizer {
         this.publish({ nextCheckAt: null })
         if (!this.state.enabled || this.state.foregroundJobs || this.active) return
         const controller = new AbortController()
+        const manual = this.manualPending
+        this.manualPending = false
         // Register ownership before any injected asynchronous operation can admit a foreground job.
-        const promise = Promise.resolve().then(() => this.cycle(controller))
+        const promise = Promise.resolve().then(() => this.cycle(controller, manual))
         const active = { controller, promise }
         this.active = active
         void promise.finally(() => {
           if (this.active !== active) return
           this.active = undefined
-          if (!this.state.enabled) this.publish({ phase: 'stopped' })
-          else if (controller.signal.aborted) this.publish({ phase: 'paused' })
+          if (!this.state.enabled) this.publish({ phase: 'stopped', manual: false })
+          else if (controller.signal.aborted) this.publish({ phase: 'paused', manual: false })
+          else this.publish({ manual: false })
           this.schedule()
         })
       },
@@ -244,8 +265,9 @@ export class IdleContextOptimizer {
     )
   }
 
-  private async cycle(controller: AbortController): Promise<void> {
+  private async cycle(controller: AbortController, manual = false): Promise<void> {
     const { signal } = controller
+    this.publish({ manual })
     let monitor: ReturnType<typeof setTimeout> | undefined
     let finished = false
     let jobBoundary: string | undefined
@@ -260,7 +282,7 @@ export class IdleContextOptimizer {
     const monitorEligibility = () => {
       monitor = setTimeout(async () => {
         try {
-          const current = await this.dependencies.inspect(signal, true)
+          const current = await this.dependencies.inspect(signal, true, manual)
           if (finished || signal.aborted) return
           if (!current.available) abort(current.reason ?? 'runtime_unavailable')
           else if (current.boundary !== jobBoundary) abort('boundary_changed')
@@ -272,7 +294,7 @@ export class IdleContextOptimizer {
     }
     try {
       signal.throwIfAborted()
-      const eligibility = await this.dependencies.inspect(signal, false)
+      const eligibility = await this.dependencies.inspect(signal, false, manual)
       signal.throwIfAborted()
       if (!eligibility.available || !eligibility.boundary) {
         this.publish({ phase: 'paused', task: null, reason: eligibility.reason ?? 'runtime_unavailable' })
@@ -282,7 +304,9 @@ export class IdleContextOptimizer {
       this.publish({ phase: 'running', task: null, reason: 'gathering_sources' })
       monitorEligibility()
       timeout = setTimeout(() => abort('timeout'), this.options.timeoutMs)
-      const job = await this.dependencies.nextJob(eligibility.boundary, signal)
+      const fetched = await this.dependencies.nextJob(eligibility.boundary, signal)
+      // Scheduled passes hand the job through untouched; only a manual pass is marked.
+      const job = fetched && manual ? { ...fetched, manual } : fetched
       selectedJob = job ?? undefined
       signal.throwIfAborted()
       if (!job) {
@@ -314,7 +338,7 @@ export class IdleContextOptimizer {
         return
       }
       jobBoundary = job.boundary
-      const beforeRun = await this.dependencies.inspect(signal, false)
+      const beforeRun = await this.dependencies.inspect(signal, false, manual)
       signal.throwIfAborted()
       if (!beforeRun.available || beforeRun.boundary !== job.boundary) {
         this.publish({ phase: 'paused', reason: 'boundary_changed' })
@@ -328,7 +352,7 @@ export class IdleContextOptimizer {
       const content = (await this.dependencies.runLocal(job, signal)).trim()
       signal.throwIfAborted()
       if (!content || content.length > MAX_CANDIDATE_CHARS) throw new Error('invalid_candidate')
-      const current = await this.dependencies.inspect(signal, true)
+      const current = await this.dependencies.inspect(signal, true, manual)
       signal.throwIfAborted()
       if (!current.available || current.boundary !== job.boundary) {
         this.publish({ phase: 'paused', reason: current.reason ?? 'boundary_changed' })

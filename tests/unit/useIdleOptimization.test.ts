@@ -6,7 +6,7 @@ const fixture = vi.hoisted(() => ({
   mounts: [] as Array<() => void | Promise<void>>,
   cleanups: [] as Array<() => void>,
   invalidations: new Set<() => void>(),
-  storeChanges: new Map<string, () => void>(),
+  storeChanges: new Map<string, (key?: string) => void>(),
   deferredSubscriptions: new Map<string, Promise<() => void>>(),
   unlistenMemory: vi.fn(),
   unlistenSettings: vi.fn(),
@@ -33,7 +33,7 @@ vi.mock('vue', async importOriginal => ({
 vi.mock('@tauri-apps/plugin-store', () => ({
   Store: {
     load: async (file: string) => ({
-      onChange: async (callback: () => void) => {
+      onChange: async (callback: (key?: string) => void) => {
         fixture.storeChanges.set(file, callback)
         return (
           fixture.deferredSubscriptions.get(file) ??
@@ -46,6 +46,7 @@ vi.mock('@tauri-apps/plugin-store', () => ({
 vi.mock('@/services/agents/idleOptimization', async () => {
   const { shallowRef } = await import('vue')
   return {
+    IDLE_OPTIMIZATION_KEY: 'local_idle_context_optimization',
     idleOptimizationEnabled: shallowRef(false),
     idleOptimizationStatus: shallowRef<IdleContextOptimizerSnapshot | null>(null),
     loadIdleOptimizationSetting: fixture.loadSetting,
@@ -225,14 +226,18 @@ describe('idle optimizer lifecycle and invalidation', () => {
     fixture.loadSetting.mockImplementation(async () => {
       idleOptimizationEnabled.value = false
     })
-    fixture.storeChanges.get('luczor.settings.json')!()
+    // Other keys interrupt; the enable toggle itself must not cancel a pass it just requested.
+    fixture.storeChanges.get('luczor.settings.json')!('local_idle_context_optimization')
+    await nextTick()
+    expect(fixture.interrupt).not.toHaveBeenCalledWith('settings_changed')
+    fixture.storeChanges.get('luczor.settings.json')!('repository_external_policy')
     await nextTick()
     expect(fixture.interrupt).toHaveBeenLastCalledWith('settings_changed')
     expect(fixture.stop).toHaveBeenCalled()
     fixture.loadSetting.mockImplementation(async () => {
       idleOptimizationEnabled.value = true
     })
-    fixture.storeChanges.get('luczor.settings.json')!()
+    fixture.storeChanges.get('luczor.settings.json')!('local_idle_context_optimization')
     await nextTick()
     expect(fixture.start).toHaveBeenCalledTimes(1)
   })

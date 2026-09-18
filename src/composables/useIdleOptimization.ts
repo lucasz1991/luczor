@@ -3,12 +3,14 @@ import { Store } from '@tauri-apps/plugin-store'
 import { onExecutionInvalidated } from '@/services/executionGate'
 import {
   createIdleOptimization,
+  IDLE_OPTIMIZATION_KEY,
   idleOptimizationEnabled,
   idleOptimizationStatus,
   loadIdleOptimizationSetting,
   registerIdleOptimizationRequest,
   type IdleOptimizationContext,
 } from '@/services/agents/idleOptimization'
+import { MEMORY_GRAPH_DISPLAY_KEY } from '@/features/memory/graphDisplay'
 import { localResources } from '@/services/inference/resources'
 import { isMaintenanceWrite } from '@/services/memory/luczorMemory'
 
@@ -18,7 +20,10 @@ export function useIdleOptimization(context: IdleOptimizationContext & { draft()
   let disposed = false
   const unlistenStores: Array<() => void> = []
   const releaseAdmission = localResources.setForegroundAdmission(signal => optimizer.acquireForeground(signal))
-  const releaseManualRequest = registerIdleOptimizationRequest(() => optimizer.requestNow())
+  const releaseManualRequest = registerIdleOptimizationRequest(
+    () => optimizer.requestNow(),
+    () => optimizer.manualBlocker()
+  )
   const releaseStatus = optimizer.subscribe(state => {
     idleOptimizationStatus.value = state
   })
@@ -64,8 +69,9 @@ export function useIdleOptimization(context: IdleOptimizationContext & { draft()
         return
       }
       unlistenStores.push(disposeMemory)
-      const disposeSettings = await settings.onChange(() => {
-        optimizer.interrupt('settings_changed')
+      const disposeSettings = await settings.onChange(key => {
+        // The enable toggle and pure display preferences must not cancel the pass they just requested.
+        if (key !== IDLE_OPTIMIZATION_KEY && key !== MEMORY_GRAPH_DISPLAY_KEY) optimizer.interrupt('settings_changed')
         void loadIdleOptimizationSetting().catch(() => {
           idleOptimizationEnabled.value = false
         })

@@ -24,7 +24,7 @@ describe('shared request budget and evidence retention', () => {
     expect(exact).toMatchObject({ index: 1, text: history[1]!.content })
     await expect(focus.reader.execute({ index: 0 }, { projectId: 'p' })).rejects.toThrow()
   })
-  it('keeps current tool pairs and execution arguments unchanged while returning parseable output', () => {
+  it('keeps full current tool evidence and execution arguments even above the planning target', () => {
     const history: WireMessage[] = [
       { role: 'system', content: 'Policy' },
       { role: 'user', content: 'Read file' },
@@ -41,11 +41,10 @@ describe('shared request budget and evidence retention', () => {
     ]
     const result = fitRequestContext(history, [], { targetTokens: 2000 })
     expect(result.messages[2]).toEqual(history[2])
-    expect(JSON.parse(result.messages[3]!.content)).toMatchObject({
-      truncated: true,
-      projection: { ok: true, path: 'file.ts' },
-    })
-    expect(result.report.shortenedToolResults).toBe(1)
+    expect(result.messages).toEqual(history)
+    expect(result.report.shortenedToolResults).toBe(0)
+    expect(result.report.overTarget).toBe(true)
+    expect(fitRequestContext(result.messages, [], { targetTokens: 1024 }).messages).toEqual(history)
   })
   it('counts profile, knowledge and tool arguments separately and flags unavoidable overflow', () => {
     const messages: WireMessage[] = [

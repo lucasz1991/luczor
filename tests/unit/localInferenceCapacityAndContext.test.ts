@@ -545,6 +545,89 @@ describe('local inference capacity and scoped context', () => {
       'E:\\\\private'
     )
   })
+
+  it('preserves exact path values and JSON transport roundtrips without extra escaping', () => {
+    const paths = [
+      '/projekte/luczor',
+      'E:\\projekte\\luczor',
+      '\\\\server\\share\\repo',
+      'src/e\u0301 📁.ts',
+      '//server/share',
+      '  src/spaced file.ts  ',
+      'https://example.test/a/b',
+    ]
+    const content = JSON.stringify({ paths, text: '  complete\r\n' + 'x'.repeat(12000) + '\r\nEND  ' })
+    const messages = [
+      { role: 'tool' as const, tool_call_id: 'paths', name: 'fs_read', content },
+      {
+        role: 'assistant' as const,
+        content: '',
+        tool_calls: [{ id: 'paths', type: 'function' as const, function: { name: 'fs_read', arguments: content } }],
+      },
+      { role: 'user' as const, content: '  /projekte/luczor\r\n' },
+    ]
+    const local = sanitizeInferenceMessagesForTarget(messages, 'local_llama_cpp')
+    expect(local).toEqual(messages)
+    expect(sanitizeInferenceMessagesForTarget(local, 'local_llama_cpp')).toEqual(messages)
+    const transported = JSON.parse(JSON.stringify({ messages: local }))
+    expect(JSON.parse(transported.messages[0].content).paths).toEqual(paths)
+    expect(JSON.parse(transported.messages[1].tool_calls[0].function.arguments).paths).toEqual(paths)
+  })
+
+  it('keeps credential-redacted tool history valid JSON and preserves its ordinary paths', () => {
+    const content = JSON.stringify({
+      path: '/projekte/luczor',
+      password: 'opaque"secret',
+      output: { path: 'src/Ä.ts', token: 'opaque-token' },
+    })
+    const input = [{ role: 'tool' as const, tool_call_id: 'a', content }]
+    const local = sanitizeInferenceMessagesForTarget(input, 'local_llama_cpp')
+    expect(JSON.parse(local[0]!.content)).toEqual({
+      path: '/projekte/luczor',
+      password: '[REDACTED]',
+      output: { path: 'src/Ä.ts', token: '[REDACTED]' },
+    })
+    const external = sanitizeInferenceMessagesForTarget(input, 'laravel_proxy')
+    expect(JSON.parse(external[0]!.content)).toMatchObject({ path: '@project', password: '[REDACTED]' })
+  })
+
+  it('omits entire over-budget scoped records and does not collapse distinct file identities', async () => {
+    const scope = {
+      principalId: 'p',
+      serverInstance: 'server',
+      projectId: 'project',
+      sessionId: 'session',
+      taskType: 'coding',
+    }
+    const contents = [
+      'src/Readme.md',
+      'src/readme.md',
+      'src/é.txt',
+      'src/e\u0301.txt',
+      '/projekte/' + 'long/'.repeat(40) + 'luczor',
+    ]
+    const fragments: ScopedContextFragment[] = contents.map((content, i) => ({
+      id: `p${i}`,
+      source: 'repository',
+      trust: 'untrusted_data',
+      scope,
+      sensitivity: 'normal',
+      lifecycle: 'active',
+      audiences: ['local_model'],
+      egress: 'local_only',
+      content,
+      contentHash: String(i),
+    }))
+    const result = await buildScopedContextPackage({
+      scopeKey: scope,
+      target: 'local_llama_cpp',
+      fragments,
+      budget: { maxFragmentChars: 80 },
+    })
+    expect(result.selected.map(item => item.id)).toEqual(['p0', 'p1', 'p2', 'p3'])
+    expect(result.omitted).toEqual([{ id: 'p4', reason: 'budget' }])
+    expect(result.text).not.toContain('/projekte/')
+  })
 })
 
 describe('CPU resource mode admission', () => {

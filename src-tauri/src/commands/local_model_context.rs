@@ -52,27 +52,6 @@ fn remove_oldest_round(messages: &mut Vec<Value>) -> usize {
     before - messages.len()
 }
 
-fn shorten_tool_result(messages: &mut [Value]) -> bool {
-    let candidate = messages
-        .iter_mut()
-        .filter(|message| message["role"] == "tool")
-        .filter(|message| {
-            message["content"]
-                .as_str()
-                .is_some_and(|text| text.chars().count() > 2048)
-        })
-        .max_by_key(|message| message["content"].as_str().map_or(0, str::len));
-    let Some(message) = candidate else {
-        return false;
-    };
-    let text = message["content"].as_str().unwrap();
-    let chars: Vec<char> = text.chars().collect();
-    let keep = (chars.len() / 4).max(512);
-    message["content"] = json!(format!("{}\n[Lokale Kontextverwaltung: Werkzeugausgabe gekürzt; fehlende Abschnitte bei Bedarf gezielt erneut lesen.]\n{}",
-        chars[..keep].iter().collect::<String>(), chars[chars.len()-keep..].iter().collect::<String>()));
-    true
-}
-
 #[cfg(test)]
 pub(super) fn fit_context<E>(
     body: &mut Value,
@@ -139,7 +118,7 @@ fn fit<E>(
         ..Default::default()
     };
     // At most 256 messages are admitted natively. Each continued pass removes a
-    // complete old round, halves a tool result, or reduces the output reservation;
+    // complete old round or reduces the output reservation;
     // the separate bound also caps tokenizer work.
     for _ in 0..272 {
         let input_tokens = count(body)?;
@@ -148,10 +127,6 @@ fn fit<E>(
             let removed = remove_oldest_round(messages);
             if removed > 0 {
                 usage.omitted_messages += removed;
-                continue;
-            }
-            if shorten_tool_result(messages) {
-                usage.shortened_tool_results += 1;
                 continue;
             }
         }
@@ -172,10 +147,8 @@ fn fit<E>(
             usage.omitted_messages += removed;
             continue;
         }
-        if shorten_tool_result(messages) {
-            usage.shortened_tool_results += 1;
-            continue;
-        }
+        // Never splice tool JSON/text to force a fit. Paths, escapes, evidence
+        // and restrictions remain intact; an unfit current round is explicit.
         // Keep the complete current request. When it fits, use the remaining
         // answer space rather than rejecting because of a fixed output default.
         if available >= requested_output.min(256) {
@@ -501,9 +474,10 @@ mod tests {
     }
 
     #[test]
-    fn large_unicode_tool_result_keeps_call_identity_and_marks_missing_data() {
+    fn unfit_current_tool_result_is_rejected_without_cutting_any_evidence() {
         let mut body = json!({"messages":[{"role":"user","content":"current"},{"role":"assistant","tool_calls":[{"id":"call"}]},{"role":"tool","tool_call_id":"call","content":"🙂ä".repeat(8000)}],"max_tokens":1000});
-        let usage = fit_context(
+        let original = body.clone();
+        let result = fit_context(
             &mut body,
             8192,
             |body| {
@@ -516,14 +490,31 @@ mod tests {
                 )
             },
             || "too large",
+        );
+        assert_eq!(result.unwrap_err(), "too large");
+        assert_eq!(body, original);
+    }
+
+    #[test]
+    fn complete_tool_json_survives_soft_ingress_limits_and_transport() {
+        let output = json!({"path":"/projekte/luczor","windows":r"E:\projekte\luczor","unicode":"src/e\u{301}📁.rs","text":"line\r\n".repeat(2500)}).to_string();
+        let mut body = json!({"messages":[{"role":"user","content":"current"},{"role":"assistant","tool_calls":[{"id":"call","function":{"name":"fs_read","arguments":"{\"path\":\"src/é📁.rs\"}"}}]},{"role":"tool","tool_call_id":"call","content":output}],"max_tokens":1000});
+        let original = body["messages"].clone();
+        let usage = fit_adaptive_context_with_ingress(
+            &mut body,
+            8192,
+            |_| Ok::<_, &str>(6000),
+            || "too large",
+            Some(2048),
         )
         .unwrap();
-        assert!(usage.shortened_tool_results > 0);
-        assert_eq!(body["messages"][2]["tool_call_id"], "call");
-        assert!(body["messages"][2]["content"]
-            .as_str()
-            .unwrap()
-            .contains("Werkzeugausgabe gekürzt"));
-        assert_eq!(body["messages"][0]["content"], "current");
+        assert_eq!(body["messages"], original);
+        assert_eq!(usage.shortened_tool_results, 0);
+        let transported: Value = serde_json::from_str(&body.to_string()).unwrap();
+        let receipt: Value =
+            serde_json::from_str(transported["messages"][2]["content"].as_str().unwrap()).unwrap();
+        assert_eq!(receipt["path"], "/projekte/luczor");
+        assert_eq!(receipt["windows"], r"E:\projekte\luczor");
+        assert_eq!(receipt["unicode"], "src/e\u{301}📁.rs");
     }
 }

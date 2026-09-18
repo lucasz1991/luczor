@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { DreamView } from './MemoryGraphView.vue'
 import {
   DREAM_OPERATION_LABELS,
@@ -14,6 +14,7 @@ import {
 import {
   idleOptimizationEnabled,
   idleOptimizationStatus,
+  idleOptimizationBlocker,
   requestIdleOptimization,
   saveIdleOptimizationSetting,
 } from '@/services/agents/idleOptimization'
@@ -109,23 +110,54 @@ function decisionCount(item: DreamRun, op: string) {
     .reduce((sum, decision) => sum + Math.max(1, decision.targets.length), 0)
 }
 
+const BLOCKERS: Record<string, string> = {
+  unmounted: 'Die Leerlauf-Pflege ist in diesem Fenster nicht eingebunden.',
+  disabled: 'Die Leerlauf-Pflege konnte nicht eingeschaltet werden.',
+  active: 'Es läuft bereits eine Prüfung oder ein Traum.',
+  foreground: 'Ein Auftrag im Vordergrund hält das Modell – bitte warten, bis er fertig ist.',
+}
+/** Set after a manual request; the next status change tells us whether the pass got admitted. */
+const requestedAt = ref(0)
+watch(
+  () => [status.value?.phase, status.value?.reason] as const,
+  ([phase, reason]) => {
+    if (!requestedAt.value || Date.now() - requestedAt.value > 60_000) return
+    if (phase === 'running' || phase === 'committing') {
+      message.value = 'Der Traum läuft – Schritte und Entscheidungen erscheinen unten und in der Karte.'
+      messageTone.value = 'info'
+      requestedAt.value = 0
+    } else if (phase === 'paused' || phase === 'cooldown') {
+      // The pass was admitted and finished, or an eligibility gate declined it: show which one.
+      // eslint-disable-next-line security/detect-object-injection
+      const why = reason ? (REASONS[reason] ?? reason) : ''
+      const ok = reason === 'candidate_ready'
+      message.value = ok
+        ? 'Traum abgeschlossen und übernommen.'
+        : `Traum nicht gestartet: ${why || 'Voraussetzung fehlt'}.`
+      messageTone.value = ok ? 'info' : 'error'
+      requestedAt.value = 0
+    }
+  }
+)
 async function startDream() {
   message.value = ''
   busy.value = true
   try {
     if (!idleOptimizationEnabled.value) {
       await saveIdleOptimizationSetting(true)
-      message.value = 'Leerlauf-Pflege eingeschaltet. Der erste Traum startet, sobald Luczor bereit ist.'
-      messageTone.value = 'info'
+      // The optimizer starts from a watcher; let that flush before asking it for a pass.
+      await nextTick()
     }
-    // The manual request goes through the same eligibility, consent and local-only gates as scheduled runs.
+    // The manual request goes through the same eligibility and local-only gates as scheduled runs,
+    // but counts as consent to start the installed model and tolerates a busy CPU.
     if (requestIdleOptimization()) {
-      message.value = 'Traum angefordert – die Voraussetzungen werden jetzt geprüft.'
+      requestedAt.value = Date.now()
+      message.value = 'Traum angefordert – Voraussetzungen werden geprüft …'
       messageTone.value = 'info'
-    } else if (idleOptimizationEnabled.value) {
-      message.value = running.value
-        ? 'Es läuft bereits ein Traum.'
-        : 'Träumen ist gerade nicht möglich: Luczor muss bereit sein und kein Auftrag darf laufen.'
+    } else {
+      const blocker = idleOptimizationBlocker() ?? 'active'
+      // eslint-disable-next-line security/detect-object-injection
+      message.value = BLOCKERS[blocker] ?? 'Träumen ist gerade nicht möglich.'
       messageTone.value = 'error'
     }
   } catch {

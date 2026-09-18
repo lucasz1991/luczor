@@ -285,6 +285,27 @@ describe('idle local context optimization', () => {
     await optimizer.stop()
   })
 
+  it('keeps a manual request alive across interrupts and marks the pass as manual', async () => {
+    const { optimizer, inspect, runLocal, commitCandidate } = setup()
+    optimizer.start()
+    expect(optimizer.manualBlocker()).toBeNull()
+    expect(optimizer.requestNow()).toBe(true)
+    // A settings echo or focus change right after the click must not push the pass back to the idle grace.
+    optimizer.interrupt('activity')
+    expect(optimizer.snapshot()).toMatchObject({ manual: true, phase: 'paused' })
+    expect(optimizer.snapshot().nextCheckAt).toBe(Date.now() + 1)
+    await vi.advanceTimersByTimeAsync(2)
+    expect(inspect).toHaveBeenCalledWith(expect.any(AbortSignal), false, true)
+    expect(runLocal).toHaveBeenCalledWith(expect.objectContaining({ manual: true }), expect.any(AbortSignal))
+    expect(commitCandidate).toHaveBeenCalledTimes(1)
+    expect(optimizer.snapshot()).toMatchObject({ manual: false, reason: 'candidate_ready' })
+    // Scheduled passes are not manual.
+    await vi.advanceTimersByTimeAsync(300)
+    expect(inspect).toHaveBeenLastCalledWith(expect.any(AbortSignal), false, false)
+    await optimizer.stop()
+    expect(optimizer.manualBlocker()).toBe('disabled')
+  })
+
   it('ignores faulty UI subscribers and returns immutable snapshots', async () => {
     const { optimizer, runLocal } = setup()
     const unsubscribe = optimizer.subscribe(() => {

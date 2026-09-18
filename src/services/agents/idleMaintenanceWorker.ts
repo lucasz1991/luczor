@@ -313,7 +313,7 @@ export function createMaintenanceWorker(
   }
   return new IdleContextOptimizer(
     {
-      async inspect(signal, running) {
+      async inspect(signal, running, manual = false) {
         const no = (reason: string) => {
           recordDreamSkip(reason)
           return { available: false, boundary: '', reason }
@@ -332,8 +332,10 @@ export function createMaintenanceWorker(
           metrics.ram_total_mb - metrics.ram_used_mb < reserve
         )
           return no('memory_pressure')
-        if (!running && (!Number.isFinite(metrics.cpu_percent) || metrics.cpu_percent > 75)) return no('cpu_pressure')
-        if (!running && (!status.operational || status.state !== 'ready' || !status.modelId)) {
+        // A user-started pass tolerates a busy CPU; scheduled passes stay strictly idle-only.
+        if (!running && !manual && (!Number.isFinite(metrics.cpu_percent) || metrics.cpu_percent > 75))
+          return no('cpu_pressure')
+        if (!running && !manual && (!status.operational || status.state !== 'ready' || !status.modelId)) {
           const { journal } = await luczorMemory.maintenanceSnapshot(current.principalId)
           if (!journal.consent?.installedModelStart) return no('model_start_consent_required')
         }
@@ -428,10 +430,11 @@ export function createMaintenanceWorker(
             projectId: job.projectId ?? '',
           }
           const snapshot = await luczorMemory.maintenanceSnapshot(job.principalId)
+          // Clicking "Jetzt träumen" is explicit consent to start the installed model for this pass.
           const modelId =
             status.state === 'ready' && status.modelId
               ? status.modelId
-              : snapshot.journal.consent?.installedModelStart
+              : snapshot.journal.consent?.installedModelStart || job.manual
                 ? await deps.prepare(signal)
                 : ''
           if (!modelId) throw new Error('installed_model_required')

@@ -91,14 +91,49 @@ describe('prompt context assembler', () => {
     expect(approved.fragments.find(item => item.id === 'approval')?.trust).toBe('untrusted_data')
   })
 
-  it('deduplicates normalized content and keeps the deterministic higher-priority candidate', () => {
+  it('deduplicates exact content and keeps the deterministic higher-priority candidate', () => {
     const result = assemblePromptContext([
-      fragment({ id: 'lower', source: 'memory', content: 'Antworte   immer knapp.', priority: 1 }),
-      fragment({ id: 'higher', source: 'memory', content: '  antworte immer KNAPP. ', priority: 9 }),
+      fragment({ id: 'lower', source: 'memory', content: 'Antworte immer knapp.', priority: 1 }),
+      fragment({ id: 'higher', source: 'memory', content: 'Antworte immer knapp.', priority: 9 }),
     ])
 
     expect(result.fragments.map(item => item.id)).toEqual(['higher'])
     expect(result.omitted).toContainEqual({ id: 'lower', reason: 'duplicate' })
+  })
+
+  it('keeps relative path case, whitespace and Unicode identities distinct', () => {
+    const paths = ['src/Readme.md', 'src/readme.md', 'src/é.txt', 'src/e\u0301.txt', 'src/a b.txt', 'src/a  b.txt']
+    const result = assemblePromptContext(
+      paths.map((content, index) => fragment({ id: `p${index}`, source: 'repository', content }))
+    )
+    expect(result.fragments.map(item => item.content)).toEqual(paths)
+  })
+
+  it('omits oversized context records instead of cutting paths or final restrictions', () => {
+    const content = 'src/' + 'long/'.repeat(30) + 'final.txt\nNever delete this file.'
+    const result = assemblePromptContext([fragment({ id: 'file', source: 'repository', content })], {
+      maxFragmentChars: 80,
+    })
+    expect(result.fragments).toEqual([])
+    expect(result.omitted).toEqual([{ id: 'file', reason: 'budget' }])
+    expect(result.providerText).toBe('')
+  })
+
+  it('redacts credential values without stripping JSON quotes or leaking escaped suffixes', () => {
+    const source = JSON.stringify({
+      path: '/projekte/luczor',
+      password: 'secret"tail\\value',
+      token: 'opaque-value',
+      note: '  unchanged\r\n',
+    })
+    const result = redactProviderSecrets(source)
+    expect(JSON.parse(result)).toEqual({
+      path: '/projekte/luczor',
+      password: '[REDACTED]',
+      token: '[REDACTED]',
+      note: '  unchanged\r\n',
+    })
+    expect(redactProviderSecrets(result)).toBe(result)
   })
 
   it('redacts drive, UNC and POSIX paths but preserves web URLs', () => {

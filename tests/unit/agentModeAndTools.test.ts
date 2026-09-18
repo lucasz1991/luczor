@@ -2193,6 +2193,34 @@ describe('agent mode and tool reliability', () => {
     expect(mocks.logAgentEvent).not.toHaveBeenCalled()
   })
 
+  it.each([true, false])('passes complete tool evidence to the next local model round (ok=%s)', async ok => {
+    const output = {
+      path: '/projekte/luczor',
+      windows: 'E:\\projekte\\luczor',
+      content: 'line\r\n'.repeat(2500) + 'END: do not delete',
+    }
+    mocks.execute.mockResolvedValue(
+      ok ? output : { ok: false, error: 'detail '.repeat(600) + '/projekte/luczor', output }
+    )
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(toolCallResult)
+      .mockResolvedValueOnce({ content: 'Geprüft.', toolCalls: [], rawToolCalls: [] })
+    await runAgent({
+      projectId: 'p1',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'Prüfe das Projekt' }],
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    const request = mocks.streamChatWithTools.mock.calls[1]![0] as InferenceRequest
+    const receipt = request.messages.find(message => message.role === 'tool')!
+    const error = 'detail '.repeat(600) + '/projekte/luczor'
+    // Failed tool envelopes remain raw evidence inside the normalized outcome.
+    expect(JSON.parse(receipt.content)).toEqual(
+      ok ? { ok: true, output } : { ok: false, error, output: { ok: false, error, output } }
+    )
+    expect(request.contextBudget?.shortenedToolResults).toBe(0)
+  })
+
   it('queues approval-required tools as approved in unrestricted mode without opening a pending approval', async () => {
     mocks.getTool.mockReturnValue({
       name: 'project_upsert_goal',

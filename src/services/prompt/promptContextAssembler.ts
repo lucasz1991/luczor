@@ -167,14 +167,17 @@ export function redactProviderSecrets(value: string): string {
   // JSON-style quoted keys need their closing quote handled before the more
   // general environment/config assignment expressions below.
   text = text.replace(
-    new RegExp(`(["'])(${secretKey})\\1(\\s*[:=]\\s*)(["'])([^"'\\r\\n]+)\\4`, 'giu'),
+    new RegExp(`(["'])(${secretKey})\\1(\\s*[:=]\\s*)(["'])((?:\\\\.|(?!\\4)[^\\\\\\r\\n])*)\\4`, 'giu'),
     '$1$2$1$3$4[REDACTED]$4'
   )
-  text = text.replace(new RegExp(`(["'])(${secretKey})\\1(\\s*[:=]\\s*)([^\\s,;}\\]]+)`, 'giu'), '$1$2$1$3[REDACTED]')
+  text = text.replace(new RegExp(`(["'])(${secretKey})\\1(\\s*[:=]\\s*)([^\\s,"';}\\]]+)`, 'giu'), '$1$2$1$3[REDACTED]')
   // Quoted JSON/config assignments, including values containing spaces.
-  text = text.replace(new RegExp(`\\b(${secretKey})(\\s*[:=]\\s*)(["'])([^"'\\r\\n]+)\\3`, 'giu'), '$1$2$3[REDACTED]$3')
+  text = text.replace(
+    new RegExp(`\\b(${secretKey})(\\s*[:=]\\s*)(["'])((?:\\\\.|(?!\\3)[^\\\\\\r\\n])*)\\3`, 'giu'),
+    '$1$2$3[REDACTED]$3'
+  )
   // Shell/env and unquoted assignments.
-  text = text.replace(new RegExp(`\\b(${secretKey})(\\s*[:=]\\s*)([^\\s,;}\\]]+)`, 'giu'), '$1$2[REDACTED]')
+  text = text.replace(new RegExp(`\\b(${secretKey})(\\s*[:=]\\s*)([^\\s,"';}\\]]+)`, 'giu'), '$1$2[REDACTED]')
 
   return text
 }
@@ -234,11 +237,8 @@ function sanitizeProvenance(value: PromptFragmentProvenance | undefined): Prompt
   return Object.values(provenance).some(item => item !== undefined) ? provenance : undefined
 }
 
-function sanitizeFragment(fragment: PromptFragment, maxFragmentChars: number): PromptFragment | null {
-  const content = clip(
-    redactAbsoluteFilesystemPaths(redactProviderSecrets(String(fragment.content ?? ''))).trim(),
-    maxFragmentChars
-  )
+function sanitizeFragment(fragment: PromptFragment): PromptFragment | null {
+  const content = redactAbsoluteFilesystemPaths(redactProviderSecrets(String(fragment.content ?? '')))
   if (!content) return null
 
   return {
@@ -254,7 +254,7 @@ function sanitizeFragment(fragment: PromptFragment, maxFragmentChars: number): P
 }
 
 function canonicalContent(value: string): string {
-  return value.normalize('NFKC').replace(/\s+/g, ' ').trim().toLocaleLowerCase('de-DE')
+  return value
 }
 
 function compareFragments(left: PromptFragment, right: PromptFragment): number {
@@ -299,7 +299,7 @@ export function assemblePromptContext(
   const approved = new Set(options.approvedEgressIds ?? [])
   const omissions: PromptFragmentOmission[] = []
   const sanitized = input
-    .map(fragment => ({ original: fragment, sanitized: sanitizeFragment(fragment, budget.maxFragmentChars) }))
+    .map(fragment => ({ original: fragment, sanitized: sanitizeFragment(fragment) }))
     .sort((left, right) => {
       if (!left.sanitized && !right.sanitized) return left.original.id.localeCompare(right.original.id, 'de')
       if (!left.sanitized) return 1
@@ -326,6 +326,10 @@ export function assemblePromptContext(
       omissions.push({ id: originalId, reason: 'approval_required' })
       continue
     }
+    if (fragment.content.length > budget.maxFragmentChars) {
+      omissions.push({ id: originalId, reason: 'budget' })
+      continue
+    }
 
     const fingerprint = canonicalContent(fragment.content)
     if (seen.has(fingerprint)) {
@@ -338,7 +342,8 @@ export function assemblePromptContext(
     }
 
     const line = renderFragment(fragment)
-    const candidate = redactProviderSecrets(redactAbsoluteFilesystemPaths(renderContext([...rendered, line])))
+    // Sanitize values before JSON serialization, never rewrite the JSON framing.
+    const candidate = renderContext([...rendered, line])
     if (!fitsBudget(candidate, budget)) {
       omissions.push({ id: originalId, reason: 'budget' })
       continue
@@ -349,7 +354,7 @@ export function assemblePromptContext(
     seen.add(fingerprint)
   }
 
-  const providerText = redactProviderSecrets(redactAbsoluteFilesystemPaths(renderContext(rendered)))
+  const providerText = renderContext(rendered)
   return {
     providerText,
     fragments: selected,
