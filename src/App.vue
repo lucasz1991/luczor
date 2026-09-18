@@ -9,6 +9,8 @@ import DeviceClusterPanel from './components/DeviceClusterPanel.vue'
 import { modelUsageSettings, type ChatRouteMode } from '@/services/inference/modelUsageSettings'
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import MemoryExplorerPage from '@/features/memory/MemoryExplorerPage.vue'
+import MemoryGraphBackdrop from '@/features/memory/MemoryGraphBackdrop.vue'
+import { recordMemoryLinks, setModelPhase } from '@/services/memory/modelActivity'
 import { useMemoryObservatoryHost } from '@/features/memory/observatory'
 import ToastHost from './components/ai/ToastHost.vue'
 import ContextInspector from './components/ContextInspector.vue'
@@ -2111,6 +2113,18 @@ async function executeChatTurn(
       local: packages.local,
       external: packages.external,
     }
+    // The knowledge space shows which memories entered this turn's prompt and which stayed out.
+    {
+      const memoryId = (fragmentId: string) => fragmentId.replace(/^memory-(?:user|project|agent|session)-/u, '')
+      const included = packages.local.selected
+        .filter(item => item.id.startsWith('memory-'))
+        .map(item => memoryId(item.id))
+      const omitted = packages.local.omitted
+        .filter(item => item.id.startsWith('memory-'))
+        .map(item => memoryId(item.id))
+      recordMemoryLinks(included, 'included', 'chat')
+      recordMemoryLinks(omitted, 'omitted', 'chat')
+    }
     const assistantProfile = await refreshAssistantProfile()
     executionGate.assert(turnExecution)
     const localProfilePrompt = localAssistantProfilePrompt(assistantProfile, text, taskType)
@@ -2648,6 +2662,12 @@ const localModelSwitchNames = computed(() =>
     ).map(model => [model.id, model.displayName])
   )
 )
+// The knowledge space's model core pulses while a turn runs.
+watch(
+  () => chatRuns.hasLive() || conversationBusy.value,
+  live => setModelPhase(live ? 'thinking' : 'idle'),
+  { immediate: true }
+)
 const backgroundPreparation = useBackgroundPreparation({
   project: () => activeProject.value,
   workspace: () => activeWorkspace.value,
@@ -2791,6 +2811,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       'ai-workspace--system-mini': showSystemPanel && systemStatusDisplayMode === 'mini',
     }"
   >
+    <MemoryGraphBackdrop :project-id="activeProjectId" :focused="showMemoryExplorer" />
     <SidebarNav
       v-model:collapsed="sidebarCollapsed"
       :title="appearance.assistantName"

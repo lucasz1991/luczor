@@ -557,6 +557,26 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                 <div class="lz-card">
                   <div class="lz-row">
                     <div>
+                      <div class="lz-card__title">Wissensraum als Hintergrund</div>
+                      <p class="lz-hint">
+                        Der langsam drehende Wissensraum liegt leicht verschwommen hinter der ganzen App; auf der
+                        Gedächtnisseite wird er scharf und bedienbar.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      class="lz-switch"
+                      :class="{ 'is-on': display.ambientBackdrop }"
+                      role="switch"
+                      :aria-checked="display.ambientBackdrop"
+                      aria-label="Wissensraum als Hintergrund"
+                      @click="setDisplay('ambientBackdrop', !display.ambientBackdrop)"
+                    >
+                      <span />
+                    </button>
+                  </div>
+                  <div class="lz-row">
+                    <div>
                       <div class="lz-card__title">Tiefenwirkung</div>
                       <p class="lz-hint">Entfernte Knoten werden blasser.</p>
                     </div>

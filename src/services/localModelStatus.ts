@@ -1,3 +1,4 @@
+import { shallowRef } from 'vue'
 import { localInferenceCoordinator, localPolicyDiagnostic } from '@/services/inference/coordinator'
 import { hasVerifiedLocalReadiness } from '@/services/inference/hybridRouter'
 import { getNativeLocalModelStatus, type NativeLocalModelStatus } from '@/services/inference/tauriLocalRuntime'
@@ -445,6 +446,9 @@ type StatusDependencies = {
   now: () => number
 }
 
+/** Most recent successful status read; passive consumers (knowledge space) show it without polling. */
+export const lastLocalModelStatus = shallowRef<LocalModelStatusView | null>(null)
+
 /** No network request, preparation, download, or model start is triggered by a status read. */
 export async function readLocalModelStatus(
   dependencies: StatusDependencies = {
@@ -474,7 +478,9 @@ export async function readLocalModelStatus(
         detail: 'Die Modellrichtlinie hat sich während der Abfrage geändert. Der Status wird erneut abgeglichen.',
       }
     }
-    return presentLocalModelStatus(after, native, dependencies.now(), modelUsageSettings.value.localModelId)
+    const view = presentLocalModelStatus(after, native, dependencies.now(), modelUsageSettings.value.localModelId)
+    lastLocalModelStatus.value = view
+    return view
   } catch {
     // Native exceptions may contain private file paths or runtime credentials.
     return blankStatus(dependencies.now())

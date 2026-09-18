@@ -9,6 +9,13 @@ import { memoryImportance, memoryPriority, MEMORY_PRIORITIES, type MemoryPriorit
 import { analyzeMemoryRecords, type MemoryAnalysis } from './memoryAnalysis'
 import { trackMemoryActivity } from './activity'
 import { trackMemoryUsage, type MemoryUsageOrigin } from './usage'
+import { recordMemoryLinks } from './modelActivity'
+
+/** Lets passive views (knowledge space) refresh after a write; ids only, never content. */
+function notifyMemoryChanged(origin: 'chat' | 'user', ids: string[], kind: 'written' | 'updated' | 'removed') {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new CustomEvent('luczor:memory-changed', { detail: { origin, ids, kind } }))
+}
 import {
   emptyMaintenanceJournal,
   maintenanceEligible,
@@ -1610,7 +1617,12 @@ export class LuczorMemoryService {
   }
 
   async remember(input: RememberInput): Promise<MemoryRecord> {
-    return trackMemoryUsage('save', () => trackMemoryActivity('write', () => this.rememberOperation(input)))
+    const record = await trackMemoryUsage('save', () =>
+      trackMemoryActivity('write', () => this.rememberOperation(input))
+    )
+    recordMemoryLinks([record.id], 'written', input.writeIntent === 'system' ? 'idle' : 'chat')
+    notifyMemoryChanged('chat', [record.id], 'written')
+    return record
   }
 
   private async rememberOperation(input: RememberInput): Promise<MemoryRecord> {
@@ -1791,7 +1803,7 @@ export class LuczorMemoryService {
   }
 
   async recall(query: RecallQuery): Promise<MemoryRecord[]> {
-    return trackMemoryUsage(
+    const records = await trackMemoryUsage(
       'sharedRecall',
       markUsageFailed =>
         trackMemoryActivity('read', markFailed =>
@@ -1802,6 +1814,12 @@ export class LuczorMemoryService {
         ),
       query.origin
     )
+    recordMemoryLinks(
+      records.map(record => record.id),
+      'recalled',
+      query.origin ?? 'chat'
+    )
+    return records
   }
 
   private async recallOperation(query: RecallQuery, markFailed: () => void): Promise<MemoryRecord[]> {
@@ -1845,6 +1863,16 @@ export class LuczorMemoryService {
 
   /** Device-only retrieval. No query, private record or result is sent to the context server. */
   async recallLocal(query: RecallQuery): Promise<MemoryRecord[]> {
+    const records = await this.recallLocalTracked(query)
+    recordMemoryLinks(
+      records.map(record => record.id),
+      'recalled',
+      query.origin ?? 'chat'
+    )
+    return records
+  }
+
+  private async recallLocalTracked(query: RecallQuery): Promise<MemoryRecord[]> {
     return trackMemoryUsage(
       'localRecall',
       markUsageFailed =>
@@ -1872,7 +1900,12 @@ export class LuczorMemoryService {
   }
 
   async promote(recordId: string): Promise<MemoryRecord | null> {
-    return trackMemoryActivity('write', () => this.promoteOperation(recordId))
+    const record = await trackMemoryActivity('write', () => this.promoteOperation(recordId))
+    if (record) {
+      recordMemoryLinks([record.id], 'updated', 'user')
+      notifyMemoryChanged('user', [record.id], 'updated')
+    }
+    return record
   }
 
   private async promoteOperation(recordId: string): Promise<MemoryRecord | null> {
@@ -1923,7 +1956,9 @@ export class LuczorMemoryService {
     id: string,
     ids: { userId?: string; projectId?: string; agentId?: string; sessionId?: string } = {}
   ): Promise<void> {
-    return trackMemoryActivity('write', () => this.forgetOperation(scope, id, ids))
+    await trackMemoryActivity('write', () => this.forgetOperation(scope, id, ids))
+    recordMemoryLinks([id], 'removed', 'user')
+    notifyMemoryChanged('user', [id], 'removed')
   }
 
   private async forgetOperation(

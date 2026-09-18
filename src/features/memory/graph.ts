@@ -15,11 +15,15 @@ export type MemoryNode = {
 export type MemoryEdge = { from: string; to: string; kind: string; grouping?: boolean }
 export type MemoryGraph = { nodes: MemoryNode[]; edges: MemoryEdge[] }
 export const MEMORY_SYSTEMS = ['Erinnerungen', 'Persönlichkeit', 'Repo-Graph', 'SQL / Cognee', 'Kontextpakete']
+/** The local model sits at the centre of the knowledge space; every system hub hangs off it. */
+export const MODEL_NODE_ID = 'model:local'
+export type MemoryGraphModel = { label: string; detail: string }
 export function buildMemoryGraph(
   inventory: MemoryInventory | null,
   repo: RepositoryGraphPage | null,
   profile: AssistantProfile,
-  artifacts: PreparedContextArtifact[] = []
+  artifacts: PreparedContextArtifact[] = [],
+  model?: MemoryGraphModel
 ): MemoryGraph {
   const nodes: MemoryNode[] = MEMORY_SYSTEMS.map((system, index) => ({
     id: `system:${index}`,
@@ -32,6 +36,17 @@ export function buildMemoryGraph(
         : 'Gestrichelte Linien zeigen die Zugehörigkeit, keine semantische Beziehung.',
   }))
   const edges: MemoryEdge[] = []
+  if (model) {
+    nodes.unshift({
+      id: MODEL_NODE_ID,
+      label: model.label,
+      system: 'Modell',
+      kind: 'Modell',
+      detail: model.detail,
+    })
+    for (let index = 0; index < MEMORY_SYSTEMS.length; index++)
+      edges.push({ from: MODEL_NODE_ID, to: `system:${index}`, kind: 'Zugriff des Modells', grouping: true })
+  }
   for (const artifact of artifacts) {
     const id = `artifact:${artifact.id}`
     nodes.push({
@@ -150,14 +165,20 @@ export function projectMemoryGraph(nodes: MemoryNode[], yaw: number, pitch: numb
   const groups = new Map<string, number>()
   return nodes
     .map(node => {
+      const isModel = node.kind === 'Modell'
       const group = Math.max(0, MEMORY_SYSTEMS.indexOf(node.system))
       const index = groups.get(node.system) ?? 0
       groups.set(node.system, index + 1)
       const angle = index * 2.399963
-      const radius = node.kind === 'System' ? 0 : Math.min(130, 24 + Math.sqrt(index) * 13)
-      const xx = (group % 2 ? 150 : -150) + Math.cos(angle) * radius
-      const yy = (group < 2 ? -95 : 95) + Math.sin(angle) * radius * 0.62
-      const zz = Math.sin(index * 1.7) * radius
+      const radius = node.kind === 'System' || isModel ? 0 : Math.min(130, 24 + Math.sqrt(index) * 13)
+      // Five system hubs orbit the model core on a ring; their members spread around each hub.
+      const hubAngle = (group / MEMORY_SYSTEMS.length) * Math.PI * 2 - Math.PI / 2
+      const hubX = Math.cos(hubAngle) * 205
+      const hubY = Math.sin(hubAngle) * 118
+      const hubZ = Math.sin(hubAngle * 2) * 70
+      const xx = isModel ? 0 : hubX + Math.cos(angle) * radius
+      const yy = isModel ? 0 : hubY + Math.sin(angle) * radius * 0.62
+      const zz = isModel ? 0 : hubZ + Math.sin(index * 1.7) * radius
       const rx = xx * Math.cos(yaw) - zz * Math.sin(yaw)
       const rz = xx * Math.sin(yaw) + zz * Math.cos(yaw)
       const ry = yy * Math.cos(pitch) - rz * Math.sin(pitch)
@@ -168,7 +189,7 @@ export function projectMemoryGraph(nodes: MemoryNode[], yaw: number, pitch: numb
         left: 400 + rx * scale,
         top: 250 + ry * scale,
         depth,
-        radius: (node.kind === 'System' ? 10 : 4) * scale,
+        radius: (isModel ? 16 : node.kind === 'System' ? 10 : 4) * scale,
       }
     })
     .sort((left, right) => right.depth - left.depth)
