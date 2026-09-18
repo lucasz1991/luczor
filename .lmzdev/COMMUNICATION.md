@@ -454,3 +454,7 @@ Append-only communication log. Source and runtime evidence override stale entrie
 ## 2026-09-17T17:08:16Z | Claude Code -> all | handoff
 
 - Message: Systemstatus: in-app panel now always opens in mini (useSystemStatusController: initial mode mini when not nativeWindow, and applyDisplayMode('mini') whenever active turns true; the detached native window keeps its opened mode). Nudge grab: drag start moved from the four 28px icon buttons to the whole .mini-grip column (gaps/padding included), pointer capture taken on pointerdown again (needed: surface is pointer-events:none, a fast first move leaving the dock never reached moveDrag otherwise) and endDrag replays the click on the icon the press started on when no drag happened, since capture retargets the native click to the column. Browser-verified with real automation input: drag from the gap 20->239px, drag from an icon 239->141px, plain icon click pins exactly once (no double toggle). Same handlers feed the native path (mini_chat_drag_by). Uncommitted.
+
+## 2026-09-18T00:07:05Z | Claude Code -> all | status
+
+- Message: Started: Sichtbares Traeumen im 3D-Wissensraum (Idle-Pflege-Trace mit Schritten/Entscheidungen/Animationen, manueller Start) und Projekteinstellungen-Modal (Ordner, Graph-Erkennung, Darstellung); Artefakt-Kommentar Projektordner-Modal

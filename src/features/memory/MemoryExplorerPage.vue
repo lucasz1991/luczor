@@ -4,10 +4,13 @@ import type { RepositoryGraphPage } from '@/services/repositoryGraph'
 import { memoryExplorerData } from './explorerData'
 import { assistantProfileState } from '@/services/assistantProfile'
 import MemoryGraphView from './MemoryGraphView.vue'
+import MemoryDreamPanel from './MemoryDreamPanel.vue'
 import { buildMemoryGraph, MEMORY_SYSTEMS, type MemoryInventory, type MemoryNode } from './graph'
+import { loadMemoryGraphDisplay, memoryGraphDisplay } from './graphDisplay'
+import { dreamEffects, dreamNodeId, dreamTrace } from '@/services/memory/dreamTrace'
 import type { PreparedContextArtifact } from '@/services/memory/maintenance'
 const props = defineProps<{ projects: Array<{ id: string; name: string }>; projectId: string }>()
-const emit = defineEmits<{ close: [] }>()
+const emit = defineEmits<{ close: []; settings: [] }>()
 const heading = ref<HTMLElement | null>(null)
 const project = ref(props.projectId)
 const query = ref('')
@@ -47,16 +50,41 @@ const identityChanged = () => {
   identityChanging = false
   void load()
 }
-async function load() {
+/** Nodes that appeared or vanished with the last idle commit; shown briefly as born/ghost nodes. */
+const transient = shallowRef<{ born: Set<string>; ghosts: MemoryNode[]; until: number }>({
+  born: new Set(),
+  ghosts: [],
+  until: 0,
+})
+let transientTimer: ReturnType<typeof setTimeout> | undefined
+function markTransient(previous: MemoryNode[], next: MemoryNode[]) {
+  const before = new Map(previous.map(node => [node.id, node]))
+  const after = new Set(next.map(node => node.id))
+  const born = new Set(next.filter(node => node.kind !== 'System' && !before.has(node.id)).map(node => node.id))
+  const ghosts = previous
+    .filter(node => node.kind !== 'System' && !after.has(node.id) && node.system === 'Erinnerungen')
+    .map(node => ({ ...node, state: 'removed' as const, detail: `${node.detail}\n\nDurch die Leerlauf-Pflege ersetzt.` }))
+  if (!born.size && !ghosts.length) return
+  transient.value = { born, ghosts, until: Date.now() + 8000 }
+  if (transientTimer) clearTimeout(transientTimer)
+  transientTimer = setTimeout(() => {
+    transient.value = { born: new Set(), ghosts: [], until: 0 }
+  }, 8000)
+}
+
+async function load(options: { soft?: boolean } = {}) {
   if (identityChanging || disposed) return
   const request = ++epoch
+  const previous = options.soft ? baseGraph.value.nodes : []
   loading.value = true
   notice.value = ''
   remote.value = []
   remoteNotice.value = ''
   remoteLoading.value = false
-  inventory.value = null
-  repo.value = null
+  if (!options.soft) {
+    inventory.value = null
+    repo.value = null
+  }
   try {
     const account = await memoryExplorerData.account()
     const [memories, graph, contexts] = await Promise.allSettled([
@@ -71,6 +99,7 @@ async function load() {
     inventory.value = memories.status === 'fulfilled' ? memories.value : null
     repo.value = graph.status === 'fulfilled' ? graph.value : null
     artifacts.value = contexts.status === 'fulfilled' ? contexts.value : []
+    if (options.soft) markTransient(previous, baseGraph.value.nodes)
     const messages = []
     if (memories.status === 'rejected') messages.push('Lokale Erinnerungen nicht verfügbar.')
     if (graph.status === 'rejected')
@@ -117,16 +146,42 @@ async function sharedSearch() {
     if (request === epoch) remoteLoading.value = false
   }
 }
+const baseGraph = computed(() =>
+  buildMemoryGraph(inventory.value, repo.value, assistantProfileState.profile, artifacts.value)
+)
 const graph = computed(() => {
-  const data = buildMemoryGraph(inventory.value, repo.value, assistantProfileState.profile, artifacts.value)
-  data.nodes.push(...remote.value)
-  data.edges.push(
-    ...remote.value.map(node => ({ from: 'system:3', to: node.id, kind: 'Abrufzuordnung', grouping: true }))
-  )
-  const nodes = data.nodes.filter(node => !system.value || node.system === system.value)
-  const ids = new Set(nodes.map(node => node.id))
-  return { nodes, edges: data.edges.filter(edge => ids.has(edge.from) && ids.has(edge.to)) }
+  const data = baseGraph.value
+  const born = transient.value.born
+  const nodes = [
+    ...data.nodes.map(node => (born.has(node.id) ? { ...node, state: 'born' as const } : node)),
+    ...remote.value,
+    ...transient.value.ghosts,
+  ]
+  const edges = [
+    ...data.edges,
+    ...remote.value.map(node => ({ from: 'system:3', to: node.id, kind: 'Abrufzuordnung', grouping: true })),
+    ...transient.value.ghosts.map(node => ({ from: 'system:0', to: node.id, kind: 'ersetzt', grouping: true })),
+  ]
+  const visible = nodes.filter(node => !system.value || node.system === system.value)
+  const ids = new Set(visible.map(node => node.id))
+  return { nodes: visible, edges: edges.filter(edge => ids.has(edge.from) && ids.has(edge.to)) }
 })
+// Dream state drives node animations; a ticking clock lets finished runs fade out of the view.
+const dreamClock = ref(Date.now())
+let dreamTimer: ReturnType<typeof setInterval> | undefined
+const dream = computed(() => {
+  void dreamClock.value
+  return dreamEffects(dreamTrace.value)
+})
+const dreamNodeIds = computed(() => new Set(graph.value.nodes.map(node => node.id)))
+function focusDreamTarget(target: { kind: 'memory' | 'file' | 'artifact' | 'source'; id: string }) {
+  const id = dreamNodeId(target)
+  if (dreamNodeIds.value.has(id)) selected.value = id
+}
+const memoryChanged = (event: Event) => {
+  const origin = (event as CustomEvent<{ origin?: string }>).detail?.origin
+  if (origin === 'idle' && !loading.value) void load({ soft: true })
+}
 const detail = computed(() => graph.value.nodes.find(node => node.id === selected.value))
 watch(system, () => {
   selected.value = graph.value.nodes[0]?.id ?? ''
@@ -157,13 +212,21 @@ onMounted(() => {
   void nextTick(() => heading.value?.focus())
   window.addEventListener('luczor:api-identity-changing', identityChange)
   window.addEventListener('luczor:api-identity-changed', identityChanged)
+  window.addEventListener('luczor:memory-changed', memoryChanged)
+  dreamTimer = setInterval(() => {
+    dreamClock.value = Date.now()
+  }, 2000)
+  void loadMemoryGraphDisplay()
   void load()
 })
 onBeforeUnmount(() => {
   disposed = true
   epoch++
+  if (dreamTimer) clearInterval(dreamTimer)
+  if (transientTimer) clearTimeout(transientTimer)
   window.removeEventListener('luczor:api-identity-changing', identityChange)
   window.removeEventListener('luczor:api-identity-changed', identityChanged)
+  window.removeEventListener('luczor:memory-changed', memoryChanged)
 })
 </script>
 <template>
@@ -174,7 +237,10 @@ onBeforeUnmount(() => {
         <h1 ref="heading" tabindex="-1">Gedächtnis</h1>
         <p>Erinnerungen, Persönlichkeit und Repository-Evidenz an einem Ort.</p>
       </div>
-      <button type="button" class="ai-button" @click="emit('close')">Zurück zum Chat</button>
+      <div class="memory-page__header-actions">
+        <button type="button" class="ai-button" @click="emit('settings')">Projekteinstellungen</button>
+        <button type="button" class="ai-button" @click="emit('close')">Zurück zum Chat</button>
+      </div>
     </header>
     <form class="memory-page__filters" @submit.prevent="search">
       <label
@@ -199,7 +265,7 @@ onBeforeUnmount(() => {
     </form>
     <p class="memory-page__scope">
       Erinnerungen: alle Bereiche des aktuellen Kontos auf diesem Gerät. Repo und Server-Abruf: ausgewähltes Projekt.
-      Nur lesend; keine Optimierung oder Indexierung durch Öffnen.
+      Öffnen startet nichts; die Leerlauf-Pflege lässt sich unten bewusst anstoßen.
     </p>
     <p v-if="notice" role="status" class="memory-page__notice">{{ notice }}</p>
     <div class="memory-page__body" :aria-busy="loading">
@@ -211,7 +277,14 @@ onBeforeUnmount(() => {
             {{ graph.edges.filter(edge => !edge.grouping).length }} gespeicherte Beziehungen</span
           >
         </div>
-        <MemoryGraphView :graph="graph" :selected="selected" @select="selected = $event" />
+        <MemoryGraphView
+          :graph="graph"
+          :selected="selected"
+          :dream="dream"
+          :display="memoryGraphDisplay"
+          @select="selected = $event"
+        />
+        <MemoryDreamPanel :dream="dream" :trace="dreamTrace" :project-id="project" @focus="focusDreamTarget" />
         <div class="memory-page__pages">
           <div>
             <span
@@ -314,6 +387,11 @@ onBeforeUnmount(() => {
   gap: 16px;
   flex-wrap: wrap;
   margin-bottom: 24px;
+}
+.memory-page__header-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 h1,
 h2,

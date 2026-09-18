@@ -29,6 +29,17 @@ import { canAccessCloudProject } from '@/services/cloudProjectAccess'
 import { inspectRepositoryGraph } from '@/services/repositoryGraph'
 import { recordMemoryUsageEvent } from '@/services/memory/usage'
 import { memoryMaintenanceAdapters, writableMaintenanceAdapter } from '@/services/memory/maintenanceAdapters'
+import {
+  beginDreamRun,
+  endDreamRun,
+  recordDreamDecision,
+  recordDreamModel,
+  recordDreamScan,
+  recordDreamSkip,
+  recordDreamStep,
+  type DreamRun,
+  type DreamTarget,
+} from '@/services/memory/dreamTrace'
 
 export const maintenanceProgress = shallowRef({
   stage: 'idle',
@@ -62,6 +73,29 @@ if (typeof window !== 'undefined')
     }
   })
 type Context = { project(): Project | undefined; projects?(): Project[]; messages?(): Message[]; busy(): boolean }
+
+/** Trace targets carry ids plus a short label; the visible knowledge space resolves them to nodes. */
+function traceTargets(material: MaintenanceSource[]): DreamTarget[] {
+  return material.map(source => {
+    if (source.kind === 'memory') return { kind: 'memory', id: source.id, label: source.content.slice(0, 72) }
+    if (source.kind === 'repository') {
+      let label = source.id
+      try {
+        const parsed = JSON.parse(source.content) as { path?: string }
+        if (typeof parsed.path === 'string') label = parsed.path
+      } catch {
+        /* Non-JSON repository evidence keeps its id as label. */
+      }
+      return { kind: 'file', id: source.id, label }
+    }
+    return { kind: 'source', id: `${source.kind}:${source.id}`, label: source.id }
+  })
+}
+function traceTask(jobId: string, kind: HydratedMaintenanceJob['kind']): DreamRun['task'] {
+  if (jobId.startsWith('evaluation:')) return 'evaluation'
+  if (jobId.startsWith('sql:')) return 'shared'
+  return kind
+}
 type Work = {
   hydrated: HydratedMaintenanceJob
   modelId: string
@@ -280,7 +314,10 @@ export function createMaintenanceWorker(
   return new IdleContextOptimizer(
     {
       async inspect(signal, running) {
-        const no = (reason: string) => ({ available: false, boundary: '', reason })
+        const no = (reason: string) => {
+          recordDreamSkip(reason)
+          return { available: false, boundary: '', reason }
+        }
         if (!deps.native()) return no('native_required')
         if (!enabled()) return no('disabled')
         if (context.busy() || (!running && deps.resources.hasWork())) return no('foreground')
@@ -328,13 +365,17 @@ export function createMaintenanceWorker(
             journal.activeStreak = choice.projectId === context.project()?.id ? journal.activeStreak + 1 : 0
             if (choice.projectId !== context.project()?.id) journal.lastProject = choice.projectId
           }
+          const queued = eligible.filter(item => ['pending', 'retry'].includes(item.status)).length
+          const blocked = journal.jobs.filter(item => item.status === 'blocked').length
+          const waitingForGate = journal.jobs.filter(
+            item => item.kind === 'memory' && item.status === 'pending' && !eligible.includes(item)
+          ).length
+          recordDreamScan({ work: snapshot.work.length, queued, blocked, waitingForGate })
           maintenanceProgress.value = {
             ...maintenanceProgress.value,
-            queued: eligible.filter(item => ['pending', 'retry'].includes(item.status)).length,
-            blocked: journal.jobs.filter(item => item.status === 'blocked').length,
-            waitingForGate: journal.jobs.filter(
-              item => item.kind === 'memory' && item.status === 'pending' && !eligible.includes(item)
-            ).length,
+            queued,
+            blocked,
+            waitingForGate,
             quality:
               journal.quality?.passed && journal.quality.catalogHash === deps.policy().manifest?.payloadSha256
                 ? 'passed'
@@ -346,9 +387,20 @@ export function createMaintenanceWorker(
           }
           return choice
         })
-        if (!job) return null
+        if (!job) {
+          recordDreamSkip('no_work')
+          return null
+        }
         const hydrated = snapshot.work.find(item => item.id === job.id)!
         recordMemoryUsageEvent('idle', 'retrieved', hydrated.material.length)
+        beginDreamRun({
+          jobKey: job.id,
+          task: traceTask(job.id, job.kind),
+          scope: job.projectId ? 'project' : 'user',
+          projectId: job.projectId,
+          sources: traceTargets(hydrated.material),
+          reason: `${hydrated.material.length} Quellen · ${job.attempts ? `Versuch ${job.attempts + 1}` : 'erster Versuch'}`,
+        })
         selected.clear()
         selected.set(job.id, { hydrated, modelId: '' })
         return {
@@ -369,6 +421,7 @@ export function createMaintenanceWorker(
         await assertCurrent(job, signal)
         return deps.resources.runBackground(async lease => {
           const status = await deps.status()
+          recordDreamStep('preparing', 'Modell vorbereiten')
           maintenanceProgress.value = {
             ...maintenanceProgress.value,
             stage: 'preparing',
@@ -390,6 +443,8 @@ export function createMaintenanceWorker(
             entry.device = 'local'
             entry.reservationId = lease?.leaseId
           })
+          recordDreamModel(modelId)
+          recordDreamStep('generating', 'Entwurf erzeugen', modelId)
           maintenanceProgress.value = { ...maintenanceProgress.value, modelId, stage: 'generating' }
           const generate = async (prompt: string) => {
             signal.throwIfAborted()
@@ -423,6 +478,43 @@ export function createMaintenanceWorker(
           recordMemoryUsageEvent('idle', 'included', work.hydrated.material.length)
           if (job.task === 'memory') work.changes = parseMemoryChangeSet(output, work.hydrated.material)
           const reviewedSources: MaintenanceSource[] = work.hydrated.material
+          const labelOf = (id: string) => work.hydrated.material.find(source => source.id === id)?.content.slice(0, 72)
+          if (work.changes) {
+            let created = 0
+            for (const operation of work.changes.operations) {
+              const targets: DreamTarget[] = [...new Set([...operation.targets, ...operation.sources])].map(id => ({
+                kind: 'memory',
+                id,
+                label: labelOf(id),
+              }))
+              if (operation.operation === 'noop') {
+                recordDreamDecision('keep', targets, operation.reason)
+                continue
+              }
+              recordDreamDecision(
+                operation.operation === 'add' ? 'create' : operation.operation,
+                targets,
+                operation.reason
+              )
+              if (operation.targets.length)
+                recordDreamDecision(
+                  'remove',
+                  operation.targets.map(id => ({ kind: 'memory', id, label: labelOf(id) })),
+                  'Wird durch die Ableitung ersetzt'
+                )
+              recordDreamDecision(
+                'create',
+                [{ kind: 'memory', id: `neu-${++created}`, label: operation.content.slice(0, 72) }],
+                operation.reason
+              )
+            }
+          } else {
+            recordDreamDecision(
+              'artifact',
+              [{ kind: 'artifact', id: job.key, label: output.slice(0, 72) }],
+              job.task === 'repository' ? 'Repository-Wissensnotiz' : 'Kontextpaket'
+            )
+          }
           if (job.task === 'context') assertPreservedReferences(reviewedSources, output)
           if (work.changes) {
             for (const operation of work.changes.operations.filter(item =>
@@ -434,11 +526,14 @@ export function createMaintenanceWorker(
               )
             }
           }
+          recordDreamStep('verifying', 'Gegenprüfung', `${reviewedSources.length} Quellen`)
           maintenanceProgress.value = { ...maintenanceProgress.value, stage: 'verifying' }
           try {
             parseMaintenanceVerification(await generate(verificationPrompt(reviewedSources, output)), reviewedSources)
+            recordDreamStep('verifying', 'Prüfung bestanden')
           } catch (error) {
             work.reviewFailed = true
+            recordDreamStep('verifying', 'Prüfung abgelehnt', error instanceof Error ? error.message : undefined)
             throw error
           }
           recordMemoryUsageEvent('idle', 'evaluated', reviewedSources.length)
@@ -480,6 +575,7 @@ export function createMaintenanceWorker(
       async commitCandidate(job, content, signal) {
         const work = selected.get(job.key)
         if (!work || work.output !== content) throw new Error('unverified_candidate')
+        recordDreamStep('committing', 'Übernehmen')
         maintenanceProgress.value = { ...maintenanceProgress.value, stage: 'committing' }
         if (job.key.startsWith('sql:')) {
           await assertCurrent(job, signal)
@@ -632,6 +728,7 @@ export function createMaintenanceWorker(
         }
       },
       async settled(job, success, interrupted) {
+        endDreamRun(success ? 'success' : interrupted ? 'interrupted' : 'failed')
         if (!success)
           await luczorMemory.updateMaintenance(job.principalId, journal => {
             failMaintenanceJob(journal, job.key, job.fingerprint, interrupted, Date.now())

@@ -3,7 +3,15 @@ import type { LuczorMemoryService } from '@/services/memory/luczorMemory'
 import type { AssistantProfile } from '@/services/assistantProfileTypes'
 import type { PreparedContextArtifact } from '@/services/memory/maintenance'
 export type MemoryInventory = Awaited<ReturnType<LuczorMemoryService['inspectLocal']>>
-export type MemoryNode = { id: string; label: string; system: string; kind: string; detail: string }
+export type MemoryNode = {
+  id: string
+  label: string
+  system: string
+  kind: string
+  detail: string
+  /** Transient presentation state set by the explorer while a dream run changes the inventory. */
+  state?: 'born' | 'removed'
+}
 export type MemoryEdge = { from: string; to: string; kind: string; grouping?: boolean }
 export type MemoryGraph = { nodes: MemoryNode[]; edges: MemoryEdge[] }
 export const MEMORY_SYSTEMS = ['Erinnerungen', 'Persönlichkeit', 'Repo-Graph', 'SQL / Cognee', 'Kontextpakete']
