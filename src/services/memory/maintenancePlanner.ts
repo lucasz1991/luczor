@@ -17,7 +17,10 @@ export async function planMaintenance(input: {
   records: MemoryRecord[]
   messages?: Message[]
   now: number
+  /** Material size per job; defaults to the generic cap, the worker fits it to the model context. */
+  maxBatchChars?: number
 }): Promise<HydratedMaintenanceJob[]> {
+  const maxBatchChars = input.maxBatchChars ?? MAINTENANCE_BATCH_CHARS
   const projects = input.projects.filter(
     project => !project.archivedAt && canAccessCloudProject(project, input.principalId)
   )
@@ -29,7 +32,7 @@ export async function planMaintenance(input: {
     material: MaintenanceSource[]
   ) => {
     if (!material.length) return
-    const oversized = JSON.stringify(material).length > 15_000
+    const oversized = JSON.stringify(material).length > maxBatchChars
     work.push({
       id,
       kind,
@@ -74,7 +77,7 @@ export async function planMaintenance(input: {
           expiresAt: record.expiresAt,
         }),
       }))
-      for (const material of partitionMaintenanceSources(sources)) {
+      for (const material of partitionMaintenanceSources(sources, 6, maxBatchChars)) {
         const batch = partition.filter(record => material.some(source => source.id === record.id))
         if (
           batch.every(

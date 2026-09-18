@@ -375,11 +375,16 @@ onBeforeUnmount(() => {
   </main>
 </template>
 <style scoped>
-.memory-page {
+/* `main.` outranks the App-scoped `.main-col { overflow: hidden }` that the root element also inherits. */
+main.memory-page {
   container-type: inline-size;
   padding: 24px;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   min-width: 0;
+  min-height: 0;
+  max-height: 100%;
   color: var(--ai-ink);
   background: var(--ai-page);
   font: 13px/1.5 var(--ai-font);

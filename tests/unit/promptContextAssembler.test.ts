@@ -136,6 +136,30 @@ describe('prompt context assembler', () => {
     expect(redactProviderSecrets(result)).toBe(result)
   })
 
+  it('sanitizes JSON credentials structurally without changing number precision or ordinary keys', () => {
+    const text =
+      '{ "revision":9007199254740993123, "exponent":1e+40, "pass\\u0077ord":{"nested":["secret",42]}, "token":12345, "path":"/projekte/luczor", "__proto__":{"safe":true} }'
+    const result = redactProviderSecrets(text)
+    expect(() => JSON.parse(result)).not.toThrow()
+    expect(result).toContain('"revision":9007199254740993123')
+    expect(result).toContain('"exponent":1e+40')
+    expect(JSON.parse(result)).toMatchObject({
+      password: '[REDACTED]',
+      token: '[REDACTED]',
+      path: '/projekte/luczor',
+      __proto__: { safe: true },
+    })
+    expect(result).not.toContain('secret')
+    expect(redactProviderSecrets(result)).toBe(result)
+    expect(({} as Record<string, unknown>).safe).toBeUndefined()
+  })
+
+  it('does not add redaction markers on repeated plain-text sanitization', () => {
+    const value = 'api_key=opaque password="opaque with spaces"\n/path/unchanged'
+    const once = redactProviderSecrets(value)
+    expect(redactProviderSecrets(once)).toBe(once)
+  })
+
   it('redacts drive, UNC and POSIX paths but preserves web URLs', () => {
     const content = [
       String.raw`Root E:\projekte\luczor\app\src`,

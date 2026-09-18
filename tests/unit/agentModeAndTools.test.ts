@@ -806,6 +806,8 @@ describe('agent mode and tool reliability', () => {
 
   it('corrects only the failed local round and retains completed tool round token usage', async () => {
     const onUsage = vi.fn()
+    const objective =
+      'Lies und prüfe das Projekt. ' + 'Kontext '.repeat(900) + '/projekte/luczor\nDiese Datei niemals löschen.'
     mocks.streamChatWithTools
       .mockResolvedValueOnce({
         ...toolCallResult,
@@ -832,12 +834,14 @@ describe('agent mode and tool reliability', () => {
     const result = await runAgent({
       projectId: 'project-2',
       mode: 'observe',
-      baseMessages: [{ role: 'user', content: 'Lies und prüfe das Projekt.' }],
+      baseMessages: [{ role: 'user', content: objective }],
       maxRounds: 3,
       onUsage,
       inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
     })
     expect(result.interrupted?.code).toBe('runtime_context_exceeded')
+    expect(result.continuation?.messages.at(-1)?.content).toContain(objective)
+    expect(result.finalText).toContain('Aktuelle Tool-Ergebnisse wurden nicht abgeschnitten.')
     expect(result.tokenUsage).toMatchObject({
       inputTokens: 19363,
       outputTokens: 20,

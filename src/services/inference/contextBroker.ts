@@ -1,4 +1,5 @@
 import { redactAbsoluteFilesystemPaths, redactProviderSecrets } from '@/services/prompt/promptContextAssembler'
+import { sanitizeJsonText } from '@/services/prompt/structuredText'
 import type { InferenceTarget, WireMessage } from '@/services/inference/types'
 
 export type ContextScopeKey = {
@@ -111,21 +112,7 @@ export function sanitizeTextForInferenceTarget(value: string, target: InferenceT
     const withoutSecrets = redactProviderSecrets(input)
     return target === 'laravel_proxy' ? redactAbsoluteFilesystemPaths(withoutSecrets) : withoutSecrets
   }
-  try {
-    JSON.parse(text)
-  } catch {
-    return sanitize(text)
-  }
-  // Sanitize decoded JSON string values, not escape syntax. Leave unchanged
-  // tokens (and number precision/formatting) byte-identical. JSON escaping is
-  // applied once only when a value actually needs redaction.
-  const sanitized = text.replace(/"(?:[^"\\]|\\[\s\S])*"/g, token => {
-    const decoded = JSON.parse(token) as string
-    const result = sanitize(decoded)
-    return result === decoded ? token : JSON.stringify(result)
-  })
-  // Field-based credentials (e.g. "password":"...") need the key as well.
-  return redactProviderSecrets(sanitized)
+  return sanitizeJsonText(text, sanitize) ?? sanitize(text)
 }
 
 /** Sanitizes the complete wire history, including tool-call arguments, for its actual target. */

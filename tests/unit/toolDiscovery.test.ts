@@ -304,7 +304,7 @@ describe('hierarchical tool discovery', () => {
     expect(seen).toEqual(tools.map(tool => tool.function.name))
   })
 
-  it('preserves hits when actual request fitting compacts an oversized catalog outcome', () => {
+  it('preserves the complete catalog outcome even above the request planning target', () => {
     const page: ToolCatalogPage = {
       catalog: 'luczor-tools-v1',
       selected: ['project_terminal_run'],
@@ -336,10 +336,10 @@ describe('hierarchical tool discovery', () => {
     expect(fitted.report.shortenedToolResults).toBe(0)
     const message = fitted.messages.find(item => item.role === 'tool')!
     const result = JSON.parse(message.content).output as ToolCatalogPage
-    expect(result.available).toEqual(page.available.map(({ name }) => ({ name })))
+    expect(result.available?.map(({ name }) => name)).toEqual(page.available.map(({ name }) => name))
     expect(result.selected).toEqual(['project_terminal_run'])
     expect(result.nextOffset).toBeNull()
-    expect(JSON.stringify(compactToolOutput(JSON.parse(message.content), 1800))).toBe(message.content)
+    expect(message.content).toBe(JSON.stringify(first))
     expect(JSON.stringify(page)).toBe(raw)
   })
 

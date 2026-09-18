@@ -104,8 +104,9 @@ describe('bounded adaptive assistance lifetime', () => {
     const original = source[0]!.content
     const handoff = teamMessages(source)
     const projected = JSON.parse(handoff[0]!.content)
-    expect(projected.projection.path).toBe(path)
-    expect(projected.projection.file_ref).toBe('file_abc')
+    expect(projected.path).toBe(path)
+    expect(projected.file_ref).toBe('file_abc')
+    expect(handoff[0]!.content).toBe(original)
     expect(handoff[0]).toMatchObject({ role: 'tool', tool_call_id: 'read1' })
     expect(source[0]!.content).toBe(original)
   })

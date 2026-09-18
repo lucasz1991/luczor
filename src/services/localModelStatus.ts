@@ -19,6 +19,8 @@ export type LocalModelStatusView = {
   checks: StatusCheck[]
   checkedAtMs: number
   resourceConfig?: LocalResourceConfigState
+  /** Context window the resident runtime was actually started with, once the plan is applied. */
+  contextTokens?: number
 }
 
 export const localResourceModeLabels = {
@@ -227,6 +229,8 @@ export function presentLocalModelStatus(
 ): LocalModelStatusView {
   const view = blankStatus(nowMs)
   if (native.resourceConfig) view.resourceConfig = structuredClone(native.resourceConfig)
+  if (native.resourcePlan?.applied && native.resourcePlan.contextTokens > 0)
+    view.contextTokens = native.resourcePlan.contextTokens
   const manifest = coordinator.manifest
   if (coordinator.mode !== 'active' || !manifest) {
     view.state = coordinator.mode === 'loading' ? 'loading' : 'blocked'

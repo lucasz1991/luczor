@@ -1,3 +1,5 @@
+import { sanitizeJsonText } from './structuredText'
+
 export type PromptFragmentSource = 'runtime' | 'project' | 'memory' | 'repository' | 'tool' | 'history'
 
 export type PromptFragmentTrust = 'policy' | 'user_confirmed' | 'untrusted_data'
@@ -147,6 +149,10 @@ function redactPrivateKeyBlocks(value: string): string {
 }
 
 export function redactProviderSecrets(value: string): string {
+  return sanitizeJsonText(value, redactSecretText) ?? redactSecretText(value)
+}
+
+function redactSecretText(value: string): string {
   // PEM variants: PKCS#8, RSA, EC, OpenSSH and encrypted private keys.
   let text = redactPrivateKeyBlocks(value)
 
@@ -170,14 +176,20 @@ export function redactProviderSecrets(value: string): string {
     new RegExp(`(["'])(${secretKey})\\1(\\s*[:=]\\s*)(["'])((?:\\\\.|(?!\\4)[^\\\\\\r\\n])*)\\4`, 'giu'),
     '$1$2$1$3$4[REDACTED]$4'
   )
-  text = text.replace(new RegExp(`(["'])(${secretKey})\\1(\\s*[:=]\\s*)([^\\s,"';}\\]]+)`, 'giu'), '$1$2$1$3[REDACTED]')
+  text = text.replace(
+    new RegExp(`(["'])(${secretKey})\\1(\\s*[:=]\\s*)(?!\\[REDACTED(?:\\]| ))([^\\s,"';}\\]]+)`, 'giu'),
+    '$1$2$1$3[REDACTED]'
+  )
   // Quoted JSON/config assignments, including values containing spaces.
   text = text.replace(
     new RegExp(`\\b(${secretKey})(\\s*[:=]\\s*)(["'])((?:\\\\.|(?!\\3)[^\\\\\\r\\n])*)\\3`, 'giu'),
     '$1$2$3[REDACTED]$3'
   )
   // Shell/env and unquoted assignments.
-  text = text.replace(new RegExp(`\\b(${secretKey})(\\s*[:=]\\s*)([^\\s,"';}\\]]+)`, 'giu'), '$1$2[REDACTED]')
+  text = text.replace(
+    new RegExp(`\\b(${secretKey})(\\s*[:=]\\s*)(?!\\[REDACTED(?:\\]| ))([^\\s,"';}\\]]+)`, 'giu'),
+    '$1$2[REDACTED]'
+  )
 
   return text
 }
@@ -253,17 +265,13 @@ function sanitizeFragment(fragment: PromptFragment): PromptFragment | null {
   }
 }
 
-function canonicalContent(value: string): string {
-  return value
-}
-
 function compareFragments(left: PromptFragment, right: PromptFragment): number {
   return (
     SOURCE_ORDER[left.source] - SOURCE_ORDER[right.source] ||
     TRUST_ORDER[left.trust] - TRUST_ORDER[right.trust] ||
     Number(right.priority ?? 0) - Number(left.priority ?? 0) ||
     left.id.localeCompare(right.id, 'de') ||
-    canonicalContent(left.content).localeCompare(canonicalContent(right.content), 'de')
+    left.content.localeCompare(right.content, 'de')
   )
 }
 
@@ -331,7 +339,7 @@ export function assemblePromptContext(
       continue
     }
 
-    const fingerprint = canonicalContent(fragment.content)
+    const fingerprint = fragment.content
     if (seen.has(fingerprint)) {
       omissions.push({ id: originalId, reason: 'duplicate' })
       continue
