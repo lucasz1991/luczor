@@ -7,6 +7,8 @@ import {
   parseMemoryChangeSet,
   parseMaintenanceVerification,
   assertPreservedReferences,
+  MAINTENANCE_BATCH_CHARS,
+  maintenanceBatchChars,
   partitionMaintenanceSources,
   type MaintenanceJob,
 } from '@/services/memory/maintenance'
@@ -98,6 +100,45 @@ describe('durable maintenance policy', () => {
   it('preserves exact tool, file and numeric references regardless of model confidence', () => {
     expect(() => assertPreservedReferences(sources, 'repo.search src/main.ts Port 8080')).not.toThrow()
     expect(() => assertPreservedReferences(sources, 'Suche im Repository.')).toThrow('lost_reference')
+  })
+  it('lets a context package condense but never invent paths or identifiers', () => {
+    const summary = [
+      {
+        ...sources[0]!,
+        content: JSON.stringify({ text: 'repo.search in src/main.ts auf Port 8080, 534 Tests.', at: 1 }),
+      },
+    ]
+    expect(() => assertPreservedReferences(summary, 'Suche im Repository über src/main.ts.', 'summary')).not.toThrow()
+    expect(() => assertPreservedReferences(summary, 'Nutzt src/other.ts und api.fetch.', 'summary')).toThrow(
+      'fabricated_reference'
+    )
+    expect(() => assertPreservedReferences(summary, 'Suche im Repository.', 'preserve')).toThrow('lost_reference')
+    expect(() =>
+      parseMaintenanceVerification(
+        JSON.stringify({
+          approved: true,
+          checkedSources: [summary[0]!.id],
+          unsupportedFacts: false,
+          lostFacts: true,
+          lostConstraints: false,
+          temporalConflict: false,
+        }),
+        summary,
+        { summary: true }
+      )
+    ).not.toThrow()
+  })
+  it('sizes maintenance batches to the resident context window', () => {
+    expect(maintenanceBatchChars(undefined)).toBe(MAINTENANCE_BATCH_CHARS)
+    expect(maintenanceBatchChars(32_768)).toBe(MAINTENANCE_BATCH_CHARS)
+    expect(maintenanceBatchChars(4_096)).toBe(5_320)
+    expect(maintenanceBatchChars(2_048)).toBe(2_500)
+    const material = Array.from({ length: 4 }, (_, index) => ({
+      ...sources[0]!,
+      id: String(index),
+      content: 'x'.repeat(2000),
+    }))
+    expect(partitionMaintenanceSources(material, 6, 5_320).map(batch => batch.length)).toEqual([2, 2])
   })
   it('compares exact answers and does not accept a persuasive model self-grade', () => {
     expect(MAINTENANCE_EVALUATION.length).toBeGreaterThanOrEqual(8)

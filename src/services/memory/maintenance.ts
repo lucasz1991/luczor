@@ -272,7 +272,8 @@ export function assertPreservedReferences(
 ): void {
   if (mode === 'summary') {
     const corpus = sources.map(source => source.content).join('\n')
-    const cited = output.match(STRONG_REFERENCE_PATTERN) ?? []
+    // Sentence punctuation glued to a path ("src/main.ts.") is not part of the reference.
+    const cited = (output.match(STRONG_REFERENCE_PATTERN) ?? []).map(ref => ref.replace(/[.,:;)\]]+$/u, ''))
     // JSON escaping doubles backslashes in the corpus; compare on the unescaped form too.
     const known = (ref: string) => corpus.includes(ref) || corpus.includes(ref.replace(/\\/g, '\\\\'))
     if (cited.some(ref => !known(ref))) throw new Error('fabricated_reference')

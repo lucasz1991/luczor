@@ -19,6 +19,8 @@ import {
   saveIdleOptimizationSetting,
 } from '@/services/agents/idleOptimization'
 import { maintenanceProgress } from '@/services/agents/idleMaintenanceWorker'
+import { luczorMemory } from '@/services/memory/luczorMemory'
+import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
 
 const props = defineProps<{ dream: DreamView; trace: DreamTrace; projectId: string }>()
 const emit = defineEmits<{ focus: [target: DreamTarget] }>()
@@ -81,6 +83,76 @@ const showHistory = ref(false)
 const busy = ref(false)
 const message = ref('')
 const messageTone = ref<'info' | 'error'>('info')
+
+/** Failure codes from the worker, the parsers and the local runtime, in plain language. */
+const FAILURES: Record<string, string> = {
+  output_truncated: 'Antwort am Ausgabelimit (768 Tokens) abgeschnitten – Quellen werden jetzt kleiner gebündelt',
+  incomplete_candidate: 'Modell hat keine vollständige Antwort geliefert',
+  invalid_candidate: 'Antwort leer oder zu lang',
+  runtime_context_exceeded: 'Kontextfenster des Modells zu klein für die Quellen – Bündel werden ans Fenster angepasst',
+  lost_reference: 'Belege (Pfad, ID oder Zahl) gingen beim Umschreiben verloren',
+  fabricated_reference: 'Ergebnis nennt Pfade oder Bezeichner, die nicht in den Quellen stehen',
+  verification_rejected: 'Gegenprüfung hat den Vorschlag abgelehnt',
+  incomplete_verification: 'Gegenprüfung hat nicht alle Quellen bestätigt',
+  invalid_verification: 'Gegenprüfung antwortete nicht im erwarteten JSON',
+  invalid_maintenance_json: 'Antwort war kein gültiges JSON',
+  invalid_operations: 'Änderungsliste leer oder zu lang',
+  invalid_operation: 'Unbekannte Operation in der Änderungsliste',
+  invalid_targets: 'Ziele der Operation passen nicht zur Art',
+  invalid_content: 'Inhalt oder Begründung fehlt bzw. zu lang',
+  missing_evidence: 'Operation ohne Quellenangabe',
+  fabricated_source: 'Antwort verweist auf unbekannte Quell-IDs',
+  overlapping_targets: 'Mehrere Operationen auf dieselbe Erinnerung',
+  installed_model_required: 'Kein installiertes lokales Modell verfügbar',
+  local_only_required: 'Nur ein lokales Modell darf träumen',
+  idle_model_not_ready: 'Lokales Modell noch nicht bereit',
+  scope_changed: 'Konto, Projekt oder Sitzung haben gewechselt',
+  stale_source: 'Quellen haben sich während des Laufs geändert',
+  stale_job: 'Auftrag wurde inzwischen ersetzt',
+  quality_gate_required: 'Automatisches Umschreiben ist noch nicht freigegeben (Modelltest)',
+  adapter_write_unsupported: 'Diese Erinnerungen dürfen lokal nicht umgeschrieben werden',
+  sensitive_candidate: 'Ergebnis enthielt sensible Daten',
+  memory_disabled: 'Automatisches Erinnern ist ausgeschaltet',
+  timeout: 'Zeitlimit überschritten',
+  resource_background_unavailable: 'Modell war belegt',
+}
+function failureLabel(code: string | undefined): string {
+  if (!code) return 'Unbekannter Fehler'
+  // `code` is a fixed identifier from our own parsers/runtime, not user input.
+  // eslint-disable-next-line security/detect-object-injection
+  return FAILURES[code] ?? code
+}
+const retrying = ref(false)
+/** Failed jobs are parked after three attempts; after a fix the user can queue them again. */
+async function retryBlocked() {
+  retrying.value = true
+  message.value = ''
+  try {
+    const account = await getVerifiedAccountSnapshot()
+    if (!account) throw new Error('no_account')
+    let released = 0
+    await luczorMemory.updateMaintenance(account.principalId, journal => {
+      for (const job of journal.jobs) {
+        if (job.status !== 'blocked' || job.blockedReason === 'source_too_large') continue
+        job.status = 'pending'
+        job.attempts = 0
+        job.nextAttemptAt = Date.now()
+        job.updatedAt = Date.now()
+        released++
+      }
+      if (journal.quality && !journal.quality.passed) journal.evaluationRequested = Date.now()
+    })
+    message.value = released
+      ? `${released} blockierte Aufträge wieder eingereiht.`
+      : 'Keine blockierten Aufträge vorhanden.'
+    messageTone.value = 'info'
+  } catch {
+    message.value = 'Blockierte Aufträge konnten nicht freigegeben werden.'
+    messageTone.value = 'error'
+  } finally {
+    retrying.value = false
+  }
+}
 
 const TASKS: Record<DreamRun['task'], string> = {
   context: 'Kontextpaket',
@@ -219,6 +291,16 @@ async function stopDreaming() {
         >
           Aus
         </button>
+        <button
+          v-if="maintenanceProgress.blocked > 0"
+          type="button"
+          class="ai-button"
+          :disabled="retrying || running"
+          title="Nach drei Fehlversuchen geparkte Aufträge wieder einreihen"
+          @click="retryBlocked"
+        >
+          {{ maintenanceProgress.blocked }} blockierte erneut
+        </button>
       </div>
     </header>
     <p v-if="message" role="status" class="dream-panel__message" :data-tone="messageTone">{{ message }}</p>
@@ -296,7 +378,9 @@ async function stopDreaming() {
           </li>
         </ul>
       </div>
-      <p v-if="run.error" class="dream-panel__error">{{ run.error }}</p>
+      <p v-if="run.outcome === 'failed'" class="dream-panel__error">
+        Fehlgeschlagen: {{ failureLabel(run.error) }}<small v-if="run.error"> · {{ run.error }}</small>
+      </p>
     </div>
     <p v-else class="dream-panel__empty">
       Noch kein Traum in dieser Sitzung. Im Leerlauf sichtet die lokale KI Erinnerungen, Kontextpakete und den

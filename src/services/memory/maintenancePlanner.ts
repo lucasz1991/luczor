@@ -2,6 +2,7 @@ import type { Message, Project } from '@/state/types'
 import type { MemoryRecord } from './luczorMemory'
 import { canAccessCloudProject } from '@/services/cloudProjectAccess'
 import {
+  MAINTENANCE_BATCH_CHARS,
   maintenanceEligible,
   maintenanceHash,
   memoryRevision,
