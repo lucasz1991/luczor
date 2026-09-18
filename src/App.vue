@@ -10,7 +10,7 @@ import { modelUsageSettings, type ChatRouteMode } from '@/services/inference/mod
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import MemoryExplorerPage from '@/features/memory/MemoryExplorerPage.vue'
 import MemoryGraphBackdrop from '@/features/memory/MemoryGraphBackdrop.vue'
-import { recordMemoryLinks, setModelPhase } from '@/services/memory/modelActivity'
+import { setModelPhase } from '@/services/memory/modelActivity'
 import { useMemoryObservatoryHost } from '@/features/memory/observatory'
 import ToastHost from './components/ai/ToastHost.vue'
 import ContextInspector from './components/ContextInspector.vue'
@@ -110,7 +110,7 @@ import {
 } from '@/services/chatActivity'
 import { presentLocalToolResult } from '@/services/toolProgressPresentation'
 import type { Message, Project } from '@/state/types'
-import { recordMemoryUsageEvent } from '@/services/memory/usage'
+import { createContextUsageObserver } from '@/services/memory/contextUsage'
 import { type LuczorMode, type WireMessage } from './services/openrouter.service'
 import {
   runAgent,
@@ -2113,18 +2113,7 @@ async function executeChatTurn(
       local: packages.local,
       external: packages.external,
     }
-    // The knowledge space shows which memories entered this turn's prompt and which stayed out.
-    {
-      const memoryId = (fragmentId: string) => fragmentId.replace(/^memory-(?:user|project|agent|session)-/u, '')
-      const included = packages.local.selected
-        .filter(item => item.id.startsWith('memory-'))
-        .map(item => memoryId(item.id))
-      const omitted = packages.local.omitted
-        .filter(item => item.id.startsWith('memory-'))
-        .map(item => memoryId(item.id))
-      recordMemoryLinks(included, 'included', 'chat')
-      recordMemoryLinks(omitted, 'omitted', 'chat')
-    }
+    const observeContextRequest = createContextUsageObserver(contextFragments, packages)
     const assistantProfile = await refreshAssistantProfile()
     executionGate.assert(turnExecution)
     const localProfilePrompt = localAssistantProfilePrompt(assistantProfile, text, taskType)
@@ -2326,6 +2315,9 @@ async function executeChatTurn(
         if (turnExecution.signal.aborted) return
         mutations.patchMessage(pid, assistant.id, { meta: { tokenUsage: usage } })
       },
+      onContextRequest: request => {
+        if (!turnExecution.signal.aborted) observeContextRequest(request)
+      },
       // Render public answer content as soon as each transport chunk arrives.
       onToken: raw => {
         if (turnExecution.signal.aborted) return
@@ -2358,18 +2350,6 @@ async function executeChatTurn(
     if (continuation || interrupted)
       await handle.interrupt('Fortschritt gesichert. Aktuellen Zustand prüfen und weiterarbeiten.')
     applyStreamedContent(pid, assistant.id, finalText, true)
-    if (inferenceTarget) {
-      const packet = inferenceTarget === 'local_llama_cpp' ? packages.local : packages.external
-      recordMemoryUsageEvent(
-        'chat',
-        'included',
-        packet.selected.filter(item =>
-          contextFragments.some(
-            fragment => fragment.id === item.id && ['memory', 'repository'].includes(fragment.source)
-          )
-        ).length
-      )
-    }
     finishChatActivity(chatActivities.value[assistant.id]!, interrupted ? 'failed' : 'done')
     // Attach the server-reported routing metadata to the assistant message.
     {

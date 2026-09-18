@@ -18,6 +18,7 @@ import {
   getNativeHardwareSnapshot,
   prepareNativeLocalModel,
   prepareInstalledNativeLocalModel,
+  prepareResidentNativeLocalModel,
   TauriLocalRuntimeTransport,
   controlLocalReasoning,
 } from '@/services/inference/tauriLocalRuntime'
@@ -52,53 +53,58 @@ const failureDiagnostic = {
 } as const
 
 describe('Tauri local runtime catalog boundary', () => {
-  it('starts installed-only preparation with request-scoped cancellation and waits for actual native release', async () => {
-    const resources = vi.spyOn(localResources, 'get').mockResolvedValue({ appliedRevision: 7 } as never)
-    let finish!: (value: unknown) => void
-    tauri.invoke.mockImplementation(command =>
-      command === 'local_model_prepare'
-        ? new Promise(resolve => {
-            finish = resolve
-          })
-        : Promise.resolve()
-    )
-    const controller = new AbortController()
-    let released = false
-    const pending = prepareInstalledNativeLocalModel('model-1', catalogBinding, controller.signal).then(
-      () => {
-        released = true
-      },
-      () => {
-        released = true
-      }
-    )
-    await vi.waitFor(() =>
-      expect(tauri.invoke).toHaveBeenCalledWith(
-        'local_model_prepare',
-        expect.objectContaining({
-          modelReleaseId: 'model-1',
-          catalogBinding,
-          resourceRevision: 7,
-          installedOnly: true,
-          requestId: expect.stringMatching(/^idle-prepare-/u),
-        })
+  it.each([false, true])(
+    'prepares idle work with residentOnly=%s and drains request-scoped cancellation',
+    async residentOnly => {
+      const resources = vi.spyOn(localResources, 'get').mockResolvedValue({ appliedRevision: 7 } as never)
+      let finish!: (value: unknown) => void
+      tauri.invoke.mockImplementation(command =>
+        command === 'local_model_prepare'
+          ? new Promise(resolve => {
+              finish = resolve
+            })
+          : Promise.resolve()
       )
-    )
-    controller.abort()
-    await Promise.resolve()
-    expect(released).toBe(false)
-    expect(tauri.invoke).toHaveBeenCalledWith(
-      'local_model_cancel',
-      expect.objectContaining({ catalogBinding, requestId: expect.stringMatching(/^idle-prepare-/u) })
-    )
-    finish({})
-    await pending
-    expect(released).toBe(true)
-    expect(
-      tauri.invoke.mock.calls.every(([command]) => ['local_model_prepare', 'local_model_cancel'].includes(command))
-    ).toBe(true)
-    resources.mockRestore()
-  })
+      const controller = new AbortController()
+      let released = false
+      const prepare = residentOnly ? prepareResidentNativeLocalModel : prepareInstalledNativeLocalModel
+      const pending = prepare('model-1', catalogBinding, controller.signal).then(
+        () => {
+          released = true
+        },
+        () => {
+          released = true
+        }
+      )
+      await vi.waitFor(() =>
+        expect(tauri.invoke).toHaveBeenCalledWith(
+          'local_model_prepare',
+          expect.objectContaining({
+            modelReleaseId: 'model-1',
+            catalogBinding,
+            resourceRevision: 7,
+            installedOnly: true,
+            ...(residentOnly ? { residentOnly: true } : {}),
+            requestId: expect.stringMatching(/^idle-prepare-/u),
+          })
+        )
+      )
+      controller.abort()
+      await Promise.resolve()
+      expect(released).toBe(false)
+      expect(tauri.invoke).toHaveBeenCalledWith(
+        'local_model_cancel',
+        expect.objectContaining({ catalogBinding, requestId: expect.stringMatching(/^idle-prepare-/u) })
+      )
+      finish({})
+      await pending
+      expect(released).toBe(true)
+      expect(
+        tauri.invoke.mock.calls.every(([command]) => ['local_model_prepare', 'local_model_cancel'].includes(command))
+      ).toBe(true)
+      resources.mockRestore()
+    }
+  )
   it('binds live controls to active catalog and generation, drops late progress, and removes the old implicit 2048 cap', async () => {
     let finish!: (value: unknown) => void
     let channel!: { onmessage: (event: unknown) => void }

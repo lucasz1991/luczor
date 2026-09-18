@@ -89,6 +89,28 @@ const durableTaskCreate = {
 } as const
 
 describe('agent mode and tool reliability', () => {
+  it('observes the selected fitted request before inference, even when diagnostics fail', async () => {
+    const onContextRequest = vi.fn(() => {
+      throw new Error('diagnostics unavailable')
+    })
+    mocks.streamChatWithTools.mockImplementationOnce(async (request: InferenceRequest) => {
+      expect(onContextRequest).toHaveBeenCalledOnce()
+      expect(onContextRequest.mock.calls[0]).toEqual([{ target: 'local_llama_cpp', messages: request.messages }])
+      expect(request).not.toHaveProperty('onContextRequest')
+      return { content: 'Hallo!', toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
+    })
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'Hallo!' }],
+      maxRounds: 1,
+      onContextRequest,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(result.finalText).toBe('Hallo!')
+    expect(onContextRequest).toHaveBeenCalledOnce()
+  })
+
   it('corrects the photographed HTTP 200 status echo without publishing invented counters', async () => {
     const fake =
       'Die nächste Modellrunde wurde unterbrochen: Tokenzählung und Kontextprüfung · HTTP 200: Der Auftrag wurde erfolgreich bearbeitet. Tokenbudget: Eingabe (gezählt) 28.000 · Kontext 43.000 · Ausgabelimit 7.000.\n\nDer Auftrag wurde in einen bereinigten Fortsetzungsstatus überführt.'

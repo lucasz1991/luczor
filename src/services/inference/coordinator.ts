@@ -37,6 +37,7 @@ import {
   recoverNativeModelMemory,
   prepareNativeLocalModel,
   prepareInstalledNativeLocalModel,
+  prepareResidentNativeLocalModel,
   tauriManifestVerifier,
   TauriLocalRuntimeTransport,
   type NativeLocalModelStatus,
@@ -232,6 +233,7 @@ export type LocalInferenceCoordinatorDependencies = {
   nativeStatus?: () => Promise<NativeLocalModelStatus>
   prepareModel: (modelReleaseId: string, catalogBinding: LocalCatalogBinding) => Promise<LocalReadinessEvidence>
   prepareInstalledModel?: typeof prepareInstalledNativeLocalModel
+  prepareResidentModel?: typeof prepareResidentNativeLocalModel
   accountSnapshot: () => Promise<VerifiedAccountSnapshot | null>
   manifestSession: (acceptanceGeneration: number) => Promise<string>
   manager: LocalModelManager
@@ -959,17 +961,62 @@ export class LocalInferenceCoordinator {
     }
   }
 
-  /** Idle preparation uses the accepted signed catalog and installed artifacts only; never downloads. */
-  async prepareInstalledOptimizationModel(signal: AbortSignal): Promise<string> {
+  /** Idle preparation never downloads; a residentModelId also forbids cold starts and fallback models. */
+  async prepareInstalledOptimizationModel(signal: AbortSignal, residentModelId?: string): Promise<string> {
     const generation = this.generation
     this.requireActiveGeneration(generation)
     signal.throwIfAborted()
+    if (!(residentModelId ? this.dependencies.prepareResidentModel : this.dependencies.prepareInstalledModel))
+      throw new Error('idle_preparation_unsupported')
+    // Share admission with chat/model-switch preparation. The old boolean check
+    // rejected idle work while another start ran, but did not reserve a slot
+    // against a foreground start arriving after idle had already begun.
+    const previous = this.preparationTail
+    let releaseQueue: () => void = () => undefined
+    this.preparationTail = new Promise<void>(resolve => {
+      releaseQueue = resolve
+    })
+    const abort = () => rejectAbort(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+    let rejectAbort: (reason: unknown) => void = () => undefined
+    const interrupted = new Promise<never>((_, reject) => {
+      rejectAbort = reject
+      signal.addEventListener('abort', abort, { once: true })
+    })
+    try {
+      await Promise.race([previous, interrupted])
+      signal.throwIfAborted()
+      this.requireActiveGeneration(generation)
+      if (this.dependencies.nativeStatus) {
+        const native = await this.dependencies.nativeStatus()
+        signal.throwIfAborted()
+        this.requireActiveGeneration(generation)
+        this.reconcileNativeStatus(native)
+      }
+      await this.refreshCapacityIfStale(generation, false)
+      signal.throwIfAborted()
+      this.requireActiveGeneration(generation)
+      return await this.prepareInstalledOptimizationModelExclusive(signal, generation, residentModelId)
+    } finally {
+      signal.removeEventListener('abort', abort)
+      // A cancelled waiter must not let successors overtake the existing owner.
+      // In-flight native cancellation has drained before Exclusive returns.
+      void previous.then(releaseQueue, releaseQueue)
+    }
+  }
+
+  private async prepareInstalledOptimizationModelExclusive(
+    signal: AbortSignal,
+    generation: number,
+    residentModelId?: string
+  ): Promise<string> {
     const manifest = this.manifest!
     const binding = this.catalogBinding!
     const resourceEpoch = this.resourceEpoch
-    const prepare = this.dependencies.prepareInstalledModel
-    if (!prepare || this.preparation) throw new Error('idle_preparation_unavailable')
-    const ids = [...new Set([manifest.routing.defaultModelId, ...manifest.routing.fallbackModelIds])]
+    const prepare = residentModelId ? this.dependencies.prepareResidentModel! : this.dependencies.prepareInstalledModel!
+    let failure: string | undefined
+    const ids = residentModelId
+      ? [residentModelId]
+      : [...new Set([manifest.routing.defaultModelId, ...manifest.routing.fallbackModelIds])]
     ids.sort(
       (left, right) =>
         Number(!!this.assessments.get(right)?.memory?.resident) - Number(!!this.assessments.get(left)?.memory?.resident)
@@ -985,6 +1032,15 @@ export class LocalInferenceCoordinator {
       )
         continue
       if (['busy', 'cooldown', 'error'].includes(this.dependencies.manager.getHealth(model).state)) continue
+      if (
+        hasVerifiedLocalReadiness(
+          model,
+          this.readiness.get(id),
+          manifest.payloadSha256,
+          this.dependencies.now().getTime() + 65_000
+        )
+      )
+        return id
       const preparation = { modelId: id, generation }
       this.preparation = preparation
       try {
@@ -994,19 +1050,31 @@ export class LocalInferenceCoordinator {
         if (
           this.resourceEpoch !== resourceEpoch ||
           this.catalogBinding !== binding ||
-          !hasVerifiedLocalReadiness(model, evidence, manifest.payloadSha256, this.dependencies.now().getTime())
+          !hasVerifiedLocalReadiness(
+            model,
+            evidence,
+            manifest.payloadSha256,
+            this.dependencies.now().getTime() + 65_000
+          )
         )
           throw new Error('stale_preparation')
+        if ((evidence.resourceRevision ?? 0) < this.resourceRevision) throw new Error('resource_revision_mismatch')
+        this.resourceRevision = evidence.resourceRevision ?? 0
         this.readiness.set(id, evidence)
+        this.preparationFailures.delete(id)
         return id
-      } catch {
+      } catch (error) {
         signal.throwIfAborted()
         this.requireActiveGeneration(generation)
+        if (this.resourceEpoch !== resourceEpoch || this.catalogBinding !== binding)
+          throw new Error('stale_preparation')
+        failure = preparationFailureReason(error)
+        this.preparationFailures.set(id, failure)
       } finally {
         if (this.preparation === preparation) this.preparation = undefined
       }
     }
-    throw new Error('installed_model_unavailable')
+    throw new Error(failure ?? 'installed_model_unavailable')
   }
 
   async residentOptimizationGateway(projectId: string, modelId: string): Promise<InferenceGateway> {
@@ -1517,6 +1585,7 @@ export const localInferenceCoordinator = new LocalInferenceCoordinator({
   nativeStatus: getNativeLocalModelStatus,
   prepareModel: prepareNativeLocalModel,
   prepareInstalledModel: prepareInstalledNativeLocalModel,
+  prepareResidentModel: prepareResidentNativeLocalModel,
   accountSnapshot: getVerifiedAccountSnapshot,
   manifestSession: beginNativeManifestAcceptance,
   manager: defaultManager,

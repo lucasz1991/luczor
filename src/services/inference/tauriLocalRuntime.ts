@@ -252,6 +252,24 @@ export async function prepareInstalledNativeLocalModel(
   catalogBinding: LocalCatalogBinding,
   signal: AbortSignal
 ): Promise<LocalReadinessEvidence> {
+  return prepareIdleNativeLocalModel(modelReleaseId, catalogBinding, signal, false)
+}
+
+/** Renew verified residency only; disappearance must not start or download a model. */
+export async function prepareResidentNativeLocalModel(
+  modelReleaseId: string,
+  catalogBinding: LocalCatalogBinding,
+  signal: AbortSignal
+): Promise<LocalReadinessEvidence> {
+  return prepareIdleNativeLocalModel(modelReleaseId, catalogBinding, signal, true)
+}
+
+async function prepareIdleNativeLocalModel(
+  modelReleaseId: string,
+  catalogBinding: LocalCatalogBinding,
+  signal: AbortSignal,
+  residentOnly: boolean
+): Promise<LocalReadinessEvidence> {
   signal.throwIfAborted()
   if (!isTauri()) throw new Error('native_required')
   const resourceRevision = (await localResources.get()).appliedRevision
@@ -274,6 +292,7 @@ export async function prepareInstalledNativeLocalModel(
     resourceRevision,
     requestId,
     installedOnly: true,
+    ...(residentOnly ? { residentOnly: true } : {}),
   })
   signal.addEventListener('abort', abort, { once: true })
   if (signal.aborted) abort()

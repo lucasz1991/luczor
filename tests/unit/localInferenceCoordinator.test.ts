@@ -475,6 +475,192 @@ describe('explicit specialist routing preference', () => {
 })
 
 describe('local inference coordinator and approved external gateway', () => {
+  it.each([9 * 60_000, 10 * 60_000])(
+    'renews resident readiness after %d ms without cold-start permission',
+    async elapsed => {
+      const verified = await manifest('promoted_preferred')
+      const harness = makeHarness(verified)
+      const resident = vi.fn(harness.prepareModel.getMockImplementation()!)
+      harness.dependencies.prepareResidentModel = resident
+      harness.dependencies.prepareInstalledModel = vi.fn()
+      await harness.coordinator.initialize(bootstrap())
+      const route = await harness.coordinator.resolveTurn({
+        projectId: 'p1',
+        routingSettings: { preference: 'local_only' },
+      })
+      const modelId = route.decision!.modelReleaseId!
+      harness.advance(elapsed)
+      vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue({
+        ...hardware(),
+        capturedAtMs: harness.dependencies.now().getTime(),
+      })
+      await expect(
+        harness.coordinator.prepareInstalledOptimizationModel(new AbortController().signal, modelId)
+      ).resolves.toBe(modelId)
+      expect(resident).toHaveBeenCalledExactlyOnceWith(modelId, expect.any(Object), expect.any(AbortSignal))
+      expect(harness.dependencies.prepareInstalledModel).not.toHaveBeenCalled()
+      expect(harness.prepareModel).toHaveBeenCalledOnce()
+      const gateway = await harness.coordinator.residentOptimizationGateway('p1', modelId)
+      await expect(
+        gateway.streamChatWithTools({ ...basicRequest, taskType: 'context.optimize' })
+      ).resolves.toMatchObject({ content: 'lokal' })
+    }
+  )
+
+  it('never cold-starts or selects another release when resident-only renewal fails', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    const resident = vi.fn(async () => {
+      throw new Error('Resident model is unavailable.')
+    })
+    harness.dependencies.prepareResidentModel = resident
+    harness.dependencies.prepareInstalledModel = vi.fn()
+    await harness.coordinator.initialize(bootstrap())
+    await expect(
+      harness.coordinator.prepareInstalledOptimizationModel(
+        new AbortController().signal,
+        verified.routing.defaultModelId
+      )
+    ).rejects.toThrow('local_preparation_failed')
+    expect(resident).toHaveBeenCalledOnce()
+    expect(harness.dependencies.prepareInstalledModel).not.toHaveBeenCalled()
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it.each(['generation', 'resource'] as const)(
+    'rejects a resident renewal completed after a %s boundary change',
+    async boundary => {
+      const verified = await manifest('promoted_preferred')
+      const harness = makeHarness(verified)
+      const ready = await harness.prepareModel.getMockImplementation()!(verified.routing.defaultModelId)
+      const pending = deferred<typeof ready>()
+      harness.dependencies.prepareResidentModel = vi.fn(() => pending.promise)
+      await harness.coordinator.initialize(bootstrap())
+      const renewal = harness.coordinator.prepareInstalledOptimizationModel(
+        new AbortController().signal,
+        ready.modelReleaseId
+      )
+      const rejection = renewal.catch((error: unknown) => error)
+      await vi.waitFor(() => expect(harness.dependencies.prepareResidentModel).toHaveBeenCalledOnce())
+      if (boundary === 'generation') harness.coordinator.beginBootstrap()
+      else harness.coordinator.resourcesApplied(2)
+      pending.resolve(ready)
+      expect(await rejection).toBeInstanceOf(Error)
+      expect(harness.coordinator.status().admissions.every(admission => !admission.ready)).toBe(true)
+    }
+  )
+
+  it('does not accept resident renewal evidence below the current applied resource revision', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    const ready = await harness.prepareModel.getMockImplementation()!(verified.routing.defaultModelId)
+    harness.dependencies.prepareResidentModel = vi.fn(async () => ({ ...ready, resourceRevision: 1 }))
+    await harness.coordinator.initialize(bootstrap())
+    harness.coordinator.resourcesApplied(2)
+    await expect(
+      harness.coordinator.prepareInstalledOptimizationModel(new AbortController().signal, ready.modelReleaseId)
+    ).rejects.toThrow('resource_revision_mismatch')
+    expect(harness.coordinator.status().admissions.every(admission => !admission.ready)).toBe(true)
+  })
+
+  it('queues installed-only idle preparation behind a foreground start and reuses its verified model', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    const ready = await harness.prepareModel.getMockImplementation()!(verified.routing.defaultModelId)
+    const pending = deferred<typeof ready>()
+    harness.prepareModel.mockImplementationOnce(() => pending.promise)
+    harness.dependencies.prepareInstalledModel = vi.fn(async () => ready)
+    await harness.coordinator.initialize(bootstrap())
+    const foreground = harness.coordinator.resolveTurn({
+      projectId: 'p1',
+      routingSettings: { preference: 'local_only' },
+    })
+    await vi.waitFor(() => expect(harness.prepareModel).toHaveBeenCalledOnce())
+    const idle = harness.coordinator.prepareInstalledOptimizationModel(new AbortController().signal)
+    await Promise.resolve()
+    expect(harness.dependencies.prepareInstalledModel).not.toHaveBeenCalled()
+    pending.resolve(ready)
+    await expect(foreground).resolves.toMatchObject({ gateway: { target: 'local_llama_cpp' } })
+    await expect(idle).resolves.toBe(ready.modelReleaseId)
+    expect(harness.dependencies.prepareInstalledModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('keeps foreground preparation queued until cancelled native idle preparation actually drains', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    const ready = await harness.prepareModel.getMockImplementation()!(verified.routing.defaultModelId)
+    const pending = deferred<typeof ready>()
+    const prepare = vi.fn(() => pending.promise)
+    harness.dependencies.prepareInstalledModel = prepare
+    await harness.coordinator.initialize(bootstrap())
+    const controller = new AbortController()
+    const idle = harness.coordinator.prepareInstalledOptimizationModel(controller.signal)
+    const rejected = idle.catch((error: unknown) => error)
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce())
+    controller.abort()
+    const foreground = harness.coordinator.resolveTurn({
+      projectId: 'p1',
+      routingSettings: { preference: 'local_only' },
+    })
+    await new Promise(resolve => setTimeout(resolve, 10))
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    pending.resolve(ready)
+    expect(await rejected).toMatchObject({ name: 'AbortError' })
+    await expect(foreground).resolves.toMatchObject({ gateway: { target: 'local_llama_cpp' } })
+    expect(harness.prepareModel).toHaveBeenCalledOnce()
+  })
+
+  it('cancels a queued idle waiter promptly without releasing another preparation owner', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    const ready = await harness.prepareModel.getMockImplementation()!(verified.routing.defaultModelId)
+    const pending = deferred<typeof ready>()
+    harness.prepareModel.mockImplementationOnce(() => pending.promise)
+    harness.dependencies.prepareInstalledModel = vi.fn(async () => ready)
+    await harness.coordinator.initialize(bootstrap())
+    const first = harness.coordinator.resolveTurn({ projectId: 'p1', routingSettings: { preference: 'local_only' } })
+    await vi.waitFor(() => expect(harness.prepareModel).toHaveBeenCalledOnce())
+    const controller = new AbortController()
+    const idle = harness.coordinator.prepareInstalledOptimizationModel(controller.signal)
+    const rejection = idle.catch((error: unknown) => error)
+    controller.abort()
+    expect(await rejection).toMatchObject({ name: 'AbortError' })
+    const next = harness.coordinator.prepareInstalledOptimizationModel(new AbortController().signal)
+    await Promise.resolve()
+    expect(harness.dependencies.prepareInstalledModel).not.toHaveBeenCalled()
+    pending.resolve(ready)
+    await first
+    await expect(next).resolves.toBe(ready.modelReleaseId)
+  })
+
+  it('refreshes cleared capacity before installed-only preparation and retains safe failure diagnostics', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    const prepare = vi.fn(async () => {
+      throw new Error('Configured GGUF file is unavailable.')
+    })
+    harness.dependencies.prepareInstalledModel = prepare
+    await harness.coordinator.initialize(bootstrap())
+    harness.coordinator.runtimeReleased()
+    await expect(harness.coordinator.prepareInstalledOptimizationModel(new AbortController().signal)).rejects.toThrow(
+      'model_files_unavailable'
+    )
+    expect(prepare).toHaveBeenCalled()
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('distinguishes a missing installed-only adapter from a busy preparation', async () => {
+    const harness = makeHarness(await manifest('promoted_preferred'))
+    await harness.coordinator.initialize(bootstrap())
+    await expect(harness.coordinator.prepareInstalledOptimizationModel(new AbortController().signal)).rejects.toThrow(
+      'idle_preparation_unsupported'
+    )
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+  })
+
   it('keeps the last verified repository scope for resident-only optimization without preparing again', async () => {
     const verified = await manifest('promoted_preferred')
     const harness = makeHarness(verified)

@@ -471,7 +471,9 @@ export function createMaintenanceWorker(
             // Clicking "Jetzt träumen" is explicit consent to start the installed model for this pass.
             const modelId =
               status.state === 'ready' && status.modelId
-                ? status.modelId
+                ? // Residency outlives the ten-minute evidence lease. Renew it
+                  // without allowing a cold start if the runtime disappears.
+                  await deps.prepare(signal, status.modelId)
                 : snapshot.journal.consent?.installedModelStart || job.manual
                   ? await deps.prepare(signal)
                   : ''
@@ -487,11 +489,14 @@ export function createMaintenanceWorker(
             recordDreamModel(modelId)
             recordDreamStep('generating', 'Entwurf erzeugen', modelId)
             maintenanceProgress.value = { ...maintenanceProgress.value, modelId, stage: 'generating' }
-            const generate = async (prompt: string) => {
+            const generate = async (prompt: string, includedSources = 0) => {
               signal.throwIfAborted()
               const stepSignal = AbortSignal.any([signal, AbortSignal.timeout(60_000)])
               const gateway = await deps.gateway(job.projectId ?? context.project()?.id ?? 'memory-user', modelId)
               if (gateway.target !== 'local_llama_cpp') throw new Error('local_only_required')
+              stepSignal.throwIfAborted()
+              // Count submitted evidence, not successful output or presumed answer use.
+              recordMemoryUsageEvent('idle', 'included', includedSources)
               const result = await gateway.streamChatWithTools({
                 projectId: job.projectId ?? context.project()?.id ?? 'memory-user',
                 taskType: 'context.optimize',
@@ -517,8 +522,7 @@ export function createMaintenanceWorker(
               if (!content || content.length > 8000) throw new Error('invalid_candidate')
               return content
             }
-            const output = await generate(job.prompt)
-            recordMemoryUsageEvent('idle', 'included', work.hydrated.material.length)
+            const output = await generate(job.prompt, work.hydrated.material.length)
             if (job.task === 'memory') work.changes = parseMemoryChangeSet(output, work.hydrated.material)
             const reviewedSources: MaintenanceSource[] = work.hydrated.material
             // Context packages condense; they may cite only what the sources contain. Rewrites keep everything.

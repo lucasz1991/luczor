@@ -100,11 +100,12 @@ async function open() {
       <div class="memory-table-wrap">
         <p v-for="row in snapshot.usageEvents" :key="row.origin">
           {{ row.origin === 'chat' ? 'Chat' : row.origin === 'idle' ? 'Idle-Pflege' : 'Inspektion' }}:
-          {{ row.retrieved }} abgerufen · {{ row.included }} im Kontextpaket · {{ row.evaluated }} geprüft
+          {{ row.retrieved }} abgerufen · {{ row.included }} an Modellaufruf übergeben · {{ row.evaluated }} geprüft
         </p>
         <table>
           <caption>
-            Zugriffe seit Start des Hauptfensters / Kontowechsel. Abruf ist kein Beleg für Nutzung in der Antwort.
+            Seit Start des Hauptfensters / Kontowechsel. Übergeben zählt Quellen im eingereichten Kontext, nicht
+            bestätigte Verarbeitung oder Nutzung in der Antwort. Chat, Pflege und Inspektion sind getrennt.
           </caption>
           <thead>
             <tr>

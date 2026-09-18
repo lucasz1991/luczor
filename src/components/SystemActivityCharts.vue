@@ -146,7 +146,7 @@ function plot(keys: [SeriesKey, SeriesKey]) {
 const cards = computed(() => [
   {
     id: 'memory',
-    label: 'Gedächtnis',
+    label: 'Gedächtnis · Speicherzugriffe',
     hint: current.value.memory
       ? `${current.value.memory.activeReads + current.value.memory.activeWrites} Zugriffe aktiv`
       : 'Hauptfenster nicht verbunden',
@@ -222,10 +222,12 @@ const visibleCards = computed(() =>
     <details v-if="!compact" class="activity-chart-info">
       <summary>Zur Messung</summary>
       <p class="activity-chart-note">
-        Messabstand ca. 3,5 s · Skalen je Diagramm automatisch. Gezählt werden Gedächtniszugriffe und HTTP-Nutzdaten der
-        API- und Modellverbindungen. Senden zählt übergebene Anfragebytes; Empfang zählt gelesene Antwortbytes. Lokale
-        Zuordnung nach Zieladresse, ohne DNS-Auflösung. Andere Programme, Protokoll-Overhead und Downloads sind nicht
-        enthalten.
+        Messabstand ca. 1 s · Skalen je Diagramm automatisch. Gezählt werden instrumentierte Speicherzugriffe und
+        HTTP-Nutzdaten der API- und Modellverbindungen. Senden zählt übergebene Anfragebytes; Empfang zählt gelesene
+        Antwortbytes. Lokale Zuordnung nach Zieladresse, ohne DNS-Auflösung. Andere Programme, Protokoll-Overhead und
+        Downloads sind nicht enthalten. Die Gedächtniskurve ist keine KI-Auslastung: Ein einmal geladener Kontext kann
+        während der gesamten Antwort genutzt werden, ohne weitere Lesezugriffe. Chat- und Pflegequellen stehen getrennt
+        in „Gedächtnis &amp; Graph“; interne Pflegejournal- und Inspektionszugriffe erhöhen diese Kurve nicht.
       </p>
       <p v-if="current.unknown.requests" class="activity-chart-note">
         {{ current.unknown.requests }} Anfragen ohne eindeutige lokale/externe Zuordnung.

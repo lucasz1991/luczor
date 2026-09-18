@@ -7,7 +7,13 @@ import { shallowRef } from 'vue'
  */
 export type MemoryLinkState = 'recalled' | 'included' | 'omitted' | 'written' | 'updated' | 'removed'
 export type MemoryLinkOrigin = 'chat' | 'idle' | 'inspector' | 'user'
-export type MemoryLink = { id: string; state: MemoryLinkState; origin: MemoryLinkOrigin; at: number }
+export type MemoryLink = {
+  id: string
+  state: MemoryLinkState
+  origin: MemoryLinkOrigin
+  at: number
+  kind?: 'memory' | 'artifact'
+}
 export type ModelPhase = 'idle' | 'recalling' | 'thinking' | 'tools' | 'answering' | 'dreaming'
 
 export type ModelActivity = {
@@ -39,7 +45,7 @@ if (typeof window !== 'undefined')
 function prune(links: Map<string, MemoryLink>, now: number): Map<string, MemoryLink> {
   const kept = [...links.values()].filter(link => now - link.at < MEMORY_LINK_TTL_MS[link.state])
   kept.sort((left, right) => left.at - right.at)
-  return new Map(kept.slice(-MAX_LINKS).map(link => [link.id, link]))
+  return new Map(kept.slice(-MAX_LINKS).map(link => [link.kind === 'artifact' ? `artifact:${link.id}` : link.id, link]))
 }
 
 export function setModelPhase(phase: ModelPhase): void {
@@ -49,18 +55,24 @@ export function setModelPhase(phase: ModelPhase): void {
 }
 
 /** Records memory ids the model touched; `removed` wins over everything, `written` over reads. */
-export function recordMemoryLinks(ids: Iterable<string>, state: MemoryLinkState, origin: MemoryLinkOrigin): void {
+export function recordMemoryLinks(
+  ids: Iterable<string>,
+  state: MemoryLinkState,
+  origin: MemoryLinkOrigin,
+  kind: 'memory' | 'artifact' = 'memory'
+): void {
   const now = Date.now()
   const links = prune(modelActivity.value.links, now)
   let changed = false
   for (const raw of ids) {
     const id = String(raw ?? '').trim()
     if (!id) continue
-    const previous = links.get(id)
+    const key = kind === 'artifact' ? `artifact:${id}` : id
+    const previous = links.get(key)
     // A write or removal must not be downgraded by a recall that races in afterwards.
     if (previous && previous.state === 'removed' && state !== 'removed') continue
     if (previous && (previous.state === 'written' || previous.state === 'updated') && state === 'recalled') continue
-    links.set(id, { id, state, origin, at: now })
+    links.set(key, { id, state, origin, at: now, ...(kind === 'artifact' ? { kind } : {}) })
     changed = true
   }
   if (changed) modelActivity.value = { ...modelActivity.value, links }
@@ -73,12 +85,12 @@ export function activeMemoryLinks(now = Date.now()): MemoryLink[] {
 
 /** Maps a memory record id to the node id used by buildMemoryGraph(). */
 export function memoryLinkNodeId(link: MemoryLink): string {
-  return `memory:${link.id}`
+  return `${link.kind ?? 'memory'}:${link.id}`
 }
 
 export const MEMORY_LINK_LABELS: Record<MemoryLinkState, string> = {
   recalled: 'abgerufen',
-  included: 'im Kontext',
+  included: 'an Modellaufruf übergeben',
   omitted: 'nicht übernommen',
   written: 'neu gespeichert',
   updated: 'geändert',

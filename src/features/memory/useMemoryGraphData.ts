@@ -5,7 +5,13 @@ import { assistantProfileState } from '@/services/assistantProfile'
 import { buildMemoryGraph, MODEL_NODE_ID, type MemoryInventory, type MemoryNode } from './graph'
 import { dreamEffects, dreamNodeId, dreamTrace, type DreamTarget } from '@/services/memory/dreamTrace'
 import { lastLocalModelStatus } from '@/services/localModelStatus'
-import { activeMemoryLinks, modelActivity, type MemoryLink, type ModelPhase } from '@/services/memory/modelActivity'
+import {
+  activeMemoryLinks,
+  memoryLinkNodeId,
+  modelActivity,
+  type MemoryLink,
+  type ModelPhase,
+} from '@/services/memory/modelActivity'
 import type { PreparedContextArtifact } from '@/services/memory/maintenance'
 
 /**
@@ -119,7 +125,7 @@ const links = computed<MemoryLink[]>(() => {
   void dreamClock.value
   void modelActivity.value
   const ids = new Set(graph.value.nodes.map(node => node.id))
-  return activeMemoryLinks().filter(link => ids.has(`memory:${link.id}`))
+  return activeMemoryLinks().filter(link => ids.has(memoryLinkNodeId(link)))
 })
 const phase = computed<ModelPhase>(() => (dream.value.active ? 'dreaming' : modelActivity.value.phase))
 

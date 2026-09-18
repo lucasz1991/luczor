@@ -94,7 +94,7 @@ const LSP_STATES = {
 } as const
 const indexedAt = computed(() =>
   props.graphStatus.last_indexed_at
-    ? new Date(props.graphStatus.last_indexed_at).toLocaleString('de-DE', {
+    ? new Date(props.graphStatus.last_indexed_at * 1000).toLocaleString('de-DE', {
         dateStyle: 'short',
         timeStyle: 'short',
       })

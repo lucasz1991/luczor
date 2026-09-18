@@ -209,6 +209,8 @@ export type RunAgentOptions = {
   }) => void
   /** Per-turn counts across all rounds; live estimates are replaced with actual usage. */
   onUsage?: (usage: TokenUsage) => void
+  /** Ephemeral host-only request observation after fitting; never persisted or sent as provider metadata. */
+  onContextRequest?: (request: import('./memory/contextUsage').SubmittedContextRequest) => void
   /** Safe UI telemetry without private model channels or tool payloads. */
   onProgress?: (event: AgentProgress) => void
   /** Retract only the unfinished round, including its queued/playing speech. */
@@ -977,6 +979,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               onResponseReset: undefined,
               onBudget: undefined,
               onUsage: undefined,
+              onContextRequest: undefined,
               onCheckpoint: undefined,
               pendingTaskCreateVerifications: undefined,
             })
@@ -1290,6 +1293,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       let acceptingOutput = true
       updateUsage(attempt, { messages: requestMessages, tools: availableTools }, '')
       try {
+        // Observation cannot change or prevent the already selected request.
+        try {
+          opts.onContextRequest?.({ target: inferenceGateway.target, messages: requestMessages })
+        } catch {
+          /* Diagnostics are best effort, never an inference failure. */
+        }
         res = await inferenceGateway.streamChatWithTools({
           debugScope: { conversationId: opts.conversationId, runId: opts.runId },
           contextBudget: fittedContext.report,

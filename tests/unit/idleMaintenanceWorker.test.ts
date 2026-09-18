@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Project } from '@/state/types'
 import { emptyMaintenanceJournal, type MaintenanceJournal } from '@/services/memory/maintenance'
 import type { idleOptimizationDependencies } from '@/services/agents/idleOptimization'
+import { memoryUsageEvents, resetMemoryUsage } from '@/services/memory/usage'
 const fixture = vi.hoisted(() => ({
   journal: null as MaintenanceJournal | null,
   writes: [] as string[],
@@ -74,6 +75,7 @@ function setup() {
   return { project, deps, stream, create }
 }
 beforeEach(() => {
+  resetMemoryUsage()
   vi.useFakeTimers()
   fixture.journal = emptyMaintenanceJournal()
   fixture.writes = []
@@ -90,6 +92,40 @@ async function run(optimizer: ReturnType<typeof createMaintenanceWorker>) {
   await vi.waitFor(() => expect(['cooldown', 'paused']).toContain(optimizer.snapshot().phase))
 }
 describe('mounted persistent maintenance worker', () => {
+  it('renews resident readiness even without cold-start consent before drafting and review', async () => {
+    const testCase = setup()
+    const worker = testCase.create()
+    await run(worker)
+    expect(testCase.deps.prepare).toHaveBeenCalledExactlyOnceWith(expect.any(AbortSignal), 'installed')
+    expect(testCase.stream).toHaveBeenCalledTimes(2)
+    expect(fixture.writes).toHaveLength(1)
+    expect(memoryUsageEvents().find(item => item.origin === 'idle')).toMatchObject({ included: 1, evaluated: 1 })
+    await worker.stop()
+  })
+  it('does not fall back to cold preparation if the resident disappears during renewal', async () => {
+    const testCase = setup()
+    vi.mocked(testCase.deps.prepare).mockRejectedValue(new Error('idle_model_not_ready'))
+    const worker = testCase.create()
+    await run(worker)
+    expect(testCase.deps.prepare).toHaveBeenCalledExactlyOnceWith(expect.any(AbortSignal), 'installed')
+    expect(testCase.stream).not.toHaveBeenCalled()
+    expect(fixture.writes).toHaveLength(0)
+    expect(memoryUsageEvents().find(item => item.origin === 'idle')).toMatchObject({ included: 0, evaluated: 0 })
+    await worker.stop()
+  })
+  it('counts submitted evidence even when generation fails without claiming review or answer use', async () => {
+    const testCase = setup()
+    testCase.stream.mockImplementation(async () => {
+      expect(memoryUsageEvents().find(item => item.origin === 'idle')).toMatchObject({ included: 1, evaluated: 0 })
+      throw new Error('runtime_generation_failed')
+    })
+    const worker = testCase.create()
+    await run(worker)
+    expect(testCase.stream).toHaveBeenCalledOnce()
+    expect(fixture.writes).toHaveLength(0)
+    expect(memoryUsageEvents().find(item => item.origin === 'idle')).toMatchObject({ included: 1, evaluated: 0 })
+    await worker.stop()
+  })
   it('reviews separately, saves an artifact and does no inference for unchanged sources after restart', async () => {
     const testCase = setup()
     const first = testCase.create()

@@ -4,7 +4,7 @@ import { luczorMemory } from './luczorMemory'
 import { planMaintenance } from './maintenancePlanner'
 import type { PromptFragment } from '@/services/prompt/promptContextAssembler'
 import { inspectRepositoryGraph, readRepositorySnippets, repositoryGraphStatus } from '@/services/repositoryGraph'
-import { maintenanceHash } from './maintenance'
+import { maintenanceHash, type PreparedContextArtifact, type SourceReference } from './maintenance'
 import type { MemoryUsageOrigin } from './usage'
 
 /** Optional fast orientation. Missing/stale artifacts never delay a chat for generation. */
@@ -26,18 +26,32 @@ export async function preparedContextFragments(
     messages: state.messages,
     now: Date.now(),
   })
-  const revisions = new Map(jobs.map(job => [job.id, job.revision]))
+  // Generation adapts its batches to resident context/RAM. A different retrieval
+  // batch must not invalidate unchanged evidence or hide later small-batch IDs.
+  // Scope and each source revision remain mandatory, independently of packing.
+  const sourceKey = (project: string | undefined, source: SourceReference) =>
+    JSON.stringify([project ?? null, source.kind, source.id])
+  const revisions = new Map(
+    jobs
+      .filter(job => job.kind === 'context')
+      .flatMap(job => job.sources.map(source => [sourceKey(job.projectId, source), source.revision] as const))
+  )
   const words = query
     .toLocaleLowerCase()
     .split(/\W+/u)
     .filter(word => word.length > 2)
   const score = (text: string) => words.filter(word => text.toLocaleLowerCase().includes(word)).length
-  const valid = snapshot.journal.artifacts.filter(
-    artifact =>
-      (!artifact.projectId || artifact.projectId === projectId) &&
-      artifact.kind === 'context' &&
-      revisions.get(artifact.id) === artifact.revision
-  )
+  const valid: PreparedContextArtifact[] = []
+  for (const artifact of snapshot.journal.artifacts) {
+    if (
+      (artifact.projectId && artifact.projectId !== projectId) ||
+      artifact.kind !== 'context' ||
+      !artifact.sources.length ||
+      artifact.sources.some(source => revisions.get(sourceKey(artifact.projectId, source)) !== source.revision)
+    )
+      continue
+    if ((await maintenanceHash(artifact.sources)) === artifact.revision) valid.push(artifact)
+  }
   const repository = snapshot.journal.artifacts
     .filter(artifact => artifact.projectId === projectId && artifact.kind === 'repository')
     .sort((left, right) => score(right.content) - score(left.content))

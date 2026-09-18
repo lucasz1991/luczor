@@ -115,6 +115,14 @@ const FAILURES: Record<string, string> = {
   memory_disabled: 'Automatisches Erinnern ist ausgeschaltet',
   timeout: 'Zeitlimit überschritten',
   resource_background_unavailable: 'Modell war belegt',
+  idle_preparation_unavailable: 'Modellvorbereitung war belegt oder nicht verfügbar. Nach Abschluss erneut starten.',
+  idle_preparation_unsupported:
+    'Installierter Modellstart wird von dieser App-Version nicht unterstützt. Desktop-App aktualisieren.',
+  installed_model_unavailable: 'Kein freigegebenes installiertes Modell erfüllt derzeit die Ressourcenbedingungen.',
+  local_preparation_failed: 'Lokale Modellvorbereitung fehlgeschlagen. Modelldiagnose in den Einstellungen prüfen.',
+  runtime_not_configured: 'Lokale Runtime ist nicht eingerichtet. Modellpfade in den Einstellungen prüfen.',
+  model_files_unavailable: 'Installierte Modelldateien sind nicht verfügbar. Modellpfade prüfen.',
+  runtime_startup_ram_pressure: 'Modellstart zum Schutz des freien Arbeitsspeichers gestoppt.',
 }
 function failureLabel(code: string | undefined): string {
   if (!code) return 'Unbekannter Fehler'
@@ -188,25 +196,42 @@ const BLOCKERS: Record<string, string> = {
   active: 'Es läuft bereits eine Prüfung oder ein Traum.',
   foreground: 'Ein Auftrag im Vordergrund hält das Modell – bitte warten, bis er fertig ist.',
 }
-/** Set after a manual request; the next status change tells us whether the pass got admitted. */
+/** Track the whole requested lifecycle, not just the first running transition. */
 const requestedAt = ref(0)
+const requestStarted = ref(false)
 watch(
-  () => [status.value?.phase, status.value?.reason] as const,
+  () => [status.value?.phase, status.value?.reason, props.trace.current?.id, run.value?.outcome] as const,
   ([phase, reason]) => {
-    if (!requestedAt.value || Date.now() - requestedAt.value > 60_000) return
+    if (!requestedAt.value) return
     if (phase === 'running' || phase === 'committing') {
-      message.value = 'Der Traum läuft – Schritte und Entscheidungen erscheinen unten und in der Karte.'
+      requestStarted.value = true
+      message.value =
+        reason === 'gathering_sources'
+          ? 'Quellen werden gesichtet – das Modell hat noch nicht begonnen.'
+          : phase === 'committing'
+            ? 'Geprüftes Ergebnis wird übernommen …'
+            : 'Der Traum läuft – Schritte und Entscheidungen erscheinen unten und in der Karte.'
       messageTone.value = 'info'
-      requestedAt.value = 0
+    } else if (phase === 'yielding') {
+      message.value = 'Traum wird unterbrochen – die laufende Arbeit wird noch freigegeben …'
+      messageTone.value = 'info'
     } else if (phase === 'paused' || phase === 'cooldown') {
       // The pass was admitted and finished, or an eligibility gate declined it: show which one.
       // eslint-disable-next-line security/detect-object-injection
       const why = reason ? (REASONS[reason] ?? reason) : ''
       const ok = reason === 'candidate_ready'
-      message.value = ok
-        ? 'Traum abgeschlossen und übernommen.'
-        : `Traum nicht gestartet: ${why || 'Voraussetzung fehlt'}.`
-      messageTone.value = ok ? 'info' : 'error'
+      const failed = run.value?.outcome === 'failed' && run.value.startedAt >= requestedAt.value
+      message.value = failed
+        ? `Traum fehlgeschlagen: ${failureLabel(run.value?.error)}`
+        : ok
+          ? 'Traum abgeschlossen und übernommen.'
+          : `Traum ${requestStarted.value ? 'pausiert' : 'nicht gestartet'}: ${why || 'Voraussetzung fehlt'}.`
+      messageTone.value = ok || reason === 'activity' || reason === 'foreground' ? 'info' : 'error'
+      // Settlement may publish its trace after the optimizer's cooldown event.
+      if (!props.trace.current) requestedAt.value = 0
+    } else if (phase === 'stopped') {
+      message.value = 'Leerlauf-Pflege ausgeschaltet.'
+      messageTone.value = 'info'
       requestedAt.value = 0
     }
   }
@@ -224,6 +249,7 @@ async function startDream() {
     // but counts as consent to start the installed model and tolerates a busy CPU.
     if (requestIdleOptimization()) {
       requestedAt.value = Date.now()
+      requestStarted.value = false
       message.value = 'Traum angefordert – Voraussetzungen werden geprüft …'
       messageTone.value = 'info'
     } else {
