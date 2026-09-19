@@ -291,7 +291,11 @@ export const mutations = {
     setSafeRecordValue(state.global.ui!.lastConversationByProject, projectId, conversationId)
   },
 
-  createConversation(projectId: AppTypes.Id, title = 'Neuer Chat'): AppTypes.Conversation {
+  createConversation(
+    projectId: AppTypes.Id,
+    title = 'Neuer Chat',
+    settings?: AppTypes.ConversationSettings
+  ): AppTypes.Conversation {
     this.getActiveConversationId(projectId)
     const timestamp = now()
     const chat: AppTypes.Conversation = {
@@ -301,10 +305,38 @@ export const mutations = {
       createdAt: timestamp,
       updatedAt: timestamp,
       archivedAt: null,
+      ...(settings && Object.keys(settings).length ? { settings: { ...settings } } : {}),
     }
     state.conversations!.push(chat)
     this.setActiveConversation(projectId, chat.id)
     return chat
+  },
+
+  getConversation(conversationId: AppTypes.Id): AppTypes.Conversation | undefined {
+    return state.conversations?.find(item => item.id === conversationId)
+  },
+
+  /** Per-chat controls are merged; `undefined` removes a key so the device default applies again. */
+  updateConversationSettings(conversationId: AppTypes.Id, patch: AppTypes.ConversationSettings): boolean {
+    const chat = this.getConversation(conversationId)
+    if (!chat) return false
+    const next: AppTypes.ConversationSettings = { ...(chat.settings ?? {}) }
+    let changed = false
+    for (const key of ['mode', 'routeMode', 'thinkingTier'] as const) {
+      if (!(key in patch)) continue
+      // eslint-disable-next-line security/detect-object-injection
+      const value = patch[key]
+      // eslint-disable-next-line security/detect-object-injection
+      if (next[key] === value) continue
+      changed = true
+      // eslint-disable-next-line security/detect-object-injection
+      if (value === undefined) delete next[key]
+      // eslint-disable-next-line security/detect-object-injection
+      else (next as Record<string, unknown>)[key] = value
+    }
+    if (!changed) return false
+    chat.settings = next
+    return true
   },
 
   renameConversation(projectId: AppTypes.Id, conversationId: AppTypes.Id, title: string) {

@@ -140,18 +140,20 @@ describe('persistent chat run owner', () => {
     })
     expect(manager.hasLive()).toBe(false)
     const state = structuredClone(DEFAULT_STATE)
-    const project = {
-      ...state.projects[0]!,
-      id: 'project',
-      autonomousGoal: {
-        ...createGoalRunState('Finish the saved task', true, 1),
-        progress: 'Previously saved progress',
-        lastMessageId: 'partial-answer',
+    const project = { ...state.projects[0]!, id: 'project' }
+    state.projects = [project, { ...project, id: 'unrelated' }]
+    const chat = { projectId: 'project', title: 'Chat', createdAt: 1, updatedAt: 1, archivedAt: null }
+    state.conversations = [
+      {
+        ...chat,
+        id: 'one',
+        autonomousGoal: {
+          ...createGoalRunState('Finish the saved task', true, 1),
+          progress: 'Previously saved progress',
+          lastMessageId: 'partial-answer',
+        },
       },
-    }
-    state.projects = [
-      project,
-      { ...project, id: 'unrelated', autonomousGoal: createGoalRunState('Other task', true, 1) },
+      { ...chat, id: 'two', projectId: 'unrelated', autonomousGoal: createGoalRunState('Other task', true, 1) },
     ]
     state.pending.toolCallsByProject.project = [
       {
@@ -182,14 +184,14 @@ describe('persistent chat run owner', () => {
       },
     ]
     expect(reconcileRecoveredChatRuns(state, manager.records.value)).toBe(3)
-    expect(state.projects[0]?.autonomousGoal).toMatchObject({
+    expect(state.conversations[0]?.autonomousGoal).toMatchObject({
       active: false,
       status: 'waiting',
       revision: 2,
       progress: 'Previously saved progress',
       lastMessageId: 'partial-answer',
     })
-    expect(state.projects[1]?.autonomousGoal?.active).toBe(true)
+    expect(state.conversations[1]?.autonomousGoal?.active).toBe(true)
     expect(state.pending.toolCallsByProject.project[0]?.status).toBe('canceled')
     expect(state.messages[0]).toMatchObject({
       content: 'Preserved partial answer',

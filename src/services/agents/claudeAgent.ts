@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core'
+import type { LuczorMode } from '@/services/inference/types'
 import { executionGate, executionPayload } from '@/services/executionGate'
 import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
 import { selectAgentEffort, type AgentCapabilityCatalog } from './effort'
@@ -38,7 +39,10 @@ export type ClaudeAgentDependencies = {
   invoke: typeof invoke
   externalPolicy: typeof getRepositoryExternalPolicy
   wait: () => Promise<void>
-  captureExecution: (signal: AbortSignal) => {
+  captureExecution: (
+    signal: AbortSignal,
+    origin?: { projectId: string; jobId: string; mode?: LuczorMode }
+  ) => {
     signal: AbortSignal
     authorize: (permission: AgentPermission) => Promise<{ sessionId: string; generation: number }>
   }
@@ -47,8 +51,11 @@ const dependencies: ClaudeAgentDependencies = {
   invoke,
   externalPolicy: getRepositoryExternalPolicy,
   wait: () => new Promise(resolve => setTimeout(resolve, 250)),
-  captureExecution(signal) {
-    const ticket = executionGate.capture(signal)
+  captureExecution(signal, origin) {
+    // A job started from a chat keeps that chat's permission mode for its whole run.
+    const ticket = origin?.mode
+      ? executionGate.capture(signal, { projectId: origin.projectId, runId: `agent-job:${origin.jobId}` }, origin.mode)
+      : executionGate.capture(signal)
     return {
       signal: ticket.signal,
       authorize: permission => executionPayload(ticket, permission === 'workspace-write'),
@@ -79,7 +86,11 @@ export function createClaudeAgentAdapter(api: ClaudeAgentDependencies = dependen
         throw new Error('Die Repository-Richtlinie verbietet externe Coding-Agenten.')
       if (!request.project.rootPath || !Number.isFinite(request.project.workspaceUpdatedAt))
         throw new Error('Claude benötigt eine aktuelle Projektzuordnung.')
-      const execution = api.captureExecution(request.signal)
+      const execution = api.captureExecution(request.signal, {
+        projectId: request.project.projectId,
+        jobId: request.jobId,
+        mode: request.mode,
+      })
       const signal = execution.signal
       if (signal.aborted) throw new DOMException('Abgebrochen', 'AbortError')
       const selection =

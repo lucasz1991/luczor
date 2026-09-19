@@ -1,6 +1,7 @@
 ﻿<!-- App.vue -->
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
+import { isTauri } from '@tauri-apps/api/core'
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import { fitRequestContext } from '@/services/inference/contextBudget'
 import { loadPendingTaskCreates, replacePendingTaskCreates } from '@/services/agents/taskCreateRecoveryLedger'
@@ -109,7 +110,7 @@ import {
   type ChatActivity,
 } from '@/services/chatActivity'
 import { presentLocalToolResult } from '@/services/toolProgressPresentation'
-import type { Message, Project } from '@/state/types'
+import type { ConversationSettings, Message, Project } from '@/state/types'
 import { createContextUsageObserver } from '@/services/memory/contextUsage'
 import { type LuczorMode, type WireMessage } from './services/openrouter.service'
 import {
@@ -264,12 +265,27 @@ function setComposerInput(value: string, source: ComposerInputSource) {
 const sending = computed(() => chatRuns.hasLive(activeConversationId.value))
 const admittingConversations = shallowRef(new Set<string>())
 const sendAdmission = computed(() => admittingConversations.value.has(activeConversationId.value))
-// The route mode is a conscious choice for this project in this session.
-// Capture it at turn admission so later UI changes cannot change an in-flight route.
-const chatRouteMode = ref<ChatRouteMode>(
-  modelUsageSettings.value.externalEnabled ? modelUsageSettings.value.chatRouteMode : 'local'
-)
-const chatThinkingChoices = ref(new Map<string, ThinkingTier>())
+/* -------------------------------------------------
+ * Per-chat controls: permission mode, model route and thinking tier live on the
+ * conversation and are persisted with it, so chats keep their own settings and
+ * run side by side. A turn captures them at admission; later UI changes never
+ * alter an in-flight route or mode.
+ * ------------------------------------------------- */
+function conversationSettings(conversationId: string): ConversationSettings {
+  return mutations.getConversation(conversationId)?.settings ?? {}
+}
+function writeConversationSettings(conversationId: string, patch: ConversationSettings) {
+  if (mutations.updateConversationSettings(conversationId, patch)) scheduleSave(state)
+}
+/** Effective route for a chat: its own choice while external models are allowed, else local. */
+function routeModeFor(conversationId: string): ChatRouteMode {
+  if (!modelUsageSettings.value.externalEnabled) return 'local'
+  return conversationSettings(conversationId).routeMode ?? modelUsageSettings.value.chatRouteMode
+}
+const chatRouteMode = computed<ChatRouteMode>({
+  get: () => routeModeFor(activeConversationId.value),
+  set: value => writeConversationSettings(activeConversationId.value, { routeMode: value }),
+})
 type RunThinkingBudget = {
   projectId: string
   messageId: string
@@ -280,18 +296,10 @@ const activeThinkingBudget = computed(() => {
   const messageId = activeTurn.value?.messageId
   return messageId ? (getSafeRecordValue(thinkingBudgets.value, messageId) ?? null) : null
 })
-watch(modelUsageSettings, value => {
-  chatRouteMode.value = value.externalEnabled ? value.chatRouteMode : 'local'
-})
 const continuations = shallowRef<Record<string, AgentCheckpoint>>({})
 const resetChatRouting = () => {
-  chatThinkingChoices.value = new Map()
   thinkingBudgets.value = {}
   continuations.value = {}
-  chatRouteMode.value = 'local'
-}
-const resetProjectRouting = () => {
-  chatRouteMode.value = 'local'
 }
 window.addEventListener('luczor:api-identity-changing', resetChatRouting)
 onBeforeUnmount(() => window.removeEventListener('luczor:api-identity-changing', resetChatRouting))
@@ -424,9 +432,23 @@ function improveWorkflow(reference: WorkflowChatReference) {
     `Verbessere mit mir Workflow „${reference.name}“ (ID ${reference.id}). Lies zuerst die aktuelle Definition${reference.runId ? ` und den Lauf ${reference.runId}` : ' und relevante letzte Läufe'}. Begründe die Änderungen anhand meines Ziels und vorhandener Ergebnisse. Starte erst auf meinen Auftrag.`
   )
 }
-const mode = ref<LuczorMode>('observe')
+/**
+ * Device default mode (persisted as before). New chats inherit it, capped at "Handeln";
+ * scope-less work such as workflows and teams follows it live. Each chat pins its own
+ * mode to its runs, so changing one chat never revokes another chat's execution.
+ */
+const defaultMode = ref<LuczorMode>('observe')
 const allowUnrestricted = ref(false)
-const stopAgentHub = configureAgentHub(() => mode.value)
+function modeFor(conversationId: string): LuczorMode {
+  const chosen = conversationSettings(conversationId).mode ?? defaultMode.value
+  return chosen === 'unrestricted' && !allowUnrestricted.value ? 'observe' : chosen
+}
+const mode = computed<LuczorMode>(() => modeFor(activeConversationId.value))
+/** Inherited by a new chat: never "unrestricted" without this chat's own confirmation. */
+const inheritedChatSettings = (): ConversationSettings => ({
+  mode: defaultMode.value === 'unrestricted' ? 'act' : defaultMode.value,
+})
+const stopAgentHub = configureAgentHub(() => defaultMode.value)
 onBeforeUnmount(stopAgentHub)
 
 function openSettings(tab: SettingsStartTab = 'server') {
@@ -450,7 +472,7 @@ function openNotificationCenter() {
  * Runtime lifecycle
  * ------------------------------------------------- */
 const appRuntimeLifecycle = createAppRuntimeLifecycle({
-  mode,
+  mode: defaultMode,
   allowUnrestricted,
   getActiveProjectId: () => activeProjectId.value,
   openProject,
@@ -740,7 +762,6 @@ watch(
   },
   { flush: 'sync' }
 )
-watch(activeProjectId, resetProjectRouting, { flush: 'sync' })
 const activePlanningSession = computed(() => {
   void planningRevision.value
   return planningHub.get(activeProjectId.value)
@@ -763,27 +784,29 @@ const planningStatusLabel = computed(() => {
   ])
   return labels.get(activePlanningSession.value?.status ?? '') ?? 'Planungsmodus'
 })
-watch(() => ({ mode: mode.value, killSwitch: hud.killSwitch, scope: 'desktop-account' }), updateExecutionControls, {
-  immediate: true,
-  flush: 'sync',
-})
+watch(
+  () => ({ mode: defaultMode.value, killSwitch: hud.killSwitch, scope: 'desktop-account' }),
+  updateExecutionControls,
+  { immediate: true, flush: 'sync' }
+)
 window.addEventListener('luczor:api-identity-changing', invalidateExecution)
 onBeforeUnmount(() => {
   window.removeEventListener('luczor:api-identity-changing', invalidateExecution)
   invalidateExecution()
 })
 const messages = computed(() => mutations.getConversationMessages(activeProjectId.value, activeConversationId.value))
+function thinkingTierFor(conversationId: string): ThinkingTier {
+  const choice = conversationSettings(conversationId).thinkingTier
+  if (choice && isThinkingTier(choice)) return choice
+  const saved = [...mutations.getConversationMessages(activeProjectId.value, conversationId)]
+    .reverse()
+    .find(message => message.role === 'user' && isThinkingTier(message.meta.thinkingTier))?.meta.thinkingTier
+  return saved ?? thinkingSettings.value.defaultTier
+}
 const thinkingTier = computed<ThinkingTier>({
-  get: () => {
-    const choice = chatThinkingChoices.value.get(activeConversationId.value)
-    if (choice) return choice
-    const saved = [...messages.value]
-      .reverse()
-      .find(message => message.role === 'user' && isThinkingTier(message.meta.thinkingTier))?.meta.thinkingTier
-    return saved ?? thinkingSettings.value.defaultTier
-  },
+  get: () => thinkingTierFor(activeConversationId.value),
   set: value => {
-    if (isThinkingTier(value)) chatThinkingChoices.value.set(activeConversationId.value, value)
+    if (isThinkingTier(value)) writeConversationSettings(activeConversationId.value, { thinkingTier: value })
   },
 })
 const visibleThinkingBudget = computed(() =>
@@ -935,7 +958,7 @@ watch(activeProjectId, () => {
 
 function newChat() {
   void voiceInputSession.stop()
-  mutations.createConversation(activeProjectId.value)
+  mutations.createConversation(activeProjectId.value, undefined, inheritedChatSettings())
   scheduleSave(state)
 }
 function selectConversation(projectId: string, conversationId: string) {
@@ -1244,8 +1267,20 @@ async function selectMode(next: LuczorMode) {
       return
     }
   }
-  mode.value = next
-  void persistActiveMode(next)
+  applyChatMode(activeConversationId.value, next)
+}
+
+/**
+ * Pins the mode to this chat and makes it the device default for new chats and
+ * scope-less work. Only this chat's live runs are revoked (mode change semantics
+ * as before) – every other chat keeps running untouched.
+ */
+function applyChatMode(conversationId: string, next: LuczorMode) {
+  const previous = modeFor(conversationId)
+  writeConversationSettings(conversationId, { mode: next })
+  if (next !== 'unrestricted') defaultMode.value = next
+  void persistActiveMode(defaultMode.value)
+  if (previous !== next) invalidateExecutionScope({ conversationId }, 'execution_mode_changed')
 }
 
 const modeTitle = computed(() => {
@@ -1856,25 +1891,38 @@ watch(
 async function send(
   automaticVoice = false,
   resume?: { checkpoint: AgentCheckpoint; messageId: string },
-  miniInput?: { text: string; projectId: string },
+  miniInput?: { text: string; projectId: string; conversationId?: string },
   goalInput?: { state: GoalRunState; signal: AbortSignal }
 ): Promise<GoalStepResult | undefined> {
   if (!appInitialized.value || appQuitting.value) return
   const pid = miniInput?.projectId ?? activeProjectId.value
-  const conversationId = mutations.getActiveConversationId(pid)
+  // A goal round targets its own chat even while another chat or project is shown.
+  const conversationId = miniInput?.conversationId ?? mutations.getActiveConversationId(pid)
+  if (mutations.getConversation(conversationId)?.projectId !== pid) return
   const submittedText = miniInput?.text ?? input.value
   const rawText = resume?.checkpoint.objective ?? submittedText.trim()
   if (!rawText || admittingConversations.value.has(conversationId)) return
   const command = planningCommandObjective(rawText)
   const text = command === null ? rawText : planningDiscussionMessage(command)
   const runId = crypto.randomUUID()
-  const workspace = activeWorkspace.value?.projectId === pid ? { ...activeWorkspace.value } : null
-  const execution = executionGate.capture(goalInput?.signal, {
-    projectId: pid,
-    conversationId,
-    runId,
-    workspaceBindingId: JSON.stringify([workspace?.rootPath ?? '', workspace?.updatedAt ?? '']),
-  })
+  let workspace: ProjectWorkspaceBinding | null =
+    activeWorkspace.value?.projectId === pid ? { ...activeWorkspace.value } : null
+  if (!workspace && miniInput?.conversationId) {
+    // A goal round of a chat in another project still needs that project's folder binding.
+    workspace = isTauri() ? await getProjectWorkspace(pid).catch(() => null) : null
+    if (admittingConversations.value.has(conversationId) || appQuitting.value) return
+  }
+  const turnMode = modeFor(conversationId)
+  const execution = executionGate.capture(
+    goalInput?.signal,
+    {
+      projectId: pid,
+      conversationId,
+      runId,
+      workspaceBindingId: JSON.stringify([workspace?.rootPath ?? '', workspace?.updatedAt ?? '']),
+    },
+    turnMode
+  )
   const prj = projects.value.find(project => project.id === pid)
   const captured: CapturedChatTurn = {
     readOnlyReview:
@@ -1887,18 +1935,18 @@ async function send(
     prj: prj ? JSON.parse(JSON.stringify(prj)) : undefined,
     workspace,
     execution,
-    mode: mode.value,
+    mode: turnMode,
     thinking: resume?.checkpoint.thinkingTier
       ? { thinkingTier: resume.checkpoint.thinkingTier, thinkingConfig: resume.checkpoint.thinkingConfig }
-      : captureThinking(thinkingTier.value),
-    routeMode: modelUsageSettings.value.externalEnabled && !resume ? chatRouteMode.value : 'local',
+      : captureThinking(thinkingTierFor(conversationId)),
+    routeMode: !resume ? routeModeFor(conversationId) : 'local',
     expectedLocalModelId: modelUsageSettings.value.localModelId,
     inputSource: miniInput ? 'keyboard' : consumeInputSource(),
   }
   admittingConversations.value = new Set([...admittingConversations.value, conversationId])
   let responseStarted = false
   try {
-    if (!goalInput && autonomousGoal.running.value) await autonomousGoal.interrupt()
+    if (!goalInput && autonomousGoal.isRunning(conversationId)) await autonomousGoal.interrupt(conversationId)
     executionGate.assert(execution)
     captured.principalId = await resolveWorkspacePrincipalId()
     executionGate.assert(execution)
@@ -2248,7 +2296,7 @@ async function executeChatTurn(
           turnExecution.signal
         ),
       mode: captured.mode,
-      getMode: () => mode.value,
+      getMode: () => modeFor(conversationId),
       toolChoice: goalInput ? 'auto' : shouldRequireToolCall(text) ? 'required' : 'auto',
       taskType: promptContext.taskType,
       // The composer is a chat contract. The task type stays a context-retrieval
@@ -2548,8 +2596,7 @@ const miniChat = useMiniChatHost({
     workspaceBindingId: JSON.stringify([activeWorkspace.value?.rootPath ?? '', activeWorkspace.value?.updatedAt ?? '']),
   }),
   setMode: next => {
-    mode.value = next
-    void persistActiveMode(next)
+    void selectMode(next)
   },
   telemetry: () => ({
     status: hud.status,
@@ -2597,18 +2644,19 @@ const conversationBusy = computed(
     planningBusy.value
 )
 const autonomousGoal = useAutonomousGoal({
-  projectId: () => activeProjectId.value,
   conversationId: () => activeConversationId.value,
-  available: () =>
+  // Only this chat's own live turn or the kill switch hold a goal back. Open app pages
+  // (settings, workflows, agents) and work in other chats do not pause it any more.
+  available: conversationId =>
     appReady.value &&
-    !conversationBusy.value &&
     !hud.killSwitch &&
-    !showSettings.value &&
-    !showWorkflows.value &&
-    !showAgentHub.value &&
-    !Object.values(projectActivity.value).some(Boolean),
+    !chatRuns.hasLive(conversationId) &&
+    !admittingConversations.value.has(conversationId) &&
+    (conversationId !== activeConversationId.value || !(showPlanning.value || planningBusy.value)),
   draft: () => input.value,
-  run: async (projectId, goal, signal) => {
+  run: async (conversationId, goal, signal) => {
+    const projectId = mutations.getConversation(conversationId)?.projectId
+    if (!projectId) throw new Error('Der Chat dieses Ziels ist nicht mehr verfügbar.')
     const previous = goal.lastMessageId ? continuations.value[goal.lastMessageId] : undefined
     const checkpoint =
       goal.phase === 'work' && previous ? { checkpoint: previous, messageId: goal.lastMessageId! } : undefined
@@ -2622,7 +2670,7 @@ const autonomousGoal = useAutonomousGoal({
     ]
       .filter(Boolean)
       .join('\n\n')
-    const result = await send(false, checkpoint, { text, projectId }, { state: goal, signal })
+    const result = await send(false, checkpoint, { text, projectId, conversationId }, { state: goal, signal })
     if (!result) throw new Error('Zielrunde konnte noch nicht gestartet werden.')
     return result
   },
@@ -3341,7 +3389,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
         >
           <template #heading-start>
             <AutonomousGoalControl
-              :key="activeProjectId"
+              :key="activeConversationId"
               :model="autonomousGoal.model.value"
               :busy="conversationBusy"
               compact

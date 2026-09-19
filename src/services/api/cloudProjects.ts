@@ -1,5 +1,6 @@
 import { reactive } from 'vue'
 import { state } from '@/state/store'
+import { CONVERSATION_LOCAL_FIELDS } from '@/state/types'
 import type { AppState, Conversation, Message, MemoryItem, Project, ProjectGoal, SummaryItem } from '@/state/types'
 import { saveAppStateStrict } from '@/services/persistence'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
@@ -14,7 +15,7 @@ export type CloudProjectSnapshot = {
   schema_version: 1
   project: Pick<Project, 'name' | 'goal' | 'summary' | 'goals' | 'createdAt' | 'updatedAt' | 'archivedAt'>
   messages: PortableMessage[]
-  conversations?: Array<Omit<Conversation, 'projectId' | 'draft'>>
+  conversations?: Array<Omit<Conversation, 'projectId' | (typeof CONVERSATION_LOCAL_FIELDS)[number]>>
   memories: PortableMemory[]
   summaries: PortableSummary[]
 }
@@ -205,11 +206,31 @@ export function snapshotForCloud(projectId: string): CloudProjectSnapshot {
       messages,
       conversations: (state.conversations ?? [])
         .filter(item => item.projectId === projectId)
-        .map(({ projectId: _projectId, draft: _draft, ...conversation }) => conversation),
+        .map(conversation => portableConversation(conversation)),
       memories,
       summaries,
     })
   )
+}
+/** Shared snapshot shape of a chat: identity and title only, no device-local controls. */
+function portableConversation(
+  conversation: Conversation
+): CloudProjectSnapshot['conversations'] extends Array<infer Item> | undefined ? Item : never {
+  const { projectId: _projectId, ...rest } = conversation
+  // `field` is a member of the closed CONVERSATION_LOCAL_FIELDS tuple, never user input.
+  // eslint-disable-next-line security/detect-object-injection
+  for (const field of CONVERSATION_LOCAL_FIELDS) delete (rest as Partial<Conversation>)[field]
+  return rest
+}
+function localConversationFields(conversation: Conversation): Partial<Conversation> {
+  const kept: Partial<Conversation> = {}
+  for (const field of CONVERSATION_LOCAL_FIELDS) {
+    // eslint-disable-next-line security/detect-object-injection
+    const value = conversation[field]
+    // eslint-disable-next-line security/detect-object-injection
+    if (value !== undefined) (kept as Record<string, unknown>)[field] = value
+  }
+  return kept
 }
 function record(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Ungültiges Cloud-Projektformat.')
@@ -407,10 +428,23 @@ async function applyRemote(
   const apply = (target: AppState) => {
     const project = target.projects.find(project => project.id === local.id)!
     Object.assign(project, { goal: undefined }, copy(remote.snapshot.project), { cloud: cloudLink })
-    if (remote.snapshot.conversations)
+    if (remote.snapshot.conversations) {
+      // Per-chat controls, drafts and goal runs never leave this device; keep them across the replace.
+      const localOnly = new Map(
+        (target.conversations ?? [])
+          .filter(item => item.projectId === local.id)
+          .map(item => [item.id, localConversationFields(item)] as const)
+      )
       target.conversations = (target.conversations ?? [])
         .filter(item => item.projectId !== local.id)
-        .concat(remote.snapshot.conversations.map(item => ({ ...item, projectId: local.id })))
+        .concat(
+          remote.snapshot.conversations.map(item => ({
+            ...item,
+            ...(localOnly.get(item.id) ?? {}),
+            projectId: local.id,
+          }))
+        )
+    }
     target.messages = target.messages
       .filter(item => item.projectId !== local.id || !portableMessage(item))
       .concat(remote.snapshot.messages.map(message => ({ ...message, projectId: local.id, parsed: null, meta: {} })))

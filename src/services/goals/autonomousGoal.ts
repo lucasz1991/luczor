@@ -33,6 +33,8 @@ export type AutonomousGoalDependencies = {
   now?: () => number
   schedule?: (callback: () => void, milliseconds: number) => () => void
   onPersistenceError?: (projectId: string, error: unknown) => void
+  /** Upper bound of goal sections executing at the same time (default 3). */
+  maxConcurrent?: number
 }
 
 export function createGoalRunState(text: string, active = false, now = Date.now()): GoalRunState {
@@ -52,7 +54,11 @@ export function createGoalRunState(text: string, active = false, now = Date.now(
 const compact = (value: string | undefined, max: number): string =>
   typeof value === 'string' ? value.trim().slice(0, max) : ''
 
-/** No timers, jobs, approval tokens, or server schedules are stored with a goal. */
+/**
+ * No timers, jobs, approval tokens, or server schedules are stored with a goal.
+ * Every id (a chat) drives independently, so several chats can pursue their own
+ * goals side by side; `maxConcurrent` bounds how many sections run at once.
+ */
 export function createAutonomousGoalController(dependencies: AutonomousGoalDependencies) {
   const now = dependencies.now ?? Date.now
   const schedule =
@@ -61,40 +67,53 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
       const timer = setTimeout(callback, milliseconds)
       return () => clearTimeout(timer)
     })
-  const suspended = new Set<string>()
-  let selected: string | undefined
-  let nextSelection: string | undefined
-  let pendingTimer: (() => void) | undefined
-  let running: { projectId: string; controller: AbortController; settled: Promise<void> } | undefined
-  let disposed = false
-  let driving = false
-
-  const cancelTimer = () => {
-    pendingTimer?.()
-    pendingTimer = undefined
+  const maxConcurrent = Math.max(1, dependencies.maxConcurrent ?? 3)
+  type Driver = {
+    pendingTimer?: () => void
+    driving: boolean
+    running?: { controller: AbortController; settled: Promise<void> }
   }
+  const drivers = new Map<string, Driver>()
+  const suspended = new Set<string>()
+  let disposed = false
+
+  const driver = (id: string): Driver => {
+    let entry = drivers.get(id)
+    if (!entry) {
+      entry = { driving: false }
+      drivers.set(id, entry)
+    }
+    return entry
+  }
+  const cancelTimer = (id: string) => {
+    const entry = drivers.get(id)
+    entry?.pendingTimer?.()
+    if (entry) entry.pendingTimer = undefined
+  }
+  const runningCount = () => [...drivers.values()].filter(entry => entry.running).length
 
   async function write(
-    projectId: string,
+    id: string,
     previous: GoalRunState,
     patch: Partial<GoalRunState>
   ): Promise<GoalRunState | undefined> {
-    if (dependencies.read(projectId)?.revision !== previous.revision) return undefined
+    if (dependencies.read(id)?.revision !== previous.revision) return undefined
     const next = { ...previous, ...patch, revision: previous.revision + 1, updatedAt: now() }
-    return (await dependencies.persist(projectId, next, previous.revision)) ? next : undefined
+    return (await dependencies.persist(id, next, previous.revision)) ? next : undefined
   }
 
-  function arrange(milliseconds = 250) {
-    cancelTimer()
-    if (disposed || !selected || suspended.has(selected) || !dependencies.read(selected)?.active) return
-    pendingTimer = schedule(() => {
-      pendingTimer = undefined
-      void drive()
+  function arrange(id: string, milliseconds = 250) {
+    cancelTimer(id)
+    if (disposed || suspended.has(id) || !dependencies.read(id)?.active) return
+    const entry = driver(id)
+    entry.pendingTimer = schedule(() => {
+      entry.pendingTimer = undefined
+      void drive(id)
     }, milliseconds)
   }
 
-  async function parkInterrupted(projectId: string, attempt: GoalRunState) {
-    await write(projectId, attempt, {
+  async function parkInterrupted(id: string, attempt: GoalRunState) {
+    await write(id, attempt, {
       status: 'waiting',
       // A fresh work round must re-read state; interrupted tools are never replayed by this scheduler.
       phase: 'work',
@@ -102,17 +121,17 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
     })
   }
 
-  async function drive(): Promise<void> {
-    if (disposed || driving || !selected || suspended.has(selected)) return
-    const projectId = selected
+  async function drive(id: string): Promise<void> {
+    const entry = driver(id)
+    if (disposed || entry.driving || suspended.has(id)) return
     let delay = 250
-    driving = true
+    entry.driving = true
     try {
-      let goal = dependencies.read(projectId)
+      let goal = dependencies.read(id)
       if (!goal?.active || !goal.text.trim()) return
       // A process cannot be resumed from persisted UI state. Never replay the previous tool round.
       if (goal.status === 'running' || goal.status === 'checking') {
-        goal = await write(projectId, goal, {
+        goal = await write(id, goal, {
           status: 'waiting',
           phase: 'work',
           reason: 'Fortsetzung nach Unterbrechung: Projektstand und bisherige Ergebnisse neu prüfen.',
@@ -120,33 +139,26 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
         if (!goal) return
       }
       if (goal.status === 'completed' || goal.status === 'blocked') {
-        await write(projectId, goal, { active: false })
+        await write(id, goal, { active: false })
         return
       }
-      if (!dependencies.canRun(projectId)) {
+      if (!dependencies.canRun(id) || runningCount() >= maxConcurrent) {
         if (goal.status !== 'waiting')
-          await write(projectId, goal, {
+          await write(id, goal, {
             status: 'waiting',
             reason: 'Wartet auf den Abschluss des aktuellen Auftrags.',
           })
         delay = 1000
         return
       }
-      const attempt = await write(projectId, goal, {
+      const attempt = await write(id, goal, {
         status: goal.phase === 'review' ? 'checking' : 'running',
         iterations: goal.iterations + 1,
         reason: undefined,
       })
-      if (
-        !attempt ||
-        disposed ||
-        selected !== projectId ||
-        suspended.has(projectId) ||
-        dependencies.read(projectId)?.revision !== attempt.revision
-      )
-        return
-      if (!dependencies.canRun(projectId)) {
-        await parkInterrupted(projectId, attempt)
+      if (!attempt || disposed || suspended.has(id) || dependencies.read(id)?.revision !== attempt.revision) return
+      if (!dependencies.canRun(id) || runningCount() >= maxConcurrent) {
+        await parkInterrupted(id, attempt)
         delay = 1000
         return
       }
@@ -155,10 +167,10 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
       const settled = new Promise<void>(resolve => {
         markSettled = resolve
       })
-      running = { projectId, controller, settled }
+      entry.running = { controller, settled }
       let result: GoalStepResult
       try {
-        result = await dependencies.run(projectId, Object.freeze({ ...attempt }), controller.signal)
+        result = await dependencies.run(id, Object.freeze({ ...attempt }), controller.signal)
         if (
           !result ||
           !['continue', 'candidate', 'completed', 'blocked'].includes(result.status) ||
@@ -167,12 +179,12 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
           throw new Error('Ungültiges Ergebnis des Zielabschnitts.')
         }
       } catch {
-        if (controller.signal.aborted || disposed || selected !== projectId || suspended.has(projectId)) {
-          if (!disposed) await parkInterrupted(projectId, attempt)
+        if (controller.signal.aborted || disposed || suspended.has(id)) {
+          if (!disposed) await parkInterrupted(id, attempt)
           return
         }
         const failures = (attempt.consecutiveErrors ?? 0) + 1
-        await write(projectId, attempt, {
+        await write(id, attempt, {
           consecutiveErrors: failures,
           active: failures < 3,
           status: failures >= 3 ? 'blocked' : 'waiting',
@@ -184,14 +196,14 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
         delay = failures === 1 ? 1000 : 3000
         return
       } finally {
-        running = undefined
+        entry.running = undefined
         markSettled()
       }
-      if (controller.signal.aborted || disposed || selected !== projectId || suspended.has(projectId)) {
-        if (!disposed) await parkInterrupted(projectId, attempt)
+      if (controller.signal.aborted || disposed || suspended.has(id)) {
+        if (!disposed) await parkInterrupted(id, attempt)
         return
       }
-      if (dependencies.read(projectId)?.revision !== attempt.revision) return
+      if (dependencies.read(id)?.revision !== attempt.revision) return
       const summary = compact(result.summary, 4000)
       const evidence = compact(result.evidence, 8000)
       const fingerprint = compact(result.fingerprint, 1000) || summary.replace(/\s+/gu, ' ')
@@ -205,7 +217,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
         consecutiveErrors: 0,
       }
       if (attempt.phase === 'review' && result.status === 'completed' && evidence) {
-        await write(projectId, attempt, {
+        await write(id, attempt, {
           ...common,
           active: false,
           status: 'completed',
@@ -213,7 +225,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
           reason: 'Ziel durch Ergebnisprüfung mit Nachweis abgeschlossen.',
         })
       } else if (result.status === 'blocked' || stagnant >= 3) {
-        await write(projectId, attempt, {
+        await write(id, attempt, {
           ...common,
           active: false,
           status: 'blocked',
@@ -224,7 +236,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
         })
       } else {
         const review = attempt.phase === 'work' && (result.status === 'candidate' || result.status === 'completed')
-        await write(projectId, attempt, {
+        await write(id, attempt, {
           ...common,
           status: 'waiting',
           phase: review ? 'review' : 'work',
@@ -238,34 +250,32 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
       }
     } catch (error) {
       // Repeated writes cannot repair unavailable persistence. Require a deliberate kick after recovery.
-      suspended.add(projectId)
-      dependencies.onPersistenceError?.(projectId, error)
+      suspended.add(id)
+      dependencies.onPersistenceError?.(id, error)
     } finally {
-      driving = false
-      if (nextSelection) {
-        selected = nextSelection
-        nextSelection = undefined
-      }
-      arrange(delay)
+      entry.driving = false
+      arrange(id, delay)
+      // A finished section frees a slot: let other waiting goals try again promptly.
+      for (const other of drivers.keys()) if (other !== id && !drivers.get(other)?.running) arrange(other, delay)
     }
   }
 
   async function interrupt(
-    projectId: string,
+    id: string,
     reason = 'Deine neue Nachricht hat Vorrang. Das Ziel bleibt offen.'
   ): Promise<void> {
-    suspended.add(projectId)
-    if (selected === projectId) cancelTimer()
-    const active = running?.projectId === projectId ? running : undefined
+    suspended.add(id)
+    cancelTimer(id)
+    const active = drivers.get(id)?.running
     active?.controller.abort(reason)
-    const goal = dependencies.read(projectId)
+    const goal = dependencies.read(id)
     try {
       if (
         goal &&
         goal.status !== 'completed' &&
         (goal.status !== 'waiting' || goal.phase !== 'work' || goal.reason !== reason)
       )
-        await write(projectId, goal, { status: 'waiting', phase: 'work', reason })
+        await write(id, goal, { status: 'waiting', phase: 'work', reason })
     } finally {
       // The chat adapter releases its busy state before the user's request is admitted.
       await active?.settled
@@ -274,42 +284,37 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
 
   return {
     /** Call after user work finishes or explicitly (re)activating a goal. */
-    kick(projectId: string): void {
+    kick(id: string): void {
       if (disposed) return
-      if (driving && selected !== projectId) {
-        nextSelection = projectId
-        suspended.delete(projectId)
-        return
-      }
-      nextSelection = undefined
-      selected = projectId
-      suspended.delete(projectId)
-      if (!driving) arrange(0)
+      suspended.delete(id)
+      if (!driver(id).driving) arrange(id, 0)
+    },
+    /** Whether a section of this goal is executing right now. */
+    isRunning(id: string): boolean {
+      return !!drivers.get(id)?.running
     },
     interrupt,
-    async stop(projectId: string, reason = 'Ziel pausiert. Der bisherige Fortschritt bleibt erhalten.'): Promise<void> {
-      suspended.add(projectId)
-      if (selected === projectId) cancelTimer()
-      const active = running?.projectId === projectId ? running : undefined
+    async stop(id: string, reason = 'Ziel pausiert. Der bisherige Fortschritt bleibt erhalten.'): Promise<void> {
+      suspended.add(id)
+      cancelTimer(id)
+      const active = drivers.get(id)?.running
       active?.controller.abort(reason)
-      const goal = dependencies.read(projectId)
+      const goal = dependencies.read(id)
       try {
         if (
           goal &&
           goal.status !== 'completed' &&
           (goal.active || goal.status !== 'waiting' || goal.phase !== 'work' || goal.reason !== reason)
         )
-          await write(projectId, goal, { active: false, status: 'waiting', phase: 'work', reason })
+          await write(id, goal, { active: false, status: 'waiting', phase: 'work', reason })
       } finally {
         await active?.settled
       }
     },
     dispose(): void {
       disposed = true
-      cancelTimer()
-      running?.controller.abort('Zielsteuerung beendet.')
-      selected = undefined
-      nextSelection = undefined
+      for (const id of drivers.keys()) cancelTimer(id)
+      for (const entry of drivers.values()) entry.running?.controller.abort('Zielsteuerung beendet.')
     },
   }
 }

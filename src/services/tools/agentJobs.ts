@@ -66,6 +66,7 @@ export const agentJobTools: ToolDef[] = [
       executionGate.assert(ticket, true)
       const job = await prepareAgentJob({
         projectId: ctx.projectId,
+        mode: ticket.mode,
         adapterId: args.agent as 'codex' | 'claude' | 'local' | 'policy',
         ...executionOptions,
         model: args.model as string | undefined,

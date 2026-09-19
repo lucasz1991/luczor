@@ -28,12 +28,12 @@ export const chatRunIsLive = (run: ChatRunRecord): boolean => liveStates.has(run
 /** UI recovery cannot re-approve an old call or keep a dead process spinning. */
 export function reconcileRecoveredChatRuns(state: AppState, records: readonly ChatRunRecord[]): number {
   const interrupted = new Set(records.filter(run => run.state === 'interrupted').map(run => run.runId))
-  const interruptedProjects = new Set(records.filter(run => run.state === 'interrupted').map(run => run.projectId))
+  const interruptedChats = new Set(records.filter(run => run.state === 'interrupted').map(run => run.conversationId))
   let changed = 0
-  for (const project of state.projects) {
-    const goal = project.autonomousGoal
-    if (!goal?.active || !interruptedProjects.has(project.id)) continue
-    project.autonomousGoal = {
+  for (const chat of state.conversations ?? []) {
+    const goal = chat.autonomousGoal
+    if (!goal?.active || !interruptedChats.has(chat.id)) continue
+    chat.autonomousGoal = {
       ...goal,
       active: false,
       status: 'waiting',

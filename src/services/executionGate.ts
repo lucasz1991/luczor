@@ -15,8 +15,10 @@ export type ExecutionTicket = Readonly<{
   signal: AbortSignal
   scope?: ExecutionScope
   scopeGeneration?: number
+  /** Mode pinned to this scope (a chat's own permission mode); scope-less tickets follow the device default. */
+  mode?: LuczorMode
 }>
-type ScopeState = { scope: ExecutionScope; generation: number; controller: AbortController }
+type ScopeState = { scope: ExecutionScope; generation: number; controller: AbortController; mode?: LuczorMode }
 function scopeKey(scope: ExecutionScope): string {
   return scope.runId ? `run:${scope.runId}` : JSON.stringify(scope)
 }
@@ -40,19 +42,25 @@ export class ExecutionGate {
   private scopes = new Map<string, ScopeState>()
   readonly sessionId = crypto.randomUUID()
 
-  update(controls: ExecutionControls): boolean {
-    if (JSON.stringify(controls) === JSON.stringify(this.controls)) return false
-    const code = controls.killSwitch
-      ? 'execution_kill_switch'
-      : controls.scope !== this.controls.scope
-        ? 'execution_scope_changed'
-        : 'execution_mode_changed'
+  /**
+   * Kill switch and account/project scope changes revoke every ticket. A change of the
+   * device default mode alone applies live: scope-less work is re-checked on its next
+   * mutation, while scoped work keeps the mode pinned at capture time. Chats therefore
+   * switch or change their own mode without aborting each other.
+   */
+  update(controls: ExecutionControls): 'unchanged' | 'mode' | 'invalidated' {
+    if (JSON.stringify(controls) === JSON.stringify(this.controls)) return 'unchanged'
+    if (controls.killSwitch === this.controls.killSwitch && controls.scope === this.controls.scope) {
+      this.controls = { ...controls }
+      return 'mode'
+    }
+    const code = controls.killSwitch ? 'execution_kill_switch' : 'execution_scope_changed'
     this.controller.abort(executionAbortReason(code))
     this.controller = new AbortController()
     this.scopes.clear()
     this.controls = { ...controls }
     this.generation++
-    return true
+    return 'invalidated'
   }
 
   invalidate(code: ExecutionAbortCode = 'execution_session_changed'): void {
@@ -62,9 +70,10 @@ export class ExecutionGate {
     this.generation++
   }
 
-  capture(signal?: AbortSignal, requestedScope?: ExecutionScope): ExecutionTicket {
+  capture(signal?: AbortSignal, requestedScope?: ExecutionScope, mode?: LuczorMode): ExecutionTicket {
     const signals = [this.controller.signal, ...(signal ? [signal] : [])]
     let state: ScopeState | undefined
+    if (mode !== undefined && !requestedScope) throw new Error('Ein eigener Modus benötigt eine Auftragszuordnung.')
     if (requestedScope) {
       const scope = normalizedScope(requestedScope)
       const key = scopeKey(scope)
@@ -75,6 +84,11 @@ export class ExecutionGate {
         state = { scope, generation: 1, controller: new AbortController() }
         this.scopes.set(key, state)
       }
+      if (mode !== undefined) {
+        if (state.mode !== undefined && state.mode !== mode)
+          throw new Error('Der Modus eines laufenden Auftrags darf nicht geändert werden.')
+        state.mode = mode
+      }
       signals.push(state.controller.signal)
     }
     return Object.freeze({
@@ -82,6 +96,7 @@ export class ExecutionGate {
       generation: this.generation,
       signal: AbortSignal.any(signals),
       ...(state ? { scope: state.scope, scopeGeneration: state.generation } : {}),
+      ...(state?.mode !== undefined ? { mode: state.mode } : {}),
     })
   }
 
@@ -95,10 +110,13 @@ export class ExecutionGate {
         generation: this.generation,
         scope: state.scope,
         scopeGeneration: state.generation,
+        ...(state.mode !== undefined ? { mode: state.mode } : {}),
       })
       state.controller.abort(executionAbortReason(code))
       state.controller = new AbortController()
       state.generation++
+      // The next capture for this scope pins the mode current at that time.
+      delete state.mode
     }
     return revoked
   }
@@ -116,7 +134,13 @@ export class ExecutionGate {
         throw new Error('Ausführung verworfen: Die Auftragszuordnung wurde geändert.')
     }
     if (this.controls.killSwitch) throw new Error('Not-Aus aktiv: Ausführung gesperrt.')
-    if (mutating && this.controls.mode === 'observe') throw new Error('Im Beobachten-Modus ist diese Aktion gesperrt.')
+    if (mutating && this.effectiveMode(ticket) === 'observe')
+      throw new Error('Im Beobachten-Modus ist diese Aktion gesperrt.')
+  }
+
+  /** The scope's pinned mode when present, otherwise the live device default. */
+  effectiveMode(ticket?: Pick<ExecutionTicket, 'mode'>): LuczorMode {
+    return ticket?.mode ?? this.controls.mode
   }
 
   snapshot() {
@@ -157,9 +181,17 @@ export function updateExecutionControls(controls: ExecutionControls): void {
     initialized = true
     syncNativeGate()
   }
-  const changed = executionGate.update(controls)
-  if (changed) invalidationListeners.forEach(listener => listener())
-  if (changed) syncNativeGate()
+  const outcome = executionGate.update(controls)
+  if (outcome === 'unchanged') return
+  if (outcome === 'invalidated') {
+    invalidationListeners.forEach(listener => listener())
+    syncNativeGate()
+    return
+  }
+  // Mode only: the native policy follows live; registered scopes and their pinned modes stay valid.
+  const payload = executionGate.snapshot()
+  nativeSync = nativeSync.catch(() => {}).then(() => invoke('execution_gate_update', { payload }))
+  void nativeSync.catch(() => {})
 }
 
 export function invalidateExecution(reason?: unknown): void {
@@ -191,13 +223,15 @@ export async function executionPayload(ticket = executionGate.capture(), mutatin
     ...(ticket.scope ? { scope: ticket.scope, scopeGeneration: ticket.scopeGeneration } : {}),
   }
   if (ticket.scope) {
-    const key = JSON.stringify(payload)
+    // The pinned mode is registered with the scope; the permit itself carries only identity.
+    const registration = { ...payload, ...(ticket.mode !== undefined ? { mode: ticket.mode } : {}) }
+    const key = JSON.stringify(registration)
     if (!registeredScopes.has(key)) {
       nativeSync = nativeSync
         .catch(() => {})
         .then(async () => {
           executionGate.assert(ticket, mutating)
-          await invoke('execution_scope_register', { payload })
+          await invoke('execution_scope_register', { payload: registration })
           executionGate.assert(ticket, mutating)
           registeredScopes.add(key)
         })

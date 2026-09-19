@@ -9,18 +9,18 @@ export function createSafeRecord<Value>(): Record<string, Value> {
 }
 
 export function getSafeRecordValue<Value>(record: Record<string, Value>, key: string): Value | undefined {
-  if (!isSafeRecordKey(key) || !Object.prototype.hasOwnProperty.call(record, key)) return undefined
-  return Reflect.get(record, key) as Value | undefined
+  if (!isSafeRecordKey(key)) return undefined
+  // Read through the proxy first so a reactive record tracks this key even while it is absent;
+  // hasOwnProperty alone bypasses the proxy and readers would never learn about a later write.
+  const value = Reflect.get(record, key) as Value | undefined
+  return Object.prototype.hasOwnProperty.call(record, key) ? value : undefined
 }
 
 export function setSafeRecordValue<Value>(record: Record<string, Value>, key: string, value: Value): void {
   if (!isSafeRecordKey(key)) throw new Error('Unsafe record key rejected.')
-  Object.defineProperty(record, key, {
-    configurable: true,
-    enumerable: true,
-    value,
-    writable: true,
-  })
+  // Reflect.set goes through a reactive proxy's `set` trap. Object.defineProperty bypassed it,
+  // so e.g. the selected chat per project changed on disk but no computed ever re-evaluated.
+  if (!Reflect.set(record, key, value)) throw new Error('Record value could not be written.')
 }
 
 export function deleteSafeRecordValue<Value>(record: Record<string, Value>, key: string): boolean {

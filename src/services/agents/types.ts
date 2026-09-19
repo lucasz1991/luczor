@@ -13,6 +13,8 @@ export type AgentEffortSelection = Readonly<{
   capabilitySource?: 'codex-cache' | 'sdk-documentation' | 'runtime'
 }>
 export type AgentExecutionOptions = Readonly<{
+  /** Permission mode of the originating chat; jobs without one follow the device default. */
+  mode?: import('@/services/inference/types').LuczorMode
   thinkingTier?: ThinkingTier
   effort?: AgentEffort
   effortSelection?: AgentEffortSelection

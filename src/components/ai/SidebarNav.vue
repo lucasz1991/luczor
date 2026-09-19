@@ -141,6 +141,36 @@ function beginChatRename(chat: { id: string; label: string }) {
   editingChat.value = chat.id
   chatTitle.value = chat.label
 }
+/* Chats of every project stay reachable: the shown project and projects with
+ * running chats open by default; the user can fold or unfold any project. */
+const folded = ref(new Set<string>())
+const unfolded = ref(new Set<string>())
+function chatsOpen(item: SearchItem): boolean {
+  if (folded.value.has(item.id)) return false
+  return item.id === props.activeId || unfolded.value.has(item.id) || !!item.chats?.some(chat => chat.busy)
+}
+function toggleChats(item: SearchItem) {
+  const open = chatsOpen(item)
+  const nextFolded = new Set(folded.value)
+  const nextUnfolded = new Set(unfolded.value)
+  if (open) {
+    nextFolded.add(item.id)
+    nextUnfolded.delete(item.id)
+  } else {
+    nextFolded.delete(item.id)
+    nextUnfolded.add(item.id)
+  }
+  folded.value = nextFolded
+  unfolded.value = nextUnfolded
+}
+/** Live chats across all projects, for switching to them directly. */
+const liveChats = computed(() =>
+  props.items.flatMap(item =>
+    (item.chats ?? [])
+      .filter(chat => chat.busy || ['waiting_approval', 'interrupted'].includes(chat.status ?? ''))
+      .map(chat => ({ ...chat, projectId: item.id, projectLabel: item.label }))
+  )
+)
 const runLabels: Record<string, string> = {
   queued: 'Wartet',
   running: 'Arbeitet',
@@ -313,12 +343,34 @@ const runLabels: Record<string, string> = {
             aria-label="Projekte suchen"
             placeholder="Projekte suchen"
         /></label>
+        <nav v-if="liveChats.length" class="ai-sidebar__live" aria-label="Laufende Chats">
+          <div class="ai-sidebar__section">
+            <span>Laufende Chats</span><span>{{ liveChats.length }}</span>
+          </div>
+          <button
+            v-for="chat in liveChats"
+            :key="chat.id"
+            type="button"
+            class="ai-sidebar__chat ai-sidebar__live-chat"
+            :class="{ 'is-current': chat.id === activeChatId }"
+            :title="`${chat.projectLabel} · ${chat.label} · ${runLabels[chat.status ?? 'running'] ?? chat.status}`"
+            @click="emit('selectChat', chat.projectId, chat.id)"
+          >
+            <span
+              v-if="chat.busy"
+              class="ai-sidebar__activity"
+              :aria-label="runLabels[chat.status ?? 'running']"
+            /><span v-else aria-hidden="true">·</span>
+            <span>{{ chat.label }}</span>
+            <small>{{ chat.projectLabel }}</small>
+          </button>
+        </nav>
         <nav class="ai-sidebar__items">
           <div
             v-for="item in filtered"
             :key="item.id"
             class="ai-sidebar__project"
-            :class="{ 'is-active': item.id === activeId, 'is-busy': item.busy }"
+            :class="{ 'is-active': item.id === activeId, 'is-busy': item.busy, 'is-open': chatsOpen(item) }"
           >
             <button
               type="button"
@@ -360,7 +412,16 @@ const runLabels: Record<string, string> = {
             >
               <AiIcon name="settings" :size="12" />
             </button>
-            <div v-if="item.id === activeId" class="ai-sidebar__chats" :aria-label="`Chats in ${item.label}`">
+            <button
+              type="button"
+              class="ai-sidebar__edit ai-sidebar__fold"
+              :aria-label="chatsOpen(item) ? `Chats in ${item.label} einklappen` : `Chats in ${item.label} anzeigen`"
+              :aria-expanded="chatsOpen(item)"
+              @click.stop="toggleChats(item)"
+            >
+              <AiIcon name="chevron" :size="12" />
+            </button>
+            <div v-if="chatsOpen(item)" class="ai-sidebar__chats" :aria-label="`Chats in ${item.label}`">
               <div v-for="chat in item.chats ?? []" :key="chat.id" class="ai-sidebar__chat-row">
                 <input
                   v-if="editingChat === chat.id"
@@ -613,6 +674,33 @@ const runLabels: Record<string, string> = {
   }
 }
 
+.ai-sidebar__live {
+  display: grid;
+  gap: 2px;
+  padding: 0 4px 6px;
+}
+.ai-sidebar__live-chat small {
+  font-size: 9px;
+  opacity: 0.7;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 40%;
+}
+.ai-sidebar__fold {
+  width: auto;
+  min-height: 0;
+  flex: 0 0 auto;
+  padding: 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  opacity: 0.55;
+  transition: transform var(--dur, 240ms) var(--ease, ease);
+}
+.ai-sidebar__project.is-open .ai-sidebar__fold {
+  transform: rotate(90deg);
+}
 .ai-sidebar__chats {
   flex: 0 0 100%;
   display: grid;

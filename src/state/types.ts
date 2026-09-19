@@ -150,6 +150,16 @@ export type Project = {
   updatedAt: number
 }
 
+/**
+ * Per-chat controls. Each chat keeps its own permission mode, model route and
+ * thinking tier so several chats can run side by side with different settings.
+ */
+export type ConversationSettings = {
+  mode?: import('@/services/inference/types').LuczorMode
+  routeMode?: import('@/services/inference/modelUsageSettings').ChatRouteMode
+  thinkingTier?: import('@/services/inference/thinking').ThinkingTier
+}
+
 export type Conversation = {
   id: Id
   projectId: Id
@@ -158,7 +168,16 @@ export type Conversation = {
   updatedAt: number
   archivedAt: number | null
   draft?: string
+  /** Device-local; never uploaded with the shared project snapshot. */
+  settings?: ConversationSettings
+  /** Saved chat goal text. Device-local like the run state below. */
+  goal?: string
+  /** Device-local autonomous goal execution state of this chat. */
+  autonomousGoal?: import('@/services/goals/autonomousGoal').GoalRunState
 }
+
+/** Fields that stay on this device even when a cloud snapshot replaces the chat list. */
+export const CONVERSATION_LOCAL_FIELDS = ['draft', 'settings', 'goal', 'autonomousGoal'] as const
 
 /* =========================================================
  * Memories / Summaries (optional but supported)

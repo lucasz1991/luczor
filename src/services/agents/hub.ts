@@ -36,14 +36,18 @@ const ROLE_INSTRUCTIONS = new Map<NonNullable<AgentJobInput['role']>, string>([
   ['assistant', 'Bearbeite den Auftrag vollständig und trenne Ergebnis, Nachweise und offene Grenzen.'],
 ])
 
-function validateControls(permission: AgentPermission) {
+function validateControls(permission: AgentPermission, mode?: LuczorMode) {
   if (hud.killSwitch) throw new Error('Not-Aus ist aktiv.')
-  if (permission === 'workspace-write' && getMode() === 'observe')
+  if (permission === 'workspace-write' && (mode ?? getMode()) === 'observe')
     throw new Error('Schreibzugriff benötigt den Modus Handeln.')
 }
 
-export async function validateAgentScope(project: AgentProjectSnapshot, permission: AgentPermission) {
-  validateControls(permission)
+export async function validateAgentScope(
+  project: AgentProjectSnapshot,
+  permission: AgentPermission,
+  mode?: LuczorMode
+) {
+  validateControls(permission, mode)
   if ((await resolveWorkspacePrincipalId()) !== project.principalId)
     throw new Error('Das aktive Konto hat sich geändert.')
   if (
@@ -163,7 +167,7 @@ export async function prepareAgentJob(
   ) {
     throw new Error('Das aktive Projekt entspricht nicht mehr dem freigegebenen Teamlauf.')
   }
-  await validateAgentScope(snapshot, input.permission)
+  await validateAgentScope(snapshot, input.permission, input.mode)
   input.assertExecution?.()
   if (input.adapterId === 'codex' || input.adapterId === 'claude') {
     if (!snapshot.rootPath) throw new Error('Bitte zuerst einen Projektordner zuordnen.')
@@ -189,7 +193,7 @@ export async function prepareAgentJob(
       : sessions[0]?.threadId
     if (!externalThreadId) throw new Error('Für diesen Projektordner besteht keine passende native Codex-Sitzung.')
   }
-  await validateAgentScope(snapshot, input.permission)
+  await validateAgentScope(snapshot, input.permission, input.mode)
   input.assertExecution?.()
   if (input.resume && input.adapterId === 'claude')
     throw new Error('Claude-Sitzungen können derzeit nicht wiederaufgenommen werden.')
@@ -199,7 +203,7 @@ export async function prepareAgentJob(
       ? await resolveAgentDefaultModel(input.adapterId, snapshot)
       : undefined
   input.assertExecution?.()
-  await validateAgentScope(snapshot, input.permission)
+  await validateAgentScope(snapshot, input.permission, input.mode)
   input.assertExecution?.()
   const model = explicitModel ?? configuredDefault?.model
   const effortSelection =
@@ -216,11 +220,12 @@ export async function prepareAgentJob(
   if (configuredDefault && effortSelection?.status === 'unknown')
     throw new Error('agent_default_model_effort_unconfirmed')
   input.assertExecution?.()
-  await validateAgentScope(snapshot, input.permission)
+  await validateAgentScope(snapshot, input.permission, input.mode)
   input.assertExecution?.()
   const job = agentHub.enqueue({
     project: snapshot,
     workflowScope,
+    mode: input.mode,
     adapterId: input.adapterId,
     prompt: assembledPrompt,
     role,
@@ -262,7 +267,7 @@ export function configureAgentHub(modeReader: () => LuczorMode): () => void {
     () => {
       for (const principal of principals)
         for (const job of agentHub.listJobs(principal)) {
-          if (hud.killSwitch || (getMode() === 'observe' && job.permission === 'workspace-write'))
+          if (hud.killSwitch || ((job.mode ?? getMode()) === 'observe' && job.permission === 'workspace-write'))
             agentHub.cancel(job.id)
         }
     },
@@ -282,7 +287,7 @@ export function configureAgentHub(modeReader: () => LuczorMode): () => void {
         }
         if (!['awaiting_approval', 'queued', 'running', 'awaiting_external_approval'].includes(job.status)) continue
         try {
-          await validateAgentScope(job.project, job.permission)
+          await validateAgentScope(job.project, job.permission, job.mode)
           if (
             (job.adapterId === 'codex' || job.adapterId === 'claude') &&
             (await getRepositoryExternalPolicy()) === 'deny'

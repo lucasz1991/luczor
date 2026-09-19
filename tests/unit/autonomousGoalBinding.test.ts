@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { nextTick, ref } from 'vue'
 import { DEFAULT_STATE } from '@/state/defaults'
-import type { AppState } from '@/state/types'
+import type { AppState, Conversation } from '@/state/types'
 
 const harness = vi.hoisted(() => ({
   save: vi.fn(),
@@ -22,6 +22,16 @@ vi.mock('@/state/store', async () => {
 import { state } from '@/state/store'
 import { useAutonomousGoal } from '@/composables/useAutonomousGoal'
 
+const chat = (id: string, projectId: string): Conversation => ({
+  id,
+  projectId,
+  title: id,
+  createdAt: 1,
+  updatedAt: 1,
+  archivedAt: null,
+})
+const chatState = (id: string) => state.conversations!.find(item => item.id === id)!
+
 beforeEach(() => {
   vi.useFakeTimers()
   vi.stubGlobal('window', new EventTarget())
@@ -29,43 +39,47 @@ beforeEach(() => {
   harness.native = true
   harness.save.mockResolvedValue(undefined)
   Object.assign(state, structuredClone(DEFAULT_STATE))
+  const projectId = state.projects[0]!.id
+  state.projects.push({ ...structuredClone(DEFAULT_STATE.projects[0]!), id: 'other-project', name: 'Other' })
+  state.conversations = [
+    chat('first-chat', projectId),
+    chat('second-chat', projectId),
+    chat('other-chat', 'other-project'),
+  ]
 })
 afterEach(() => {
   for (const cleanup of harness.cleanup.splice(0)) cleanup()
   vi.useRealTimers()
   vi.unstubAllGlobals()
 })
-const setup = (run = vi.fn().mockResolvedValue({ status: 'blocked', summary: 'Test benötigt Eingabe.' })) => {
+const setup = (
+  run = vi.fn().mockResolvedValue({ status: 'blocked', summary: 'Test benötigt Eingabe.' }),
+  available: (id: string) => boolean = () => true
+) => {
   const draft = ref('')
-  const projectId = state.projects[0]!.id
+  const conversation = ref('first-chat')
   const binding = useAutonomousGoal({
-    projectId: () => projectId,
-    available: () => true,
+    conversationId: () => conversation.value,
+    available,
     draft: () => draft.value,
     run,
   })
-  return { binding, draft, run, projectId }
+  return { binding, draft, run, conversation }
 }
 
 describe('device-local goal binding', () => {
-  it('keeps a goal running when another chat in the same project receives a draft', async () => {
-    const conversation = ref('first-chat')
-    const draft = ref('')
+  it('keeps a goal running when the user switches to another chat and types there', async () => {
     let finish!: () => void
     let signal!: AbortSignal
-    const binding = useAutonomousGoal({
-      projectId: () => state.projects[0]!.id,
-      conversationId: () => conversation.value,
-      available: () => true,
-      draft: () => draft.value,
-      run: async (_project, _goal, runSignal) => {
+    const { binding, draft, conversation } = setup(
+      vi.fn(async (_id: string, _goal: unknown, runSignal: AbortSignal) => {
         signal = runSignal
         await new Promise<void>(resolve => {
           finish = resolve
         })
         return { status: 'blocked', summary: 'Ergebnis des ursprünglichen Chats gesichert.' }
-      },
-    })
+      })
+    )
     await binding.save('Analyse im ersten Chat abschließen')
     await binding.toggle(true)
     await vi.advanceTimersByTimeAsync(1000)
@@ -74,16 +88,46 @@ describe('device-local goal binding', () => {
     draft.value = 'Unabhängiger neuer Auftrag'
     await nextTick()
     expect(binding.running.value).toBe(false)
+    expect(binding.isRunning('first-chat')).toBe(true)
+    expect(binding.model.value).toBeUndefined()
     expect(signal.aborted).toBe(false)
     finish()
     await vi.advanceTimersByTimeAsync(0)
-    expect(binding.model.value?.progress).toContain('ursprünglichen Chats')
+    expect(chatState('first-chat').autonomousGoal?.progress).toContain('ursprünglichen Chats')
+    expect(chatState('second-chat').autonomousGoal).toBeUndefined()
   })
+
+  it('runs goals of chats from different projects side by side', async () => {
+    const finishers = new Map<string, () => void>()
+    const run = vi.fn(
+      (id: string) =>
+        new Promise<{ status: 'blocked'; summary: string }>(resolve => {
+          finishers.set(id, () => resolve({ status: 'blocked', summary: `${id} fertig` }))
+        })
+    )
+    const { binding, conversation } = setup(run)
+    await binding.save('Erstes Ziel')
+    await binding.toggle(true)
+    conversation.value = 'other-chat'
+    await nextTick()
+    await binding.save('Zweites Ziel')
+    await binding.toggle(true)
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(run.mock.calls.map(call => call[0])).toEqual(['first-chat', 'other-chat'])
+    expect(binding.isRunning('first-chat')).toBe(true)
+    expect(binding.isRunning('other-chat')).toBe(true)
+    finishers.get('first-chat')!()
+    finishers.get('other-chat')!()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(chatState('first-chat').autonomousGoal).toMatchObject({ active: false, status: 'blocked' })
+    expect(chatState('other-chat').autonomousGoal).toMatchObject({ active: false, status: 'blocked' })
+  })
+
   it('persists the saved text before starting and does not silently activate it', async () => {
     const { binding, run } = setup()
     await binding.save('Dokumentierte Lösung erstellen')
     expect(harness.save).toHaveBeenCalled()
-    expect(state.projects[0]?.goal).toBe('Dokumentierte Lösung erstellen')
+    expect(chatState('first-chat').goal).toBe('Dokumentierte Lösung erstellen')
     expect(binding.model.value).toMatchObject({ active: false, status: 'idle', phase: 'work' })
     await vi.advanceTimersByTimeAsync(1000)
     expect(run).not.toHaveBeenCalled()
@@ -109,7 +153,7 @@ describe('device-local goal binding', () => {
     )
     const pending = binding.save('Alter Entwurf')
     await vi.advanceTimersByTimeAsync(0)
-    state.projects[0]!.autonomousGoal = {
+    chatState('first-chat').autonomousGoal = {
       text: 'Neuer Entwurf',
       active: false,
       status: 'idle',
@@ -118,11 +162,11 @@ describe('device-local goal binding', () => {
       phase: 'work',
       updatedAt: 8,
     }
-    state.projects[0]!.goal = 'Neuer Entwurf'
+    chatState('first-chat').goal = 'Neuer Entwurf'
     release()
     await pending
     expect(binding.model.value?.text).toBe('Neuer Entwurf')
-    expect(state.projects[0]?.goal).toBe('Neuer Entwurf')
+    expect(chatState('first-chat').goal).toBe('Neuer Entwurf')
     expect(binding.error.value).toContain('erneut speichern')
   })
 
@@ -138,6 +182,20 @@ describe('device-local goal binding', () => {
     await vi.advanceTimersByTimeAsync(1000)
     expect(run).toHaveBeenCalledTimes(1)
     expect(binding.model.value).toMatchObject({ active: false, status: 'blocked' })
+  })
+
+  it('waits only for its own chat to become available, not for app pages or other chats', async () => {
+    const busy = ref(new Set<string>(['first-chat']))
+    const { binding, run } = setup(undefined, id => !busy.value.has(id))
+    await binding.save('Nach dem laufenden Auftrag weiterarbeiten')
+    await binding.toggle(true)
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(run).not.toHaveBeenCalled()
+    expect(binding.model.value).toMatchObject({ active: true, status: 'waiting' })
+    busy.value = new Set(['second-chat'])
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(run).toHaveBeenCalledTimes(1)
   })
 
   it('refuses to schedule native work in a browser preview', async () => {
@@ -173,7 +231,7 @@ describe('device-local goal binding', () => {
     expect(run).toHaveBeenCalledTimes(1)
   })
 
-  it('deactivates a saved goal on account change instead of inheriting authorization', async () => {
+  it('deactivates saved goals of every chat on account change instead of inheriting authorization', async () => {
     const { binding, draft, run } = setup()
     draft.value = 'Pause für Benutzer'
     await binding.save('Konto A Auftrag')

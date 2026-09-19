@@ -64,6 +64,7 @@ export const agentTools: ToolDef[] = [
       executionGate.assert(ticket, true)
       const job = await prepareAgentJob({
         projectId: ctx.projectId,
+        mode: ticket.mode,
         adapterId: 'codex',
         prompt,
         role: 'assistant',

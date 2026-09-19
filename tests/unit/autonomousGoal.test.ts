@@ -208,9 +208,9 @@ describe('autonomous goal controller', () => {
     expect(() => createGoalRunState('x'.repeat(20001), true)).toThrow('nichts gekürzt')
   })
 
-  it('keeps the captured goal section alive during navigation before scheduling the next project', async () => {
+  it('drives goals of several chats side by side without aborting the first one', async () => {
     const context = fixture()
-    context.states.set('p2', createGoalRunState('Second project goal', true))
+    context.states.set('p2', createGoalRunState('Second chat goal', true))
     let finish!: (result: GoalStepResult) => void
     context.run
       .mockImplementationOnce(
@@ -219,22 +219,59 @@ describe('autonomous goal controller', () => {
             finish = resolve
           })
       )
-      .mockResolvedValueOnce({ status: 'blocked', summary: 'Second project needs input' })
+      .mockResolvedValueOnce({ status: 'blocked', summary: 'Second chat needs input' })
     context.controller.kick('p1')
     await vi.advanceTimersByTimeAsync(0)
     context.controller.kick('p2')
-    await vi.advanceTimersByTimeAsync(5000)
-    expect(context.run).toHaveBeenCalledTimes(1)
-    expect(context.run.mock.calls[0]?.[2].aborted).toBe(false)
-    finish({ status: 'candidate', summary: 'First project result retained', evidence: 'Evidence to review' })
-    await vi.advanceTimersByTimeAsync(250)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(context.run).toHaveBeenCalledTimes(2)
     expect(context.run.mock.calls.map(call => call[0])).toEqual(['p1', 'p2'])
+    expect(context.run.mock.calls[0]?.[2].aborted).toBe(false)
+    expect(context.controller.isRunning('p1')).toBe(true)
+    expect(context.states.get('p2')).toMatchObject({ active: false, status: 'blocked' })
+    finish({ status: 'candidate', summary: 'First chat result retained', evidence: 'Evidence to review' })
+    await vi.advanceTimersByTimeAsync(0)
     expect(context.states.get('p1')).toMatchObject({
       active: true,
       status: 'waiting',
       phase: 'review',
-      progress: 'First project result retained',
+      progress: 'First chat result retained',
     })
-    expect(context.states.get('p2')).toMatchObject({ active: false, status: 'blocked' })
+  })
+
+  it('bounds concurrent goal sections and resumes the waiting goal once a slot frees up', async () => {
+    const states = new Map<string, GoalRunState>([
+      ['a', createGoalRunState('Goal A', true)],
+      ['b', createGoalRunState('Goal B', true)],
+    ])
+    const finishers = new Map<string, (result: GoalStepResult) => void>()
+    const run = vi.fn(
+      (id: string) =>
+        new Promise<GoalStepResult>(resolve => {
+          finishers.set(id, resolve)
+        })
+    )
+    const controller = createAutonomousGoalController({
+      read: id => states.get(id),
+      persist: async (id, next, expected) => {
+        if (states.get(id)?.revision !== expected) return false
+        states.set(id, next)
+        return true
+      },
+      run,
+      canRun: () => true,
+      maxConcurrent: 1,
+    })
+    controllers.push(controller)
+    controller.kick('a')
+    await vi.advanceTimersByTimeAsync(0)
+    controller.kick('b')
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(run).toHaveBeenCalledTimes(1)
+    expect(states.get('b')).toMatchObject({ active: true, status: 'waiting' })
+    finishers.get('a')!({ status: 'blocked', summary: 'A needs input' })
+    await vi.advanceTimersByTimeAsync(1500)
+    expect(run.mock.calls.map(call => call[0])).toEqual(['a', 'b'])
+    expect(controller.isRunning('b')).toBe(true)
   })
 })

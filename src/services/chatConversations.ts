@@ -59,6 +59,16 @@ export function migrateConversations(state: AppState): void {
       }
       if (chat) setSafeRecordValue(state.global.ui.lastConversationByProject, project.id, chat.id)
     }
+    // Goals moved from the project to its chats: hand a legacy project goal run to the selected chat once.
+    if (project.autonomousGoal) {
+      const selectedId = getSafeRecordValue(state.global.ui.lastConversationByProject, project.id)
+      const target = chats.find(chat => chat.id === selectedId) ?? chats[0]
+      if (target && !target.autonomousGoal) {
+        target.autonomousGoal = { ...project.autonomousGoal, active: false, status: 'waiting' }
+        target.goal ??= project.autonomousGoal.text
+      }
+      delete project.autonomousGoal
+    }
   }
   state.conversationSchemaVersion = 1
 }

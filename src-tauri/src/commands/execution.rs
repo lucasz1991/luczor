@@ -75,11 +75,15 @@ pub struct ScopeRegistration {
     generation: u64,
     scope_generation: u64,
     scope: ExecutionScope,
+    /// A chat pins its own permission mode to its run; absent scopes follow the policy mode.
+    #[serde(default)]
+    mode: Option<ExecutionMode>,
 }
 struct RegisteredScope {
     scope: ExecutionScope,
     generation: u64,
     revoked: bool,
+    mode: Option<ExecutionMode>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -120,6 +124,14 @@ impl GateState {
                 {
                     return Ok(current.clone());
                 }
+                if next.generation == current.generation && next.kill_switch == current.kill_switch {
+                    // Only the device default mode changed. Registered scopes keep their
+                    // pinned modes, so one chat's mode change never revokes another chat's run.
+                    let mut updated = current.clone();
+                    updated.mode = next.mode;
+                    self.policy = Some(updated.clone());
+                    return Ok(updated);
+                }
                 if next.generation <= current.generation {
                     return Err("Stale execution generation.".into());
                 }
@@ -149,6 +161,7 @@ impl GateState {
         if policy.kill_switch {
             return Err("Not-Aus is active; native execution is blocked.".into());
         }
+        let mut mode = &policy.mode;
         match (&permit.scope, permit.scope_generation) {
             (None, None) => {}
             (Some(scope), Some(generation)) => {
@@ -162,6 +175,9 @@ impl GateState {
                 {
                     return Err("execution_scope_revoked_or_changed".into());
                 }
+                if let Some(pinned) = &registered.mode {
+                    mode = pinned;
+                }
             }
             _ => return Err("execution_scope_invalid".into()),
         }
@@ -170,10 +186,10 @@ impl GateState {
                 return Err("Workflow execution was cancelled or is invalid.".into());
             }
         }
-        if write && policy.mode == ExecutionMode::Observe {
+        if write && *mode == ExecutionMode::Observe {
             return Err("Native mutation is blocked in Observe mode.".into());
         }
-        if full_access && policy.mode != ExecutionMode::Unrestricted {
+        if full_access && *mode != ExecutionMode::Unrestricted {
             return Err(
                 "Local scripts require explicit Unrestricted mode; this is not a sandbox.".into(),
             );
@@ -210,8 +226,18 @@ impl GateState {
                 if previous.revoked && input.scope_generation == previous.generation {
                     return Err("execution_scope_revoked_or_changed".into());
                 }
+                if input.scope_generation == previous.generation
+                    && input.mode.is_some()
+                    && previous.mode.is_some()
+                    && input.mode != previous.mode
+                {
+                    return Err("execution_scope_mode_changed".into());
+                }
                 previous.generation = input.scope_generation;
                 previous.revoked = false;
+                if input.mode.is_some() {
+                    previous.mode = input.mode;
+                }
             }
         } else {
             if self.scopes.len() >= 8192 {
@@ -223,6 +249,7 @@ impl GateState {
                     scope: input.scope,
                     generation: input.scope_generation,
                     revoked: revoke,
+                    mode: input.mode,
                 },
             );
         }
@@ -400,6 +427,7 @@ mod tests {
                 run_id: Some(run.into()),
                 workspace_binding_id: Some("binding-1".into()),
             },
+            mode: None,
         };
         gate.register_scope(registration("a"), false).unwrap();
         gate.register_scope(registration("b"), false).unwrap();
@@ -422,6 +450,64 @@ mod tests {
         gate.update(policy(&session, 2, ExecutionMode::Act, false))
             .unwrap();
         assert!(gate.scopes.is_empty());
+    }
+    #[test]
+    fn a_scope_keeps_its_pinned_mode_while_the_default_mode_changes_live() {
+        let session = uuid::Uuid::new_v4().to_string();
+        let mut gate = GateState::default();
+        gate.update(policy(&session, 1, ExecutionMode::Act, false))
+            .unwrap();
+        let scope = |run: &str| ExecutionScope {
+            project_id: "project".into(),
+            conversation_id: Some(run.into()),
+            run_id: Some(run.into()),
+            workspace_binding_id: None,
+        };
+        let registration = |run: &str, mode: Option<ExecutionMode>| ScopeRegistration {
+            session_id: session.clone(),
+            generation: 1,
+            scope_generation: 1,
+            scope: scope(run),
+            mode,
+        };
+        gate.register_scope(registration("act-chat", Some(ExecutionMode::Act)), false)
+            .unwrap();
+        gate.register_scope(registration("observe-chat", Some(ExecutionMode::Observe)), false)
+            .unwrap();
+        gate.register_scope(registration("default-chat", None), false)
+            .unwrap();
+        let permit = |run: &str| ExecutionPermit {
+            session_id: session.clone(),
+            generation: 1,
+            workflow_execution_id: None,
+            scope: Some(scope(run)),
+            scope_generation: Some(1),
+        };
+        let unscoped = ExecutionPermit {
+            session_id: session.clone(),
+            generation: 1,
+            workflow_execution_id: None,
+            scope: None,
+            scope_generation: None,
+        };
+        assert!(gate.check(&permit("act-chat"), true, false).is_ok());
+        assert!(gate.check(&permit("observe-chat"), true, false).is_err());
+        assert!(gate.check(&permit("default-chat"), true, false).is_ok());
+        assert!(gate.check(&unscoped, true, false).is_ok());
+        // The default mode switches to Observe at the same generation: nothing is revoked.
+        gate.update(policy(&session, 1, ExecutionMode::Observe, false))
+            .unwrap();
+        assert_eq!(gate.scopes.len(), 3);
+        assert!(gate.check(&permit("act-chat"), true, false).is_ok());
+        assert!(gate.check(&permit("default-chat"), true, false).is_err());
+        assert!(gate.check(&unscoped, true, false).is_err());
+        assert!(gate.check(&unscoped, false, false).is_ok());
+        // A pinned mode cannot be swapped underneath a registered run.
+        assert!(gate
+            .register_scope(registration("act-chat", Some(ExecutionMode::Unrestricted)), false)
+            .is_err());
+        // Scripts still require the pinned Unrestricted mode of that chat.
+        assert!(gate.check(&permit("act-chat"), true, true).is_err());
     }
     fn policy(
         session: &str,
