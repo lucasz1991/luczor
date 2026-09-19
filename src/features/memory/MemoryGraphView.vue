@@ -231,6 +231,48 @@ const adjacent = computed(() => {
   }
   return set
 })
+/* Hovering a node lifts it and its neighbours; everything else recedes softly. */
+const hoverId = computed(() => (props.ambient || dragging.value ? '' : (hovered.value ?? '')))
+const hoverAdjacent = computed(() => {
+  const set = new Set<string>()
+  const id = hoverId.value
+  if (!id) return set
+  for (const edge of props.graph.edges) {
+    if (edge.from === id) set.add(edge.to)
+    else if (edge.to === id) set.add(edge.from)
+  }
+  return set
+})
+/* Deterministic star field and orbit rings give the knowledge space depth; positions never change. */
+type Star = { x: number; y: number; r: number; delay: number; duration: number; far: boolean }
+const stars: readonly Star[] = (() => {
+  let seed = 0x9e3779b1
+  const next = () => {
+    seed = (Math.imul(seed ^ (seed >>> 15), 0x2c1b3c6d) + 0x7fffffff) >>> 0
+    return (seed >>> 8) / 0x01000000
+  }
+  return Array.from({ length: 72 }, (_, index) => ({
+    x: Math.round(next() * 800 * 10) / 10,
+    y: Math.round(next() * 500 * 10) / 10,
+    r: Math.round((0.4 + next() * 1.1) * 100) / 100,
+    delay: Math.round(next() * 9000),
+    duration: 4200 + Math.round(next() * 6000),
+    far: index % 3 !== 0,
+  }))
+})()
+const ORBIT_RINGS = [
+  { rx: 150, ry: 46, duration: 52, reverse: false },
+  { rx: 235, ry: 74, duration: 78, reverse: true },
+  { rx: 320, ry: 102, duration: 110, reverse: false },
+] as const
+/* Nodes play their entrance whenever a different graph arrives, never on every rotation frame. */
+const sceneEntrance = ref(0)
+watch(
+  () => [props.graph.nodes.length, props.graph.nodes[0]?.id ?? '', props.graph.edges.length] as const,
+  () => {
+    sceneEntrance.value++
+  }
+)
 const systemCount = computed(() => {
   const counts = new Map<string, number>()
   for (const node of props.graph.nodes) {
@@ -503,6 +545,8 @@ function buildEntry(point: Point): Entry {
   const born = point.state === 'born'
   const cls = {
     selected,
+    'is-hover': point.id === hoverId.value,
+    'is-hover-near': hoverAdjacent.value.has(point.id),
     hub: point.hub,
     model: point.model,
     'is-reading': reading,
@@ -522,6 +566,10 @@ function buildEntry(point: Point): Entry {
     'is-deleted': state === 'removed',
   }
   const style: Record<string, number | string> = { '--dp': point.dp }
+  if (!props.ambient) {
+    // Stagger the entrance by depth so the space builds from the back to the front.
+    style['--enter-delay'] = `${Math.round(120 + (1 - point.depthT) * 420)}ms`
+  }
   const wave = waveFactor.value.get(point.id)
   if (wave !== undefined) style['--wave-f'] = wave
   const pill = pillFor(point)
@@ -1069,6 +1117,8 @@ onBeforeUnmount(() => {
       'is-ambient': ambient,
       'is-dense': scene.dense,
       'has-links': linkEdges.length > 0,
+      'has-hover': !!hoverId,
+      'is-reduced': reducedMotion,
     }"
     :data-stage="stage"
     :data-phase="phase"
@@ -1210,6 +1260,35 @@ onBeforeUnmount(() => {
         </filter>
       </defs>
 
+      <!-- L0 space: drifting stars and slowly turning orbit rings (knowledge space only) -->
+      <g v-if="!ambient" class="space" aria-hidden="true">
+        <g class="stars">
+          <circle
+            v-for="(star, index) in stars"
+            :key="index"
+            class="star"
+            :class="{ 'star--far': star.far }"
+            :cx="star.x"
+            :cy="star.y"
+            :r="star.r"
+            :style="{ '--twinkle-delay': `${star.delay}ms`, '--twinkle': `${star.duration}ms` }"
+          />
+        </g>
+        <g class="orbits">
+          <ellipse
+            v-for="(ring, index) in ORBIT_RINGS"
+            :key="index"
+            class="orbit"
+            :class="{ 'orbit--reverse': ring.reverse }"
+            cx="400"
+            cy="262"
+            :rx="ring.rx"
+            :ry="ring.ry"
+            pathLength="100"
+            :style="{ '--orbit': `${ring.duration}s`, '--orbit-index': index }"
+          />
+        </g>
+      </g>
       <!-- L1 mist: three soft ellipses per system hub, no filter -->
       <g class="mist" aria-hidden="true">
         <g v-for="blob in mistBlobs" :key="blob.system" :style="{ '--dp-hub': blob.hub.dp }">
@@ -1302,7 +1381,7 @@ onBeforeUnmount(() => {
         <ellipse class="wave-ring wave-ring--b" rx="12" ry="7.4" @animationend="endWave" />
       </g>
       <!-- L6 nodes -->
-      <g class="nodes">
+      <g :key="sceneEntrance" class="nodes" :class="{ 'nodes--enter': !ambient }">
         <g
           v-for="entry in entries.regular"
           :key="entry.point.id"
@@ -1544,6 +1623,101 @@ onBeforeUnmount(() => {
 }
 .memory-graph.is-ambient::after {
   display: none;
+}
+/* ------------------------------------------------------------------ space layer */
+.star {
+  fill: var(--mg-light);
+  opacity: 0.22;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: mg-twinkle var(--twinkle, 6s) ease-in-out var(--twinkle-delay, 0ms) infinite alternate;
+}
+.star--far {
+  opacity: 0.12;
+}
+.orbit {
+  fill: none;
+  stroke: color-mix(in srgb, var(--ai-accent) 26%, transparent);
+  stroke-width: 0.7px;
+  stroke-dasharray: 0.6 2.2;
+  vector-effect: non-scaling-stroke;
+  opacity: calc(0.55 - var(--orbit-index, 0) * 0.14);
+  animation: mg-orbit var(--orbit, 60s) linear infinite;
+}
+.orbit--reverse {
+  animation-direction: reverse;
+}
+.is-dragging .orbit,
+.is-reduced .orbit,
+.is-reduced .star {
+  animation-play-state: paused;
+}
+@keyframes mg-twinkle {
+  from {
+    opacity: 0.08;
+    transform: scale(0.8);
+  }
+  to {
+    opacity: 0.42;
+    transform: scale(1.25);
+  }
+}
+@keyframes mg-orbit {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -100;
+  }
+}
+/* Entrance: nodes bloom from the back to the front once per scene. */
+.nodes--enter g[data-node] {
+  animation: mg-enter 720ms var(--mg-ease) var(--enter-delay, 0ms) both;
+}
+.is-reduced .nodes--enter g[data-node] {
+  animation: none;
+}
+@keyframes mg-enter {
+  from {
+    opacity: 0;
+    filter: blur(6px);
+  }
+  60% {
+    filter: blur(0);
+  }
+  to {
+    opacity: 1;
+    filter: blur(0);
+  }
+}
+/* Hover: the node and its neighbourhood step forward, the rest recedes. */
+.memory-graph.has-hover .nodes g[data-node]:not(.is-hover):not(.is-hover-near):not(.selected):not(.model) {
+  opacity: 0.38;
+  transition: opacity 320ms var(--mg-ease);
+}
+.memory-graph .nodes g[data-node] {
+  transition: opacity 320ms var(--mg-ease);
+}
+.memory-graph.has-hover .nodes g.is-hover-near .body {
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--ai-accent) 55%, transparent));
+}
+.memory-graph.has-hover .nodes g.is-hover .body {
+  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--ai-accent) 80%, transparent));
+}
+.memory-graph.has-hover .edges .edge--stored,
+.memory-graph.has-hover .edges .edge--group {
+  opacity: 0.35;
+  transition: opacity 320ms var(--mg-ease);
+}
+/* Relations carry a slow current so the space never looks frozen. */
+.memory-graph:not(.is-ambient):not(.is-reduced) .edge--stored.is-near {
+  stroke-dasharray: 3 9;
+  animation: mg-current 4.5s linear infinite;
+}
+@keyframes mg-current {
+  to {
+    stroke-dashoffset: -48;
+  }
 }
 @keyframes mg-nebel {
   from {
