@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import { computed, nextTick, reactive } from 'vue'
 import {
   createSafeRecord,
   deleteSafeRecordValue,
@@ -30,5 +31,20 @@ describe('safe dynamic records', () => {
 
     expect(() => setSafeRecordValue(record, '__proto__', { polluted: true })).toThrow(/unsafe/i)
     expect(({} as { polluted?: boolean }).polluted).toBeUndefined()
+  })
+
+  it('notifies reactive readers when a key is written or removed', async () => {
+    const record = reactive<Record<string, string>>({})
+    const value = computed(() => getSafeRecordValue(record, 'default') ?? 'none')
+    expect(value.value).toBe('none')
+    setSafeRecordValue(record, 'default', 'chat-2')
+    await nextTick()
+    expect(value.value).toBe('chat-2')
+    setSafeRecordValue(record, 'default', 'chat-3')
+    await nextTick()
+    expect(value.value).toBe('chat-3')
+    deleteSafeRecordValue(record, 'default')
+    await nextTick()
+    expect(value.value).toBe('none')
   })
 })

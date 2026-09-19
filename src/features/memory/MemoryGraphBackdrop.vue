@@ -35,7 +35,7 @@ watch(
 const visible = computed(() => props.focused || memoryGraphDisplay.value.ambientBackdrop)
 const display = computed(() => ({
   ...memoryGraphDisplay.value,
-  // Ambient mode: always a slow orbit, hub labels only, edges kept light.
+  // Ambient mode: always a slow orbit, no labels at all (the view drops them while ambient), edges kept light.
   autoRotate: props.focused ? memoryGraphDisplay.value.autoRotate : !hidden.value && !reducedMotion,
   labels: props.focused ? memoryGraphDisplay.value.labels : 'hubs',
 }))

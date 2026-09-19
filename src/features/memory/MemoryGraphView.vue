@@ -88,6 +88,7 @@ type Pill = {
   top: number
   width: number
   height: number
+  fontSize: number
   text: string
   count: string | null
   hub: boolean
@@ -427,9 +428,12 @@ const scene = computed(() => {
 function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text
 }
+/** Labels stay small in the knowledge space so the structure, not the text, dominates. */
+const LABEL_SCALE = 0.55
 function showPill(point: Point): boolean {
+  // Behind a chat the graph is pure ambience: no labels at all, not even hubs or the model.
+  if (props.ambient) return false
   if (point.model) return true
-  if (props.ambient) return point.hub
   if (point.id === props.selected) return true
   const labels = props.display.labels
   if (labels === 'all') return point.hub || point.depthT <= 0.72
@@ -441,23 +445,24 @@ function pillFor(point: Point): Pill | null {
   void fontVersion.value
   const hub = point.hub
   const major = hub || point.model
-  const size = major ? 11 : 10.5
+  const size = (major ? 11 : 10.5) * LABEL_SCALE
   const weight = major ? 600 : 500
   const raw = truncate(point.label, major ? 48 : 30)
   const text = hub ? raw.toUpperCase() : raw
   const spacing = hub ? 0.08 * size * text.length : 0
   const count = hub ? `· ${systemCount.value.get(point.system) ?? 0}` : null
-  const countWidth = count ? textWidth(count, 10, 500, true) + 6 : 0
-  const padding = major ? 10 : 8
-  const dot = hub ? 12 : 0
+  const countWidth = count ? textWidth(count, 10 * LABEL_SCALE, 500, true) + 4 : 0
+  const padding = (major ? 10 : 8) * LABEL_SCALE
+  const dot = hub ? 12 * LABEL_SCALE : 0
   const width = Math.round(textWidth(text, size, weight) + spacing + 2 * padding + dot + countWidth)
-  const height = major ? 22 : 18
+  const height = Math.round((major ? 22 : 18) * LABEL_SCALE)
   if (point.model) {
     return {
       left: -width / 2,
-      top: point.radiusEff + 10 + height,
+      top: point.radiusEff + 6 + height,
       width,
       height,
+      fontSize: size,
       text,
       count,
       hub,
@@ -467,13 +472,14 @@ function pillFor(point: Point): Pill | null {
       dotX: 0,
     }
   }
-  let left = point.radiusEff + 10
-  if (point.left + left + width > 792) left = -point.radiusEff - 10 - width
+  let left = point.radiusEff + 6
+  if (point.left + left + width > 792) left = -point.radiusEff - 6 - width
   return {
     left,
-    top: -point.radiusEff - 6,
+    top: -point.radiusEff - 4,
     width,
     height,
+    fontSize: size,
     text,
     count,
     hub,
@@ -1338,10 +1344,17 @@ onBeforeUnmount(() => {
               :x2="entry.pill.width - 8"
               :y2="-entry.pill.height + 1"
             />
-            <circle v-if="entry.pill.hub" class="pill-dot" :cx="entry.pill.dotX" :cy="entry.pill.textY" r="3" />
-            <text :x="entry.pill.textX" :y="entry.pill.textY">
+            <circle v-if="entry.pill.hub" class="pill-dot" :cx="entry.pill.dotX" :cy="entry.pill.textY" r="1.8" />
+            <text :x="entry.pill.textX" :y="entry.pill.textY" :style="{ fontSize: `${entry.pill.fontSize}px` }">
               {{ entry.pill.text }}
-              <tspan v-if="entry.pill.count" class="pill-count" dx="0.6em">{{ entry.pill.count }}</tspan>
+              <tspan
+                v-if="entry.pill.count"
+                class="pill-count"
+                dx="0.6em"
+                :style="{ fontSize: `${entry.pill.fontSize * 0.9}px` }"
+              >
+                {{ entry.pill.count }}
+              </tspan>
             </text>
           </g>
           <text
@@ -1385,7 +1398,9 @@ onBeforeUnmount(() => {
               :height="entry.pill.height"
               :rx="entry.pill.height / 2"
             />
-            <text :x="entry.pill.textX" :y="entry.pill.textY">{{ entry.pill.text }}</text>
+            <text :x="entry.pill.textX" :y="entry.pill.textY" :style="{ fontSize: `${entry.pill.fontSize}px` }">
+              {{ entry.pill.text }}
+            </text>
           </g>
           <text
             v-if="entry.flag"
