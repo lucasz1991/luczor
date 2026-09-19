@@ -73,6 +73,8 @@ export type InferenceRequest = {
   toolChoice?: ToolChoice
   /** Local generation only; never part of the approved external provider body. */
   reasoningMode?: 'auto' | 'off'
+  /** Local generation output ceiling; excluded from approved external provider bodies. */
+  maxOutputTokens?: number
   thinkingTier?: ThinkingTier
   thinkingConfig?: ThinkingConfig
   onBudget?: (progress: ThinkingBudgetProgress | null) => void

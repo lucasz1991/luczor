@@ -2,7 +2,7 @@ import type { RepositoryGraphPage, RepositoryGraphStatus } from '@/services/repo
 import { maintenanceHash, type MaintenanceJob, type MaintenanceSource } from './maintenance'
 import type { HydratedMaintenanceJob } from './maintenancePlanner'
 
-/** Source text is never stored in this checkpoint. It lives in the principal's encrypted journal. */
+/** This content-free checkpoint belongs in the principal's encrypted journal; it never stores source text. */
 export type RepositoryMaintenanceCursor = {
   repositoryId: string
   offset: number
@@ -125,9 +125,7 @@ export async function discoverRepositoryPage(
       : { repositoryId, offset: 0, indexRevision: revision }
   const prefix = `repository:${input.projectId}:`
   const known = new Map(
-    input.jobs
-      .filter(job => job.kind === 'repository' && job.projectId === input.projectId)
-      .map(job => [job.id, job])
+    input.jobs.filter(job => job.kind === 'repository' && job.projectId === input.projectId).map(job => [job.id, job])
   )
   const work: HydratedMaintenanceJob[] = []
   let inspections = 0
@@ -144,10 +142,7 @@ export async function discoverRepositoryPage(
     if (hydrated) work.push(hydrated)
   }
   if (cursor.exhaustedAt !== undefined) {
-    if (
-      cursor.indexRevision === revision &&
-      input.now < cursor.exhaustedAt + REPOSITORY_MAINTENANCE_RESCAN_MS
-    ) {
+    if (cursor.indexRevision === revision && input.now < cursor.exhaustedAt + REPOSITORY_MAINTENANCE_RESCAN_MS) {
       return { work, cursor, pendingScan: false }
     }
     cursor = { repositoryId, offset: 0, indexRevision: revision }

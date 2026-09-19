@@ -10,6 +10,7 @@ import {
 } from '@/services/inference/localModelManager'
 import { verifyLocalModelManifest, type LocalModelReleaseManifest } from '@/services/inference/modelManifest'
 import type { InferenceResult } from '@/services/inference/types'
+import { buildLaravelProxyBody } from '@/services/inference/laravelProxyBody'
 
 const payloadHash = 'a'.repeat(64)
 const catalogBinding = {
@@ -64,6 +65,12 @@ const successfulResult: InferenceResult = {
 }
 
 describe('LocalModelManager runtime safety', () => {
+  it('never serializes local output ceilings to the approved external provider body', () => {
+    const body = buildLaravelProxyBody({ messages: [], maxOutputTokens: 384 }, 'synthetic-client', true)
+    expect(body).not.toHaveProperty('maxOutputTokens')
+    expect(body).not.toHaveProperty('max_tokens')
+    expect(body).toEqual(buildLaravelProxyBody({ messages: [] }, 'synthetic-client', true))
+  })
   it.each(['off', 'auto', undefined] as const)(
     'preserves local request reasoning mode %s through the resident gateway',
     async reasoningMode => {

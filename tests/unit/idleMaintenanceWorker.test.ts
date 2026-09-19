@@ -15,7 +15,10 @@ vi.mock('@/services/executionGate', () => ({
 }))
 vi.mock('@/services/memory/luczorMemory', () => ({
   luczorMemory: {
-    maintenanceSnapshot: async () => ({ journal: structuredClone(fixture.journal), records: structuredClone(fixture.records) }),
+    maintenanceSnapshot: async () => ({
+      journal: structuredClone(fixture.journal),
+      records: structuredClone(fixture.records),
+    }),
     updateMaintenance: async (_id: string, update: (journal: MaintenanceJournal) => unknown) =>
       update(fixture.journal!),
     applyMaintenance: fixture.apply,
@@ -95,6 +98,85 @@ async function run(optimizer: ReturnType<typeof createMaintenanceWorker>) {
   await vi.waitFor(() => expect(['cooldown', 'paused']).toContain(optimizer.snapshot().phase))
 }
 describe('mounted persistent maintenance worker', () => {
+  it('loads a missing local memory on request and binds and reviews all evidence before saving', async () => {
+    const testCase = setup()
+    testCase.stream.mockImplementation(async request => {
+      const prompt = request.messages[1]!.content
+      let content: string
+      if (prompt.startsWith('Unabhängige Prüfung')) {
+        content = JSON.stringify({
+          approved: true,
+          checkedSources: ['project:p1', 'redis'],
+          unsupportedFacts: false,
+          lostFacts: false,
+          lostConstraints: false,
+          temporalConflict: false,
+        })
+      } else if (!fixture.records.length) {
+        fixture.records.push({
+          id: 'redis',
+          principalId: 'owner',
+          projectId: 'p1',
+          scope: 'project',
+          dataset: 'p1',
+          content: 'Redis: /projekte/luczor. Nur lesen.',
+          contentHash: 'h',
+          source: 'user',
+          writeIntent: 'explicit',
+          status: 'active',
+          sensitivity: 'normal',
+          visibility: 'private',
+          retention: 'durable',
+          type: 'fact',
+          confidence: 1,
+          importance: 0.5,
+          tags: [],
+          createdAt: 1,
+          updatedAt: 1,
+        })
+        content = '{"request_context":{"query":"Redis","limit":2}}'
+      } else {
+        content = 'Elbe: Nur lesen. Redis: /projekte/luczor. Quellen project:p1 und redis.'
+      }
+      return { content, toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
+    })
+    const worker = testCase.create()
+    try {
+      await run(worker)
+      expect(testCase.stream).toHaveBeenCalledTimes(3)
+      expect(testCase.stream.mock.calls[1]![0].messages[1]!.content).toContain('/projekte/luczor')
+      expect(testCase.stream.mock.calls[1]![0].messages[1]!.content).not.toContain('//projekte//luczor')
+      expect(testCase.stream.mock.calls[2]![0].messages[1]!.content).toContain('/projekte/luczor')
+      expect(fixture.writes).toHaveLength(1)
+      expect(fixture.apply.mock.calls[0]![0].artifact.sources.map((source: { id: string }) => source.id)).toEqual([
+        'project:p1',
+        'redis',
+      ])
+      expect(fixture.apply.mock.calls[0]![0].sources).toHaveLength(2)
+      expect(fixture.apply.mock.calls[0]![0].artifact.revision).not.toBe(fixture.apply.mock.calls[0]![0].revision)
+      expect(memoryUsageEvents().find(item => item.origin === 'idle')).toMatchObject({ retrieved: 2, evaluated: 2 })
+    } finally {
+      await worker.stop()
+    }
+  })
+  it('does not save a context request or loop indefinitely when a model keeps asking for more', async () => {
+    const testCase = setup()
+    testCase.stream.mockResolvedValue({
+      content: '{"request_context":{"query":"missing","limit":1}}',
+      toolCalls: [],
+      rawToolCalls: [],
+      finishReason: 'stop',
+    })
+    const worker = testCase.create()
+    try {
+      await run(worker)
+      expect(testCase.stream).toHaveBeenCalledTimes(3)
+      expect(fixture.writes).toEqual([])
+      expect(fixture.journal!.jobs[0]?.status).toBe('retry')
+    } finally {
+      await worker.stop()
+    }
+  })
   it('continues partial LSP work on a later index pass without pretending the whole graph is ready', async () => {
     const testCase = setup()
     let scanned = 0

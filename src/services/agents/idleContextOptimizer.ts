@@ -28,6 +28,8 @@ export type IdleContextOptimizerDependencies = {
   /** running=true must not interpret this optimizer's own occupied slot as foreign work; manual marks a user-started pass. */
   inspect(signal: AbortSignal, running: boolean, manual?: boolean): Promise<IdleOptimizationEligibility>
   nextJob(boundary: string, signal: AbortSignal): Promise<IdleOptimizationJob | null>
+  /** A bounded discovery page may contain only completed work while later pages remain. */
+  hasPendingDiscovery?(): boolean
   /** Must settle only after native stream cancellation and the background resource lease settle. */
   runLocal(job: IdleOptimizationJob, signal: AbortSignal): Promise<string>
   /** Must bind writes to job.principalId and preserve existing facts/project summaries. */
@@ -391,7 +393,8 @@ export class IdleContextOptimizer {
         }
       }
       const delay =
-        this.state.reason === 'candidate_ready'
+        this.state.reason === 'candidate_ready' ||
+        (!selectedJob && this.state.reason === 'no_context' && this.dependencies.hasPendingDiscovery?.())
           ? (this.options.successfulIntervalMs ?? this.options.intervalMs)
           : this.options.intervalMs
       this.earliestCycle = Math.max(this.earliestCycle, this.now() + delay)

@@ -118,7 +118,8 @@ export function reconcileMaintenanceJobs(journal: MaintenanceJournal, work: Main
       const old = previous.get(job.id)
       if (job.blockedReason) return job
       if (!old || old.revision !== job.revision) return { ...job, status: 'pending', attempts: 0, nextAttemptAt: now }
-      if (old.blockedReason === 'source_too_large') return { ...job, status: 'pending', attempts: 0, nextAttemptAt: now }
+      if (old.blockedReason === 'source_too_large')
+        return { ...job, status: 'pending', attempts: 0, nextAttemptAt: now }
       // A crashed process owns no lease after restart. Revalidation still precedes the eventual commit.
       return old.status === 'running' ? { ...old, status: 'retry', nextAttemptAt: now } : old
     }),

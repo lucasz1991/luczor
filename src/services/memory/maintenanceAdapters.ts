@@ -5,7 +5,12 @@ import type { HydratedMaintenanceJob } from './maintenancePlanner'
 export type MemoryMaintenanceAdapter = {
   id: string
   capabilities: { scoped: boolean; revisioned: boolean; atomicWrite: boolean }
-  jobs(principalId: string, projectId: string | undefined, signal: AbortSignal): Promise<HydratedMaintenanceJob[]>
+  jobs(
+    principalId: string,
+    projectId: string | undefined,
+    signal: AbortSignal,
+    budget?: { maxBatchChars: number; maxSourceCount: number }
+  ): Promise<HydratedMaintenanceJob[]>
   apply?(
     principalId: string,
     job: HydratedMaintenanceJob,
@@ -28,7 +33,7 @@ type SharedSource = {
 export const sqlMemoryMaintenanceAdapter: MemoryMaintenanceAdapter = {
   id: 'luczor-sql',
   capabilities: { scoped: true, revisioned: true, atomicWrite: true },
-  async jobs(principalId, projectId, signal) {
+  async jobs(principalId, projectId, signal, budget) {
     const jobs: HydratedMaintenanceJob[] = []
     let after = 0
     do {
@@ -52,8 +57,9 @@ export const sqlMemoryMaintenanceAdapter: MemoryMaintenanceAdapter = {
         revision: record.revision,
         content: JSON.stringify(record),
       }))
-      for (const material of partitionMaintenanceSources(sources, 4)) {
-        const oversized = JSON.stringify(material).length > 15_000
+      const maxChars = budget?.maxBatchChars ?? 15_000
+      for (const material of partitionMaintenanceSources(sources, budget?.maxSourceCount ?? 4, maxChars)) {
+        const oversized = JSON.stringify(material).length > maxChars
         const revision = await maintenanceHash(material.map(({ content: _content, ...ref }) => ref))
         jobs.push({
           id: `sql:${projectId ?? 'user'}:${material[0]!.id}`,

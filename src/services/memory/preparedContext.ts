@@ -60,9 +60,13 @@ export async function preparedContextFragments(
     try {
       const repositorySources = artifact.sources.filter(source => source.kind === 'repository')
       const extraSources = artifact.sources.filter(source => source.kind !== 'repository')
-      if (repositorySources.length !== 1 || extraSources.some(source =>
-        source.kind !== 'memory' || revisions.get(sourceKey(artifact.projectId, source)) !== source.revision
-      )) continue
+      if (
+        repositorySources.length !== 1 ||
+        extraSources.some(
+          source => source.kind !== 'memory' || revisions.get(sourceKey(artifact.projectId, source)) !== source.revision
+        )
+      )
+        continue
       if (artifact.repositoryRevision && (await maintenanceHash(artifact.sources)) !== artifact.revision) continue
       if (!artifact.repositoryRevision && extraSources.length) continue
       const path = artifact.id.slice(`repository:${projectId}:`.length)
@@ -86,8 +90,12 @@ export async function preparedContextFragments(
           evidence: 'LSP/index metadata; no full repository claim',
         })
       )
-      if (revision === (artifact.repositoryRevision ?? artifact.revision) &&
-        repositorySources[0]!.id === file.id && repositorySources[0]!.revision === revision) valid.push(artifact)
+      if (
+        revision === (artifact.repositoryRevision ?? artifact.revision) &&
+        repositorySources[0]!.id === file.id &&
+        repositorySources[0]!.revision === revision
+      )
+        valid.push(artifact)
     } catch {
       /* Current evidence unavailable: regular retrieval remains the fallback. */
     }

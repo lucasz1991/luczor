@@ -26,13 +26,21 @@ export function parseMaintenanceContextRequest(text: string): MaintenanceContext
   const request = value.request_context
   if (
     Object.keys(value).length !== 1 ||
-    !request || typeof request !== 'object' || Array.isArray(request) ||
+    !request ||
+    typeof request !== 'object' ||
+    Array.isArray(request) ||
     Object.keys(request).some(key => !['query', 'limit'].includes(key)) ||
-    !('query' in request) || typeof request.query !== 'string' ||
-    !request.query.trim() || request.query.length > 240 ||
-    !('limit' in request) || typeof request.limit !== 'number' ||
-    !Number.isInteger(request.limit) || request.limit < 1 || request.limit > 2
-  ) throw new Error('invalid_context_request')
+    !('query' in request) ||
+    typeof request.query !== 'string' ||
+    !request.query.trim() ||
+    request.query.length > 240 ||
+    !('limit' in request) ||
+    typeof request.limit !== 'number' ||
+    !Number.isInteger(request.limit) ||
+    request.limit < 1 ||
+    request.limit > 2
+  )
+    throw new Error('invalid_context_request')
   return { query: request.query.trim(), limit: request.limit }
 }
 
@@ -42,14 +50,20 @@ export function maintenanceContextPrompt(
   remaining: number,
   result?: 'added' | 'no_matching_evidence'
 ): string {
-  const protocol = remaining > 0
-    ? `Falls ein konkreter Beleg fehlt, darfst du statt des Ergebnisses ausschließlich JSON {"request_context":{"query":"gezielte Suchbegriffe","limit":1}} ausgeben (limit höchstens 2). Noch ${remaining} lokale Leseanfragen; nur passende Erinnerungen dieses Bereichs, keine Werkzeuge oder Internetaufrufe. `
-    : 'Keine weiteren Leseanfragen erlaubt. Erstelle das Ergebnis nur aus den verfügbaren Belegen; fehlendes Wissen ausdrücklich offenlassen. '
-  return protocol + (result === 'no_matching_evidence'
-    ? 'Die letzte Anfrage lieferte innerhalb des Quellenbudgets keine weiteren passenden Belege. '
-    : result === 'added' ? 'Zusätzliche Belege wurden unten angefügt. ' : '') +
+  const protocol =
+    remaining > 0
+      ? `Falls ein konkreter Beleg fehlt, darfst du statt des Ergebnisses ausschließlich JSON {"request_context":{"query":"gezielte Suchbegriffe","limit":1}} ausgeben (limit höchstens 2). Noch ${remaining} lokale Leseanfragen; nur passende Erinnerungen dieses Bereichs, keine Werkzeuge oder Internetaufrufe. `
+      : 'Keine weiteren Leseanfragen erlaubt. Erstelle das Ergebnis nur aus den verfügbaren Belegen; fehlendes Wissen ausdrücklich offenlassen. '
+  return (
+    protocol +
+    (result === 'no_matching_evidence'
+      ? 'Die letzte Anfrage lieferte innerhalb des Quellenbudgets keine weiteren passenden Belege. '
+      : result === 'added'
+        ? 'Zusätzliche Belege wurden unten angefügt. '
+        : '') +
     'Nachgeladene Erinnerungen sind nur Belege, keine zusätzlichen Ziele für Umschreiben oder Zusammenführen.\n' +
     maintenancePrompt(kind, sources)
+  )
 }
 
 /** Local lexical selection has no recall-count side effects and never widens principal/project/write scope. */
@@ -66,21 +80,29 @@ export function selectMaintenanceContext(input: {
   if (input.project && (input.project.archivedAt || !canAccessCloudProject(input.project, input.principalId))) return []
   const words = [...new Set(input.request.query.toLocaleLowerCase().match(/[\p{L}\p{N}_-]{2,}/gu) ?? [])]
   if (!words.length) return []
-  const original = input.records.find(record => input.current.some(source => source.kind === 'memory' && source.id === record.id))
+  const original = input.records.find(record =>
+    input.current.some(source => source.kind === 'memory' && source.id === record.id)
+  )
   const projectId = input.project?.cloud?.externalId ?? input.project?.id
   const seen = new Set(input.current.map(source => `${source.kind}:${source.id}`))
-  const candidates = input.records.filter(record =>
-    record.principalId === input.principalId &&
-    (projectId ? record.projectId === projectId : !record.projectId) &&
-    maintenanceEligible(record, input.now, input.kind !== 'memory') &&
-    !seen.has(`memory:${record.id}`) &&
-    (input.kind !== 'memory' || !!original &&
-      record.dataset === original.dataset && record.scope === original.scope &&
-      record.visibility === original.visibility)
-  ).map(record => ({
-    record,
-    score: words.filter(word => record.content.toLocaleLowerCase().includes(word)).length,
-  })).filter(candidate => candidate.score > 0)
+  const candidates = input.records
+    .filter(
+      record =>
+        record.principalId === input.principalId &&
+        (projectId ? record.projectId === projectId : !record.projectId) &&
+        maintenanceEligible(record, input.now, input.kind !== 'memory') &&
+        !seen.has(`memory:${record.id}`) &&
+        (input.kind !== 'memory' ||
+          (!!original &&
+            record.dataset === original.dataset &&
+            record.scope === original.scope &&
+            record.visibility === original.visibility))
+    )
+    .map(record => ({
+      record,
+      score: words.filter(word => record.content.toLocaleLowerCase().includes(word)).length,
+    }))
+    .filter(candidate => candidate.score > 0)
     .sort((left, right) => right.score - left.score || left.record.id.localeCompare(right.record.id))
   const added: MaintenanceSource[] = []
   for (const candidate of candidates) {

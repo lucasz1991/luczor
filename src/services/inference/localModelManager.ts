@@ -39,7 +39,6 @@ export type LocalRuntimeRequest = InferenceRequest & {
   modelReleaseId: string
   scopeDigest: string
   catalogBinding: LocalCatalogBinding
-  maxOutputTokens?: number
   contextLimit?: number
 }
 

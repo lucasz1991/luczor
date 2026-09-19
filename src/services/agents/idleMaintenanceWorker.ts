@@ -133,7 +133,7 @@ export function createMaintenanceWorker(
   let pendingRepositoryScan = false
   /** Source budget per job, fitted to the resident model's context window (native idle work cannot grow it). */
   let batchChars = MAINTENANCE_CONTEXT_CHARS
-  const initialChars = () => Math.min(MAINTENANCE_INITIAL_CHARS, Math.floor(batchChars * 2 / 3))
+  const initialChars = () => Math.min(MAINTENANCE_INITIAL_CHARS, Math.floor((batchChars * 2) / 3))
   /** Permission to continue below the normal RAM reserve; not a measurement of actual OS paging. */
   let offloading = false
   let lastFailure = ''
@@ -145,7 +145,12 @@ export function createMaintenanceWorker(
     status.status === 'ready'
       ? `Basisindex bereit${status.lsp ? ` · LSP ${status.lsp.scanned}/${status.lsp.files} (${status.lsp.status})` : ''}`
       : `Graph: ${status.status}`
-  const repositoryWork = async (principalId: string, projects: Project[], signal: AbortSignal, journal: MaintenanceJournal) => {
+  const repositoryWork = async (
+    principalId: string,
+    projects: Project[],
+    signal: AbortSignal,
+    journal: MaintenanceJournal
+  ) => {
     const work: HydratedMaintenanceJob[] = []
     const cursors = { ...journal.repositoryCursors }
     pendingRepositoryScan = false
@@ -173,8 +178,14 @@ export function createMaintenanceWorker(
         if (status.status !== 'ready') continue
         maintenanceProgress.value = { ...maintenanceProgress.value, repository: repositoryLabel(status) }
         const page = await discoverRepositoryPage({
-          principalId, projectId: project.id, status, jobs: journal.jobs,
-          cursor: cursors[project.id], maxChars: initialChars(), now: Date.now(), signal,
+          principalId,
+          projectId: project.id,
+          status,
+          jobs: journal.jobs,
+          cursor: cursors[project.id],
+          maxChars: initialChars(),
+          now: Date.now(),
+          signal,
           inspect: inspectRepositoryGraph,
         })
         work.push(...page.work)
@@ -280,7 +291,12 @@ export function createMaintenanceWorker(
         ]) {
           signal.throwIfAborted()
           try {
-            sharedJobs.push(...(await adapter.jobs(principalId, projectId, signal)))
+            sharedJobs.push(
+              ...(await adapter.jobs(principalId, projectId, signal, {
+                maxBatchChars: initialChars(),
+                maxSourceCount: MAINTENANCE_INITIAL_SOURCES,
+              }))
+            )
           } catch {
             signal.throwIfAborted()
           }
@@ -317,15 +333,25 @@ export function createMaintenanceWorker(
     return { ...snapshot, work }
   }
   const currentRepositoryJob = async (job: IdleOptimizationJob, signal: AbortSignal) => {
-    if (!job.projectId || !(context.projects?.() ?? [context.project()!]).some(project =>
-      project?.id === job.projectId && !project.archivedAt && canAccessCloudProject(project, job.principalId)
-    )) throw new Error('project_unavailable')
+    if (
+      !job.projectId ||
+      !(context.projects?.() ?? [context.project()!]).some(
+        project =>
+          project?.id === job.projectId && !project.archivedAt && canAccessCloudProject(project, job.principalId)
+      )
+    )
+      throw new Error('project_unavailable')
     const prefix = `repository:${job.projectId}:`
     if (!job.key.startsWith(prefix)) throw new Error('stale_source')
     return hydrateRepositoryJob({
-      principalId: job.principalId, projectId: job.projectId,
-      path: job.key.slice(prefix.length), status: await deps.graphStatus(job.principalId, job.projectId),
-      signal, maxChars: initialChars(), now: Date.now(), inspect: inspectRepositoryGraph,
+      principalId: job.principalId,
+      projectId: job.projectId,
+      path: job.key.slice(prefix.length),
+      status: await deps.graphStatus(job.principalId, job.projectId),
+      signal,
+      maxChars: initialChars(),
+      now: Date.now(),
+      inspect: inspectRepositoryGraph,
     })
   }
   const assertCurrent = async (job: IdleOptimizationJob, signal: AbortSignal) => {
@@ -337,9 +363,10 @@ export function createMaintenanceWorker(
       !(await deps.preferences()).autoRemember
     )
       throw new Error('scope_changed')
-    const current = job.task === 'repository'
-      ? await currentRepositoryJob(job, signal)
-      : (await workList(job.principalId, signal)).work.find(item => item.id === job.key)
+    const current =
+      job.task === 'repository'
+        ? await currentRepositoryJob(job, signal)
+        : (await workList(job.principalId, signal)).work.find(item => item.id === job.key)
     if (!current || current.revision !== job.fingerprint) throw new Error('stale_source')
     signal.throwIfAborted()
   }
@@ -574,10 +601,18 @@ export function createMaintenanceWorker(
               signal.throwIfAborted()
               reviewedSources.push(...added)
               recordMemoryUsageEvent('idle', 'retrieved', added.length)
-              recordDreamStep('generating', 'Gezielt nachgeladen', `${added.length} zusätzliche Quellen · ${reviewedSources.length} insgesamt`)
+              recordDreamStep(
+                'generating',
+                'Gezielt nachgeladen',
+                `${added.length} zusätzliche Quellen · ${reviewedSources.length} insgesamt`
+              )
               if (added.length) recordDreamDecision('read', traceTargets(added), 'Gezielte lokale Belegsuche')
-              prompt = maintenanceContextPrompt(work.hydrated.kind, reviewedSources, remaining,
-                added.length ? 'added' : 'no_matching_evidence')
+              prompt = maintenanceContextPrompt(
+                work.hydrated.kind,
+                reviewedSources,
+                remaining,
+                added.length ? 'added' : 'no_matching_evidence'
+              )
             }
             work.evidence = reviewedSources
             if (job.task === 'memory') {
@@ -588,8 +623,7 @@ export function createMaintenanceWorker(
             }
             // Context packages condense; they may cite only what the sources contain. Rewrites keep everything.
             if (job.task !== 'memory') assertPreservedReferences(reviewedSources, output, 'summary')
-            const labelOf = (id: string) =>
-              reviewedSources.find(source => source.id === id)?.content.slice(0, 72)
+            const labelOf = (id: string) => reviewedSources.find(source => source.id === id)?.content.slice(0, 72)
             if (work.changes) {
               let created = 0
               for (const operation of work.changes.operations) {
