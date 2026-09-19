@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import source from '@/features/memory/MemoryDreamPanel.vue?raw'
 import * as DreamApi from '@/services/memory/dreamTrace'
 import * as FailureApi from '@/services/inference/localFailure'
+import * as IdleRecoveryApi from '@/services/inference/idleRecovery'
 import type { DreamView } from '@/features/memory/MemoryGraphView.vue'
 
 const status = shallowRef({ phase: 'waiting', reason: 'activity' })
@@ -37,6 +38,7 @@ runInNewContext(
       if (id === 'vue') return VueRuntime
       if (id === '@/services/memory/dreamTrace') return DreamApi
       if (id === '@/services/inference/localFailure') return FailureApi
+      if (id === '@/services/inference/idleRecovery') return IdleRecoveryApi
       if (id === '@/services/agents/idleOptimization') return idleApi
       if (id === '@/services/agents/idleMaintenanceWorker')
         return { maintenanceProgress: shallowRef({ queued: 30, blocked: 0, checked: 0, changed: 0 }) }
@@ -144,6 +146,16 @@ afterEach(() => {
 })
 
 describe('dream panel lifecycle', () => {
+  it('shows a recoverable model wait instead of reporting broken memory', async () => {
+    const panel = await mount()
+    await panel.updateRun('interrupted', 'idle_model_cooldown')
+    status.value = { phase: 'paused', reason: 'idle_model_cooldown' }
+    await nextTick()
+    expect(text(panel.root)).toContain('Modell-Abkühlphase')
+    expect(text(panel.root)).toContain('automatische Wiederholung')
+    expect(panel.message()).not.toContain('Traum fehlgeschlagen')
+  })
+
   it('replaces the running banner when preparation fails, including a later trace settlement', async () => {
     const panel = await mount()
     await panel.updateRun()

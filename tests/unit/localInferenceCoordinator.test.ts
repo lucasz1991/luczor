@@ -179,6 +179,7 @@ function makeHarness(verified: VerifiedLocalModelManifest, serverInstance = 'htt
     dependencies,
     prepareModel,
     requests,
+    transport,
     advance(ms: number) {
       nowMs += ms
     },
@@ -475,6 +476,118 @@ describe('explicit specialist routing preference', () => {
 })
 
 describe('local inference coordinator and approved external gateway', () => {
+  it('renews an expiring signed catalog before idle scope capture and never starts a model', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    await harness.coordinator.initialize(bootstrap())
+    harness.advance(29 * 60_000)
+    vi.mocked(harness.dependencies.verifyManifest).mockResolvedValue({ ...verified, expiresAt: '2026-08-30T14:00:00Z' })
+    vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue({
+      ...hardware(),
+      capturedAtMs: harness.dependencies.now().getTime(),
+    })
+    await harness.coordinator.refreshIdlePolicy(new AbortController().signal)
+    expect(harness.dependencies.bootstrap).toHaveBeenCalledOnce()
+    expect(harness.dependencies.manifestSession).toHaveBeenCalledWith(expect.any(Number))
+    expect(harness.coordinator.status().manifest?.expiresAt).toBe('2026-08-30T14:00:00Z')
+    expect(harness.prepareModel).not.toHaveBeenCalled()
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('does not rotate a busy catalog and bounds retries when the server repeats an expiring catalog', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    await harness.coordinator.initialize(bootstrap())
+    harness.advance(29 * 60_000)
+    const busy = vi.spyOn(harness.dependencies.manager, 'hasActiveWork').mockReturnValue(true)
+    await expect(harness.coordinator.refreshIdlePolicy(new AbortController().signal)).rejects.toThrow('idle_model_busy')
+    expect(harness.dependencies.bootstrap).not.toHaveBeenCalled()
+    busy.mockReturnValue(false)
+    vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue({
+      ...hardware(),
+      capturedAtMs: harness.dependencies.now().getTime(),
+    })
+    await expect(harness.coordinator.refreshIdlePolicy(new AbortController().signal)).rejects.toThrow(
+      'idle_catalog_refresh_wait'
+    )
+    await expect(harness.coordinator.refreshIdlePolicy(new AbortController().signal)).rejects.toThrow(
+      'idle_catalog_refresh_wait'
+    )
+    expect(harness.dependencies.bootstrap).toHaveBeenCalledOnce()
+    const abort = new AbortController()
+    abort.abort()
+    await expect(harness.coordinator.refreshIdlePolicy(abort.signal)).rejects.toMatchObject({ name: 'AbortError' })
+    expect(harness.dependencies.bootstrap).toHaveBeenCalledOnce()
+  })
+
+  it('recovers a degraded resident through verified preparation without clearing failure counters early', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    harness.dependencies.prepareResidentModel = vi.fn(harness.prepareModel.getMockImplementation()!)
+    await harness.coordinator.initialize(bootstrap())
+    const route = await harness.coordinator.resolveTurn({
+      projectId: 'p1',
+      routingSettings: { preference: 'local_only' },
+    })
+    const model = verified.models.find(item => item.id === route.decision!.modelReleaseId)!
+    vi.mocked(harness.transport.stream).mockRejectedValueOnce(
+      new LocalInferenceError('failed', 'runtime_stream_failed', true, false)
+    )
+    await expect(route.gateway.streamChatWithTools(basicRequest)).rejects.toThrow()
+    expect(harness.dependencies.manager.getHealth(model)).toMatchObject({ state: 'degraded', consecutiveFailures: 1 })
+    const gateway = await harness.coordinator.residentOptimizationGateway('p1', model.id, new AbortController().signal)
+    expect(harness.dependencies.prepareResidentModel).toHaveBeenCalledOnce()
+    expect(harness.dependencies.manager.getHealth(model).consecutiveFailures).toBe(1)
+    await expect(gateway.streamChatWithTools({ ...basicRequest, taskType: 'context.optimize' })).resolves.toMatchObject(
+      { content: 'lokal' }
+    )
+    expect(harness.dependencies.manager.getHealth(model)).toMatchObject({ state: 'ready', consecutiveFailures: 0 })
+    expect(proxy).not.toHaveBeenCalled()
+  })
+
+  it('renews evidence between draft and review using the full idle deadline headroom', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    harness.dependencies.prepareResidentModel = vi.fn(harness.prepareModel.getMockImplementation()!)
+    await harness.coordinator.initialize(bootstrap())
+    const route = await harness.coordinator.resolveTurn({
+      projectId: 'p1',
+      routingSettings: { preference: 'local_only' },
+    })
+    harness.advance(8 * 60_000) // 120s left: formerly admitted with only 65s headroom.
+    vi.mocked(harness.dependencies.hardwareSnapshot).mockResolvedValue({
+      ...hardware(),
+      capturedAtMs: harness.dependencies.now().getTime(),
+    })
+    await harness.coordinator.residentOptimizationGateway(
+      'p1',
+      route.decision!.modelReleaseId!,
+      new AbortController().signal
+    )
+    expect(harness.dependencies.prepareResidentModel).toHaveBeenCalledOnce()
+  })
+
+  it.each(['busy', 'cooldown'] as const)('defers %s models without probing or resetting their health', async state => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    harness.dependencies.prepareResidentModel = vi.fn(harness.prepareModel.getMockImplementation()!)
+    await harness.coordinator.initialize(bootstrap())
+    vi.spyOn(harness.dependencies.manager, 'getHealth').mockReturnValue({
+      modelReleaseId: verified.routing.defaultModelId,
+      state,
+      consecutiveFailures: 2,
+      updatedAt: '',
+    })
+    await expect(
+      harness.coordinator.residentOptimizationGateway(
+        'p1',
+        verified.routing.defaultModelId,
+        new AbortController().signal
+      )
+    ).rejects.toThrow(`idle_model_${state}`)
+    expect(harness.dependencies.prepareResidentModel).not.toHaveBeenCalled()
+  })
+
   it.each([9 * 60_000, 10 * 60_000])(
     'renews resident readiness after %d ms without cold-start permission',
     async elapsed => {

@@ -2,6 +2,7 @@ import type { BootstrapResponse, LuczorApiConfigSnapshot } from '@/services/api/
 import { localResources, onLocalResourcesApplied, onLocalRuntimeReleased } from './resources'
 import { localModelManifestWithApiConfig, LuczorApi } from '@/services/api/luczorApi'
 import { modelPlatformTarget } from './modelPlatform'
+import { IDLE_READINESS_HEADROOM_MS } from './idleRecovery'
 import {
   deriveLocalModelManifestTrustDomain,
   getVerifiedAccountSnapshot,
@@ -600,6 +601,7 @@ export class LocalInferenceCoordinator {
   private account?: VerifiedAccountSnapshot
   private assessments = new Map<string, CapacityAssessment>()
   private lastMemoryRecoveryAt = -Infinity
+  private lastIdlePolicyRefreshAt = -Infinity
   private readiness = new Map<string, LocalReadinessEvidence>()
   private preparationFailures = new Map<string, string>()
   /** Retryable preparation attempts per release, bounded by its signed health policy. */
@@ -613,6 +615,28 @@ export class LocalInferenceCoordinator {
   private recovery?: { generation: number; diagnoseUnavailable: boolean; promise: Promise<InferenceConnectionResult> }
 
   constructor(private readonly dependencies: LocalInferenceCoordinatorDependencies) {}
+
+  /** Caller holds the idle resource barrier; refresh before capturing any maintenance scope. */
+  async refreshIdlePolicy(signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted()
+    const now = this.dependencies.now().getTime()
+    const expiring =
+      this.mode === 'active' && this.manifest && Date.parse(this.manifest.expiresAt) <= now + IDLE_READINESS_HEADROOM_MS
+    const retryOffline = this.mode === 'blocked' && this.reason === 'server_unreachable'
+    if (!expiring && !retryOffline) return
+    if (this.dependencies.manager.hasActiveWork() || this.preparation) throw new Error('idle_model_busy')
+    if (now - this.lastIdlePolicyRefreshAt < 120_000) throw new Error('idle_catalog_refresh_wait')
+    this.lastIdlePolicyRefreshAt = now
+    // Existing bootstrap verifies account, signature, versions and native catalog acceptance.
+    const result = await this.reinitialize()
+    signal.throwIfAborted()
+    if (!result.ok) throw new Error('idle_catalog_unavailable')
+    if (
+      !this.manifest ||
+      Date.parse(this.manifest.expiresAt) <= this.dependencies.now().getTime() + IDLE_READINESS_HEADROOM_MS
+    )
+      throw new Error('idle_catalog_refresh_wait')
+  }
 
   /** Called only behind the whole-job resource barrier; never between tool rounds. */
   async unloadResidentForModelChange(selectedModelId: string | null, onUnloading: (id: string) => void): Promise<void> {
@@ -1031,13 +1055,19 @@ export class LocalInferenceCoordinator {
         this.assessments.get(id)?.status !== 'eligible'
       )
         continue
-      if (['busy', 'cooldown', 'error'].includes(this.dependencies.manager.getHealth(model).state)) continue
+      const health = this.dependencies.manager.getHealth(model)
+      if (health.state === 'busy' || health.state === 'cooldown') {
+        failure = health.state === 'busy' ? 'idle_model_busy' : 'idle_model_cooldown'
+        continue
+      }
       if (
+        health.state !== 'degraded' &&
+        health.state !== 'error' &&
         hasVerifiedLocalReadiness(
           model,
           this.readiness.get(id),
           manifest.payloadSha256,
-          this.dependencies.now().getTime() + 65_000
+          this.dependencies.now().getTime() + IDLE_READINESS_HEADROOM_MS
         )
       )
         return id
@@ -1054,7 +1084,7 @@ export class LocalInferenceCoordinator {
             model,
             evidence,
             manifest.payloadSha256,
-            this.dependencies.now().getTime() + 65_000
+            this.dependencies.now().getTime() + IDLE_READINESS_HEADROOM_MS
           )
         )
           throw new Error('stale_preparation')
@@ -1077,23 +1107,35 @@ export class LocalInferenceCoordinator {
     throw new Error(failure ?? 'installed_model_unavailable')
   }
 
-  async residentOptimizationGateway(projectId: string, modelId: string): Promise<InferenceGateway> {
+  async residentOptimizationGateway(
+    projectId: string,
+    modelId: string,
+    signal?: AbortSignal
+  ): Promise<InferenceGateway> {
     const generation = this.generation
     this.requireActiveGeneration(generation)
+    // Explicit idle callers can renew residency, never cold-start or switch releases here.
+    // Keep manager failure counters: only a successful generation establishes recovery.
+    if (signal) {
+      signal.throwIfAborted()
+      await this.prepareInstalledOptimizationModel(signal, modelId)
+      this.requireActiveGeneration(generation)
+      signal.throwIfAborted()
+    }
     const manifest = this.manifest!
     const release = manifest.models.find(model => model.id === modelId)
     const readiness = this.readiness.get(modelId)
     if (
-      Date.parse(manifest.expiresAt) <= this.dependencies.now().getTime() + 65_000 ||
+      Date.parse(manifest.expiresAt) <= this.dependencies.now().getTime() + IDLE_READINESS_HEADROOM_MS ||
       !hasVerifiedLocalReadiness(
         release,
         readiness,
         manifest.payloadSha256,
-        this.dependencies.now().getTime() + 65_000
+        this.dependencies.now().getTime() + IDLE_READINESS_HEADROOM_MS
       ) ||
       !release ||
       !readiness ||
-      ['busy', 'cooldown', 'error', 'degraded'].includes(this.dependencies.manager.getHealth(release).state)
+      (!signal && ['error', 'degraded'].includes(this.dependencies.manager.getHealth(release).state))
     ) {
       throw new LocalInferenceError(
         'Leerlaufoptimierung wartet auf ein bereits bereites lokales Modell.',
@@ -1102,11 +1144,20 @@ export class LocalInferenceCoordinator {
         false
       )
     }
+    const health = this.dependencies.manager.getHealth(release)
+    if (health.state === 'busy' || health.state === 'cooldown')
+      throw new LocalInferenceError(
+        'Lokales Modell wartet auf Freigabe.',
+        health.state === 'busy' ? 'idle_model_busy' : 'idle_model_cooldown',
+        true,
+        false
+      )
     const digest =
       this.localScope?.projectId === projectId
         ? this.localScope.digest
         : await this.scopeDigest({ projectId }, generation)
     this.requireActiveGeneration(generation)
+    signal?.throwIfAborted()
     return this.dependencies.manager.gateway(release, readiness, this.catalogBinding!, digest, true)
   }
 

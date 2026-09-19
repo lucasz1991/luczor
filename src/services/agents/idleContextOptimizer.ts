@@ -4,6 +4,8 @@
  * Foreground admission waits for actual inference cancellation/cleanup, never
  * merely for an abort signal or a timeout race.
  */
+import { idleWaitReason } from '@/services/inference/idleRecovery'
+
 export type IdleOptimizationJob = Readonly<{
   key: string
   fingerprint: string
@@ -374,10 +376,11 @@ export class IdleContextOptimizer {
         completed: this.state.completed + 1,
         lastCompletedAt: this.now(),
       })
-    } catch {
+    } catch (error) {
       if (!signal.aborted) {
-        this.publish({ phase: 'cooldown', reason: 'failed' })
-        this.earliestCycle = this.now() + this.options.errorBackoffMs
+        const waiting = idleWaitReason(error)
+        this.publish({ phase: waiting ? 'paused' : 'cooldown', reason: waiting ?? 'failed' })
+        this.earliestCycle = this.now() + (waiting ? this.options.intervalMs : this.options.errorBackoffMs)
       } else if (this.state.reason === 'timeout') {
         this.earliestCycle = this.now() + this.options.errorBackoffMs
       }

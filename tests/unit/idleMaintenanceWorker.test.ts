@@ -98,6 +98,32 @@ async function run(optimizer: ReturnType<typeof createMaintenanceWorker>) {
   await vi.waitFor(() => expect(['cooldown', 'paused']).toContain(optimizer.snapshot().phase))
 }
 describe('mounted persistent maintenance worker', () => {
+  it.each(['idle_model_busy', 'idle_model_cooldown', 'model_cooldown', 'resource_background_unavailable'])(
+    'defers %s without burning source retries or closing the quality gate',
+    async reason => {
+      const testCase = setup()
+      fixture.journal!.quality = {
+        policy: 'test',
+        passed: true,
+        modelId: 'installed',
+        at: Date.now(),
+        reason: 'passed',
+      }
+      const quality = structuredClone(fixture.journal!.quality)
+      testCase.deps.prepare = vi.fn(async () => {
+        throw new Error(reason)
+      })
+      const optimizer = testCase.create()
+      await run(optimizer)
+      expect(optimizer.snapshot()).toMatchObject({ phase: 'paused', reason })
+      expect(fixture.journal!.jobs.some(job => job.status === 'retry')).toBe(true)
+      expect(fixture.journal!.jobs.every(job => job.attempts === 0)).toBe(true)
+      expect(fixture.journal!.quality).toEqual(quality)
+      expect(fixture.writes).toHaveLength(0)
+      optimizer.stop()
+    }
+  )
+
   it('loads a missing local memory on request and binds and reviews all evidence before saving', async () => {
     const testCase = setup()
     testCase.stream.mockImplementation(async request => {

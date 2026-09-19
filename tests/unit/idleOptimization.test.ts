@@ -135,6 +135,7 @@ function fixture() {
   const remember = vi.fn<typeof idleOptimizationDependencies.remember>(async () => memory({ status: 'active' }))
   const deps: typeof idleOptimizationDependencies = {
     prepare: vi.fn(async () => 'local-1'),
+    refreshPolicy: vi.fn(async () => undefined),
     native: () => true,
     account: vi.fn(async () => account),
     preferences: vi.fn(async () => preferences),

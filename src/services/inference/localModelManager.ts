@@ -147,6 +147,10 @@ export class LocalModelManager {
     return { ...current }
   }
 
+  hasActiveWork(): boolean {
+    return this.slotOccupied || this.active.size > 0 || this.waiters.length > 0
+  }
+
   /** Abort old JS turns before the native catalog/session boundary rotates. */
   invalidateCatalogBoundary(): void {
     localModelDiagnostics.clear()

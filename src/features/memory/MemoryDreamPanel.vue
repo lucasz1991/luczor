@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { IDLE_WAIT_LABELS } from '@/services/inference/idleRecovery'
 import type { DreamView } from './MemoryGraphView.vue'
 import {
   DREAM_OPERATION_LABELS,
@@ -36,6 +37,7 @@ const PHASES: Record<string, string> = {
   cooldown: 'Ruht kurz',
 }
 const REASONS: Record<string, string> = {
+  ...IDLE_WAIT_LABELS,
   ...DREAM_SKIP_LABELS,
   gathering_sources: 'Quellen werden gesammelt',
   no_context: 'Nichts zu pflegen',
@@ -114,6 +116,7 @@ const FAILURES: Record<string, string> = {
   installed_model_required: 'Kein installiertes lokales Modell verfügbar',
   local_only_required: 'Nur ein lokales Modell darf träumen',
   idle_model_not_ready: 'Lokales Modell noch nicht bereit',
+  idle_catalog_unavailable: 'Modellkatalog konnte nicht sicher erneuert werden. Verbindung und Modellfreigabe prüfen.',
   scope_changed: 'Konto, Projekt oder Sitzung haben gewechselt',
   stale_source: 'Quellen haben sich während des Laufs geändert',
   stale_job: 'Auftrag wurde inzwischen ersetzt',
@@ -123,6 +126,7 @@ const FAILURES: Record<string, string> = {
   memory_disabled: 'Automatisches Erinnern ist ausgeschaltet',
   timeout: 'Zeitlimit überschritten',
   resource_background_unavailable: 'Modell war belegt',
+  ...IDLE_WAIT_LABELS,
   idle_preparation_unavailable: 'Modellvorbereitung war belegt oder nicht verfügbar. Nach Abschluss erneut starten.',
   idle_preparation_unsupported:
     'Installierter Modellstart wird von dieser App-Version nicht unterstützt. Desktop-App aktualisieren.',

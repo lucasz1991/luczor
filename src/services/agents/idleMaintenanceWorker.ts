@@ -1,4 +1,5 @@
 import { shallowRef } from 'vue'
+import { idleWaitReason } from '@/services/inference/idleRecovery'
 import type { Message, Project } from '@/state/types'
 import { executionGate } from '@/services/executionGate'
 import { luczorMemory } from '@/services/memory/luczorMemory'
@@ -384,6 +385,7 @@ export function createMaintenanceWorker(
         if (!deps.native()) return no('native_required')
         if (!enabled()) return no('disabled')
         if (context.busy() || (!running && deps.resources.hasWork())) return no('foreground')
+        if (!running && (await deps.preferences()).autoRemember) await deps.refreshPolicy?.(signal)
         const current = await scope(signal)
         const [prefs, status, metrics] = await Promise.all([deps.preferences(), deps.status(), deps.metrics()])
         signal.throwIfAborted()
@@ -541,7 +543,11 @@ export function createMaintenanceWorker(
             const generate = async (prompt: string, includedSources = 0, maxOutputTokens = 768) => {
               signal.throwIfAborted()
               const stepSignal = AbortSignal.any([signal, AbortSignal.timeout(125_000)])
-              const gateway = await deps.gateway(job.projectId ?? context.project()?.id ?? 'memory-user', modelId)
+              const gateway = await deps.gateway(
+                job.projectId ?? context.project()?.id ?? 'memory-user',
+                modelId,
+                stepSignal
+              )
               if (gateway.target !== 'local_llama_cpp') throw new Error('local_only_required')
               stepSignal.throwIfAborted()
               // Count submitted evidence, not successful output or presumed answer use.
@@ -743,6 +749,8 @@ export function createMaintenanceWorker(
         }
       },
       async settled(job, success, interrupted) {
+        const deferred = !success && !!idleWaitReason(lastFailure)
+        interrupted ||= deferred
         endDreamRun(success ? 'success' : interrupted ? 'interrupted' : 'failed', success ? undefined : lastFailure)
         lastFailure = ''
         if (!success)

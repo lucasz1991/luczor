@@ -91,10 +91,12 @@ export const idleOptimizationDependencies = {
   status: readLocalModelStatus,
   metrics: readSystemMetrics,
   policy: () => localInferenceCoordinator.status(),
+  refreshPolicy: (signal: AbortSignal) =>
+    localResources.inspectIdle(() => localInferenceCoordinator.refreshIdlePolicy(signal)),
   prepare: (signal: AbortSignal, residentModelId?: string) =>
     localInferenceCoordinator.prepareInstalledOptimizationModel(signal, residentModelId),
-  gateway: (projectId: string, modelId: string) =>
-    localInferenceCoordinator.residentOptimizationGateway(projectId, modelId),
+  gateway: (projectId: string, modelId: string, signal?: AbortSignal) =>
+    localInferenceCoordinator.residentOptimizationGateway(projectId, modelId, signal),
   recall: luczorMemory.recallLocal.bind(luczorMemory),
   candidates: luczorMemory.listCandidates.bind(luczorMemory),
   sharedRecall: luczorMemory.recall.bind(luczorMemory),
