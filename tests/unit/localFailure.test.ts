@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   describeLocalFailureDiagnostic,
   readLocalFailureDiagnostic,
+  localFailureTraceCode,
   type LocalFailureDiagnostic,
 } from '@/services/inference/localFailure'
 
@@ -15,6 +16,17 @@ const diagnostic: LocalFailureDiagnostic = {
 }
 
 describe('public local inference failure diagnostics', () => {
+  it.each(['connection', 'response_body', 'transport_timeout', 'invalid_stream', 'incomplete_stream', 'event_channel'])(
+    'keeps safe stream reason %s visible in the maintenance trace',
+    reason => {
+      const value = { schemaVersion: 1, stage: 'generation', code: 'runtime_stream_failed', reason }
+      expect(localFailureTraceCode({ diagnostic: value })).toBe(`runtime_stream_failed:${reason}`)
+      expect(describeLocalFailureDiagnostic(readLocalFailureDiagnostic(value)!)).not.toContain(
+        'Fehlerstufe nicht gemeldet'
+      )
+      expect(localFailureTraceCode({ diagnostic: { ...value, reason: 'PRIVATE' } })).toBeUndefined()
+    }
+  )
   it('projects only known metadata and measured counters, never raw errors or parameter values', () => {
     const decoded = readLocalFailureDiagnostic({
       ...diagnostic,

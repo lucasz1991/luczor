@@ -32,6 +32,12 @@ const reasons = [
   'authentication',
   'model_unavailable',
   'server',
+  'connection',
+  'response_body',
+  'transport_timeout',
+  'invalid_stream',
+  'incomplete_stream',
+  'event_channel',
   'unclassified',
 ] as const
 const parameters = [
@@ -63,6 +69,12 @@ const parameters = [
 
 export type LocalFailureCode = (typeof failureCodes)[number]
 export type LocalFailureParameter = (typeof parameters)[number]
+export function localFailureTraceCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object' || !('diagnostic' in error)) return
+  const diagnostic = readLocalFailureDiagnostic(error.diagnostic)
+  if (diagnostic?.code === 'runtime_stream_failed' && diagnostic.reason !== 'unclassified')
+    return `${diagnostic.code}:${diagnostic.reason}`
+}
 export type LocalFailureDiagnostic = {
   schemaVersion: 1
   stage: (typeof stages)[number]
@@ -125,6 +137,14 @@ const stageLabels: Record<LocalFailureDiagnostic['stage'], string> = {
   unknown: 'Fehlerstufe nicht gemeldet',
 }
 const reasonDescriptions: Record<LocalFailureDiagnostic['reason'], string> = {
+  connection: 'Die Verbindung zur lokalen Runtime konnte nicht aufgebaut werden.',
+  response_body:
+    'Der HTTP-Antwortstrom der lokalen Runtime brach während des Lesens ab. Das belegt weder einen RAM-Mangel noch einen Modellabsturz.',
+  transport_timeout: 'Der lokale HTTP-Transport hat sein Zeitlimit erreicht.',
+  invalid_stream: 'Die lokale Runtime lieferte ungültiges UTF-8 oder ungültige JSON-Streamdaten.',
+  incomplete_stream:
+    'Die lokale Runtime beendete den Stream ohne bestätigten Antwortabschluss. Das Teilergebnis wird nicht gespeichert.',
+  event_channel: 'Der Ausgabekanal zwischen nativer Runtime und App wurde geschlossen.',
   context_limit:
     'Der Auftrag überschreitet das verfügbare Kontextfenster. Kontextumfang und Antwortreserve prüfen; große Inhalte abschnittsweise bearbeiten.',
   message_order:

@@ -330,6 +330,86 @@ mod tests {
     }
 
     #[test]
+    fn response_body_failure_after_terminal_choice_preserves_completed_answer_only() {
+        struct FailingTrailer(std::io::Cursor<Vec<u8>>);
+        impl Read for FailingTrailer {
+            fn read(&mut self, bytes: &mut [u8]) -> io::Result<usize> {
+                let count = self.0.read(bytes)?;
+                if count == 0 {
+                    Err(io::Error::other("Local HTTP response body failed."))
+                } else {
+                    Ok(count)
+                }
+            }
+        }
+        for terminal in [false, true] {
+            let frame = serde_json::json!({"choices":[{"delta":{"content":"Synthetic evidence"},
+                "finish_reason":if terminal { Some("stop") } else { None }}]});
+            let reader = FailingTrailer(std::io::Cursor::new(
+                format!("data: {frame}\n\n").into_bytes(),
+            ));
+            let result = super::super::parse_sse(
+                reader,
+                &idle_request(),
+                Arc::new(AtomicBool::new(false)),
+                &tauri::ipc::Channel::new(|_| Ok(())),
+            );
+            if terminal {
+                assert_eq!(result.unwrap().content, "Synthetic evidence");
+            } else {
+                let failure = result.unwrap_err();
+                assert_eq!(
+                    serde_json::to_value(failure.diagnostic).unwrap()["reason"],
+                    "response_body"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stream_failure_projection_keeps_fixed_causes_without_echoing_raw_errors() {
+        for (message, reason) in [
+            ("Local HTTP connection failed.", "connection"),
+            ("Local HTTP response body failed.", "response_body"),
+            ("Local HTTP transport timed out.", "transport_timeout"),
+            (
+                "Local llama.cpp emitted invalid SSE JSON.",
+                "invalid_stream",
+            ),
+            (
+                "Local llama.cpp stream ended without a terminal marker.",
+                "incomplete_stream",
+            ),
+            ("Local inference event channel closed.", "event_channel"),
+            ("PRIVATE credential prompt", "unclassified"),
+        ] {
+            let failure = super::super::LocalInferenceFailure::stream(message);
+            let diagnostic = serde_json::to_value(failure.diagnostic).unwrap();
+            assert_eq!(diagnostic["reason"], reason);
+            assert!(!diagnostic.to_string().contains("PRIVATE"));
+        }
+    }
+
+    #[test]
+    fn terminal_choice_does_not_override_explicit_cancellation() {
+        let cancel = Arc::new(AtomicBool::new(false));
+        let channel_cancel = cancel.clone();
+        let channel = tauri::ipc::Channel::new(move |_| {
+            channel_cancel.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        let frame = b"data: {\"choices\":[{\"delta\":{\"content\":\"Synthetic\"},\"finish_reason\":\"stop\"}]}\n\n";
+        let failure = super::super::parse_sse(
+            std::io::Cursor::new(frame),
+            &idle_request(),
+            cancel,
+            &channel,
+        )
+        .unwrap_err();
+        assert_eq!(failure.public_message, "Local inference was cancelled.");
+    }
+
+    #[test]
     fn idle_completion_observes_each_delta_before_finish_and_can_outlast_first_progress_deadline() {
         use serde_json::json;
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

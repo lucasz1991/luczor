@@ -338,7 +338,7 @@ const hoverAdjacent = computed(() => {
   return set
 })
 /* Deterministic star field and orbit rings give the knowledge space depth; positions never change. */
-type Star = { left: number; top: number; radius: number; delay: number; duration: number; far: boolean }
+type Star = { left: number; top: number; radius: number; far: boolean }
 const stars: readonly Star[] = (() => {
   let seed = 0x9e3779b1
   const next = () => {
@@ -349,24 +349,14 @@ const stars: readonly Star[] = (() => {
     left: Math.round(next() * 800 * 10) / 10,
     top: Math.round(next() * 500 * 10) / 10,
     radius: Math.round((0.4 + next() * 1.1) * 100) / 100,
-    delay: Math.round(next() * 9000),
-    duration: 4200 + Math.round(next() * 6000),
     far: index % 3 !== 0,
   }))
 })()
 const ORBIT_RINGS = [
-  { rx: 150, ry: 46, duration: 52, reverse: false },
-  { rx: 235, ry: 74, duration: 78, reverse: true },
-  { rx: 320, ry: 102, duration: 110, reverse: false },
+  { rx: 150, ry: 46 },
+  { rx: 235, ry: 74 },
+  { rx: 320, ry: 102 },
 ] as const
-/* Nodes play their entrance whenever a different graph arrives, never on every rotation frame. */
-const sceneEntrance = ref(0)
-watch(
-  () => [props.graph.nodes.length, props.graph.nodes[0]?.id ?? '', props.graph.edges.length] as const,
-  () => {
-    sceneEntrance.value++
-  }
-)
 const systemCount = computed(() => {
   const counts = new Map<string, number>()
   for (const node of props.graph.nodes) {
@@ -677,10 +667,6 @@ function buildEntry(point: Point): Entry {
   }
   const style: Record<string, number | string> = { '--dp': point.dp }
   if (!point.model) Object.assign(style, systemPaints(point.system))
-  if (!props.ambient) {
-    // Stagger the entrance by depth so the space builds from the back to the front.
-    style['--enter-delay'] = `${Math.round(120 + (1 - point.depthT) * 420)}ms`
-  }
   const wave = waveFactor.value.get(point.id)
   if (wave !== undefined) style['--wave-f'] = wave
   const pill = pillFor(point)
@@ -1457,7 +1443,6 @@ onBeforeUnmount(() => {
             :cx="star.left"
             :cy="star.top"
             :r="star.radius"
-            :style="{ '--twinkle-delay': `${star.delay}ms`, '--twinkle': `${star.duration}ms` }"
           />
         </g>
         <g class="orbits">
@@ -1465,13 +1450,12 @@ onBeforeUnmount(() => {
             v-for="(ring, index) in ORBIT_RINGS"
             :key="index"
             class="orbit"
-            :class="{ 'orbit--reverse': ring.reverse }"
             cx="400"
             cy="262"
             :rx="ring.rx"
             :ry="ring.ry"
             pathLength="100"
-            :style="{ '--orbit': `${ring.duration}s`, '--orbit-index': index }"
+            :style="{ '--orbit-index': index }"
           />
         </g>
       </g>
@@ -1574,7 +1558,7 @@ onBeforeUnmount(() => {
         <ellipse class="wave-ring wave-ring--b" rx="12" ry="7.4" @animationend="endWave" />
       </g>
       <!-- L6 nodes -->
-      <g :key="sceneEntrance" class="nodes" :class="{ 'nodes--enter': !ambient }">
+      <g class="nodes">
         <g
           v-for="entry in entries.regular"
           :key="entry.point.id"
@@ -1854,13 +1838,11 @@ onBeforeUnmount(() => {
   display: none;
 }
 /* ------------------------------------------------------------------ quiet space */
-/* Nothing in use: stars, rings, currents, the model core and the orb all stand still.
- * The node entrance keeps its one-shot so a scene never freezes half-faded. */
-.memory-graph.is-quiet svg *:not(.nodes--enter > g[data-node]) {
+/* Nothing in use: the model core, its ring and the orb halo stand still. Items themselves never
+ * fade in or out; only usage, creation, change and removal are highlighted on the affected nodes,
+ * edges and links (their own state classes below). */
+.memory-graph.is-quiet :is(.core-halo, .core-body, .core-ring, .model .ring, .orb-anchor *) {
   animation-play-state: paused;
-}
-.memory-graph.is-quiet .star {
-  opacity: 0.16;
 }
 /* Who touches a memory: chat (accent), dream (mint), agent (amber), team (rosé), workflow (sky). */
 .link--from-idle {
@@ -1889,50 +1871,21 @@ onBeforeUnmount(() => {
 }
 
 /* ------------------------------------------------------------------ space layer */
+/* Static depth cues: stars and orbit rings never move by themselves. */
 .star {
   fill: var(--mg-light);
-  opacity: 0.22;
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: mg-twinkle var(--twinkle, 6s) ease-in-out var(--twinkle-delay, 0ms) infinite alternate;
+  opacity: 0.18;
 }
 .star--far {
-  opacity: 0.12;
+  opacity: 0.1;
 }
 .orbit {
   fill: none;
-  stroke: color-mix(in srgb, var(--ai-accent) 26%, transparent);
+  stroke: color-mix(in srgb, var(--ai-accent) 22%, transparent);
   stroke-width: 0.7px;
   stroke-dasharray: 0.6 2.2;
   vector-effect: non-scaling-stroke;
-  opacity: calc(0.55 - var(--orbit-index, 0) * 0.14);
-  animation: mg-orbit var(--orbit, 60s) linear infinite;
-}
-.orbit--reverse {
-  animation-direction: reverse;
-}
-.is-dragging .orbit,
-.is-reduced .orbit,
-.is-reduced .star {
-  animation-play-state: paused;
-}
-@keyframes mg-twinkle {
-  from {
-    opacity: 0.08;
-    transform: scale(0.8);
-  }
-  to {
-    opacity: 0.42;
-    transform: scale(1.25);
-  }
-}
-@keyframes mg-orbit {
-  from {
-    stroke-dashoffset: 0;
-  }
-  to {
-    stroke-dashoffset: -100;
-  }
+  opacity: calc(0.45 - var(--orbit-index, 0) * 0.12);
 }
 .orb-anchor {
   cursor: pointer;
@@ -1955,26 +1908,6 @@ onBeforeUnmount(() => {
 .orb-anchor.is-dreaming :deep(.thinking-orb__halo) {
   animation: mg-breathe 3s ease-in-out infinite alternate;
 }
-/* Entrance: nodes bloom from the back to the front once per scene. */
-.nodes--enter g[data-node] {
-  animation: mg-enter 720ms var(--mg-ease) var(--enter-delay, 0ms) both;
-}
-.is-reduced .nodes--enter g[data-node] {
-  animation: none;
-}
-@keyframes mg-enter {
-  from {
-    opacity: 0;
-    filter: blur(6px);
-  }
-  60% {
-    filter: blur(0);
-  }
-  to {
-    opacity: 1;
-    filter: blur(0);
-  }
-}
 /* Hover: the node and its neighbourhood step forward, the rest recedes. */
 .memory-graph.has-hover .nodes g[data-node]:not(.is-hover):not(.is-hover-near):not(.selected):not(.model) {
   opacity: 0.38;
@@ -1993,16 +1926,6 @@ onBeforeUnmount(() => {
 .memory-graph.has-hover .edges .edge--group {
   opacity: 0.35;
   transition: opacity 320ms var(--mg-ease);
-}
-/* Relations carry a slow current so the space never looks frozen. */
-.memory-graph:not(.is-ambient):not(.is-reduced) .edge--stored.is-near {
-  stroke-dasharray: 3 9;
-  animation: mg-current 4.5s linear infinite;
-}
-@keyframes mg-current {
-  to {
-    stroke-dashoffset: -48;
-  }
 }
 @keyframes mg-nebel {
   from {
@@ -2226,38 +2149,39 @@ svg:focus-visible {
   stroke-linecap: round;
   pointer-events: none;
 }
+/* Resting connections stay quiet; live links and selection draw the eye instead. */
 .edge--group {
-  stroke: color-mix(in srgb, var(--sys) 70%, var(--ai-faint));
+  stroke: color-mix(in srgb, var(--sys) 60%, var(--ai-faint));
   stroke-dasharray: 2 5;
-  stroke-width: 0.7;
-  opacity: 0.28;
+  stroke-width: 0.6;
+  opacity: 0.14;
 }
 .edge--group.is-near {
-  stroke-width: 0.8;
-  opacity: 0.3;
+  stroke-width: 0.7;
+  opacity: 0.17;
 }
 .edge--group.is-far {
-  stroke-width: 0.6;
-  opacity: 0.11;
+  stroke-width: 0.5;
+  opacity: 0.07;
 }
 .edge--spoke {
   stroke: var(--sys);
-  stroke-width: 0.9;
-  opacity: 0.32;
+  stroke-width: 0.7;
+  opacity: 0.16;
 }
 .edge--stored {
-  stroke: color-mix(in srgb, var(--sys) 70%, var(--ai-line-strong));
-  stroke-width: 0.9;
-  opacity: calc(0.36 * var(--mg-dim, 1));
+  stroke: color-mix(in srgb, var(--sys) 60%, var(--ai-line-strong));
+  stroke-width: 0.8;
+  opacity: calc(0.2 * var(--mg-dim, 1));
   pointer-events: stroke;
 }
 .edge--stored.is-near {
-  stroke-width: 1.1;
-  opacity: calc(0.55 * var(--mg-dim, 1));
+  stroke-width: 0.9;
+  opacity: calc(0.3 * var(--mg-dim, 1));
 }
 .edge--stored.is-far {
-  stroke-width: 0.7;
-  opacity: calc(0.2 * var(--mg-dim, 1));
+  stroke-width: 0.6;
+  opacity: calc(0.1 * var(--mg-dim, 1));
 }
 .edge--selected {
   stroke: var(--ai-accent);

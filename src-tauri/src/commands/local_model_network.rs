@@ -137,9 +137,14 @@ impl AsyncResponse {
                 Ok(Some(bytes.to_vec()))
             }
             Ok(None) => Ok(None),
-            Err(_) => {
+            Err(error) => {
                 self.count.fail();
-                Err("Local HTTP stream failed.".into())
+                Err(if error.is_timeout() {
+                    "Local HTTP transport timed out."
+                } else {
+                    "Local HTTP response body failed."
+                }
+                .into())
             }
         }
     }
@@ -152,9 +157,13 @@ pub(super) async fn send_async(request: reqwest::RequestBuilder) -> Result<Async
         .and_then(|body| body.as_bytes())
         .map_or(0, |bytes| bytes.len() as u64);
     let mut count = RequestCount::begin(&COUNTERS, bytes);
-    let response = client.execute(request).await.map_err(|_| {
+    let response = client.execute(request).await.map_err(|error| {
         count.fail();
-        "Local HTTP connection failed."
+        if error.is_timeout() {
+            "Local HTTP transport timed out."
+        } else {
+            "Local HTTP connection failed."
+        }
     })?;
     if !response.status().is_success() {
         count.fail();

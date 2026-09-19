@@ -6,6 +6,7 @@ import ts from 'typescript'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import source from '@/features/memory/MemoryDreamPanel.vue?raw'
 import * as DreamApi from '@/services/memory/dreamTrace'
+import * as FailureApi from '@/services/inference/localFailure'
 import type { DreamView } from '@/features/memory/MemoryGraphView.vue'
 
 const status = shallowRef({ phase: 'waiting', reason: 'activity' })
@@ -35,6 +36,7 @@ runInNewContext(
     require: (id: string) => {
       if (id === 'vue') return VueRuntime
       if (id === '@/services/memory/dreamTrace') return DreamApi
+      if (id === '@/services/inference/localFailure') return FailureApi
       if (id === '@/services/agents/idleOptimization') return idleApi
       if (id === '@/services/agents/idleMaintenanceWorker')
         return { maintenanceProgress: shallowRef({ queued: 30, blocked: 0, checked: 0, changed: 0 }) }

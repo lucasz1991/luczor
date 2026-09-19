@@ -21,6 +21,7 @@ import {
 import { maintenanceProgress } from '@/services/agents/idleMaintenanceWorker'
 import { luczorMemory } from '@/services/memory/luczorMemory'
 import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
+import { readLocalFailureDiagnostic, describeLocalFailureDiagnostic } from '@/services/inference/localFailure'
 
 const props = defineProps<{ dream: DreamView; trace: DreamTrace; projectId: string }>()
 const emit = defineEmits<{ focus: [target: DreamTarget] }>()
@@ -140,6 +141,15 @@ const FAILURES: Record<string, string> = {
     'Der lokale Modellschritt hat sein Gesamtzeitlimit erreicht. Es wurde kein Ergebnis übernommen.',
 }
 function failureLabel(code: string | undefined): string {
+  if (code?.startsWith('runtime_stream_failed:')) {
+    const detail = readLocalFailureDiagnostic({
+      schemaVersion: 1,
+      code: 'runtime_stream_failed',
+      stage: 'generation',
+      reason: code.slice('runtime_stream_failed:'.length),
+    })
+    if (detail) return describeLocalFailureDiagnostic(detail)
+  }
   if (!code) return 'Unbekannter Fehler'
   // `code` is a fixed identifier from our own parsers/runtime, not user input.
   // eslint-disable-next-line security/detect-object-injection

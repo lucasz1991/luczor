@@ -20,6 +20,7 @@ import {
   type MaintenanceJournal,
 } from '@/services/memory/maintenance'
 import { publicAnswerText } from '@/services/publicAnswerStream'
+import { localFailureTraceCode } from '@/services/inference/localFailure'
 import { IdleContextOptimizer, type IdleOptimizationJob } from './idleContextOptimizer'
 import type { idleOptimizationDependencies } from './idleOptimization'
 import { idleEmergencyOffload } from './idleOffloadSetting'
@@ -138,6 +139,8 @@ export function createMaintenanceWorker(
   let offloading = false
   let lastFailure = ''
   const failureCode = (error: unknown) => {
+    const detailed = localFailureTraceCode(error)
+    if (detailed) return detailed
     if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') return error.code
     return error instanceof Error ? error.message : String(error)
   }

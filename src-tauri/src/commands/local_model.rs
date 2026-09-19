@@ -591,12 +591,9 @@ impl LocalInferenceFailure {
         }
         Self {
             code: "runtime_stream_failed",
-            public_message: message,
             retryable: true,
-            diagnostic: failure_diagnostics::Diagnostic::new(
-                "runtime_stream_failed",
-                failure_diagnostics::Stage::Unknown,
-            ),
+            diagnostic: failure_diagnostics::Diagnostic::stream(&message),
+            public_message: message,
         }
     }
 
@@ -4481,7 +4478,25 @@ fn parse_sse_observed(
         if cancel.load(Ordering::SeqCst) {
             return Err("Local inference was cancelled.".into());
         }
-        let read = read_bounded_line(&mut reader, &mut line, 1024 * 1024)?;
+        let read = match read_bounded_line(&mut reader, &mut line, 1024 * 1024) {
+            Ok(read) => read,
+            // A declared final choice already completed the answer. A broken
+            // optional usage trailer must not turn it into a failed generation.
+            // Cancellation and all pre-finish failures still fail closed.
+            Err(error)
+                if completed
+                    && matches!(
+                        error.as_str(),
+                        "Local HTTP response body failed."
+                            | "Local HTTP stream failed."
+                            | "Local llama.cpp stream failed."
+                            | "Local HTTP transport timed out."
+                    ) =>
+            {
+                break
+            }
+            Err(error) => return Err(error.into()),
+        };
         if read == 0 {
             break;
         }
@@ -4765,6 +4780,9 @@ fn read_bounded_line<R: BufRead>(
                     }
                     "Local inference was cancelled." => "Local inference was cancelled.",
                     reasoning_budget::CONTROL_UNAVAILABLE => reasoning_budget::CONTROL_UNAVAILABLE,
+                    "Local HTTP response body failed." => "Local HTTP response body failed.",
+                    "Local HTTP stream failed." => "Local HTTP stream failed.",
+                    "Local HTTP transport timed out." => "Local HTTP transport timed out.",
                     _ => "Local llama.cpp stream failed.",
                 }
                 .to_string()

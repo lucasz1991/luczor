@@ -30,6 +30,12 @@ pub enum Reason {
     Authentication,
     ModelUnavailable,
     Server,
+    Connection,
+    ResponseBody,
+    TransportTimeout,
+    InvalidStream,
+    IncompleteStream,
+    EventChannel,
     Unclassified,
 }
 
@@ -53,6 +59,24 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
+    pub(super) fn stream(message: &str) -> Self {
+        let reason = match message {
+            "Local HTTP connection failed." => Reason::Connection,
+            "Local HTTP response body failed." | "Local HTTP stream failed." => {
+                Reason::ResponseBody
+            }
+            "Local HTTP transport timed out." => Reason::TransportTimeout,
+            "Local llama.cpp emitted invalid SSE JSON."
+            | "Local llama.cpp emitted invalid UTF-8." => Reason::InvalidStream,
+            "Local llama.cpp stream ended without a terminal marker." => Reason::IncompleteStream,
+            "Local inference event channel closed." => Reason::EventChannel,
+            _ => Reason::Unclassified,
+        };
+        Self {
+            reason,
+            ..Self::new("runtime_stream_failed", Stage::Unknown)
+        }
+    }
     pub(super) fn new(code: &'static str, stage: Stage) -> Self {
         Self {
             schema_version: 1,
