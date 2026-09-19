@@ -83,6 +83,7 @@ export const agentTeamTools: ToolDef[] = [
         project,
         objective,
         approvalMode: approvalMode as 'team' | 'per-node',
+        mode: ticket.mode,
       })
       return {
         ok: true,

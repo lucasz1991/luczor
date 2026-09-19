@@ -62,6 +62,8 @@ export type AgentTeamRunInput = Readonly<{
   project: AgentProjectSnapshot
   objective: string
   approvalMode: AgentTeamApprovalMode
+  /** Permission mode of the chat that started the team; absent runs follow the device default. */
+  mode?: import('@/services/inference/types').LuczorMode
 }>
 
 export type AgentTeamNode = Readonly<{
@@ -89,6 +91,7 @@ export type AgentTeamRun = Readonly<{
   project: AgentProjectSnapshot
   objective: string
   approvalMode: AgentTeamApprovalMode
+  mode?: import('@/services/inference/types').LuczorMode
   status: AgentTeamRunStatus
   nodes: readonly AgentTeamNode[]
   maxParallel: number
@@ -109,6 +112,7 @@ export type AgentTeamExecutionRequest = Readonly<{
   adapterId: AgentTeamNodeDefinition['adapterId']
   role: AgentRole
   permission: AgentPermission
+  mode?: import('@/services/inference/types').LuczorMode
   prompt: string
   promptAssembly?: 'project' | 'exact-reviewed'
   model?: string
@@ -126,7 +130,11 @@ export type AgentTeamExecutor = (request: AgentTeamExecutionRequest) => Promise<
 export type AgentTeamOrchestratorOptions = Readonly<{
   acquireResources?: (runId: string, signal: AbortSignal) => Promise<() => Promise<void>>
   executor: AgentTeamExecutor
-  validateScope?: (project: AgentProjectSnapshot, permission: AgentPermission) => void | Promise<void>
+  validateScope?: (
+    project: AgentProjectSnapshot,
+    permission: AgentPermission,
+    mode?: import('@/services/inference/types').LuczorMode
+  ) => void | Promise<void>
   maxConcurrent?: number
   maxRuns?: number
   maxOutputCharacters?: number
@@ -161,6 +169,7 @@ type InternalRun = {
   project: AgentProjectSnapshot
   objective: string
   approvalMode: AgentTeamApprovalMode
+  mode?: import('@/services/inference/types').LuczorMode
   status: AgentTeamRunStatus
   nodes: Map<string, InternalNode>
   maxParallel: number
@@ -375,6 +384,7 @@ export class AgentTeamOrchestrator {
       project,
       objective: input.objective.trim(),
       approvalMode: input.approvalMode,
+      ...(input.mode ? { mode: input.mode } : {}),
       status: 'awaiting_approval',
       nodes: new Map(
         definition.nodes.map(node => [
@@ -607,7 +617,7 @@ export class AgentTeamOrchestrator {
     let phase: 'scope' | 'prompt' | 'run' | 'result' = 'scope'
     let timeout: ReturnType<typeof setTimeout> | undefined
     try {
-      await this.options.validateScope?.(run.project, node.definition.permission)
+      await this.options.validateScope?.(run.project, node.definition.permission, run.mode)
       if (this.options.acquireResources) {
         run.resourceController ??= new AbortController()
         run.resourceLease ??= this.options.acquireResources(run.id, run.resourceController.signal)
@@ -635,6 +645,7 @@ export class AgentTeamOrchestrator {
         adapterId: node.definition.adapterId,
         role: node.definition.role,
         permission: node.definition.permission,
+        mode: run.mode,
         prompt,
         promptAssembly: node.definition.promptAssembly,
         model: node.definition.model,
@@ -672,7 +683,7 @@ export class AgentTeamOrchestrator {
       })
       if (controller.signal.aborted || run.status !== 'running') throw new DOMException('Abgebrochen', 'AbortError')
       phase = 'scope'
-      await this.options.validateScope?.(run.project, node.definition.permission)
+      await this.options.validateScope?.(run.project, node.definition.permission, run.mode)
       if (controller.signal.aborted || run.status !== 'running') throw new DOMException('Abgebrochen', 'AbortError')
       phase = 'result'
       if (
@@ -884,6 +895,7 @@ export class AgentTeamOrchestrator {
       project: run.project,
       objective: run.objective,
       approvalMode: run.approvalMode,
+      ...(run.mode ? { mode: run.mode } : {}),
       status: run.status,
       nodes: Object.freeze(
         [...run.nodes.values()].map(node =>

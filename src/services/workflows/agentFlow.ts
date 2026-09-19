@@ -40,7 +40,8 @@ type AgentFlowDependencies = {
   run: typeof runAgent
   managed: typeof runWorkflowAgent
   assert: (ticket: ExecutionTicket) => void
-  mode: () => RunAgentOptions['mode']
+  /** Mode pinned to the run's ticket when present; signed device jobs follow the device default. */
+  mode: (ticket: ExecutionTicket) => RunAgentOptions['mode']
   confirm: typeof requestConfirmation
   approve: typeof requestPayloadApproval
   availability: typeof readWorkflowAgentAvailability
@@ -52,7 +53,7 @@ const dependencies: AgentFlowDependencies = {
   run: runAgent,
   managed: runWorkflowAgent,
   assert: ticket => executionGate.assert(ticket),
-  mode: () => executionGate.snapshot().mode,
+  mode: ticket => executionGate.effectiveMode(ticket),
   confirm: requestConfirmation,
   approve: requestPayloadApproval,
   availability: readWorkflowAgentAvailability,
@@ -203,7 +204,7 @@ export async function runWorkflowAgentFlow(
       decision = selectWorkflowAgent({
         team,
         instruction: params.instruction as string,
-        mode: deps.mode(),
+        mode: deps.mode(ticket),
         projectBound: !!project.rootPath && Number.isFinite(project.workspaceUpdatedAt),
         tier: thinkingTier,
         maxTurns: managedTurns,
@@ -367,8 +368,8 @@ export async function runWorkflowAgentFlow(
         workspaceBindingId: JSON.stringify([project.rootPath ?? '', project.workspaceUpdatedAt ?? '']),
         baseMessages: messages,
         externalBaseMessages: messages,
-        mode: deps.mode(),
-        getMode: deps.mode,
+        mode: deps.mode(ticket),
+        getMode: () => deps.mode(ticket),
         contextEgress: 'local_only',
         routingSettings: { preference: 'local_only' },
         signal: ticket.signal,

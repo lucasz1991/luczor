@@ -232,7 +232,13 @@ export async function runChatAgentTeam(
         },
       ],
     },
-    { project, objective: checkpoint.objective, approvalMode: 'team', resourceWork: opts.resourceWork },
+    {
+      project,
+      objective: checkpoint.objective,
+      approvalMode: 'team',
+      resourceWork: opts.resourceWork,
+      mode: opts.mode,
+    },
     async request => {
       if (request.adapterId === 'external_chat' && specialists) {
         const role = request.nodeId.slice('specialist-'.length) as SpecialistRole

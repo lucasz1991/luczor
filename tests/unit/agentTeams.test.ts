@@ -62,6 +62,37 @@ afterEach(() => {
 })
 
 describe('agent team DAG scheduler', () => {
+  it('carries the starting chat mode to scope checks and every worker request', async () => {
+    const calls: AgentTeamExecutionRequest[] = []
+    const scopes: Array<string | undefined> = []
+    const teams = new AgentTeamOrchestrator({
+      executor: async request => {
+        calls.push(request)
+        return { output: `${request.nodeId}-output` }
+      },
+      validateScope: (_project, _permission, mode) => {
+        scopes.push(mode)
+      },
+      maxConcurrent: 2,
+    })
+    const pinned = teams.prepare(twoRoots(), {
+      project: PROJECT,
+      objective: 'Chat A works in act mode.',
+      approvalMode: 'team',
+      mode: 'act',
+    })
+    expect(pinned.mode).toBe('act')
+    teams.approveRun(pinned.id)
+    await vi.waitFor(() => expect(teams.getRun(pinned.id)?.status).toBe('completed'))
+    expect(calls.map(call => call.mode)).toEqual(['act', 'act'])
+    expect(scopes.every(mode => mode === 'act')).toBe(true)
+    const inherited = teams.prepare(twoRoots(), { project: PROJECT, objective: 'No chat mode.', approvalMode: 'team' })
+    expect(inherited.mode).toBeUndefined()
+    teams.approveRun(inherited.id)
+    await vi.waitFor(() => expect(teams.getRun(inherited.id)?.status).toBe('completed'))
+    expect(calls.slice(2).map(call => call.mode)).toEqual([undefined, undefined])
+  })
+
   it('preserves reviewed-plan assembly through scheduling and rejects unknown assembly modes', async () => {
     const requests: AgentTeamExecutionRequest[] = []
     const teams = new AgentTeamOrchestrator({

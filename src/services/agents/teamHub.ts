@@ -31,6 +31,7 @@ export const agentTeams = new AgentTeamOrchestrator({
       promptAssembly: request.promptAssembly,
       role: request.role,
       permission: request.permission,
+      mode: request.mode,
       model: request.model,
       includeMemory: request.includeMemory,
       resume: request.resume,
