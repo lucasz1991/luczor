@@ -9,7 +9,7 @@ import {
 import { maintenanceProgress } from '@/services/agents/idleMaintenanceWorker'
 import { luczorMemory } from '@/services/memory/luczorMemory'
 import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
-const consent = ref({ installedModelStart: false, automaticRewrite: false })
+const consent = ref({ installedModelStart: false, automaticRewrite: false, metadataAnnotations: true })
 const consentPrincipal = ref('')
 const quality = ref('Noch nicht geprüft')
 const stageLabels: Record<string, string> = {
@@ -30,13 +30,17 @@ const qualityLabels: Record<string, string> = {
 }
 async function loadConsent() {
   consentPrincipal.value = ''
-  consent.value = { installedModelStart: false, automaticRewrite: false }
+  consent.value = { installedModelStart: false, automaticRewrite: false, metadataAnnotations: true }
   try {
     const account = await getVerifiedAccountSnapshot()
     if (!account) return
     const snapshot = await luczorMemory.maintenanceSnapshot(account.principalId)
     consentPrincipal.value = account.principalId
-    consent.value = snapshot.journal.consent ?? consent.value
+    consent.value = {
+      ...consent.value,
+      ...snapshot.journal.consent,
+      metadataAnnotations: snapshot.journal.consent?.metadataAnnotations !== false,
+    }
     quality.value = snapshot.journal.quality?.passed
       ? 'Bestanden für das geprüfte Modell'
       : 'Umschreiben gesperrt bis zur Modellprüfung'
@@ -46,7 +50,7 @@ async function loadConsent() {
 }
 function clearConsent() {
   consentPrincipal.value = ''
-  consent.value = { installedModelStart: false, automaticRewrite: false }
+  consent.value = { installedModelStart: false, automaticRewrite: false, metadataAnnotations: true }
   quality.value = 'Konto wird gewechselt'
 }
 async function saveConsent() {
@@ -112,9 +116,15 @@ const reason = computed(() => {
       ? 'Analysiert den lokalen Repository-Graphen'
       : state.task === 'memory'
         ? 'Analysiert Erinnerungen aus lokalem Speicher, SQL und Cognee'
-        : 'Optimiert den Projektkontext'
+        : state.task === 'metadata'
+          ? 'Ordnet Erinnerungen nach Kategorien, Themen und Abrufrelevanz'
+          : 'Optimiert den Projektkontext'
   if (state?.phase === 'committing')
-    return state.task === 'memory' ? 'Speichert die KI-Erinnerung dauerhaft' : 'Speichert den KI-Kontext dauerhaft'
+    return state.task === 'metadata'
+      ? 'Speichert geprüfte Erinnerungsmetadaten'
+      : state.task === 'memory'
+        ? 'Speichert die KI-Erinnerung dauerhaft'
+        : 'Speichert den KI-Kontext dauerhaft'
   if (state?.phase === 'yielding') return 'Gibt das Modell für deinen Auftrag frei'
   if (state?.reason === 'manual_requested') return 'Prüfung wird jetzt vorbereitet'
   if (state?.reason === 'memory_pressure') return 'Pausiert: zu wenig freier Arbeitsspeicher'
@@ -185,6 +195,15 @@ function startNow() {
       Repository: {{ maintenanceProgress.repository }}. Architekturpakete verwenden belegte Datei- und Symbolreferenzen.
     </p>
     <div class="maintenance-consent">
+      <label
+        ><input
+          v-model="consent.metadataAnnotations"
+          type="checkbox"
+          :disabled="!consentPrincipal"
+          @change="saveConsent"
+        />
+        Kategorien und Suchmetadaten im Leerlauf ergänzen (ändert weder Erinnerungstext noch Bestätigungsstatus)</label
+      >
       <label
         ><input
           v-model="consent.installedModelStart"

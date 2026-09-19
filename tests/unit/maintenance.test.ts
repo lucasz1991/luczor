@@ -1,20 +1,26 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   chooseMaintenanceJob,
   emptyMaintenanceJournal,
   reconcileMaintenanceJobs,
   failMaintenanceJob,
   parseMemoryChangeSet,
+  parseMemoryAnnotation,
   parseMaintenanceVerification,
   assertPreservedReferences,
   MAINTENANCE_BATCH_CHARS,
   maintenanceBatchChars,
   partitionMaintenanceSources,
+  maintenancePrompt,
+  verificationPrompt,
   type MaintenanceJob,
 } from '@/services/memory/maintenance'
 import { matchesEvaluationAnswer, MAINTENANCE_EVALUATION } from '@/services/memory/maintenanceEvaluation'
 import { planMaintenance } from '@/services/memory/maintenancePlanner'
 import type { Message, Project } from '@/state/types'
+import { luczorMemory, type MemoryRecord } from '@/services/memory/luczorMemory'
+import { sqlMemoryMaintenanceAdapter } from '@/services/memory/maintenanceAdapters'
+import { applyMemoryAnnotation, captureMemoryMetadata } from '@/services/memory/memoryMetadata'
 
 const job = (id: string, projectId = 'active'): MaintenanceJob => ({
   id,
@@ -36,6 +42,208 @@ const sources = [
   },
 ]
 describe('durable maintenance policy', () => {
+  const memory = (id: string, patch: Partial<MemoryRecord> = {}): MemoryRecord => ({
+    id,
+    principalId: 'owner',
+    scope: 'user',
+    dataset: 'user',
+    content: 'Laravel bleibt unbestätigt.',
+    contentHash: 'hash',
+    type: 'fact',
+    source: 'assistant',
+    writeIntent: 'inferred',
+    status: 'candidate',
+    visibility: 'private',
+    retention: 'durable',
+    sensitivity: 'normal',
+    confidence: 0.3,
+    importance: 0.5,
+    tags: [],
+    createdAt: 1,
+    updatedAt: 1,
+    ...patch,
+  })
+
+  it('wraps one strict model classification in a host-owned annotation without invented IDs or body', () => {
+    const metadata = { kind: 'hypothesis', interest: null, categories: [['Software', 'Laravel']], tags: ['Laravel'] }
+    expect(parseMemoryAnnotation(JSON.stringify(metadata), sources)).toEqual({
+      operations: [
+        {
+          operation: 'annotate',
+          targets: ['a'],
+          sources: ['a'],
+          content: '',
+          reason: 'Klassifikation der Originalquelle',
+          metadata,
+        },
+      ],
+    })
+    expect(parseMemoryAnnotation('{}', sources).operations[0]!.metadata).toEqual({})
+    for (const value of [
+      { operations: [] },
+      { ...metadata, content: 'Invented body' },
+      { ...metadata, targets: ['fabricated'] },
+      { ...metadata, reason: 'Invented repeated user activity' },
+      { ...metadata, evidence: { status: 'source_backed' } },
+      { ...metadata, files: ['fake.php'] },
+      [metadata],
+    ])
+      expect(() => parseMemoryAnnotation(JSON.stringify(value), sources)).toThrow()
+    expect(() => parseMemoryAnnotation('```json\n{}\n```', sources)).toThrow()
+    expect(() => parseMemoryAnnotation('{}', [])).toThrow('invalid_annotation_source')
+    expect(() => parseMemoryAnnotation('{}', [sources[0]!, { ...sources[0]!, id: 'b' }])).toThrow(
+      'invalid_annotation_source'
+    )
+  })
+
+  it('reviews the exact classification against originals without presenting an empty replacement body', () => {
+    const changes = parseMemoryAnnotation('{"kind":"hypothesis","interest":null}', sources)
+    const prompt = verificationPrompt(sources, JSON.stringify(changes), 'metadata')
+    const [originals, classification] = prompt.split('\nORIGINALQUELLEN:\n')[1]!.split('\nKLASSIFIKATION:\n')
+    expect(JSON.parse(originals!)).toEqual(sources)
+    expect(JSON.parse(classification!)).toEqual([{ sourceId: 'a', metadata: changes.operations[0]!.metadata }])
+    expect(prompt).toContain('Es wird kein Text ersetzt oder gelöscht')
+    expect(prompt).toContain('overrides')
+    expect(prompt).toContain('erfundenem Nutzerinteresse')
+    expect(prompt).not.toContain('"content":""')
+    expect(() =>
+      parseMaintenanceVerification(
+        JSON.stringify({
+          approved: true,
+          checkedSources: ['a'],
+          unsupportedFacts: true,
+          lostFacts: false,
+          lostConstraints: false,
+          temporalConflict: false,
+        }),
+        sources
+      )
+    ).toThrow('verification_rejected')
+  })
+
+  it('accepts metadata-only annotations and rejects body edits, trust claims and foreign sources', () => {
+    const operation = {
+      operation: 'annotate',
+      targets: ['a'],
+      sources: ['a'],
+      content: '',
+      reason: 'Find by topic',
+      metadata: { kind: 'hypothesis', categories: [['Software', 'Laravel']], importance: 0.4 },
+    }
+    expect(parseMemoryChangeSet(JSON.stringify({ operations: [operation] }), sources).operations[0]).toMatchObject(
+      operation
+    )
+    for (const patch of [
+      { content: 'Promoted fact' },
+      { sources: [] },
+      { targets: [] },
+      { metadata: { evidence: { status: 'source_backed' } } },
+      { metadata: { files: ['fake.php'] } },
+    ])
+      expect(() =>
+        parseMemoryChangeSet(JSON.stringify({ operations: [{ ...operation, ...patch }] }), sources)
+      ).toThrow()
+    expect(() => parseMemoryChangeSet(JSON.stringify({ operations: [operation, operation] }), sources)).toThrow(
+      'overlapping_targets'
+    )
+  })
+
+  it('plans single-record metadata for assistant candidates and derived records without rewriting them', async () => {
+    const records = [
+      memory('assistant'),
+      memory('derived', { tags: ['maintenance-derived', 'idle-optimization'] }),
+      memory('sensitive', { sensitivity: 'sensitive' }),
+      memory('old', { status: 'superseded' }),
+      memory('expired', { expiresAt: 2 }),
+      memory('foreign', { principalId: 'other' }),
+    ]
+    const jobs = await planMaintenance({ principalId: 'owner', projects: [], records, now: 10 })
+    expect(jobs.filter(item => item.kind === 'metadata').map(item => item.sources.map(source => source.id))).toEqual([
+      ['assistant'],
+      ['derived'],
+    ])
+    expect(jobs.filter(item => item.kind === 'memory')).toHaveLength(0)
+    const proposal = maintenancePrompt('metadata', jobs[0]!.material)
+    expect(proposal).toContain('Nutzerwerte niemals ersetzen')
+    expect(proposal).toContain('assistant')
+    expect(proposal).toContain('candidate')
+  })
+
+  it('preserves metadata in source packets and does not queue its own completed classification again', async () => {
+    const record = memory('stable')
+    record.meta = {
+      memory_metadata: captureMemoryMetadata({ ...record, classification: { categories: [['Software', 'Laravel']] } }),
+    }
+    const before = (await planMaintenance({ principalId: 'owner', projects: [], records: [record], now: 10 }))[0]!
+    expect(JSON.parse(before.material[0]!.content).metadata.categories[0].path).toEqual(['Software', 'Laravel'])
+    Object.assign(
+      record,
+      applyMemoryAnnotation(
+        record,
+        { kind: 'hypothesis', tags: ['Laravel'] },
+        { origin: 'dream', now: 11, modelId: 'local' }
+      )
+    )
+    expect(
+      (await planMaintenance({ principalId: 'owner', projects: [], records: [record], now: 12 })).filter(
+        item => item.kind === 'metadata'
+      )
+    ).toHaveLength(0)
+    record.contentHash = 'changed'
+    expect(
+      (await planMaintenance({ principalId: 'owner', projects: [], records: [record], now: 13 })).filter(
+        item => item.kind === 'metadata'
+      )
+    ).toHaveLength(1)
+  })
+
+  it('uses server metadata eligibility independently of destructive rewrite eligibility', async () => {
+    const shared = vi.spyOn(luczorMemory, 'sharedMaintenance').mockResolvedValue({
+      next: null,
+      records: [
+        {
+          id: '1',
+          revision: 'a'.repeat(64),
+          content: 'Laravel bleibt unbestätigt.',
+          source: 'assistant',
+          scope: 'user',
+          confidence: 0.3,
+          metadata_needed: true,
+          rewrite_eligible: false,
+          metadata: { kind: 'hypothesis' },
+          tags: ['Laravel'],
+          importance: 0.5,
+          provenance: { source_type: 'assistant' },
+        },
+        {
+          id: '2',
+          revision: 'b'.repeat(64),
+          content: 'Bereits eingeordnet.',
+          source: 'user',
+          scope: 'user',
+          confidence: 1,
+          metadata_needed: false,
+          rewrite_eligible: true,
+        },
+      ],
+    })
+    try {
+      const jobs = await sqlMemoryMaintenanceAdapter.jobs('owner', undefined, new AbortController().signal)
+      expect(jobs.filter(job => job.kind === 'metadata').map(job => job.sources.map(source => source.id))).toEqual([
+        ['1'],
+      ])
+      expect(jobs.filter(job => job.kind === 'memory').flatMap(job => job.sources.map(source => source.id))).toEqual([
+        '2',
+      ])
+      expect(JSON.parse(jobs.find(job => job.kind === 'metadata')!.material[0]!.content)).toMatchObject({
+        metadata: { kind: 'hypothesis' },
+        tags: ['Laravel'],
+        provenance: { source_type: 'assistant' },
+      })
+    } finally {
+      shared.mockRestore()
+    }
+  })
   it('keeps completed revisions across serialization and ignores runtime identity', () => {
     const journal = emptyMaintenanceJournal()
     journal.jobs = [{ ...job('a'), status: 'completed' }]

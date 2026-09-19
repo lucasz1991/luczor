@@ -4,6 +4,7 @@ import type { MemoryRecord } from '@/services/memory/luczorMemory'
 import { emptyMaintenanceJournal, type MaintenanceJournal } from '@/services/memory/maintenance'
 import type { idleOptimizationDependencies } from '@/services/agents/idleOptimization'
 import { memoryUsageEvents, resetMemoryUsage } from '@/services/memory/usage'
+import { applyMemoryAnnotation, captureMemoryMetadata } from '@/services/memory/memoryMetadata'
 const fixture = vi.hoisted(() => ({
   journal: null as MaintenanceJournal | null,
   writes: [] as string[],
@@ -98,6 +99,172 @@ async function run(optimizer: ReturnType<typeof createMaintenanceWorker>) {
   await vi.waitFor(() => expect(['cooldown', 'paused']).toContain(optimizer.snapshot().phase))
 }
 describe('mounted persistent maintenance worker', () => {
+  function candidate(): MemoryRecord {
+    const record: MemoryRecord = {
+      id: 'ai-candidate',
+      principalId: 'owner',
+      projectId: 'p1',
+      scope: 'project',
+      dataset: 'p1',
+      content: 'Laravel könnte verwendet werden; nicht bestätigt.',
+      contentHash: 'candidate-hash',
+      source: 'assistant',
+      writeIntent: 'inferred',
+      status: 'candidate',
+      sensitivity: 'normal',
+      visibility: 'private',
+      retention: 'durable',
+      type: 'fact',
+      confidence: 0.3,
+      importance: 0.5,
+      tags: [],
+      createdAt: 1,
+      updatedAt: 1,
+    }
+    record.meta = { memory_metadata: captureMemoryMetadata(record) }
+    return record
+  }
+  function classificationStream(approved = true) {
+    return async (request: { messages: Array<{ content: string }> }) => ({
+      content: request.messages[1]!.content.startsWith('Unabhängige Prüfung')
+        ? JSON.stringify({
+            approved,
+            checkedSources: ['ai-candidate'],
+            unsupportedFacts: !approved,
+            lostFacts: false,
+            lostConstraints: false,
+            temporalConflict: false,
+          })
+        : JSON.stringify({
+            kind: 'hypothesis',
+            categories: [['Software', 'Laravel']],
+            tags: ['Laravel'],
+            importance: 0.6,
+          }),
+      toolCalls: [],
+      rawToolCalls: [],
+      finishReason: 'stop',
+    })
+  }
+
+  it('annotates existing AI candidates by default after review without rewrite consent or provider improve', async () => {
+    const testCase = setup()
+    fixture.records = [candidate()]
+    const original = structuredClone(fixture.records[0]!)
+    testCase.stream.mockImplementation(classificationStream())
+    testCase.deps.improve = vi.fn()
+    fixture.apply.mockImplementation(async input => {
+      await input.validate()
+      expect(input.artifact).toBeUndefined()
+      const record = fixture.records[0]!
+      Object.assign(
+        record,
+        applyMemoryAnnotation(record, input.changes.operations[0].metadata, {
+          origin: 'dream',
+          now: 10,
+          modelId: input.modelId,
+        })
+      )
+      fixture.journal!.jobs.find(job => job.id === input.jobId)!.status = 'completed'
+    })
+    const optimizer = testCase.create()
+    try {
+      await run(optimizer)
+      expect(testCase.stream).toHaveBeenCalledTimes(2)
+      expect(fixture.apply).toHaveBeenCalledOnce()
+      expect(fixture.apply.mock.calls[0]![0].jobId).toBe('metadata:p1:ai-candidate')
+      const reviewPrompt = testCase.stream.mock.calls[1]![0].messages[1]!.content
+      expect(JSON.parse(reviewPrompt.split('\nKLASSIFIKATION:\n')[1]!)).toEqual([
+        {
+          sourceId: 'ai-candidate',
+          metadata: fixture.apply.mock.calls[0]![0].changes.operations[0].metadata,
+        },
+      ])
+      expect(fixture.records[0]).toMatchObject({
+        content: original.content,
+        source: 'assistant',
+        status: 'candidate',
+        confidence: 0.3,
+        tags: ['Laravel'],
+      })
+      expect(testCase.deps.improve).not.toHaveBeenCalled()
+      expect(fixture.journal!.consent).toBeUndefined()
+      expect(fixture.journal!.quality).toBeUndefined()
+    } finally {
+      optimizer.stop()
+    }
+  })
+
+  it('respects metadata opt-out while ordinary context preparation remains available', async () => {
+    const testCase = setup()
+    fixture.records = [candidate()]
+    fixture.journal!.consent = { automaticRewrite: false, installedModelStart: false, metadataAnnotations: false }
+    const optimizer = testCase.create()
+    try {
+      await run(optimizer)
+      expect(fixture.apply.mock.calls[0]![0].jobId).toBe('project:p1')
+      expect(fixture.records[0]!.tags).toEqual([])
+      expect(fixture.journal!.jobs.find(job => job.kind === 'metadata')?.status).toBe('pending')
+    } finally {
+      optimizer.stop()
+    }
+  })
+
+  it.each(['generation', 'commit'] as const)(
+    'keeps source retries unchanged when metadata is disabled during %s',
+    async phase => {
+      const testCase = setup()
+      fixture.records = [candidate()]
+      testCase.stream.mockImplementation(async request => {
+        const response = await classificationStream()(request)
+        if (phase === 'generation')
+          fixture.journal!.consent = { automaticRewrite: false, installedModelStart: false, metadataAnnotations: false }
+        return response
+      })
+      fixture.apply.mockImplementation(async () => {
+        throw new Error('metadata_annotations_disabled')
+      })
+      const original = structuredClone(fixture.records)
+      const optimizer = testCase.create()
+      try {
+        await run(optimizer)
+        expect(fixture.journal!.jobs.find(job => job.kind === 'metadata')).toMatchObject({
+          status: 'retry',
+          attempts: 0,
+        })
+        expect(maintenanceProgress.value.stage).toBe('paused')
+        expect(fixture.records).toEqual(original)
+        expect(fixture.apply).toHaveBeenCalledTimes(phase === 'generation' ? 0 : 1)
+      } finally {
+        optimizer.stop()
+      }
+    }
+  )
+
+  it('rejects an unapproved metadata proposal without changing the independent rewrite quality gate', async () => {
+    const testCase = setup()
+    fixture.records = [candidate()]
+    const original = structuredClone(fixture.records)
+    fixture.journal!.quality = {
+      policy: 'test',
+      modelId: 'installed',
+      passed: true,
+      at: 1,
+      reason: 'passed',
+      catalogHash: 'signed',
+    }
+    testCase.stream.mockImplementation(classificationStream(false))
+    const optimizer = testCase.create()
+    try {
+      await run(optimizer)
+      expect(fixture.apply).not.toHaveBeenCalled()
+      expect(fixture.records).toEqual(original)
+      expect(fixture.journal!.jobs.find(job => job.kind === 'metadata')).toMatchObject({ status: 'retry', attempts: 1 })
+      expect(fixture.journal!.quality.passed).toBe(true)
+    } finally {
+      optimizer.stop()
+    }
+  })
   it.each(['idle_model_busy', 'idle_model_cooldown', 'model_cooldown', 'resource_background_unavailable'])(
     'defers %s without burning source retries or closing the quality gate',
     async reason => {

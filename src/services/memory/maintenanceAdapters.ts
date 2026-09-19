@@ -29,6 +29,12 @@ type SharedSource = {
   confidence: number
   valid_from?: string
   valid_until?: string
+  metadata_needed?: boolean
+  rewrite_eligible?: boolean
+  metadata?: Record<string, unknown>
+  tags?: string[]
+  importance?: number
+  provenance?: Record<string, unknown>
 }
 export const sqlMemoryMaintenanceAdapter: MemoryMaintenanceAdapter = {
   id: 'luczor-sql',
@@ -58,7 +64,27 @@ export const sqlMemoryMaintenanceAdapter: MemoryMaintenanceAdapter = {
         content: JSON.stringify(record),
       }))
       const maxChars = budget?.maxBatchChars ?? 15_000
-      for (const material of partitionMaintenanceSources(sources, budget?.maxSourceCount ?? 4, maxChars)) {
+      for (const record of safeRecords.filter(record => record.metadata_needed === true)) {
+        const material = sources.filter(source => source.id === record.id)
+        const oversized = JSON.stringify(material).length > maxChars
+        jobs.push({
+          id: `sql:${projectId ?? 'user'}:metadata:${record.id}`,
+          projectId,
+          kind: 'metadata',
+          material,
+          sources: material.map(({ content: _content, ...ref }) => ref),
+          revision: await maintenanceHash(material.map(({ content: _content, ...ref }) => ref)),
+          status: oversized ? 'blocked' : 'pending',
+          blockedReason: oversized ? 'source_too_large' : undefined,
+          attempts: 0,
+          nextAttemptAt: Date.now(),
+          updatedAt: Date.now(),
+        })
+      }
+      const writableSources = sources.filter(
+        source => safeRecords.find(record => record.id === source.id)?.rewrite_eligible !== false
+      )
+      for (const material of partitionMaintenanceSources(writableSources, budget?.maxSourceCount ?? 4, maxChars)) {
         const oversized = JSON.stringify(material).length > maxChars
         const revision = await maintenanceHash(material.map(({ content: _content, ...ref }) => ref))
         jobs.push({

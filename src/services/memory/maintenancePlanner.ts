@@ -1,11 +1,13 @@
 import type { Message, Project } from '@/state/types'
 import type { MemoryRecord } from './luczorMemory'
 import { canAccessCloudProject } from '@/services/cloudProjectAccess'
+import { memoryMetadataOf, needsMemoryAnnotation } from './memoryMetadata'
 import {
   MAINTENANCE_BATCH_CHARS,
   maintenanceEligible,
   maintenanceHash,
   memoryRevision,
+  metadataMaintenanceEligible,
   partitionMaintenanceSources,
   type MaintenanceJob,
   type MaintenanceSource,
@@ -24,6 +26,9 @@ export const memoryMaintenanceSource = (record: MemoryRecord): MaintenanceSource
     status: record.status,
     at: record.updatedAt,
     expiresAt: record.expiresAt,
+    metadata: memoryMetadataOf(record),
+    tags: record.tags,
+    importance: record.importance,
   }),
 })
 export async function planMaintenance(input: {
@@ -65,6 +70,19 @@ export async function planMaintenance(input: {
   }
   const scopes = [undefined, ...projects] as Array<Project | undefined>
   for (const project of scopes) {
+    const annotationRecords = input.records
+      .filter(
+        record =>
+          record.principalId === input.principalId &&
+          metadataMaintenanceEligible(record, input.now) &&
+          needsMemoryAnnotation(record) &&
+          (project ? record.projectId === (project.cloud?.externalId ?? project.id) : !record.projectId)
+      )
+      .sort((left, right) => left.id.localeCompare(right.id))
+    for (const record of annotationRecords)
+      await append(`metadata:${project?.id ?? 'user'}:${record.id}`, 'metadata', project?.id, [
+        memoryMaintenanceSource(record),
+      ])
     const records = input.records
       .filter(
         record =>

@@ -9,7 +9,8 @@ import { shallowRef } from 'vue'
 export type DreamStage =
   'scanning' | 'selecting' | 'preparing' | 'generating' | 'verifying' | 'committing' | 'done' | 'failed' | 'interrupted'
 
-export type DreamOperation = 'read' | 'keep' | 'rewrite' | 'merge' | 'conflict' | 'remove' | 'create' | 'artifact'
+export type DreamOperation =
+  'read' | 'keep' | 'rewrite' | 'merge' | 'conflict' | 'remove' | 'create' | 'artifact' | 'annotate'
 
 export type DreamTarget = { kind: 'memory' | 'file' | 'artifact' | 'source'; id: string; label?: string }
 
@@ -27,7 +28,7 @@ export type DreamRun = {
   startedAt: number
   endedAt?: number
   jobKey: string
-  task: 'context' | 'memory' | 'repository' | 'evaluation' | 'shared'
+  task: 'context' | 'memory' | 'metadata' | 'repository' | 'evaluation' | 'shared'
   scope: 'user' | 'project'
   projectId?: string
   modelId?: string
@@ -273,6 +274,7 @@ export const DREAM_OPERATION_LABELS: Record<DreamOperation, string> = {
   remove: 'entfernt',
   create: 'erzeugt',
   artifact: 'Kontextpaket',
+  annotate: 'Metadaten ergänzt',
 }
 
 export const DREAM_SKIP_LABELS: Record<string, string> = {

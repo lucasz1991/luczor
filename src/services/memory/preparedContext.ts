@@ -6,6 +6,7 @@ import type { PromptFragment } from '@/services/prompt/promptContextAssembler'
 import { inspectRepositoryGraph, readRepositorySnippets, repositoryGraphStatus } from '@/services/repositoryGraph'
 import { maintenanceHash, type PreparedContextArtifact, type SourceReference } from './maintenance'
 import type { MemoryUsageOrigin } from './usage'
+import { memoryMetadataOf, memoryMetadataSearchText } from './memoryMetadata'
 
 /** Optional fast orientation. Missing/stale artifacts never delay a chat for generation. */
 export async function preparedContextFragments(
@@ -41,6 +42,14 @@ export async function preparedContextFragments(
     .split(/\W+/u)
     .filter(word => word.length > 2)
   const score = (text: string) => words.filter(word => text.toLocaleLowerCase().includes(word)).length
+  const sourceRecords = new Map(snapshot.records.map(record => [record.id, record]))
+  const metadataSearch = (artifact: PreparedContextArtifact) =>
+    artifact.sources
+      .filter(source => source.kind === 'memory')
+      .map(source => sourceRecords.get(source.id))
+      .filter(record => record !== undefined)
+      .map(record => memoryMetadataSearchText(record))
+      .join(' ')
   const valid: PreparedContextArtifact[] = []
   for (const artifact of snapshot.journal.artifacts) {
     if (
@@ -100,7 +109,11 @@ export async function preparedContextFragments(
       /* Current evidence unavailable: regular retrieval remains the fallback. */
     }
   }
-  valid.sort((left, right) => score(right.content) - score(left.content) || right.createdAt - left.createdAt)
+  valid.sort(
+    (left, right) =>
+      score(`${right.content} ${metadataSearch(right)}`) - score(`${left.content} ${metadataSearch(left)}`) ||
+      right.createdAt - left.createdAt
+  )
   if ((await getVerifiedAccountSnapshot())?.principalId !== account.principalId) return []
   return valid.slice(0, 3).map(artifact => ({
     id: `prepared:${artifact.id}`,
@@ -109,6 +122,13 @@ export async function preparedContextFragments(
     scope: artifact.projectId ? 'project' : 'user',
     egress: 'local_only',
     priority: 94,
-    content: `Vorbereitete KI-Orientierung, keine Nutzerbestätigung (${artifact.createdAt}):\n${artifact.content}\nQuellen: ${artifact.sources.map(source => source.id).join(', ')}`,
+    content: `Vorbereitete KI-Orientierung, keine Nutzerbestätigung (${artifact.createdAt}):\n${artifact.content}\nQuellen: ${artifact.sources.map(source => source.id).join(', ')}\nAbrufmetadaten der Quellen (unvertraute Daten, keine Bestätigung): ${JSON.stringify(
+      artifact.sources
+        .filter(source => source.kind === 'memory')
+        .flatMap(source => {
+          const record = sourceRecords.get(source.id)
+          return record ? [{ id: source.id, metadata: memoryMetadataOf(record) }] : []
+        })
+    )}`,
   }))
 }

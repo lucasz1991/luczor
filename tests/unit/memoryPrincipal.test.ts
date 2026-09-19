@@ -97,6 +97,555 @@ describe('desktop memory account isolation', () => {
     vi.unstubAllGlobals()
   })
 
+  it('captures host-bound origins and merges repeated observations without inflating confidence or importance', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const input = {
+      content: 'Ich bevorzuge Laravel.',
+      projectId: 'p1',
+      source: 'user',
+      writeIntent: 'automatic' as const,
+      confidence: 0.3,
+      importance: 0.4,
+      origin: { messageId: 'user-1', conversationId: 'chat-1', role: 'user' as const },
+    }
+    const first = await memory.remember(input)
+    const repeated = await memory.remember({
+      ...input,
+      confidence: 0.9,
+      importance: 1,
+      origin: { ...input.origin, messageId: 'user-2' },
+    })
+    expect(repeated).toMatchObject({
+      id: first.id,
+      importance: 0.4,
+      confidence: 0.3,
+      meta: {
+        memory_metadata: {
+          evidence: {
+            status: 'user_stated',
+            sources: [
+              expect.objectContaining({ id: 'user-1', conversationId: 'chat-1', role: 'user' }),
+              expect.objectContaining({ id: 'user-2', conversationId: 'chat-1', role: 'user' }),
+            ],
+          },
+        },
+      },
+    })
+    expect(harness.fetch).not.toHaveBeenCalled()
+  })
+
+  it('fills capture tags from known categories while respecting explicit tags and real user priority', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const user = await memory.remember({
+      content: 'Merke dir: Laravel ist unser Backend.',
+      projectId: 'p1',
+      source: 'user',
+      writeIntent: 'explicit',
+      priority: 'high',
+      classification: { importance: 0.1 },
+    })
+    expect(user).toMatchObject({
+      tags: ['Laravel'],
+      importance: 0.8,
+      meta: { memory_metadata: { overrides: ['importance'] } },
+    })
+    const custom = await memory.remember({
+      content: 'Laravel mit eigener Einordnung.',
+      projectId: 'p1',
+      source: 'user',
+      tags: ['custom'],
+    })
+    expect(custom.tags).toEqual(['custom'])
+    const cleared = await memory.remember({
+      content: 'Laravel ohne zusätzliche Tags.',
+      projectId: 'p1',
+      source: 'user',
+      classification: { tags: [] },
+    })
+    expect(cleared.tags).toEqual([])
+    const model = await memory.remember({
+      content: 'Laravel ist ein Modellvorschlag.',
+      projectId: 'p1',
+      source: 'assistant',
+      writeIntent: 'system',
+      visibility: 'private',
+      priority: 'high',
+    })
+    expect(model.meta?.memory_metadata).toMatchObject({ overrides: [] })
+    expect(harness.fetch).not.toHaveBeenCalled()
+  })
+
+  it('preserves model evidence when the user confirms storage of a candidate', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const candidate = await memory.remember({
+      content: 'Eine vorläufige Erklärung.',
+      projectId: 'p1',
+      source: 'assistant',
+      writeIntent: 'automatic',
+      confidence: 0.35,
+      origin: { messageId: 'assistant-message', role: 'assistant' },
+    })
+    const promoted = await memory.promote(candidate.id)
+    expect(promoted).toMatchObject({
+      status: 'active',
+      confidence: 0.35,
+      source: 'assistant',
+      provenance: { storage_confirmed_at: expect.any(Number) },
+      meta: {
+        memory_metadata: {
+          evidence: {
+            status: 'inferred',
+            sources: [expect.objectContaining({ id: 'assistant-message', role: 'assistant' })],
+          },
+        },
+      },
+    })
+  })
+
+  it('authorizes shared annotation separately while respecting a disabled metadata preference', async () => {
+    await setServerEnabled(true)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const principalId = harness.currentSnapshot.principalId
+    await memory.updateMaintenance(principalId, journal => {
+      journal.consent = { automaticRewrite: false, installedModelStart: false, metadataAnnotations: true }
+    })
+    harness.fetch.mockImplementation(async (url: string) =>
+      url.endsWith('/status')
+        ? jsonResponse({ data: [], capabilities: { memory_metadata_versions: [1], memory_metadata_cas: true } })
+        : jsonResponse({ data: { changed: 1 } })
+    )
+    const payload = {
+      model_id: 'local-model',
+      operations: [
+        { operation: 'annotate', targets: ['1'], sources: ['1'], content: '', metadata: { kind: 'decision' } },
+      ],
+    }
+    await expect(
+      memory.sharedMaintenance(principalId, 'project', 'p1', 'apply', payload, new AbortController().signal)
+    ).resolves.toEqual({ changed: 1 })
+    const write = JSON.parse(harness.fetch.mock.calls.find(([url]) => String(url).endsWith('/apply'))![1].body)
+    expect(write.consent).toBe(false)
+    expect(write).not.toHaveProperty('quality')
+    await memory.updateMaintenance(principalId, journal => {
+      journal.consent!.metadataAnnotations = false
+    })
+    harness.fetch.mockClear()
+    await expect(
+      memory.sharedMaintenance(principalId, 'project', 'p1', 'apply', payload, new AbortController().signal)
+    ).rejects.toThrow('metadata_annotations_disabled')
+    expect(harness.fetch).not.toHaveBeenCalled()
+  })
+
+  it('edits only metadata with account and revision checks, persists overrides and retrieves categories', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const original = await memory.remember({
+      content: 'Die interne Notiz bleibt unverändert.',
+      projectId: 'p1',
+      visibility: 'private',
+      writeIntent: 'confirmed',
+    })
+    const shown = (await memory.inspectLocal()).records[0]!
+    const updated = await memory.updateMetadata(
+      original.id,
+      { categories: [['Software', 'Backend', 'Laravel']], tags: ['deployment'], importance: 0.8, interest: 0.7 },
+      shown.metadataRevision
+    )
+    expect(updated).toMatchObject({
+      id: original.id,
+      content: original.content,
+      contentHash: original.contentHash,
+      source: original.source,
+      confidence: original.confidence,
+      visibility: original.visibility,
+      writeIntent: original.writeIntent,
+      meta: {
+        memory_metadata: { overrides: expect.arrayContaining(['categories', 'tags', 'importance', 'interest']) },
+      },
+    })
+    await expect(memory.updateMetadata(original.id, { tags: ['stale'] }, shown.metadataRevision)).rejects.toThrow(
+      'Memory changed'
+    )
+    const restarted = new LuczorMemoryService()
+    await expect(restarted.recallLocal({ scope: 'project', projectId: 'p1', query: 'Laravel' })).resolves.toEqual([
+      expect.objectContaining({ id: original.id }),
+    ])
+    expect((await restarted.inspectLocal({ query: 'deployment' })).filtered).toBe(1)
+    const fresh = (await restarted.inspectLocal()).records[0]!
+    harness.currentSnapshot = accountSnapshot(2, 'other')
+    await expect(restarted.updateMetadata(original.id, { kind: 'rule' }, fresh.metadataRevision)).rejects.toThrow(
+      'no longer available'
+    )
+  })
+
+  it('uses interest only after equal retrieval rank for both local and fused recall', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const save = (content: string, importance: number, interest: number | null) =>
+      memory.remember({
+        content,
+        projectId: 'p1',
+        source: 'user',
+        writeIntent: 'confirmed',
+        importance,
+        confidence: 0.8,
+        classification: { interest },
+      })
+    const important = await save('Format ist die entscheidende Regel.', 1, null)
+    const interesting = await save('Format ist ein besonderes Interesse.', 0.5, 1)
+    vi.advanceTimersByTime(1000)
+    const recent = await save('Format wurde gerade erwähnt.', 0.5, null)
+    const lowPriority = await save('Format ist interessant aber weniger wichtig.', 0.2, 1)
+    const query = { query: 'Format', scope: 'project' as const, projectId: 'p1', limit: 4 }
+    const expected = [important.id, interesting.id, recent.id, lowPriority.id]
+    expect((await memory.recallLocal(query)).map(record => record.id)).toEqual(expected)
+    expect((await memory.recall(query)).map(record => record.id)).toEqual(expected)
+  })
+
+  it('adopts only freshly revalidated SQL dream metadata into the local scheduling identity', async () => {
+    await setServerEnabled(true)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { captureMemoryMetadata, needsMemoryAnnotation } = await import('@/services/memory/memoryMetadata')
+    const metadata = captureMemoryMetadata({
+      content: 'Eine geteilte Entscheidung.',
+      source: 'user',
+      writeIntent: 'confirmed',
+    })
+    metadata.classification = { ...metadata.classification, origin: 'dream', inputRevision: 'server-sql-revision' }
+    harness.fetch.mockResolvedValue(
+      jsonResponse({
+        data: [
+          {
+            id: 'shared-memory',
+            source_record_id: 52,
+            content: 'Eine geteilte Entscheidung.',
+            scope: 'project',
+            project_id: 'p1',
+            meta: { memory_metadata: metadata },
+          },
+        ],
+      })
+    )
+    const memory = new LuczorMemoryService()
+    const [record] = await memory.recall({ query: 'Entscheidung', scope: 'project', projectId: 'p1' })
+    expect(record).toBeDefined()
+    expect(needsMemoryAnnotation(record!)).toBe(false)
+    expect(record!.meta?.memory_metadata).toMatchObject({ evidence: metadata.evidence })
+  })
+
+  it('keeps concrete file metadata local and checkpoints respect disabled automatic capture', async () => {
+    await setServerEnabled(false)
+    harness.files.get('luczor.settings.json')!.set('memory_auto_remember', false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    await expect(
+      memory.captureCheckpoint({
+        content: 'Dieser öffentliche Zwischenstand soll bei ausgeschaltetem Gedächtnis nicht gespeichert werden.',
+        scope: 'project',
+        projectId: 'p1',
+        sessionId: 'answer',
+        expectedPrincipalId: harness.currentSnapshot.principalId,
+      })
+    ).resolves.toBeNull()
+    const record = await memory.remember({
+      content: 'Die Quelle liegt in `src/Example.ts`.',
+      source: 'user',
+      writeIntent: 'explicit',
+      projectId: 'p1',
+    })
+    expect(record.visibility).toBe('private')
+    expect(record.meta?.memory_metadata).toMatchObject({
+      files: [expect.objectContaining({ path: 'src/Example.ts', relation: 'mentioned' })],
+    })
+    expect(await memory.pendingSyncCount()).toBe(0)
+  })
+
+  it('refines metadata independently of content rewrite consent and preserves manual overrides', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { memoryRevision } = await import('@/services/memory/maintenance')
+    const { needsMemoryAnnotation } = await import('@/services/memory/memoryMetadata')
+    const memory = new LuczorMemoryService()
+    const principalId = harness.currentSnapshot.principalId
+    const record = await memory.remember({
+      content: 'Ein manuell gewichteter Hinweis.',
+      projectId: 'p1',
+      source: 'assistant',
+      visibility: 'private',
+      writeIntent: 'automatic',
+      confidence: 0.35,
+    })
+    const user = await memory.updateMetadata(
+      record.id,
+      { importance: 0.2 },
+      (await memory.inspectLocal()).records[0]!.metadataRevision
+    )
+    await memory.updateMaintenance(principalId, journal => {
+      journal.consent = { automaticRewrite: false, installedModelStart: false, metadataAnnotations: true }
+      journal.jobs = [
+        {
+          id: 'metadata-job',
+          revision: 'r1',
+          kind: 'metadata',
+          sources: [],
+          status: 'running',
+          attempts: 0,
+          nextAttemptAt: 0,
+          updatedAt: 0,
+        },
+      ]
+    })
+    await memory.applyMaintenance({
+      principalId,
+      jobId: 'metadata-job',
+      revision: 'r1',
+      modelId: 'local-model',
+      catalogHash: 'catalog',
+      sources: [{ id: user.id, kind: 'memory', revision: memoryRevision(user), content: user.content }],
+      changes: {
+        operations: [
+          {
+            operation: 'annotate',
+            targets: [user.id],
+            sources: [user.id],
+            content: '',
+            reason: 'Einordnung',
+            metadata: { importance: 1, kind: 'observation', categories: [['Software']] },
+          },
+        ],
+      },
+      signal: new AbortController().signal,
+      validate: async () => undefined,
+    })
+    const result = (await memory.maintenanceSnapshot(principalId)).records.find(item => item.id === user.id)!
+    expect(result).toMatchObject({
+      content: user.content,
+      contentHash: user.contentHash,
+      status: 'candidate',
+      source: 'assistant',
+      confidence: 0.35,
+      importance: 0.2,
+      meta: { memory_metadata: { kind: 'observation', classification: { origin: 'dream' } } },
+    })
+    expect(needsMemoryAnnotation(result)).toBe(false)
+  })
+
+  it('exposes assistant candidates and existing idle notes to metadata planning without making them rewrite sources', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { maintenanceEligible, metadataMaintenanceEligible } = await import('@/services/memory/maintenance')
+    const memory = new LuczorMemoryService()
+    const candidate = await memory.remember({
+      content: 'Eine noch nicht bestätigte Modellerklärung.',
+      projectId: 'p1',
+      source: 'assistant',
+      writeIntent: 'automatic',
+    })
+    const idle = await memory.remember({
+      content: 'Ein vorhandener intern erstellter Hinweis.',
+      projectId: 'p1',
+      source: 'assistant',
+      writeIntent: 'system',
+      visibility: 'private',
+      tags: ['idle-optimization'],
+    })
+    const snapshot = await memory.maintenanceSnapshot(harness.currentSnapshot.principalId)
+    expect(snapshot.records.map(record => record.id)).toEqual(expect.arrayContaining([candidate.id, idle.id]))
+    for (const record of snapshot.records) {
+      expect(metadataMaintenanceEligible(record)).toBe(true)
+      expect(maintenanceEligible(record, Date.now(), true)).toBe(false)
+    }
+  })
+
+  it('preserves protected canonical tags and importance from a non-first merge source', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { memoryRevision, MAINTENANCE_POLICY } = await import('@/services/memory/maintenance')
+    const memory = new LuczorMemoryService()
+    const principalId = harness.currentSnapshot.principalId
+    const first = await memory.remember({
+      content: 'Ein verwandter ungewichteter Hinweis.',
+      projectId: 'p1',
+      visibility: 'private',
+      writeIntent: 'confirmed',
+      tags: ['automatic'],
+      importance: 0.3,
+    })
+    const second = await memory.remember({
+      content: 'Die manuell gepflegte entscheidende Ergänzung.',
+      projectId: 'p1',
+      visibility: 'private',
+      writeIntent: 'confirmed',
+    })
+    const protectedSource = await memory.updateMetadata(
+      second.id,
+      { tags: ['user-choice'], importance: 0.8 },
+      (await memory.inspectLocal()).records.find(item => item.id === second.id)!.metadataRevision
+    )
+    await memory.updateMaintenance(principalId, journal => {
+      journal.consent = { automaticRewrite: true, installedModelStart: false }
+      journal.quality = {
+        passed: true,
+        policy: MAINTENANCE_POLICY,
+        modelId: 'local-model',
+        catalogHash: 'catalog',
+        at: Date.now(),
+        reason: 'fixture',
+      }
+      journal.jobs = [
+        {
+          id: 'merge-job',
+          revision: 'r1',
+          kind: 'memory',
+          sources: [],
+          status: 'running',
+          attempts: 0,
+          nextAttemptAt: 0,
+          updatedAt: 0,
+        },
+      ]
+    })
+    await memory.applyMaintenance({
+      principalId,
+      jobId: 'merge-job',
+      revision: 'r1',
+      modelId: 'local-model',
+      catalogHash: 'catalog',
+      sources: [first, protectedSource].map(record => ({
+        id: record.id,
+        kind: 'memory' as const,
+        revision: memoryRevision(record),
+        content: record.content,
+      })),
+      changes: {
+        operations: [
+          {
+            operation: 'merge',
+            targets: [first.id, second.id],
+            sources: [first.id, second.id],
+            content: 'Eine kombinierte Aussage mit beiden Informationen.',
+            reason: 'Beide Hinweise verbinden.',
+          },
+        ],
+      },
+      signal: new AbortController().signal,
+      validate: async () => undefined,
+    })
+    const result = (await memory.maintenanceSnapshot(principalId)).records[0]!
+    expect(result).toMatchObject({
+      importance: 0.8,
+      priority: 'high',
+      tags: ['user-choice', 'maintenance-derived'],
+      meta: { memory_metadata: { overrides: expect.arrayContaining(['tags', 'importance']) } },
+    })
+  })
+
+  it('synchronizes annotations as immutable CAS writes and retains them for older servers', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const record = await memory.remember({
+      content: 'Eine geteilte geprüfte Einstellung.',
+      projectId: 'p1',
+      source: 'user',
+      writeIntent: 'confirmed',
+    })
+    const originalMetadata = structuredClone(record.meta)
+    await memory.updateMetadata(
+      record.id,
+      { tags: ['reviewed'] },
+      (await memory.inspectLocal()).records[0]!.metadataRevision
+    )
+    await setServerEnabled(true)
+    harness.fetch.mockImplementation(async (url: string) =>
+      url.endsWith('/maintenance/status')
+        ? jsonResponse({ data: [] })
+        : jsonResponse({ decision: 'accepted', persisted: true, id: record.id, memory_link_id: 41 })
+    )
+    await memory.flushPendingSync()
+    const originalWrite = JSON.parse(
+      harness.fetch.mock.calls.find(([url]) => String(url).endsWith('/remember'))![1].body
+    )
+    expect(originalWrite.meta).toEqual(originalMetadata)
+    expect(originalWrite.write_id).toBe(record.id)
+    expect(await memory.pendingSyncCount()).toBe(1)
+    expect((await memory.inspectLocal()).records[0]?.syncError).toContain('remain saved locally and pending')
+    harness.fetch.mockClear()
+    harness.fetch.mockImplementation(async (url: string) =>
+      url.endsWith('/maintenance/status')
+        ? jsonResponse({ data: [], capabilities: { memory_metadata_versions: [1], memory_metadata_cas: true } })
+        : jsonResponse({ decision: 'accepted', persisted: true, id: record.id, memory_link_id: 42 })
+    )
+    vi.advanceTimersByTime(11_000)
+    await memory.flushPendingSync()
+    const annotationWrite = JSON.parse(
+      harness.fetch.mock.calls.find(([url]) => String(url).endsWith('/remember'))![1].body
+    )
+    expect(annotationWrite).toMatchObject({
+      content: record.content,
+      external_id: record.id,
+      expected_previous_id: 41,
+      tags: ['reviewed'],
+    })
+    expect(annotationWrite.write_id).not.toBe(record.id)
+    expect(await memory.pendingSyncCount()).toBe(0)
+    expect((await memory.inspectLocal()).records[0]?.synced).toBe(true)
+  })
+
+  it('retries an annotation fingerprint unchanged before admitting a later edit of the same memory', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const original = await memory.remember({
+      content: 'Eine sichere geteilte Einstellung.',
+      source: 'user',
+      writeIntent: 'confirmed',
+      projectId: 'p1',
+    })
+    await setServerEnabled(true)
+    harness.fetch.mockResolvedValue(jsonResponse({ persisted: true, memory_link_id: 1, id: original.id }))
+    await memory.flushPendingSync()
+    await memory.updateMetadata(
+      original.id,
+      { tags: ['first'] },
+      (await memory.inspectLocal()).records[0]!.metadataRevision
+    )
+    let fail = true
+    let version = 1
+    const payloads: string[] = []
+    harness.fetch.mockImplementation(async (url: string, init: RequestInit) => {
+      if (url.endsWith('/status'))
+        return jsonResponse({ capabilities: { memory_metadata_versions: [1], memory_metadata_cas: true } })
+      payloads.push(String(init.body))
+      if (fail) throw new Error('offline')
+      return jsonResponse({ persisted: true, memory_link_id: ++version, id: original.id })
+    })
+    await memory.flushPendingSync()
+    await memory.updateMetadata(
+      original.id,
+      { tags: ['second'] },
+      (await memory.inspectLocal()).records[0]!.metadataRevision
+    )
+    await memory.flushPendingSync()
+    expect(payloads).toHaveLength(1)
+    fail = false
+    await vi.advanceTimersByTimeAsync(21_000)
+    await memory.flushPendingSync()
+    expect(payloads).toHaveLength(3)
+    expect(payloads[1]).toBe(payloads[0])
+    expect(JSON.parse(payloads[2]!)).toMatchObject({ expected_previous_id: 2, tags: ['second'] })
+    expect(await memory.pendingSyncCount()).toBe(0)
+  })
+
   it('commits maintenance with source CAS, restart persistence and no old-text archive', async () => {
     await setServerEnabled(false)
     const { LuczorMemoryService, isMaintenanceWrite } = await import('@/services/memory/luczorMemory')

@@ -14,7 +14,7 @@ export type IdleOptimizationJob = Readonly<{
   scope: 'user' | 'project'
   projectId?: string
   prompt: string
-  task?: 'context' | 'memory' | 'repository'
+  task?: 'context' | 'memory' | 'metadata' | 'repository'
   sourceMemoryIds?: readonly string[]
   /** True when the user started this pass explicitly; integrations may relax idle-only gates. */
   manual?: boolean
@@ -53,7 +53,7 @@ export type IdleContextOptimizerSnapshot = Readonly<{
   enabled: boolean
   phase: 'stopped' | 'waiting' | 'paused' | 'running' | 'committing' | 'yielding' | 'cooldown'
   /** The currently running or most recently completed locally bounded task. */
-  task: 'context' | 'memory' | 'repository' | null
+  task: 'context' | 'memory' | 'metadata' | 'repository' | null
   reason: string | null
   foregroundJobs: number
   completed: number

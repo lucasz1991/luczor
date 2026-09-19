@@ -39,6 +39,40 @@ function memory(overrides: Partial<MemoryRecord> = {}): MemoryRecord {
 }
 
 describe('provider-safe explicit memory recall tool', () => {
+  it('accepts bounded model classifications but rejects asserted evidence and ownership', async () => {
+    const remember = memoryTools.find(item => item.name === 'memory_remember')!
+    mocks.remember.mockResolvedValue(memory())
+    const classification = {
+      kind: 'decision',
+      categories: [['Software', 'Backend']],
+      tags: ['migration'],
+      interest: 0.4,
+    }
+    expect(() =>
+      validateToolArguments(remember.parameters, {
+        content: 'Die Migration bleibt reversibel.',
+        priority: 'normal',
+        classification,
+      })
+    ).not.toThrow()
+    await remember.execute(
+      { content: 'Die Migration bleibt reversibel.', priority: 'normal', classification },
+      { ...CONTEXT, toolSessionId: 'run-a' }
+    )
+    expect(mocks.remember).toHaveBeenCalledWith(
+      expect.objectContaining({ classification, sourceRef: 'run-a', source: 'assistant', writeIntent: 'system' })
+    )
+    for (const forbidden of [
+      { evidence: { status: 'source_backed' } },
+      { projectId: 'foreign' },
+      { confirmed: true },
+    ]) {
+      await expect(
+        remember.execute({ content: 'Claim', priority: 'normal', classification: forbidden }, CONTEXT)
+      ).rejects.toThrow('invalid_memory_classification')
+    }
+    expect(mocks.remember).toHaveBeenCalledTimes(1)
+  })
   beforeEach(() => {
     vi.clearAllMocks()
     mocks.recall.mockResolvedValue([memory()])
@@ -218,13 +252,21 @@ describe('provider-safe explicit memory recall tool', () => {
     await expect(analyze.execute({ scope: 'user', user_id: 2 }, CONTEXT)).rejects.toThrow()
   })
 
-  it('requires explicit approval for a durable prioritized save and keeps the current project', async () => {
+  it('uses execution-policy approval for a durable private note without inventing user confirmation', async () => {
     const remember = memoryTools.find(item => item.name === 'memory_remember')!
     expect(remember).toMatchObject({ mutating: true, requiresApproval: true, dataHandling: 'ephemeral' })
     mocks.remember.mockResolvedValue(memory())
     await remember.execute({ content: 'Antworten kurz halten.', priority: 'high' }, CONTEXT)
     expect(mocks.remember).toHaveBeenCalledExactlyOnceWith(
-      expect.objectContaining({ projectId: 'project-1', scope: 'project', priority: 'high', writeIntent: 'confirmed' })
+      expect.objectContaining({
+        projectId: 'project-1',
+        scope: 'project',
+        priority: 'high',
+        writeIntent: 'system',
+        source: 'assistant',
+        confidence: 0.35,
+        visibility: 'private',
+      })
     )
     await expect(
       remember.execute({ content: 'Andere Daten', priority: 'critical', projectId: 'p2' }, CONTEXT)

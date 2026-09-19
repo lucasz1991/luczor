@@ -194,6 +194,7 @@ async function retryBlocked() {
 const TASKS: Record<DreamRun['task'], string> = {
   context: 'Kontextpaket',
   memory: 'Erinnerungen verdichten',
+  metadata: 'Erinnerungen einordnen',
   repository: 'Repository-Wissen',
   evaluation: 'Modelltest',
   shared: 'Gemeinsame Pflege',

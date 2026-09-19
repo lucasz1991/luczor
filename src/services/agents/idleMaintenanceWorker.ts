@@ -11,6 +11,7 @@ import {
   maintenancePrompt,
   verificationPrompt,
   parseMemoryChangeSet,
+  parseMemoryAnnotation,
   parseMaintenanceVerification,
   assertPreservedReferences,
   maintenanceBatchChars,
@@ -367,6 +368,11 @@ export function createMaintenanceWorker(
       !(await deps.preferences()).autoRemember
     )
       throw new Error('scope_changed')
+    if (
+      job.task === 'metadata' &&
+      (await luczorMemory.maintenanceSnapshot(job.principalId)).journal.consent?.metadataAnnotations === false
+    )
+      throw new Error('metadata_disabled')
     const current =
       job.task === 'repository'
         ? await currentRepositoryJob(job, signal)
@@ -439,6 +445,7 @@ export function createMaintenanceWorker(
           const eligible = journal.jobs.filter(
             item =>
               availableIds.has(item.id) &&
+              (item.kind !== 'metadata' || journal.consent?.metadataAnnotations !== false) &&
               (item.kind !== 'memory' ||
                 (journal.consent?.automaticRewrite &&
                   journal.quality?.passed &&
@@ -542,6 +549,11 @@ export function createMaintenanceWorker(
             maintenanceProgress.value = { ...maintenanceProgress.value, modelId, stage: 'generating' }
             const generate = async (prompt: string, includedSources = 0, maxOutputTokens = 768) => {
               signal.throwIfAborted()
+              if (
+                job.task === 'metadata' &&
+                (await luczorMemory.maintenanceSnapshot(job.principalId)).journal.consent?.metadataAnnotations === false
+              )
+                throw new Error('metadata_disabled')
               const stepSignal = AbortSignal.any([signal, AbortSignal.timeout(125_000)])
               const gateway = await deps.gateway(
                 job.projectId ?? context.project()?.id ?? 'memory-user',
@@ -579,7 +591,8 @@ export function createMaintenanceWorker(
               return content
             }
             const reviewedSources: MaintenanceSource[] = [...work.hydrated.material]
-            const supportsContext = !job.key.startsWith('evaluation:') && !job.key.startsWith('sql:')
+            const supportsContext =
+              job.task !== 'metadata' && !job.key.startsWith('evaluation:') && !job.key.startsWith('sql:')
             let remaining = supportsContext ? MAINTENANCE_CONTEXT_ROUNDS : 0
             let prompt = supportsContext
               ? maintenanceContextPrompt(work.hydrated.kind, reviewedSources, remaining)
@@ -624,14 +637,26 @@ export function createMaintenanceWorker(
               )
             }
             work.evidence = reviewedSources
-            if (job.task === 'memory') {
-              work.changes = parseMemoryChangeSet(output, reviewedSources)
+            if (job.task === 'memory' || job.task === 'metadata') {
+              work.changes =
+                job.task === 'metadata'
+                  ? parseMemoryAnnotation(output, reviewedSources)
+                  : parseMemoryChangeSet(output, reviewedSources)
+              if (
+                work.changes.operations.some(operation =>
+                  job.task === 'metadata'
+                    ? !['annotate', 'noop'].includes(operation.operation)
+                    : operation.operation === 'annotate'
+                )
+              )
+                throw new Error('invalid_operation_for_job')
               const originalTargets = new Set(work.hydrated.material.map(source => source.id))
               if (work.changes.operations.some(operation => operation.targets.some(id => !originalTargets.has(id))))
                 throw new Error('context_target_forbidden')
             }
             // Context packages condense; they may cite only what the sources contain. Rewrites keep everything.
-            if (job.task !== 'memory') assertPreservedReferences(reviewedSources, output, 'summary')
+            if (job.task !== 'memory' && job.task !== 'metadata')
+              assertPreservedReferences(reviewedSources, output, 'summary')
             const labelOf = (id: string) => reviewedSources.find(source => source.id === id)?.content.slice(0, 72)
             if (work.changes) {
               let created = 0
@@ -643,6 +668,10 @@ export function createMaintenanceWorker(
                 }))
                 if (operation.operation === 'noop') {
                   recordDreamDecision('keep', targets, operation.reason)
+                  continue
+                }
+                if (operation.operation === 'annotate') {
+                  recordDreamDecision('annotate', targets, operation.reason)
                   continue
                 }
                 recordDreamDecision(
@@ -684,12 +713,16 @@ export function createMaintenanceWorker(
             try {
               parseMaintenanceVerification(
                 await generate(
-                  verificationPrompt(reviewedSources, output, job.task === 'memory' ? 'memory' : 'context'),
+                  verificationPrompt(
+                    reviewedSources,
+                    job.task === 'metadata' ? JSON.stringify(work.changes) : output,
+                    job.task === 'metadata' ? 'metadata' : job.task === 'memory' ? 'memory' : 'context'
+                  ),
                   0,
                   384
                 ),
                 reviewedSources,
-                { summary: job.task !== 'memory' }
+                { summary: job.task !== 'memory' && job.task !== 'metadata' }
               )
               recordDreamStep('verifying', 'Prüfung bestanden')
             } catch (error) {
@@ -750,13 +783,22 @@ export function createMaintenanceWorker(
       },
       async settled(job, success, interrupted) {
         const deferred = !success && !!idleWaitReason(lastFailure)
-        interrupted ||= deferred
+        const metadataOptOut =
+          !success &&
+          job.task === 'metadata' &&
+          ['metadata_disabled', 'metadata_annotations_disabled'].includes(lastFailure)
+        interrupted ||= deferred || metadataOptOut
         endDreamRun(success ? 'success' : interrupted ? 'interrupted' : 'failed', success ? undefined : lastFailure)
         lastFailure = ''
         if (!success)
           await luczorMemory.updateMaintenance(job.principalId, journal => {
             failMaintenanceJob(journal, job.key, job.fingerprint, interrupted, Date.now())
-            if (!interrupted && (job.task === 'memory' || selected.get(job.key)?.reviewFailed) && journal.quality)
+            if (
+              !interrupted &&
+              job.task !== 'metadata' &&
+              (job.task === 'memory' || selected.get(job.key)?.reviewFailed) &&
+              journal.quality
+            )
               journal.quality = { ...journal.quality, passed: false, reason: 'review_failure' }
           })
         selected.delete(job.key)
@@ -875,7 +917,7 @@ export function createMaintenanceWorker(
         if (!(await deps.preferences()).autoRemember) throw new Error('memory_disabled')
       },
       artifact:
-        job.task === 'memory'
+        job.task === 'memory' || job.task === 'metadata'
           ? undefined
           : {
               id: job.key,
@@ -891,7 +933,7 @@ export function createMaintenanceWorker(
             },
     })
     window.dispatchEvent(new CustomEvent('luczor:memory-changed', { detail: { origin: 'idle' } }))
-    if (job.task !== 'repository') {
+    if (job.task !== 'repository' && job.task !== 'metadata') {
       try {
         const result = await deps.improve(job.scope, {
           projectId: job.projectId,

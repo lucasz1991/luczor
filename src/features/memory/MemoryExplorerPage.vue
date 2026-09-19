@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AiIcon from '@/components/ai/AiIcon.vue'
 import MemoryDreamPanel from './MemoryDreamPanel.vue'
+import MemoryMetadataEditor from './MemoryMetadataEditor.vue'
 import { MEMORY_SYSTEMS } from './graph'
 import { loadMemoryGraphDisplay } from './graphDisplay'
 import { useMemoryGraphData } from './useMemoryGraphData'
@@ -14,6 +15,9 @@ import { useMemoryGraphData } from './useMemoryGraphData'
 const props = defineProps<{ projects: Array<{ id: string; name: string }>; projectId: string }>()
 const emit = defineEmits<{ close: []; settings: [] }>()
 const data = useMemoryGraphData()
+const selectedMemory = computed(() =>
+  data.inventory.value?.records.find(record => `memory:${record.id}` === data.selected.value)
+)
 const heading = ref<HTMLElement | null>(null)
 const showDream = ref(true)
 const showInspector = ref(true)
@@ -141,6 +145,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
           <p class="memory-inspector__detail">
             {{ data.detail.value?.detail ?? 'Knoten in der Karte oder Liste auswählen.' }}
           </p>
+          <MemoryMetadataEditor
+            v-if="selectedMemory?.metadataRevision"
+            :key="selectedMemory.id"
+            :record="selectedMemory"
+            @saved="data.load({ soft: true })"
+          />
           <div class="memory-inspector__head">
             <h2>Einträge dieser Ansicht</h2>
             <span>{{ stats.nodes }} Knoten · {{ stats.edges }} Beziehungen</span>

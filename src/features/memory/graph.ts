@@ -2,6 +2,7 @@ import type { RepositoryGraphPage } from '@/services/repositoryGraph'
 import type { LuczorMemoryService } from '@/services/memory/luczorMemory'
 import type { AssistantProfile } from '@/services/assistantProfileTypes'
 import type { PreparedContextArtifact } from '@/services/memory/maintenance'
+import { memoryMetadataDescription } from './metadataPresentation'
 export type MemoryInventory = Awaited<ReturnType<LuczorMemoryService['inspectLocal']>>
 export type MemoryNode = {
   id: string
@@ -84,7 +85,7 @@ export function buildMemoryGraph(
       label: record.content.slice(0, 72),
       system: 'Erinnerungen',
       kind: record.type,
-      detail: `${record.content}${record.truncated ? '\n[Auszug: erste 4.000 Zeichen]' : ''}\n\nBereich: ${record.scope} · Status: ${record.status}\nQuelle: ${record.source} · Sichtbarkeit: ${record.visibility}\nAufbewahrung: ${record.retention} · Vertrauen: ${record.confidence}\n${record.projectId ? `Projekt: ${record.projectId}\n` : ''}Geändert: ${new Date(record.updatedAt).toLocaleString('de-DE')}${record.expiresAt ? `\nAblauf: ${new Date(record.expiresAt).toLocaleString('de-DE')}` : ''}\nGespeicherte Erinnerungsquellen: ${record.sourceIds?.length ?? 0} (Kanten nur zu Einträgen dieser Seite).`,
+      detail: `${record.content}${record.truncated ? '\n[Auszug: erste 4.000 Zeichen]' : ''}\n\nBereich: ${record.scope} · Status: ${record.status}\nQuelle: ${record.source} · Sichtbarkeit: ${record.visibility}\nAufbewahrung: ${record.retention}\nWichtigkeit: ${Math.round((record.importance ?? 0.5) * 100)} %\n${memoryMetadataDescription(record.metadata)}\nTags: ${record.tags?.join(', ') || 'keine'}\n${record.projectId ? `Projekt: ${record.projectId}\n` : ''}Geändert: ${new Date(record.updatedAt).toLocaleString('de-DE')}${record.expiresAt ? `\nAblauf: ${new Date(record.expiresAt).toLocaleString('de-DE')}` : ''}\nGespeicherte Erinnerungsquellen: ${record.sourceIds?.length ?? 0} (Kanten nur zu Einträgen dieser Seite).`,
     })
     edges.push({ from: 'system:0', to: id, kind: 'Zugehörigkeit', grouping: true })
     for (const source of record.sourceIds ?? []) {

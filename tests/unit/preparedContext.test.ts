@@ -4,6 +4,7 @@ import { emptyMaintenanceJournal, maintenanceBatchChars, type MaintenanceJournal
 import type { MemoryRecord } from '@/services/memory/luczorMemory'
 import { planMaintenance } from '@/services/memory/maintenancePlanner'
 import { buildScopedContextPackage, type ScopedContextFragment } from '@/services/inference/contextBroker'
+import { captureMemoryMetadata } from '@/services/memory/memoryMetadata'
 const fixture = vi.hoisted(() => ({
   projects: [] as Project[],
   messages: [],
@@ -116,6 +117,47 @@ describe('prepared orientation and fallback boundaries', () => {
     const generated = await prepareSmallBatches()
     expect((await preparedContextFragments('p1', 'lesen')).map(fragment => fragment.id)).toEqual(
       generated.map(job => `prepared:${job.id}`)
+    )
+  })
+  it('ranks prepared packages by current source categories and includes evidence metadata without promoting it', async () => {
+    await prepareSmallBatches()
+    const source = fixture.records[0]!
+    source.meta = {
+      memory_metadata: captureMemoryMetadata({
+        ...source,
+        classification: { categories: [['Software', 'Laravel']] },
+        origin: { role: 'user', messageId: 'original-user', conversationId: 'chat' },
+      }),
+    }
+    const jobs = (
+      await planMaintenance({
+        principalId: 'owner',
+        projects: fixture.projects,
+        records: fixture.records,
+        now: 1,
+        maxSourceCount: 1,
+      })
+    ).filter(job => job.kind === 'context' && job.sources[0]?.kind === 'memory')
+    fixture.journal!.artifacts = jobs.map((job, index) => ({
+      id: job.id,
+      projectId: job.projectId,
+      revision: job.revision,
+      kind: 'context',
+      content: 'Allgemeiner Überblick.',
+      createdAt: index + 1,
+      modelId: 'local',
+      sources: job.sources,
+      localOnly: true,
+    }))
+    const result = await preparedContextFragments('p1', 'Laravel')
+    expect(result[0]?.id).toBe(`prepared:${jobs[0]!.id}`)
+    expect(result[0]?.content).toContain('Laravel')
+    expect(result[0]?.content).toContain('user_stated')
+    expect(result[0]?.content).toContain('original-user')
+    expect(result[0]).toMatchObject({ egress: 'local_only', trust: 'untrusted_data' })
+    source.tags = ['changed-classification']
+    expect((await preparedContextFragments('p1', 'Laravel')).some(fragment => fragment.id === result[0]!.id)).toBe(
+      false
     )
   })
   it.each(['changed', 'deleted', 'superseded', 'sensitive', 'expired', 'foreign'] as const)(

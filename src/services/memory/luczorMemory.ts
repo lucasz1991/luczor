@@ -10,6 +10,18 @@ import { analyzeMemoryRecords, type MemoryAnalysis } from './memoryAnalysis'
 import { trackMemoryActivity } from './activity'
 import { trackMemoryUsage, type MemoryUsageOrigin } from './usage'
 import { recordMemoryLinks } from './modelActivity'
+import { redactAbsoluteFilesystemPaths } from '@/services/prompt/promptContextAssembler'
+import {
+  applyMemoryAnnotation,
+  captureMemoryMetadata,
+  memoryMetadataOf,
+  memoryMetadataInputRevision,
+  memoryMetadataSearchText,
+  mergeMemoryMetadata,
+  parseMemoryClassification,
+  type MemoryClassification,
+  type MemoryOriginContext,
+} from './memoryMetadata'
 
 /** Lets passive views (knowledge space) refresh after a write; ids only, never content. */
 function notifyMemoryChanged(origin: 'chat' | 'user', ids: string[], kind: 'written' | 'updated' | 'removed') {
@@ -19,6 +31,7 @@ function notifyMemoryChanged(origin: 'chat' | 'user', ids: string[], kind: 'writ
 import {
   emptyMaintenanceJournal,
   maintenanceEligible,
+  metadataMaintenanceEligible,
   memoryRevision,
   MAINTENANCE_POLICY,
   type MaintenanceJournal,
@@ -120,6 +133,9 @@ export type RememberInput = {
   writeIntent?: MemoryWriteIntent
   retention?: MemoryRetention
   sensitivity?: MemorySensitivity
+  /** Captured by the host; model classification never supplies source authority. */
+  origin?: MemoryOriginContext
+  classification?: MemoryClassification
 }
 
 export type RecallQuery = {
@@ -147,7 +163,10 @@ type MemoryOutboxEvent = {
   id: string
   principalId: string
   recordId: string
-  operation: 'upsert' | 'delete'
+  operation: 'upsert' | 'delete' | 'annotate'
+  /** Immutable original write payload while metadata changes independently. */
+  writeSnapshot?: MemoryRecord
+  annotation?: MemoryRecord
   attempts: number
   nextAttemptAt: number
   createdAt: number
@@ -364,6 +383,11 @@ function containsLocalRepositorySource(value: unknown): boolean {
       const current = stack.pop()!
       nodes += 1
       if (nodes > DLP_MAX_NODES || current.depth > DLP_MAX_DEPTH) return true
+      if (
+        typeof current.value === 'string' &&
+        redactAbsoluteFilesystemPaths(current.value) !== current.value.replace(/\r\n?/g, '\n').replace(/\0/g, '')
+      )
+        return true
       if (current.value === null || typeof current.value !== 'object') continue
       if (seen.has(current.value)) return true
       seen.add(current.value)
@@ -406,6 +430,8 @@ function rememberInputDlpPayload(input: RememberInput): Record<string, unknown> 
     tags: input.tags,
     provenance: input.provenance,
     meta: input.meta,
+    origin: input.origin,
+    classification: input.classification,
   }
 }
 
@@ -507,7 +533,14 @@ export function planMemoryWrite(input: RememberInput): WritePlan {
 
   const repositoryDerived =
     LOCAL_SOURCE_TYPES.has(source.trim().toLocaleLowerCase()) ||
-    containsLocalRepositorySource({ meta: input.meta, provenance: input.provenance })
+    containsLocalRepositorySource({
+      meta: input.meta,
+      provenance: input.provenance,
+      tags: input.tags,
+      classification: input.classification,
+    }) ||
+    (memoryMetadataOf(input)?.files.length ?? 0) > 0 ||
+    (input.origin?.files?.length ?? 0) > 0
   const privateScope = input.scope === 'device' || input.scope === 'private'
   const localOnly = privateScope || repositoryDerived || sensitivity === 'secret' || input.visibility === 'private'
   const candidate = writeIntent === 'automatic' || writeIntent === 'inferred'
@@ -646,7 +679,9 @@ class OfflineMemoryStore {
           ? (Reflect.get(state.maintenance, principalId) as MaintenanceJournal)
           : undefined) ?? emptyMaintenanceJournal(),
       records: state.records.filter(
-        record => record.principalId === principalId && maintenanceEligible(record, Date.now(), true)
+        record =>
+          record.principalId === principalId &&
+          (maintenanceEligible(record, Date.now(), true) || metadataMaintenanceEligible(record, Date.now()))
       ),
     }
   }
@@ -677,19 +712,38 @@ class OfflineMemoryStore {
   async remember(record: MemoryRecord, enqueueServer: boolean): Promise<MemoryRecord> {
     return this.mutate(state => {
       enqueueServer = enqueueServer && !containsSensitiveMemoryData(memoryRecordDlpPayload(record))
-      const duplicate = state.records.find(
-        item =>
-          item.principalId === record.principalId &&
-          item.contentHash === record.contentHash &&
-          item.dataset === record.dataset &&
-          item.status === record.status &&
-          item.source === record.source &&
-          item.writeIntent === record.writeIntent &&
-          item.visibility === record.visibility &&
-          item.retention === record.retention &&
-          item.featureKey === record.featureKey &&
-          (!enqueueServer || sameSyncedWrite(item, record))
-      )
+      let duplicate = state.records
+        .slice()
+        .reverse()
+        .find(
+          item =>
+            item.principalId === record.principalId &&
+            item.contentHash === record.contentHash &&
+            item.dataset === record.dataset &&
+            item.status === record.status &&
+            item.source === record.source &&
+            item.writeIntent === record.writeIntent &&
+            item.visibility === record.visibility &&
+            item.retention === record.retention &&
+            item.featureKey === record.featureKey &&
+            (!enqueueServer || sameSyncedWrite(item, record))
+        )
+      let mergedMetadata: ReturnType<typeof mergeMemoryMetadata> | undefined
+      if (duplicate && !enqueueServer) {
+        try {
+          mergedMetadata = mergeMemoryMetadata([duplicate, record], record.updatedAt)
+          if (new Set([...duplicate.tags, ...record.tags]).size > 32) duplicate = undefined
+        } catch (error) {
+          if (
+            !(error instanceof Error) ||
+            !['memory_metadata_merge_too_large', 'memory_metadata_override_conflict'].includes(error.message)
+          )
+            throw error
+          // Keep both complete observations when their identities or protected
+          // annotations cannot safely fit in one bounded record.
+          duplicate = undefined
+        }
+      }
       if (duplicate) {
         // A persisted write ID is immutable. Repeated capture must not mutate
         // provenance/priority and replay a different fingerprint under that ID.
@@ -697,16 +751,27 @@ class OfflineMemoryStore {
         duplicate.content = record.content
         duplicate.updatedAt = record.updatedAt
         duplicate.expiresAt = record.expiresAt
-        duplicate.importance = Math.max(duplicate.importance, record.importance)
-        duplicate.confidence = Math.max(duplicate.confidence, record.confidence)
+        // Repetition is an observation, not independent confirmation or authority.
         duplicate.source = record.source
-        duplicate.tags = [...new Set([...duplicate.tags, ...record.tags])]
+        if (!memoryMetadataOf(duplicate)?.overrides.includes('tags'))
+          duplicate.tags = [...new Set([...duplicate.tags, ...record.tags])]
         duplicate.provenance = {
-          ...(duplicate.provenance ?? {}),
           ...(record.provenance ?? {}),
+          ...(duplicate.provenance ?? {}),
+          captured_at: record.provenance?.captured_at,
           observation_count: Math.max(1, Number(duplicate.provenance?.observation_count ?? 1)) + 1,
         }
-        duplicate.meta = { ...(duplicate.meta ?? {}), ...(record.meta ?? {}) }
+        const previousMetadata = memoryMetadataOf(duplicate)
+        duplicate.meta = {
+          ...(duplicate.meta ?? {}),
+          ...(record.meta ?? {}),
+          memory_metadata: mergedMetadata!,
+        }
+        if (previousMetadata && mergedMetadata) {
+          mergedMetadata.evidence.status = previousMetadata.evidence.status
+          mergedMetadata.evidence.verifiedAt = previousMetadata.evidence.verifiedAt
+          duplicate.meta.memory_metadata = mergedMetadata
+        }
         if (enqueueServer) {
           duplicate.synced = false
           if (
@@ -751,7 +816,11 @@ class OfflineMemoryStore {
         }
       }
       state.records.push(record)
-      if (enqueueServer) state.outbox.push(newOutboxEvent(record.id, 'upsert', record.principalId))
+      if (enqueueServer)
+        state.outbox.push({
+          ...newOutboxEvent(record.id, 'upsert', record.principalId),
+          writeSnapshot: structuredClone(record),
+        })
       pruneState(state)
       return record
     })
@@ -775,7 +844,7 @@ class OfflineMemoryStore {
       )
       .filter(record => matchesRecallQuery(record, query, terms))
       .map(record => ({ record, rank: memoryRank(record, terms) }))
-      .sort((left, right) => right.rank - left.rank || right.record.updatedAt - left.record.updatedAt)
+      .sort(compareRankedMemories)
       .slice(0, limit)
       .map(item => item.record)
   }
@@ -887,16 +956,22 @@ class OfflineMemoryStore {
       record.retention = sensitive ? 'session' : plan.retention
       record.visibility = sensitive || plan.localOnly ? 'private' : plan.visibility
       record.writeIntent = plan.writeIntent
-      record.confidence = Math.max(plan.confidence, 0.85)
+      record.confidence = plan.confidence
       record.expiresAt = record.retention === 'session' ? Date.now() + 24 * 60 * 60_000 : undefined
       record.updatedAt = Date.now()
       record.provenance = { ...(record.provenance ?? {}), write_reason: plan.reason }
+      record.provenance.storage_confirmed_at = Date.now()
+      // Promotion confirms retention of the selected text; its original author
+      // and evidence classification remain intact.
       state.outbox = state.outbox.filter(
         event =>
           !(event.operation === 'upsert' && event.recordId === record.id && event.principalId === record.principalId)
       )
       if (!plan.localOnly && !sensitive) {
-        state.outbox.push(newOutboxEvent(record.id, 'upsert', principalId))
+        state.outbox.push({
+          ...newOutboxEvent(record.id, 'upsert', principalId),
+          writeSnapshot: structuredClone(record),
+        })
       }
       return record
     })
@@ -982,6 +1057,49 @@ class OfflineMemoryStore {
     return (await this.load()).records.find(record => record.id === recordId && record.principalId === principalId)
   }
 
+  async updateMetadata(
+    principalId: string,
+    id: string,
+    patch: MemoryClassification,
+    expectedRevision: string
+  ): Promise<MemoryRecord> {
+    return this.mutate(async state => {
+      const record = state.records.find(item => item.id === id && item.principalId === principalId)
+      if (!record || state.tombstones.some(item => item.recordId === id && item.principalId === principalId))
+        throw new Error('Memory is no longer available.')
+      if (memoryRevision(record) !== expectedRevision)
+        throw new Error('Memory changed. Refresh before editing its metadata.')
+      const annotation = applyMemoryAnnotation(record, patch, { origin: 'user' })
+      const updated = { ...record, ...annotation }
+      if (containsSensitiveMemoryData(memoryRecordDlpPayload(updated)))
+        throw new Error('Metadata failed the privacy policy.')
+      if (((await getVerifiedAccountSnapshot())?.principalId ?? 'device-local') !== principalId)
+        throw new Error('scope_changed')
+      Object.assign(record, annotation, {
+        priority: memoryPriority(annotation.importance),
+        updatedAt: Math.max(Date.now(), record.updatedAt + 1),
+      })
+      queueMetadataAnnotation(state, record)
+      return structuredClone(record)
+    })
+  }
+
+  async prepareAnnotation(eventId: string, principalId: string): Promise<MemoryRecord | undefined> {
+    return this.mutate(state => {
+      const event = state.outbox.find(item => item.id === eventId && item.principalId === principalId)
+      const record = state.records.find(item => item.id === event?.recordId && item.principalId === principalId)
+      if (!event?.annotation || !record || record.status !== 'active') return undefined
+      const index = state.outbox.indexOf(event)
+      if (state.outbox.slice(0, index).some(item => item.recordId === record.id && item.principalId === principalId))
+        throw new Error('Metadata synchronization is waiting for an earlier memory write.')
+      if (event.writeSnapshot) return event.writeSnapshot
+      if (!record.serverVersionId)
+        throw new Error('Metadata synchronization is waiting for the original server version.')
+      event.writeSnapshot = { ...structuredClone(event.annotation), serverVersionId: record.serverVersionId }
+      return event.writeSnapshot
+    })
+  }
+
   async tombstoneForOutbox(recordId: string, principalId: string): Promise<MemoryTombstone | undefined> {
     return (await this.load()).tombstones.find(
       tombstone => tombstone.recordId === recordId && tombstone.principalId === principalId
@@ -994,7 +1112,9 @@ class OfflineMemoryStore {
       if (!event) return
       const record = state.records.find(item => item.id === event.recordId && item.principalId === event.principalId)
       if (record) {
-        record.synced = true
+        record.synced = !state.outbox.some(
+          item => item.id !== eventId && item.recordId === record.id && item.operation !== 'delete'
+        )
         record.syncError = undefined
         if (serverId) record.serverId = serverId
         if (serverVersionId) record.serverVersionId = serverVersionId
@@ -1163,7 +1283,7 @@ class ServerMemoryBackend {
     }
   }
 
-  remember(record: MemoryRecord): Promise<ServerWriteResult> {
+  remember(record: MemoryRecord, annotationWriteId?: string): Promise<ServerWriteResult> {
     const plan = recordWritePlan(record)
     if (plan.localOnly || containsSensitiveMemoryData(memoryRecordDlpPayload(record))) {
       return Promise.reject(new Error('Memory payload failed the local privacy policy.'))
@@ -1193,12 +1313,26 @@ class ServerMemoryBackend {
       source_ref: record.provenance?.source_ref,
       provenance: record.provenance,
       external_id: record.id,
-      write_id: record.id,
-      expected_previous_id: record.featureKey ? (record.expectedPreviousServerVersionId ?? null) : undefined,
+      write_id: annotationWriteId ?? record.id,
+      expected_previous_id: annotationWriteId
+        ? record.serverVersionId
+        : record.featureKey
+          ? (record.expectedPreviousServerVersionId ?? null)
+          : undefined,
       client_id: this.clientId,
       tags: record.tags,
       meta: record.meta,
     })
+  }
+
+  async supportsMetadata(context: MemoryContext): Promise<boolean> {
+    const result = await this.call<{
+      capabilities?: { memory_metadata_versions?: number[]; memory_metadata_cas?: boolean }
+    }>('/memory/maintenance/status', { scope: context.scope, project_id: context.projectId })
+    return (
+      result.capabilities?.memory_metadata_cas === true &&
+      result.capabilities.memory_metadata_versions?.includes(1) === true
+    )
   }
 
   async recall(context: MemoryContext, query: string, limit: number): Promise<MemoryRecord[]> {
@@ -1235,40 +1369,46 @@ class ServerMemoryBackend {
       ) {
         return []
       }
-      return [
-        {
-          id: String(item.id),
-          principalId: context.principalId,
-          serverId: String(item.id),
-          serverVersionId: positiveInteger(item.source_record_id),
-          scope: context.scope,
-          dataset: context.dataset,
-          content: item.content.trim(),
-          contentHash: String(item.content_hash ?? ''),
-          type: String(item.type ?? 'note'),
-          visibility: 'syncable' as MemoryVisibility,
-          status: 'active' as MemoryStatus,
-          retention: 'durable' as MemoryRetention,
-          sensitivity: 'normal' as MemorySensitivity,
-          writeIntent: 'confirmed' as MemoryWriteIntent,
-          importance: clamp(Number(item.importance ?? 0.5)),
-          priority: memoryPriority(Number(item.importance ?? 0.5)),
-          confidence: clamp(Number(item.confidence ?? 0.5)),
-          source: String(item.source ?? 'server'),
-          tags: Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === 'string') : [],
-          createdAt: parseDate(item.recorded_at) ?? Date.now(),
-          updatedAt: parseDate(item.recorded_at) ?? Date.now(),
-          projectId: context.projectId,
-          agentId: context.agentId,
-          sessionId: context.sessionId,
-          featureKey: typeof item.feature_key === 'string' ? item.feature_key : undefined,
-          provenance: item.provenance as Record<string, unknown> | undefined,
-          meta: item.meta as Record<string, unknown> | undefined,
-          expiresAt: parseDate(item.expires_at) ?? parseDate(item.valid_until),
-          retrievalScore: typeof item.retrieval_score === 'number' ? clamp(item.retrieval_score) : undefined,
-          synced: true,
-        },
-      ]
+      const record: MemoryRecord = {
+        id: String(item.id),
+        principalId: context.principalId,
+        serverId: String(item.id),
+        serverVersionId: positiveInteger(item.source_record_id),
+        scope: context.scope,
+        dataset: context.dataset,
+        content: item.content.trim(),
+        contentHash: String(item.content_hash ?? ''),
+        type: String(item.type ?? 'note'),
+        visibility: 'syncable' as MemoryVisibility,
+        status: 'active' as MemoryStatus,
+        retention: 'durable' as MemoryRetention,
+        sensitivity: 'normal' as MemorySensitivity,
+        writeIntent: 'confirmed' as MemoryWriteIntent,
+        importance: clamp(Number(item.importance ?? 0.5)),
+        priority: memoryPriority(Number(item.importance ?? 0.5)),
+        confidence: clamp(Number(item.confidence ?? 0.5)),
+        source: String(item.source ?? 'server'),
+        tags: Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === 'string') : [],
+        createdAt: parseDate(item.recorded_at) ?? Date.now(),
+        updatedAt: parseDate(item.recorded_at) ?? Date.now(),
+        projectId: context.projectId,
+        agentId: context.agentId,
+        sessionId: context.sessionId,
+        featureKey: typeof item.feature_key === 'string' ? item.feature_key : undefined,
+        provenance: item.provenance as Record<string, unknown> | undefined,
+        meta: item.meta as Record<string, unknown> | undefined,
+        expiresAt: parseDate(item.expires_at) ?? parseDate(item.valid_until),
+        retrievalScore: typeof item.retrieval_score === 'number' ? clamp(item.retrieval_score) : undefined,
+        synced: true,
+      }
+      const metadata = memoryMetadataOf(record)
+      if (metadata?.classification.origin === 'dream') {
+        // The SQL adapter has revalidated this source. Its scheduler stamp is
+        // not a local queue identity; adoption never changes evidence authority.
+        metadata.classification.inputRevision = memoryMetadataInputRevision(record)
+        record.meta = { ...record.meta, memory_metadata: metadata }
+      }
+      return [record]
     })
   }
 
@@ -1376,21 +1516,38 @@ export class LuczorMemoryService {
     if (!backend) throw new Error('server_disabled')
     if (action === 'apply') {
       const { journal } = await this.maintenanceSnapshot(principalId)
-      if (
-        !journal.consent?.automaticRewrite ||
-        !journal.quality?.passed ||
-        journal.quality.modelId !== data.model_id ||
-        journal.quality.policy !== MAINTENANCE_POLICY ||
-        containsSensitiveMemoryData(data)
-      )
-        throw new Error('shared_write_gate')
-      data = {
-        ...data,
-        consent: true,
-        quality: { passed: true, policy: journal.quality.policy, model_id: journal.quality.modelId },
+      const annotationsOnly =
+        Array.isArray(data.operations) &&
+        data.operations.length > 0 &&
+        data.operations.every(
+          operation => operation && typeof operation === 'object' && ['annotate', 'noop'].includes(operation.operation)
+        )
+      if (containsSensitiveMemoryData(data)) throw new Error('shared_write_gate')
+      if (annotationsOnly) {
+        if (journal.consent?.metadataAnnotations === false) throw new Error('metadata_annotations_disabled')
+        if (!(await backend.supportsMetadata(this.context(scope, { projectId }, principalId))))
+          throw new Error('metadata_adapter_unsupported')
+        for (const operation of data.operations as Array<{ operation: string; metadata?: unknown }>)
+          if (operation.operation === 'annotate') parseMemoryClassification(operation.metadata)
+        data = { ...data, consent: false, quality: undefined }
+      } else {
+        if (
+          !journal.consent?.automaticRewrite ||
+          !journal.quality?.passed ||
+          journal.quality.modelId !== data.model_id ||
+          journal.quality.policy !== MAINTENANCE_POLICY
+        )
+          throw new Error('shared_write_gate')
+        data = {
+          ...data,
+          consent: true,
+          quality: { passed: true, policy: journal.quality.policy, model_id: journal.quality.modelId },
+        }
       }
     }
     signal.throwIfAborted()
+    if (action === 'apply' && (await this.operationSnapshot()).principalId !== principalId)
+      throw new Error('scope_changed')
     const result = await backend.maintenance<T>(this.context(scope, { projectId }, principalId), action, data, signal)
     signal.throwIfAborted()
     if ((await this.operationSnapshot()).principalId !== principalId) throw new Error('scope_changed')
@@ -1467,7 +1624,11 @@ export class LuczorMemoryService {
         const record = records.find(item => item.id === source.id)
         if (
           !record ||
-          !maintenanceEligible(record, Date.now(), !!input.artifact) ||
+          !(job.kind === 'metadata'
+            ? record.sensitivity === 'normal' &&
+              ['active', 'candidate'].includes(record.status) &&
+              (!record.expiresAt || record.expiresAt > Date.now())
+            : maintenanceEligible(record, Date.now(), !!input.artifact)) ||
           memoryRevision(record) !== source.revision ||
           state.tombstones.some(item => item.principalId === input.principalId && item.recordId === source.id)
         )
@@ -1477,6 +1638,34 @@ export class LuczorMemoryService {
       let conflicts = 0
       for (const operation of input.changes?.operations ?? []) {
         if (operation.operation === 'noop') continue
+        if (operation.operation === 'annotate') {
+          if (journal.consent?.metadataAnnotations === false) throw new Error('metadata_annotations_disabled')
+          if (
+            job.kind !== 'metadata' ||
+            operation.targets.length !== 1 ||
+            operation.sources.length !== 1 ||
+            operation.targets[0] !== operation.sources[0] ||
+            !operation.metadata ||
+            !input.sources.some(source => source.kind === 'memory' && source.id === operation.targets[0])
+          )
+            throw new Error('invalid_metadata_annotation')
+          const record = records.find(item => item.id === operation.targets[0])!
+          const annotation = applyMemoryAnnotation(record, operation.metadata, {
+            origin: 'dream',
+            modelId: input.modelId,
+            inputRevision: memoryMetadataInputRevision(record),
+          })
+          if (containsSensitiveMemoryData(memoryRecordDlpPayload({ ...record, ...annotation })))
+            throw new Error('sensitive_candidate')
+          Object.assign(record, annotation, {
+            priority: memoryPriority(annotation.importance),
+            updatedAt: Math.max(Date.now(), record.updatedAt + 1),
+          })
+          queueMetadataAnnotation(state, record)
+          changed++
+          continue
+        }
+        if (job.kind === 'metadata') throw new Error('invalid_metadata_annotation')
         // New authority is account-local and model/policy-bound, never migrated from the old idle toggle.
         if (
           !journal.consent?.automaticRewrite ||
@@ -1507,6 +1696,17 @@ export class LuczorMemoryService {
           throw new Error('adapter_write_unsupported')
         const now = Date.now()
         const id = uid()
+        const mergedMetadata = mergeMemoryMetadata(
+          sources.map(source => source!),
+          now
+        )
+        const protectedTags = sources.find(source => memoryMetadataOf(source!)?.overrides.includes('tags'))
+        const protectedImportance = sources.find(source => memoryMetadataOf(source!)?.overrides.includes('importance'))
+        const derivedImportance =
+          protectedImportance?.importance ?? Math.max(...sources.map(source => source!.importance))
+        const derivedTags = [
+          ...new Set([...(protectedTags?.tags ?? sources.flatMap(source => source!.tags)), 'maintenance-derived']),
+        ]
         const derived: MemoryRecord = {
           ...original,
           id,
@@ -1528,7 +1728,9 @@ export class LuczorMemoryService {
             : undefined,
           retention: sources.some(source => source!.retention === 'session') ? 'session' : 'durable',
           type: operation.operation === 'conflict' ? 'memory_conflict' : 'memory_consolidation',
-          tags: ['maintenance-derived'],
+          importance: derivedImportance,
+          priority: memoryPriority(derivedImportance),
+          tags: derivedTags,
           createdAt: now,
           updatedAt: now,
           featureKey: undefined,
@@ -1541,7 +1743,7 @@ export class LuczorMemoryService {
             reason: operation.reason,
             model_id: input.modelId,
           },
-          meta: undefined,
+          meta: { memory_metadata: mergedMetadata },
         }
         for (const target of targets) {
           state.records = state.records.filter(
@@ -1576,6 +1778,7 @@ export class LuczorMemoryService {
         { id: job.id, revision: job.revision, at: Date.now(), modelId: input.modelId, changed, conflicts },
       ].slice(-2000)
     })
+    this.scheduleSync()
   }
 
   private async operationSnapshot(): Promise<MemoryOperationSnapshot> {
@@ -1638,6 +1841,30 @@ export class LuczorMemoryService {
     }
     const context = this.context(scope, input, principalId)
     const now = Date.now()
+    const classification = input.classification ? parseMemoryClassification(input.classification) : undefined
+    const metadata = captureMemoryMetadata({
+      content,
+      source: input.source ?? 'user',
+      writeIntent: plan.writeIntent,
+      projectId: context.projectId,
+      origin: input.origin
+        ? {
+            ...input.origin,
+            files: input.origin.files?.map(file => ({
+              ...file,
+              projectId: file.projectId ? projectExternalIdForServer(file.projectId, principalId) : context.projectId,
+            })),
+          }
+        : undefined,
+      classification,
+      now,
+    })
+    const importance = memoryImportance(
+      input.priority,
+      input.importance ?? classification?.importance ?? score(content)
+    )
+    if (input.priority && input.source === 'user' && ['explicit', 'confirmed'].includes(plan.writeIntent))
+      metadata.overrides.push('importance')
     const record: MemoryRecord = {
       id: uid(),
       principalId,
@@ -1651,11 +1878,14 @@ export class LuczorMemoryService {
       retention: plan.retention,
       sensitivity: plan.sensitivity,
       writeIntent: plan.writeIntent,
-      importance: memoryImportance(input.priority, input.importance ?? score(content)),
-      priority: input.priority ?? memoryPriority(input.importance ?? score(content)),
+      importance,
+      priority: input.priority ?? memoryPriority(importance),
       confidence: plan.confidence,
       source: input.source ?? 'user',
-      tags: input.tags ?? [],
+      tags:
+        input.tags ??
+        classification?.tags ??
+        [...new Set(metadata.categories.flatMap(category => category.path.slice(-1)))].slice(0, 8),
       createdAt: now,
       updatedAt: now,
       expiresAt: plan.retention === 'session' ? now + 24 * 60 * 60_000 : undefined,
@@ -1667,13 +1897,16 @@ export class LuczorMemoryService {
         ...(input.provenance ?? {}),
         source_type: input.source ?? 'user',
         source_ref: input.sourceRef,
+        chat_run_id: input.origin?.runId,
+        conversation_id: input.origin?.conversationId,
+        author_role: input.origin?.role,
         captured_at: new Date(now).toISOString(),
         policy_version: 'desktop-memory-policy.v2',
         write_reason: plan.reason,
         requested_visibility: input.visibility,
         requested_retention: input.retention,
       },
-      meta: input.meta,
+      meta: { ...(input.meta ?? {}), memory_metadata: metadata },
       synced: false,
     }
     if (plan.sensitivity === 'secret' || containsSensitiveMemoryData(memoryRecordDlpPayload(record))) {
@@ -1685,8 +1918,11 @@ export class LuczorMemoryService {
       this.sessionSecrets.push(record)
       return record
     }
-    const stored = await this.offline.remember(record, !plan.localOnly)
-    if (!plan.localOnly && snapshot.config && (await memoryUseServer())) this.scheduleSync(stored.importance >= 0.95)
+    const finalPlan = recordWritePlan(record)
+    if (finalPlan.localOnly) record.visibility = 'private'
+    const stored = await this.offline.remember(record, !finalPlan.localOnly)
+    if (!finalPlan.localOnly && snapshot.config && (await memoryUseServer()))
+      this.scheduleSync(stored.importance >= 0.95)
     return stored
   }
 
@@ -1698,7 +1934,9 @@ export class LuczorMemoryService {
     sessionId: string
     expectedPrincipalId: string
     final?: boolean
+    origin?: MemoryOriginContext
   }): Promise<MemoryRecord | null> {
+    if (!(await getMemoryPrefs()).autoRemember) return null
     if (input.scope === 'project' && !input.projectId?.trim())
       throw new Error('A project is required for its checkpoint.')
     const snapshot = await this.operationSnapshot()
@@ -2018,11 +2256,12 @@ export class LuczorMemoryService {
     for (const event of await this.offline.dueOutbox(principalId)) {
       try {
         if (event.operation === 'upsert') {
-          const record = await this.offline.recordForOutbox(event.recordId, principalId)
-          if (!record || record.status !== 'active') {
+          const currentRecord = await this.offline.recordForOutbox(event.recordId, principalId)
+          if (!currentRecord || currentRecord.status !== 'active') {
             await this.offline.acknowledge(event.id)
             continue
           }
+          const record = event.writeSnapshot ?? currentRecord
           if (containsSensitiveMemoryData(memoryRecordDlpPayload(record))) {
             await this.offline.quarantineSensitiveUpsert(event.id, record.id, principalId)
             continue
@@ -2043,6 +2282,22 @@ export class LuczorMemoryService {
             continue
           }
           await this.offline.acknowledge(event.id, result.id, result.memory_link_id)
+        } else if (event.operation === 'annotate') {
+          const record = await this.offline.prepareAnnotation(event.id, principalId)
+          if (!record) {
+            await this.offline.acknowledge(event.id)
+            continue
+          }
+          if (recordWritePlan(record).localOnly || containsSensitiveMemoryData(memoryRecordDlpPayload(record))) {
+            throw new Error('Metadata is retained locally by the privacy policy.')
+          }
+          if (!(await server.supportsMetadata(this.context(record.scope, record, principalId)))) {
+            throw new Error('Server metadata support is unavailable; annotations remain saved locally and pending.')
+          }
+          const result = await server.remember(record, event.id)
+          if (result.persisted === false || !result.memory_link_id || result.decision === 'local_only')
+            throw new Error('Server did not acknowledge the metadata version; annotations remain pending.')
+          await this.offline.acknowledge(event.id, result.id, result.memory_link_id)
         } else {
           const tombstone = await this.offline.tombstoneForOutbox(event.recordId, principalId)
           if (!tombstone) {
@@ -2056,6 +2311,13 @@ export class LuczorMemoryService {
           await this.offline.acknowledge(event.id)
         }
       } catch (error) {
+        if (event.operation === 'annotate' && error instanceof MemoryHttpError && error.status === 409) {
+          await this.offline.fail(
+            event.id,
+            new Error('Server metadata changed; local annotations are retained for review.')
+          )
+          continue
+        }
         if (event.operation === 'upsert' && error instanceof MemoryHttpError && error.status === 409) {
           const record = await this.offline.recordForOutbox(event.recordId, principalId)
           let currentServerVersionId = conflictVersionFromResponse(error.responseBody)
@@ -2087,6 +2349,19 @@ export class LuczorMemoryService {
     return this.offline.pending(snapshot.principalId)
   }
 
+  /** User edits change annotations only; source text and retention authority stay intact. */
+  async updateMetadata(id: string, patch: MemoryClassification, expectedRevision: string): Promise<MemoryRecord> {
+    const normalized = parseMemoryClassification(patch)
+    const snapshot = await this.operationSnapshot()
+    const record = await trackMemoryActivity('write', () =>
+      this.offline.updateMetadata(snapshot.principalId, id, normalized, expectedRevision)
+    )
+    notifyMemoryChanged('user', [id], 'updated')
+    recordMemoryLinks([id], 'written', 'user')
+    this.scheduleSync()
+    return record
+  }
+
   /** Read-only, account-bound inventory. Inspector reads never count as AI retrieval. */
   async inspectLocal(options: { projectId?: string; query?: string; offset?: number; limit?: number } = {}) {
     const snapshot = await this.operationSnapshot()
@@ -2100,7 +2375,7 @@ export class LuczorMemoryService {
         record =>
           (!projectId || record.projectId === projectId) &&
           (!query ||
-            `${record.sensitivity === 'normal' ? record.content : ''} ${record.type} ${record.scope}`
+            `${record.sensitivity === 'normal' ? `${record.content} ${memoryMetadataSearchText(record)}` : ''} ${record.type} ${record.scope}`
               .toLocaleLowerCase('de')
               .includes(query))
       )
@@ -2142,6 +2417,11 @@ export class LuczorMemoryService {
         visibility: record.visibility,
         retention: record.retention,
         confidence: record.confidence,
+        importance: record.importance,
+        tags: record.tags,
+        metadata: memoryMetadataOf(record),
+        metadataRevision: memoryRevision(record),
+        syncError: record.syncError,
         updatedAt: record.updatedAt,
         synced: !!record.synced,
       })),
@@ -2201,7 +2481,7 @@ function normalizeState(state: MemoryState): MemoryState {
     ...event,
     principalId: event.principalId || principalByRecord.get(event.recordId) || 'legacy-quarantine',
   }))
-  const protectedRecordIds = new Set(outbox.filter(event => event.operation === 'upsert').map(event => event.recordId))
+  const protectedRecordIds = new Set(outbox.filter(event => event.operation !== 'delete').map(event => event.recordId))
   const eligibleRecords = records
     .filter(record => record.status !== 'superseded' || record.updatedAt > now - 90 * 24 * 60 * 60_000)
     .filter(record => !record.expiresAt || record.expiresAt > now - 7 * 24 * 60 * 60_000)
@@ -2315,7 +2595,28 @@ function queueRemoteDelete(state: MemoryState, record: MemoryRecord): void {
   state.outbox.push(newOutboxEvent(record.id, 'delete', record.principalId))
 }
 
+/** Metadata versions have their own immutable write identities, never replay a changed original write. */
+function queueMetadataAnnotation(state: MemoryState, record: MemoryRecord): void {
+  if (record.status !== 'active' || recordWritePlan(record).localOnly) return
+  if (
+    !record.serverVersionId &&
+    !state.outbox.some(event => event.recordId === record.id && event.operation === 'upsert')
+  )
+    return
+  state.outbox.push({
+    ...newOutboxEvent(record.id, 'annotate', record.principalId),
+    annotation: structuredClone(record),
+  })
+  record.synced = false
+}
+
 function sameSyncedWrite(left: MemoryRecord, right: MemoryRecord): boolean {
+  const stableMeta = (record: MemoryRecord) => {
+    const metadata = memoryMetadataOf(record)
+    if (!metadata) return record.meta
+    const { updatedAt: _updatedAt, ...classification } = metadata.classification
+    return { ...record.meta, memory_metadata: { ...metadata, classification } }
+  }
   const payload = (record: MemoryRecord) => ({
     importance: record.importance,
     confidence: record.confidence,
@@ -2326,7 +2627,7 @@ function sameSyncedWrite(left: MemoryRecord, right: MemoryRecord): boolean {
     writeIntent: record.writeIntent,
     type: record.type,
     tags: record.tags,
-    meta: record.meta,
+    meta: stableMeta(record),
     provenance: Object.fromEntries(
       Object.entries(record.provenance ?? {}).filter(([key]) => key !== 'captured_at' && key !== 'observation_count')
     ),
@@ -2354,7 +2655,7 @@ function fuseMemories(local: MemoryRecord[], server: MemoryRecord[], query: stri
   const ranked = [...byContent.values()]
     .filter(record => matchesRecallQuery(record, query, terms))
     .map(record => ({ record, rank: memoryRank(record, terms) }))
-    .sort((left, right) => right.rank - left.rank || right.record.updatedAt - left.record.updatedAt)
+    .sort(compareRankedMemories)
   const features = new Set<string>()
   return ranked
     .filter(({ record }) => {
@@ -2371,6 +2672,18 @@ function memoryRank(record: MemoryRecord, terms: string[]): number {
   const lexical = lexicalRecallScore(record, terms)
   const semantic = record.source === 'cognee_revalidated' ? (record.retrievalScore ?? 0.5) : 0
   return Math.max(lexical, semantic) * 0.6 + record.importance * 0.2 + record.confidence * 0.2
+}
+
+/** Interest only breaks an existing rank tie; it cannot outweigh relevance or importance. */
+function compareRankedMemories(
+  left: { record: MemoryRecord; rank: number },
+  right: { record: MemoryRecord; rank: number }
+): number {
+  return (
+    right.rank - left.rank ||
+    (memoryMetadataOf(right.record)?.interest ?? 0) - (memoryMetadataOf(left.record)?.interest ?? 0) ||
+    right.record.updatedAt - left.record.updatedAt
+  )
 }
 
 function normalizeRecallContent(content: string): string {
@@ -2467,7 +2780,9 @@ function queryTerms(query: string): string[] {
 
 function lexicalRecallScore(record: MemoryRecord, terms: string[]): number {
   if (!terms.length) return 0
-  const tokens = queryTerms([record.content, record.featureKey ?? '', ...record.tags].join(' '))
+  const tokens = queryTerms(
+    [record.content, record.featureKey ?? '', ...record.tags, memoryMetadataSearchText(record)].join(' ')
+  )
   const matches = terms.filter(term =>
     tokens.some(token => token === term || (term.length >= 4 && token.startsWith(term)))
   )

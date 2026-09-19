@@ -1,5 +1,6 @@
 import { luczorMemory } from '@/services/memory/luczorMemory'
 import { memoryPriority, MEMORY_PRIORITIES } from '@/services/memory/memoryPriority'
+import { memoryMetadataOf, parseMemoryClassification } from '@/services/memory/memoryMetadata'
 import { redactAbsoluteFilesystemPaths, redactProviderSecrets } from '@/services/prompt/promptContextAssembler'
 import type { ToolDef } from './types'
 
@@ -103,6 +104,16 @@ export const memoryTools: ToolDef[] = [
           priority: memoryPriority(record.importance),
           priority_label: MEMORY_PRIORITIES[memoryPriority(record.importance)].label,
           tags: record.tags.slice(0, 8).map(tag => compactText(tag, 80)),
+          ...(memoryMetadataOf(record)
+            ? {
+                kind: memoryMetadataOf(record)!.kind,
+                interest: memoryMetadataOf(record)!.interest,
+                categories: memoryMetadataOf(record)!.categories.map(category =>
+                  category.path.map(segment => compactText(segment, 80))
+                ),
+                evidence_status: memoryMetadataOf(record)!.evidence.status,
+              }
+            : {}),
           ...(record.featureKey ? { feature_key: compactText(record.featureKey, 120) } : {}),
         }
         if (JSON.stringify({ scope, memories: [...memories, item], truncated: true }).length > MAX_RESULT_CHARS) {
@@ -170,7 +181,7 @@ export const memoryTools: ToolDef[] = [
     name: 'memory_remember',
     category: 'project',
     description:
-      'Save one concise, evidence-backed preference or decision after the user approves this exact memory. Use the requested priority. Project memories stay in the active project; user scope is personal account memory. Never save secrets or raw repository/screen content, invent facts, or treat an assistant guess as confirmed evidence.',
+      'Save one concise preference, decision or observation when execution policy permits. Use the requested priority and optional classification; classification is provisional, never evidence authority. Project memories stay in the active project; user scope is personal account memory. Never save secrets or raw repository/screen content, invent facts, or treat an assistant guess as confirmed evidence.',
     mutating: true,
     requiresApproval: true,
     dataHandling: 'ephemeral',
@@ -184,6 +195,29 @@ export const memoryTools: ToolDef[] = [
         content: { type: 'string', minLength: 1, maxLength: 1600 },
         scope: { type: 'string', enum: ['project', 'user'] },
         priority: { type: 'string', enum: ['background', 'normal', 'high', 'critical'] },
+        classification: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            kind: {
+              type: 'string',
+              enum: ['unknown', 'fact', 'preference', 'decision', 'rule', 'hypothesis', 'observation'],
+            },
+            interest: { type: 'number', minimum: 0, maximum: 1 },
+            categories: {
+              type: 'array',
+              maxItems: 4,
+              items: {
+                type: 'array',
+                minItems: 1,
+                maxItems: 3,
+                items: { type: 'string', minLength: 1, maxLength: 60 },
+              },
+            },
+            tags: { type: 'array', maxItems: 8, items: { type: 'string', minLength: 1, maxLength: 40 } },
+            importance: { type: 'number', minimum: 0, maximum: 1 },
+          },
+        },
       },
       required: ['content', 'priority'],
     },
@@ -192,9 +226,9 @@ export const memoryTools: ToolDef[] = [
         !args ||
         typeof args !== 'object' ||
         Array.isArray(args) ||
-        Object.keys(args).some(key => !['content', 'scope', 'priority'].includes(key))
+        Object.keys(args).some(key => !['content', 'scope', 'priority', 'classification'].includes(key))
       ) {
-        throw new Error('memory_remember accepts only content, scope and priority.')
+        throw new Error('memory_remember accepts only content, scope, priority and classification.')
       }
       if (typeof args.content !== 'string' || !args.content.trim() || args.content.length > 1600)
         throw new Error('Memory content must contain 1 to 1600 characters.')
@@ -209,9 +243,22 @@ export const memoryTools: ToolDef[] = [
         scope,
         ...(scope === 'project' ? { projectId: ctx.projectId } : {}),
         priority,
-        source: 'user',
-        writeIntent: 'confirmed',
+        source: 'assistant',
+        writeIntent: 'system',
         retention: 'durable',
+        visibility: 'private',
+        confidence: 0.35,
+        provenance: { generated_locally: true, storage_authorization: 'execution_policy' },
+        sessionId: ctx.execution?.scope?.conversationId ?? ctx.toolSessionId,
+        sourceRef: ctx.execution?.scope?.runId ?? ctx.toolSessionId,
+        origin: {
+          role: 'assistant',
+          conversationId: ctx.execution?.scope?.conversationId,
+          runId: ctx.execution?.scope?.runId ?? ctx.toolSessionId,
+        },
+        ...(args.classification === undefined
+          ? {}
+          : { classification: parseMemoryClassification(args.classification) }),
       })
       return {
         id: record.id,

@@ -1643,7 +1643,8 @@ function sendSuggestion(text: string) {
 /** Persist the exchange to long-term memory (project scope). */
 async function rememberExchange(
   pid: string,
-  userText: string,
+  conversationId: string,
+  userMessageId: string | undefined,
   assistantId: string,
   expectedPrincipalId: string,
   execution: ExecutionTicket
@@ -1652,7 +1653,11 @@ async function rememberExchange(
     const prefs = await getMemoryPrefs()
     executionGate.assert(execution)
     if (!prefs.autoRemember) return
-    const msg = mutations.getProjectMessages(pid).find(m => m.id === assistantId)
+    const messages = mutations.getConversationMessages(pid, conversationId)
+    const msg = messages.find(m => m.id === assistantId && m.role === 'assistant')
+    const user = userMessageId ? messages.find(m => m.id === userMessageId && m.role === 'user') : undefined
+    const userText = safeTrim(user?.content)
+    const origin = { conversationId, runId: execution.scope?.runId }
     const summary = safeTrim(msg?.content)
     if (userText) {
       await luczorMemory.remember({
@@ -1662,6 +1667,9 @@ async function rememberExchange(
         source: 'user',
         writeIntent: 'automatic',
         expectedPrincipalId,
+        sessionId: conversationId,
+        sourceRef: user!.id,
+        origin: { ...origin, messageId: user!.id, role: 'user', observedAt: user!.ts },
       })
     }
     if (summary && !summary.startsWith('[Fehler]') && summary !== 'Fertig.') {
@@ -1673,6 +1681,9 @@ async function rememberExchange(
         source: 'assistant',
         writeIntent: 'automatic',
         expectedPrincipalId,
+        sessionId: conversationId,
+        sourceRef: assistantId,
+        origin: { ...origin, messageId: assistantId, role: 'assistant', observedAt: msg!.ts },
       })
     }
     executionGate.assert(execution)
@@ -2089,6 +2100,13 @@ async function executeChatTurn(
         projectId: pid,
         sessionId: assistant.id,
         expectedPrincipalId: checkpointMemoryPrincipal,
+        origin: {
+          messageId: assistant.id,
+          role: 'assistant',
+          conversationId,
+          runId: handle.runId,
+          observedAt: assistant.ts,
+        },
         final,
       })
       .catch(() => {
@@ -2486,7 +2504,14 @@ async function executeChatTurn(
     if (isSilentLocalResponseFailure(interrupted?.code)) progressiveSpeech.cancel()
     else if (isVisible() && turnSpeechGeneration === speechGeneration) progressiveSpeech.completeAnswer()
     if (!ephemeralDataUsed && !continuation && !interrupted)
-      void rememberExchange(pid, text, assistant.id, scopeKey.principalId, turnExecution)
+      void rememberExchange(
+        pid,
+        conversationId,
+        goalInput && !goalInput.foreground ? undefined : captured.userMessageId,
+        assistant.id,
+        scopeKey.principalId,
+        turnExecution
+      )
     if (goalInput) {
       if (interrupted)
         return {
