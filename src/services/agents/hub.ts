@@ -5,6 +5,7 @@ import { hud } from '@/state/hud'
 import { getProjectWorkspace, resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
 import { getRepositoryExternalPolicy } from '@/services/repositoryGraph'
 import { buildProjectStartContext } from '@/services/prompt/projectStartContext'
+import { setLiveWork } from '@/services/memory/modelActivity'
 import type { LuczorMode } from '@/services/inference/types'
 import { AgentOrchestrator } from './orchestrator'
 import { createCodexAgentAdapter, listCodexSessions, getCodexModelCapabilities } from './codexAgent'
@@ -106,6 +107,11 @@ export const agentHub = new AgentOrchestrator({
 })
 agentHub.subscribe(() => {
   agentHubRevision.value++
+  // Team nodes are counted with their team; everything else is a plain agent job.
+  const jobs = [...principals].flatMap(principal => [...agentHub.listJobs(principal)])
+  setLiveWork({
+    agents: jobs.filter(job => !job.teamRunId && ['running', 'awaiting_external_approval'].includes(job.status)).length,
+  })
 })
 
 export async function agentProjectSnapshot(projectId: string): Promise<AgentProjectSnapshot> {
@@ -142,6 +148,8 @@ export async function prepareAgentJob(
     assertExecution?: () => void
     /** exact-reviewed preserves a reviewed workflow or plan, including structured predecessor results. */
     promptAssembly?: 'project' | 'exact-reviewed'
+    /** Shown in the knowledge space as the reader of recalled memory. */
+    memoryOrigin?: 'agent' | 'team' | 'workflow'
   }
 ) {
   input = { ...input }
@@ -180,7 +188,12 @@ export async function prepareAgentJob(
   if (input.promptAssembly !== 'exact-reviewed') {
     const workspace = await getProjectWorkspace(project.id, snapshot.principalId)
     input.assertExecution?.()
-    const context = await buildProjectStartContext({ project, workspace, includeMemory: input.includeMemory === true })
+    const context = await buildProjectStartContext({
+      project,
+      workspace,
+      includeMemory: input.includeMemory === true,
+      memoryOrigin: input.memoryOrigin ?? (input.teamRunId ? 'team' : 'agent'),
+    })
     input.assertExecution?.()
     assembledPrompt = `${context.providerText}\n\nRollenauftrag (${role}):\n${ROLE_INSTRUCTIONS.get(role)}\n\nArbeitsauftrag:\n${input.prompt}`
   }

@@ -61,6 +61,7 @@ export async function runWorkflowAgent(
     role: options.role ?? 'implementer',
     permission: options.permission ?? 'workspace-write',
     includeMemory: false,
+    memoryOrigin: 'workflow',
     expectedProject: snapshot,
     promptAssembly: 'exact-reviewed',
     assertExecution: () => signal?.throwIfAborted(),

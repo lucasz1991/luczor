@@ -35,6 +35,10 @@ export function isDurableWorkflowJob(job: DeviceJob): boolean {
   )
 }
 
+import { setLiveWork } from '@/services/memory/modelActivity'
+
+let liveWorkflows = 0
+
 /** Called after signature verification. Every effect uses explicit signed project/device context. */
 export async function runWorkflowDeviceJob(
   job: DeviceJob,
@@ -86,6 +90,8 @@ export async function runWorkflowDeviceJob(
   const controller = new AbortController()
   let automated = false
   const automationRevision = workflowAutomationRevision(scope, metadata.definition_id ?? 0)
+  liveWorkflows++
+  setLiveWork({ workflows: liveWorkflows })
   const artifactScope = {
     principalId: account.principalId,
     projectId: localProjectId,
@@ -241,6 +247,8 @@ export async function runWorkflowDeviceJob(
     )
     await workflowExecutionLedger.acknowledge(scope, executionId)
   } finally {
+    liveWorkflows = Math.max(0, liveWorkflows - 1)
+    setLiveWork({ workflows: liveWorkflows })
     window.removeEventListener(WORKFLOW_AUTOMATION_INVALIDATED, invalidate)
     clearInterval(timer)
     ticket.signal.removeEventListener('abort', cancelNative)

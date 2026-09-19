@@ -11,7 +11,7 @@ import { modelUsageSettings, type ChatRouteMode } from '@/services/inference/mod
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import MemoryExplorerPage from '@/features/memory/MemoryExplorerPage.vue'
 import MemoryGraphBackdrop from '@/features/memory/MemoryGraphBackdrop.vue'
-import { setModelPhase } from '@/services/memory/modelActivity'
+import { hasLiveWork, liveWork, setModelPhase } from '@/services/memory/modelActivity'
 import { useMemoryObservatoryHost } from '@/features/memory/observatory'
 import ToastHost from './components/ai/ToastHost.vue'
 import ContextInspector from './components/ContextInspector.vue'
@@ -2692,8 +2692,8 @@ const localModelSwitchNames = computed(() =>
 )
 // The knowledge space's model core pulses while a turn runs.
 watch(
-  () => chatRuns.hasLive() || conversationBusy.value,
-  live => setModelPhase(live ? 'thinking' : 'idle'),
+  () => (chatRuns.hasLive() || conversationBusy.value ? 'thinking' : hasLiveWork(liveWork.value) ? 'tools' : 'idle'),
+  phase => setModelPhase(phase),
   { immediate: true }
 )
 const backgroundPreparation = useBackgroundPreparation({

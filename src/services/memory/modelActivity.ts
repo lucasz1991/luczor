@@ -6,7 +6,7 @@ import { shallowRef } from 'vue'
  * and which it wrote, changed or removed. Identifiers and timestamps only – never content.
  */
 export type MemoryLinkState = 'recalled' | 'included' | 'omitted' | 'written' | 'updated' | 'removed'
-export type MemoryLinkOrigin = 'chat' | 'idle' | 'inspector' | 'user'
+export type MemoryLinkOrigin = 'chat' | 'idle' | 'inspector' | 'user' | 'agent' | 'team' | 'workflow'
 export type MemoryLink = {
   id: string
   state: MemoryLinkState
@@ -35,11 +35,29 @@ export const MEMORY_LINK_TTL_MS: Record<MemoryLinkState, number> = {
 const MAX_LINKS = 160
 
 const empty = (): ModelActivity => ({ phase: 'idle', since: Date.now(), links: new Map() })
+
+/** Managed work running right now besides chat turns; the knowledge space only moves while something works. */
+export type LiveWork = Readonly<{ agents: number; teams: number; workflows: number }>
+export const liveWork = shallowRef<LiveWork>({ agents: 0, teams: 0, workflows: 0 })
+export function setLiveWork(patch: Partial<LiveWork>): void {
+  const next = { ...liveWork.value, ...patch }
+  if (
+    next.agents === liveWork.value.agents &&
+    next.teams === liveWork.value.teams &&
+    next.workflows === liveWork.value.workflows
+  )
+    return
+  liveWork.value = next
+}
+export function hasLiveWork(work: LiveWork = liveWork.value): boolean {
+  return work.agents > 0 || work.teams > 0 || work.workflows > 0
+}
 export const modelActivity = shallowRef<ModelActivity>(empty())
 
 if (typeof window !== 'undefined')
   window.addEventListener('luczor:api-identity-changing', () => {
     modelActivity.value = empty()
+    liveWork.value = { agents: 0, teams: 0, workflows: 0 }
   })
 
 function prune(links: Map<string, MemoryLink>, now: number): Map<string, MemoryLink> {

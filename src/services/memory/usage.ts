@@ -1,7 +1,7 @@
 export type MemoryUsageKind = 'localRecall' | 'sharedRecall' | 'save' | 'graphSearch' | 'graphRead' | 'graphIndex'
-export type MemoryUsageOrigin = 'chat' | 'idle' | 'inspector'
+export type MemoryUsageOrigin = 'chat' | 'idle' | 'inspector' | 'agent' | 'team' | 'workflow'
 export type MemoryUsageStage = 'retrieved' | 'included' | 'evaluated'
-const origins: MemoryUsageOrigin[] = ['chat', 'idle', 'inspector']
+const origins: MemoryUsageOrigin[] = ['chat', 'idle', 'inspector', 'agent', 'team', 'workflow']
 const events = new Map<string, number>()
 export function recordMemoryUsageEvent(origin: MemoryUsageOrigin, stage: MemoryUsageStage, count: number) {
   if (!Number.isFinite(count) || count <= 0) return

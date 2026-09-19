@@ -114,7 +114,14 @@ type StoredEdge = { key: string; path: string; band: Band; kind: string; system:
 type SystemBundle = { system: string; key: string; near: string; mid: string; far: string; spokes: string }
 type SpecialEdge = { key: string; path: string; cls: string; kind: string }
 type Mist = { system: string; hub: Point; rx: number; ry: number }
-type LinkEdge = { key: string; state: MemoryLinkState; path: string; opacity: number; written: boolean }
+type LinkEdge = {
+  key: string
+  state: MemoryLinkState
+  origin: MemoryLink['origin']
+  path: string
+  opacity: number
+  written: boolean
+}
 type MoteSlot = { key: number; nodeId: string; state: MemoryLinkState; link: MemoryLink; offset: number }
 
 const HOME = { yaw: 0.12, pitch: -0.12, zoom: 1 }
@@ -291,6 +298,13 @@ function orbClick() {
   )
 }
 const orbCore = computed(() => (props.ambient ? null : (scene.value.byId.get(MODEL_NODE_ID) ?? null)))
+/**
+ * The space only moves while something actually uses it: a dream, a chat turn, agents, teams or
+ * workflows touching memory, or a commit wave. Otherwise every ambient animation stands still.
+ */
+const quiet = computed(
+  () => !dreamVisible.value && props.phase === 'idle' && linkEdges.value.length === 0 && !wave.value
+)
 const taskHub = computed(() => {
   const task = props.dream?.run?.task
   return task === 'repository' ? 'system:2' : task === 'context' ? 'system:4' : 'system:0'
@@ -776,6 +790,7 @@ const linkEdges = computed<LinkEdge[]>(() => {
     edges.push({
       key: `${node.id}:${link.state}:${link.at}`,
       state: link.state,
+      origin: link.origin,
       path: memoryEdgePath(core, node, 26),
       opacity: Math.round(linkLife(link, now) * 100) / 100,
       written: link.state === 'written',
@@ -1216,6 +1231,7 @@ onBeforeUnmount(() => {
       'has-links': linkEdges.length > 0,
       'has-hover': !!hoverId,
       'is-reduced': reducedMotion,
+      'is-quiet': quiet,
     }"
     :data-stage="stage"
     :data-phase="phase"
@@ -1522,7 +1538,7 @@ onBeforeUnmount(() => {
           v-for="edge in linkEdges"
           :key="edge.key"
           class="link"
-          :class="`link--${edge.state}`"
+          :class="[`link--${edge.state}`, `link--from-${edge.origin}`]"
           :d="edge.path"
           :pathLength="edge.written ? 1 : undefined"
           :style="{ opacity: edge.opacity }"
@@ -1532,7 +1548,7 @@ onBeforeUnmount(() => {
             v-for="slot in linkMoteSlots"
             :key="slot.key"
             class="link-mote"
-            :class="`link-mote--${slot.state}`"
+            :class="[`link-mote--${slot.state}`, `link--from-${slot.link.origin}`]"
             r="2.1"
             opacity="0"
           />
@@ -1640,7 +1656,7 @@ onBeforeUnmount(() => {
         <title>{{ orbTitle }}</title>
         <circle class="orb-hit" :r="ORB_BOX / 2" fill="transparent" />
         <foreignObject :x="-ORB_BOX / 2" :y="-ORB_BOX / 2" :width="ORB_BOX" :height="ORB_BOX" class="orb-frame">
-          <ThinkingOrb :state="orbState" :size="ORB_BOX" :dark="darkTheme" />
+          <ThinkingOrb :state="orbState" :size="ORB_BOX" :dark="darkTheme" :still="quiet" />
         </foreignObject>
       </g>
       <!-- L7 transient nodes (born / ghost) in a stable order -->
@@ -1837,6 +1853,41 @@ onBeforeUnmount(() => {
 .memory-graph.is-ambient::after {
   display: none;
 }
+/* ------------------------------------------------------------------ quiet space */
+/* Nothing in use: stars, rings, currents, the model core and the orb all stand still.
+ * The node entrance keeps its one-shot so a scene never freezes half-faded. */
+.memory-graph.is-quiet svg *:not(.nodes--enter > g[data-node]) {
+  animation-play-state: paused;
+}
+.memory-graph.is-quiet .star {
+  opacity: 0.16;
+}
+/* Who touches a memory: chat (accent), dream (mint), agent (amber), team (rosé), workflow (sky). */
+.link--from-idle {
+  stroke: var(--sys-s3);
+}
+.link--from-agent {
+  stroke: var(--sys-s4);
+}
+.link--from-team {
+  stroke: var(--sys-s1);
+}
+.link--from-workflow {
+  stroke: var(--sys-s2);
+}
+.link-mote.link--from-idle {
+  fill: color-mix(in srgb, var(--mg-light) 45%, var(--sys-s3));
+}
+.link-mote.link--from-agent {
+  fill: color-mix(in srgb, var(--mg-light) 45%, var(--sys-s4));
+}
+.link-mote.link--from-team {
+  fill: color-mix(in srgb, var(--mg-light) 45%, var(--sys-s1));
+}
+.link-mote.link--from-workflow {
+  fill: color-mix(in srgb, var(--mg-light) 45%, var(--sys-s2));
+}
+
 /* ------------------------------------------------------------------ space layer */
 .star {
   fill: var(--mg-light);

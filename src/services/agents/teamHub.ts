@@ -3,6 +3,7 @@ import { localResources, type LocalResourceWork } from '@/services/inference/res
 import { onExecutionInvalidated } from '@/services/executionGate'
 import { agentHub, prepareAgentJob, validateAgentScope } from './hub'
 import { executePreparedAgentJob } from './managedJob'
+import { setLiveWork } from '@/services/memory/modelActivity'
 import { AgentTeamOrchestrator, type AgentTeamDefinition, type AgentTeamRun, type AgentTeamRunInput } from './teams'
 import type { AgentTeamExecutor } from './teams'
 
@@ -34,6 +35,7 @@ export const agentTeams = new AgentTeamOrchestrator({
       mode: request.mode,
       model: request.model,
       includeMemory: request.includeMemory,
+      memoryOrigin: 'team',
       resume: request.resume,
       teamRunId: request.runId,
       teamNodeId: request.nodeId,
@@ -54,6 +56,11 @@ export const agentTeams = new AgentTeamOrchestrator({
 
 agentTeams.subscribe(() => {
   agentTeamsRevision.value++
+  setLiveWork({
+    teams: [...principals]
+      .flatMap(principal => [...agentTeams.listRuns(principal)])
+      .filter(run => run.status === 'running').length,
+  })
   for (const runId of resourceParents.keys()) {
     const run = agentTeams.getRun(runId)
     if (!run || ['completed', 'failed', 'cancelled'].includes(run.status)) resourceParents.delete(runId)

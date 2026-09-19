@@ -13,11 +13,10 @@ import type { ModeFrame } from '@/vendor/thinking-orbs/engine/types'
  */
 export type ThinkingOrbState = 'idle' | 'thinking' | 'listening' | 'speaking' | 'curious' | 'happy' | 'wave' | 'offline'
 
-const props = withDefaults(defineProps<{ state?: ThinkingOrbState; size?: number; dark?: boolean }>(), {
-  state: 'idle',
-  size: 96,
-  dark: true,
-})
+const props = withDefaults(
+  defineProps<{ state?: ThinkingOrbState; size?: number; dark?: boolean; still?: boolean }>(),
+  { state: 'idle', size: 96, dark: true, still: false }
+)
 
 const TRANSITION_MS = 650
 type Mode = 'ribbon' | 'globe' | 'wave'
@@ -97,7 +96,7 @@ function draw() {
   const size = cssSize.value
   const dpr = Math.min(window.devicePixelRatio || 1, 2)
   const pixels = Math.max(1, Math.round(size * dpr))
-  const still = reducedMotion
+  const still = reducedMotion || props.still
   const resting = current === 'idle' && still
   const key = still || resting ? `${size}-${dpr}-${props.dark}-${current}` : ''
   if (key && key === staticKey) return
@@ -113,7 +112,7 @@ function draw() {
   drawState(context, current, mix < 1 && previous !== current ? mix : 1, still)
 }
 function canAnimate(): boolean {
-  if (reducedMotion || !canvas.value?.isConnected || document.visibilityState === 'hidden') return false
+  if (reducedMotion || props.still || !canvas.value?.isConnected || document.visibilityState === 'hidden') return false
   return current !== 'offline' || clock * 1000 - changedAt < TRANSITION_MS
 }
 function render(timestamp: number) {
@@ -150,8 +149,9 @@ watch(
     queue()
   }
 )
-watch([cssSize, () => props.dark], () => {
+watch([cssSize, () => props.dark, () => props.still], () => {
   staticKey = ''
+  lastAt = null
   draw()
   queue()
 })
