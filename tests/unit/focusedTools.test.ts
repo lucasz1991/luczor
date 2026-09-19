@@ -129,8 +129,35 @@ describe('focused local tool context', () => {
     const catalog = await focus.selector.execute({}, { projectId: 'test' })
     expect(catalog).toMatchObject({
       selected: [],
-      available: pool.map(tool => ({ name: tool.function.name })),
+      available: [...pool.map(tool => ({ name: tool.function.name })), { name: 'tools_select' }],
     })
+  })
+  it('accepts and discovers an already advertised history reader without duplicate schemas', async () => {
+    const focus = focusedTools('history', () => [{ role: 'user', content: 'Original request' }])
+    focus.select(pool)
+    const page = await focus.selector.execute({ query: 'context_read_history' }, { projectId: 'test' })
+    expect(page).toMatchObject({
+      available: expect.arrayContaining([
+        {
+          name: 'context_read_history',
+          description: expect.any(String),
+          category: expect.any(String),
+          path: expect.any(String),
+        },
+      ]),
+    })
+    await expect(
+      focus.selector.execute({ names: ['context_read_history', 'tools_select'] }, { projectId: 'test' })
+    ).resolves.toMatchObject({ selected: ['context_read_history', 'tools_select'] })
+    const schemas = focus.select(pool).map(tool => tool.function.name)
+    expect(schemas.filter(name => name === 'context_read_history')).toHaveLength(1)
+    expect(schemas.filter(name => name === 'tools_select')).toHaveLength(1)
+    expect(schemas.length).toBeLessThanOrEqual(10)
+    const noArchive = focusedTools('history')
+    noArchive.select(pool)
+    await expect(
+      noArchive.selector.execute({ names: ['context_read_history'] }, { projectId: 'test' })
+    ).rejects.toThrow('Unavailable names')
   })
   it('removes exact historical UI failures but preserves tool evidence and user examples', () => {
     const failure =

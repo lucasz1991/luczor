@@ -24,6 +24,7 @@ import {
   GOAL_REPORT_NAME,
   GOAL_READ_RESULT_NAME,
   type GoalReadReceipt,
+  type GoalReport,
   type GoalTracking,
 } from '@/services/agents/goalReport'
 import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
@@ -180,6 +181,8 @@ export type RunAgentOptions = {
   inferenceGateway?: InferenceGateway
   /** Local/external boundary for this turn. Local-only can never route to Laravel. */
   contextEgress?: 'local_only' | 'external_allowed'
+  /** Local history already contains host-only evidence, even before a new tool is called. */
+  ephemeralContextUsed?: boolean
   routingSettings?: Partial<HybridRoutingSettings>
   /** Separately assembled provider-safe packet plus packet-bound approval. */
   externalPackage?: ExternalTurnPackage
@@ -358,6 +361,9 @@ export type RunAgentResult = {
   continuation?: AgentCheckpoint
   /** A model round stopped after tool progress was already recorded. */
   interrupted?: AgentInterruption
+  /** Host-owned goal outcome; model prose cannot mark an objective complete. */
+  goalReport?: GoalReport
+  goalReviewVerified?: boolean
   /** Per-node outcomes for an agent team. Never attribute team aggregates to one request ID. */
   agentRunEvaluations?: AgentRunEvaluation[]
 }
@@ -695,9 +701,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     // the composer's explicit mode does, and each outgoing packet still needs its own
     // approval. A resumed checkpoint and a workspace-scoped run keep the local-only
     // contract their saved context was collected under.
-    contextEgress: opts.continuation || opts.workspaceScope ? ('local_only' as const) : opts.contextEgress,
+    contextEgress:
+      opts.continuation || opts.workspaceScope || opts.ephemeralContextUsed
+        ? ('local_only' as const)
+        : opts.contextEgress,
     routingSettings:
-      opts.continuation || opts.workspaceScope
+      opts.continuation || opts.workspaceScope || opts.ephemeralContextUsed
         ? { ...opts.routingSettings, preference: 'local_only' as const }
         : opts.routingSettings,
     externalPackage,
@@ -712,6 +721,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       if (
         !(error instanceof LocalInferenceError) ||
         error.code !== 'external_approval_required' ||
+        opts.ephemeralContextUsed ||
         !opts.externalBaseMessages ||
         (!opts.requestExternalApproval && !modelUsageSettings.value.externalEnabled)
       ) {
@@ -722,7 +732,6 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       applyRuntimeTools(externalMessages, [], currentMode())
       // Assemble before approval/hash, never mutate an approved provider packet.
       const fittedExternal = fitRequestContext(externalMessages, [], {
-        targetTokens: 10000,
         summarizeWithoutReader: true,
       })
       externalMessages.splice(0, externalMessages.length, ...fittedExternal.messages)
@@ -771,6 +780,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     message =>
       resolvedRoute.externalOneShot || message.role !== 'system' || !message.content.startsWith(GOAL_REPORT_MARKER)
   )
+  if (opts.ephemeralContextUsed && resolvedRoute.gateway.target !== 'local_llama_cpp')
+    throw new Error('Gerätelokaler Gesprächskontext darf nicht an einen externen Anbieter gesendet werden.')
   const completedMutations = new Map(opts.continuation?.completedMutations ?? [])
   const pendingSeedsByExternalId = new Map<string, PendingTaskCreateVerification>()
   for (const item of opts.pendingTaskCreateVerifications ?? [])
@@ -792,7 +803,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   let pendingTaskCreateTouched = !!opts.continuation?.pendingTaskCreateVerifications?.some(
     item => item.state === 'unknown' || item.state === 'verified_absent'
   )
-  let ephemeralDataUsed = !!opts.continuation?.ephemeralDataUsed
+  let ephemeralDataUsed = !!opts.ephemeralContextUsed || !!opts.continuation?.ephemeralDataUsed
   const checkpoint = (): AgentCheckpoint => ({
     projectId,
     principalScopeId: opts.principalScopeId,
@@ -1010,15 +1021,30 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   }
 
   const goalReadReceipts: GoalReadReceipt[] = []
-  const goalReportTool =
+  const inlineGoal = !!opts.goalTracking?.continueInline && inferenceGateway.target === 'local_llama_cpp'
+  const workToolAccess = opts.toolAccess
+  let lastGoalReport: GoalReport | undefined
+  let goalReviewVerified = false
+  let goalPhaseFailures = toolFailures
+  let stagnantGoalSections = 0
+  let lastGoalFingerprint = ''
+  let missingGoalReports = 0
+  const trackedGoal = (): GoalTracking => ({
+    ...opts.goalTracking!,
+    report: report => {
+      lastGoalReport = report
+      opts.goalTracking!.report(report)
+    },
+  })
+  let goalReportTool =
     opts.goalTracking &&
     !resolvedRoute.externalOneShot &&
     !opts.forceAgentTeam &&
     opts.toolAccess !== 'none' &&
     !disabledTools.has(GOAL_REPORT_NAME)
-      ? createGoalReportTool(opts.goalTracking, () => goalReadReceipts)
+      ? createGoalReportTool(trackedGoal(), () => goalReadReceipts)
       : undefined
-  const goalReadResultTool =
+  let goalReadResultTool =
     goalReportTool && !disabledTools.has(GOAL_READ_RESULT_NAME)
       ? createGoalReadResultTool(opts.goalTracking!)
       : undefined
@@ -1031,6 +1057,32 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   }
   if (goalReportTool) {
     messages.unshift({ role: 'system', content: goalReportInstruction(opts.goalTracking!.phase) })
+  }
+  const reviewingGoal = () => inlineGoal && opts.goalTracking?.phase === 'review'
+  const setGoalPhase = (phase: GoalTracking['phase'], candidateText?: string) => {
+    opts = { ...opts, goalTracking: { ...opts.goalTracking!, phase, candidateText } }
+    goalReadReceipts.length = 0
+    goalPhaseFailures = toolFailures
+    lastGoalReport = undefined
+    goalReportTool = createGoalReportTool(trackedGoal(), () => goalReadReceipts)
+    goalReadResultTool = disabledTools.has(GOAL_READ_RESULT_NAME) ? undefined : createGoalReadResultTool(trackedGoal())
+    for (let index = tools.length - 1; index >= 0; index--)
+      if ([GOAL_REPORT_NAME, GOAL_READ_RESULT_NAME].includes(tools.at(index)!.function.name)) tools.splice(index, 1)
+    for (const tool of [goalReportTool, goalReadResultTool])
+      if (tool)
+        tools.push({
+          type: 'function',
+          function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+        })
+    const instruction = messages.find(
+      message => message.role === 'system' && message.content.startsWith(GOAL_REPORT_MARKER)
+    )
+    if (instruction)
+      instruction.content =
+        goalReportInstruction(phase) +
+        (phase === 'review'
+          ? ' Jetzt beginnt eine gesonderte, ausschließlich lesende Ergebnisprüfung. Frühere Erfolgsaussagen sind keine Belege; prüfe die tatsächlichen Ergebnisse erneut.'
+          : ' Das aktive Ziel wird im selben Auftrag weiterbearbeitet. Behalte bisherigen Kontext und geprüfte Werkzeugergebnisse bei; wiederhole keine erfolgreichen Änderungen.')
   }
 
   const partialResultAfterInferenceFailure = async (
@@ -1227,7 +1279,13 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     // running. Refresh both the model instruction and the hard execution gate.
     // Approved external messages are immutable: even a mode change while the
     // approval was open must not alter the already approved request hash.
-    const eligibleTools = tools.filter(tool => toolRecovery.canOffer(tool.function.name))
+    const eligibleTools = tools.filter(tool => {
+      if (!toolRecovery.canOffer(tool.function.name)) return false
+      if (!reviewingGoal()) return true
+      if ([GOAL_REPORT_NAME, GOAL_READ_RESULT_NAME].includes(tool.function.name)) return true
+      const definition = getTool(tool.function.name)
+      return !!definition && permittedDuringPlanningDiscussion(definition) && !tool.function.name.startsWith('agent_')
+    })
     const toolStatistics = await toolUsage.snapshot()
     const availableTools = focused ? focused.select(eligibleTools, toolStatistics) : eligibleTools
     if (!resolvedRoute.externalOneShot) {
@@ -1564,6 +1622,69 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           ? '\n\nMindestens ein task_create- oder chat_create-Aufruf hat einen unklaren Schreibausgang. Vor einem erneuten Anlegen muss die konkrete external_id mit task_list beziehungsweise chat_list geprüft werden. Der Verifikationsstand bleibt zum Weiterarbeiten erhalten.'
           : '\n\nDie exakte Prüfung hat bestätigt, dass mindestens ein Eintrag noch nicht gespeichert ist. Der sichere Wiederholungsstand mit derselben external_id bleibt zum Weiterarbeiten erhalten.'
       }
+      let continueGoal = false
+      if (inlineGoal && goalReportTool && !synthesisOnly) {
+        const report = lastGoalReport
+        if (pendingVerification && pendingTaskCreateTouched) {
+          lastGoalReport = {
+            status: 'blocked',
+            summary:
+              'Ein unklarer Schreibausgang muss vor der Zielbearbeitung geprüft werden. Der Fortschritt bleibt erhalten.',
+          }
+        } else if (!report) {
+          missingGoalReports++
+          if (missingGoalReports < 2) continueGoal = true
+          else
+            lastGoalReport = {
+              status: 'blocked',
+              summary: 'Das Modell hat wiederholt keinen prüfbaren Zielstatus geliefert. Das Ziel bleibt offen.',
+            }
+        } else {
+          missingGoalReports = 0
+          const fingerprint = `${opts.goalTracking!.phase}:${report.status}:${report.summary.replace(/\s+/gu, ' ').trim()}`
+          stagnantGoalSections = fingerprint === lastGoalFingerprint ? stagnantGoalSections + 1 : 1
+          lastGoalFingerprint = fingerprint
+          if (report.status === 'blocked') {
+            // A concrete blocker stops this run; the scheduler must not replay it.
+          } else if (stagnantGoalSections >= 3) {
+            lastGoalReport = {
+              status: 'blocked',
+              summary:
+                'Drei Zielabschnitte ohne erkennbaren Fortschritt. Das Ziel bleibt offen; Voraussetzungen prüfen.',
+            }
+          } else if (
+            reviewingGoal() &&
+            report.status === 'completed' &&
+            report.evidence?.trim() &&
+            goalReadReceipts.length &&
+            toolFailures === goalPhaseFailures
+          ) {
+            goalReviewVerified = true
+          } else {
+            const nextPhase = opts.goalTracking!.phase === 'work' && report.status === 'candidate' ? 'review' : 'work'
+            setGoalPhase(nextPhase, nextPhase === 'review' ? content : undefined)
+            continueGoal = true
+          }
+        }
+        if (continueGoal) {
+          messages.push({ role: 'assistant', content })
+          opts.onRoundComplete?.({
+            round: round + 1,
+            content,
+            kind: 'commentary',
+            serverSpeechAllowed: !ephemeralDataUsed,
+          })
+          if (!report) {
+            messages.push({
+              role: 'system',
+              content: `${GOAL_REPORT_MARKER} Der Zielstatus fehlt. Nutze goal_report mit dem tatsächlich belegten Stand; das aktive Ziel bleibt offen.`,
+            })
+          }
+          // Preserve full wire history, completed mutation receipts and the existing run budget.
+          await emitCheckpoint(checkpoint())
+          continue
+        }
+      }
       publish(finalText)
       opts.onRoundComplete?.({
         round: round + 1,
@@ -1585,6 +1706,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         routeDecisionId: resolvedRoute.decision?.id,
         tokenUsage: assistance?.withUsage(tokenCounter.snapshot()) ?? tokenCounter.snapshot(),
         continuation: pendingVerification && pendingTaskCreateTouched ? checkpoint() : undefined,
+        ...(inlineGoal ? { goalReport: lastGoalReport, goalReviewVerified } : {}),
       }
     }
 
@@ -1715,7 +1837,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         (tool.workspaceOnly && (!opts.workspaceScope || inferenceGateway.target !== 'local_llama_cpp')) ||
         (opts.workflowScope && !WORKFLOW_WORKCOPY_TOOLS.has(call.name)) ||
         opts.toolAccess === 'none' ||
-        (opts.toolAccess === 'read-only' && tool.mutating)
+        (workToolAccess === 'read-only' && tool.mutating) ||
+        (reviewingGoal() && (!permittedDuringPlanningDiscussion(tool) || call.name.startsWith('agent_')))
       ) {
         const outcome: Outcome = { ok: false, error: 'Dieser Agent darf dieses Werkzeug nicht ausführen.' }
         toolFailures++
@@ -2445,8 +2568,9 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   }
 
   return {
-    finalText:
-      'Der Auftrag ist noch nicht abgeschlossen. Der bisherige Fortschritt bleibt erhalten. Du kannst weiterarbeiten oder mit einem Agententeam fortsetzen.',
+    finalText: inlineGoal
+      ? 'Das konfigurierte Rundenlimit ist erreicht. Das Ziel bleibt offen; vollständiger Fortschritt und Kontext sind zum bewussten Fortsetzen gesichert.'
+      : 'Der Auftrag ist noch nicht abgeschlossen. Der bisherige Fortschritt bleibt erhalten. Du kannst weiterarbeiten oder mit einem Agententeam fortsetzen.',
     requestId: lastRequestId,
     toolFailures,
     toolSuccesses,
@@ -2455,6 +2579,16 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     routeDecisionId: resolvedRoute.decision?.id,
     tokenUsage: assistance?.withUsage(tokenCounter.snapshot()) ?? tokenCounter.snapshot(),
     continuation: resolvedRoute.externalOneShot ? undefined : checkpoint(),
+    ...(inlineGoal
+      ? {
+          goalReport: {
+            status: 'blocked' as const,
+            summary:
+              'Das konfigurierte Rundenlimit ist erreicht. Das Ziel bleibt offen; vollständiger Fortschritt und Kontext sind zum bewussten Fortsetzen gesichert.',
+          },
+          goalReviewVerified: false,
+        }
+      : {}),
   }
 }
 

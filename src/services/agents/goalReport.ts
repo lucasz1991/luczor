@@ -10,6 +10,8 @@ export type GoalReport = {
 /** A local callback owned by one root goal turn, never part of an inference request. */
 export type GoalTracking = {
   phase: 'work' | 'review'
+  /** Continue work and a separate read-only review inside the same bounded agent run. */
+  continueInline?: boolean
   /** Previous public deliverable, captured locally for the independent review only. */
   candidateText?: string
   report: (result: GoalReport) => void

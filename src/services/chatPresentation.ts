@@ -1,5 +1,44 @@
 import type { WireMessage } from './openrouter.service'
 import { cleanLocalHistory } from './inference/focusedTools'
+import type { Message } from '@/state/types'
+
+export const DEFAULT_EXTERNAL_HISTORY_TOKENS = 12_000
+export const MAX_EXTERNAL_HISTORY_TOKENS = 20_000
+
+/** Project a captured conversation only after its inference destination is known.
+ * Device-local answers remain useful context locally; their privacy classification
+ * must follow every derived answer, including one that does not call another tool.
+ */
+export function conversationHistoryForInference(
+  messages: readonly Pick<Message, 'role' | 'content' | 'visibility' | 'meta'>[],
+  target: 'local' | 'external',
+  options: { initialUserContext?: string } = {}
+): { messages: WireMessage[]; ephemeralDataUsed: boolean } {
+  const history: WireMessage[] = []
+  let ephemeralDataUsed = false
+  for (const message of messages) {
+    if (message.visibility !== 'visible' || message.meta?.isLoading) continue
+    if (message.role !== 'user' && message.role !== 'assistant') continue
+    const ephemeral = message.meta?.dataHandling === 'ephemeral'
+    if (target === 'external' && ephemeral) continue
+    const parts: string[] = []
+    if (message.role === 'assistant') {
+      for (const entry of message.meta?.commentary ?? []) {
+        if (!entry.content.trim() || (target === 'external' && !entry.serverSpeechAllowed)) continue
+        if (!parts.includes(entry.content)) parts.push(entry.content)
+        if (!entry.serverSpeechAllowed) ephemeralDataUsed = true
+      }
+    }
+    if (message.content.trim() && !parts.includes(message.content)) parts.push(message.content)
+    if (!parts.length) continue
+    if (ephemeral) ephemeralDataUsed = true
+    history.push({ role: message.role, content: parts.join('\n\n') })
+  }
+  if (history[0]?.role === 'assistant' && options.initialUserContext?.trim()) {
+    history.unshift({ role: 'user', content: `Gespeichertes Nutzerziel:\n${options.initialUserContext}` })
+  }
+  return { messages: history, ephemeralDataUsed }
+}
 
 /** Pure presentation helpers shared by the chat shell and its child views. */
 export function clampNumber(value: number, min: number, max: number): number {

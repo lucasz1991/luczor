@@ -12,6 +12,7 @@ const supported = new Set([
   'maxLength',
   'minItems',
   'maxItems',
+  'format',
   'description',
   'default',
   'title',
@@ -24,6 +25,8 @@ export function validateToolArguments(schema: Record<string, unknown>, value: un
     for (const key of Object.keys(rule))
       if (!supported.has(key)) throw new Error(`Nicht unterstütztes Tool-Schema: ${key}`)
     const type = rule.type
+    if (Object.prototype.hasOwnProperty.call(rule, 'format') && (rule.format !== 'uuid' || type !== 'string'))
+      throw new Error('Nicht unterstütztes Tool-Schema: format')
     if (type === 'object') {
       if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error(`${path}: Objekt erwartet.`)
       const record = input as Record<string, unknown>
@@ -50,6 +53,13 @@ export function validateToolArguments(schema: Record<string, unknown>, value: un
       if (typeof input !== 'string') throw new Error(`${path}: Text erwartet.`)
       if (input.length > Number(rule.maxLength ?? 200_000) || input.length < Number(rule.minLength ?? 0))
         throw new Error(`${path}: Ungültige Textlänge.`)
+      // Match the UUID string representation, also enforced by the server's
+      // uuid rule. No coercion, URN prefixes, braces, or trailing line breaks.
+      if (
+        rule.format === 'uuid' &&
+        (input.length !== 36 || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input))
+      )
+        throw new Error(`${path}: UUID erwartet.`)
     } else if (type === 'number' || type === 'integer') {
       if (typeof input !== 'number' || !Number.isFinite(input) || (type === 'integer' && !Number.isInteger(input)))
         throw new Error(`${path}: ${type} erwartet.`)

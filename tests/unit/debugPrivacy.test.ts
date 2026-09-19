@@ -305,4 +305,80 @@ describe('debug privacy boundary', () => {
     await trace.setTraceEnabled(false)
     expect(await trace.readTrace()).toBeUndefined()
   })
+
+  it('preserves numeric request evidence even when a large diagnostic payload is truncated', async () => {
+    const debug = await import('@/services/debug')
+    const trace = await import('@/services/debugTrace')
+    await debug.setDebugCollectionEnabled(true)
+    await trace.setTraceEnabled(true)
+    await trace.recordTrace('model.request', {
+      messages: [
+        { role: 'system', content: 'rules' },
+        { role: 'user', content: 'x'.repeat(600_000) },
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id: 'call-a', type: 'function', function: { name: 'fs_read', arguments: '{"path":"a"}' } }],
+        },
+        { role: 'tool', tool_call_id: 'call-a', content: 'result' },
+      ],
+      tools: [{ type: 'function', function: { name: 'fs_read' } }],
+    })
+    const event = (await trace.readTrace())?.events[0]
+    expect(event?.data).toMatchObject({
+      truncated: true,
+      requestSummary: {
+        messageCount: 4,
+        roles: { system: 1, user: 1, assistant: 1, tool: 1 },
+        contentCharacters: 600_011,
+        toolCallCount: 1,
+        toolArgumentCharacters: 12,
+        toolSchemaCount: 1,
+      },
+    })
+    const summary = (event?.data as { requestSummary: unknown }).requestSummary
+    expect(JSON.stringify(summary)).not.toContain('fs_read')
+    expect(JSON.stringify(summary)).not.toContain('path')
+  })
+
+  it('coalesces full progress snapshots without evicting requests or mixing concurrent exchanges', async () => {
+    const debug = await import('@/services/debug')
+    const trace = await import('@/services/debugTrace')
+    await debug.setDebugCollectionEnabled(true)
+    await trace.setTraceEnabled(true)
+    await trace.recordTrace('model.request', {
+      exchangeId: 'exchange-a',
+      messages: [{ role: 'user', content: 'start' }],
+    })
+    await trace.recordTrace('model.progress', { exchangeId: 'exchange-b', content: 'other request' })
+    for (let index = 0; index < 100; index++) {
+      await trace.recordTrace('model.progress', { exchangeId: 'exchange-a', content: 'x'.repeat(50_000 + index) })
+    }
+    await trace.recordTrace('model.response', { exchangeId: 'exchange-a', result: { content: 'done' } })
+    const archive = await trace.readTrace()
+    expect(archive?.dropped_events).toBe(0)
+    expect(archive?.coalesced_progress_events).toBe(99)
+    expect(archive?.events).toHaveLength(4)
+    expect(archive?.events[0]?.kind).toBe('model.request')
+    const progress = archive?.events.filter(event => event.kind === 'model.progress')
+    expect(progress?.map(event => event.data)).toEqual([
+      { exchangeId: 'exchange-b', content: 'other request' },
+      { exchangeId: 'exchange-a', content: 'x'.repeat(50_099) },
+    ])
+    expect(archive?.events.at(-1)?.kind).toBe('model.response')
+  })
+
+  it('coalesces oversized progress snapshots while preserving their exchange identity', async () => {
+    const debug = await import('@/services/debug')
+    const trace = await import('@/services/debugTrace')
+    await debug.setDebugCollectionEnabled(true)
+    await trace.setTraceEnabled(true)
+    await trace.recordTrace('model.progress', { exchangeId: 'exchange-a', content: 'x'.repeat(600_000) })
+    await trace.recordTrace('model.progress', { exchangeId: 'exchange-a', content: 'x'.repeat(610_000) })
+    const archive = await trace.readTrace()
+    expect(archive?.events).toHaveLength(1)
+    expect(archive?.events[0]?.data).toMatchObject({ truncated: true, exchangeId: 'exchange-a' })
+    expect(archive?.coalesced_progress_events).toBe(1)
+    expect(archive?.dropped_events).toBe(0)
+  })
 })

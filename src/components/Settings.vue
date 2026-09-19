@@ -34,6 +34,7 @@ import {
 } from '@/services/notifications'
 import { AUTO_EXECUTE_MUTATING_TOOLS_KEY, DEFAULT_EXECUTION_POLICY } from '@/services/executionPolicy'
 import { FLASH_EXPERIMENT_SETTING_KEY } from '@/services/inference/hybridRouter'
+import { DEFAULT_EXTERNAL_HISTORY_TOKENS, MAX_EXTERNAL_HISTORY_TOKENS } from '@/services/chatPresentation'
 import {
   getVoiceConfig,
   resolveVoiceSettings,
@@ -123,7 +124,7 @@ const DEFAULTS: AppSettings = {
   chat_auto_speech_mode: 'assistant_only',
   voice_tts_allow_local_content: false,
   voice_tts_voice_id: '',
-  client_history_token_budget: 2400,
+  client_history_token_budget: DEFAULT_EXTERNAL_HISTORY_TOKENS,
   local_model_flash_experiment: false,
   chat_tool_rounds: DEFAULT_TOOL_LIMITS.chat,
   agent_tool_rounds: DEFAULT_TOOL_LIMITS.agent,
@@ -240,7 +241,7 @@ async function ensureStoreLoaded() {
   if (mode === 'off' || mode === 'assistant_only' || mode === 'all') settings.chat_auto_speech_mode = mode
   const historyBudget = await settingsStore.get<number>('client_history_token_budget')
   if (typeof historyBudget === 'number' && !Number.isNaN(historyBudget))
-    settings.client_history_token_budget = clamp(historyBudget, 400, 12000)
+    settings.client_history_token_budget = clamp(historyBudget, 400, MAX_EXTERNAL_HISTORY_TOKENS)
   settings.local_model_flash_experiment = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
   const toolLimits = await loadToolLimits()
   settings.chat_tool_rounds = toolLimits.chat
@@ -381,7 +382,7 @@ async function persistAll() {
   await settingsStore.set('voice_tts_voice_id', settings.voice_tts_voice_id)
   await settingsStore.set(
     'client_history_token_budget',
-    clamp(Math.round(settings.client_history_token_budget), 400, 12000)
+    clamp(Math.round(settings.client_history_token_budget), 400, MAX_EXTERNAL_HISTORY_TOKENS)
   )
   await settingsStore.set(FLASH_EXPERIMENT_SETTING_KEY, settings.local_model_flash_experiment)
   await settingsStore.set('chat_tool_rounds', settings.chat_tool_rounds)

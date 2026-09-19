@@ -22,6 +22,8 @@ export type GoalStepResult = {
   evidence?: string
   messageId?: string
   fingerprint?: string
+  /** Set only by the run adapter after an independent inline review with successful evidence reads. */
+  reviewVerified?: boolean
 }
 
 export type AutonomousGoalDependencies = {
@@ -216,7 +218,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
         stagnantIterations: stagnant,
         consecutiveErrors: 0,
       }
-      if (attempt.phase === 'review' && result.status === 'completed' && evidence) {
+      if ((attempt.phase === 'review' || result.reviewVerified === true) && result.status === 'completed' && evidence) {
         await write(id, attempt, {
           ...common,
           active: false,

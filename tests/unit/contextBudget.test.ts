@@ -4,6 +4,60 @@ import { focusedTools } from '@/services/inference/focusedTools'
 import type { WireMessage } from '@/services/inference/types'
 
 describe('shared request budget and evidence retention', () => {
+  it('uses the available model window instead of a fixed ten-thousand-token history ceiling', () => {
+    const history: WireMessage[] = [{ role: 'system', content: 'Retain the conversation requirements.' }]
+    for (let index = 0; index < 12; index++)
+      history.push(
+        { role: 'user', content: `Requirement ${index}: ` + 'detail '.repeat(350) },
+        { role: 'assistant', content: 'Established answer '.repeat(120) }
+      )
+    history.push({ role: 'user', content: 'Apply the previously agreed requirements.' })
+    const result = fitRequestContext(history, [], { contextTokens: 131072, retrievalAvailable: true })
+    expect(result.report.estimatedInputTokens).toBeGreaterThan(10000)
+    expect(result.report.targetTokens).toBe(Math.floor(131072 * 0.65))
+    expect(result.report.summarizedMessages).toBe(0)
+    expect(result.messages).toEqual(history)
+  })
+
+  it('archives the fewest oldest complete rounds needed instead of dropping all but two', () => {
+    const history: WireMessage[] = [{ role: 'system', content: 'Mandatory policy.' }]
+    for (let index = 0; index < 10; index++)
+      history.push(
+        { role: 'user', content: `Requirement ${index}\n` + 'detail\n'.repeat(210) },
+        { role: 'assistant', content: `Answer ${index}\n` + 'result\n'.repeat(210) }
+      )
+    history.push({ role: 'user', content: 'Continue with the agreed requirements.' })
+    const original = structuredClone(history)
+    const result = fitRequestContext(history, [], { targetTokens: 9000, retrievalAvailable: true })
+    expect(result.report.estimatedInputTokens).toBeLessThanOrEqual(9000)
+    expect(result.report.summarizedMessages).toBeGreaterThan(0)
+    expect(result.report.summarizedMessages).toBeLessThanOrEqual(6)
+    expect(result.report.summarizedMessages % 2).toBe(0)
+    expect(result.messages).toContainEqual(history[9])
+    expect(result.messages).toContainEqual(history[10])
+    expect(result.messages.at(-1)).toEqual(history.at(-1))
+    expect(history).toEqual(original)
+  })
+
+  it('keeps conversation requirements ahead of optional retrieved records', () => {
+    const workspace = JSON.stringify({ id: 'project-workspace', content: 'E:/projekte/luczor' })
+    const optional = JSON.stringify({ id: 'optional-memory', content: 'Extra context '.repeat(3000) })
+    const history: WireMessage[] = [
+      { role: 'system', content: `[LUCZOR-SCOPE-KONTEXT]\n${workspace}\n${optional}\n[LUCZOR-SCOPE-KONTEXT-END]` },
+      { role: 'user', content: 'The report must retain exact file identities.' },
+      { role: 'assistant', content: 'The report will preserve the original paths.' },
+      { role: 'user', content: 'Also retain the full tool receipts.' },
+      { role: 'assistant', content: 'Both requirements are included.' },
+      { role: 'user', content: 'Implement those requirements now.' },
+    ]
+    const result = fitRequestContext(history, [], { targetTokens: 3000, retrievalAvailable: true })
+    expect(result.report.summarizedMessages).toBe(0)
+    expect(result.messages.slice(1)).toEqual(history.slice(1))
+    expect(result.messages[0]!.content).toContain(workspace)
+    expect(result.messages[0]!.content).not.toContain('optional-memory')
+    expect(history[0]!.content).toContain(optional)
+  })
+
   it('compacts complete old rounds, retains the current request and can retrieve exact originals', async () => {
     const history: WireMessage[] = [{ role: 'system', content: 'Never repeat confirmed changes.' }]
     for (let i = 0; i < 30; i++)
@@ -86,7 +140,7 @@ describe('shared request budget and evidence retention', () => {
     focus.select(pool)
     const page = await focus.selector.execute({ offset: 32 }, { projectId: 'p' })
     expect(page).toMatchObject({
-      total: 50,
+      total: 51,
       nextOffset: 48,
       available: expect.arrayContaining([expect.objectContaining({ name: 'tool_47' })]),
     })

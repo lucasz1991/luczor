@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import {
   clampNumber,
   compactHistory,
+  conversationHistoryForInference,
   localConversationHistory,
   composeProviderSystemPrompt,
   goalStatusLabel,
@@ -10,8 +11,91 @@ import {
   safeTrim,
 } from '../../src/services/chatPresentation'
 import type { WireMessage } from '../../src/services/openrouter.service'
+import type { Message } from '../../src/state/types'
 
 describe('chat presentation helpers', () => {
+  it('retains device-local answers and completed public rounds in local follow-up context only', () => {
+    const history: Pick<Message, 'role' | 'content' | 'visibility' | 'meta'>[] = [
+      { role: 'user', content: 'Read the local project', visibility: 'visible', meta: {} },
+      {
+        role: 'assistant',
+        content: 'The exact file is E:/projekte/luczor/notes.md.',
+        visibility: 'visible',
+        meta: {
+          dataHandling: 'ephemeral',
+          commentary: [
+            {
+              id: 'round-1',
+              round: 1,
+              content: 'Verified the local repository.',
+              createdAt: 1,
+              serverSpeechAllowed: false,
+            },
+          ],
+        },
+      },
+      { role: 'tool', content: 'Hidden raw receipt', visibility: 'hidden', meta: { dataHandling: 'ephemeral' } },
+      { role: 'assistant', content: 'Still running', visibility: 'visible', meta: { isLoading: true } },
+      { role: 'user', content: 'Use the file from your answer.', visibility: 'visible', meta: {} },
+    ]
+    const original = structuredClone(history)
+    const local = conversationHistoryForInference(history, 'local')
+    expect(local.ephemeralDataUsed).toBe(true)
+    expect(local.messages).toEqual([
+      { role: 'user', content: history[0]!.content },
+      { role: 'assistant', content: `Verified the local repository.\n\n${history[1]!.content}` },
+      { role: 'user', content: history[4]!.content },
+    ])
+    const external = conversationHistoryForInference(history, 'external')
+    expect(external).toEqual({ messages: [local.messages[0], local.messages[2]], ephemeralDataUsed: false })
+    expect(history).toEqual(original)
+  })
+
+  it('tracks the privacy of historical commentary independently and avoids duplicate final text', () => {
+    const history: Pick<Message, 'role' | 'content' | 'visibility' | 'meta'>[] = [
+      { role: 'user', content: 'Proceed', visibility: 'visible', meta: {} },
+      {
+        role: 'assistant',
+        content: 'Done',
+        visibility: 'visible',
+        meta: {
+          commentary: [
+            { id: 'a', round: 1, content: 'Local observation', createdAt: 1, serverSpeechAllowed: false },
+            { id: 'b', round: 2, content: 'Done', createdAt: 2, serverSpeechAllowed: true },
+          ],
+        },
+      },
+    ]
+    expect(conversationHistoryForInference(history, 'local')).toMatchObject({
+      messages: [expect.anything(), { role: 'assistant', content: 'Local observation\n\nDone' }],
+      ephemeralDataUsed: true,
+    })
+    expect(conversationHistoryForInference(history, 'external')).toMatchObject({
+      messages: [expect.anything(), { role: 'assistant', content: 'Done' }],
+      ephemeralDataUsed: false,
+    })
+  })
+
+  it('keeps goal-only assistant history anchored to the saved user goal without synthetic continuation prompts', () => {
+    const history: Pick<Message, 'role' | 'content' | 'visibility' | 'meta'>[] = [
+      {
+        role: 'assistant',
+        content: 'Step one is verified.',
+        visibility: 'visible',
+        meta: { dataHandling: 'ephemeral' },
+      },
+    ]
+    const selected = conversationHistoryForInference(history, 'local', { initialUserContext: 'Implement the report.' })
+    expect(localConversationHistory(selected.messages)).toEqual([
+      { role: 'user', content: 'Gespeichertes Nutzerziel:\nImplement the report.' },
+      { role: 'assistant', content: 'Step one is verified.' },
+    ])
+    expect(selected.ephemeralDataUsed).toBe(true)
+    expect(
+      conversationHistoryForInference(history, 'external', { initialUserContext: 'Implement the report.' }).messages
+    ).toEqual([])
+  })
+
   it('removes local UI status before merging adjacent assistant turns, without changing storage', () => {
     const history: WireMessage[] = [
       { role: 'user', content: 'Prüfe den Zustand' },

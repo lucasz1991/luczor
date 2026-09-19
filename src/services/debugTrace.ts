@@ -6,8 +6,63 @@ export const DEBUG_TRACE_ENABLED_KEY = 'debug_chat_trace_enabled'
 const FILE = 'luczor.debug.json'
 const LIMIT = 4 * 1024 * 1024
 type Trace = { id: string; at: string; kind: string; data: unknown }
-type Archive = { scope: string; events: Trace[]; dropped: number }
+type Archive = { scope: string; events: Trace[]; dropped: number; coalescedProgress?: number }
 let writes: Promise<unknown> = Promise.resolve()
+
+/** Count the submitted contract without copying message content or tool arguments. */
+function modelRequestSummary(value: unknown) {
+  if (!value || typeof value !== 'object') return undefined
+  const request = value as Record<string, unknown>
+  if (!Array.isArray(request.messages)) return undefined
+  const roles = { system: 0, user: 0, assistant: 0, tool: 0 }
+  let contentCharacters = 0
+  let toolArgumentCharacters = 0
+  let toolCallCount = 0
+  for (const message of request.messages as InferenceRequest['messages']) {
+    if (!message || !Object.hasOwn(roles, message.role)) continue
+    roles[message.role] += 1
+    if (typeof message.content === 'string') contentCharacters += message.content.length
+    if (message.role === 'assistant' && Array.isArray(message.tool_calls)) {
+      toolCallCount += message.tool_calls.length
+      for (const call of message.tool_calls) {
+        if (typeof call?.function?.arguments === 'string') toolArgumentCharacters += call.function.arguments.length
+      }
+    }
+  }
+  const tools = Array.isArray(request.tools) ? request.tools : []
+  return {
+    messageCount: request.messages.length,
+    roles,
+    contentCharacters,
+    toolCallCount,
+    toolArgumentCharacters,
+    toolSchemaCount: tools.length,
+    toolSchemaCharacters: JSON.stringify(tools).length,
+  }
+}
+
+/** Each progress payload is a full public snapshot; retain the latest per exchange. */
+function coalesceProgress(archive: Archive): void {
+  const seen = new Set<string>()
+  const retained: Trace[] = []
+  let coalesced = 0
+  for (const event of [...archive.events].reverse()) {
+    const exchange =
+      event.kind === 'model.progress' && event.data && typeof event.data === 'object'
+        ? (event.data as Record<string, unknown>).exchangeId
+        : undefined
+    if (typeof exchange === 'string' && exchange.length > 0) {
+      if (seen.has(exchange)) {
+        coalesced += 1
+        continue
+      }
+      seen.add(exchange)
+    }
+    retained.push(event)
+  }
+  archive.events = retained.reverse()
+  archive.coalescedProgress = (archive.coalescedProgress ?? 0) + coalesced
+}
 
 export async function traceEnabled(): Promise<boolean> {
   try {
@@ -77,12 +132,16 @@ export async function recordTrace(kind: string, data: unknown, expectedScope?: s
     const scope = await debugScope()
     if (expectedScope && scope !== expectedScope) return
     // Snapshot before queueing: later tool mutations must not rewrite the request history.
-    let safe = redactTrace(data)
+    const requestSummary = kind === 'model.request' ? modelRequestSummary(data) : undefined
+    let safe = redactTrace(requestSummary ? { ...(data as Record<string, unknown>), requestSummary } : data)
     const encoded = JSON.stringify(safe)
     if (new TextEncoder().encode(encoded).length > 512 * 1024) {
+      const exchangeId = safe && typeof safe === 'object' ? (safe as Record<string, unknown>).exchangeId : undefined
       safe = {
         truncated: true,
         original_bytes: new TextEncoder().encode(encoded).length,
+        ...(typeof exchangeId === 'string' && /^[a-z0-9-]{1,100}$/i.test(exchangeId) ? { exchangeId } : {}),
+        ...(requestSummary ? { requestSummary } : {}),
         preview: encoded.slice(0, 120_000),
       }
     }
@@ -95,6 +154,7 @@ export async function recordTrace(kind: string, data: unknown, expectedScope?: s
         const existing = await store.get<Archive>('chat_trace')
         const archive: Archive = existing?.scope === scope ? existing : { scope, events: [], dropped: 0 }
         archive.events.push(event)
+        coalesceProgress(archive)
         while (archive.events.length > 500 || new TextEncoder().encode(JSON.stringify(archive)).length > LIMIT) {
           archive.events.shift()
           archive.dropped++
@@ -117,6 +177,7 @@ export async function readTrace() {
     enabled: true,
     limit_bytes: LIMIT,
     dropped_events: archive?.scope === scope ? archive.dropped : 0,
+    coalesced_progress_events: archive?.scope === scope ? (archive.coalescedProgress ?? 0) : 0,
     events: archive?.scope === scope ? archive.events : [],
     exclusions: ['credentials', 'private_reasoning', 'binary_data'],
     scope,

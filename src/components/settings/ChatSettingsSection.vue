@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import ModelUsageSettings from './ModelUsageSettings.vue'
+import { MAX_EXTERNAL_HISTORY_TOKENS } from '@/services/chatPresentation'
 
 import type { ModelUsageSettings as ModelUsageConfig } from '@/services/inference/modelUsageSettings'
 
@@ -96,14 +97,20 @@ const historyTokenBudgetModel = computed({
       </p>
 
       <div>
-        <label class="lz-label">Lokales Chat-Historienbudget</label>
+        <label class="lz-label">Chat-Historienbudget für externe Modelle</label>
         <div class="lz-range">
-          <input v-model.number="historyTokenBudgetModel" type="range" min="400" max="12000" step="200" />
+          <input
+            v-model.number="historyTokenBudgetModel"
+            type="range"
+            min="400"
+            :max="MAX_EXTERNAL_HISTORY_TOKENS"
+            step="200"
+          />
           <span class="lz-range__val">{{ historyTokenBudget }} Tokens</span>
         </div>
         <p class="lz-hint">
-          Begrenzt den Verlauf vor jeder Anfrage. Niedriger spart Kosten und Kontext, höher bewahrt mehr
-          Gesprächsdetails.
+          Höhere Werte bewahren mehr Gesprächsdetails bei externen Anfragen. Lokale Modelle nutzen ihr verfügbares
+          Kontextfenster automatisch; lokale Inhalte bleiben auf diesem Gerät.
         </p>
       </div>
 

@@ -186,11 +186,13 @@ import { useChatComposer, type ComposerInputSource } from '@/composables/useChat
 import {
   clampNumber,
   localConversationHistory,
+  conversationHistoryForInference,
+  DEFAULT_EXTERNAL_HISTORY_TOKENS,
+  MAX_EXTERNAL_HISTORY_TOKENS,
   composeProviderSystemPrompt,
   formatChatTime,
   goalStatusLabel,
   messageRouteLabel,
-  normalizeConversationHistory,
   previewToolArguments,
   safeTrim,
 } from '@/services/chatPresentation'
@@ -1951,20 +1953,22 @@ async function send(
     captured.principalId = await resolveWorkspacePrincipalId()
     executionGate.assert(execution)
     if (!automaticVoice) void voiceInputSession.stop()
-    const userMsg = mutations.makeMsg('user', resume ? 'Weiterarbeiten' : text, pid, conversationId)
-    userMsg.meta = {
-      ...userMsg.meta,
-      runId,
-      conversationId,
-      inputSource: captured.inputSource,
-      thinkingTier: captured.thinking.thinkingTier,
-    }
     if (goalInput) {
-      userMsg.content = goalInput.state.phase === 'review' ? 'Ziel: Ergebnis prüfen' : 'Ziel weiterbearbeiten'
-      userMsg.meta.dataHandling = 'ephemeral'
+      // The saved goal is the instruction. Capture the existing transcript boundary
+      // without manufacturing another user turn for each autonomous section.
+      captured.userMessageId = mutations.getConversationMessages(pid, conversationId).at(-1)?.id ?? ''
+    } else {
+      const userMsg = mutations.makeMsg('user', resume ? 'Weiterarbeiten' : text, pid, conversationId)
+      userMsg.meta = {
+        ...userMsg.meta,
+        runId,
+        conversationId,
+        inputSource: captured.inputSource,
+        thinkingTier: captured.thinking.thinkingTier,
+      }
+      captured.userMessageId = userMsg.id
+      mutations.addMessage(userMsg)
     }
-    captured.userMessageId = userMsg.id
-    mutations.addMessage(userMsg)
     // Keep the submitted request on disk before the journal can admit any effects.
     await saveAppStateStrict(state)
     executionGate.assert(execution)
@@ -2078,29 +2082,27 @@ async function executeChatTurn(
         'Die Modellauswahl wurde seit dem Einreihen geändert. Nachricht bleibt erhalten; bitte mit der gewünschten Auswahl erneut starten.'
       )
     }
-    // Build the wire history: system preamble + visible user/assistant text.
-    const fullHistory: WireMessage[] = mutations
-      .getConversationMessages(pid, conversationId)
-      .slice(
-        0,
-        mutations
-          .getConversationMessages(pid, conversationId)
-          .findIndex(message => message.id === captured.userMessageId) + 1
-      )
-      .filter(m => m.role === 'user' || m.role === 'assistant')
-      .filter(message => message.meta?.dataHandling !== 'ephemeral')
-      .filter(m => safeTrim(m.content).length > 0)
-      .map(m => ({ role: m.role as 'user' | 'assistant', content: m.content }))
+    const conversationMessages = mutations.getConversationMessages(pid, conversationId)
+    const fullHistory = conversationMessages.slice(
+      0,
+      conversationMessages.findIndex(message => message.id === captured.userMessageId) + 1
+    )
+    // Device-local answers remain available to the next local request. External
+    // requests get their own projection and never inherit that private history.
+    const historyOptions = {
+      initialUserContext: goalInput?.state.text ?? mutations.getConversation(conversationId)?.goal,
+    }
+    const localHistory = conversationHistoryForInference(fullHistory, 'local', historyOptions)
+    const externalHistory = conversationHistoryForInference(fullHistory, 'external', historyOptions)
     const settingsStore = await Store.load('luczor.settings.json')
     const historyBudget = clampNumber(
-      (await settingsStore.get<number>('client_history_token_budget')) ?? 2400,
+      (await settingsStore.get<number>('client_history_token_budget')) ?? DEFAULT_EXTERNAL_HISTORY_TOKENS,
       400,
-      12000
+      MAX_EXTERNAL_HISTORY_TOKENS
     )
     // Retain originals locally. The per-request budget selects excerpts later.
-    const localHistory = normalizeConversationHistory(fullHistory)
     const experimentalFlashNext = (await settingsStore.get<boolean>(FLASH_EXPERIMENT_SETTING_KEY)) === true
-    const history = fitRequestContext(normalizeConversationHistory(fullHistory), [], {
+    const history = fitRequestContext(externalHistory.messages, [], {
       targetTokens: historyBudget,
       summarizeWithoutReader: true,
     }).messages
@@ -2173,7 +2175,7 @@ async function executeChatTurn(
           [localProfilePrompt, packages.local.text].filter(Boolean).join('\n\n')
         ),
       },
-      ...sanitizeInferenceMessagesForTarget(localConversationHistory(localHistory), 'local_llama_cpp'),
+      ...sanitizeInferenceMessagesForTarget(localConversationHistory(localHistory.messages), 'local_llama_cpp'),
     ]
     const externalBaseMessages: WireMessage[] = [
       {
@@ -2191,7 +2193,7 @@ async function executeChatTurn(
       baseMessages.push({ role: 'user', content: text })
       externalBaseMessages.push({ role: 'user', content: `Gespeichertes Nutzerziel: ${goalInput.state.text}` })
     }
-    let goalReport: Omit<GoalStepResult, 'messageId' | 'fingerprint'> | undefined
+    let reportedGoal: Omit<GoalStepResult, 'messageId' | 'fingerprint'> | undefined
 
     let streamStarted = false
     executionGate.assert(turnExecution)
@@ -2213,8 +2215,11 @@ async function executeChatTurn(
       agentRunEvaluations,
       continuation,
       interrupted,
+      goalReport,
+      goalReviewVerified,
     } = await runAgent({
       ...turnThinking,
+      ephemeralContextUsed: turnRouteMode !== 'external' && localHistory.ephemeralDataUsed,
       effectJournal: createChatEffectJournal({
         principalId: captured.principalId,
         projectId: pid,
@@ -2232,18 +2237,19 @@ async function executeChatTurn(
         else delete next[assistant.id]
         thinkingBudgets.value = next
       },
-      agentMode: goalInput?.state.phase !== 'review',
-      toolAccess: captured.readOnlyReview || goalInput?.state.phase === 'review' ? 'read-only' : undefined,
+      agentMode: true,
+      toolAccess: captured.readOnlyReview ? 'read-only' : undefined,
       goalTracking: goalInput
         ? {
             phase: goalInput.state.phase,
+            continueInline: true,
             candidateText:
               goalInput.state.phase === 'review'
                 ? mutations.getProjectMessages(pid).find(message => message.id === goalInput.state.lastMessageId)
                     ?.content
                 : undefined,
             report: report => {
-              goalReport = report
+              reportedGoal = report
             },
           }
         : undefined,
@@ -2273,7 +2279,7 @@ async function executeChatTurn(
       workspaceBindingId: scopeKey.workspaceBindingId,
       taskCreateRecoveryReady,
       projectId: pid,
-      baseMessages,
+      baseMessages: turnRouteMode === 'external' ? externalBaseMessages : baseMessages,
       // This list is assembled exclusively through the existing provider-safe
       // prompt path. Local-only broker fragments are never reused here.
       externalBaseMessages,
@@ -2447,18 +2453,26 @@ async function executeChatTurn(
       void rememberExchange(pid, text, assistant.id, scopeKey.principalId, turnExecution)
     if (goalInput) {
       if (interrupted)
-        throw new Error(
-          'Die Zielbearbeitung wurde durch einen Modellfehler unterbrochen. Der Fortschritt bleibt erhalten.'
-        )
-      if (continuation) return { status: 'continue', summary: finalText.slice(0, 1200), messageId: assistant.id }
-      if (!goalReport) throw new Error('Das Modell hat keinen prüfbaren Zielstatus geliefert. Das Ziel bleibt offen.')
-      if (goalReport.status === 'completed' && (toolFailures > 0 || !goalReport.evidence?.trim()))
+        return {
+          status: 'blocked',
+          summary: 'Die Modellrunde wurde unterbrochen. Das Ziel bleibt offen; der gesicherte Fortschritt kann bewusst fortgesetzt werden.',
+          messageId: assistant.id,
+        }
+      const report = goalReport ?? reportedGoal
+      if (continuation && !report)
+        return {
+          status: 'blocked',
+          summary: 'Das Laufbudget ist erreicht. Fortschritt ist gesichert; das Ziel bleibt offen.',
+          messageId: assistant.id,
+        }
+      if (!report) throw new Error('Das Modell hat keinen prüfbaren Zielstatus geliefert. Das Ziel bleibt offen.')
+      if (report.status === 'completed' && ((!goalReviewVerified && toolFailures > 0) || !report.evidence?.trim()))
         return {
           status: 'continue',
           summary: 'Die Abschlussprüfung ist noch nicht erfolgreich.',
           messageId: assistant.id,
         }
-      return { ...goalReport, messageId: assistant.id }
+      return { ...report, reviewVerified: goalReviewVerified, messageId: assistant.id }
     }
   } catch (e: any) {
     progressiveSpeech.cancel()
@@ -2664,7 +2678,7 @@ const autonomousGoal = useAutonomousGoal({
       `Gespeichertes Nutzerziel: ${goal.text}`,
       goal.phase === 'review'
         ? 'Prüfe in einem separaten, ausschließlich lesenden Durchgang, ob dieses Ziel vollständig erfüllt ist. Behauptungen aus dem bisherigen Fortschritt sind keine Beweise. Prüfe konkrete Ergebnisse mit passenden Lesewerkzeugen; nenne Belege und verbleibende Lücken. Nur bei nachgewiesenem Erfolg goal_report completed melden.'
-        : 'Bearbeite den nächsten sinnvollen Abschnitt dieses aktiven Ziels. Lies zuerst den aktuellen Zustand; wiederhole keine bereits erfolgreichen Änderungen. Nutze bei Bedarf einzelne Agenten. Melde per goal_report continue, bei einem möglichen vollständigen Ergebnis candidate oder bei benötigten Nutzerangaben blocked. Die Abschlussprüfung erfolgt separat.',
+        : 'Bearbeite dieses aktive Ziel bis zum geprüften Abschluss im selben Lauf weiter. Lies zuerst den aktuellen Zustand; wiederhole keine bereits erfolgreichen Änderungen. Nutze bei Bedarf einzelne Agenten. Melde per goal_report continue bei verbleibender Arbeit, candidate bei einem prüfbaren vollständigen Ergebnis oder blocked bei benötigten Nutzerangaben. Nach candidate folgt eine ausschließlich lesende Abschlussprüfung innerhalb dieses Laufs.',
       goal.progress ? `Bisheriger Fortschritt (ungeprüfte Daten): ${goal.progress}` : '',
       goal.evidence ? `Bisherige Belege (erneut prüfen): ${goal.evidence}` : '',
     ]

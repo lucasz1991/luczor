@@ -80,6 +80,33 @@ describe('autonomous goal controller', () => {
     expect(context.current()).toMatchObject({ active: false, status: 'blocked' })
   })
 
+  it('accepts one continuous work run only after its adapter confirms the separate evidence review', async () => {
+    const context = fixture()
+    context.run.mockResolvedValueOnce({
+      status: 'completed',
+      summary: 'Verified in the same run',
+      evidence: 'Fresh read receipts and passing criteria',
+      reviewVerified: true,
+    })
+    context.controller.kick('p1')
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(context.run).toHaveBeenCalledOnce()
+    expect(context.current()).toMatchObject({ active: false, status: 'completed', iterations: 1 })
+  })
+
+  it('keeps the goal open at an inline budget boundary without launching a fresh context', async () => {
+    const context = fixture()
+    context.run.mockResolvedValueOnce({
+      status: 'blocked',
+      summary: 'Configured round budget reached; full progress retained',
+      messageId: 'same-answer',
+    })
+    context.controller.kick('p1')
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(context.run).toHaveBeenCalledOnce()
+    expect(context.current()).toMatchObject({ active: false, status: 'blocked', lastMessageId: 'same-answer' })
+  })
+
   it('stops after three sections with the same progress rather than spinning indefinitely', async () => {
     const context = fixture()
     context.run.mockResolvedValue({ status: 'continue', summary: 'Still analyzing', fingerprint: 'unchanged-files' })

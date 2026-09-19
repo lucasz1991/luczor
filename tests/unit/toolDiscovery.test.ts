@@ -253,9 +253,9 @@ describe('hierarchical tool discovery', () => {
     const many = Array.from({ length: 30 }, (_, index) => definition(`custom_${index}`))
     focused.select(many)
     expect(await focused.selector.execute({ offset: 16 }, { projectId: 'p' })).toMatchObject({
-      total: 30,
+      total: 31,
       nextOffset: null,
-      available: many.slice(16).map(tool => ({ name: tool.function.name })),
+      available: [...many.slice(16).map(tool => ({ name: tool.function.name })), { name: 'tools_select' }],
     })
   })
   it('retains the sole terminal hit through both compaction stages and loads its schema', async () => {

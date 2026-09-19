@@ -311,4 +311,202 @@ describe('goal reports in the real agent loop', () => {
     expect(result.toolFailures).toBe(1)
     expect(report).not.toHaveBeenCalled()
   })
+
+  it('keeps goal sections, full read evidence and independent review in one bounded run', async () => {
+    const report = vi.fn()
+    const completed = vi.fn()
+    const requests: InferenceRequest[] = []
+    const completeEvidence = 'ORIGINAL READ EVIDENCE '.repeat(1000)
+    registerReadTool({ content: completeEvidence })
+    const responses = [
+      toolResponse({}, 'fs_read', 'work-read'),
+      toolResponse({ status: 'continue', summary: 'First section finished' }, 'goal_report', 'progress'),
+      { ...finalResponse(), content: 'First public section.' },
+      toolResponse({ status: 'candidate', summary: 'Deliverable ready' }, 'goal_report', 'candidate'),
+      { ...finalResponse(), content: 'Complete public deliverable.' },
+      toolResponse({}, 'goal_read_result', 'review-read'),
+      toolResponse(
+        { status: 'completed', summary: 'Criteria verified', evidence: 'Complete deliverable inspected' },
+        'goal_report',
+        'complete'
+      ),
+      { ...finalResponse(), content: 'Verified final answer.' },
+    ]
+    mocks.stream.mockImplementation(async (request: InferenceRequest) => {
+      requests.push({ ...request, messages: structuredClone(request.messages), tools: structuredClone(request.tools) })
+      return responses.shift()!
+    })
+    const result = await runAgent(
+      options({
+        maxRounds: 8,
+        goalTracking: { phase: 'work', continueInline: true, report },
+        onRoundComplete: completed,
+      })
+    )
+    expect(mocks.stream).toHaveBeenCalledTimes(8)
+    expect(result).toMatchObject({
+      finalText: 'Verified final answer.',
+      goalReviewVerified: true,
+      goalReport: { status: 'completed' },
+    })
+    expect(result.continuation).toBeUndefined()
+    expect(JSON.stringify(requests.at(-1)!.messages)).toContain(completeEvidence)
+    expect(requests.at(-1)!.messages.filter(message => message.role === 'user')).toEqual(options().baseMessages)
+    expect(requests.at(-1)!.messages).toContainEqual({ role: 'assistant', content: 'First public section.' })
+    expect(completed.mock.calls.map(([event]) => event.kind)).toEqual(['commentary', 'commentary', 'answer'])
+    expect(offered(requests[5]!)).toContain('goal_read_result')
+    expect(result.tokenUsage.rounds).toBe(8)
+  })
+
+  it('enforces read-only review even when the model invents a write call', async () => {
+    const execute = vi.fn(async () => ({ ok: true }))
+    const write = { name: 'fs_write', mutating: true, effects: ['write'], execute, parameters: { type: 'object' } }
+    mocks.getTool.mockImplementation(name => (name === 'fs_write' ? write : undefined))
+    mocks.descriptors.mockReturnValue([
+      { type: 'function', function: { name: 'fs_write', parameters: write.parameters } },
+    ])
+    mocks.stream
+      .mockResolvedValueOnce(toolResponse({ status: 'candidate', summary: 'Ready' }))
+      .mockResolvedValueOnce(finalResponse())
+      .mockImplementationOnce(async (request: InferenceRequest) => {
+        expect(offered(request)).not.toContain('fs_write')
+        return toolResponse({}, 'fs_write', 'invented-write')
+      })
+      .mockResolvedValueOnce(toolResponse({ status: 'blocked', summary: 'Review needs clarification' }))
+    const result = await runAgent(
+      options({
+        mode: 'unrestricted',
+        maxRounds: 5,
+        goalTracking: { phase: 'work', continueInline: true, report: vi.fn() },
+      })
+    )
+    expect(execute).not.toHaveBeenCalled()
+    expect(result).toMatchObject({ goalReviewVerified: false, goalReport: { status: 'blocked' }, toolFailures: 1 })
+  })
+
+  it('does not count work-phase reads as independent review evidence', async () => {
+    registerReadTool()
+    mocks.stream
+      .mockResolvedValueOnce(toolResponse({}, 'fs_read', 'work-read'))
+      .mockResolvedValueOnce(toolResponse({ status: 'candidate', summary: 'Ready' }))
+      .mockResolvedValueOnce(finalResponse())
+      .mockResolvedValueOnce(toolResponse({ status: 'completed', summary: 'Claim', evidence: 'Old work read' }))
+      .mockResolvedValueOnce(toolResponse({ status: 'blocked', summary: 'New evidence required' }))
+    const result = await runAgent(
+      options({ maxRounds: 6, goalTracking: { phase: 'work', continueInline: true, report: vi.fn() } })
+    )
+    expect(result).toMatchObject({ goalReviewVerified: false, goalReport: { status: 'blocked' }, toolFailures: 1 })
+  })
+
+  it('retains context at the configured round bound without scheduling a new goal request', async () => {
+    mocks.stream.mockResolvedValueOnce(toolResponse({ status: 'continue', summary: 'More work remains' }))
+    const result = await runAgent(
+      options({ maxRounds: 2, goalTracking: { phase: 'work', continueInline: true, report: vi.fn() } })
+    )
+    expect(mocks.stream).toHaveBeenCalledTimes(2)
+    expect(result.goalReport).toMatchObject({ status: 'blocked', summary: expect.stringContaining('Rundenlimit') })
+    expect(result.continuation?.messages).toContainEqual({ role: 'assistant', content: 'Ergebnis geprüft.' })
+    expect(result.goalReviewVerified).toBe(false)
+  })
+
+  it('stops after three unchanged inline goal sections', async () => {
+    let round = 0
+    mocks.stream.mockImplementation(async () =>
+      ++round % 2
+        ? toolResponse({ status: 'continue', summary: 'Unchanged progress' }, 'goal_report', `report-${round}`)
+        : finalResponse()
+    )
+    const result = await runAgent(
+      options({ maxRounds: 12, goalTracking: { phase: 'work', continueInline: true, report: vi.fn() } })
+    )
+    expect(mocks.stream).toHaveBeenCalledTimes(6)
+    expect(result.goalReport).toMatchObject({
+      status: 'blocked',
+      summary: expect.stringContaining('ohne erkennbaren Fortschritt'),
+    })
+  })
+
+  it('stops inline continuation immediately when the existing signal is canceled', async () => {
+    const controller = new AbortController()
+    mocks.stream.mockResolvedValueOnce(toolResponse({ status: 'continue', summary: 'More work' }))
+    await expect(
+      runAgent(
+        options({
+          signal: controller.signal,
+          goalTracking: { phase: 'work', continueInline: true, report: vi.fn() },
+          onRoundComplete: () => controller.abort(),
+        })
+      )
+    ).rejects.toThrow()
+    expect(mocks.stream).toHaveBeenCalledTimes(2)
+  })
+
+  it('retains host-only history taint without requiring a new tool call', async () => {
+    const completed = vi.fn()
+    const result = await runAgent(options({ ephemeralContextUsed: true, onRoundComplete: completed }))
+    expect(result.ephemeralDataUsed).toBe(true)
+    expect(completed).toHaveBeenCalledWith(expect.objectContaining({ serverSpeechAllowed: false }))
+  })
+
+  it('keeps successful mutation receipts across goal sections and does not repeat a write', async () => {
+    const execute = vi.fn(async () => ({ ok: true, content: 'Saved once' }))
+    const write = { name: 'fs_write', mutating: true, effects: ['write'], execute, parameters: { type: 'object' } }
+    mocks.getTool.mockImplementation(name => (name === 'fs_write' ? write : undefined))
+    mocks.descriptors.mockReturnValue([
+      { type: 'function', function: { name: 'fs_write', parameters: write.parameters } },
+    ])
+    mocks.stream
+      .mockResolvedValueOnce(toolResponse({}, 'fs_write', 'first-write'))
+      .mockResolvedValueOnce(toolResponse({ status: 'continue', summary: 'File written' }))
+      .mockResolvedValueOnce(finalResponse())
+      .mockResolvedValueOnce(toolResponse({}, 'fs_write', 'duplicate-write'))
+      .mockResolvedValueOnce(toolResponse({ status: 'blocked', summary: 'Needs user decision' }))
+    const result = await runAgent(
+      options({
+        mode: 'unrestricted',
+        maxRounds: 6,
+        goalTracking: { phase: 'work', continueInline: true, report: vi.fn() },
+      })
+    )
+    expect(execute).toHaveBeenCalledOnce()
+    expect(result.goalReport?.status).toBe('blocked')
+    expect(JSON.stringify((mocks.stream.mock.calls.at(-1)![0] as InferenceRequest).messages)).toContain(
+      'alreadyCompleted'
+    )
+  })
+
+  it('starts in read-only review and restores authorized work after an incomplete review', async () => {
+    const execute = vi.fn(async () => ({ ok: true }))
+    const write = { name: 'fs_write', mutating: true, effects: ['write'], execute, parameters: { type: 'object' } }
+    mocks.getTool.mockImplementation(name => (name === 'fs_write' ? write : undefined))
+    mocks.descriptors.mockReturnValue([
+      { type: 'function', function: { name: 'fs_write', parameters: write.parameters } },
+    ])
+    mocks.stream
+      .mockImplementationOnce(async (request: InferenceRequest) => {
+        expect(offered(request)).not.toContain('fs_write')
+        expect(offered(request)).not.toContain('agent_assist')
+        return toolResponse({ status: 'continue', summary: 'An implementation gap remains' })
+      })
+      .mockResolvedValueOnce(finalResponse())
+      .mockResolvedValueOnce(toolResponse({}, 'fs_write', 'work-write'))
+      .mockResolvedValueOnce(toolResponse({ status: 'blocked', summary: 'Needs final acceptance' }))
+    const result = await runAgent(
+      options({
+        mode: 'unrestricted',
+        maxRounds: 5,
+        agentMode: true,
+        goalTracking: { phase: 'review', continueInline: true, report: vi.fn(), candidateText: 'Prior candidate' },
+      })
+    )
+    expect(execute).toHaveBeenCalledOnce()
+    expect(result.goalReport?.status).toBe('blocked')
+  })
+
+  it('rejects an external gateway when the history includes host-only context', async () => {
+    await expect(
+      runAgent(options({ ephemeralContextUsed: true, inferenceGateway: { ...gateway, target: 'laravel_proxy' } }))
+    ).rejects.toThrow('Gerätelokaler Gesprächskontext')
+    expect(mocks.stream).not.toHaveBeenCalled()
+  })
 })
