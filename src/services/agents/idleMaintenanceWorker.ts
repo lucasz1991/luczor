@@ -28,7 +28,7 @@ import {
   matchesEvaluationAnswer,
 } from '@/services/memory/maintenanceEvaluation'
 import { canAccessCloudProject } from '@/services/cloudProjectAccess'
-import { inspectRepositoryGraph } from '@/services/repositoryGraph'
+import { inspectRepositoryGraph, type RepositoryGraphStatus } from '@/services/repositoryGraph'
 import { recordMemoryUsageEvent } from '@/services/memory/usage'
 import { memoryMaintenanceAdapters, writableMaintenanceAdapter } from '@/services/memory/maintenanceAdapters'
 import {
@@ -127,6 +127,10 @@ export function createMaintenanceWorker(
     if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') return error.code
     return error instanceof Error ? error.message : String(error)
   }
+  const repositoryLabel = (status: RepositoryGraphStatus) =>
+    status.status === 'ready'
+      ? `Basisindex bereit${status.lsp ? ` · LSP ${status.lsp.scanned}/${status.lsp.files} (${status.lsp.status})` : ''}`
+      : `Graph: ${status.status}`
   const repositoryWork = async (principalId: string, projects: Project[], signal: AbortSignal, refresh: boolean) => {
     const work: HydratedMaintenanceJob[] = []
     for (const project of projects.filter(item => !item.archivedAt && canAccessCloudProject(item, principalId))) {
@@ -135,7 +139,7 @@ export function createMaintenanceWorker(
         let status = await deps.graphStatus(principalId, project.id)
         maintenanceProgress.value = {
           ...maintenanceProgress.value,
-          repository: status.status === 'ready' ? 'Lokaler Graph bereit' : `Graph: ${status.status}`,
+          repository: repositoryLabel(status),
         }
         if (status.status === 'unbound' || status.status === 'indexing') continue
         const key = `${principalId}:${project.id}`
@@ -151,7 +155,7 @@ export function createMaintenanceWorker(
           status = await deps.graphStatus(principalId, project.id)
         }
         if (status.status !== 'ready') continue
-        maintenanceProgress.value = { ...maintenanceProgress.value, repository: 'Lokaler Graph bereit' }
+        maintenanceProgress.value = { ...maintenanceProgress.value, repository: repositoryLabel(status) }
         let offset = 0
         do {
           signal.throwIfAborted()

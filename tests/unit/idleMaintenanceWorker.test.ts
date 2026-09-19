@@ -24,7 +24,7 @@ vi.mock('@/services/memory/maintenanceAdapters', () => ({
   writableMaintenanceAdapter: () => false,
 }))
 vi.mock('@/services/repositoryGraph', () => ({ inspectRepositoryGraph: async () => ({ files: [], total: 0 }) }))
-import { createMaintenanceWorker } from '@/services/agents/idleMaintenanceWorker'
+import { createMaintenanceWorker, maintenanceProgress } from '@/services/agents/idleMaintenanceWorker'
 
 function setup() {
   const project: Project = {
@@ -92,6 +92,34 @@ async function run(optimizer: ReturnType<typeof createMaintenanceWorker>) {
   await vi.waitFor(() => expect(['cooldown', 'paused']).toContain(optimizer.snapshot().phase))
 }
 describe('mounted persistent maintenance worker', () => {
+  it('continues partial LSP work on a later index pass without pretending the whole graph is ready', async () => {
+    const testCase = setup()
+    let scanned = 0
+    testCase.deps.graphStatus = async () => ({
+      status: 'ready',
+      files: 714,
+      symbols: 1000,
+      edges: 10,
+      skipped: 0,
+      lsp: { status: 'partial', scanned, files: 714, edges: 4, reason: 'lsp_batch_limit' },
+    })
+    testCase.deps.graphIndex = vi.fn(async () => {
+      scanned += 20
+    })
+    const worker = testCase.create()
+    try {
+      await run(worker)
+      expect(testCase.deps.graphIndex).toHaveBeenCalledOnce()
+      expect(maintenanceProgress.value.repository).toBe('Basisindex bereit · LSP 20/714 (partial)')
+      await worker.stop()
+      await vi.advanceTimersByTimeAsync(300_001)
+      await run(worker)
+      expect(testCase.deps.graphIndex).toHaveBeenCalledTimes(2)
+      expect(maintenanceProgress.value.repository).toBe('Basisindex bereit · LSP 40/714 (partial)')
+    } finally {
+      await worker.stop()
+    }
+  })
   it('renews resident readiness even without cold-start consent before drafting and review', async () => {
     const testCase = setup()
     const worker = testCase.create()

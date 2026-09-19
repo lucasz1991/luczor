@@ -160,6 +160,35 @@ export function buildMemoryGraph(
   return { nodes, edges }
 }
 
+/** Projected screen position of one 3D point in the 800×500 view box, plus its depth and perspective scale. */
+export type ProjectedPoint = { left: number; top: number; depth: number; scale: number }
+
+/**
+ * Rotates a scene point by yaw (around the vertical axis) and pitch (around the horizontal axis)
+ * and projects it with the same perspective as projectMemoryGraph(). Shared by the node layout
+ * and by decorative geometry in the view (floor ring, curve anchors) so both stay aligned.
+ */
+export function projectPoint(
+  xx: number,
+  yy: number,
+  zz: number,
+  yaw: number,
+  pitch: number,
+  zoom: number
+): ProjectedPoint {
+  const rx = xx * Math.cos(yaw) - zz * Math.sin(yaw)
+  const rz = xx * Math.sin(yaw) + zz * Math.cos(yaw)
+  const ry = yy * Math.cos(pitch) - rz * Math.sin(pitch)
+  const depth = yy * Math.sin(pitch) + rz * Math.cos(pitch)
+  const scale = (650 / (650 + depth)) * zoom
+  return { left: 400 + rx * scale, top: 250 + ry * scale, depth, scale }
+}
+
+/** Unscaled bead radius of a node in view-box units (the projection multiplies it by perspective × zoom). */
+export function memoryNodeBaseRadius(node: Pick<MemoryNode, 'kind'>): number {
+  return node.kind === 'Modell' ? 16 : node.kind === 'System' ? 10 : 4
+}
+
 /** Deterministic spatial layout. Coordinates express grouping, never semantic similarity. */
 export function projectMemoryGraph(nodes: MemoryNode[], yaw: number, pitch: number, zoom: number) {
   const groups = new Map<string, number>()
@@ -179,18 +208,64 @@ export function projectMemoryGraph(nodes: MemoryNode[], yaw: number, pitch: numb
       const xx = isModel ? 0 : hubX + Math.cos(angle) * radius
       const yy = isModel ? 0 : hubY + Math.sin(angle) * radius * 0.62
       const zz = isModel ? 0 : hubZ + Math.sin(index * 1.7) * radius
-      const rx = xx * Math.cos(yaw) - zz * Math.sin(yaw)
-      const rz = xx * Math.sin(yaw) + zz * Math.cos(yaw)
-      const ry = yy * Math.cos(pitch) - rz * Math.sin(pitch)
-      const depth = yy * Math.sin(pitch) + rz * Math.cos(pitch)
-      const scale = (650 / (650 + depth)) * zoom
+      const projected = projectPoint(xx, yy, zz, yaw, pitch, zoom)
       return {
         ...node,
-        left: 400 + rx * scale,
-        top: 250 + ry * scale,
-        depth,
-        radius: (isModel ? 16 : node.kind === 'System' ? 10 : 4) * scale,
+        left: projected.left,
+        top: projected.top,
+        depth: projected.depth,
+        radius: memoryNodeBaseRadius(node) * projected.scale,
       }
     })
     .sort((left, right) => right.depth - left.depth)
+}
+
+/** Control point of a memory edge: the midpoint bowed towards the view centre, capped by `maxBend`. */
+export function memoryEdgeControl(
+  from: { left: number; top: number },
+  to: { left: number; top: number },
+  maxBend = 18
+): { left: number; top: number } {
+  const length = Math.hypot(to.left - from.left, to.top - from.top)
+  const midLeft = (from.left + to.left) / 2
+  const midTop = (from.top + to.top) / 2
+  let bendLeft = (400 - midLeft) * 0.14
+  let bendTop = (250 - midTop) * 0.14
+  const bend = Math.hypot(bendLeft, bendTop)
+  const limit = Math.min(maxBend, 0.25 * length)
+  if (bend > limit && bend > 0) {
+    bendLeft *= limit / bend
+    bendTop *= limit / bend
+  }
+  return { left: midLeft + bendLeft, top: midTop + bendTop }
+}
+
+/**
+ * Quadratic curve between two projected points, bowed gently towards the view centre so the
+ * space reads as a shallow dome. Deterministic in the endpoints: no jitter while rotating.
+ */
+export function memoryEdgePath(
+  from: { left: number; top: number },
+  to: { left: number; top: number },
+  maxBend = 18
+): string {
+  const start = `M${from.left.toFixed(1)} ${from.top.toFixed(1)}`
+  const end = `${to.left.toFixed(1)} ${to.top.toFixed(1)}`
+  if (Math.hypot(to.left - from.left, to.top - from.top) < 1) return `${start} L${end}`
+  const control = memoryEdgeControl(from, to, maxBend)
+  return `${start} Q${control.left.toFixed(1)} ${control.top.toFixed(1)} ${end}`
+}
+
+/** Point on the quadratic curve from `from` over `control` to `to` at parameter t (0..1). */
+export function quadraticPoint(
+  from: { left: number; top: number },
+  control: { left: number; top: number },
+  to: { left: number; top: number },
+  tt: number
+): { left: number; top: number } {
+  const inverse = 1 - tt
+  return {
+    left: inverse * inverse * from.left + 2 * inverse * tt * control.left + tt * tt * to.left,
+    top: inverse * inverse * from.top + 2 * inverse * tt * control.top + tt * tt * to.top,
+  }
 }
