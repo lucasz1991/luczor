@@ -7,3 +7,6 @@ tests/fixtures/local-model-manifest-golden-canonical.json
 tests/fixtures/local-model-manifest-golden-envelope.json
 tests/fixtures/local-model-manifest-v1.json
 tests/fixtures/local-model-manifest-test-public.pem
+
+# Vendored MIT engine (Thinking Orbs); kept byte-close to upstream for updates.
+src/vendor/thinking-orbs/**

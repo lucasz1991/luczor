@@ -14,6 +14,7 @@ import {
 } from './graph'
 import { DEFAULT_MEMORY_GRAPH_DISPLAY, type MemoryGraphDisplay } from './graphDisplay'
 import { DREAM_STAGE_LABELS, type DreamRun, type DreamStage } from '@/services/memory/dreamTrace'
+import ThinkingOrb, { type ThinkingOrbState } from './ThinkingOrb.vue'
 import {
   MEMORY_LINK_TTL_MS,
   memoryLinkNodeId,
@@ -109,7 +110,8 @@ type Entry = {
   pill: Pill | null
   flag: Flag | null
 }
-type StoredEdge = { key: string; path: string; band: Band; kind: string }
+type StoredEdge = { key: string; path: string; band: Band; kind: string; system: string }
+type SystemBundle = { system: string; key: string; near: string; mid: string; far: string; spokes: string }
 type SpecialEdge = { key: string; path: string; cls: string; kind: string }
 type Mist = { system: string; hub: Point; rx: number; ry: number }
 type LinkEdge = { key: string; state: MemoryLinkState; path: string; opacity: number; written: boolean }
@@ -149,6 +151,34 @@ const STAGES_AT_START = new Set<DreamStage>(['scanning', 'selecting', 'preparing
 const LINK_TOWARD_CORE = new Set<MemoryLinkState>(['recalled', 'included'])
 const LINK_WITH_MOTES = new Set<MemoryLinkState>(['recalled', 'included', 'written', 'updated'])
 const SYSTEM_INDEX = new Map(MEMORY_SYSTEMS.map((system, index) => [system, index]))
+/**
+ * One hue per memory system, tuned to sit together: equal lightness and restrained
+ * saturation on the dark obsidian ground, deeper tones on the light theme. Index order
+ * follows MEMORY_SYSTEMS (Erinnerungen, Persönlichkeit, Repo-Graph, SQL / Cognee, Kontextpakete).
+ */
+const SYSTEM_PALETTE = [
+  { dark: '#b9a6f2', light: '#6a56c4' }, // Erinnerungen · violet
+  { dark: '#f0a9bb', light: '#b04a66' }, // Persönlichkeit · rose
+  { dark: '#8cc6ea', light: '#2f6f94' }, // Repo-Graph · sky
+  { dark: '#83d6bd', light: '#2b7f66' }, // SQL / Cognee · mint
+  { dark: '#f1cb86', light: '#946a24' }, // Kontextpakete · amber
+] as const
+const SYSTEM_KEYS = MEMORY_SYSTEMS.map((_system, index) => `s${index}`)
+function systemKey(system: string): string {
+  return `s${SYSTEM_INDEX.get(system) ?? 0}`
+}
+/** Inline paint overrides so `.body`, `.glow` and the mist pick up the system's gradients. */
+function systemPaints(system: string): Record<string, string> {
+  const key = systemKey(system)
+  return {
+    '--sys': `var(--sys-${key})`,
+    '--mg-u-glass': `url(#${uid}-glass-${key})`,
+    '--mg-u-glass-lit': `url(#${uid}-lit-${key})`,
+    '--mg-u-glow': `url(#${uid}-glow-${key})`,
+    '--mg-u-mist': `url(#${uid}-mist-${key})`,
+    '--mg-u-mist-lit': `url(#${uid}-mistlit-${key})`,
+  }
+}
 
 const uid = useId()
 const reducedMotion =
@@ -189,8 +219,15 @@ const paints = computed(() => {
     '--mg-u-floor': url('floor'),
     '--mg-u-aura': url('aura'),
     '--mg-u-core': url('core'),
+    '--mg-u-core-deep': url('core-deep'),
     '--mg-u-blur': url('blur'),
     '--mg-u-blur-core': url('blur-core'),
+    ...Object.fromEntries(
+      SYSTEM_PALETTE.flatMap((tone, index) => [
+        [`--sys-s${index}-dark`, tone.dark],
+        [`--sys-s${index}-light`, tone.light],
+      ])
+    ),
   }
 })
 
@@ -211,6 +248,49 @@ const progress = computed(() => {
   return 0
 })
 const runOutcome = computed(() => props.dream?.run?.outcome)
+/* The centre orb mirrors the dream: listening while it scans, thinking while it generates,
+ * executing while it verifies, speaking while it commits; outcomes stay visible afterwards. */
+const ORB_STAGE: Record<DreamStage, ThinkingOrbState> = {
+  scanning: 'curious',
+  selecting: 'curious',
+  preparing: 'thinking',
+  generating: 'thinking',
+  verifying: 'wave',
+  committing: 'speaking',
+  done: 'happy',
+  failed: 'offline',
+  interrupted: 'idle',
+}
+const orbState = computed<ThinkingOrbState>(() => {
+  if (props.offloading && props.dream?.active) return 'listening'
+  if (props.dream?.active && stage.value) return ORB_STAGE[stage.value]
+  if (props.dream?.active) return 'curious'
+  if (runOutcome.value === 'failed') return 'offline'
+  if (runOutcome.value === 'success') return 'happy'
+  return props.phase !== 'idle' ? 'thinking' : 'idle'
+})
+const orbTitle = computed(() => {
+  if (props.dream?.active) return `Träumt · ${dreamStage.value || 'Leerlauf-Pflege'} · Klicken zum Anhalten`
+  if (runOutcome.value === 'success') return 'Letzter Traum übernommen · Klicken für einen neuen Traum'
+  if (runOutcome.value === 'failed') return 'Letzter Traum verworfen · Klicken für einen neuen Versuch'
+  if (runOutcome.value === 'interrupted') return 'Letzter Traum unterbrochen · Klicken zum Fortsetzen'
+  return 'Lokales Modell · Klicken, um zu träumen'
+})
+const ORB_BOX = 150
+const darkTheme = computed(() => {
+  void fontVersion.value
+  if (typeof document === 'undefined') return true
+  const root = document.documentElement
+  return !(root.dataset.theme === 'light' || root.classList.contains('ai-light'))
+})
+/** The dream panel owns consent and eligibility; the orb only asks it. */
+function orbClick() {
+  if (props.ambient) return
+  window.dispatchEvent(
+    new CustomEvent('luczor:dream-request', { detail: { action: props.dream?.active ? 'stop' : 'start' } })
+  )
+}
+const orbCore = computed(() => (props.ambient ? null : (scene.value.byId.get(MODEL_NODE_ID) ?? null)))
 const taskHub = computed(() => {
   const task = props.dream?.run?.task
   return task === 'repository' ? 'system:2' : task === 'context' ? 'system:4' : 'system:0'
@@ -244,7 +324,7 @@ const hoverAdjacent = computed(() => {
   return set
 })
 /* Deterministic star field and orbit rings give the knowledge space depth; positions never change. */
-type Star = { x: number; y: number; r: number; delay: number; duration: number; far: boolean }
+type Star = { left: number; top: number; radius: number; delay: number; duration: number; far: boolean }
 const stars: readonly Star[] = (() => {
   let seed = 0x9e3779b1
   const next = () => {
@@ -252,9 +332,9 @@ const stars: readonly Star[] = (() => {
     return (seed >>> 8) / 0x01000000
   }
   return Array.from({ length: 72 }, (_, index) => ({
-    x: Math.round(next() * 800 * 10) / 10,
-    y: Math.round(next() * 500 * 10) / 10,
-    r: Math.round((0.4 + next() * 1.1) * 100) / 100,
+    left: Math.round(next() * 800 * 10) / 10,
+    top: Math.round(next() * 500 * 10) / 10,
+    radius: Math.round((0.4 + next() * 1.1) * 100) / 100,
     delay: Math.round(next() * 9000),
     duration: 4200 + Math.round(next() * 6000),
     far: index % 3 !== 0,
@@ -393,12 +473,18 @@ const scene = computed(() => {
   for (const [system, blob] of spread)
     mist.push({ system, hub: blob.hub, rx: Math.max(60, 1.15 * blob.dx), ry: Math.max(40, 1.15 * blob.dy) })
   // Edges: grouping in three depth bundles, stored relations as single paths, special edges on top.
-  const bundles = new Map<Band, string[]>([
-    ['near', []],
-    ['mid', []],
-    ['far', []],
-  ])
-  const spokes: string[] = []
+  // Membership bundles and model spokes are kept per system so each keeps its own colour.
+  const bundles = new Map<string, Record<Band | 'spokes', string[]>>(
+    MEMORY_SYSTEMS.map(system => [system, { near: [], mid: [], far: [], spokes: [] }])
+  )
+  const bundleOf = (system: string) => {
+    let bundle = bundles.get(system)
+    if (!bundle) {
+      bundle = { near: [], mid: [], far: [], spokes: [] }
+      bundles.set(system, bundle)
+    }
+    return bundle
+  }
   const stored: StoredEdge[] = []
   const special: SpecialEdge[] = []
   const selectedBundle: string[] = []
@@ -434,19 +520,27 @@ const scene = computed(() => {
     }
     if (edgeMode === 'none') continue
     if (edge.grouping && from.model) {
-      spokes.push(memoryEdgePath(from, to))
+      bundleOf(to.system).spokes.push(memoryEdgePath(from, to))
       continue
     }
     if (edge.grouping) {
       if (edgeMode !== 'all') continue
       const mean = (from.depthT + to.depthT) / 2
       const band: Band = !display.depthFade ? 'mid' : mean < 0.33 ? 'near' : mean > 0.66 ? 'far' : 'mid'
-      bundles.get(band)?.push(memoryEdgePath(from, to))
+      // `band` is a member of the closed Band union, never arbitrary input.
+      // eslint-disable-next-line security/detect-object-injection
+      bundleOf(from.hub ? from.system : to.system)[band].push(memoryEdgePath(from, to))
       continue
     }
     const mean = (from.depthT + to.depthT) / 2
     const band: Band = !display.depthFade ? 'mid' : mean < 0.33 ? 'near' : mean > 0.66 ? 'far' : 'mid'
-    stored.push({ key, path: memoryEdgePath(from, to), band, kind: edge.kind })
+    stored.push({
+      key,
+      path: memoryEdgePath(from, to),
+      band,
+      kind: edge.kind,
+      system: from.model ? to.system : from.system,
+    })
   }
   return {
     points,
@@ -457,10 +551,14 @@ const scene = computed(() => {
     selectedBundle: selectedBundle.join(' '),
     flows,
     floorD: floorPath(yaw.value, pitch.value + sway.value, zoomValue),
-    bundleNear: bundles.get('near')?.join(' ') ?? '',
-    bundleMid: bundles.get('mid')?.join(' ') ?? '',
-    bundleFar: bundles.get('far')?.join(' ') ?? '',
-    spokesD: spokes.join(' '),
+    bundles: [...bundles].map(([system, bundle]): SystemBundle => ({
+      system,
+      key: systemKey(system),
+      near: bundle.near.join(' '),
+      mid: bundle.mid.join(' '),
+      far: bundle.far.join(' '),
+      spokes: bundle.spokes.join(' '),
+    })),
     stored,
     special,
   }
@@ -475,12 +573,10 @@ const LABEL_SCALE = 0.55
 function showPill(point: Point): boolean {
   // Behind a chat the graph is pure ambience: no labels at all, not even hubs or the model.
   if (props.ambient) return false
-  if (point.model) return true
-  if (point.id === props.selected) return true
-  const labels = props.display.labels
-  if (labels === 'all') return point.hub || point.depthT <= 0.72
-  if (labels === 'hubs') return point.hub
-  return false
+  // The thinking orb sits on the model node and carries its own label.
+  if (point.model) return false
+  // Labels appear only for the node under the pointer; the space itself stays label-free.
+  return point.id === hoverId.value
 }
 function pillFor(point: Point): Pill | null {
   if (!showPill(point)) return null
@@ -566,6 +662,7 @@ function buildEntry(point: Point): Entry {
     'is-deleted': state === 'removed',
   }
   const style: Record<string, number | string> = { '--dp': point.dp }
+  if (!point.model) Object.assign(style, systemPaints(point.system))
   if (!props.ambient) {
     // Stagger the entrance by depth so the space builds from the back to the front.
     style['--enter-delay'] = `${Math.round(120 + (1 - point.depthT) * 420)}ms`
@@ -1226,6 +1323,74 @@ onBeforeUnmount(() => {
           <stop offset="0.45" class="st-glow-1" stop-color="var(--ai-orange)" />
           <stop offset="1" class="st-glow-2" stop-color="var(--ai-orange)" />
         </radialGradient>
+        <template v-for="sysKey in SYSTEM_KEYS" :key="sysKey">
+          <radialGradient
+            :id="`${uid}-glass-${sysKey}`"
+            class="grad"
+            :style="{ '--mg-base': `var(--sys-${sysKey})` }"
+            cx="0.36"
+            cy="0.32"
+            r="0.78"
+            fx="0.3"
+            fy="0.26"
+          >
+            <stop offset="0" class="st-glass-0" />
+            <stop offset="0.18" class="st-glass-1" />
+            <stop offset="0.55" class="st-glass-2" />
+            <stop offset="1" class="st-glass-3" />
+          </radialGradient>
+          <radialGradient
+            :id="`${uid}-lit-${sysKey}`"
+            class="grad"
+            :style="{ '--mg-base': `var(--sys-${sysKey})` }"
+            cx="0.36"
+            cy="0.32"
+            r="0.78"
+            fx="0.3"
+            fy="0.26"
+          >
+            <stop offset="0" class="st-lit-0" />
+            <stop offset="0.32" class="st-lit-1" />
+            <stop offset="0.7" class="st-lit-2" />
+            <stop offset="1" class="st-lit-3" />
+          </radialGradient>
+          <radialGradient
+            :id="`${uid}-glow-${sysKey}`"
+            class="grad"
+            :style="{ '--mg-base': `var(--sys-${sysKey})` }"
+            cx="0.5"
+            cy="0.5"
+            r="0.5"
+          >
+            <stop offset="0" class="st-glow-0" />
+            <stop offset="0.45" class="st-glow-1" />
+            <stop offset="1" class="st-glow-2" />
+          </radialGradient>
+          <radialGradient
+            :id="`${uid}-mist-${sysKey}`"
+            :style="{ '--mg-base': `var(--sys-${sysKey})` }"
+            cx="0.5"
+            cy="0.5"
+            r="0.5"
+          >
+            <stop offset="0" class="st-mist-0" />
+            <stop offset="0.4" class="st-mist-1" />
+            <stop offset="0.75" class="st-mist-2" />
+            <stop offset="1" class="st-mist-3" />
+          </radialGradient>
+          <radialGradient
+            :id="`${uid}-mistlit-${sysKey}`"
+            :style="{ '--mg-base': `var(--sys-${sysKey})` }"
+            cx="0.5"
+            cy="0.5"
+            r="0.5"
+          >
+            <stop offset="0" class="st-mistlit-0" />
+            <stop offset="0.4" class="st-mistlit-1" />
+            <stop offset="0.75" class="st-mistlit-2" />
+            <stop offset="1" class="st-mistlit-3" />
+          </radialGradient>
+        </template>
         <radialGradient :id="`${uid}-mist`" cx="0.5" cy="0.5" r="0.5">
           <stop offset="0" class="st-mist-0" stop-color="var(--ai-accent)" />
           <stop offset="0.4" class="st-mist-1" stop-color="var(--ai-accent)" />
@@ -1252,6 +1417,11 @@ onBeforeUnmount(() => {
           <stop offset="0.55" class="st-core-1" stop-color="var(--ai-ink)" />
           <stop offset="1" class="st-core-2" stop-color="var(--ai-accent)" />
         </radialGradient>
+        <radialGradient :id="`${uid}-core-deep`" cx="0.42" cy="0.38" r="0.72">
+          <stop offset="0" class="st-deep-0" />
+          <stop offset="0.55" class="st-deep-1" />
+          <stop offset="1" class="st-deep-2" />
+        </radialGradient>
         <filter :id="`${uid}-blur`" x="-50%" y="-50%" width="200%" height="200%">
           <feGaussianBlur stdDeviation="4" />
         </filter>
@@ -1268,9 +1438,9 @@ onBeforeUnmount(() => {
             :key="index"
             class="star"
             :class="{ 'star--far': star.far }"
-            :cx="star.x"
-            :cy="star.y"
-            :r="star.r"
+            :cx="star.left"
+            :cy="star.top"
+            :r="star.radius"
             :style="{ '--twinkle-delay': `${star.delay}ms`, '--twinkle': `${star.duration}ms` }"
           />
         </g>
@@ -1291,7 +1461,11 @@ onBeforeUnmount(() => {
       </g>
       <!-- L1 mist: three soft ellipses per system hub, no filter -->
       <g class="mist" aria-hidden="true">
-        <g v-for="blob in mistBlobs" :key="blob.system" :style="{ '--dp-hub': blob.hub.dp }">
+        <g
+          v-for="blob in mistBlobs"
+          :key="blob.system"
+          :style="{ '--dp-hub': blob.hub.dp, ...systemPaints(blob.system) }"
+        >
           <ellipse class="mist-far" :cx="blob.hub.left" :cy="blob.hub.top" :rx="blob.rx * 1.5" :ry="blob.ry * 1.5" />
           <ellipse class="mist-core" :cx="blob.hub.left" :cy="blob.hub.top" :rx="blob.rx" :ry="blob.ry" />
           <ellipse
@@ -1308,10 +1482,12 @@ onBeforeUnmount(() => {
       <path v-if="scene.floorD" class="floor" :d="scene.floorD" aria-hidden="true" />
       <!-- L3 edges: grouping bundles, model spokes, stored relations -->
       <g class="edges" aria-hidden="true">
-        <path v-if="scene.bundleNear" class="edge edge--group is-near" :d="scene.bundleNear" />
-        <path v-if="scene.bundleMid" class="edge edge--group" :d="scene.bundleMid" />
-        <path v-if="scene.bundleFar" class="edge edge--group is-far" :d="scene.bundleFar" />
-        <path v-if="scene.spokesD" class="edge edge--spoke" :d="scene.spokesD" />
+        <g v-for="bundle in scene.bundles" :key="bundle.key" :style="{ '--sys': `var(--sys-${bundle.key})` }">
+          <path v-if="bundle.near" class="edge edge--group is-near" :d="bundle.near" />
+          <path v-if="bundle.mid" class="edge edge--group" :d="bundle.mid" />
+          <path v-if="bundle.far" class="edge edge--group is-far" :d="bundle.far" />
+          <path v-if="bundle.spokes" class="edge edge--spoke" :d="bundle.spokes" />
+        </g>
       </g>
       <g class="edges">
         <path
@@ -1320,6 +1496,7 @@ onBeforeUnmount(() => {
           class="edge edge--stored"
           :class="{ 'is-near': edge.band === 'near', 'is-far': edge.band === 'far' }"
           :d="edge.path"
+          :style="{ '--sys': `var(--sys-${systemKey(edge.system)})` }"
         >
           <title>{{ edge.kind }}</title>
         </path>
@@ -1447,6 +1624,25 @@ onBeforeUnmount(() => {
           <title>{{ entry.point.label }} · {{ entry.point.kind }}</title>
         </g>
       </g>
+      <!-- L6b the thinking orb sits on the model node and follows the dream -->
+      <g
+        v-if="orbCore"
+        class="orb-anchor"
+        :class="{ 'is-dreaming': dreamVisible }"
+        :transform="`translate(${orbCore.left} ${orbCore.top}) scale(${(0.65 * Math.max(orbCore.radiusEff * 2.2, 92)) / ORB_BOX})`"
+        role="button"
+        tabindex="0"
+        :aria-label="orbTitle"
+        @click.stop="orbClick"
+        @keydown.enter.prevent="orbClick"
+        @keydown.space.prevent="orbClick"
+      >
+        <title>{{ orbTitle }}</title>
+        <circle class="orb-hit" :r="ORB_BOX / 2" fill="transparent" />
+        <foreignObject :x="-ORB_BOX / 2" :y="-ORB_BOX / 2" :width="ORB_BOX" :height="ORB_BOX" class="orb-frame">
+          <ThinkingOrb :state="orbState" :size="ORB_BOX" :dark="darkTheme" />
+        </foreignObject>
+      </g>
       <!-- L7 transient nodes (born / ghost) in a stable order -->
       <g class="nodes nodes--transient">
         <g
@@ -1567,6 +1763,23 @@ onBeforeUnmount(() => {
     inset 0 -1px 0 color-mix(in srgb, var(--mg-shade) 18%, transparent);
   transition: box-shadow 900ms var(--mg-ease);
 }
+/* System hues: the dark set by default, the deeper set on the light theme (see SYSTEM_PALETTE). */
+.memory-graph {
+  --sys-s0: var(--sys-s0-dark);
+  --sys-s1: var(--sys-s1-dark);
+  --sys-s2: var(--sys-s2-dark);
+  --sys-s3: var(--sys-s3-dark);
+  --sys-s4: var(--sys-s4-dark);
+  --sys: var(--ai-accent);
+}
+:global(html[data-theme='light'] .memory-graph),
+:global(.ai-light .memory-graph) {
+  --sys-s0: var(--sys-s0-light);
+  --sys-s1: var(--sys-s1-light);
+  --sys-s2: var(--sys-s2-light);
+  --sys-s3: var(--sys-s3-light);
+  --sys-s4: var(--sys-s4-light);
+}
 /* Theme overrides need the html ancestor, so the whole selector is global (Vue's :global replaces the selector). */
 :global(html[data-theme='light'] .memory-graph),
 :global(.ai-light .memory-graph) {
@@ -1670,6 +1883,27 @@ onBeforeUnmount(() => {
     stroke-dashoffset: -100;
   }
 }
+.orb-anchor {
+  cursor: pointer;
+  outline: none;
+  transition: transform 400ms var(--mg-ease);
+}
+.orb-frame {
+  overflow: visible;
+  pointer-events: none;
+}
+.orb-anchor:hover :deep(.thinking-orb),
+.orb-anchor:focus-visible :deep(.thinking-orb) {
+  transform: scale(1.06);
+}
+.orb-anchor:focus-visible .orb-hit {
+  stroke: color-mix(in srgb, var(--ai-accent) 60%, transparent);
+  stroke-width: 1.5px;
+  vector-effect: non-scaling-stroke;
+}
+.orb-anchor.is-dreaming :deep(.thinking-orb__halo) {
+  animation: mg-breathe 3s ease-in-out infinite alternate;
+}
 /* Entrance: nodes bloom from the back to the front once per scene. */
 .nodes--enter g[data-node] {
   animation: mg-enter 720ms var(--mg-ease) var(--enter-delay, 0ms) both;
@@ -1699,10 +1933,10 @@ onBeforeUnmount(() => {
   transition: opacity 320ms var(--mg-ease);
 }
 .memory-graph.has-hover .nodes g.is-hover-near .body {
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--ai-accent) 55%, transparent));
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--sys) 55%, transparent));
 }
 .memory-graph.has-hover .nodes g.is-hover .body {
-  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--ai-accent) 80%, transparent));
+  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--sys) 80%, transparent));
 }
 .memory-graph.has-hover .edges .edge--stored,
 .memory-graph.has-hover .edges .edge--group {
@@ -1836,35 +2070,35 @@ svg:focus-visible {
   stop-opacity: 0;
 }
 .st-mist-0 {
-  stop-color: var(--ai-accent);
+  stop-color: var(--mg-base, var(--ai-accent));
   stop-opacity: var(--mg-mist);
 }
 .st-mist-1 {
-  stop-color: var(--ai-accent);
+  stop-color: var(--mg-base, var(--ai-accent));
   stop-opacity: calc(var(--mg-mist) * 0.55);
 }
 .st-mist-2 {
-  stop-color: var(--ai-accent);
+  stop-color: var(--mg-base, var(--ai-accent));
   stop-opacity: calc(var(--mg-mist) * 0.18);
 }
 .st-mist-3 {
-  stop-color: var(--ai-accent);
+  stop-color: var(--mg-base, var(--ai-accent));
   stop-opacity: 0;
 }
 .st-mistlit-0 {
-  stop-color: var(--ai-accent);
+  stop-color: var(--mg-base, var(--ai-accent));
   stop-opacity: calc(var(--mg-mist) * 1.6);
 }
 .st-mistlit-1 {
-  stop-color: var(--ai-accent);
+  stop-color: var(--mg-base, var(--ai-accent));
   stop-opacity: calc(var(--mg-mist) * 0.88);
 }
 .st-mistlit-2 {
-  stop-color: var(--ai-accent);
+  stop-color: var(--mg-base, var(--ai-accent));
   stop-opacity: calc(var(--mg-mist) * 0.29);
 }
 .st-mistlit-3 {
-  stop-color: var(--ai-accent);
+  stop-color: var(--mg-base, var(--ai-accent));
   stop-opacity: 0;
 }
 .st-floor-0 {
@@ -1942,10 +2176,10 @@ svg:focus-visible {
   pointer-events: none;
 }
 .edge--group {
-  stroke: var(--ai-faint);
+  stroke: color-mix(in srgb, var(--sys) 70%, var(--ai-faint));
   stroke-dasharray: 2 5;
   stroke-width: 0.7;
-  opacity: 0.2;
+  opacity: 0.28;
 }
 .edge--group.is-near {
   stroke-width: 0.8;
@@ -1956,12 +2190,12 @@ svg:focus-visible {
   opacity: 0.11;
 }
 .edge--spoke {
-  stroke: var(--ai-accent);
+  stroke: var(--sys);
   stroke-width: 0.9;
-  opacity: 0.28;
+  opacity: 0.32;
 }
 .edge--stored {
-  stroke: color-mix(in srgb, var(--ai-accent) 70%, var(--ai-line-strong));
+  stroke: color-mix(in srgb, var(--sys) 70%, var(--ai-line-strong));
   stroke-width: 0.9;
   opacity: calc(0.36 * var(--mg-dim, 1));
   pointer-events: stroke;
@@ -2395,6 +2629,28 @@ g[data-node]:hover .body {
   stroke: var(--mg-u-rim);
   stroke-width: 1.5px;
 }
+/* Inside the white particle orb the sphere reads as a dark core with an accent rim. */
+.st-deep-0 {
+  stop-color: color-mix(in srgb, var(--mg-shade) 82%, var(--ai-accent));
+  stop-opacity: 1;
+}
+.st-deep-1 {
+  stop-color: color-mix(in srgb, var(--mg-shade) 62%, var(--ai-accent));
+  stop-opacity: 1;
+}
+.st-deep-2 {
+  stop-color: color-mix(in srgb, var(--ai-accent) 70%, var(--mg-shade));
+  stop-opacity: 1;
+}
+.memory-graph:not(.is-ambient) .core-body {
+  fill: var(--mg-u-core-deep);
+}
+.memory-graph:not(.is-ambient) .core-spark {
+  fill-opacity: 0.3;
+}
+.memory-graph:not(.is-ambient) .core-halo {
+  fill-opacity: 0.22;
+}
 .core-spark {
   fill: var(--mg-u-core);
   fill-opacity: 0.85;
@@ -2473,7 +2729,10 @@ g[data-node]:hover .body {
   opacity: 0.35;
 }
 .pill-dot {
-  fill: var(--mg-u-glass);
+  fill: var(--sys);
+}
+.pill--hub rect {
+  stroke: color-mix(in srgb, var(--sys) 45%, var(--ai-line-strong));
 }
 .pill--model rect {
   stroke: color-mix(in srgb, var(--ai-accent) 45%, var(--ai-line-strong));

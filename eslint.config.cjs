@@ -13,7 +13,7 @@ module.exports = defineConfigWithVueTs(
 
   {
     name: 'app/files-to-ignore',
-    ignores: ['**/dist/**', '**/dist-ssr/**', '**/coverage/**', '**/test-results/**', '*.config.*'],
+    ignores: ['**/dist/**', 'src/vendor/**', '**/dist-ssr/**', '**/coverage/**', '**/test-results/**', '*.config.*'],
   },
 
   {

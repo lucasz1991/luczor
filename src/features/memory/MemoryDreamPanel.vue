@@ -251,6 +251,17 @@ watch(
     }
   }
 )
+/** The orb in the 3D map asks for a dream or its end; consent and eligibility stay here. */
+function onDreamRequest(event: Event) {
+  const action = (event as CustomEvent<{ action?: string }>).detail?.action
+  if (action === 'stop') {
+    if (running.value) void stopDreaming()
+    return
+  }
+  if (!busy.value && !running.value) void startDream()
+}
+onMounted(() => globalThis.window?.addEventListener('luczor:dream-request', onDreamRequest))
+onBeforeUnmount(() => globalThis.window?.removeEventListener('luczor:dream-request', onDreamRequest))
 async function startDream() {
   message.value = ''
   busy.value = true
