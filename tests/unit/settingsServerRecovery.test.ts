@@ -5,6 +5,7 @@ import ts from 'typescript'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import settingsSource from '@/components/Settings.vue?raw'
 import type { InferenceConnectionResult } from '@/services/inference/coordinator'
+import { DEFAULT_EXTERNAL_HISTORY_TOKENS, MAX_EXTERNAL_HISTORY_TOKENS } from '@/services/chatPresentation'
 
 const appliedModelUsage = VueRuntime.ref({
   localModelId: null as string | null,
@@ -30,7 +31,12 @@ type SettingsSetup = {
   ensureStoreLoaded(): Promise<void>
   testServer(): Promise<void>
   saveAll(): Promise<void>
-  settings: { chat_tool_rounds: number; agent_tool_rounds: number; voice_tts_voice_id: string }
+  settings: {
+    chat_tool_rounds: number
+    agent_tool_rounds: number
+    voice_tts_voice_id: string
+    client_history_token_budget: number
+  }
   ui: {
     saved: boolean
     error: string | null
@@ -72,6 +78,7 @@ function setup(): SettingsSetup {
     ],
     ['@/services/executionPolicy', { DEFAULT_EXECUTION_POLICY: {} }],
     ['@/services/inference/hybridRouter', {}],
+    ['@/services/chatPresentation', { DEFAULT_EXTERNAL_HISTORY_TOKENS, MAX_EXTERNAL_HISTORY_TOKENS }],
     [
       '@/services/appearance',
       {
@@ -129,6 +136,25 @@ beforeEach(() => {
 })
 
 describe('Settings connection retry', () => {
+  it.each([
+    [undefined, 12000],
+    [2400, 2400],
+    [20000, 20000],
+    [25000, 20000],
+  ])('loads and saves history budget %s as %s while preserving explicit choices', async (stored, expected) => {
+    store.get.mockImplementation(async key => (key === 'client_history_token_budget' ? stored : undefined))
+    try {
+      const settings = setup()
+      await settings.ensureStoreLoaded()
+      expect(settings.settings.client_history_token_budget).toBe(expected)
+      store.set.mockClear()
+      await settings.saveAll()
+      expect(store.set).toHaveBeenCalledWith('client_history_token_budget', expected)
+    } finally {
+      store.get.mockReset()
+    }
+  })
+
   it.each([false, true])(
     'retains the selected V2 voice only for the same server identity (changed=%s)',
     async changed => {

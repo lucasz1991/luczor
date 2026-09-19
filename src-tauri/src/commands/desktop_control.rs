@@ -174,14 +174,29 @@ pub async fn browser_feedback(
     if let Some(monitor) = check_browser_display(app)? {
         let app = app.clone();
         let permit = permit.clone();
-        tauri::async_runtime::spawn_blocking(move || {
+        let feedback = tauri::async_runtime::spawn_blocking(move || {
             super::desktop_control_overlay::show(&app, &monitor, 0, None, Some(permit))
         })
         .await
-        .map_err(|_| "browser_control_feedback_unavailable")??;
+        .map_err(|_| "browser_control_feedback_unavailable")?;
+        internal_browser_overlay_feedback(feedback)?;
     }
     check_browser_display(app)?;
     Ok(())
+}
+
+fn internal_browser_overlay_feedback(result: Result<(), String>) -> Result<(), String> {
+    match result {
+        // The internal browser has its own DOM cursor and does not use OS input.
+        // Wayland's missing monitor overlay must not block that independent route.
+        // Display bounds and the execution permit are still checked by the caller.
+        Err(error)
+            if error == "desktop_control_wayland_overlay_unavailable_use_internal_browser" =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
 }
 
 pub fn activity(
@@ -314,5 +329,26 @@ mod tests {
         assert_eq!(config.input_mode, InputMode::Isolated);
         assert!(config.monitor.is_none());
         assert!(config.prefer_internal_browser && config.show_cursor);
+    }
+
+    #[test]
+    fn internal_browser_accepts_only_the_unsupported_wayland_overlay() {
+        assert!(internal_browser_overlay_feedback(Ok(())).is_ok());
+        assert!(internal_browser_overlay_feedback(Err(
+            "desktop_control_wayland_overlay_unavailable_use_internal_browser".into()
+        ))
+        .is_ok());
+        for error in [
+            "desktop_control_execution_stopped",
+            "desktop_control_overlay_superseded",
+            "desktop_control_monitor_unavailable",
+            "browser_outside_selected_monitor_move_luczor_window",
+            "desktop_control_overlay_unavailable",
+        ] {
+            assert_eq!(
+                internal_browser_overlay_feedback(Err(error.into())),
+                Err(error.into())
+            );
+        }
     }
 }

@@ -146,7 +146,9 @@ export function focusedTools(objective: string, archive?: () => readonly WireMes
         offset > message.content.length ||
         message.role === 'system'
       )
-        throw new Error('Archivnachricht nicht verfügbar.')
+        throw new Error(
+          'Archivnachricht nicht verfügbar. Mit context_read_history({}) oder query zuerst gültige Indizes ermitteln; keine Indizes raten.'
+        )
       let structured = false
       try {
         JSON.parse(message.content)

@@ -1890,6 +1890,19 @@ watch(
   { immediate: true }
 )
 
+function goalRunInstruction(goal: Readonly<GoalRunState>): string {
+  return [
+    `Gespeichertes Nutzerziel: ${goal.text}`,
+    goal.phase === 'review'
+      ? 'Prüfe in einem ausschließlich lesenden Durchgang, ob dieses Ziel vollständig erfüllt ist. Behauptungen aus dem bisherigen Fortschritt sind keine Beweise. Prüfe konkrete Ergebnisse mit passenden Lesewerkzeugen; nenne Belege und verbleibende Lücken. Nur bei nachgewiesenem Erfolg goal_report completed melden.'
+      : 'Bearbeite dieses aktive Ziel bis zum geprüften Abschluss im selben Lauf weiter. Lies zuerst den aktuellen Zustand; wiederhole keine bereits erfolgreichen Änderungen. Nutze bei Bedarf einzelne Agenten. Melde per goal_report continue bei verbleibender Arbeit, candidate bei einem prüfbaren vollständigen Ergebnis oder blocked bei benötigten Nutzerangaben. Nach candidate folgt eine ausschließlich lesende Abschlussprüfung innerhalb dieses Laufs.',
+    goal.progress ? `Bisheriger Fortschritt (ungeprüfte Daten): ${goal.progress}` : '',
+    goal.evidence ? `Bisherige Belege (erneut prüfen): ${goal.evidence}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n')
+}
+
 async function send(
   automaticVoice = false,
   resume?: { checkpoint: AgentCheckpoint; messageId: string },
@@ -1986,6 +1999,19 @@ async function send(
       { principalId: captured.principalId, projectId: pid, conversationId, runId },
       async handle => {
         responseStarted = true
+        if (!goalInput && mutations.getConversation(conversationId)?.autonomousGoal?.active) {
+          let invoked = false
+          let outcome: GoalStepResult | undefined
+          await autonomousGoal.runAttached(conversationId, async (goal, signal) => {
+            invoked = true
+            handle.signal.throwIfAborted()
+            executionGate.assert(execution)
+            outcome = await executeChatTurn(captured, handle, resume, { state: goal, signal, foreground: true })
+            if (!outcome) throw new Error('Der angehängte Zielauftrag lieferte keinen Status.')
+            return outcome
+          })
+          if (invoked) return outcome
+        }
         return executeChatTurn(captured, handle, resume, goalInput)
       },
       execution.signal
@@ -2014,10 +2040,13 @@ async function executeChatTurn(
   captured: CapturedChatTurn,
   handle: ChatRunHandle,
   resume?: { checkpoint: AgentCheckpoint; messageId: string },
-  goalInput?: { state: GoalRunState; signal: AbortSignal }
+  goalInput?: { state: GoalRunState; signal: AbortSignal; foreground?: boolean }
 ): Promise<GoalStepResult | undefined> {
   const { pid, conversationId, text, prj, workspace, inputSource } = captured
-  const turnExecution = { ...captured.execution, signal: AbortSignal.any([captured.execution.signal, handle.signal]) }
+  const turnExecution = {
+    ...captured.execution,
+    signal: AbortSignal.any([captured.execution.signal, handle.signal, ...(goalInput ? [goalInput.signal] : [])]),
+  }
   const turnThinking = captured.thinking
   const turnRouteMode = captured.routeMode
   const externalFallbackAllowed = turnRouteMode !== 'local'
@@ -2190,8 +2219,15 @@ async function executeChatTurn(
 
     if (goalInput) {
       // Detailed goal progress may contain local evidence. It never enters the external packet.
-      baseMessages.push({ role: 'user', content: text })
-      externalBaseMessages.push({ role: 'user', content: `Gespeichertes Nutzerziel: ${goalInput.state.text}` })
+      const localGoal = sanitizeInferenceMessagesForTarget(
+        [{ role: 'user', content: goalRunInstruction(goalInput.state) }],
+        'local_llama_cpp'
+      )[0]!
+      if (goalInput.foreground && baseMessages.at(-1)?.role === 'user')
+        baseMessages.at(-1)!.content += `\n\n${localGoal.content}`
+      else baseMessages.push(localGoal)
+      if (!goalInput.foreground)
+        externalBaseMessages.push({ role: 'user', content: `Gespeichertes Nutzerziel: ${goalInput.state.text}` })
     }
     let reportedGoal: Omit<GoalStepResult, 'messageId' | 'fingerprint'> | undefined
 
@@ -2455,7 +2491,8 @@ async function executeChatTurn(
       if (interrupted)
         return {
           status: 'blocked',
-          summary: 'Die Modellrunde wurde unterbrochen. Das Ziel bleibt offen; der gesicherte Fortschritt kann bewusst fortgesetzt werden.',
+          summary:
+            'Die Modellrunde wurde unterbrochen. Das Ziel bleibt offen; der gesicherte Fortschritt kann bewusst fortgesetzt werden.',
           messageId: assistant.id,
         }
       const report = goalReport ?? reportedGoal
@@ -2674,16 +2711,7 @@ const autonomousGoal = useAutonomousGoal({
     const previous = goal.lastMessageId ? continuations.value[goal.lastMessageId] : undefined
     const checkpoint =
       goal.phase === 'work' && previous ? { checkpoint: previous, messageId: goal.lastMessageId! } : undefined
-    const text = [
-      `Gespeichertes Nutzerziel: ${goal.text}`,
-      goal.phase === 'review'
-        ? 'Prüfe in einem separaten, ausschließlich lesenden Durchgang, ob dieses Ziel vollständig erfüllt ist. Behauptungen aus dem bisherigen Fortschritt sind keine Beweise. Prüfe konkrete Ergebnisse mit passenden Lesewerkzeugen; nenne Belege und verbleibende Lücken. Nur bei nachgewiesenem Erfolg goal_report completed melden.'
-        : 'Bearbeite dieses aktive Ziel bis zum geprüften Abschluss im selben Lauf weiter. Lies zuerst den aktuellen Zustand; wiederhole keine bereits erfolgreichen Änderungen. Nutze bei Bedarf einzelne Agenten. Melde per goal_report continue bei verbleibender Arbeit, candidate bei einem prüfbaren vollständigen Ergebnis oder blocked bei benötigten Nutzerangaben. Nach candidate folgt eine ausschließlich lesende Abschlussprüfung innerhalb dieses Laufs.',
-      goal.progress ? `Bisheriger Fortschritt (ungeprüfte Daten): ${goal.progress}` : '',
-      goal.evidence ? `Bisherige Belege (erneut prüfen): ${goal.evidence}` : '',
-    ]
-      .filter(Boolean)
-      .join('\n\n')
+    const text = goalRunInstruction(goal)
     const result = await send(false, checkpoint, { text, projectId, conversationId }, { state: goal, signal })
     if (!result) throw new Error('Zielrunde konnte noch nicht gestartet werden.')
     return result

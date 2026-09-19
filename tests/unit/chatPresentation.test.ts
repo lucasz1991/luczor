@@ -91,6 +91,16 @@ describe('chat presentation helpers', () => {
       { role: 'assistant', content: 'Step one is verified.' },
     ])
     expect(selected.ephemeralDataUsed).toBe(true)
+    const nextPrompt = conversationHistoryForInference(
+      [...history, { role: 'user', content: 'Now check the remaining requirement.', visibility: 'visible', meta: {} }],
+      'local',
+      { initialUserContext: 'Implement the report.' }
+    )
+    expect(localConversationHistory(nextPrompt.messages)).toEqual([
+      ...selected.messages,
+      { role: 'user', content: 'Now check the remaining requirement.' },
+    ])
+    expect(nextPrompt.ephemeralDataUsed).toBe(true)
     expect(
       conversationHistoryForInference(history, 'external', { initialUserContext: 'Implement the report.' }).messages
     ).toEqual([])

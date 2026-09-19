@@ -20,6 +20,33 @@ const pool = [
   'browser_dom_read',
 ].map(name => ({ type: 'function' as const, function: { name, description: name, parameters: { type: 'object' } } }))
 describe('focused local tool context', () => {
+  it('finds exact archive indices without exposing system instructions or guessing offsets', async () => {
+    const archive: WireMessage[] = [
+      { role: 'system', content: 'Needle private policy' },
+      ...Array.from({ length: 10 }, (_, index) => ({
+        role: 'user' as const,
+        content: `Needle /exact/file-${index}.txt`,
+      })),
+    ]
+    const focus = focusedTools('history', () => archive)
+    const first = await focus.reader.execute({ query: 'needle' }, { projectId: 'p' })
+    expect(first).toMatchObject({
+      matches: Array.from({ length: 8 }, (_, index) => ({ index: index + 1, role: 'user' })),
+      nextOffset: 9,
+    })
+    expect(JSON.stringify(first)).not.toContain('private policy')
+    expect(JSON.stringify(first)).not.toContain('/exact/')
+    expect(await focus.reader.execute({ query: 'needle', offset: 9 }, { projectId: 'p' })).toMatchObject({
+      matches: [{ index: 9 }, { index: 10 }],
+      nextOffset: null,
+    })
+    expect(await focus.reader.execute({ index: 10 }, { projectId: 'p' })).toMatchObject({
+      text: 'Needle /exact/file-9.txt',
+    })
+    await expect(focus.reader.execute({ index: 0 }, { projectId: 'p' })).rejects.toThrow('gültige Indizes')
+    await expect(focus.reader.execute({ index: 1, query: 'needle' }, { projectId: 'p' })).rejects.toThrow('wählen')
+    await expect(focus.reader.execute({ offset: -1 }, { projectId: 'p' })).rejects.toThrow('Archivsuche')
+  })
   it('returns whole archived JSON and paginates prose only at complete line boundaries', async () => {
     const path = '/projekte/' + 'nested/'.repeat(700) + 'e\u0301📁.ts'
     const json = JSON.stringify({ path, output: 'x'.repeat(9000) })

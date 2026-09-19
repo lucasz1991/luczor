@@ -312,7 +312,7 @@ describe('goal reports in the real agent loop', () => {
     expect(report).not.toHaveBeenCalled()
   })
 
-  it('keeps goal sections, full read evidence and independent review in one bounded run', async () => {
+  it('renews bounded goal sections beyond maxRounds while retaining one run, evidence and verified review', async () => {
     const report = vi.fn()
     const completed = vi.fn()
     const requests: InferenceRequest[] = []
@@ -338,7 +338,7 @@ describe('goal reports in the real agent loop', () => {
     })
     const result = await runAgent(
       options({
-        maxRounds: 8,
+        maxRounds: 3,
         goalTracking: { phase: 'work', continueInline: true, report },
         onRoundComplete: completed,
       })
@@ -354,6 +354,7 @@ describe('goal reports in the real agent loop', () => {
     expect(requests.at(-1)!.messages.filter(message => message.role === 'user')).toEqual(options().baseMessages)
     expect(requests.at(-1)!.messages).toContainEqual({ role: 'assistant', content: 'First public section.' })
     expect(completed.mock.calls.map(([event]) => event.kind)).toEqual(['commentary', 'commentary', 'answer'])
+    expect(completed.mock.calls.map(([event]) => event.round)).toEqual([3, 5, 8])
     expect(offered(requests[5]!)).toContain('goal_read_result')
     expect(result.tokenUsage.rounds).toBe(8)
   })
@@ -398,15 +399,28 @@ describe('goal reports in the real agent loop', () => {
     expect(result).toMatchObject({ goalReviewVerified: false, goalReport: { status: 'blocked' }, toolFailures: 1 })
   })
 
-  it('retains context at the configured round bound without scheduling a new goal request', async () => {
-    mocks.stream.mockResolvedValueOnce(toolResponse({ status: 'continue', summary: 'More work remains' }))
+  it('does not renew a section without a goal report and keeps context at its configured round bound', async () => {
+    const result = await runAgent(
+      options({ maxRounds: 1, goalTracking: { phase: 'work', continueInline: true, report: vi.fn() } })
+    )
+    expect(mocks.stream).toHaveBeenCalledOnce()
+    expect(result.goalReport).toMatchObject({ status: 'blocked', summary: expect.stringContaining('Rundenlimit') })
+    expect(result.continuation?.messages).toContainEqual({ role: 'assistant', content: 'Ergebnis geprüft.' })
+    expect(result.goalReviewVerified).toBe(false)
+  })
+
+  it('keeps an unfinished tool section bounded even when its reads succeed', async () => {
+    const execute = registerReadTool()
+    mocks.stream
+      .mockResolvedValueOnce(toolResponse({}, 'fs_read', 'read-one'))
+      .mockResolvedValueOnce(toolResponse({}, 'fs_read', 'read-two'))
     const result = await runAgent(
       options({ maxRounds: 2, goalTracking: { phase: 'work', continueInline: true, report: vi.fn() } })
     )
     expect(mocks.stream).toHaveBeenCalledTimes(2)
+    expect(execute).toHaveBeenCalledTimes(2)
     expect(result.goalReport).toMatchObject({ status: 'blocked', summary: expect.stringContaining('Rundenlimit') })
-    expect(result.continuation?.messages).toContainEqual({ role: 'assistant', content: 'Ergebnis geprüft.' })
-    expect(result.goalReviewVerified).toBe(false)
+    expect(result.continuation?.messages.filter(message => message.role === 'tool')).toHaveLength(2)
   })
 
   it('stops after three unchanged inline goal sections', async () => {
@@ -417,7 +431,7 @@ describe('goal reports in the real agent loop', () => {
         : finalResponse()
     )
     const result = await runAgent(
-      options({ maxRounds: 12, goalTracking: { phase: 'work', continueInline: true, report: vi.fn() } })
+      options({ maxRounds: 2, goalTracking: { phase: 'work', continueInline: true, report: vi.fn() } })
     )
     expect(mocks.stream).toHaveBeenCalledTimes(6)
     expect(result.goalReport).toMatchObject({

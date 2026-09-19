@@ -916,7 +916,9 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   if (opts.workspaceScope && inferenceGateway.target !== 'local_llama_cpp') {
     throw new Error('Der Workspace-Modus verwendet ausschließlich das lokale Modell.')
   }
-  const roundLimit = resolvedRoute.externalOneShot ? 1 : maxRounds
+  // Each verified goal progress boundary can admit another bounded section in
+  // this same run. The cumulative round counter and all execution state stay live.
+  let roundLimit = resolvedRoute.externalOneShot ? 1 : maxRounds
 
   const localAssistantTools = allTools
     .map(tool => tool.function.name)
@@ -1663,6 +1665,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           } else {
             const nextPhase = opts.goalTracking!.phase === 'work' && report.status === 'candidate' ? 'review' : 'work'
             setGoalPhase(nextPhase, nextPhase === 'review' ? content : undefined)
+            roundLimit = round + 1 + maxRounds
             continueGoal = true
           }
         }
@@ -1680,7 +1683,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               content: `${GOAL_REPORT_MARKER} Der Zielstatus fehlt. Nutze goal_report mit dem tatsächlich belegten Stand; das aktive Ziel bleibt offen.`,
             })
           }
-          // Preserve full wire history, completed mutation receipts and the existing run budget.
+          // Missing reports never renew the section budget. Genuine reported
+          // progress preserves full history, mutation receipts and total usage.
           await emitCheckpoint(checkpoint())
           continue
         }
@@ -2569,7 +2573,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
 
   return {
     finalText: inlineGoal
-      ? 'Das konfigurierte Rundenlimit ist erreicht. Das Ziel bleibt offen; vollständiger Fortschritt und Kontext sind zum bewussten Fortsetzen gesichert.'
+      ? 'Das konfigurierte Rundenlimit dieses Zielabschnitts ist erreicht. Das Ziel bleibt offen; vollständiger Fortschritt und Kontext sind zum bewussten Fortsetzen gesichert.'
       : 'Der Auftrag ist noch nicht abgeschlossen. Der bisherige Fortschritt bleibt erhalten. Du kannst weiterarbeiten oder mit einem Agententeam fortsetzen.',
     requestId: lastRequestId,
     toolFailures,
@@ -2584,7 +2588,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           goalReport: {
             status: 'blocked' as const,
             summary:
-              'Das konfigurierte Rundenlimit ist erreicht. Das Ziel bleibt offen; vollständiger Fortschritt und Kontext sind zum bewussten Fortsetzen gesichert.',
+              'Das konfigurierte Rundenlimit dieses Zielabschnitts ist erreicht. Das Ziel bleibt offen; vollständiger Fortschritt und Kontext sind zum bewussten Fortsetzen gesichert.',
           },
           goalReviewVerified: false,
         }

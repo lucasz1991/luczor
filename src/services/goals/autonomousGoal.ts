@@ -26,6 +26,8 @@ export type GoalStepResult = {
   reviewVerified?: boolean
 }
 
+export type AttachedGoalRun = (goal: Readonly<GoalRunState>, signal: AbortSignal) => Promise<GoalStepResult>
+
 export type AutonomousGoalDependencies = {
   read(projectId: string): GoalRunState | undefined
   /** Atomically compare the current revision before applying/persisting the next state. */
@@ -73,6 +75,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
   type Driver = {
     pendingTimer?: () => void
     driving: boolean
+    settled?: Promise<void>
     running?: { controller: AbortController; settled: Promise<void> }
   }
   const drivers = new Map<string, Driver>()
@@ -123,11 +126,15 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
     })
   }
 
-  async function drive(id: string): Promise<void> {
+  async function drive(id: string, attachedRun?: AttachedGoalRun): Promise<void> {
     const entry = driver(id)
     if (disposed || entry.driving || suspended.has(id)) return
     let delay = 250
     entry.driving = true
+    let markSettled!: () => void
+    entry.settled = new Promise<void>(resolve => {
+      markSettled = resolve
+    })
     try {
       let goal = dependencies.read(id)
       if (!goal?.active || !goal.text.trim()) return
@@ -144,7 +151,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
         await write(id, goal, { active: false })
         return
       }
-      if (!dependencies.canRun(id) || runningCount() >= maxConcurrent) {
+      if (!attachedRun && (!dependencies.canRun(id) || runningCount() >= maxConcurrent)) {
         if (goal.status !== 'waiting')
           await write(id, goal, {
             status: 'waiting',
@@ -159,20 +166,18 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
         reason: undefined,
       })
       if (!attempt || disposed || suspended.has(id) || dependencies.read(id)?.revision !== attempt.revision) return
-      if (!dependencies.canRun(id) || runningCount() >= maxConcurrent) {
+      if (!attachedRun && (!dependencies.canRun(id) || runningCount() >= maxConcurrent)) {
         await parkInterrupted(id, attempt)
         delay = 1000
         return
       }
       const controller = new AbortController()
-      let markSettled!: () => void
-      const settled = new Promise<void>(resolve => {
-        markSettled = resolve
-      })
-      entry.running = { controller, settled }
+      entry.running = { controller, settled: entry.settled }
       let result: GoalStepResult
       try {
-        result = await dependencies.run(id, Object.freeze({ ...attempt }), controller.signal)
+        result = attachedRun
+          ? await attachedRun(Object.freeze({ ...attempt }), controller.signal)
+          : await dependencies.run(id, Object.freeze({ ...attempt }), controller.signal)
         if (
           !result ||
           !['continue', 'candidate', 'completed', 'blocked'].includes(result.status) ||
@@ -188,18 +193,16 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
         const failures = (attempt.consecutiveErrors ?? 0) + 1
         await write(id, attempt, {
           consecutiveErrors: failures,
-          active: failures < 3,
-          status: failures >= 3 ? 'blocked' : 'waiting',
-          reason:
-            failures >= 3
+          active: !attachedRun && failures < 3,
+          status: attachedRun || failures >= 3 ? 'blocked' : 'waiting',
+          reason: attachedRun
+            ? 'Die laufende Zielbearbeitung wurde unterbrochen. Das Ziel bleibt offen; Fortschritt und Modellzustand prüfen.'
+            : failures >= 3
               ? 'Drei aufeinanderfolgende Versuche sind fehlgeschlagen. Ziel bleibt offen; Verbindung oder Modell prüfen.'
               : 'Der Arbeitsabschnitt konnte nicht abgeschlossen werden. Ein begrenzter neuer Versuch folgt.',
         })
         delay = failures === 1 ? 1000 : 3000
         return
-      } finally {
-        entry.running = undefined
-        markSettled()
       }
       if (controller.signal.aborted || disposed || suspended.has(id)) {
         if (!disposed) await parkInterrupted(id, attempt)
@@ -255,7 +258,10 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
       suspended.add(id)
       dependencies.onPersistenceError?.(id, error)
     } finally {
+      entry.running = undefined
       entry.driving = false
+      markSettled()
+      entry.settled = undefined
       arrange(id, delay)
       // A finished section frees a slot: let other waiting goals try again promptly.
       for (const other of drivers.keys()) if (other !== id && !drivers.get(other)?.running) arrange(other, delay)
@@ -269,6 +275,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
     suspended.add(id)
     cancelTimer(id)
     const active = drivers.get(id)?.running
+    const settled = drivers.get(id)?.settled
     active?.controller.abort(reason)
     const goal = dependencies.read(id)
     try {
@@ -280,26 +287,37 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
         await write(id, goal, { status: 'waiting', phase: 'work', reason })
     } finally {
       // The chat adapter releases its busy state before the user's request is admitted.
-      await active?.settled
+      await settled
     }
   }
 
   return {
+    /** Attach an already admitted foreground chat turn without creating another prompt or run. */
+    async runAttached(id: string, run: AttachedGoalRun): Promise<void> {
+      if (disposed || !dependencies.read(id)?.active) return
+      const entry = driver(id)
+      if (entry.driving)
+        throw new Error('Die vorherige Zielbearbeitung muss vor dem neuen Auftrag vollständig beendet sein.')
+      cancelTimer(id)
+      suspended.delete(id)
+      await drive(id, run)
+    },
     /** Call after user work finishes or explicitly (re)activating a goal. */
     kick(id: string): void {
       if (disposed) return
       suspended.delete(id)
       if (!driver(id).driving) arrange(id, 0)
     },
-    /** Whether a section of this goal is executing right now. */
+    /** Includes admission/result persistence so foreground preemption drains the whole lifecycle. */
     isRunning(id: string): boolean {
-      return !!drivers.get(id)?.running
+      return !!drivers.get(id)?.driving
     },
     interrupt,
     async stop(id: string, reason = 'Ziel pausiert. Der bisherige Fortschritt bleibt erhalten.'): Promise<void> {
       suspended.add(id)
       cancelTimer(id)
       const active = drivers.get(id)?.running
+      const settled = drivers.get(id)?.settled
       active?.controller.abort(reason)
       const goal = dependencies.read(id)
       try {
@@ -310,7 +328,7 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
         )
           await write(id, goal, { active: false, status: 'waiting', phase: 'work', reason })
       } finally {
-        await active?.settled
+        await settled
       }
     },
     dispose(): void {
