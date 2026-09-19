@@ -148,6 +148,7 @@ export type RunAgentOptions = {
   repoId?: string
   branch?: string
   commitSha?: string
+  /** Tool/model rounds per turn, or per reported progress section of an inline goal. */
   maxRounds?: number
   /** Adaptive assistance: the chat model chooses individual subtasks via tools. */
   agentMode?: boolean
@@ -916,7 +917,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   if (opts.workspaceScope && inferenceGateway.target !== 'local_llama_cpp') {
     throw new Error('Der Workspace-Modus verwendet ausschließlich das lokale Modell.')
   }
-  // Each verified goal progress boundary can admit another bounded section in
+  // Each reported goal progress boundary can admit another bounded section in
   // this same run. The cumulative round counter and all execution state stay live.
   let roundLimit = resolvedRoute.externalOneShot ? 1 : maxRounds
 
