@@ -17,6 +17,7 @@ import {
   MAINTENANCE_POLICY,
   type MaintenanceSource,
   type MemoryChangeSet,
+  type MaintenanceJournal,
 } from '@/services/memory/maintenance'
 import { publicAnswerText } from '@/services/publicAnswerStream'
 import { IdleContextOptimizer, type IdleOptimizationJob } from './idleContextOptimizer'
@@ -31,6 +32,16 @@ import { canAccessCloudProject } from '@/services/cloudProjectAccess'
 import { inspectRepositoryGraph, type RepositoryGraphStatus } from '@/services/repositoryGraph'
 import { recordMemoryUsageEvent } from '@/services/memory/usage'
 import { memoryMaintenanceAdapters, writableMaintenanceAdapter } from '@/services/memory/maintenanceAdapters'
+import {
+  MAINTENANCE_CONTEXT_CHARS,
+  MAINTENANCE_INITIAL_CHARS,
+  MAINTENANCE_INITIAL_SOURCES,
+  MAINTENANCE_CONTEXT_ROUNDS,
+  maintenanceContextPrompt,
+  parseMaintenanceContextRequest,
+  selectMaintenanceContext,
+} from '@/services/memory/maintenanceContext'
+import { discoverRepositoryPage, hydrateRepositoryJob } from '@/services/memory/repositoryMaintenance'
 import {
   beginDreamRun,
   endDreamRun,
@@ -106,6 +117,7 @@ type Work = {
   output?: string
   evaluation?: { passed: boolean; baseline: boolean }
   reviewFailed?: boolean
+  evidence?: MaintenanceSource[]
 }
 
 /** Foreground admission, source gathering, generation and review share the optimizer's abort/drain lifetime. */
@@ -118,9 +130,11 @@ export function createMaintenanceWorker(
   const indexed = new Map<string, number>()
   let sharedJobs: HydratedMaintenanceJob[] = []
   let sharedPrincipal = ''
+  let pendingRepositoryScan = false
   /** Source budget per job, fitted to the resident model's context window (native idle work cannot grow it). */
-  let batchChars = maintenanceBatchChars(undefined)
-  /** True while the current pass runs below the normal RAM reserve on the page file (emergency offload). */
+  let batchChars = MAINTENANCE_CONTEXT_CHARS
+  const initialChars = () => Math.min(MAINTENANCE_INITIAL_CHARS, Math.floor(batchChars * 2 / 3))
+  /** Permission to continue below the normal RAM reserve; not a measurement of actual OS paging. */
   let offloading = false
   let lastFailure = ''
   const failureCode = (error: unknown) => {
@@ -131,8 +145,10 @@ export function createMaintenanceWorker(
     status.status === 'ready'
       ? `Basisindex bereit${status.lsp ? ` · LSP ${status.lsp.scanned}/${status.lsp.files} (${status.lsp.status})` : ''}`
       : `Graph: ${status.status}`
-  const repositoryWork = async (principalId: string, projects: Project[], signal: AbortSignal, refresh: boolean) => {
+  const repositoryWork = async (principalId: string, projects: Project[], signal: AbortSignal, journal: MaintenanceJournal) => {
     const work: HydratedMaintenanceJob[] = []
+    const cursors = { ...journal.repositoryCursors }
+    pendingRepositoryScan = false
     for (const project of projects.filter(item => !item.archivedAt && canAccessCloudProject(item, principalId))) {
       signal.throwIfAborted()
       try {
@@ -143,7 +159,7 @@ export function createMaintenanceWorker(
         }
         if (status.status === 'unbound' || status.status === 'indexing') continue
         const key = `${principalId}:${project.id}`
-        if (refresh && Date.now() - (indexed.get(key) ?? 0) >= 300_000) {
+        if (Date.now() - (indexed.get(key) ?? 0) >= 300_000) {
           maintenanceProgress.value = {
             ...maintenanceProgress.value,
             stage: 'indexing',
@@ -156,39 +172,23 @@ export function createMaintenanceWorker(
         }
         if (status.status !== 'ready') continue
         maintenanceProgress.value = { ...maintenanceProgress.value, repository: repositoryLabel(status) }
-        let offset = 0
-        do {
-          signal.throwIfAborted()
-          const page = await inspectRepositoryGraph(principalId, project.id, '', offset)
-          for (const file of page.files) {
-            const content = JSON.stringify({
-              repository: status.repository_id,
-              ...file,
-              evidence: 'LSP/index metadata; no full repository claim',
-            })
-            if (content.length > Math.min(12_000, batchChars - 400)) continue
-            const revision = await maintenanceHash(content)
-            const source: MaintenanceSource = { id: file.id, kind: 'repository', revision, content }
-            work.push({
-              id: `repository:${project.id}:${file.path}`,
-              kind: 'repository',
-              projectId: project.id,
-              revision,
-              sources: [{ id: source.id, kind: source.kind, revision }],
-              material: [source],
-              status: 'pending',
-              attempts: 0,
-              nextAttemptAt: Date.now(),
-              updatedAt: Date.now(),
-            })
-          }
-          offset += page.files.length
-          if (!page.files.length || offset >= page.total) break
-        } while (offset < 20_000)
+        const page = await discoverRepositoryPage({
+          principalId, projectId: project.id, status, jobs: journal.jobs,
+          cursor: cursors[project.id], maxChars: initialChars(), now: Date.now(), signal,
+          inspect: inspectRepositoryGraph,
+        })
+        work.push(...page.work)
+        pendingRepositoryScan ||= page.pendingScan
+        if (page.cursor) cursors[project.id] = page.cursor
       } catch {
         signal.throwIfAborted() /* Offline/unbound repositories do not block other projects. */
       }
     }
+    signal.throwIfAborted()
+    await luczorMemory.updateMaintenance(principalId, current => {
+      signal.throwIfAborted()
+      current.repositoryCursors = cursors
+    })
     return work
   }
   const scope = async (signal: AbortSignal) => {
@@ -264,9 +264,10 @@ export function createMaintenanceWorker(
       records: snapshot.records,
       messages: context.messages?.(),
       now: Date.now(),
-      maxBatchChars: batchChars,
+      maxBatchChars: initialChars(),
+      maxSourceCount: MAINTENANCE_INITIAL_SOURCES,
     })
-    work.push(...(await repositoryWork(principalId, projects, signal, refresh)))
+    if (refresh) work.push(...(await repositoryWork(principalId, projects, signal, snapshot.journal)))
     if (refresh || sharedPrincipal !== principalId) {
       sharedJobs = []
       sharedPrincipal = principalId
@@ -315,6 +316,18 @@ export function createMaintenanceWorker(
       }
     return { ...snapshot, work }
   }
+  const currentRepositoryJob = async (job: IdleOptimizationJob, signal: AbortSignal) => {
+    if (!job.projectId || !(context.projects?.() ?? [context.project()!]).some(project =>
+      project?.id === job.projectId && !project.archivedAt && canAccessCloudProject(project, job.principalId)
+    )) throw new Error('project_unavailable')
+    const prefix = `repository:${job.projectId}:`
+    if (!job.key.startsWith(prefix)) throw new Error('stale_source')
+    return hydrateRepositoryJob({
+      principalId: job.principalId, projectId: job.projectId,
+      path: job.key.slice(prefix.length), status: await deps.graphStatus(job.principalId, job.projectId),
+      signal, maxChars: initialChars(), now: Date.now(), inspect: inspectRepositoryGraph,
+    })
+  }
   const assertCurrent = async (job: IdleOptimizationJob, signal: AbortSignal) => {
     signal.throwIfAborted()
     if (
@@ -324,12 +337,15 @@ export function createMaintenanceWorker(
       !(await deps.preferences()).autoRemember
     )
       throw new Error('scope_changed')
-    const current = (await workList(job.principalId, signal)).work.find(item => item.id === job.key)
+    const current = job.task === 'repository'
+      ? await currentRepositoryJob(job, signal)
+      : (await workList(job.principalId, signal)).work.find(item => item.id === job.key)
     if (!current || current.revision !== job.fingerprint) throw new Error('stale_source')
     signal.throwIfAborted()
   }
   return new IdleContextOptimizer(
     {
+      hasPendingDiscovery: () => pendingRepositoryScan,
       async inspect(signal, running, manual = false) {
         const no = (reason: string) => {
           recordDreamSkip(reason)
@@ -341,16 +357,15 @@ export function createMaintenanceWorker(
         const current = await scope(signal)
         const [prefs, status, metrics] = await Promise.all([deps.preferences(), deps.status(), deps.metrics()])
         signal.throwIfAborted()
-        batchChars = maintenanceBatchChars(status.contextTokens)
+        batchChars = Math.min(MAINTENANCE_CONTEXT_CHARS, maintenanceBatchChars(status.contextTokens))
         if (!prefs.autoRemember) return no('memory_disabled')
         if (status.resourceConfig?.pending) return no('resource_switch')
         const reserve = Math.max(4096, (status.resourceConfig?.applied.ramReserveBytes ?? 0) / 1048576)
         const freeRamMiB = metrics.ram_total_mb - metrics.ram_used_mb
         if (!Number.isFinite(freeRamMiB)) return no('memory_pressure')
         if (freeRamMiB < reserve) {
-          // Emergency offload: keep dreaming on the page file / SSD instead of aborting, but only
-          // with a hard floor of physical RAM left for the desktop and with real swap headroom.
-          // Model starts under pressure already pick the native memory-saving profile (mmap/buffered).
+          // Optional low-RAM admission, with physical RAM and system commit headroom floors.
+          // These system metrics do not measure this model's page-file consumption.
           const swapFreeMiB = Math.max(0, (metrics.swap_total_mb ?? 0) - (metrics.swap_used_mb ?? 0))
           const floorMiB = Math.max(768, Math.floor(metrics.ram_total_mb * 0.03))
           if (!idleEmergencyOffload.value || freeRamMiB < floorMiB) return no('memory_pressure')
@@ -358,10 +373,10 @@ export function createMaintenanceWorker(
           if (swapFreeMiB < 2048) return no('memory_pressure')
           // Mid-run activation lands in the step list directly; before a run, beginDreamRun() folds it in.
           if (!offloading && running)
-            recordDreamStep('preparing', 'Notfall-Auslagerung', `RAM ${Math.round(freeRamMiB)} MiB frei`)
+            recordDreamStep('preparing', 'RAM-schonender Modus', `RAM ${Math.round(freeRamMiB)} MiB frei`)
           offloading = true
           recordDreamOffload({ active: true, freeRamMiB: Math.round(freeRamMiB), swapFreeMiB: Math.round(swapFreeMiB) })
-          // Smaller bundles keep the KV cache and the prompt working set small while paging.
+          // Smaller evidence bundles reduce prompt work, but do not reduce model weights.
           batchChars = Math.max(2_500, Math.floor(batchChars / 2))
         } else if (offloading || running) {
           offloading = false
@@ -493,9 +508,9 @@ export function createMaintenanceWorker(
             recordDreamModel(modelId)
             recordDreamStep('generating', 'Entwurf erzeugen', modelId)
             maintenanceProgress.value = { ...maintenanceProgress.value, modelId, stage: 'generating' }
-            const generate = async (prompt: string, includedSources = 0) => {
+            const generate = async (prompt: string, includedSources = 0, maxOutputTokens = 768) => {
               signal.throwIfAborted()
-              const stepSignal = AbortSignal.any([signal, AbortSignal.timeout(60_000)])
+              const stepSignal = AbortSignal.any([signal, AbortSignal.timeout(125_000)])
               const gateway = await deps.gateway(job.projectId ?? context.project()?.id ?? 'memory-user', modelId)
               if (gateway.target !== 'local_llama_cpp') throw new Error('local_only_required')
               stepSignal.throwIfAborted()
@@ -506,6 +521,7 @@ export function createMaintenanceWorker(
                 taskType: 'context.optimize',
                 tools: [],
                 toolChoice: 'none',
+                maxOutputTokens,
                 signal: stepSignal,
                 messages: [
                   {
@@ -526,13 +542,54 @@ export function createMaintenanceWorker(
               if (!content || content.length > 8000) throw new Error('invalid_candidate')
               return content
             }
-            const output = await generate(job.prompt, work.hydrated.material.length)
-            if (job.task === 'memory') work.changes = parseMemoryChangeSet(output, work.hydrated.material)
-            const reviewedSources: MaintenanceSource[] = work.hydrated.material
+            const reviewedSources: MaintenanceSource[] = [...work.hydrated.material]
+            const supportsContext = !job.key.startsWith('evaluation:') && !job.key.startsWith('sql:')
+            let remaining = supportsContext ? MAINTENANCE_CONTEXT_ROUNDS : 0
+            let prompt = supportsContext
+              ? maintenanceContextPrompt(work.hydrated.kind, reviewedSources, remaining)
+              : job.prompt
+            let output: string
+            while (true) {
+              output = await generate(prompt, reviewedSources.length)
+              const request = parseMaintenanceContextRequest(output)
+              if (!request) break
+              if (!remaining) throw new Error('context_request_limit')
+              remaining--
+              // No retrieval tools or remote calls. This account's encrypted local snapshot
+              // is searched without increasing chat recall/importance counters.
+              await assertCurrent(job, signal)
+              const fresh = await luczorMemory.maintenanceSnapshot(job.principalId)
+              const project = (context.projects?.() ?? [context.project()!]).find(item => item?.id === job.projectId)
+              if (job.projectId && !project) throw new Error('project_unavailable')
+              const added = selectMaintenanceContext({
+                principalId: job.principalId,
+                project,
+                records: fresh.records,
+                current: reviewedSources,
+                kind: work.hydrated.kind,
+                request,
+                maxChars: batchChars,
+                now: Date.now(),
+              })
+              signal.throwIfAborted()
+              reviewedSources.push(...added)
+              recordMemoryUsageEvent('idle', 'retrieved', added.length)
+              recordDreamStep('generating', 'Gezielt nachgeladen', `${added.length} zusätzliche Quellen · ${reviewedSources.length} insgesamt`)
+              if (added.length) recordDreamDecision('read', traceTargets(added), 'Gezielte lokale Belegsuche')
+              prompt = maintenanceContextPrompt(work.hydrated.kind, reviewedSources, remaining,
+                added.length ? 'added' : 'no_matching_evidence')
+            }
+            work.evidence = reviewedSources
+            if (job.task === 'memory') {
+              work.changes = parseMemoryChangeSet(output, reviewedSources)
+              const originalTargets = new Set(work.hydrated.material.map(source => source.id))
+              if (work.changes.operations.some(operation => operation.targets.some(id => !originalTargets.has(id))))
+                throw new Error('context_target_forbidden')
+            }
             // Context packages condense; they may cite only what the sources contain. Rewrites keep everything.
             if (job.task !== 'memory') assertPreservedReferences(reviewedSources, output, 'summary')
             const labelOf = (id: string) =>
-              work.hydrated.material.find(source => source.id === id)?.content.slice(0, 72)
+              reviewedSources.find(source => source.id === id)?.content.slice(0, 72)
             if (work.changes) {
               let created = 0
               for (const operation of work.changes.operations) {
@@ -584,7 +641,9 @@ export function createMaintenanceWorker(
             try {
               parseMaintenanceVerification(
                 await generate(
-                  verificationPrompt(reviewedSources, output, job.task === 'memory' ? 'memory' : 'context')
+                  verificationPrompt(reviewedSources, output, job.task === 'memory' ? 'memory' : 'context'),
+                  0,
+                  384
                 ),
                 reviewedSources,
                 { summary: job.task !== 'memory' }
@@ -729,13 +788,15 @@ export function createMaintenanceWorker(
       })
       return
     }
+    const evidence = work.evidence ?? work.hydrated.material
+    const references = evidence.map(({ content: _content, ...ref }) => ref)
     await luczorMemory.applyMaintenance({
       principalId: job.principalId,
       jobId: job.key,
       revision: job.fingerprint,
       modelId: work.modelId,
       catalogHash: deps.policy().manifest?.payloadSha256 ?? '',
-      sources: work.hydrated.material,
+      sources: evidence,
       changes: work.changes,
       signal,
       // Avoid reentering the store serialization queue from its own commit callback.
@@ -758,16 +819,11 @@ export function createMaintenanceWorker(
           messages: context.messages?.(),
           now: Date.now(),
         })
-        if (job.task === 'repository')
-          current.push(
-            ...(await repositoryWork(
-              job.principalId,
-              (context.projects?.() ?? [context.project()!]).filter(project => project?.id === job.projectId),
-              signal,
-              false
-            ))
-          )
-        for (const source of work.hydrated.material.filter(item => item.kind !== 'memory')) {
+        if (job.task === 'repository') {
+          const repository = await currentRepositoryJob(job, signal)
+          if (repository) current.push(repository)
+        }
+        for (const source of evidence.filter(item => item.kind !== 'memory')) {
           if (!current.some(item => item.sources.some(ref => ref.id === source.id && ref.revision === source.revision)))
             throw new Error('stale_source')
         }
@@ -781,8 +837,9 @@ export function createMaintenanceWorker(
               kind: job.task === 'repository' ? 'repository' : 'context',
               projectId: job.projectId,
               content,
-              sources: work.hydrated.sources,
-              revision: job.fingerprint,
+              sources: references,
+              revision: await maintenanceHash(references),
+              repositoryRevision: job.task === 'repository' ? job.fingerprint : undefined,
               createdAt: Date.now(),
               modelId: work.modelId,
               localOnly: true,

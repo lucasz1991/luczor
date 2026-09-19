@@ -470,11 +470,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                   </div>
                   <div class="lz-row">
                     <div>
-                      <div class="lz-card__title">Notfall-Auslagerung auf den Datenträger</div>
+                      <div class="lz-card__title">Kleine Pflegeaufträge bei knappem RAM erlauben</div>
                       <p class="lz-hint">
-                        Wird beim Träumen der Arbeitsspeicher knapp, läuft der Durchgang weiter über die
-                        Auslagerungsdatei (SSD): Modellgewichte per Speicherabbildung, kleinere Quellenbündel. Deutlich
-                        langsamer, greift nur bei RAM-Mangel und lässt mindestens 3 % des RAM für den Desktop frei.
+                        Erlaubt kleinere Quellenbündel unterhalb der normalen RAM-Reserve, wenn die Sicherheitsreserven
+                        ausreichen. Eine freie Auslagerungsdatei ersetzt nicht den RAM-Bedarf des Modells. Auslagerung
+                        steuert das Betriebssystem; Luczor reserviert dafür keinen festen Speicher und misst hier keinen
+                        eigenen Auslagerungsverbrauch.
                       </p>
                     </div>
                     <button
@@ -484,7 +485,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
                       role="switch"
                       :aria-checked="idleEmergencyOffload"
                       :disabled="savingOffload"
-                      aria-label="Notfall-Auslagerung"
+                      aria-label="Kleine Pflegeaufträge bei knappem RAM erlauben"
                       @click="toggleOffload"
                     >
                       <span />

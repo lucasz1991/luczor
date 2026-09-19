@@ -7,6 +7,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub(super) const FIRST_PROGRESS_TIMEOUT: &str =
+    "Local generation produced no first progress before its deadline.";
+pub(super) const PROGRESS_TIMEOUT: &str =
+    "Local generation stopped making progress before its idle deadline.";
+pub(super) const TOTAL_TIMEOUT: &str = "Local generation exceeded its total deadline.";
+
 #[derive(Clone, Copy)]
 pub(super) struct Deadlines {
     pub first: Duration,
@@ -42,11 +48,11 @@ impl Progress {
     }
     fn expired(&self, limits: Deadlines) -> Option<&'static str> {
         if self.started.elapsed() >= limits.total {
-            Some("Local generation exceeded its total deadline.")
+            Some(TOTAL_TIMEOUT)
         } else if self.last.is_none() && self.started.elapsed() >= limits.first {
-            Some("Local generation produced no first progress before its deadline.")
+            Some(FIRST_PROGRESS_TIMEOUT)
         } else if self.last.is_some_and(|last| last.elapsed() >= limits.idle) {
-            Some("Local generation stopped making progress before its idle deadline.")
+            Some(PROGRESS_TIMEOUT)
         } else {
             None
         }
@@ -86,6 +92,15 @@ impl Stream {
         limits: Deadlines,
         max_bytes: usize,
     ) -> Result<(u16, Self), String> {
+        if cancel.load(Ordering::SeqCst) {
+            return Err("Local inference was cancelled.".into());
+        }
+        if reasoning_interruption.load(Ordering::SeqCst) {
+            return Err(super::reasoning_budget::CONTROL_UNAVAILABLE.into());
+        }
+        // Start before the HTTP client: a transport's total timeout must not
+        // race ahead of the same, explicitly classified generation deadline.
+        let started = Instant::now();
         let request = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -133,7 +148,7 @@ impl Stream {
             receiver,
             task: Some(task),
             progress: Arc::new(Mutex::new(Progress {
-                started: Instant::now(),
+                started,
                 last: None,
                 generated: 0,
             })),
@@ -304,6 +319,159 @@ mod tests {
             idle: Duration::from_millis(180),
             total: Duration::from_secs(3),
         }
+    }
+
+    fn idle_request() -> super::super::LocalInferenceRequest {
+        serde_json::from_value(serde_json::json!({
+            "requestId":"idle-test","scopeDigest":"a".repeat(64),"modelReleaseId":"synthetic-model","useCase":"context.optimize",
+            "catalogBinding":{"acceptanceSessionId":"00000000-0000-4000-8000-000000000001","acceptanceGeneration":1,"manifestPayloadSha256":"b".repeat(64)},
+            "messages":[{"role":"user","content":"synthetic bounded portion"}],"tools":[],"toolChoice":"none","reasoningMode":"off","maxOutputTokens":768
+        })).unwrap()
+    }
+
+    #[test]
+    fn idle_completion_observes_each_delta_before_finish_and_can_outlast_first_progress_deadline() {
+        use serde_json::json;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (delta_tx, delta_rx) = std::sync::mpsc::sync_channel(1);
+        let server = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            request(&mut socket);
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let first = json!({"choices":[{"delta":{"content":"{"}}]});
+            write!(socket, "data: {first}\n\n").unwrap();
+            // A full-body buffer cannot pass: the first public delta must be
+            // observed while the server is still holding the stream open.
+            delta_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+            for index in 0..8 {
+                std::thread::sleep(Duration::from_millis(100));
+                let value = json!({"timings":{"predicted_n":index + 2},"choices":[{"delta":{"content":" "}}]});
+                write!(socket, "data: {value}\n\n").unwrap();
+            }
+            let finish = json!({"choices":[{"delta":{"content":"}"},"finish_reason":"stop"}]});
+            write!(socket, "data: {finish}\n\ndata: [DONE]\n\n").unwrap();
+        });
+        let once = AtomicBool::new(false);
+        let channel = tauri::ipc::Channel::new(move |_| {
+            if !once.swap(true, Ordering::SeqCst) {
+                delta_tx.send(()).unwrap();
+            }
+            Ok(())
+        });
+        let limits = Deadlines {
+            first: Duration::from_millis(500),
+            idle: Duration::from_millis(500),
+            total: Duration::from_secs(3),
+        };
+        let started = Instant::now();
+        let result = super::super::stream_idle_completion(
+            port,
+            "synthetic-key",
+            b"{}".to_vec(),
+            &idle_request(),
+            Arc::new(AtomicBool::new(false)),
+            &channel,
+            limits,
+        )
+        .unwrap();
+        assert_eq!(result.content, format!("{{{}}}", " ".repeat(8)));
+        assert!(started.elapsed() > limits.first);
+        assert_eq!(result.finish_reason, "stop");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn idle_stalled_generation_reports_exact_stage_and_drops_socket_before_returning() {
+        for progressed in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let server = std::thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                request(&mut socket);
+                write!(socket, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n").unwrap();
+                if progressed {
+                    write!(
+                        socket,
+                        "data: {{\"choices\":[{{\"delta\":{{\"content\":\"{{\"}}}}]}}\n\n"
+                    )
+                    .unwrap();
+                }
+                closed(&mut socket);
+            });
+            let failure = super::super::stream_idle_completion(
+                port,
+                "synthetic-key",
+                b"{}".to_vec(),
+                &idle_request(),
+                Arc::new(AtomicBool::new(false)),
+                &tauri::ipc::Channel::new(|_| Ok(())),
+                limits(),
+            )
+            .err()
+            .unwrap();
+            assert_eq!(
+                failure.code,
+                if progressed {
+                    "runtime_progress_timeout"
+                } else {
+                    "runtime_first_progress_timeout"
+                }
+            );
+            assert!(failure.preserves_runtime_for_use_case("context.optimize"));
+            assert!(!failure.preserves_runtime_for_use_case("chat"));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn idle_deadlines_remain_bounded_and_are_not_transport_failure_evidence() {
+        let deadlines = super::super::idle_generation_deadlines(1200).unwrap();
+        assert_eq!(deadlines.first, Duration::from_secs(12));
+        assert_eq!(deadlines.idle, Duration::from_secs(12));
+        assert_eq!(deadlines.total, Duration::from_secs(120));
+        let maximum = super::super::idle_generation_deadlines(u64::MAX).unwrap();
+        assert_eq!(maximum.first, Duration::from_secs(120));
+        assert_eq!(maximum.total, Duration::from_secs(120));
+        for (message, code) in [
+            (FIRST_PROGRESS_TIMEOUT, "runtime_first_progress_timeout"),
+            (PROGRESS_TIMEOUT, "runtime_progress_timeout"),
+            (TOTAL_TIMEOUT, "runtime_total_timeout"),
+        ] {
+            let failure = super::super::LocalInferenceFailure::from(message);
+            assert_eq!(failure.code, code);
+            assert!(failure.preserves_runtime_for_use_case("context.optimize"));
+            assert!(!failure.preserves_runtime_for_use_case("chat"));
+        }
+        let transport = super::super::LocalInferenceFailure::from("Local HTTP connection failed.");
+        assert_eq!(transport.code, "runtime_stream_failed");
+        assert!(!transport.preserves_runtime_for_use_case("context.optimize"));
+    }
+
+    #[test]
+    fn already_cancelled_generation_never_opens_a_socket() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let error = Stream::open(
+            listener.local_addr().unwrap().port(),
+            "synthetic-key",
+            b"{}".to_vec(),
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            limits(),
+            4096,
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("cancelled"));
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
     }
     #[test]
     fn repeated_generation_closes_owned_http_stream_before_returning_failure() {

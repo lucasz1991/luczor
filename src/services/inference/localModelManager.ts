@@ -392,7 +392,7 @@ export class LocalModelManager {
             taskType: 'context.optimize',
             tools: [],
             toolChoice: 'none' as const,
-            maxOutputTokens: 768,
+            maxOutputTokens: Math.min(request.maxOutputTokens ?? 768, 768),
             reasoningMode: 'off' as const,
           }
         : {}),
@@ -445,8 +445,9 @@ export class LocalModelManager {
         throw abortError()
       }
 
-      // Input/template role rejection is not model-health evidence. Native code
-      // retains the resident process, so the next valid request stays admissible.
+      // Rejected input and an idle job's own bounded deadline are not model-
+      // health evidence. Native code retains that resident process. Foreground
+      // deadlines and real transport failures still follow the failure policy.
       if (
         error instanceof LocalInferenceError &&
         ([
@@ -457,6 +458,10 @@ export class LocalModelManager {
           'runtime_reasoning_control_unavailable',
           'runtime_output_repeated',
         ].includes(error.code) ||
+          (idleOptimization &&
+            ['runtime_first_progress_timeout', 'runtime_progress_timeout', 'runtime_total_timeout'].includes(
+              error.code
+            )) ||
           (error.code === 'runtime_request_rejected' &&
             (error.diagnostic?.httpStatus === 400 ||
               (!error.diagnostic && error.message === 'Local llama.cpp rejected the request (HTTP 400).'))))

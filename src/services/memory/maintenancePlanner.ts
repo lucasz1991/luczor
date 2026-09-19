@@ -12,6 +12,20 @@ import {
 } from './maintenance'
 
 export type HydratedMaintenanceJob = MaintenanceJob & { material: MaintenanceSource[] }
+export const memoryMaintenanceSource = (record: MemoryRecord): MaintenanceSource => ({
+  id: record.id,
+  kind: 'memory',
+  revision: memoryRevision(record),
+  content: JSON.stringify({
+    text: record.content,
+    source: record.source,
+    intent: record.writeIntent,
+    scope: record.scope,
+    status: record.status,
+    at: record.updatedAt,
+    expiresAt: record.expiresAt,
+  }),
+})
 export async function planMaintenance(input: {
   principalId: string
   projects: Project[]
@@ -20,6 +34,7 @@ export async function planMaintenance(input: {
   now: number
   /** Material size per job; defaults to the generic cap, the worker fits it to the model context. */
   maxBatchChars?: number
+  maxSourceCount?: number
 }): Promise<HydratedMaintenanceJob[]> {
   const maxBatchChars = input.maxBatchChars ?? MAINTENANCE_BATCH_CHARS
   const projects = input.projects.filter(
@@ -64,21 +79,8 @@ export async function planMaintenance(input: {
     for (const partitionId of partitions) {
       const partition = records.filter(record => partitionKey(record) === partitionId)
       const dataset = partition[0]!.dataset
-      const sources: MaintenanceSource[] = partition.map(record => ({
-        id: record.id,
-        kind: 'memory',
-        revision: memoryRevision(record),
-        content: JSON.stringify({
-          text: record.content,
-          source: record.source,
-          intent: record.writeIntent,
-          scope: record.scope,
-          status: record.status,
-          at: record.updatedAt,
-          expiresAt: record.expiresAt,
-        }),
-      }))
-      for (const material of partitionMaintenanceSources(sources, 6, maxBatchChars)) {
+      const sources = partition.map(memoryMaintenanceSource)
+      for (const material of partitionMaintenanceSources(sources, input.maxSourceCount ?? 6, maxBatchChars)) {
         const batch = partition.filter(record => material.some(source => source.id === record.id))
         if (
           batch.every(
@@ -122,7 +124,7 @@ export async function planMaintenance(input: {
       const completed = loading < 0 ? visible : visible.slice(0, loading)
       while (completed.length && completed.at(-1)?.role !== 'assistant') completed.pop()
       for (let index = 0; index < completed.length;) {
-        let end = Math.min(index + 4, completed.length)
+        let end = Math.min(index + (input.maxSourceCount ?? 4), completed.length)
         while (end < completed.length && completed[end - 1]?.role !== 'assistant') end++
         const material: MaintenanceSource[] = []
         for (const message of completed.slice(index, end)) {

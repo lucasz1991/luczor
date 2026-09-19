@@ -1,4 +1,5 @@
 import type { MemoryRecord } from './luczorMemory'
+import type { RepositoryMaintenanceCursor } from './repositoryMaintenance'
 
 export const MAINTENANCE_POLICY = 'luczor-maintenance-v1'
 export type SourceReference = {
@@ -46,6 +47,8 @@ export type PreparedContextArtifact = {
   content: string
   sources: SourceReference[]
   revision: string
+  /** New repository artifacts bind all evidence via revision; this retains the primary file revision. */
+  repositoryRevision?: string
   createdAt: number
   modelId: string
   localOnly: true
@@ -56,6 +59,7 @@ export type MaintenanceJournal = {
   artifacts: PreparedContextArtifact[]
   receipts: Array<{ id: string; revision: string; at: number; modelId: string; changed: number; conflicts: number }>
   activeStreak: number
+  repositoryCursors?: Record<string, RepositoryMaintenanceCursor>
   lastProject?: string
   consent?: { automaticRewrite: boolean; installedModelStart: boolean }
   evaluationRequested?: number
@@ -114,6 +118,7 @@ export function reconcileMaintenanceJobs(journal: MaintenanceJournal, work: Main
       const old = previous.get(job.id)
       if (job.blockedReason) return job
       if (!old || old.revision !== job.revision) return { ...job, status: 'pending', attempts: 0, nextAttemptAt: now }
+      if (old.blockedReason === 'source_too_large') return { ...job, status: 'pending', attempts: 0, nextAttemptAt: now }
       // A crashed process owns no lease after restart. Revalidation still precedes the eventual commit.
       return old.status === 'running' ? { ...old, status: 'retry', nextAttemptAt: now } : old
     }),

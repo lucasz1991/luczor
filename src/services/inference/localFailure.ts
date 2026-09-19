@@ -12,6 +12,9 @@ const failureCodes = [
   'runtime_reasoning_control_unavailable',
   'runtime_output_repeated',
   'runtime_stream_failed',
+  'runtime_first_progress_timeout',
+  'runtime_progress_timeout',
+  'runtime_total_timeout',
   'runtime_start_failed',
 ] as const
 
@@ -154,6 +157,12 @@ const codeDescriptions: Partial<Record<LocalFailureCode, string>> = {
     'Die Runtime hat den Abschluss der Denkphase nicht bestätigt. Denkbudget und Runtime-Unterstützung prüfen. Das Modell bleibt geladen.',
   runtime_stream_failed:
     'Die lokale Modellverbindung wurde während der Anfrage unterbrochen. Den Runtime-Status prüfen und die Anfrage erneut versuchen.',
+  runtime_first_progress_timeout:
+    'Das lokale Modell hat innerhalb der Startfrist keinen Generierungsfortschritt gemeldet. Modellgröße, Auslastung und verfügbaren Arbeitsspeicher prüfen.',
+  runtime_progress_timeout:
+    'Die lokale Generierung hat begonnen, danach aber zu lange keinen Fortschritt gemeldet. Auslastung und verfügbaren Arbeitsspeicher prüfen.',
+  runtime_total_timeout:
+    'Die Generierung hat ihr festes Zeitbudget erreicht. Eine kleinere Quellenportion oder ein schnelleres geeignetes Modell verwenden; unvollständige Ergebnisse werden nicht übernommen.',
   runtime_start_failed:
     'Das lokale Modell konnte nicht vorbereitet werden. Installationsstatus, Ressourcen und Runtime-Status prüfen.',
 }

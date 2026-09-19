@@ -105,4 +105,27 @@ describe('public local inference failure diagnostics', () => {
       'Installationsstatus, Ressourcen und Runtime-Status prüfen'
     )
   })
+
+  it.each([
+    ['runtime_first_progress_timeout', 'Startfrist'],
+    ['runtime_progress_timeout', 'danach aber zu lange'],
+    ['runtime_total_timeout', 'festes Zeitbudget'],
+  ] as const)('distinguishes the bounded generation failure %s from a connection failure', (code, hint) => {
+    const decoded = readLocalFailureDiagnostic({
+      schemaVersion: 1,
+      stage: 'generation',
+      code,
+      reason: 'unclassified',
+      inputTokens: 490,
+      contextTokens: 8192,
+      outputTokens: 768,
+      rawError: 'PRIVATE',
+    })!
+    expect(decoded.code).toBe(code)
+    const description = describeLocalFailureDiagnostic(decoded)
+    expect(description).toContain(hint)
+    expect(description).toContain('Eingabe (gezählt) 490')
+    expect(description).not.toContain('PRIVATE')
+    expect(description).not.toContain('Modellverbindung wurde')
+  })
 })

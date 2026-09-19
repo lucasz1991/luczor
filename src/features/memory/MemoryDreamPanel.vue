@@ -79,6 +79,13 @@ const countdown = computed(() => {
 })
 const run = computed<DreamRun | null>(() => props.dream.run)
 const running = computed(() => props.dream.active)
+const lowMemoryRun = computed(
+  () =>
+    running.value &&
+    !!props.trace.current &&
+    !!props.trace.offload?.active &&
+    (status.value?.phase === 'running' || status.value?.phase === 'committing')
+)
 const showHistory = ref(false)
 const busy = ref(false)
 const message = ref('')
@@ -123,6 +130,14 @@ const FAILURES: Record<string, string> = {
   runtime_not_configured: 'Lokale Runtime ist nicht eingerichtet. Modellpfade in den Einstellungen prüfen.',
   model_files_unavailable: 'Installierte Modelldateien sind nicht verfügbar. Modellpfade prüfen.',
   runtime_startup_ram_pressure: 'Modellstart zum Schutz des freien Arbeitsspeichers gestoppt.',
+  runtime_stream_failed:
+    'Lokale Modellausgabe wurde unterbrochen. Runtime-Diagnose prüfen; dieser Fehler allein belegt keinen RAM-Mangel.',
+  runtime_first_progress_timeout:
+    'Das lokale Modell hat vor dem Zeitlimit keinen Fortschritt gemeldet. Modell- und Runtime-Diagnose prüfen.',
+  runtime_progress_timeout:
+    'Das lokale Modell meldete während der Antwort zu lange keinen weiteren Fortschritt. Runtime-Diagnose prüfen.',
+  runtime_total_timeout:
+    'Der lokale Modellschritt hat sein Gesamtzeitlimit erreicht. Es wurde kein Ergebnis übernommen.',
 }
 function failureLabel(code: string | undefined): string {
   if (!code) return 'Unbekannter Fehler'
@@ -330,11 +345,14 @@ async function stopDreaming() {
       </div>
     </header>
     <p v-if="message" role="status" class="dream-panel__message" :data-tone="messageTone">{{ message }}</p>
-    <p v-if="trace.offload?.active" class="dream-panel__offload" role="status">
+    <p v-if="lowMemoryRun && trace.offload" class="dream-panel__offload" role="status">
       <span class="dream-panel__offload-dot" aria-hidden="true" />
-      Notfall-Auslagerung aktiv: RAM knapp ({{ trace.offload.freeRamMiB.toLocaleString('de-DE') }} MiB frei) – der Traum
-      läuft langsamer über die Auslagerungsdatei ({{ trace.offload.swapFreeMiB.toLocaleString('de-DE') }} MiB frei) mit
-      kleineren Quellenbündeln.
+      <span>
+        RAM-schonender Modus: Dieser Durchgang verwendet kleinere Quellenbündel. Letzte Systemmessung: RAM
+        {{ trace.offload.freeRamMiB.toLocaleString('de-DE') }} MiB frei, Auslagerung
+        {{ trace.offload.swapFreeMiB.toLocaleString('de-DE') }} MiB frei. Das ist systemweit verfügbare Kapazität, kein
+        Speicherbedarf oder gemessener Verbrauch von Luczor. Ob das Betriebssystem auslagert, wird hier nicht gemessen.
+      </span>
     </p>
 
     <dl class="dream-panel__stats" aria-label="Pflegezustand">
@@ -359,6 +377,10 @@ async function stopDreaming() {
         <dd class="dream-panel__mono">{{ run?.modelId || maintenanceProgress.modelId || '—' }}</dd>
       </div>
     </dl>
+    <p class="dream-panel__queue-hint">
+      Die Warteschlange enthält einzelne Pflegeaufträge, keinen gemeinsamen Modellkontext. Pro Durchgang wird nur ein
+      begrenztes Quellenbündel verarbeitet.
+    </p>
 
     <div v-if="run" class="dream-panel__run">
       <div class="dream-panel__run-head">
@@ -539,6 +561,12 @@ async function stopDreaming() {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   gap: 8px;
+}
+.dream-panel__queue-hint {
+  margin: 0;
+  color: var(--ai-faint);
+  font-size: 12px;
+  line-height: 1.5;
 }
 .dream-panel__stats > div {
   padding: 8px 10px;

@@ -2,9 +2,9 @@ import { shallowRef } from 'vue'
 import { Store } from '@tauri-apps/plugin-store'
 
 /**
- * Emergency offload: when free RAM drops below the normal reserve, a dream may still run
- * by leaning on the OS page file / SSD (mmap-loaded weights, smaller batches) instead of
- * aborting. Slower, but it lets large maintenance backlogs finish on tight machines.
+ * Low-RAM admission: allow smaller source batches below the normal RAM reserve only
+ * while the worker's physical-memory and system-wide swap headroom checks pass.
+ * This setting neither reserves a page file nor measures or guarantees OS paging.
  * Kept in its own module so the maintenance worker does not pull the optimizer wiring.
  */
 export const IDLE_EMERGENCY_OFFLOAD_KEY = 'local_idle_emergency_offload'

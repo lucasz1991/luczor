@@ -115,6 +115,60 @@ describe('LocalModelManager runtime safety', () => {
     expect(transport.prepare).not.toHaveBeenCalled()
     expect(vi.mocked(transport.stream).mock.calls).toHaveLength(1)
   })
+
+  it.each([384, 768, 1200])(
+    'preserves a smaller idle output budget and clamps %s at its native maximum',
+    async maximum => {
+      const model = await release()
+      const transport: LocalRuntimeTransport = {
+        stream: vi.fn(async () => successfulResult),
+        cancel: vi.fn(),
+        stop: vi.fn(),
+      }
+      const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
+      const idle = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64), true)
+      await idle.streamChatWithTools({ messages: [], maxOutputTokens: maximum })
+      expect(transport.stream).toHaveBeenCalledWith(
+        model,
+        expect.objectContaining({ maxOutputTokens: Math.min(maximum, 768) })
+      )
+    }
+  )
+
+  it.each(['runtime_first_progress_timeout', 'runtime_progress_timeout', 'runtime_total_timeout'])(
+    'does not poison model health when an idle portion reaches %s',
+    async code => {
+      const model = await release()
+      const stream = vi.fn().mockRejectedValue(new LocalInferenceError('Bounded idle deadline', code, true, false))
+      const transport: LocalRuntimeTransport = { prepare: vi.fn(), stream, cancel: vi.fn(), stop: vi.fn() }
+      const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
+      const idle = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64), true)
+      for (let attempt = 0; attempt < 3; attempt++) {
+        await expect(idle.streamChatWithTools({ messages: [] })).rejects.toMatchObject({ code })
+      }
+      expect(manager.getHealth(model)).toMatchObject({ state: 'ready', consecutiveFailures: 0 })
+      expect(transport.prepare).not.toHaveBeenCalled()
+      expect(transport.stop).not.toHaveBeenCalled()
+      const foreground = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+      await expect(foreground.streamChatWithTools({ messages: [] })).rejects.toMatchObject({ code })
+      expect(manager.getHealth(model)).toMatchObject({ state: 'degraded', consecutiveFailures: 1 })
+    }
+  )
+
+  it('still counts genuine idle stream failures as model health failures', async () => {
+    const model = await release()
+    const transport: LocalRuntimeTransport = {
+      stream: vi
+        .fn()
+        .mockRejectedValue(new LocalInferenceError('Connection failed', 'runtime_stream_failed', true, false)),
+      cancel: vi.fn(),
+      stop: vi.fn(),
+    }
+    const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
+    const idle = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64), true)
+    await expect(idle.streamChatWithTools({ messages: [] })).rejects.toMatchObject({ code: 'runtime_stream_failed' })
+    expect(manager.getHealth(model)).toMatchObject({ state: 'degraded', consecutiveFailures: 1 })
+  })
   it('rejects a readiness renewal from a different resource configuration', async () => {
     const model = await release()
     const old = { ...readiness(model), resourceRevision: 3 }

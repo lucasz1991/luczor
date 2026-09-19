@@ -46,7 +46,7 @@ export type DreamTrace = {
   lastSkip: { at: number; reason: string } | null
   /** Bounded scan summary from the last work-list pass. */
   scan: { at: number; work: number; queued: number; blocked: number; waitingForGate: number } | null
-  /** Emergency offload state: RAM is below the normal reserve and the pass leans on the page file. */
+  /** Low-RAM admission snapshot. Values are system-wide free capacity, not per-app paging usage. */
   offload: { at: number; active: boolean; freeRamMiB: number; swapFreeMiB: number } | null
 }
 
@@ -77,8 +77,13 @@ export function dreamTargetLabel(target: DreamTarget): string {
 /** Eligibility declined; only reason changes are recorded so polling stays quiet. */
 export function recordDreamSkip(reason: string): void {
   const last = dreamTrace.value.lastSkip
-  if (last?.reason === reason) return
-  patch({ lastSkip: { at: Date.now(), reason } })
+  const offload = dreamTrace.value.offload
+  const resetOffload = !dreamTrace.value.current && offload?.active
+  if (last?.reason === reason && !resetOffload) return
+  patch({
+    lastSkip: last?.reason === reason ? last : { at: Date.now(), reason },
+    ...(resetOffload ? { offload: { ...offload, active: false } } : {}),
+  })
 }
 
 export function recordDreamScan(scan: Omit<NonNullable<DreamTrace['scan']>, 'at'>): void {
@@ -122,13 +127,13 @@ export function beginDreamRun(input: {
             },
           ]
         : []),
-      ...(dreamTrace.value.offload?.active
+      ...(dreamTrace.value.offload?.active && now - dreamTrace.value.offload.at < 120_000
         ? [
             {
               at: dreamTrace.value.offload.at,
               stage: 'preparing' as const,
-              title: 'Notfall-Auslagerung',
-              detail: `RAM ${dreamTrace.value.offload.freeRamMiB} MiB frei · Auslagerungsdatei ${dreamTrace.value.offload.swapFreeMiB} MiB frei · langsamer`,
+              title: 'RAM-schonender Modus',
+              detail: `Systemweit frei: RAM ${dreamTrace.value.offload.freeRamMiB} MiB · Auslagerung ${dreamTrace.value.offload.swapFreeMiB} MiB. Keine Verbrauchsmessung.`,
             },
           ]
         : []),
@@ -202,7 +207,11 @@ export function endDreamRun(outcome: NonNullable<DreamRun['outcome']>, error?: s
     error: label(error),
     steps: [...run.steps, finalStep].slice(-MAX_STEPS),
   }
-  patch({ current: null, history: [finished, ...dreamTrace.value.history].slice(0, MAX_HISTORY) })
+  patch({
+    current: null,
+    history: [finished, ...dreamTrace.value.history].slice(0, MAX_HISTORY),
+    offload: dreamTrace.value.offload ? { ...dreamTrace.value.offload, active: false } : null,
+  })
 }
 
 /** Node-level effects the 3D view animates; the newest run wins. */
@@ -274,8 +283,8 @@ export const DREAM_SKIP_LABELS: Record<string, string> = {
   memory_disabled: 'Automatisches Erinnern ist ausgeschaltet',
   runtime_unavailable: 'Lokales Modell nicht bereit',
   resource_switch: 'Ressourcenwechsel läuft',
-  memory_pressure: 'Zu wenig freier Arbeitsspeicher – auch für die Notfall-Auslagerung',
-  no_swap: 'Keine Auslagerungsdatei verfügbar – Notfall-Auslagerung nicht möglich',
+  memory_pressure: 'Zu wenig freier Arbeitsspeicher für sichere Leerlauf-Pflege',
+  no_swap: 'Keine freie Auslagerungskapazität für den Modus mit wenig RAM verfügbar',
   cpu_pressure: 'CPU ist ausgelastet',
   boundary_changed: 'Konto, Projekt oder Sitzung haben gewechselt',
   model_start_consent_required: 'Modellstart im Leerlauf braucht Zustimmung',

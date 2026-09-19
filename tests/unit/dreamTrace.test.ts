@@ -1,10 +1,11 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
   beginDreamRun,
   dreamEffects,
   dreamTrace,
   endDreamRun,
   recordDreamDecision,
+  recordDreamOffload,
   recordDreamScan,
   recordDreamSkip,
   recordDreamStep,
@@ -13,6 +14,7 @@ import {
 
 describe('dream trace', () => {
   beforeEach(() => resetDreamTraceForTests())
+  afterEach(() => vi.restoreAllMocks())
 
   it('records skips only when the reason changes', () => {
     recordDreamSkip('foreground')
@@ -62,5 +64,37 @@ describe('dream trace', () => {
     expect(dreamTrace.value.history[0]?.jobKey).toBe('a')
     expect(dreamTrace.value.history[0]?.outcome).toBe('interrupted')
     expect(dreamTrace.value.current?.jobKey).toBe('b')
+  })
+
+  it.each(['success', 'failed', 'interrupted'] as const)(
+    'stops low-RAM activity after %s and retains the free-capacity observation as history',
+    outcome => {
+      recordDreamOffload({ active: true, freeRamMiB: 2898, swapFreeMiB: 33947 })
+      beginDreamRun({ jobKey: 'a', task: 'context', scope: 'user', sources: [] })
+      const step = dreamTrace.value.current?.steps[0]
+      expect(step?.title).toBe('RAM-schonender Modus')
+      expect(step?.detail).toContain('Systemweit frei')
+      expect(step?.detail).toContain('Keine Verbrauchsmessung')
+      expect(step?.detail).not.toContain('langsamer')
+      endDreamRun(outcome)
+      expect(dreamTrace.value.offload?.active).toBe(false)
+      expect(dreamTrace.value.history[0]?.steps[0]).toEqual(step)
+    }
+  )
+
+  it('clears a declined admission even for a repeated skip without discarding the observation', () => {
+    recordDreamSkip('cpu_pressure')
+    const originalSkip = dreamTrace.value.lastSkip
+    recordDreamOffload({ active: true, freeRamMiB: 2898, swapFreeMiB: 33947 })
+    recordDreamSkip('cpu_pressure')
+    expect(dreamTrace.value.offload).toMatchObject({ active: false, freeRamMiB: 2898, swapFreeMiB: 33947 })
+    expect(dreamTrace.value.lastSkip).toBe(originalSkip)
+  })
+
+  it('does not attach old low-RAM eligibility to a later run', () => {
+    recordDreamOffload({ active: true, freeRamMiB: 2898, swapFreeMiB: 33947 })
+    vi.spyOn(Date, 'now').mockReturnValue(Date.now() + 121_000)
+    beginDreamRun({ jobKey: 'a', task: 'context', scope: 'user', sources: [] })
+    expect(dreamTrace.value.current?.steps.map(step => step.stage)).toEqual(['selecting'])
   })
 })

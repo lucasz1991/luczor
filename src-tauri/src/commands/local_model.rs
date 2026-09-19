@@ -520,8 +520,30 @@ impl LocalInferenceFailure {
         ) || (self.code == "runtime_request_rejected" && self.diagnostic.http_status == Some(400))
     }
 
+    fn preserves_runtime_for_use_case(&self, use_case: &str) -> bool {
+        self.preserves_resident_runtime()
+            || (use_case == IDLE_CONTEXT_USE_CASE && is_generation_deadline(self.code))
+    }
+
     fn stream(message: impl Into<String>) -> Self {
         let message = message.into();
+        let deadline_code = match message.as_str() {
+            generation_stream::FIRST_PROGRESS_TIMEOUT => Some("runtime_first_progress_timeout"),
+            generation_stream::PROGRESS_TIMEOUT => Some("runtime_progress_timeout"),
+            generation_stream::TOTAL_TIMEOUT => Some("runtime_total_timeout"),
+            _ => None,
+        };
+        if let Some(code) = deadline_code {
+            return Self {
+                code,
+                public_message: message,
+                retryable: true,
+                diagnostic: failure_diagnostics::Diagnostic::new(
+                    code,
+                    failure_diagnostics::Stage::Generation,
+                ),
+            };
+        }
         if matches!(
             message.as_str(),
             generation_safety::REPETITION | generation_safety::TOOL_CONTRACT
@@ -3117,7 +3139,7 @@ fn infer_blocking(
     } else if result
         .as_ref()
         .err()
-        .is_some_and(LocalInferenceFailure::preserves_resident_runtime)
+        .is_some_and(|failure| failure.preserves_runtime_for_use_case(&request.use_case))
     {
         RequestOutcome::Rejected
     } else {
@@ -4277,19 +4299,15 @@ fn stream_completion_with_diagnostics(
     diagnostic.output.set(Some(usage.output_tokens));
     require_runtime_operation_checkpoint(&request.request_id, &request.catalog_binding, &cancel)?;
     if request.use_case == IDLE_CONTEXT_USE_CASE {
-        let (status, bytes) = idle_inference::post(
+        let mut result = stream_idle_completion(
             port,
             &api_key,
-            idle_inference::Endpoint::Completion,
             serde_json::to_vec(&body).map_err(|_| "Local context encoding failed.")?,
-            &cancel,
-            signed_read_timeout(thresholds.max_first_token_ms)?,
-            128 * 1024,
+            request,
+            cancel,
+            on_event,
+            idle_generation_deadlines(thresholds.max_first_token_ms)?,
         )?;
-        if !(200..300).contains(&status) {
-            return Err(llama_http_failure(status, std::io::Cursor::new(bytes)));
-        }
-        let mut result = parse_sse(std::io::Cursor::new(bytes), request, cancel, on_event)?;
         result.context_usage = Some(usage);
         return Ok(result);
     }
@@ -4377,6 +4395,61 @@ fn stream_completion_with_diagnostics(
     Ok(result)
 }
 
+fn idle_generation_deadlines(
+    max_first_token_ms: u64,
+) -> Result<generation_stream::Deadlines, String> {
+    let total = Duration::from_secs(120);
+    let progress = signed_read_timeout(max_first_token_ms)?.min(total);
+    Ok(generation_stream::Deadlines {
+        first: progress,
+        idle: progress,
+        total,
+    })
+}
+
+fn is_generation_deadline(code: &str) -> bool {
+    matches!(
+        code,
+        "runtime_first_progress_timeout" | "runtime_progress_timeout" | "runtime_total_timeout"
+    )
+}
+
+fn stream_idle_completion(
+    port: u16,
+    api_key: &str,
+    body: Vec<u8>,
+    request: &LocalInferenceRequest,
+    cancel: Arc<AtomicBool>,
+    on_event: &Channel<LocalInferenceEvent>,
+    deadlines: generation_stream::Deadlines,
+) -> Result<LocalInferenceResult, LocalInferenceFailure> {
+    // Read and observe bounded chunks as they arrive. Previously idle work
+    // buffered the complete SSE body under the first-token deadline, so even
+    // healthy ongoing generation could fail before its completion was parsed.
+    // The stream owns its socket and settles it before the request lease ends.
+    let (status, response) = generation_stream::Stream::open(
+        port,
+        api_key,
+        body,
+        cancel.clone(),
+        Arc::new(AtomicBool::new(false)),
+        deadlines,
+        128 * 1024,
+    )?;
+    if !(200..300).contains(&status) {
+        return Err(llama_http_failure(status, response));
+    }
+    let progress = response.progress.clone();
+    parse_sse_observed(response, request, cancel, on_event, |value| {
+        progress
+            .lock()
+            .map_err(|_| "Local progress is unavailable.")?
+            .observe(value);
+        Ok(())
+    })
+}
+
+#[cfg(test)]
 fn parse_sse(
     response: impl Read,
     request: &LocalInferenceRequest,

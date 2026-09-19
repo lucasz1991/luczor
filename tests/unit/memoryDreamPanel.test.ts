@@ -113,13 +113,24 @@ async function mount() {
     decisions: [],
   }
   const updateRun = async (outcome?: DreamApi.DreamRun['outcome'], error?: string) => {
-    const current = { ...run, outcome, error }
+    const current = { ...run, outcome, error, endedAt: outcome ? Date.now() : undefined }
     props.trace = { ...props.trace, current: outcome ? null : current, history: outcome ? [current] : [] }
     props.dream = { ...props.dream, active: !outcome, run: current }
     await nextTick()
   }
   const message = () => text(nodes(root).find(node => node.props.get('class') === 'dream-panel__message')!)
-  return { root, message, updateRun }
+  const offload = () => {
+    const node = nodes(root).find(node => node.props.get('class') === 'dream-panel__offload')
+    return node ? text(node) : ''
+  }
+  const updateOffload = async (active = true) => {
+    props.trace = {
+      ...props.trace,
+      offload: { at: Date.now(), active, freeRamMiB: 2898, swapFreeMiB: 33947 },
+    }
+    await nextTick()
+  }
+  return { root, message, updateRun, offload, updateOffload }
 }
 beforeEach(() => {
   status.value = { phase: 'waiting', reason: 'activity' }
@@ -180,5 +191,57 @@ describe('dream panel lifecycle', () => {
     status.value = { phase: 'paused', reason: 'memory_disabled' }
     await nextTick()
     expect(declined.message()).toContain('Traum nicht gestartet')
+  })
+
+  it('labels free system capacity without claiming measured paging or memory demand', async () => {
+    const panel = await mount()
+    await panel.updateRun()
+    await panel.updateOffload()
+    status.value = { phase: 'running', reason: 'generating' }
+    await nextTick()
+    expect(panel.offload()).toContain('RAM-schonender Modus')
+    expect(panel.offload()).toContain('33.947 MiB frei')
+    expect(panel.offload()).toContain('systemweit verfügbare Kapazität')
+    expect(panel.offload()).toContain('kein Speicherbedarf oder gemessener Verbrauch von Luczor')
+    expect(panel.offload()).toContain('wird hier nicht gemessen')
+    expect(panel.offload()).not.toContain('läuft langsamer')
+    expect(text(panel.root)).toContain('ein begrenztes Quellenbündel')
+  })
+
+  it('does not show stale offload activity after failure, pause or while yielding', async () => {
+    const panel = await mount()
+    await panel.updateOffload()
+    expect(panel.offload()).toBe('')
+    await panel.updateRun()
+    status.value = { phase: 'running', reason: 'generating' }
+    await nextTick()
+    expect(panel.offload()).not.toBe('')
+    status.value = { phase: 'yielding', reason: 'foreground' }
+    await nextTick()
+    expect(panel.offload()).toBe('')
+    status.value = { phase: 'paused', reason: 'activity' }
+    await nextTick()
+    expect(panel.offload()).toBe('')
+    await panel.updateRun('failed', 'runtime_stream_failed')
+    expect(panel.message()).toContain('Lokale Modellausgabe wurde unterbrochen')
+    expect(panel.message()).toContain('belegt keinen RAM-Mangel')
+    expect(panel.offload()).toBe('')
+    expect(text(panel.root)).not.toContain('Notfall-Auslagerung aktiv')
+  })
+
+  it.each([
+    ['runtime_first_progress_timeout', 'vor dem Zeitlimit keinen Fortschritt'],
+    ['runtime_progress_timeout', 'zu lange keinen weiteren Fortschritt'],
+    ['runtime_total_timeout', 'sein Gesamtzeitlimit erreicht'],
+  ])('explains the observed timeout %s without diagnosing memory exhaustion', async (code, explanation) => {
+    const panel = await mount()
+    await panel.updateRun()
+    status.value = { phase: 'running', reason: 'generating' }
+    await nextTick()
+    await panel.updateRun('failed', code)
+    status.value = { phase: 'cooldown', reason: 'failed' }
+    await nextTick()
+    expect(panel.message()).toContain(explanation)
+    expect(panel.message()).not.toContain('RAM-Mangel')
   })
 })

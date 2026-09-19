@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Project } from '@/state/types'
+import type { MemoryRecord } from '@/services/memory/luczorMemory'
 import { emptyMaintenanceJournal, type MaintenanceJournal } from '@/services/memory/maintenance'
 import type { idleOptimizationDependencies } from '@/services/agents/idleOptimization'
 import { memoryUsageEvents, resetMemoryUsage } from '@/services/memory/usage'
@@ -7,13 +8,14 @@ const fixture = vi.hoisted(() => ({
   journal: null as MaintenanceJournal | null,
   writes: [] as string[],
   apply: vi.fn(),
+  records: [] as MemoryRecord[],
 }))
 vi.mock('@/services/executionGate', () => ({
   executionGate: { capture: () => ({ sessionId: 'session', generation: 1 }), assert: () => undefined },
 }))
 vi.mock('@/services/memory/luczorMemory', () => ({
   luczorMemory: {
-    maintenanceSnapshot: async () => ({ journal: structuredClone(fixture.journal), records: [] }),
+    maintenanceSnapshot: async () => ({ journal: structuredClone(fixture.journal), records: structuredClone(fixture.records) }),
     updateMaintenance: async (_id: string, update: (journal: MaintenanceJournal) => unknown) =>
       update(fixture.journal!),
     applyMaintenance: fixture.apply,
@@ -79,6 +81,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   fixture.journal = emptyMaintenanceJournal()
   fixture.writes = []
+  fixture.records = []
   fixture.apply.mockReset()
 })
 afterEach(() => {
@@ -166,7 +169,7 @@ describe('mounted persistent maintenance worker', () => {
     expect(testCase.stream).toHaveBeenCalledTimes(2)
     await restarted.stop()
   })
-  it('keeps dreaming on the page file under RAM pressure, but refuses without swap or below the floor', async () => {
+  it('allows small work under RAM pressure with headroom, but refuses without swap or below the floor', async () => {
     const { dreamTrace, resetDreamTraceForTests } = await import('@/services/memory/dreamTrace')
     const { idleEmergencyOffload } = await import('@/services/agents/idleOffloadSetting')
     resetDreamTraceForTests()
@@ -178,7 +181,7 @@ describe('mounted persistent maintenance worker', () => {
     await run(offloaded)
     expect(testCase.stream).toHaveBeenCalledTimes(2)
     expect(fixture.writes).toHaveLength(1)
-    expect(dreamTrace.value.history[0]?.steps.some(step => step.title === 'Notfall-Auslagerung')).toBe(true)
+    expect(dreamTrace.value.history[0]?.steps.some(step => step.title === 'RAM-schonender Modus')).toBe(true)
     await offloaded.stop()
 
     fixture.journal = emptyMaintenanceJournal()

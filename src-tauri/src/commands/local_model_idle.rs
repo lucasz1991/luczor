@@ -7,6 +7,7 @@ use std::time::Duration;
 
 pub(super) enum Endpoint {
     InputTokens,
+    #[cfg(test)]
     Completion,
 }
 
@@ -14,6 +15,7 @@ impl Endpoint {
     fn path(&self) -> &'static str {
         match self {
             Self::InputTokens => "/v1/chat/completions/input_tokens",
+            #[cfg(test)]
             Self::Completion => "/v1/chat/completions",
         }
     }
