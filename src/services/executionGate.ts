@@ -23,15 +23,20 @@ function scopeKey(scope: ExecutionScope): string {
   return scope.runId ? `run:${scope.runId}` : JSON.stringify(scope)
 }
 function normalizedScope(scope: ExecutionScope): ExecutionScope {
-  const result: Record<string, string> = {}
-  for (const name of ['projectId', 'conversationId', 'runId', 'workspaceBindingId'] as const) {
-    const value = scope[name]
+  const result: Array<[string, string]> = []
+  const fields = {
+    projectId: scope.projectId,
+    conversationId: scope.conversationId,
+    runId: scope.runId,
+    workspaceBindingId: scope.workspaceBindingId,
+  }
+  for (const [name, value] of Object.entries(fields)) {
     if (value === undefined && name !== 'projectId') continue
     if (typeof value !== 'string' || !value.trim() || value.length > 512 || /[\u0000-\u001f]/u.test(value))
       throw new Error('Ungültige Auftragszuordnung.')
-    result[name] = value
+    result.push([name, value])
   }
-  return Object.freeze(result) as ExecutionScope
+  return Object.freeze(Object.fromEntries(result)) as ExecutionScope
 }
 
 /** One revocable session shared by chat, teams and signed device/workflow jobs. */
@@ -155,23 +160,56 @@ export class ExecutionGate {
 
 export const executionGate = new ExecutionGate()
 let nativeSync: Promise<unknown> = Promise.resolve()
+let nativeSyncEpoch = 0
 let initialized = false
 const invalidationListeners = new Set<() => void>()
 const registeredScopes = new Set<string>()
 
+function queueNativeSync(operation: () => Promise<unknown>): Promise<unknown> {
+  const epoch = nativeSyncEpoch
+  nativeSync = nativeSync
+    .catch(() => {})
+    .then(() => {
+      if (epoch !== nativeSyncEpoch) throw executionAbortReason('execution_session_changed')
+      return operation()
+    })
+  // Consumers still await the original rejection; avoid unhandled background promises.
+  void nativeSync.catch(() => {})
+  return nativeSync
+}
+
+function awaitNativeSync(signal: AbortSignal): Promise<unknown> {
+  const pending = nativeSync
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener('abort', abort)
+      reject(signal.reason ?? executionAbortReason('execution_session_changed'))
+    }
+    if (signal.aborted) return abort()
+    signal.addEventListener('abort', abort, { once: true })
+    pending.then(
+      value => {
+        signal.removeEventListener('abort', abort)
+        resolve(value)
+      },
+      error => {
+        signal.removeEventListener('abort', abort)
+        reject(error)
+      }
+    )
+  })
+}
+
 function syncNativeGate(): void {
   registeredScopes.clear()
   const payload = executionGate.snapshot()
-  nativeSync = nativeSync.catch(() => {}).then(() => invoke('execution_gate_update', { payload }))
-  // Consumers still await the original rejection; avoid unhandled background promises.
-  void nativeSync.catch(() => {})
+  queueNativeSync(() => invoke('execution_gate_update', { payload }))
 }
 
 /** Revoke only the matching work; UI navigation must never call global invalidation. */
 export function invalidateExecutionScope(match: Partial<ExecutionScope>, reason?: ExecutionAbortCode): void {
   for (const payload of executionGate.invalidateScope(match, reason)) {
-    nativeSync = nativeSync.catch(() => {}).then(() => invoke('execution_scope_revoke', { payload }))
-    void nativeSync.catch(() => {})
+    queueNativeSync(() => invoke('execution_scope_revoke', { payload }))
   }
 }
 
@@ -190,8 +228,7 @@ export function updateExecutionControls(controls: ExecutionControls): void {
   }
   // Mode only: the native policy follows live; registered scopes and their pinned modes stay valid.
   const payload = executionGate.snapshot()
-  nativeSync = nativeSync.catch(() => {}).then(() => invoke('execution_gate_update', { payload }))
-  void nativeSync.catch(() => {})
+  queueNativeSync(() => invoke('execution_gate_update', { payload }))
 }
 
 export function invalidateExecution(reason?: unknown): void {
@@ -209,13 +246,27 @@ export function onExecutionInvalidated(listener: () => void): () => void {
   return () => invalidationListeners.delete(listener)
 }
 
+/** Only after native workers have stopped may a hung transport queue be abandoned. */
+export function recoverExecutionAfterStop(acknowledgement: { nativeStopped: true }): void {
+  if (!acknowledgement.nativeStopped || !executionGate.snapshot().killSwitch)
+    throw new Error('Die Wiederherstellung benötigt bestätigten Stopp und aktiven Not-Aus.')
+  nativeSyncEpoch++
+  nativeSync = Promise.resolve()
+  initialized = true
+  // Keep the current session, mode and kill switch; the higher generation also
+  // prevents an already-sent stale native update from restoring an old policy.
+  executionGate.invalidate('execution_kill_switch')
+  invalidationListeners.forEach(listener => listener())
+  syncNativeGate()
+}
+
 export async function executionPayload(ticket = executionGate.capture(), mutating = true) {
   executionGate.assert(ticket, mutating)
   if (!initialized) {
     initialized = true
     syncNativeGate()
   }
-  await nativeSync
+  await awaitNativeSync(ticket.signal)
   executionGate.assert(ticket, mutating)
   const payload = {
     sessionId: ticket.sessionId,
@@ -227,16 +278,13 @@ export async function executionPayload(ticket = executionGate.capture(), mutatin
     const registration = { ...payload, ...(ticket.mode !== undefined ? { mode: ticket.mode } : {}) }
     const key = JSON.stringify(registration)
     if (!registeredScopes.has(key)) {
-      nativeSync = nativeSync
-        .catch(() => {})
-        .then(async () => {
-          executionGate.assert(ticket, mutating)
-          await invoke('execution_scope_register', { payload: registration })
-          executionGate.assert(ticket, mutating)
-          registeredScopes.add(key)
-        })
-      void nativeSync.catch(() => {})
-      await nativeSync
+      queueNativeSync(async () => {
+        executionGate.assert(ticket, mutating)
+        await invoke('execution_scope_register', { payload: registration })
+        executionGate.assert(ticket, mutating)
+        registeredScopes.add(key)
+      })
+      await awaitNativeSync(ticket.signal)
     }
   }
   executionGate.assert(ticket, mutating)

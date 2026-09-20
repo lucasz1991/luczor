@@ -7,9 +7,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs::File;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use tauri::{AppHandle, Manager};
 
 use super::ensure_main_webview;
@@ -199,9 +198,14 @@ pub async fn local_stt(
     payload: LocalSttPayload,
 ) -> Result<LocalSttResponse, String> {
     ensure_main_webview(&window)?;
-    tauri::async_runtime::spawn_blocking(move || local_stt_sync(&app, payload))
-        .await
-        .map_err(|error| structured_error("task_join", &error.to_string()))?
+    let (operation, cancellation) = super::owned_processes::Operation::begin()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
+        cancellation.check()?;
+        local_stt_sync(&app, payload)
+    })
+    .await
+    .map_err(|error| structured_error("task_join", &error.to_string()))?
 }
 
 pub(super) fn local_stt_sync(
@@ -225,18 +229,20 @@ pub(super) fn local_stt_sync(
         args.push(language.trim().to_string());
     }
     let mut command = Command::new(&runtime.paths["stt_binary"]);
-    hide_console_window(&mut command);
-    let output = command.args(args).output();
+    command.args(args);
+    let output = super::process::run_bounded_command(
+        command,
+        None,
+        std::time::Duration::from_secs(120),
+        1024 * 1024,
+    );
     let _ = std::fs::remove_file(wav);
     let output = output.map_err(|error| structured_error("stt_start", &error.to_string()))?;
-    if !output.status.success() {
-        return Err(structured_error(
-            "stt_runtime",
-            &String::from_utf8_lossy(&output.stderr),
-        ));
+    if !output.success {
+        return Err(structured_error("stt_runtime", &output.stderr));
     }
     Ok(LocalSttResponse {
-        text: filter_recognizer_output(&String::from_utf8_lossy(&output.stdout)),
+        text: filter_recognizer_output(&output.stdout),
     })
 }
 
@@ -253,9 +259,16 @@ pub async fn local_stt_rs(
     ensure_main_webview(&window)?;
     #[cfg(feature = "whisper_rs")]
     {
-        return tauri::async_runtime::spawn_blocking(move || whisper_rs_stt(&app, payload))
-            .await
-            .map_err(|error| structured_error("task_join", &error.to_string()))?;
+        let (operation, cancellation) = super::owned_processes::Operation::begin()?;
+        return tauri::async_runtime::spawn_blocking(move || {
+            let _operation = operation;
+            cancellation.check()?;
+            let result = whisper_rs_stt(&app, payload);
+            cancellation.check()?;
+            result
+        })
+        .await
+        .map_err(|error| structured_error("task_join", &error.to_string()))?;
     }
     #[cfg(not(feature = "whisper_rs"))]
     {
@@ -354,9 +367,14 @@ pub async fn local_tts(
     payload: LocalTtsPayload,
 ) -> Result<LocalTtsResponse, String> {
     ensure_main_webview(&window)?;
-    tauri::async_runtime::spawn_blocking(move || local_tts_sync(&app, payload))
-        .await
-        .map_err(|error| structured_error("task_join", &error.to_string()))?
+    let (operation, cancellation) = super::owned_processes::Operation::begin()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
+        cancellation.check()?;
+        local_tts_sync(&app, payload)
+    })
+    .await
+    .map_err(|error| structured_error("task_join", &error.to_string()))?
 }
 
 fn local_tts_sync(app: &AppHandle, payload: LocalTtsPayload) -> Result<LocalTtsResponse, String> {
@@ -385,28 +403,23 @@ fn local_tts_sync(app: &AppHandle, payload: LocalTtsPayload) -> Result<LocalTtsR
     }
 
     let mut command = Command::new(&runtime.paths["tts_binary"]);
-    hide_console_window(&mut command);
-    let mut child = command
-        .args(&args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| structured_error("tts_start", &error.to_string()))?;
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(text.as_bytes())
-            .map_err(|error| structured_error("tts_input", &error.to_string()))?;
-    }
-    let output = child
-        .wait_with_output()
-        .map_err(|error| structured_error("tts_runtime", &error.to_string()))?;
-    if !output.status.success() {
+    command.args(&args);
+    let result = super::process::run_bounded_command(
+        command,
+        Some(text.as_bytes().to_vec()),
+        std::time::Duration::from_secs(120),
+        64 * 1024,
+    );
+    let output = match result {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = std::fs::remove_file(&out);
+            return Err(structured_error("tts_runtime", &error));
+        }
+    };
+    if !output.success {
         let _ = std::fs::remove_file(&out);
-        return Err(structured_error(
-            "tts_runtime",
-            &String::from_utf8_lossy(&output.stderr),
-        ));
+        return Err(structured_error("tts_runtime", &output.stderr));
     }
     let bytes = std::fs::read(&out);
     let _ = std::fs::remove_file(out);
@@ -446,16 +459,6 @@ fn is_non_speech_recognizer_marker(value: &str) -> bool {
         .collect::<String>();
     matches!(normalized.as_str(), "blankaudio" | "music" | "musik")
 }
-
-#[cfg(windows)]
-fn hide_console_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-
-    command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-}
-
-#[cfg(not(windows))]
-fn hide_console_window(_command: &mut Command) {}
 
 fn ready_runtime(app: &AppHandle, first: &str, second: &str) -> Result<RuntimeState, String> {
     let state = read_state(app)?.ok_or_else(|| {

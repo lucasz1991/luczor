@@ -33,6 +33,9 @@ const props = withDefaults(
     mode: 'observe',
     killSwitch: false,
     tools: () => [],
+    agentStopState: undefined,
+    stopAgents: undefined,
+    resumeAgents: undefined,
   }
 )
 const emit = defineEmits<{

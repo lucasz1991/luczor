@@ -124,7 +124,8 @@ impl GateState {
                 {
                     return Ok(current.clone());
                 }
-                if next.generation == current.generation && next.kill_switch == current.kill_switch {
+                if next.generation == current.generation && next.kill_switch == current.kill_switch
+                {
                     // Only the device default mode changed. Registered scopes keep their
                     // pinned modes, so one chat's mode change never revokes another chat's run.
                     let mut updated = current.clone();
@@ -402,23 +403,30 @@ pub async fn execution_gate_update(
     payload: ExecutionPolicy,
 ) -> Result<ExecutionPolicy, String> {
     ensure_main_webview(&window)?;
-    super::owned_processes::check_policy_resume(payload.kill_switch)?;
+    let cancellation_generation = super::owned_processes::check_policy_resume(payload.kill_switch)?;
     if payload.kill_switch || payload.mode == ExecutionMode::Observe {
         super::desktop_control::stop_feedback();
     }
-    let policy = GATE.get_or_init(Mutex::default)
+    let policy = GATE
+        .get_or_init(Mutex::default)
         .lock()
         .map_err(|_| "Execution gate unavailable.")?
         .update(payload)?;
-    super::owned_processes::apply_policy(policy.kill_switch);
+    super::owned_processes::apply_policy(policy.kill_switch, cancellation_generation);
     Ok(policy)
 }
 
 pub(crate) fn stop_all() -> Result<(), String> {
-    let mut gate = GATE.get_or_init(Mutex::default).try_lock()
+    let mut gate = GATE
+        .get_or_init(Mutex::default)
+        .try_lock()
         .map_err(|_| "execution_gate_stop_pending")?;
-    if let Some(policy) = gate.policy.as_mut() { policy.kill_switch = true; }
-    for scope in gate.scopes.values_mut() { scope.revoked = true; }
+    if let Some(policy) = gate.policy.as_mut() {
+        policy.kill_switch = true;
+    }
+    for scope in gate.scopes.values_mut() {
+        scope.revoked = true;
+    }
     Ok(())
 }
 
@@ -486,8 +494,11 @@ mod tests {
         };
         gate.register_scope(registration("act-chat", Some(ExecutionMode::Act)), false)
             .unwrap();
-        gate.register_scope(registration("observe-chat", Some(ExecutionMode::Observe)), false)
-            .unwrap();
+        gate.register_scope(
+            registration("observe-chat", Some(ExecutionMode::Observe)),
+            false,
+        )
+        .unwrap();
         gate.register_scope(registration("default-chat", None), false)
             .unwrap();
         let permit = |run: &str| ExecutionPermit {
@@ -518,7 +529,10 @@ mod tests {
         assert!(gate.check(&unscoped, false, false).is_ok());
         // A pinned mode cannot be swapped underneath a registered run.
         assert!(gate
-            .register_scope(registration("act-chat", Some(ExecutionMode::Unrestricted)), false)
+            .register_scope(
+                registration("act-chat", Some(ExecutionMode::Unrestricted)),
+                false
+            )
             .is_err());
         // Scripts still require the pinned Unrestricted mode of that chat.
         assert!(gate.check(&permit("act-chat"), true, true).is_err());

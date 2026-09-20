@@ -85,6 +85,20 @@ fn sessions() -> &'static Mutex<Option<Arc<Session>>> {
     static SESSION: OnceLock<Mutex<Option<Arc<Session>>>> = OnceLock::new();
     SESSION.get_or_init(Mutex::default)
 }
+
+pub(crate) fn stop_all(app: &AppHandle) -> Result<(), String> {
+    let mut session = sessions()
+        .try_lock()
+        .map_err(|_| "workflow_browser_stop_pending")?;
+    if let Some(current) = session.as_ref() {
+        current.policy_violation.store(true, Ordering::Release);
+    }
+    if let Some(view) = app.get_webview(BROWSER_WEBVIEW_LABEL) {
+        view.close().map_err(|_| "workflow_browser_close_failed")?;
+    }
+    *session = None;
+    Ok(())
+}
 pub(crate) fn ensure_unbound() -> Result<(), String> {
     if sessions()
         .lock()
@@ -343,6 +357,7 @@ pub async fn wf_browser_action(
     payload: Guarded<WorkflowBrowserAction>,
 ) -> Result<WorkflowBrowserResult, String> {
     super::ensure_main_webview(&window)?;
+    let (_operation, _) = super::owned_processes::Operation::begin()?;
     validate(&payload.request)?;
     if capabilities()["available"] != true {
         return Err("workflow_browser_requires_windows_webview2".into());

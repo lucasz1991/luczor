@@ -337,7 +337,9 @@ pub fn wf_watch_start(
     )?;
     handles.insert(key.clone(), stopped.clone());
     let debounce = Duration::from_millis(input.debounce_ms.unwrap_or(1000).clamp(250, 30000));
+    let (operation, _) = super::owned_processes::Operation::begin()?;
     std::thread::spawn(move || {
+        let _operation = operation;
         let _watcher = watcher;
         let mut pending = BTreeMap::new();
         let mut last_event = Instant::now();

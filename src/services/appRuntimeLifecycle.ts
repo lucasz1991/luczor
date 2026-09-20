@@ -135,6 +135,7 @@ export function createAppRuntimeLifecycle(
   let statusHeartbeat: number | null = null
   let runtimeActive = false
   let runtimeReady = false
+  let lifecycleGeneration = 0
   let identityChanging = false
   let workSuspended = false
   let deviceChannelGeneration = 0
@@ -182,8 +183,10 @@ export function createAppRuntimeLifecycle(
   }
 
   async function start(): Promise<void> {
+    const generation = ++lifecycleGeneration
     runtimeActive = true
     runtimeReady = false
+    const current = () => runtimeActive && lifecycleGeneration === generation
     if (!identityListenersInstalled && typeof window !== 'undefined') {
       window.addEventListener('luczor:api-identity-changing', onIdentityChanging)
       window.addEventListener('luczor:api-identity-changed', onIdentityChanged)
@@ -196,8 +199,10 @@ export function createAppRuntimeLifecycle(
         throw new Error('Native local-model manifest boundary is unavailable.')
       }
       localBootstrapGeneration = await dependencies.beginLocalInferenceBootstrap()
+      if (!current()) return
       localManifestBoundaryReady = true
     } catch (error) {
+      if (!current()) return
       dependencies.markLocalInferenceBootstrapUnavailable?.(localBootstrapGeneration)
       dependencies.warn('[local-model] native manifest boundary unavailable', error)
     }
@@ -206,6 +211,10 @@ export function createAppRuntimeLifecycle(
     void dependencies
       .startNotificationActionListener()
       .then(stopListener => {
+        if (!current()) {
+          void stopListener()
+          return
+        }
         stopNativeNotificationActions = stopListener
       })
       .catch(error => dependencies.warn('[notifications] native action listener unavailable', error))
@@ -218,6 +227,7 @@ export function createAppRuntimeLifecycle(
 
     void dependencies.loadPlans()
     const loaded = await dependencies.loadAppState()
+    if (!current()) return
     dependencies.hydrate(loaded)
 
     dependencies.ensureDefaults()
@@ -227,9 +237,12 @@ export function createAppRuntimeLifecycle(
     // administrator-managed unrestricted policy when it is available.
     try {
       const settings = await dependencies.loadSettingsStore()
+      if (!current()) return
       const defaultMode = await settings.get<string>('default_mode')
       const persistedMode = await settings.get<string>(ACTIVE_MODE_KEY)
-      options.allowUnrestricted.value = (await settings.get<unknown>('allow_unrestricted')) === true
+      const allow = (await settings.get<unknown>('allow_unrestricted')) === true
+      if (!current()) return
+      options.allowUnrestricted.value = allow
       const restoredMode = resolveStartupMode(persistedMode, defaultMode, options.allowUnrestricted.value)
       if (restoredMode) options.mode.value = restoredMode
 
@@ -237,25 +250,28 @@ export function createAppRuntimeLifecycle(
         void (async () => {
           try {
             const bootstrap = await dependencies.bootstrap()
+            if (!current()) return
             if (dependencies.initializeLocalInference) {
               const accepted = await dependencies.initializeLocalInference(
                 bootstrap as BootstrapResponse,
                 localBootstrapGeneration
               )
-              if (!accepted) return
+              if (!accepted || !current()) return
             }
             const remoteAllow = bootstrap.runtime_settings?.settings?.allow_unrestricted
             if (remoteAllow === true || remoteAllow === false) {
               options.allowUnrestricted.value = remoteAllow
               await settings.set('allow_unrestricted', remoteAllow)
+              if (!current()) return
               if (!remoteAllow && options.mode.value === 'unrestricted') {
                 options.mode.value = 'observe'
                 await settings.set(ACTIVE_MODE_KEY, 'observe')
+                if (!current()) return
               }
               await settings.save()
             }
           } catch {
-            dependencies.markLocalInferenceBootstrapUnavailable?.(localBootstrapGeneration)
+            if (current()) dependencies.markLocalInferenceBootstrapUnavailable?.(localBootstrapGeneration)
             // No signed policy is restored from disk; routing stays blocked.
           }
         })()
@@ -263,17 +279,20 @@ export function createAppRuntimeLifecycle(
       // Local settings are optional; the in-memory defaults remain valid.
     }
 
+    if (!current()) return
     try {
       await dependencies.listenHotkey(() => {
-        void options.togglePushToTalk()
+        if (current()) void options.togglePushToTalk()
       })
     } catch (error) {
       dependencies.warn('[hotkey] listen failed:', error)
     }
 
+    if (!current()) return
     void dependencies.refreshStatus()
     void dependencies.flushMemoryOutbox?.()
     statusHeartbeat = dependencies.setStatusHeartbeat(() => {
+      if (!current()) return
       void dependencies.refreshStatus()
       // Also drives retry deadlines without requiring a new write or restart.
       void dependencies.flushMemoryOutbox?.()
@@ -284,6 +303,7 @@ export function createAppRuntimeLifecycle(
   }
 
   function stop(): void {
+    lifecycleGeneration++
     runtimeActive = false
     runtimeReady = false
     identityChanging = false
@@ -295,7 +315,9 @@ export function createAppRuntimeLifecycle(
     invalidateDeviceChannel()
     dependencies.removeNotificationActionListener(options.openNotificationCenter)
     if (statusHeartbeat !== null) dependencies.clearStatusHeartbeat(statusHeartbeat)
+    statusHeartbeat = null
     void stopNativeNotificationActions?.()
+    stopNativeNotificationActions = null
   }
 
   return {

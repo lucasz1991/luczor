@@ -62,6 +62,9 @@ const props = withDefaults(
     initialTab: 'server',
     mode: 'observe',
     killSwitch: false,
+    agentStopState: undefined,
+    stopAgents: undefined,
+    resumeAgents: undefined,
   }
 )
 const emit = defineEmits<{ (e: 'update:open', v: boolean): void }>()

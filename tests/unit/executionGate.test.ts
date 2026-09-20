@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
+import { invoke } from '@tauri-apps/api/core'
 import { ExecutionGate } from '@/services/executionGate'
 
 describe('shared execution session', () => {
@@ -70,22 +71,22 @@ describe('shared execution session', () => {
   it('revokes a changed workspace without stopping another project or conversation', () => {
     const gate = new ExecutionGate()
     gate.update({ mode: 'act', killSwitch: false, scope: 'account-1' })
-    const a = gate.capture(undefined, {
+    const ticketA = gate.capture(undefined, {
       projectId: 'a',
       runId: 'a-1',
       conversationId: 'chat-a',
       workspaceBindingId: 'wa',
     })
-    const b = gate.capture(undefined, {
+    const ticketB = gate.capture(undefined, {
       projectId: 'b',
       runId: 'b-1',
       conversationId: 'chat-b',
       workspaceBindingId: 'wb',
     })
     expect(gate.invalidateScope({ projectId: 'a', workspaceBindingId: 'wa' })).toHaveLength(1)
-    expect(a.signal.aborted).toBe(true)
-    expect(() => gate.assert(a, true)).toThrow()
-    expect(() => gate.assert(b, true)).not.toThrow()
+    expect(ticketA.signal.aborted).toBe(true)
+    expect(() => gate.assert(ticketA, true)).toThrow()
+    expect(() => gate.assert(ticketB, true)).not.toThrow()
   })
 
   it('keeps a run permanently bound to its originating conversation', () => {
@@ -99,15 +100,79 @@ describe('shared execution session', () => {
   it('stopping one run leaves another in the same project valid while global stop revokes both', () => {
     const gate = new ExecutionGate()
     gate.update({ mode: 'act', killSwitch: false, scope: 'account-1' })
-    const a = gate.capture(undefined, { projectId: 'a', runId: 'run-a' })
-    const b = gate.capture(undefined, { projectId: 'a', runId: 'run-b' })
+    const ticketA = gate.capture(undefined, { projectId: 'a', runId: 'run-a' })
+    const ticketB = gate.capture(undefined, { projectId: 'a', runId: 'run-b' })
     gate.invalidateScope({ runId: 'run-a' })
-    expect(a.signal.aborted).toBe(true)
-    expect(() => gate.assert(b, true)).not.toThrow()
+    expect(ticketA.signal.aborted).toBe(true)
+    expect(() => gate.assert(ticketB, true)).not.toThrow()
     const renewed = gate.capture(undefined, { projectId: 'a', runId: 'run-a' })
     expect(renewed.scopeGeneration).toBe(2)
     gate.invalidate()
-    expect(b.signal.aborted).toBe(true)
+    expect(ticketB.signal.aborted).toBe(true)
     expect(renewed.signal.aborted).toBe(true)
+  })
+})
+
+describe('native execution synchronization recovery', () => {
+  it('recovers a hung policy sync, rejects waiting work and never sends abandoned queued policies', async () => {
+    vi.resetModules()
+    const gate = await import('@/services/executionGate')
+    let finishOld!: () => void
+    const stuck = new Promise<void>(resolve => {
+      finishOld = resolve
+    })
+    const native = vi.mocked(invoke).mockReset().mockResolvedValue(undefined)
+    native.mockImplementationOnce(() => stuck)
+    gate.updateExecutionControls({ mode: 'act', killSwitch: false, scope: 'account' })
+    const ticket = gate.executionGate.capture()
+    const waiting = gate.executionPayload(ticket).catch(error => error)
+    await vi.waitFor(() => expect(native).toHaveBeenCalledOnce())
+    expect(() => gate.recoverExecutionAfterStop({ nativeStopped: true })).toThrow('Not-Aus')
+    gate.updateExecutionControls({ mode: 'act', killSwitch: true, scope: 'account' })
+    expect(await waiting).toMatchObject({ name: 'AbortError' })
+    const before = gate.executionGate.snapshot()
+    gate.recoverExecutionAfterStop({ nativeStopped: true })
+    const recovered = gate.executionGate.snapshot()
+    expect(recovered).toEqual({ ...before, generation: before.generation + 1 })
+    await vi.waitFor(() => expect(native).toHaveBeenCalledTimes(2))
+    expect(native.mock.calls[1]).toEqual(['execution_gate_update', { payload: recovered }])
+    await expect(gate.executionPayload()).rejects.toThrow('Not-Aus')
+    gate.updateExecutionControls({ mode: 'act', killSwitch: false, scope: 'account' })
+    await expect(gate.executionPayload()).resolves.toMatchObject({ generation: recovered.generation + 1 })
+    const callCount = native.mock.calls.length
+    finishOld()
+    for (let index = 0; index < 12; index++) await Promise.resolve()
+    expect(native).toHaveBeenCalledTimes(callCount)
+    expect(ticket.signal.aborted).toBe(true)
+  })
+
+  it('cancels a hung scope registration and fences its late result while fresh scoped work resumes', async () => {
+    vi.resetModules()
+    const gate = await import('@/services/executionGate')
+    const native = vi.mocked(invoke).mockReset().mockResolvedValue(undefined)
+    gate.updateExecutionControls({ mode: 'observe', killSwitch: false, scope: 'account' })
+    await gate.executionPayload(undefined, false)
+    let finishOld!: () => void
+    const stuck = new Promise<void>(resolve => {
+      finishOld = resolve
+    })
+    native.mockImplementationOnce(() => stuck)
+    const old = gate.executionGate.capture(undefined, { projectId: 'project', runId: 'old' }, 'act')
+    const waiting = gate.executionPayload(old).catch(error => error)
+    await vi.waitFor(() => expect(native.mock.calls.at(-1)?.[0]).toBe('execution_scope_register'))
+    gate.invalidateExecutionScope({ runId: 'old' })
+    expect(await waiting).toMatchObject({ name: 'AbortError' })
+    gate.updateExecutionControls({ mode: 'observe', killSwitch: true, scope: 'account' })
+    gate.recoverExecutionAfterStop({ nativeStopped: true })
+    gate.updateExecutionControls({ mode: 'observe', killSwitch: false, scope: 'account' })
+    const fresh = gate.executionGate.capture(undefined, { projectId: 'project', runId: 'fresh' }, 'act')
+    await expect(gate.executionPayload(fresh)).resolves.toMatchObject({ scope: fresh.scope })
+    await expect(gate.executionPayload()).rejects.toThrow('Beobachten')
+    finishOld()
+    for (let index = 0; index < 12; index++) await Promise.resolve()
+    expect(native.mock.calls.filter(([command]) => command === 'execution_scope_revoke')).toHaveLength(0)
+    expect(native.mock.calls.filter(([command]) => command === 'execution_scope_register')).toHaveLength(2)
+    await expect(gate.executionPayload(fresh)).resolves.toMatchObject({ scope: fresh.scope })
+    expect(native.mock.calls.filter(([command]) => command === 'execution_scope_register')).toHaveLength(2)
   })
 })

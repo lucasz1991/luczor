@@ -91,6 +91,37 @@ function createHarness(remoteAllow: boolean | undefined = true) {
 }
 
 describe('app runtime lifecycle', () => {
+  it('does not revive startup after quit interrupts hydration or a late notification subscription', async () => {
+    const harness = createHarness()
+    const hydration = deferred<AppState>()
+    const notification = deferred<() => Promise<void>>()
+    vi.mocked(harness.dependencies.loadAppState).mockReturnValue(hydration.promise)
+    vi.mocked(harness.dependencies.startNotificationActionListener).mockReturnValue(notification.promise)
+    const lifecycle = createAppRuntimeLifecycle(
+      {
+        mode: ref('observe'),
+        allowUnrestricted: ref(false),
+        getActiveProjectId: () => 'project-1',
+        openProject: vi.fn(),
+        openNotificationCenter: vi.fn(),
+        togglePushToTalk: vi.fn(),
+      },
+      harness.dependencies
+    )
+    const started = lifecycle.start()
+    await vi.waitFor(() => expect(harness.dependencies.loadAppState).toHaveBeenCalledOnce())
+    lifecycle.stop()
+    hydration.resolve({ version: 1 } as AppState)
+    notification.resolve(harness.stopNotifications)
+    await started
+    await Promise.resolve()
+    expect(harness.stopNotifications).toHaveBeenCalledOnce()
+    expect(harness.dependencies.hydrate).not.toHaveBeenCalled()
+    expect(harness.dependencies.listenHotkey).not.toHaveBeenCalled()
+    expect(harness.dependencies.setStatusHeartbeat).not.toHaveBeenCalled()
+    expect(harness.dependencies.startDeviceJobChannel).not.toHaveBeenCalled()
+  })
+
   it('keeps device work suspended through late startup until explicitly resumed without rehydrating', async () => {
     const harness = createHarness()
     const hydration = deferred<AppState>()

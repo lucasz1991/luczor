@@ -6,9 +6,9 @@ describe('shared run resources', () => {
     const coordinator = new RunResourceCoordinator()
     const oldRelease = await coordinator.acquire(['desktop'])
     const queued = coordinator.acquire(['desktop'])
-    const rejected = expect(queued).rejects.toThrow('global stop')
+    const rejected = queued.catch(error => error)
     const generation = coordinator.cancelPending(new Error('global stop'))
-    await rejected
+    expect(await rejected).toMatchObject({ message: 'global stop' })
     expect(coordinator.snapshot()).toEqual({ occupied: ['desktop'], waiting: 0 })
     expect(coordinator.resumeAfterStop()).toBe(false)
     expect(coordinator.recoverStopped({ generation: generation - 1, nativeStopped: true })).toBe(0)

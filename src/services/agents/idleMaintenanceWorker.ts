@@ -140,6 +140,7 @@ export function createMaintenanceWorker(
   /** Permission to continue below the normal RAM reserve; not a measurement of actual OS paging. */
   let offloading = false
   let lastFailure = ''
+  let recoveryEpoch = 0
   const failureCode = (error: unknown) => {
     const detailed = localFailureTraceCode(error)
     if (detailed) return detailed
@@ -435,6 +436,7 @@ export function createMaintenanceWorker(
         const snapshot = await workList(current.principalId, signal, true)
         signal.throwIfAborted()
         const job = await luczorMemory.updateMaintenance(current.principalId, journal => {
+          signal.throwIfAborted()
           reconcileMaintenanceJobs(
             journal,
             snapshot.work.map(({ material: _material, ...item }) => item),
@@ -478,6 +480,7 @@ export function createMaintenanceWorker(
           }
           return choice
         })
+        signal.throwIfAborted()
         if (!job) {
           recordDreamSkip('no_work')
           return null
@@ -513,12 +516,13 @@ export function createMaintenanceWorker(
         try {
           await assertCurrent(job, signal)
         } catch (error) {
-          lastFailure = failureCode(error)
+          if (!signal.aborted) lastFailure = failureCode(error)
           throw error
         }
         return deps.resources
           .runBackground(async lease => {
             const status = await deps.status()
+            signal.throwIfAborted()
             recordDreamStep('preparing', 'Modell vorbereiten')
             maintenanceProgress.value = {
               ...maintenanceProgress.value,
@@ -526,6 +530,7 @@ export function createMaintenanceWorker(
               projectId: job.projectId ?? '',
             }
             const snapshot = await luczorMemory.maintenanceSnapshot(job.principalId)
+            signal.throwIfAborted()
             // Clicking "Jetzt träumen" is explicit consent to start the installed model for this pass.
             const modelId =
               status.state === 'ready' && status.modelId
@@ -535,15 +540,18 @@ export function createMaintenanceWorker(
                 : snapshot.journal.consent?.installedModelStart || job.manual
                   ? await deps.prepare(signal)
                   : ''
+            signal.throwIfAborted()
             if (!modelId) throw new Error('installed_model_required')
             work.modelId = modelId
             await luczorMemory.updateMaintenance(job.principalId, journal => {
+              signal.throwIfAborted()
               const entry = journal.jobs.find(item => item.id === job.key && item.revision === job.fingerprint)
               if (!entry) throw new Error('stale_job')
               entry.modelId = modelId
               entry.device = 'local'
               entry.reservationId = lease?.leaseId
             })
+            signal.throwIfAborted()
             recordDreamModel(modelId)
             recordDreamStep('generating', 'Entwurf erzeugen', modelId)
             maintenanceProgress.value = { ...maintenanceProgress.value, modelId, stage: 'generating' }
@@ -608,6 +616,7 @@ export function createMaintenanceWorker(
               // is searched without increasing chat recall/importance counters.
               await assertCurrent(job, signal)
               const fresh = await luczorMemory.maintenanceSnapshot(job.principalId)
+              signal.throwIfAborted()
               const project = (context.projects?.() ?? [context.project()!]).find(item => item?.id === job.projectId)
               if (job.projectId && !project) throw new Error('project_unavailable')
               const added = selectMaintenanceContext({
@@ -726,6 +735,7 @@ export function createMaintenanceWorker(
               )
               recordDreamStep('verifying', 'Prüfung bestanden')
             } catch (error) {
+              signal.throwIfAborted()
               work.reviewFailed = true
               recordDreamStep('verifying', 'Prüfung abgelehnt', failureCode(error))
               throw error
@@ -782,6 +792,8 @@ export function createMaintenanceWorker(
         }
       },
       async settled(job, success, interrupted) {
+        const epoch = recoveryEpoch
+        const reviewFailed = selected.get(job.key)?.reviewFailed
         const deferred = !success && !!idleWaitReason(lastFailure)
         const metadataOptOut =
           !success &&
@@ -792,17 +804,21 @@ export function createMaintenanceWorker(
         lastFailure = ''
         if (!success)
           await luczorMemory.updateMaintenance(job.principalId, journal => {
+            if (epoch !== recoveryEpoch) throw new DOMException('Recovered owner', 'AbortError')
             failMaintenanceJob(journal, job.key, job.fingerprint, interrupted, Date.now())
-            if (
-              !interrupted &&
-              job.task !== 'metadata' &&
-              (job.task === 'memory' || selected.get(job.key)?.reviewFailed) &&
-              journal.quality
-            )
+            if (!interrupted && job.task !== 'metadata' && (job.task === 'memory' || reviewFailed) && journal.quality)
               journal.quality = { ...journal.quality, passed: false, reason: 'review_failure' }
           })
+        if (epoch !== recoveryEpoch) return
         selected.delete(job.key)
         maintenanceProgress.value = { ...maintenanceProgress.value, stage: interrupted ? 'paused' : 'idle' }
+      },
+      recovered() {
+        recoveryEpoch++
+        selected.clear()
+        lastFailure = ''
+        endDreamRun('interrupted', 'global_stop')
+        maintenanceProgress.value = { ...maintenanceProgress.value, stage: 'paused' }
       },
     },
     { successfulIntervalMs: 1000, timeoutMs: 480_000 }

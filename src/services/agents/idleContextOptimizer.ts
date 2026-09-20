@@ -37,6 +37,7 @@ export type IdleContextOptimizerDependencies = {
   /** Must bind writes to job.principalId and preserve existing facts/project summaries. */
   commitCandidate(job: IdleOptimizationJob, content: string, signal: AbortSignal): Promise<void>
   settled?(job: IdleOptimizationJob, success: boolean, interrupted: boolean): Promise<void>
+  recovered?(): void
   now?(): number
 }
 
@@ -182,6 +183,7 @@ export class IdleContextOptimizer {
     this.lastActivity = this.now()
     this.earliestCycle = 0
     this.publish({ enabled: false, phase: 'stopped', task: null, reason: 'disabled', foregroundJobs: 0, manual: false })
+    this.dependencies.recovered?.()
   }
 
   /**
@@ -418,8 +420,7 @@ export class IdleContextOptimizer {
         (!selectedJob && this.state.reason === 'no_context' && this.dependencies.hasPendingDiscovery?.())
           ? (this.options.successfulIntervalMs ?? this.options.intervalMs)
           : this.options.intervalMs
-      if (this.active?.controller === controller)
-        this.earliestCycle = Math.max(this.earliestCycle, this.now() + delay)
+      if (this.active?.controller === controller) this.earliestCycle = Math.max(this.earliestCycle, this.now() + delay)
     }
   }
 }

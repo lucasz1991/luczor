@@ -22,7 +22,8 @@ describe('persistent chat run owner', () => {
   it('bounds a stuck worker stop and ignores late completion after native-confirmed recovery', async () => {
     vi.useFakeTimers()
     try {
-      const manager = createChatRunManager(createChatRunJournal(false))
+      const journal = createChatRunJournal(false)
+      const manager = createChatRunManager(journal)
       const oldWork = deferred()
       let signal!: AbortSignal
       const old = manager.submit({ ...input('one'), runId: 'old' }, async handle => {
@@ -39,6 +40,8 @@ describe('persistent chat run owner', () => {
       expect(manager.recoverStopped({ generation: generation - 1, nativeStopped: true })).toBe(0)
       expect(manager.recoverStopped({ generation, nativeStopped: true })).toBe(1)
       await old
+      await vi.advanceTimersByTimeAsync(1)
+      expect((await journal.list('person')).find(run => run.runId === 'old')?.state).toBe('cancelled')
       expect(manager.resumeAfterStop()).toBe(true)
       const freshWork = deferred()
       const start = vi.fn(async () => freshWork.promise)
@@ -249,6 +252,27 @@ describe('persistent chat run owner', () => {
         meta: { runId: 'previous', isLoading: true, activity: createChatActivity(1) },
       },
     ]
+    const cancelledState = structuredClone(state)
+    const cancelledTools = cancelledState.pending.toolCallsByProject.project!
+    const completedTool = {
+      ...cancelledTools[0]!,
+      id: 'completed-tool',
+      status: 'executed' as const,
+    }
+    cancelledTools.push(completedTool)
+    expect(
+      reconcileRecoveredChatRuns(
+        cancelledState,
+        manager.records.value.map(run => ({ ...run, state: 'cancelled' }))
+      )
+    ).toBe(3)
+    expect(cancelledTools[0]?.status).toBe('canceled')
+    expect(cancelledTools[1]).toEqual(completedTool)
+    expect(cancelledState.messages[0]).toMatchObject({
+      content: 'Preserved partial answer',
+      meta: { isLoading: false, activity: { status: 'canceled' } },
+    })
+    expect(cancelledState.conversations?.[0]?.autonomousGoal?.active).toBe(false)
     expect(reconcileRecoveredChatRuns(state, manager.records.value)).toBe(3)
     expect(state.conversations[0]?.autonomousGoal).toMatchObject({
       active: false,

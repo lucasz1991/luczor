@@ -41,7 +41,12 @@ it('retains the original cleanup scope when a rebound workspace attempts to reus
 it('clears native-confirmed ownership without letting a late cleanup forget a new session', async () => {
   retainWorkflowResources(scope, config)
   let finish!: () => void
-  mock.invoke.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+  mock.invoke.mockImplementationOnce(
+    () =>
+      new Promise<void>(resolve => {
+        finish = resolve
+      })
+  )
   const old = releaseAllWorkflowResources()
   recoverWorkflowResourcesAfterStop()
   retainWorkflowResources(scope, config)

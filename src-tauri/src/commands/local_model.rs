@@ -1183,7 +1183,9 @@ pub async fn local_model_prepare(
         )?;
         return tauri::async_runtime::spawn_blocking(move || {
             let _operation = operation;
-            if cancellation.check().is_err() { cancel.store(true, Ordering::Release); }
+            if cancellation.check().is_err() {
+                cancel.store(true, Ordering::Release);
+            }
             finish_prepare_release(
                 &app,
                 &operation_id,
@@ -1242,8 +1244,8 @@ pub async fn local_model_infer(
         cancellation.check()?;
         infer_blocking(&app, request, on_event)
     })
-        .await
-        .map_err(|error| error.to_string())?
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -1456,8 +1458,12 @@ pub async fn local_model_stop(
 }
 
 pub(crate) fn signal_stop_all() -> Result<(), String> {
-    let guard = state().try_lock().map_err(|_| "local_runtime_stop_pending")?;
-    if let Some(cancel) = guard.cancel.as_ref() { cancel.store(true, Ordering::SeqCst); }
+    let guard = state()
+        .try_lock()
+        .map_err(|_| "local_runtime_stop_pending")?;
+    if let Some(cancel) = guard.cancel.as_ref() {
+        cancel.store(true, Ordering::SeqCst);
+    }
     Ok(())
 }
 
@@ -1465,6 +1471,19 @@ pub(crate) fn shutdown_all() -> Result<bool, String> {
     let (mut runtime, active) = if let Ok(mut guard) = state().try_lock() {
         if let Some(cancel) = guard.cancel.as_ref() {
             cancel.store(true, Ordering::SeqCst);
+        }
+        if let Some(child) = guard
+            .runtime
+            .as_mut()
+            .and_then(|runtime| runtime.child.as_mut())
+        {
+            if !child
+                .try_wait()
+                .map_err(|_| "local_runtime_status_failed")?
+                .is_some()
+            {
+                return Ok(false);
+            }
         }
         (guard.runtime.take(), guard.active_request_id.is_some())
     } else {
@@ -1476,6 +1495,26 @@ pub(crate) fn shutdown_all() -> Result<bool, String> {
         runtime.stop();
     }
     Ok(!active)
+}
+
+pub(crate) fn finish_stop_bookkeeping() -> Result<(), String> {
+    let mut guard = state()
+        .try_lock()
+        .map_err(|_| "local_runtime_stop_pending")?;
+    if guard.active_request_id.is_some()
+        || guard.runtime.is_some()
+        || guard.resource_system_check_id.is_some()
+    {
+        return Err("local_runtime_stop_pending".into());
+    }
+    guard.resource_work_leases.clear();
+    guard.readiness.clear();
+    guard.active_reasoning = None;
+    guard.cancel = None;
+    guard.cooldown_until_ms.clear();
+    guard.failures.clear();
+    guard.last_error = None;
+    Ok(())
 }
 
 fn verify_envelope_with_trust(
@@ -5236,7 +5275,7 @@ fn attach_process_lifetime_guard(child: &Child) -> Result<ProcessLifetimeGuard, 
         let guard = ProcessLifetimeGuard {
             job: super::owned_processes::WindowsJob::register(handle as isize)?,
         };
-        super::codex::resume_suspended_child(child.id())?;
+        super::codex::resume_suspended_child(child)?;
         Ok(guard)
     }
 }
@@ -6480,10 +6519,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn windows_job_guard_kills_the_runtime_tree_when_closed() {
-        let mut child = Command::new("cmd.exe")
-            .args(["/D", "/S", "/C", "ping 127.0.0.1 -n 30 >NUL"])
-            .spawn()
-            .unwrap();
+        let mut command = Command::new("cmd.exe");
+        command.args(["/D", "/S", "/C", "ping 127.0.0.1 -n 30 >NUL"]);
+        super::configure_process(&mut command);
+        let mut child = command.spawn().unwrap();
         let guard = attach_process_lifetime_guard(&child).unwrap();
         drop(guard);
         let deadline = Instant::now() + Duration::from_secs(5);

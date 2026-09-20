@@ -536,19 +536,20 @@ export class AgentOrchestrator {
         })
       }
     } finally {
-      if (job.detached) return
-      job.executing = false
-      job.drain()
-      this.clearApprovalTimer(job)
-      job.prompt = ''
-      job.resumeThreadId = undefined
-      if (job.discard) {
-        this.jobs.delete(job.metadata.id)
+      if (!job.detached) {
+        job.executing = false
+        job.drain()
+        this.clearApprovalTimer(job)
+        job.prompt = ''
+        job.resumeThreadId = undefined
+        if (job.discard) {
+          this.jobs.delete(job.metadata.id)
+          this.notify()
+        }
+        this.prune()
         this.notify()
+        this.schedule()
       }
-      this.prune()
-      this.notify()
-      this.schedule()
     }
   }
 

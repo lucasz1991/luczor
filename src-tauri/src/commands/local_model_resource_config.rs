@@ -498,7 +498,10 @@ pub async fn local_model_resource_system_check(
     cleanup: Option<bool>,
 ) -> Result<ResourceHardwareCheck, String> {
     ensure_main_webview(&window)?;
+    let (operation, cancellation) = super::super::owned_processes::Operation::begin()?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
+        cancellation.check()?;
         if cleanup != Some(true) {
             return Ok(ResourceHardwareCheck {
                 hardware: Some(collect_hardware_snapshot(Some(&app))?),
@@ -549,6 +552,7 @@ pub fn local_model_begin_resource_work(
     lease_id: String,
 ) -> Result<ResourceWork, String> {
     ensure_main_webview(&window)?;
+    let cancellation = super::super::owned_processes::CancellationToken::capture()?;
     if !safe_id(&lease_id) {
         return Err("resource_work_lease_invalid".into());
     }
@@ -560,6 +564,7 @@ pub fn local_model_begin_resource_work(
     if guard.resource_settings.state.pending {
         return Err("resource_config_pending".into());
     }
+    cancellation.check()?;
     if guard.resource_work_leases.len() >= 128
         || !guard.resource_work_leases.insert(lease_id.clone())
     {

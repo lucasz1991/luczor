@@ -10,6 +10,31 @@ function deferred<T = void>() {
 }
 
 describe('resident model selection switch', () => {
+  it('retires a hung switch after native stop without late readiness replacing a fresh selection', async () => {
+    const oldReady = deferred<string>()
+    const newReady = deferred<string>()
+    const prepare = vi.fn().mockReturnValueOnce(oldReady.promise).mockReturnValueOnce(newReady.promise)
+    const controller = new LocalModelSwitch({
+      exclusive: async operation => {
+        await Promise.resolve()
+        await operation()
+      },
+      unload: async () => {},
+      prepare,
+    })
+    const old = controller.request('old', () => {})
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce())
+    controller.recoverAfterStop()
+    expect(controller.snapshot()).toMatchObject({ phase: 'idle', selectedModelId: 'old' })
+    const fresh = controller.request('new', () => {})
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(2))
+    oldReady.resolve('old')
+    await old
+    expect(controller.snapshot()).toMatchObject({ phase: 'loading', selectedModelId: 'new' })
+    newReady.resolve('new')
+    await fresh
+    expect(controller.snapshot()).toMatchObject({ phase: 'ready', activeModelId: 'new' })
+  })
   it('starts a selection that arrives after draining but before the exclusive barrier settles', async () => {
     const drained = deferred()
     const releaseBarrier = deferred()

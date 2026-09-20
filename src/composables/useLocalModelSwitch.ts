@@ -37,5 +37,5 @@ export function useLocalModelSwitch() {
   // Persistence publishes only after the device store has confirmed saving.
   watch(() => modelUsageSettings.value.localModelId, request, { flush: 'sync' })
   onBeforeUnmount(unsubscribe)
-  return { state, pending, retry: request }
+  return { state, pending, retry: request, recoverAfterStop: () => controller.recoverAfterStop() }
 }

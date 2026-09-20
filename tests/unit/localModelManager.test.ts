@@ -69,8 +69,14 @@ describe('LocalModelManager runtime safety', () => {
     const model = await release()
     const finishes: Array<(result: InferenceResult) => void> = []
     const transport: LocalRuntimeTransport = {
-      stream: vi.fn(() => new Promise(resolve => { finishes.push(resolve) })),
-      cancel: vi.fn(async () => undefined), stop: vi.fn(async () => undefined),
+      stream: vi.fn(
+        () =>
+          new Promise<InferenceResult>(resolve => {
+            finishes.push(resolve)
+          })
+      ),
+      cancel: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
     }
     const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
     const oldGateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))

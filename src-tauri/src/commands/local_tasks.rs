@@ -153,7 +153,9 @@ pub async fn wf_scoped_file_read(
 ) -> Result<FileReadResult, String> {
     ensure_main_webview(&window)?;
     let gate = admit(&payload.execution, false)?;
+    let (operation, _) = super::owned_processes::Operation::begin()?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
         use std::io::Read;
         let request = payload.request;
         if request.content.is_some() {
@@ -190,7 +192,8 @@ pub async fn wf_scoped_file_write(
 ) -> Result<Value, String> {
     ensure_main_webview(&window)?;
     let gate = admit(&payload.execution, true)?;
-    tauri::async_runtime::spawn_blocking(move||{use std::io::Write;let request=payload.request;let content=request.content.ok_or("workflow_file_content_missing")?;if content.len()>MAX_FILE_BYTES{return Err("workflow_file_size_exceeded".into());}request.scope.check(&app)?;let root=PathBuf::from(&request.scope.expected_root_path);let _workspace=super::codex::acquire_workspace_lease(&root,true)?;let path=safe_path(&root,&request.path,true)?;
+    let (operation, _) = super::owned_processes::Operation::begin()?;
+    tauri::async_runtime::spawn_blocking(move||{let _operation=operation;gate.check()?;use std::io::Write;let request=payload.request;let content=request.content.ok_or("workflow_file_content_missing")?;if content.len()>MAX_FILE_BYTES{return Err("workflow_file_size_exceeded".into());}request.scope.check(&app)?;let root=PathBuf::from(&request.scope.expected_root_path);let _workspace=super::codex::acquire_workspace_lease(&root,true)?;let path=safe_path(&root,&request.path,true)?;
         if let Some(expected)=request.expected_sha256 {
             use std::io::Read;
             let mut previous=std::fs::File::open(&path).map_err(|_|"workflow_file_revision_conflict")?;
@@ -210,6 +213,7 @@ pub async fn wf_file_read(
     payload: Guarded<FileReadPayload>,
 ) -> Result<FileReadResult, String> {
     ensure_main_webview(&window)?;
+    let (_operation, _) = super::owned_processes::Operation::begin()?;
     let gate = admit(&payload.execution, false)?;
     let payload = payload.request;
     let root = files_root(&app, false)?;
@@ -259,6 +263,7 @@ pub async fn wf_file_write(
     payload: Guarded<FileWritePayload>,
 ) -> Result<FileWriteResult, String> {
     ensure_main_webview(&window)?;
+    let (_operation, _) = super::owned_processes::Operation::begin()?;
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     if payload.content.len() > MAX_FILE_BYTES {
@@ -492,7 +497,9 @@ pub async fn wf_run_script(
     );
 
     // Run the potentially long subprocess off the async runtime.
+    let (operation, _) = super::owned_processes::Operation::begin()?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
         gate.check()?;
         let check = || {
             gate.check()?;

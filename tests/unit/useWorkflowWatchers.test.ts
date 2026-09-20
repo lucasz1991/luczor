@@ -36,9 +36,10 @@ import { useWorkflowWatchers } from '@/composables/useWorkflowWatchers'
 import { workflowChanged } from '@/services/workflows/presentation'
 
 let unmount: (() => void) | undefined
+let binding: ReturnType<typeof useWorkflowWatchers>
 function setup() {
   const scope = effectScope()
-  scope.run(useWorkflowWatchers)
+  binding = scope.run(useWorkflowWatchers)!
   let disposed = false
   unmount = () => {
     if (disposed) return
@@ -66,6 +67,31 @@ afterEach(async () => {
 })
 
 describe('workflow watcher application lifecycle', () => {
+  it('releases a stuck setup after native stop and does not restart while the execution gate remains stopped', async () => {
+    let finish!: (stop: () => void) => void
+    fixture.start.mockReturnValueOnce(
+      new Promise<() => void>(resolve => {
+        finish = resolve
+      })
+    )
+    setup()
+    await flushPromises()
+    expect(fixture.start).toHaveBeenCalledOnce()
+    fixture.controls.killSwitch = true
+    fixture.invalidations.forEach(invalidate => invalidate())
+    binding.recoverAfterStop()
+    await flushPromises()
+    expect(fixture.start).toHaveBeenCalledOnce()
+    fixture.controls.killSwitch = false
+    fixture.invalidations.forEach(invalidate => invalidate())
+    await flushPromises()
+    expect(fixture.start).toHaveBeenCalledTimes(2)
+    const staleStop = vi.fn()
+    finish(staleStop)
+    await flushPromises()
+    expect(staleStop).toHaveBeenCalledOnce()
+    expect(fixture.start).toHaveBeenCalledTimes(2)
+  })
   it('holds watchers stopped throughout identity changes, including a failed save', async () => {
     setup()
     await flushPromises()

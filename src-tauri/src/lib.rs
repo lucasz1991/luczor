@@ -58,6 +58,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_quit_commit,
+            commands::agent_shutdown::app_stop_agents,
             commands::execution::execution_gate_update,
             commands::execution::execution_scope_register,
             commands::execution::execution_scope_revoke,
@@ -222,15 +223,20 @@ pub fn run() {
         })
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
-    app.run(|_app, event| {
-        if matches!(
-            event,
-            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-        ) {
-            WORKER_TICK_STOP.store(true, std::sync::atomic::Ordering::Release);
-            commands::local_model::shutdown_all();
-            _app.state::<commands::codex::CodexJobs>().cancel_all();
-            _app.state::<commands::claude::ClaudeJobs>().cancel_all();
+    app.run(|app, event| {
+        match event {
+            tauri::RunEvent::ExitRequested { api, .. }
+                if !QUIT_COMMITTED.load(std::sync::atomic::Ordering::Acquire) =>
+            {
+                api.prevent_exit();
+                request_app_quit(app.clone());
+            }
+            tauri::RunEvent::Exit => {
+                WORKER_TICK_STOP.store(true, std::sync::atomic::Ordering::Release);
+                // The event loop is ending: never wait for WebView work here.
+                let _ = commands::agent_shutdown::stop_all(app, true, false);
+            }
+            _ => {}
         }
     });
 }
@@ -317,6 +323,7 @@ fn setup_global_shortcut(app: &tauri::App) -> Result<(), Box<dyn std::error::Err
 
 // Native timing is independent of background WebView timer throttling.
 static WORKER_TICK_STOP: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static QUIT_COMMITTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static QUIT_REQUEST: std::sync::OnceLock<std::sync::Mutex<Option<String>>> =
     std::sync::OnceLock::new();
 #[derive(serde::Deserialize)]
@@ -325,13 +332,15 @@ struct QuitCommit {
     request_id: String,
 }
 #[tauri::command]
-fn app_quit_commit(
+async fn app_quit_commit(
     app: tauri::AppHandle,
     window: commands::CallerWebview,
     payload: QuitCommit,
 ) -> Result<(), String> {
     commands::ensure_main_webview(&window)?;
-    finish_app_quit(&app, &payload.request_id)
+    tauri::async_runtime::spawn_blocking(move || finish_app_quit(&app, &payload.request_id))
+        .await
+        .map_err(|_| "app_quit_failed".to_string())?
 }
 fn finish_app_quit(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     let mut pending = QUIT_REQUEST
@@ -344,9 +353,8 @@ fn finish_app_quit(app: &tauri::AppHandle, id: &str) -> Result<(), String> {
     *pending = None;
     drop(pending);
     WORKER_TICK_STOP.store(true, std::sync::atomic::Ordering::Release);
-    app.state::<commands::codex::CodexJobs>().cancel_all();
-    app.state::<commands::claude::ClaudeJobs>().cancel_all();
-    commands::local_model::shutdown_all();
+    let _ = commands::agent_shutdown::stop_all(app, true, true);
+    QUIT_COMMITTED.store(true, std::sync::atomic::Ordering::Release);
     app.exit(0);
     Ok(())
 }

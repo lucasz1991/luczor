@@ -92,7 +92,11 @@ pub(crate) fn run_bounded_command_scoped(
     #[cfg(target_os = "linux")]
     let _lifetime = match super::owned_processes::LinuxProcess::attach(&child) {
         Ok(guard) => guard,
-        Err(error) => { terminate_process_tree(&mut child); let _ = child.wait(); return Err(error); }
+        Err(error) => {
+            terminate_process_tree(&mut child);
+            let _ = child.wait();
+            return Err(error);
+        }
     };
     {
         if let Err(error) = check() {

@@ -145,6 +145,16 @@ afterEach(async () => {
 })
 
 describe('idle optimizer lifecycle and invalidation', () => {
+  it('keeps a global stop through delayed mounting until an explicit resume', async () => {
+    const harness = setup()
+    await harness.binding.stop()
+    await harness.mount()
+    expect(fixture.start).not.toHaveBeenCalled()
+    harness.binding.recoverAfterStop()
+    expect(fixture.recover).toHaveBeenCalledOnce()
+    harness.binding.start()
+    expect(fixture.start).toHaveBeenCalledOnce()
+  })
   it('invalidates memory during generation and preserves its own candidate commit', async () => {
     const harness = setup()
     await harness.mount()

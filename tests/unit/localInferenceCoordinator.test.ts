@@ -1033,7 +1033,9 @@ describe('local inference coordinator and approved external gateway', () => {
     harness.prepareModel.mockImplementationOnce(() => pending.promise)
     await harness.coordinator.initialize(bootstrap())
     const input: TurnRoutingInput = {
-      projectId: 'project-1', taskType: 'chat.general', contextEgress: 'local_only',
+      projectId: 'project-1',
+      taskType: 'chat.general',
+      contextEgress: 'local_only',
       routingSettings: { preference: 'local_only' },
     }
     const old = harness.coordinator.resolveTurn(input).catch(error => error)

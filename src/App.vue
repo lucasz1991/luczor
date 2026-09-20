@@ -65,6 +65,7 @@ import {
   executionGate,
   invalidateExecution,
   invalidateExecutionScope,
+  recoverExecutionAfterStop,
   updateExecutionControls,
   type ExecutionTicket,
 } from '@/services/executionGate'
@@ -496,6 +497,7 @@ onMounted(() => {
   window.addEventListener('luczor:voice-stop', stopAllVoice)
   window.addEventListener('luczor:voice-settings-changed', stopVoiceInputForSettings)
   return appRuntimeLifecycle.start().then(async () => {
+    if (appUnmounted || appQuitting.value) return
     try {
       const principalId = await resolveWorkspacePrincipalId()
       await chatRuns.recover(principalId)
@@ -2217,6 +2219,7 @@ async function executeChatTurn(
       })),
       budget: { maxChars: 6_000, maxFragments: 12, maxFragmentChars: 1_200 },
     })
+    executionGate.assert(turnExecution)
     lastRunContext.value = {
       kind: 'run',
       at: Date.now(),
@@ -2837,6 +2840,7 @@ const globalAgentStop = createAgentStopController({
     ]),
   stopNative: () => invoke<NativeAgentStopResult>('app_stop_agents'),
   recover: async () => {
+    recoverExecutionAfterStop({ nativeStopped: true })
     chatRuns.recoverStopped({ generation: stopChatGeneration, nativeStopped: true })
     agentHub.recoverStopped({ generation: stopHubGeneration, nativeStopped: true })
     agentTeams.recoverStopped({ generation: stopTeamGeneration, nativeStopped: true })
@@ -2845,6 +2849,7 @@ const globalAgentStop = createAgentStopController({
     idleOptimization.recoverAfterStop()
     localResources.recoverAfterStop()
     localInferenceCoordinator.recoverAfterStop()
+    localModelSwitch.recoverAfterStop()
     recoverWorkflowResourcesAfterStop()
     workflowExecutionLedger.recoverAfterStop()
     workflowWatchers.recoverAfterStop()

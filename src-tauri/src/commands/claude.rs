@@ -364,11 +364,13 @@ pub async fn claude_job_start(
     std::thread::spawn(move || {
         let _operation = operation;
         let _lease = lease;
-        let result = cancellation.check().and_then(|_| run_worker(&app, &runtime, &job, &input));
+        let result = cancellation
+            .check()
+            .and_then(|_| run_worker(&app, &runtime, &job, &input));
         if let Err(error) = result {
             finish(
                 &job,
-                if job.cancel.load(Ordering::Acquire) {
+                if job.cancel.load(Ordering::Acquire) || cancellation.check().is_err() {
                     "cancelled"
                 } else {
                     "failed"

@@ -62,6 +62,36 @@ afterEach(() => {
 })
 
 describe('agent team DAG scheduler', () => {
+  it('keeps completed teams with hung resource releases visible through pruning and principal cleanup', async () => {
+    vi.useFakeTimers()
+    const pendingRelease = deferred<void>()
+    const teams = new AgentTeamOrchestrator({
+      maxRuns: 1,
+      executor: async () => ({ output: 'Completed work' }),
+      acquireResources: async () => () => pendingRelease.promise,
+    })
+    const ids: string[] = []
+    for (let index = 0; index < 2; index++) {
+      const run = teams.prepare(twoRoots(), { project: PROJECT, objective: 'Finish work.', approvalMode: 'team' })
+      ids.push(run.id)
+      teams.approveRun(run.id)
+      await flush()
+      expect(teams.getRun(run.id)?.status).toBe('completed')
+    }
+    teams.clearPrincipal(PROJECT.principalId)
+    const generation = teams.requestStopAll()
+    const waiting = teams.waitForStop(10)
+    await vi.advanceTimersByTimeAsync(10)
+    expect(await waiting).toEqual({ settled: false, pendingIds: ids })
+    expect(teams.resumeAfterStop()).toBe(false)
+    teams.recoverStopped({ generation, nativeStopped: true })
+    expect(await teams.waitForStop()).toEqual({ settled: true, pendingIds: [] })
+    expect(teams.resumeAfterStop()).toBe(true)
+    expect(teams.getRun(ids[1]!)?.status).toBe('completed')
+    pendingRelease.resolve()
+    await flush()
+    teams.dispose()
+  })
   it('recovers cancelling team nodes only after native stop and ignores late executor output and resource cleanup', async () => {
     vi.useFakeTimers()
     const pending = deferred<AgentRunResult>()
@@ -74,7 +104,10 @@ describe('agent team DAG scheduler', () => {
       },
       acquireResources: async () => release,
     })
-    const definition = { ...twoRoots(), nodes: twoRoots().nodes.slice(0, 1) }
+    const definition = {
+      ...twoRoots(),
+      nodes: twoRoots().nodes.map((node, index) => (index ? { ...node, dependencies: ['one'] } : node)),
+    }
     const run = teams.prepare(definition, {
       project: PROJECT,
       objective: 'Perform current task.',
@@ -97,7 +130,13 @@ describe('agent team DAG scheduler', () => {
     requests[0]!.onOutput('late old output')
     pending.resolve({ output: 'late completion' })
     await flush()
-    expect(teams.getRun(run.id)).toMatchObject({ status: 'cancelled', nodes: [{ status: 'cancelled', output: '' }] })
+    expect(teams.getRun(run.id)).toMatchObject({
+      status: 'cancelled',
+      nodes: [
+        { status: 'cancelled', output: '' },
+        { status: 'cancelled', output: '' },
+      ],
+    })
     expect(release).not.toHaveBeenCalled()
     expect(await teams.waitForStop()).toEqual({ settled: true, pendingIds: [] })
     teams.dispose()

@@ -56,6 +56,7 @@ pub(super) fn capture(
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
+    let (_operation, cancellation) = super::owned_processes::Operation::begin()?;
     if node_id == 0 || serial == Some(0) {
         return Err("desktop_portal_capture_node_invalid".into());
     }
@@ -87,13 +88,22 @@ pub(super) fn capture(
             Ok(())
         });
     }
-    let child = command.spawn().map_err(|error| {
+    cancellation.check()?;
+    let mut child = command.spawn().map_err(|error| {
         if error.kind() == std::io::ErrorKind::NotFound {
             "desktop_portal_capture_helper_unavailable".to_string()
         } else {
             "desktop_portal_capture_start_failed".to_string()
         }
     })?;
+    let _lifetime = match super::owned_processes::LinuxProcess::attach(&child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
     drop(fd);
     collect_child(child, deadline)
 }

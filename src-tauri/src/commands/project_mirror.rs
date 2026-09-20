@@ -1605,8 +1605,10 @@ pub fn project_mirror_watch_start(
     watcher
         .watch(&root, notify::RecursiveMode::Recursive)
         .map_err(|_| "mirror_watch_unavailable")?;
+    let (operation, _) = super::owned_processes::Operation::begin()?;
     watches.insert(key.clone(), MirrorWatch { stop });
     std::thread::spawn(move || {
+        let _operation = operation;
         let _watcher = watcher;
         let mut sequence = 0_u64;
         while !thread_stop.load(Ordering::Acquire) {

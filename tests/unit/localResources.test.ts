@@ -175,7 +175,12 @@ describe('device resource workflow barrier', () => {
     const { controller, deps, nativeLeases } = setup()
     let finish!: (lease: { release(): void }) => void
     const oldRelease = vi.fn()
-    const releaseAdmission = controller.setForegroundAdmission(() => new Promise(resolve => { finish = resolve }))
+    const releaseAdmission = controller.setForegroundAdmission(
+      () =>
+        new Promise(resolve => {
+          finish = resolve
+        })
+    )
     const old = controller.acquire().catch(error => error)
     await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
     expect(controller.hasWork()).toBe(true)

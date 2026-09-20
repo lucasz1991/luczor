@@ -15,7 +15,12 @@ describe('durable workflow execution', () => {
   it('keeps uncertain effect markers while releasing stopped locks and rejects late completion', async () => {
     const { ledger, records } = fixture()
     let finish!: (value: Record<string, unknown>) => void
-    const effect = vi.fn(() => new Promise<Record<string, unknown>>(resolve => { finish = resolve }))
+    const effect = vi.fn(
+      () =>
+        new Promise<Record<string, unknown>>(resolve => {
+          finish = resolve
+        })
+    )
     const old = ledger.execute('account', 'execution', {}, effect).catch(error => error)
     await vi.waitFor(() => expect(effect).toHaveBeenCalledOnce())
     ledger.recoverAfterStop()

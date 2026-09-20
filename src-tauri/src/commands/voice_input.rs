@@ -104,9 +104,14 @@ pub async fn voice_input_stt(
     {
         return Err("Ungültige oder zu lange Sprachaufnahme.".into());
     }
-    tauri::async_runtime::spawn_blocking(move || super::voice::local_stt_sync(&app, payload))
-        .await
-        .map_err(|error| error.to_string())?
+    let (operation, cancellation) = super::owned_processes::Operation::begin()?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
+        cancellation.check()?;
+        super::voice::local_stt_sync(&app, payload)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]

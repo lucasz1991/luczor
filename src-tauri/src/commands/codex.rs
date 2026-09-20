@@ -462,9 +462,19 @@ pub async fn codex_job_start(
     thread::spawn(move || {
         let _operation = operation;
         let _lease = lease;
-        let result = cancellation.check().and_then(|_| run_job(&app, &database, &executable, &job, &payload));
+        let result = cancellation
+            .check()
+            .and_then(|_| run_job(&app, &database, &executable, &job, &payload));
         if let Err(error) = result {
-            finish(&job, if job.cancel.load(Ordering::Acquire) || cancellation.check().is_err() { "cancelled" } else { "failed" }, Some(error));
+            finish(
+                &job,
+                if job.cancel.load(Ordering::Acquire) || cancellation.check().is_err() {
+                    "cancelled"
+                } else {
+                    "failed"
+                },
+                Some(error),
+            );
         }
     });
     Ok(initial)
@@ -1825,6 +1835,34 @@ mod tests {
         }
         assert_eq!(child.wait().unwrap().code(), Some(7));
         drop(guard);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn explicit_job_termination_stops_only_its_owned_fixture() {
+        fn fixture() -> (Child, LifetimeGuard) {
+            let mut command = Command::new("cmd.exe");
+            command
+                .args(["/D", "/S", "/C", "ping 127.0.0.1 -n 20 >NUL"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            configure_process(&mut command);
+            let child = command.spawn().unwrap();
+            let guard = LifetimeGuard::attach(&child).unwrap();
+            (child, guard)
+        }
+        let (mut owned, guard) = fixture();
+        let (mut other, other_guard) = fixture();
+        guard._job.terminate().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(4);
+        while owned.try_wait().unwrap().is_none() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(other.try_wait().unwrap().is_none());
+        drop(other_guard);
+        other.wait().unwrap();
     }
 
     #[cfg(windows)]

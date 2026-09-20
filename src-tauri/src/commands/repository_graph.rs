@@ -214,13 +214,17 @@ pub async fn local_graph_index(
     request_id: Option<String>,
 ) -> Result<GraphIndexResult, String> {
     ensure_main_webview(&window)?;
+    let (operation, token) = super::owned_processes::Operation::begin()?;
+    let request_id = Some(request_id.unwrap_or_else(|| Uuid::new_v4().to_string()));
     let cancellation = request_id
         .as_ref()
         .map(|id| index_cancellation(&principal_id, &project_id, id))
         .transpose()?;
     tauri::async_runtime::spawn_blocking(move || {
-        let result =
-            index_repository_cancellable(&app, &principal_id, &project_id, cancellation.as_deref());
+        let _operation = operation;
+        let result = token.check().and_then(|_| {
+            index_repository_cancellable(&app, &principal_id, &project_id, cancellation.as_deref())
+        });
         if let Some(id) = request_id {
             if let Ok(mut entries) = INDEX_CANCELLATIONS.get_or_init(Default::default).lock() {
                 entries.remove(&(principal_id, project_id, id));
@@ -230,6 +234,17 @@ pub async fn local_graph_index(
     })
     .await
     .map_err(|error| format!("Repository indexing task failed: {error}"))?
+}
+
+pub(crate) fn stop_all() -> Result<(), String> {
+    let entries = INDEX_CANCELLATIONS
+        .get_or_init(Default::default)
+        .try_lock()
+        .map_err(|_| "repository_index_stop_pending")?;
+    for cancel in entries.values() {
+        cancel.store(true, Ordering::Release);
+    }
+    Ok(())
 }
 
 #[tauri::command]

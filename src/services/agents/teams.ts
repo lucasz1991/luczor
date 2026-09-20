@@ -534,7 +534,8 @@ export class AgentTeamOrchestrator {
       if (run.project.principalId !== principalId) continue
       for (const node of run.nodes.values()) node.output = ''
       this.cancelRun(run.id)
-      if (![...run.nodes.values()].some(node => node.executing)) this.runs.delete(run.id)
+      if (![...run.nodes.values()].some(node => node.executing) && (!run.resourceLease || run.resourcesSettled))
+        this.runs.delete(run.id)
     }
     this.notify()
   }
@@ -916,6 +917,7 @@ export class AgentTeamOrchestrator {
           await release?.()
           run.resourcesSettled = true
           run.drain()
+          this.prune()
           this.notify()
         })
         .catch(() => {
@@ -1028,7 +1030,9 @@ export class AgentTeamOrchestrator {
   }
 
   private prune(): void {
-    const terminal = [...this.runs.values()].filter(run => ['completed', 'failed', 'cancelled'].includes(run.status))
+    const terminal = [...this.runs.values()].filter(
+      run => ['completed', 'failed', 'cancelled'].includes(run.status) && (!run.resourceLease || run.resourcesSettled)
+    )
     const excess = terminal.length - this.maxRuns
     if (excess <= 0) return
     for (const run of terminal.slice(0, excess)) {

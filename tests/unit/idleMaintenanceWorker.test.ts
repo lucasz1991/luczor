@@ -10,6 +10,8 @@ const fixture = vi.hoisted(() => ({
   writes: [] as string[],
   apply: vi.fn(),
   records: [] as MemoryRecord[],
+  beforeUpdate: null as (() => Promise<void>) | null,
+  afterUpdate: null as (() => Promise<void>) | null,
 }))
 vi.mock('@/services/executionGate', () => ({
   executionGate: { capture: () => ({ sessionId: 'session', generation: 1 }), assert: () => undefined },
@@ -20,8 +22,16 @@ vi.mock('@/services/memory/luczorMemory', () => ({
       journal: structuredClone(fixture.journal),
       records: structuredClone(fixture.records),
     }),
-    updateMaintenance: async (_id: string, update: (journal: MaintenanceJournal) => unknown) =>
-      update(fixture.journal!),
+    updateMaintenance: async (_id: string, update: (journal: MaintenanceJournal) => unknown) => {
+      const before = fixture.beforeUpdate
+      fixture.beforeUpdate = null
+      await before?.()
+      const result = update(fixture.journal!)
+      const after = fixture.afterUpdate
+      fixture.afterUpdate = null
+      await after?.()
+      return result
+    },
     applyMaintenance: fixture.apply,
   },
 }))
@@ -86,6 +96,8 @@ beforeEach(() => {
   fixture.journal = emptyMaintenanceJournal()
   fixture.writes = []
   fixture.records = []
+  fixture.beforeUpdate = null
+  fixture.afterUpdate = null
   fixture.apply.mockReset()
 })
 afterEach(() => {
@@ -99,6 +111,94 @@ async function run(optimizer: ReturnType<typeof createMaintenanceWorker>) {
   await vi.waitFor(() => expect(['cooldown', 'paused']).toContain(optimizer.snapshot().phase))
 }
 describe('mounted persistent maintenance worker', () => {
+  it.each(['beforeUpdate', 'afterUpdate'] as const)(
+    'fences a late %s transaction from replacing the recovered dream state',
+    async checkpoint => {
+      const { beginDreamRun, dreamTrace, resetDreamTraceForTests } = await import('@/services/memory/dreamTrace')
+      resetDreamTraceForTests()
+      const testCase = setup()
+      let release!: () => void
+      const blocked = new Promise<void>(resolve => {
+        release = resolve
+      })
+      const entered = vi.fn(() => blocked)
+      if (checkpoint === 'beforeUpdate') fixture.beforeUpdate = entered
+      else fixture.afterUpdate = entered
+      const worker = testCase.create()
+      worker.start()
+      worker.requestNow()
+      await vi.advanceTimersByTimeAsync(2)
+      await vi.waitFor(() => expect(entered).toHaveBeenCalledOnce())
+      const stopping = worker.stop()
+      worker.recoverAfterStop()
+      beginDreamRun({ jobKey: 'new-owner', task: 'context', scope: 'project', projectId: 'p1', sources: [] })
+      const current = dreamTrace.value.current
+      const progress = { ...maintenanceProgress.value, queued: 123 }
+      maintenanceProgress.value = progress
+      const journal = structuredClone(fixture.journal)
+      release()
+      await stopping
+      expect(dreamTrace.value.current).toBe(current)
+      expect(maintenanceProgress.value).toBe(progress)
+      expect(fixture.journal).toEqual(journal)
+      expect(testCase.stream).not.toHaveBeenCalled()
+      expect(fixture.apply).not.toHaveBeenCalled()
+      resetDreamTraceForTests()
+    }
+  )
+
+  it.each(['beforeUpdate', 'afterUpdate'] as const)(
+    'does not let late settled %s cleanup change a newer job',
+    async checkpoint => {
+      const { dreamTrace, resetDreamTraceForTests } = await import('@/services/memory/dreamTrace')
+      resetDreamTraceForTests()
+      const testCase = setup()
+      let release!: () => void
+      const blocked = new Promise<void>(resolve => {
+        release = resolve
+      })
+      const entered = vi.fn(() => blocked)
+      testCase.stream.mockImplementationOnce(async () => {
+        if (checkpoint === 'beforeUpdate') fixture.beforeUpdate = entered
+        else fixture.afterUpdate = entered
+        throw new Error('runtime_generation_failed')
+      })
+      const worker = testCase.create()
+      worker.start()
+      worker.requestNow()
+      await vi.advanceTimersByTimeAsync(2)
+      await vi.waitFor(() => expect(entered).toHaveBeenCalledOnce())
+      const stopping = worker.stop()
+      worker.recoverAfterStop()
+      testCase.project.summary = 'Nur lesen. Neue bestätigte Quelle.'
+      let releaseNew!: () => void
+      const newBlocked = new Promise<void>(resolve => {
+        releaseNew = resolve
+      })
+      const normalStream = testCase.stream.getMockImplementation()!
+      testCase.stream.mockImplementationOnce(async request => {
+        await newBlocked
+        return normalStream(request)
+      })
+      worker.start()
+      worker.requestNow()
+      await vi.advanceTimersByTimeAsync(2)
+      await vi.waitFor(() => expect(testCase.stream).toHaveBeenCalledTimes(2))
+      const current = dreamTrace.value.current
+      const progress = maintenanceProgress.value
+      const journal = structuredClone(fixture.journal)
+      release()
+      await stopping
+      expect(dreamTrace.value.current).toBe(current)
+      expect(maintenanceProgress.value).toBe(progress)
+      expect(fixture.journal).toEqual(journal)
+      releaseNew()
+      await vi.waitFor(() => expect(fixture.apply).toHaveBeenCalledOnce())
+      await worker.stop()
+      resetDreamTraceForTests()
+    }
+  )
+
   function candidate(): MemoryRecord {
     const record: MemoryRecord = {
       id: 'ai-candidate',

@@ -28,8 +28,9 @@ export const chatRunIsLive = (run: ChatRunRecord): boolean => liveStates.has(run
 
 /** UI recovery cannot re-approve an old call or keep a dead process spinning. */
 export function reconcileRecoveredChatRuns(state: AppState, records: readonly ChatRunRecord[]): number {
-  const interrupted = new Set(records.filter(run => run.state === 'interrupted').map(run => run.runId))
-  const interruptedChats = new Set(records.filter(run => run.state === 'interrupted').map(run => run.conversationId))
+  const stopped = records.filter(run => run.state === 'interrupted' || run.state === 'cancelled')
+  const interrupted = new Set(stopped.map(run => run.runId))
+  const interruptedChats = new Set(stopped.map(run => run.conversationId))
   let changed = 0
   for (const chat of state.conversations ?? []) {
     const goal = chat.autonomousGoal
@@ -356,6 +357,17 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
         if (job) {
           job.detached = true
           publish({ ...job.record, state: 'cancelled' })
+          // Do not queue behind a hung journal write. CAS against the last
+          // acknowledged revision preserves newer disk state if another write won.
+          void journal
+            .write({ ...job.record, state: 'cancelled' }, job.record.revision)
+            .then(record => {
+              if (!jobs.has(runId) && records.value.some(item => item.runId === runId && item.state === 'cancelled'))
+                publish(record)
+            })
+            .catch(() => {
+              // Startup recovery still interrupts a surviving live journal record.
+            })
           job.resolve(undefined)
           job.drain()
           jobs.delete(runId)

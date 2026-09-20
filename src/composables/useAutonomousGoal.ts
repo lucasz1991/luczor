@@ -175,7 +175,10 @@ export function useAutonomousGoal(input: {
   const pauseAll = async (reason = 'Alle Agenten gestoppt. Ziel bei Bedarf erneut aktivieren.') => {
     identityGeneration++
     const chats = state.conversations ?? []
-    controller.cancelAll(chats.map(chat => chat.id), reason)
+    controller.cancelAll(
+      chats.map(chat => chat.id),
+      reason
+    )
     // Persist logical cancellation before waiting for any worker. A stuck model cannot keep a goal active on restart.
     for (const chat of chats) {
       const goal = chat.autonomousGoal

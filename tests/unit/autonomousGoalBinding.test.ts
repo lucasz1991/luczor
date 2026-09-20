@@ -70,7 +70,14 @@ const setup = (
 describe('device-local goal binding', () => {
   it('persists a global pause without draining a stuck goal and ignores its late completion after recovery', async () => {
     let finish!: (result: unknown) => void
-    const run = vi.fn().mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+    const run = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise(resolve => {
+            finish = resolve
+          })
+      )
       .mockResolvedValue({ status: 'blocked', summary: 'New explicit run' })
     const { binding } = setup(run)
     await binding.save('Keep original progress')
@@ -96,8 +103,14 @@ describe('device-local goal binding', () => {
     const { binding, run } = setup()
     chatState('first-chat').goal = 'Recovered saved goal'
     chatState('first-chat').autonomousGoal = {
-      text: 'Recovered saved goal', active: true, status: 'waiting', revision: 7,
-      iterations: 2, phase: 'work', progress: 'Original checkpoint', updatedAt: 1,
+      text: 'Recovered saved goal',
+      active: true,
+      status: 'waiting',
+      revision: 7,
+      iterations: 2,
+      phase: 'work',
+      progress: 'Original checkpoint',
+      updatedAt: 1,
     }
     await binding.pauseAll('App neu gestartet. Ziel erneut aktivieren.')
     await nextTick()

@@ -50,8 +50,10 @@ pub async fn wf_http_request(
     // Even GET requests can disclose information or trigger poorly designed
     // endpoints; workflow networking always needs mutation admission.
     let gate = admit(&payload.execution, true)?;
+    let (operation, _) = super::owned_processes::Operation::begin()?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
         gate.check()?;
         let result = perform_request(payload, &gate)?;
         gate.check()?;

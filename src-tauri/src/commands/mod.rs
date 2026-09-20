@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod agent_effort;
+pub(crate) mod agent_shutdown;
 pub mod browser;
 pub mod browser_panel;
 pub mod claude;
@@ -44,8 +45,8 @@ pub mod workflow_http;
 pub mod workflow_image;
 pub mod workflow_watch;
 
-mod process;
 pub(crate) mod owned_processes;
+mod process;
 
 /// Command identity must follow the calling webview, even in a split window.
 /// Tauri's WebviewWindow extractor rejects multi-webview windows.

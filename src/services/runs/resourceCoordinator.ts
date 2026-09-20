@@ -73,7 +73,7 @@ export class RunResourceCoordinator {
     if (this.admissionPaused) return
     const earlier = new Set<string>()
     for (let index = 0; index < this.queue.length;) {
-      const item = this.queue[index]!
+      const item = this.queue.at(index)!
       if (item.keys.some(key => (this.occupied.get(key) ?? 0) >= (key === 'script' ? 2 : 1) || earlier.has(key))) {
         item.keys.forEach(key => earlier.add(key))
         index++

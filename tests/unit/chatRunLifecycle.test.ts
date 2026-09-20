@@ -108,13 +108,15 @@ describe('captured chat cancellation', () => {
     const start = app.indexOf('appRuntimeLifecycle.start().then(')
     const source = app.slice(start, app.indexOf('\n})\nonBeforeUnmount', start))
     const recovery = deferred(),
-      saved = deferred()
+      saved = deferred(),
+      paused = deferred()
     const context = {
       appRuntimeLifecycle: { start: async () => undefined },
       resolveWorkspacePrincipalId: async () => 'person',
       chatRuns: { recover: () => recovery.promise, records: { value: [] } },
       reconcileRecoveredChatRuns: vi.fn(() => 1),
       saveAppStateStrict: vi.fn(() => saved.promise),
+      autonomousGoal: { pauseAll: vi.fn(() => paused.promise) },
       state: {},
       appReady: { value: false },
       appInitialized: { value: false },
@@ -131,6 +133,10 @@ describe('captured chat cancellation', () => {
     expect(context.appReady.value).toBe(false)
     expect(context.appInitialized.value).toBe(false)
     saved.resolve()
+    await vi.waitFor(() => expect(context.autonomousGoal.pauseAll).toHaveBeenCalledOnce())
+    expect(context.appReady.value).toBe(false)
+    expect(context.appInitialized.value).toBe(false)
+    paused.resolve()
     await result
     expect(context.appReady.value).toBe(true)
     expect(context.appInitialized.value).toBe(true)

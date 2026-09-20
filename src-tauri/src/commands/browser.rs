@@ -57,6 +57,18 @@ fn action_permits() -> &'static Mutex<HashMap<String, ExecutionLease>> {
     static ACTIONS: OnceLock<Mutex<HashMap<String, ExecutionLease>>> = OnceLock::new();
     ACTIONS.get_or_init(Mutex::default)
 }
+
+pub(crate) fn stop_all() -> Result<(), String> {
+    pending()
+        .try_lock()
+        .map_err(|_| "browser_requests_stop_pending")?
+        .clear();
+    action_permits()
+        .try_lock()
+        .map_err(|_| "browser_permits_stop_pending")?
+        .clear();
+    Ok(())
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BrowserAdmissionPayload {
@@ -117,6 +129,7 @@ pub async fn browser_open(
     payload: Guarded<BrowserOpenPayload>,
 ) -> Result<BrowserOkResult, String> {
     ensure_main_webview(&window)?;
+    let (_operation, _) = super::owned_processes::Operation::begin()?;
     super::workflow_browser::ensure_unbound()?;
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;

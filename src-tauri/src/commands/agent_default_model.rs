@@ -78,9 +78,14 @@ pub async fn resolve_for_window(
     payload: DefaultModelRequest,
 ) -> Result<DefaultModelResolution, String> {
     crate::commands::ensure_main_webview(&window)?;
+    let (operation, cancellation) = crate::commands::owned_processes::Operation::begin()?;
     check_binding(&app, &payload)?;
     tauri::async_runtime::spawn_blocking(move || {
-        let check = || check_binding(&app, &payload).map(|_| ());
+        let _operation = operation;
+        let check = || {
+            cancellation.check()?;
+            check_binding(&app, &payload).map(|_| ())
+        };
         let result = resolve(&app, &payload, None, &check);
         check()?;
         // Never forward CLI stderr, settings, token fields, file paths or protocol errors.
