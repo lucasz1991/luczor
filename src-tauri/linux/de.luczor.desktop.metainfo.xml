@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>de.luczor.desktop</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Luczor</name>
+  <url type="homepage">https://luczor.follow-flow.de</url>
+  <summary>Work on projects with an AI assistant</summary>
+  <summary xml:lang="de">Mit einem KI-Assistenten an Projekten arbeiten</summary>
+  <description>
+    <p>Luczor brings project conversations, local models and tools into one desktop application.</p>
+    <p>Review proposed actions, keep project context and manage ongoing tasks from your desktop.</p>
+    <p xml:lang="de">Luczor verbindet Projektgespräche, lokale Modelle und Werkzeuge in einer Desktop-Anwendung.</p>
+    <p xml:lang="de">Prüfe vorgeschlagene Aktionen, behalte den Projektkontext und verwalte laufende Aufgaben.</p>
+  </description>
+  <launchable type="desktop-id">Luczor.desktop</launchable>
+  <icon type="stock">tauri-app</icon>
+  <categories>
+    <category>Utility</category>
+  </categories>
+  <provides>
+    <binary>tauri-app</binary>
+  </provides>
+</component>

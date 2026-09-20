@@ -58,6 +58,79 @@ for missing dependencies. A raw `dpkg -i` does not download dependencies; use ap
 as shown above. These dependencies also apply when updating an existing installation
 with a newly built package. Existing binaries are not updated by source changes.
 
+### Uninstalling on Debian/Ubuntu
+
+Close Luczor through the tray menu **Beenden** first. Window-X only hides the app;
+removing a package does not close an already running process.
+
+New DEBs include **Luczor deinstallieren** in the applications menu (English:
+**Uninstall Luczor**). It opens a terminal, displays the exact package and asks
+for the normal administrator authorization and APT confirmation. A cancelled
+confirmation, authorization failure or package-manager lock does not report a
+successful uninstall. No package locks are forcibly removed. AppStream metadata
+also identifies the app to compatible software managers; available GUI actions
+depend on the Ubuntu software manager and its DEB support.
+
+Existing installations can be removed without updating first:
+
+```sh
+sudo apt remove luczor
+```
+
+The production **package name is `luczor`**, even though its executable is named
+`tauri-app`. The separately installed test application uses a different package:
+
+```sh
+sudo apt remove luczor-local-test
+```
+
+Choose the intended variant. Neither uninstall launcher removes the other one.
+To inspect both installed identities first:
+
+```sh
+dpkg-query -W -f='${Package}\t${Status}\n' luczor luczor-local-test
+```
+
+One missing variant can make that query return a nonzero exit code; it does not
+mean that the other displayed installed package is missing.
+
+The source-checkout helper provides the same removal flow for old DEBs:
+
+```sh
+bash scripts/uninstall-linux.sh --check
+bash scripts/uninstall-linux.sh --package luczor
+# For the separate test build:
+bash scripts/uninstall-linux.sh --package luczor-local-test
+```
+
+`--check` is read-only. Installed helpers live at
+`/usr/share/de.luczor.desktop/uninstall.sh` and
+`/usr/share/de.luczor.desktop.local-test/uninstall.sh`; they are invoked with
+`/bin/bash`, so executable-bit differences from Windows checkouts cannot break
+the launcher. The helper removes through APT, never by deleting system files
+itself. It does not purge data or run `autoremove`.
+
+Chats, memories, settings, keyring entries, downloaded models and external
+project/model directories remain intact. If autostart was enabled, disable it
+in Luczor before uninstalling or remove the Luczor entry in the desktop's
+Startup Applications settings afterward. A personal autostart entry is separate
+from the package-owned application-menu launcher.
+
+An AppImage or a `pnpm tauri dev` checkout has no DEB installation to remove.
+The helper reports that the selected package is absent and leaves those files
+alone. Stop the development process or portable app and manage its exact file
+through the file manager. Do not uninstall shared Node/Rust/system dependencies
+just to remove a development checkout.
+
+The package workflow now tests artifact identity, installation and removal,
+including preservation of synthetic user data. Its removal checker defaults to
+read-only artifact inspection; destructive verification requires an explicit
+disposable Linux CI mode. This is not a command to run against a personal
+installation.
+
+References: [Ubuntu package management](https://documentation.ubuntu.com/server/how-to/software/package-management/)
+and [Tauri Debian file packaging](https://v2.tauri.app/distribute/debian/).
+
 For portable Linux packages, build on the
 oldest supported distribution (the workflow uses Ubuntu 22.04). A package built
 locally on Ubuntu 26.04 is only a local test artifact, not proof of compatibility

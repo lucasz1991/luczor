@@ -14,6 +14,18 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/share/de.luczor.desktop/uninstall.sh": null,
+          "/usr/share/applications/de.luczor.desktop.uninstall.desktop": null,
+          "/usr/share/metainfo/de.luczor.desktop.metainfo.xml": null,
+          "/usr/share/de.luczor.desktop.local-test/uninstall.sh": "../scripts/uninstall-linux.sh",
+          "/usr/share/applications/de.luczor.desktop.local-test.uninstall.desktop": "linux/de.luczor.desktop.local-test.uninstall.desktop",
+          "/usr/share/metainfo/de.luczor.desktop.local-test.metainfo.xml": "linux/de.luczor.desktop.local-test.metainfo.xml"
+        }
+      }
+    },
     "windows": {
       "nsis": {
         "installMode": "currentUser"

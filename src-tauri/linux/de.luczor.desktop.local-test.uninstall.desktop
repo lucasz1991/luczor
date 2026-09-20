@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Luczor Local Test deinstallieren
+Name[en]=Uninstall Luczor Local Test
+Comment=Luczor Local Test über die Paketverwaltung entfernen; persönliche Daten bleiben erhalten
+Comment[en]=Remove Luczor Local Test with the package manager; keep personal data
+Exec=/bin/bash /usr/share/de.luczor.desktop.local-test/uninstall.sh --package luczor-local-test --desktop
+Icon=luczor-local-test
+Terminal=true
+StartupNotify=false
+Categories=System;
+X-AppStream-Ignore=true

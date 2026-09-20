@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Luczor deinstallieren
+Name[en]=Uninstall Luczor
+Comment=Luczor über die Paketverwaltung entfernen; persönliche Daten bleiben erhalten
+Comment[en]=Remove Luczor with the package manager; keep personal data
+Exec=/bin/bash /usr/share/de.luczor.desktop/uninstall.sh --package luczor --desktop
+Icon=tauri-app
+Terminal=true
+StartupNotify=false
+Categories=System;
+X-AppStream-Ignore=true

@@ -4,6 +4,11 @@
     "targets": ["deb"],
     "linux": {
       "deb": {
+        "files": {
+          "/usr/share/de.luczor.desktop/uninstall.sh": "../scripts/uninstall-linux.sh",
+          "/usr/share/applications/de.luczor.desktop.uninstall.desktop": "linux/de.luczor.desktop.uninstall.desktop",
+          "/usr/share/metainfo/de.luczor.desktop.metainfo.xml": "linux/de.luczor.desktop.metainfo.xml"
+        },
         "recommends": ["gnome-keyring", "xdg-desktop-portal"],
         "depends": [
           "libgbm1",
