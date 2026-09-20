@@ -45,6 +45,7 @@ pub mod workflow_image;
 pub mod workflow_watch;
 
 mod process;
+pub(crate) mod owned_processes;
 
 /// Command identity must follow the calling webview, even in a split window.
 /// Tauri's WebviewWindow extractor rejects multi-webview windows.

@@ -65,6 +65,35 @@ const successfulResult: InferenceResult = {
 }
 
 describe('LocalModelManager runtime safety', () => {
+  it('opens a fresh slot after native-confirmed stop and ignores old completion without releasing the new slot', async () => {
+    const model = await release()
+    const finishes: Array<(result: InferenceResult) => void> = []
+    const transport: LocalRuntimeTransport = {
+      stream: vi.fn(() => new Promise(resolve => { finishes.push(resolve) })),
+      cancel: vi.fn(async () => undefined), stop: vi.fn(async () => undefined),
+    }
+    const manager = new LocalModelManager(transport, () => new Date('2026-08-30T12:30:00Z'))
+    const oldGateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+    const old = oldGateway.streamChatWithTools({ messages: [] }).catch(error => error)
+    await vi.waitFor(() => expect(transport.stream).toHaveBeenCalledOnce())
+    manager.recoverAfterStop()
+    expect(manager.hasActiveWork()).toBe(false)
+    const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+    const fresh = gateway.streamChatWithTools({ messages: [] })
+    await vi.waitFor(() => expect(transport.stream).toHaveBeenCalledTimes(2))
+    finishes[0]!(successfulResult)
+    expect(await old).toMatchObject({ name: 'AbortError' })
+    expect(manager.hasActiveWork()).toBe(true)
+    const queued = gateway.streamChatWithTools({ messages: [] })
+    await Promise.resolve()
+    expect(transport.stream).toHaveBeenCalledTimes(2)
+    finishes[1]!(successfulResult)
+    await fresh
+    await vi.waitFor(() => expect(transport.stream).toHaveBeenCalledTimes(3))
+    finishes[2]!(successfulResult)
+    await queued
+    expect(manager.hasActiveWork()).toBe(false)
+  })
   it('never serializes local output ceilings to the approved external provider body', () => {
     const body = buildLaravelProxyBody({ messages: [], maxOutputTokens: 384 }, 'synthetic-client', true)
     expect(body).not.toHaveProperty('maxOutputTokens')

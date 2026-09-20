@@ -91,6 +91,36 @@ function createHarness(remoteAllow: boolean | undefined = true) {
 }
 
 describe('app runtime lifecycle', () => {
+  it('keeps device work suspended through late startup until explicitly resumed without rehydrating', async () => {
+    const harness = createHarness()
+    const hydration = deferred<AppState>()
+    vi.mocked(harness.dependencies.loadAppState).mockReturnValue(hydration.promise)
+    const lifecycle = createAppRuntimeLifecycle(
+      {
+        mode: ref('observe'),
+        allowUnrestricted: ref(false),
+        getActiveProjectId: () => 'project-1',
+        openProject: vi.fn(),
+        openNotificationCenter: vi.fn(),
+        togglePushToTalk: vi.fn(),
+      },
+      harness.dependencies
+    )
+    const started = lifecycle.start()
+    lifecycle.suspendWork()
+    hydration.resolve({ version: 1 } as AppState)
+    await started
+    expect(harness.dependencies.startDeviceJobChannel).not.toHaveBeenCalled()
+    lifecycle.resumeWork()
+    await Promise.resolve()
+    expect(harness.dependencies.startDeviceJobChannel).toHaveBeenCalledOnce()
+    expect(harness.dependencies.loadAppState).toHaveBeenCalledOnce()
+    lifecycle.suspendWork()
+    lifecycle.stop()
+    lifecycle.resumeWork()
+    expect(harness.dependencies.startDeviceJobChannel).toHaveBeenCalledOnce()
+  })
+
   it('resolves persisted modes fail-closed against the unrestricted policy', () => {
     expect(resolveStartupMode('act', 'observe', false)).toBe('act')
     expect(resolveStartupMode('unrestricted', 'act', false)).toBe('observe')

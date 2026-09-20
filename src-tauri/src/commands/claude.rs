@@ -32,7 +32,7 @@ pub struct ClaudeJobs {
 }
 impl ClaudeJobs {
     pub fn cancel_all(&self) {
-        if let Ok(entries) = self.entries.lock() {
+        if let Ok(entries) = self.entries.try_lock() {
             for job in entries.values() {
                 job.cancel.store(true, Ordering::Release);
             }
@@ -358,11 +358,13 @@ pub async fn claude_job_start(
         cancel: AtomicBool::new(false),
         snapshot: Mutex::new(snapshot.clone()),
     });
+    let (operation, cancellation) = super::owned_processes::Operation::begin()?;
     entries.insert(snapshot.id.clone(), job.clone());
     drop(entries);
     std::thread::spawn(move || {
+        let _operation = operation;
         let _lease = lease;
-        let result = run_worker(&app, &runtime, &job, &input);
+        let result = cancellation.check().and_then(|_| run_worker(&app, &runtime, &job, &input));
         if let Err(error) = result {
             finish(
                 &job,

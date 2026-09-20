@@ -1,7 +1,7 @@
 ﻿<!-- App.vue -->
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
-import { isTauri } from '@tauri-apps/api/core'
+import { invoke, isTauri } from '@tauri-apps/api/core'
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import { fitRequestContext } from '@/services/inference/contextBudget'
 import { loadPendingTaskCreates, replacePendingTaskCreates } from '@/services/agents/taskCreateRecoveryLedger'
@@ -31,6 +31,13 @@ import { useCloudProjects } from '@/composables/useCloudProjects'
 import { chatRuns, chatRunIsLive, reconcileRecoveredChatRuns, type ChatRunHandle } from '@/services/chatRunManager'
 import { createChatEffectJournal } from '@/services/chatEffectJournal'
 import { createGracefulQuit, listenForGracefulQuit } from '@/services/gracefulQuit'
+import { createAgentStopController, type NativeAgentStopResult } from '@/services/agentStop'
+import { runResourceCoordinator } from '@/services/runs/resourceCoordinator'
+import { localResources } from '@/services/inference/resources'
+import { agentTeams } from '@/services/agents/teamHub'
+import { releaseAllWorkflowResources, recoverWorkflowResourcesAfterStop } from '@/services/workflows/runResources'
+import { workflowExecutionLedger } from '@/services/workflows/executionLedger'
+import { idleOptimizationEnabled } from '@/services/agents/idleOptimization'
 import { drainCoordinationChannel } from '@/services/coordination/channel'
 import { createWorkspaceRefresh } from '@/services/workspaceRefresh'
 import {
@@ -266,6 +273,7 @@ function setComposerInput(value: string, source: ComposerInputSource) {
 }
 const sending = computed(() => chatRuns.hasLive(activeConversationId.value))
 const admittingConversations = shallowRef(new Set<string>())
+let agentStopEpoch = 0
 const sendAdmission = computed(() => admittingConversations.value.has(activeConversationId.value))
 /* -------------------------------------------------
  * Per-chat controls: permission mode, model route and thinking tier live on the
@@ -492,6 +500,7 @@ onMounted(() => {
       const principalId = await resolveWorkspacePrincipalId()
       await chatRuns.recover(principalId)
       if (reconcileRecoveredChatRuns(state, chatRuns.records.value)) await saveAppStateStrict(state)
+      await autonomousGoal.pauseAll('App neu gestartet. Projektstand prüfen und Ziel bei Bedarf erneut aktivieren.')
       if (!appUnmounted && !appQuitting.value) appReady.value = true
     } catch (error) {
       console.warn('[runs] Recovery journal unavailable:', error)
@@ -1920,7 +1929,8 @@ async function send(
   miniInput?: { text: string; projectId: string; conversationId?: string },
   goalInput?: { state: GoalRunState; signal: AbortSignal }
 ): Promise<GoalStepResult | undefined> {
-  if (!appInitialized.value || appQuitting.value) return
+  if (!appInitialized.value || appQuitting.value || hud.killSwitch) return
+  const admissionEpoch = agentStopEpoch
   const pid = miniInput?.projectId ?? activeProjectId.value
   // A goal round targets its own chat even while another chat or project is shown.
   const conversationId = miniInput?.conversationId ?? mutations.getActiveConversationId(pid)
@@ -1936,7 +1946,13 @@ async function send(
   if (!workspace && miniInput?.conversationId) {
     // A goal round of a chat in another project still needs that project's folder binding.
     workspace = isTauri() ? await getProjectWorkspace(pid).catch(() => null) : null
-    if (admittingConversations.value.has(conversationId) || appQuitting.value) return
+    if (
+      admittingConversations.value.has(conversationId) ||
+      appQuitting.value ||
+      hud.killSwitch ||
+      admissionEpoch !== agentStopEpoch
+    )
+      return
   }
   const turnMode = modeFor(conversationId)
   const execution = executionGate.capture(
@@ -2028,7 +2044,8 @@ async function send(
       execution.signal
     )
     // A second message may be queued for this conversation; it cannot execute concurrently.
-    admittingConversations.value = new Set([...admittingConversations.value].filter(id => id !== conversationId))
+    if (admissionEpoch === agentStopEpoch)
+      admittingConversations.value = new Set([...admittingConversations.value].filter(id => id !== conversationId))
     return await result
   } catch (error) {
     if (!responseStarted && !execution.signal.aborted) {
@@ -2044,7 +2061,8 @@ async function send(
     }
     if (goalInput) throw error
   } finally {
-    admittingConversations.value = new Set([...admittingConversations.value].filter(id => id !== conversationId))
+    if (admissionEpoch === agentStopEpoch)
+      admittingConversations.value = new Set([...admittingConversations.value].filter(id => id !== conversationId))
   }
 }
 async function executeChatTurn(
@@ -2064,7 +2082,8 @@ async function executeChatTurn(
   const turnTeamPreset = teamPresetForRouteMode(turnRouteMode)
   const taskType = inferTaskType(text)
   const turnSpeechGeneration = speechGeneration
-  const isVisible = () => activeConversationId.value === conversationId
+  const turnStopEpoch = agentStopEpoch
+  const isVisible = () => turnStopEpoch === agentStopEpoch && activeConversationId.value === conversationId
   const assistant = mutations.makeMsg('assistant', '', pid, conversationId)
   assistant.raw = ''
   assistant.parsed = null
@@ -2441,10 +2460,12 @@ async function executeChatTurn(
       },
     })
 
-    try {
-      stopSfx('loading')
-    } catch {}
-    stopAssistantLoading()
+    if (isVisible()) {
+      try {
+        stopSfx('loading')
+      } catch {}
+      stopAssistantLoading()
+    }
 
     if (turnExecution.signal.aborted) throw new DOMException('Aborted', 'AbortError')
     executionGate.assert(turnExecution)
@@ -2769,7 +2790,7 @@ const backgroundPreparation = useBackgroundPreparation({
   busy: () => localModelSwitch.pending.value || chatRuns.hasLive() || conversationBusy.value || hud.killSwitch,
   draft: () => input.value,
 })
-useIdleOptimization({
+const idleOptimization = useIdleOptimization({
   projects: () => state.projects,
   messages: () => state.messages,
   project: () => activeProject.value,
@@ -2780,27 +2801,98 @@ watch(conversationBusy, busy => voiceInputSession.setMuted(busy || voiceMuteDept
 const liveStatus = computed(() => miniStatus(miniChat.snapshot.value))
 let stopQuitListener: (() => void) | undefined
 let coordinationQuitDrain: Promise<void> = Promise.resolve()
+let stopChatGeneration = 0
+let stopHubGeneration = 0
+let stopTeamGeneration = 0
+let stopResourceGeneration = 0
+let stopBackgroundDrain: Promise<unknown> = Promise.resolve()
+const globalAgentStop = createAgentStopController({
+  begin: () => {
+    agentStopEpoch++
+    hud.killSwitch = true
+    invalidateExecution()
+    const reason = executionAbortReason('execution_kill_switch')
+    stopChatGeneration = chatRuns.requestStopAll(reason)
+    stopHubGeneration = agentHub.requestStopAll(reason)
+    stopTeamGeneration = agentTeams.requestStopAll()
+    stopResourceGeneration = runResourceCoordinator.cancelPending(reason)
+    coordinationQuitDrain = drainCoordinationChannel()
+    appRuntimeLifecycle.suspendWork()
+    stopAllVoice()
+    planningHub.interruptActive()
+    backgroundPreparation.invalidate()
+    stopBackgroundDrain = Promise.allSettled([
+      autonomousGoal.pauseAll(),
+      idleOptimization.stop(),
+      releaseAllWorkflowResources(),
+    ])
+  },
+  drain: () =>
+    Promise.all([
+      coordinationQuitDrain,
+      stopBackgroundDrain,
+      chatRuns.waitForStop(1_000),
+      agentHub.waitForStop(1_000),
+      agentTeams.waitForStop(1_000),
+    ]),
+  stopNative: () => invoke<NativeAgentStopResult>('app_stop_agents'),
+  recover: async () => {
+    chatRuns.recoverStopped({ generation: stopChatGeneration, nativeStopped: true })
+    agentHub.recoverStopped({ generation: stopHubGeneration, nativeStopped: true })
+    agentTeams.recoverStopped({ generation: stopTeamGeneration, nativeStopped: true })
+    runResourceCoordinator.recoverStopped({ generation: stopResourceGeneration, nativeStopped: true })
+    autonomousGoal.recoverAfterStop()
+    idleOptimization.recoverAfterStop()
+    localResources.recoverAfterStop()
+    localInferenceCoordinator.recoverAfterStop()
+    recoverWorkflowResourcesAfterStop()
+    workflowExecutionLedger.recoverAfterStop()
+    workflowWatchers.recoverAfterStop()
+    admittingConversations.value = new Set()
+    stopAssistantLoading()
+    stopSfx('loading')
+    reconcileRecoveredChatRuns(state, chatRuns.records.value)
+    setStatus('idle')
+    await saveAppStateStrict(state)
+  },
+  resume: () => {
+    if (appQuitting.value) return
+    if (
+      !chatRuns.resumeAfterStop() ||
+      !agentHub.resumeAfterStop() ||
+      !agentTeams.resumeAfterStop() ||
+      !runResourceCoordinator.resumeAfterStop()
+    )
+      throw new Error('agent_stop_recovery_incomplete')
+    hud.killSwitch = false
+    appRuntimeLifecycle.resumeWork()
+    if (idleOptimizationEnabled.value) idleOptimization.start()
+  },
+})
+const agentStopState = globalAgentStop.state
+watch(
+  () => hud.killSwitch,
+  enabled => {
+    if (!enabled && agentStopState.value.phase === 'stopped' && !appQuitting.value) globalAgentStop.resume()
+    if (!enabled && (appQuitting.value || ['stopping', 'failed'].includes(agentStopState.value.phase)))
+      hud.killSwitch = true
+  },
+  { flush: 'sync' }
+)
+let globalQuitDrain: Promise<boolean> = Promise.resolve(true)
 const gracefulQuit = createGracefulQuit({
   begin: () => {
     appQuitting.value = true
-    coordinationQuitDrain = drainCoordinationChannel()
+    globalQuitDrain = globalAgentStop.stop()
     appRuntimeLifecycle.stop()
-    hud.killSwitch = true
-    stopAllVoice()
-    planningHub.interruptActive()
   },
   drain: async () => {
-    await Promise.all([
-      coordinationQuitDrain,
-      chatRuns.stopAll(executionAbortReason('execution_session_changed')),
-      autonomousGoal.pauseAll(),
-      agentHub.shutdown(),
-    ])
+    if (!(await globalQuitDrain)) throw new Error('agent_shutdown_incomplete')
   },
   save: () => saveAppStateStrict(state),
   failed: error => console.warn('[runs] Shutdown could not finish before native fallback:', error),
 })
-useWorkflowWatchers()
+const workflowWatchers = useWorkflowWatchers()
 useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.value).some(Boolean))
 </script>
 
@@ -2854,6 +2946,9 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
     :mode="mode"
     :kill-switch="hud.killSwitch"
     :test-speech="testSelectedVoice"
+    :agent-stop-state="agentStopState"
+    :stop-agents="globalAgentStop.stop"
+    :resume-agents="globalAgentStop.resume"
     @update:open="showSettings = $event"
   />
   <ToolCenterPanel

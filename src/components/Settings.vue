@@ -10,6 +10,7 @@ import ChatSettingsSection from '@/components/settings/ChatSettingsSection.vue'
 import { modelUsageSettings, saveModelUsageSettings } from '@/services/inference/modelUsageSettings'
 import { DEFAULT_TOOL_LIMITS, loadToolLimits, validToolRounds } from '@/services/toolLimits'
 import ExecutionSettingsSection from '@/components/settings/ExecutionSettingsSection.vue'
+import type { AgentStopState } from '@/services/agentStop'
 import DesktopControlSettings from '@/components/settings/DesktopControlSettings.vue'
 import { listTools } from '@/services/tools/registry'
 import type { LuczorMode } from '@/services/inference/types'
@@ -52,6 +53,9 @@ const props = withDefaults(
     initialTab?: SettingsTab
     mode?: LuczorMode
     killSwitch?: boolean
+    agentStopState?: AgentStopState
+    stopAgents?: () => Promise<boolean>
+    resumeAgents?: () => void
     testSpeech: (text: string, signal?: AbortSignal, voiceId?: string) => Promise<'completed' | 'cancelled'>
   }>(),
   {
@@ -1024,6 +1028,9 @@ function iconPath(kind: string) {
                 :mode="props.mode"
                 :kill-switch="props.killSwitch"
                 :tools="registeredTools"
+                :agent-stop-state="props.agentStopState"
+                :stop-agents="props.stopAgents"
+                :resume-agents="props.resumeAgents"
               />
 
               <!-- VOICE -->

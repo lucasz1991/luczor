@@ -1025,6 +1025,29 @@ describe('local inference coordinator and approved external gateway', () => {
     expect(harness.requests).toHaveLength(0)
   })
 
+  it('recovers a stuck preparation queue after native stop and rejects stale readiness', async () => {
+    const verified = await manifest('promoted_preferred')
+    const harness = makeHarness(verified)
+    const ready = await harness.prepareModel.getMockImplementation()!(verified.routing.defaultModelId)
+    const pending = deferred<typeof ready>()
+    harness.prepareModel.mockImplementationOnce(() => pending.promise)
+    await harness.coordinator.initialize(bootstrap())
+    const input: TurnRoutingInput = {
+      projectId: 'project-1', taskType: 'chat.general', contextEgress: 'local_only',
+      routingSettings: { preference: 'local_only' },
+    }
+    const old = harness.coordinator.resolveTurn(input).catch(error => error)
+    await vi.waitFor(() => expect(harness.prepareModel).toHaveBeenCalledOnce())
+    harness.coordinator.recoverAfterStop()
+    const fresh = await harness.coordinator.resolveTurn(input)
+    expect(fresh.gateway.target).toBe('local_llama_cpp')
+    expect(harness.prepareModel).toHaveBeenCalledTimes(2)
+    pending.resolve(ready)
+    expect(await old).toBeInstanceOf(Error)
+    expect(harness.coordinator.status().preparingModelId).toBeUndefined()
+    expect(harness.coordinator.status().mode).toBe('active')
+  })
+
   it('does not wait behind a local preparation already in progress', async () => {
     const verified = await manifest('promoted_preferred')
     const harness = makeHarness(verified)

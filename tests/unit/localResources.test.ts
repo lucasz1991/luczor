@@ -171,6 +171,45 @@ function setup() {
 afterEach(() => vi.useRealTimers())
 
 describe('device resource workflow barrier', () => {
+  it('releases stale ownership only at native-confirmed recovery and fences late foreground admission', async () => {
+    const { controller, deps, nativeLeases } = setup()
+    let finish!: (lease: { release(): void }) => void
+    const oldRelease = vi.fn()
+    const releaseAdmission = controller.setForegroundAdmission(() => new Promise(resolve => { finish = resolve }))
+    const old = controller.acquire().catch(error => error)
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
+    expect(controller.hasWork()).toBe(true)
+    controller.recoverAfterStop()
+    releaseAdmission()
+    const fresh = await controller.acquire()
+    finish({ release: oldRelease })
+    expect(await old).toMatchObject({ name: 'AbortError' })
+    expect(oldRelease).toHaveBeenCalledOnce()
+    expect(deps.begin).toHaveBeenCalledOnce()
+    expect(controller.hasWork()).toBe(true)
+    await fresh.release()
+    expect(nativeLeases.size).toBe(0)
+    expect(controller.hasWork()).toBe(false)
+  })
+
+  it('does not let a recovered model switch or old release touch a new owner', async () => {
+    vi.useFakeTimers()
+    const { controller, nativeLeases } = setup()
+    const old = await controller.acquire()
+    const replacement = vi.fn(async () => {})
+    const changing = controller.switchModel(replacement).catch(error => error)
+    await vi.advanceTimersByTimeAsync(0)
+    nativeLeases.clear() // Native global stop acknowledged cleanup.
+    controller.recoverAfterStop()
+    const fresh = await controller.acquire()
+    await old.release()
+    expect(await changing).toMatchObject({ name: 'AbortError' })
+    expect(replacement).not.toHaveBeenCalled()
+    expect(controller.hasWork()).toBe(true)
+    expect(nativeLeases.size).toBe(1)
+    await fresh.release()
+    expect(controller.hasWork()).toBe(false)
+  })
   it('refuses cleanup during a whole job and never stops or queues it', async () => {
     const { controller, deps } = setup()
     const work = await controller.acquire()

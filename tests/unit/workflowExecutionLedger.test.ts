@@ -12,6 +12,20 @@ function fixture() {
   return { records, storage, ledger: createWorkflowExecutionLedger(storage) }
 }
 describe('durable workflow execution', () => {
+  it('keeps uncertain effect markers while releasing stopped locks and rejects late completion', async () => {
+    const { ledger, records } = fixture()
+    let finish!: (value: Record<string, unknown>) => void
+    const effect = vi.fn(() => new Promise<Record<string, unknown>>(resolve => { finish = resolve }))
+    const old = ledger.execute('account', 'execution', {}, effect).catch(error => error)
+    await vi.waitFor(() => expect(effect).toHaveBeenCalledOnce())
+    ledger.recoverAfterStop()
+    await expect(ledger.execute('account', 'execution', {}, effect)).rejects.toThrow('outcome_unknown')
+    await expect(ledger.execute('account', 'fresh', {}, async () => ({ ok: true }))).resolves.toEqual({ ok: true })
+    finish({ ok: true, late: true })
+    expect(await old).toMatchObject({ message: 'workflow_execution_stopped' })
+    expect(records.get('account:execution')?.state).toBe('started')
+    expect(effect).toHaveBeenCalledOnce()
+  })
   it('persists before effects and reuses the exact result after a lost acknowledgment or restart', async () => {
     const { records, storage, ledger } = fixture()
     const effect = vi.fn(async () => {

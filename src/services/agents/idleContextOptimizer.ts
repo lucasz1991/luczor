@@ -107,6 +107,7 @@ export class IdleContextOptimizer {
   private lastActivity: number
   private earliestCycle = 0
   private manualPending = false
+  private lifecycle = new AbortController()
   private state: IdleContextOptimizerSnapshot = {
     enabled: false,
     phase: 'stopped',
@@ -163,10 +164,24 @@ export class IdleContextOptimizer {
 
   async stop(): Promise<void> {
     this.clearTimer()
+    this.manualPending = false
     this.publish({ enabled: false, phase: this.active ? 'yielding' : 'stopped', reason: 'disabled' })
     this.active?.controller.abort(aborted())
     await this.active?.promise
     if (!this.state.enabled) this.publish({ phase: 'stopped' })
+  }
+
+  /** Native-confirmed global cleanup is the only safe boundary for detaching an undrained owner. */
+  recoverAfterStop(): void {
+    this.clearTimer()
+    this.active?.controller.abort(aborted())
+    this.lifecycle.abort(aborted())
+    this.lifecycle = new AbortController()
+    this.active = undefined
+    this.manualPending = false
+    this.lastActivity = this.now()
+    this.earliestCycle = 0
+    this.publish({ enabled: false, phase: 'stopped', task: null, reason: 'disabled', foregroundJobs: 0, manual: false })
   }
 
   /**
@@ -210,6 +225,8 @@ export class IdleContextOptimizer {
 
   /** Acquire before context/model preparation; release after the complete foreground workflow. */
   async acquireForeground(signal?: AbortSignal): Promise<{ release(): void }> {
+    const lifecycle = this.lifecycle
+    signal = signal ? AbortSignal.any([signal, lifecycle.signal]) : lifecycle.signal
     signal?.throwIfAborted()
     this.publish({ foregroundJobs: this.state.foregroundJobs + 1 })
     this.interrupt('foreground')
@@ -217,6 +234,7 @@ export class IdleContextOptimizer {
     const release = () => {
       if (released) return
       released = true
+      if (this.lifecycle !== lifecycle) return
       this.lastActivity = this.now()
       this.publish({ foregroundJobs: Math.max(0, this.state.foregroundJobs - 1) })
       this.schedule()
@@ -388,7 +406,7 @@ export class IdleContextOptimizer {
       finished = true
       clearTimeout(timeout)
       if (monitor !== undefined) clearTimeout(monitor)
-      if (selectedJob) {
+      if (selectedJob && this.active?.controller === controller) {
         try {
           await this.dependencies.settled?.(selectedJob, success, signal.aborted)
         } catch {
@@ -400,7 +418,8 @@ export class IdleContextOptimizer {
         (!selectedJob && this.state.reason === 'no_context' && this.dependencies.hasPendingDiscovery?.())
           ? (this.options.successfulIntervalMs ?? this.options.intervalMs)
           : this.options.intervalMs
-      this.earliestCycle = Math.max(this.earliestCycle, this.now() + delay)
+      if (this.active?.controller === controller)
+        this.earliestCycle = Math.max(this.earliestCycle, this.now() + delay)
     }
   }
 }

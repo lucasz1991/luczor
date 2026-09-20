@@ -48,6 +48,26 @@ beforeEach(() => {
 afterEach(() => vi.useRealTimers())
 
 describe('idle local context optimization', () => {
+  it('fences a detached idle owner and its foreground counters after native-confirmed global stop', async () => {
+    const late = deferred<string>()
+    const { optimizer, commitCandidate } = setup({ runLocal: () => late.promise })
+    optimizer.start()
+    await vi.advanceTimersByTimeAsync(100)
+    const oldForeground = optimizer.acquireForeground().catch(error => error)
+    void optimizer.stop()
+    optimizer.recoverAfterStop()
+    expect(await oldForeground).toMatchObject({ name: 'AbortError' })
+    expect(optimizer.snapshot()).toMatchObject({ enabled: false, phase: 'stopped', foregroundJobs: 0, manual: false })
+    const fresh = await optimizer.acquireForeground()
+    expect(optimizer.snapshot().foregroundJobs).toBe(1)
+    late.resolve('Must not commit after native stop')
+    await vi.advanceTimersByTimeAsync(500)
+    expect(commitCandidate).not.toHaveBeenCalled()
+    expect(optimizer.snapshot().foregroundJobs).toBe(1)
+    fresh.release()
+    expect(optimizer.snapshot().foregroundJobs).toBe(0)
+    expect(optimizer.snapshot().nextCheckAt).toBeNull()
+  })
   it('waits for idle grace, writes one candidate, and does not repeat unchanged source context', async () => {
     const { optimizer, runLocal, commitCandidate } = setup()
     optimizer.start()

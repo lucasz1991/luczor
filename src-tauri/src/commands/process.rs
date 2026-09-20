@@ -48,7 +48,9 @@ pub(crate) fn run_bounded_command_scoped(
     execution: Option<super::execution::ExecutionLease>,
     scope_check: Option<&dyn Fn() -> Result<(), String>>,
 ) -> Result<BoundedProcessOutput, String> {
+    let (_operation, cancellation) = super::owned_processes::Operation::begin()?;
     let check = || {
+        cancellation.check()?;
         if let Some(gate) = &execution {
             gate.check()?;
         }
@@ -86,6 +88,11 @@ pub(crate) fn run_bounded_command_scoped(
             let _ = child.wait();
             return Err(error);
         }
+    };
+    #[cfg(target_os = "linux")]
+    let _lifetime = match super::owned_processes::LinuxProcess::attach(&child) {
+        Ok(guard) => guard,
+        Err(error) => { terminate_process_tree(&mut child); let _ = child.wait(); return Err(error); }
     };
     {
         if let Err(error) = check() {

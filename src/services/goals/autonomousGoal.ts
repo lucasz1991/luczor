@@ -262,6 +262,8 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
       entry.driving = false
       markSettled()
       entry.settled = undefined
+      // Native-confirmed recovery detached this owner. Its late completion cannot schedule a new run.
+      if (drivers.get(id) !== entry) return
       arrange(id, delay)
       // A finished section frees a slot: let other waiting goals try again promptly.
       for (const other of drivers.keys()) if (other !== id && !drivers.get(other)?.running) arrange(other, delay)
@@ -292,6 +294,23 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
   }
 
   return {
+    /** Synchronous admission fence; the binding persists the paused states separately. */
+    cancelAll(ids: Iterable<string>, reason: string): void {
+      for (const id of new Set([...drivers.keys(), ...ids])) {
+        suspended.add(id)
+        cancelTimer(id)
+        drivers.get(id)?.running?.controller.abort(reason)
+      }
+    },
+    /** Only after native cleanup has confirmed that old work can no longer run. */
+    recoverAfterStop(): void {
+      for (const [id, entry] of drivers) {
+        suspended.add(id)
+        cancelTimer(id)
+        entry.running?.controller.abort('Globale Ausführung beendet.')
+      }
+      drivers.clear()
+    },
     /** Attach an already admitted foreground chat turn without creating another prompt or run. */
     async runAttached(id: string, run: AttachedGoalRun): Promise<void> {
       if (disposed || !dependencies.read(id)?.active) return

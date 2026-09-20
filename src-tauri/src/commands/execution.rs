@@ -327,6 +327,7 @@ pub(crate) fn revoke_project_scopes(project_id: &str) -> Result<(), String> {
 
 #[derive(Clone)]
 pub(crate) struct ExecutionLease {
+    cancellation: super::owned_processes::CancellationToken,
     permit: ExecutionPermit,
     write: bool,
     full_access: bool,
@@ -337,6 +338,7 @@ impl ExecutionLease {
         &self.permit
     }
     pub fn check(&self) -> Result<(), String> {
+        self.cancellation.check()?;
         GATE.get_or_init(Mutex::default)
             .lock()
             .map_err(|_| "Execution gate unavailable.")?
@@ -354,6 +356,7 @@ pub(crate) fn admit_full(
     full_access: bool,
 ) -> Result<ExecutionLease, String> {
     let lease = ExecutionLease {
+        cancellation: super::owned_processes::CancellationToken::capture()?,
         permit: permit.clone(),
         write,
         full_access,
@@ -399,13 +402,24 @@ pub async fn execution_gate_update(
     payload: ExecutionPolicy,
 ) -> Result<ExecutionPolicy, String> {
     ensure_main_webview(&window)?;
+    super::owned_processes::check_policy_resume(payload.kill_switch)?;
     if payload.kill_switch || payload.mode == ExecutionMode::Observe {
         super::desktop_control::stop_feedback();
     }
-    GATE.get_or_init(Mutex::default)
+    let policy = GATE.get_or_init(Mutex::default)
         .lock()
         .map_err(|_| "Execution gate unavailable.")?
-        .update(payload)
+        .update(payload)?;
+    super::owned_processes::apply_policy(policy.kill_switch);
+    Ok(policy)
+}
+
+pub(crate) fn stop_all() -> Result<(), String> {
+    let mut gate = GATE.get_or_init(Mutex::default).try_lock()
+        .map_err(|_| "execution_gate_stop_pending")?;
+    if let Some(policy) = gate.policy.as_mut() { policy.kill_switch = true; }
+    for scope in gate.scopes.values_mut() { scope.revoked = true; }
+    Ok(())
 }
 
 #[cfg(test)]

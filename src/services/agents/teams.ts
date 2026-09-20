@@ -1,4 +1,5 @@
 import type { AgentPermission, AgentProjectSnapshot, AgentRole, AgentRunResult } from './types'
+import { waitForRuntimeDrain, type NativeStopAcknowledgement, type RuntimeDrainResult } from '@/services/runs/drain'
 
 export type AgentTeamApprovalMode = 'team' | 'per-node'
 export type AgentTeamRunStatus = 'awaiting_approval' | 'running' | 'cancelling' | 'completed' | 'failed' | 'cancelled'
@@ -158,6 +159,8 @@ type InternalNode = {
   controller?: AbortController
   executing: boolean
   timeoutTriggered: boolean
+  detached?: boolean
+  executionTimer?: ReturnType<typeof setTimeout>
 }
 
 type InternalRun = {
@@ -186,6 +189,10 @@ type InternalRun = {
   startedAt?: number
   finishedAt?: number
   finalStatus?: 'failed' | 'cancelled'
+  drained: Promise<void>
+  drain: () => void
+  resourcesSettled?: boolean
+  stopGeneration?: number
 }
 
 const ROLES = new Set<AgentRole>(['planner', 'implementer', 'reviewer', 'join', 'assistant'])
@@ -341,6 +348,8 @@ export class AgentTeamOrchestrator {
   private scheduleSequence = 0
   private scheduling = false
   private disposed = false
+  private admissionPaused = false
+  private stopGeneration = 0
 
   constructor(private readonly options: AgentTeamOrchestratorOptions) {
     this.maxConcurrent = integer(options.maxConcurrent, 2, 1, 16, 'Globale Team-Parallelität')
@@ -359,6 +368,7 @@ export class AgentTeamOrchestrator {
 
   prepare(definitionInput: AgentTeamDefinition, input: AgentTeamRunInput): AgentTeamRun {
     if (this.disposed) throw new Error('Die Agententeam-Steuerung ist geschlossen.')
+    if (this.admissionPaused) throw new Error('Agententeams sind gestoppt. Ausführung ausdrücklich wieder erlauben.')
     const definition = cloneDefinition(definitionInput)
     const project = snapshotProject(input.project)
     if (
@@ -378,7 +388,13 @@ export class AgentTeamOrchestrator {
     const id = this.createId()
     if (!identifier(id) || this.runs.has(id)) throw new Error('Es konnte keine eindeutige Teamlauf-ID erstellt werden.')
     const createdAt = this.now()
+    let drain!: () => void
+    const drained = new Promise<void>(resolve => {
+      drain = resolve
+    })
     const run: InternalRun = {
+      drained,
+      drain,
       id,
       definition,
       project,
@@ -417,7 +433,7 @@ export class AgentTeamOrchestrator {
 
   approveRun(id: string): boolean {
     const run = this.runs.get(id)
-    if (this.disposed || !run || run.status !== 'awaiting_approval') return false
+    if (this.disposed || this.admissionPaused || !run || run.status !== 'awaiting_approval') return false
     this.clearRunApproval(run)
     run.status = 'running'
     run.startedAt = this.now()
@@ -430,6 +446,7 @@ export class AgentTeamOrchestrator {
   }
 
   approveNode(runId: string, nodeId: string): boolean {
+    if (this.disposed || this.admissionPaused) return false
     const run = this.runs.get(runId)
     const node = run?.nodes.get(nodeId)
     if (!run || run.approvalMode !== 'per-node' || run.status !== 'running' || node?.status !== 'awaiting_approval') {
@@ -529,6 +546,68 @@ export class AgentTeamOrchestrator {
     this.listeners.clear()
   }
 
+  requestStopAll(reason?: unknown): number {
+    this.admissionPaused = true
+    const generation = ++this.stopGeneration
+    for (const run of this.runs.values()) {
+      run.stopGeneration = generation
+      run.resourceController?.abort(reason)
+      for (const node of run.nodes.values()) if (node.executing) node.controller?.abort(reason)
+      this.cancelRun(run.id)
+    }
+    return generation
+  }
+
+  waitForStop(timeoutMs = 1500): Promise<RuntimeDrainResult> {
+    return waitForRuntimeDrain(
+      () =>
+        [...this.runs.values()]
+          .filter(
+            run =>
+              [...run.nodes.values()].some(node => node.executing) || (!!run.resourceLease && !run.resourcesSettled)
+          )
+          .map(run => ({ id: run.id, drained: run.drained })),
+      timeoutMs
+    )
+  }
+
+  recoverStopped(acknowledgement: NativeStopAcknowledgement): number {
+    if (!acknowledgement.nativeStopped || acknowledgement.generation !== this.stopGeneration || !this.admissionPaused)
+      return 0
+    let recovered = 0
+    for (const run of this.runs.values()) {
+      if (run.stopGeneration !== acknowledgement.generation) continue
+      for (const node of run.nodes.values()) {
+        if (!node.executing || !node.controller?.signal.aborted) continue
+        node.detached = true
+        node.executing = false
+        node.status = 'cancelled'
+        node.finishedAt = this.now()
+        if (node.executionTimer) clearTimeout(node.executionTimer)
+        recovered++
+      }
+      // The global native proof, not a stalled JS release callback, owns this recovery.
+      run.resourcesReleased = true
+      run.resourcesSettled = true
+      run.drain()
+      this.finishRunIfTerminal(run)
+    }
+    this.notify()
+    return recovered
+  }
+
+  resumeAfterStop(): boolean {
+    if (
+      this.disposed ||
+      [...this.runs.values()].some(
+        run => [...run.nodes.values()].some(node => node.executing) || (!!run.resourceLease && !run.resourcesSettled)
+      )
+    )
+      return false
+    this.admissionPaused = false
+    return true
+  }
+
   private releaseReadyNodes(run: InternalRun): void {
     if (run.status !== 'running') return
     for (const node of run.nodes.values()) {
@@ -570,11 +649,11 @@ export class AgentTeamOrchestrator {
   }
 
   private schedule(): void {
-    if (this.scheduling || this.disposed) return
+    if (this.scheduling || this.disposed || this.admissionPaused) return
     this.scheduling = true
     queueMicrotask(() => {
       this.scheduling = false
-      if (this.disposed) return
+      if (this.disposed || this.admissionPaused) return
       const active = this.activeNodes()
       while (active.length < this.maxConcurrent) {
         const candidates = [...this.runs.values()]
@@ -618,6 +697,7 @@ export class AgentTeamOrchestrator {
     let timeout: ReturnType<typeof setTimeout> | undefined
     try {
       await this.options.validateScope?.(run.project, node.definition.permission, run.mode)
+      if (controller.signal.aborted || run.status !== 'running') throw new DOMException('Abgebrochen', 'AbortError')
       if (this.options.acquireResources) {
         run.resourceController ??= new AbortController()
         run.resourceLease ??= this.options.acquireResources(run.id, run.resourceController.signal)
@@ -633,11 +713,13 @@ export class AgentTeamOrchestrator {
       let preparedPromptCharacters = prompt.length
       phase = 'run'
       timeout = setTimeout(() => {
+        if (node.detached) return
         node.timeoutTriggered = true
         node.status = 'cancelling'
         controller.abort()
         this.notify()
       }, node.definition.timeoutMs)
+      node.executionTimer = timeout
       const result = await this.options.executor({
         runId: run.id,
         nodeId: node.definition.id,
@@ -653,6 +735,7 @@ export class AgentTeamOrchestrator {
         resume: node.definition.resume === true,
         signal: controller.signal,
         onPreparedPrompt: characterCount => {
+          controller.signal.throwIfAborted()
           if (!Number.isSafeInteger(characterCount) || characterCount < 1) {
             throw new TeamExecutionError('Der vorbereitete Knotenprompt ist ungültig.', 'prompt_budget_exceeded')
           }
@@ -699,7 +782,9 @@ export class AgentTeamOrchestrator {
       node.status = 'completed'
       node.finishedAt = this.now()
     } catch (error) {
-      if (node.timeoutTriggered) {
+      if (node.detached) {
+        // A late executor result cannot reanimate a recovered team.
+      } else if (node.timeoutTriggered) {
         node.status = 'failed'
         node.errorCode = 'node_timeout'
       } else if (run.finalStatus || controller.signal.aborted) {
@@ -720,12 +805,14 @@ export class AgentTeamOrchestrator {
       if (!run.finalStatus) this.skipDescendants(run, node.definition.id, 'dependency_failed')
     } finally {
       if (timeout) clearTimeout(timeout)
-      node.executing = false
-      node.controller = undefined
-      this.releaseReadyNodes(run)
-      this.notify()
-      this.finishRunIfTerminal(run)
-      this.schedule()
+      if (!node.detached) {
+        node.executing = false
+        node.controller = undefined
+        this.releaseReadyNodes(run)
+        this.notify()
+        this.finishRunIfTerminal(run)
+        this.schedule()
+      }
     }
   }
 
@@ -823,7 +910,17 @@ export class AgentTeamOrchestrator {
     if (!run.resourcesReleased) {
       run.resourcesReleased = true
       run.resourceController?.abort()
-      void run.resourceLease?.then(release => release()).catch(() => undefined)
+      void Promise.resolve(run.resourceLease)
+        .then(async release => {
+          if (run.resourcesSettled) return
+          await release?.()
+          run.resourcesSettled = true
+          run.drain()
+          this.notify()
+        })
+        .catch(() => {
+          // Keep ownership visible to bounded global stop until native recovery confirms it.
+        })
     }
     this.prune()
     this.notify()

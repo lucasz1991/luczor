@@ -3,6 +3,7 @@ import { computed, ref } from 'vue'
 import IdleOptimizationSettings from '@/components/IdleOptimizationSettings.vue'
 import { searchToolCatalog, toolCategoryMap } from '@/services/tools/discovery'
 import type { LuczorMode } from '@/services/inference/types'
+import type { AgentStopState } from '@/services/agentStop'
 import {
   capabilityAccess,
   capabilityAccessLabels,
@@ -20,6 +21,9 @@ const props = withDefaults(
     mode?: LuczorMode
     killSwitch?: boolean
     tools?: ToolCapability[]
+    agentStopState?: AgentStopState
+    stopAgents?: () => Promise<boolean>
+    resumeAgents?: () => void
   }>(),
   {
     chatToolRounds: 6,
@@ -82,6 +86,36 @@ function toggleAutoExecution(): void {
     <div class="lz-section__head">
       <h3>Ausführung & Freigaben</h3>
       <p>Steuert, ob erlaubte datenverändernde Tools einzeln bestätigt werden müssen.</p>
+    </div>
+    <div class="lz-card">
+      <div class="lz-card__title">Agenten beenden und Sperren freigeben</div>
+      <p class="lz-hint">
+        Stoppt alle Luczor-Agenten, Chats und lokalen Hintergrundaufträge auf diesem Gerät. Laufende Ziele werden
+        pausiert. Beim Beenden der App wird diese Bereinigung automatisch ausgeführt; das Ausblenden im Infobereich
+        lässt die App weiterlaufen.
+      </p>
+      <div class="agent-stop-actions">
+        <button
+          class="ai-button"
+          type="button"
+          :disabled="!stopAgents || agentStopState?.phase === 'stopping'"
+          @click="stopAgents?.()"
+        >
+          {{ agentStopState?.phase === 'stopping' ? 'Agenten werden beendet …' : 'Alle Agenten beenden' }}
+        </button>
+        <button
+          v-if="agentStopState?.phase === 'stopped' && killSwitch"
+          class="ai-button"
+          type="button"
+          :disabled="!resumeAgents"
+          @click="resumeAgents?.()"
+        >
+          Ausführung wieder erlauben
+        </button>
+      </div>
+      <p v-if="agentStopState?.message" role="status" aria-live="polite" class="lz-hint">
+        {{ agentStopState.message }}
+      </p>
     </div>
     <div class="lz-card">
       <div class="lz-card__head">
@@ -235,6 +269,12 @@ function toggleAutoExecution(): void {
 </template>
 
 <style scoped>
+.agent-stop-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+}
 .capability-search {
   display: grid;
   gap: 6px;

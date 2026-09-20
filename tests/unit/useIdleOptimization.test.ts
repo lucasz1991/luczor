@@ -16,6 +16,7 @@ const fixture = vi.hoisted(() => ({
   releaseManualRequest: vi.fn(),
   start: vi.fn(),
   stop: vi.fn(),
+  recover: vi.fn(),
   interrupt: vi.fn(),
   acquireForeground: vi.fn(),
   loadSetting: vi.fn(),
@@ -56,6 +57,7 @@ vi.mock('@/services/agents/idleOptimization', async () => {
       return {
         start: fixture.start,
         stop: fixture.stop,
+        recoverAfterStop: fixture.recover,
         interrupt: fixture.interrupt,
         acquireForeground: fixture.acquireForeground,
         snapshot: () => ({ phase: fixture.phase }),
@@ -98,7 +100,7 @@ let unmount: (() => void) | undefined
 function setup() {
   const sources = reactive({ busy: false, draft: '', project: { id: 'project-1' } as Project })
   const scope = effectScope()
-  scope.run(() =>
+  const binding = scope.run(() =>
     useIdleOptimization({
       project: () => sources.project,
       busy: () => sources.busy,
@@ -112,7 +114,7 @@ function setup() {
     fixture.cleanups.forEach(cleanup => cleanup())
     scope.stop()
   }
-  return { sources, mount: () => fixture.mounts[0]!(), unmount }
+  return { sources, binding: binding!, mount: () => fixture.mounts[0]!(), unmount }
 }
 
 beforeEach(() => {

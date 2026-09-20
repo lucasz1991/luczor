@@ -68,6 +68,43 @@ const setup = (
 }
 
 describe('device-local goal binding', () => {
+  it('persists a global pause without draining a stuck goal and ignores its late completion after recovery', async () => {
+    let finish!: (result: unknown) => void
+    const run = vi.fn().mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+      .mockResolvedValue({ status: 'blocked', summary: 'New explicit run' })
+    const { binding } = setup(run)
+    await binding.save('Keep original progress')
+    await binding.toggle(true)
+    await vi.advanceTimersByTimeAsync(0)
+    const pausing = binding.pauseAll('Global stopped')
+    expect(binding.model.value).toMatchObject({ active: false, status: 'waiting', reason: 'Global stopped' })
+    await pausing
+    expect(harness.save.mock.calls.at(-1)![0].conversations[0].autonomousGoal.active).toBe(false)
+    binding.recoverAfterStop()
+    expect(binding.isRunning('first-chat')).toBe(false)
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(run).toHaveBeenCalledOnce()
+    await binding.toggle(true)
+    await vi.advanceTimersByTimeAsync(0)
+    expect(run).toHaveBeenCalledTimes(2)
+    finish({ status: 'completed', summary: 'Old completion', evidence: 'Old proof', reviewVerified: true })
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(binding.model.value).toMatchObject({ active: false, status: 'blocked', progress: 'New explicit run' })
+  })
+
+  it('pauses a saved waiting goal without a run journal before startup admission', async () => {
+    const { binding, run } = setup()
+    chatState('first-chat').goal = 'Recovered saved goal'
+    chatState('first-chat').autonomousGoal = {
+      text: 'Recovered saved goal', active: true, status: 'waiting', revision: 7,
+      iterations: 2, phase: 'work', progress: 'Original checkpoint', updatedAt: 1,
+    }
+    await binding.pauseAll('App neu gestartet. Ziel erneut aktivieren.')
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(5000)
+    expect(run).not.toHaveBeenCalled()
+    expect(binding.model.value).toMatchObject({ active: false, revision: 8, progress: 'Original checkpoint' })
+  })
   it('keeps a goal running when the user switches to another chat and types there', async () => {
     let finish!: () => void
     let signal!: AbortSignal

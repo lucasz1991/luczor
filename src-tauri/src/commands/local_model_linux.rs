@@ -189,6 +189,7 @@ pub(super) fn configure(command: &mut Command) {
 #[derive(Debug)]
 pub(super) struct LifetimeGuard {
     pid: File,
+    _global_process: std::sync::Arc<super::super::owned_processes::LinuxProcess>,
     spawning_thread: Option<(std::sync::mpsc::Sender<()>, std::thread::JoinHandle<()>)>,
 }
 impl LifetimeGuard {
@@ -199,6 +200,7 @@ impl LifetimeGuard {
         }
         Ok(Self {
             pid: unsafe { File::from_raw_fd(fd as i32) },
+            _global_process: super::super::owned_processes::LinuxProcess::attach(child)?,
             spawning_thread: None,
         })
     }

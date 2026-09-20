@@ -104,8 +104,27 @@ export class LocalResourceController {
   private foregroundPending = 0
   private modelTransition?: Promise<unknown>
   private preemptibleBackground?: { controller: AbortController; drained: Promise<void> }
+  private lifecycle = new AbortController()
 
   constructor(private readonly dependencies: ResourceDependencies) {}
+
+  /** Only native-confirmed global cleanup may release ownership of a hung renderer promise. */
+  recoverAfterStop(): void {
+    this.lifecycle.abort(new DOMException('Global stop', 'AbortError'))
+    this.lifecycle = new AbortController()
+    this.preemptibleBackground?.controller.abort(new DOMException('Global stop', 'AbortError'))
+    this.preemptibleBackground = undefined
+    for (const job of this.cleanups.values()) if (job.timer) clearTimeout(job.timer)
+    this.cleanups.clear()
+    for (const lease of this.leases.values()) lease.releaseForeground?.()
+    this.leases.clear()
+    this.groups.clear()
+    this.foregroundPending = 0
+    this.modelTransition = undefined
+    this.applying = undefined
+    if (this.retry) clearTimeout(this.retry)
+    this.retry = undefined
+  }
 
   /** Main-renderer background owner. The returned disposer only removes its own hook. */
   setForegroundAdmission(admit: ForegroundAdmission): () => void {
@@ -128,7 +147,11 @@ export class LocalResourceController {
     if (this.hasWork() || this.modelTransition || this.applying)
       return Promise.reject(new Error('resource_system_check_busy'))
     // Install the barrier synchronously, before invoking native cleanup.
-    const transition = Promise.resolve().then(operation)
+    const lifecycle = this.lifecycle
+    const transition = Promise.resolve().then(() => {
+      lifecycle.signal.throwIfAborted()
+      return operation()
+    })
     this.modelTransition = transition
     const clear = () => {
       if (this.modelTransition === transition) this.modelTransition = undefined
@@ -142,11 +165,14 @@ export class LocalResourceController {
     // A new selection/retry is an explicit request to reconcile closing jobs.
     this.restartCleanup()
     const previous = this.modelTransition
+    const lifecycle = this.lifecycle
     const transition = (async () => {
       await previous?.catch(() => undefined)
+      lifecycle.signal.throwIfAborted()
       const background = this.preemptibleBackground
       background?.controller.abort(new Error('resource_background_preempted'))
       if (background) await background.drained
+      lifecycle.signal.throwIfAborted()
       while (this.hasWork()) {
         // Never silently wait forever for an exhausted native end acknowledgement.
         // Keep ownership, surface the failure, and allow the UI retry to reconcile it.
@@ -156,9 +182,10 @@ export class LocalResourceController {
           )
         )
           throw new Error('resource_work_cleanup_failed')
-        await waitForChange()
+        await waitForChange(lifecycle.signal)
       }
       if (this.dependencies.enabled()) await this.flush()
+      lifecycle.signal.throwIfAborted()
       return operation()
     })()
     this.modelTransition = transition
@@ -181,7 +208,10 @@ export class LocalResourceController {
   }
 
   async get(): Promise<LocalResourceConfigState> {
-    return this.publish(await this.dependencies.get())
+    const lifecycle = this.lifecycle
+    const result = await this.dependencies.get()
+    lifecycle.signal.throwIfAborted()
+    return this.publish(result)
   }
 
   /** An explicit UI refresh may retry exhausted cleanup; internal reads never restart it. */
@@ -191,8 +221,11 @@ export class LocalResourceController {
   }
 
   async set(config: LocalResourceConfig, expectedRevision: number): Promise<LocalResourceConfigState> {
+    const lifecycle = this.lifecycle
     this.restartCleanup()
-    const state = this.publish(await this.dependencies.set(config, expectedRevision))
+    const result = await this.dependencies.set(config, expectedRevision)
+    lifecycle.signal.throwIfAborted()
+    const state = this.publish(result)
     if (!state.pending) return state
     return this.flush()
   }
@@ -220,6 +253,7 @@ export class LocalResourceController {
   }
 
   private async finishLease(lease: WorkLease): Promise<void> {
+    if (this.leases.get(lease.work.leaseId) !== lease) return
     const job = this.cleanups.get(lease.work.leaseId)
     if (job?.timer) clearTimeout(job.timer)
     this.cleanups.delete(lease.work.leaseId)
@@ -233,6 +267,7 @@ export class LocalResourceController {
   private async closeLease(lease: WorkLease): Promise<void> {
     if (lease.native) {
       for (let attempt = 0; attempt < 3; attempt++) {
+        if (this.leases.get(lease.work.leaseId) !== lease) return
         try {
           await this.dependencies.end(lease.work.leaseId)
           await this.finishLease(lease)
@@ -241,6 +276,7 @@ export class LocalResourceController {
           if (attempt < 2) await waitForChange()
         }
       }
+      if (this.leases.get(lease.work.leaseId) !== lease) return
       // The controller now owns the retry, even after a run/team drops its release handle.
       const job: DeferredCleanup = { lease, attempts: 0 }
       this.cleanups.set(lease.work.leaseId, job)
@@ -283,24 +319,30 @@ export class LocalResourceController {
   /** Native also verifies workflow leases and active preparation/inference before replacing its own runtime. */
   async flush(): Promise<LocalResourceConfigState> {
     if (this.applying) return this.applying
-    this.applying = (async () => {
+    const lifecycle = this.lifecycle
+    const applying = (async () => {
       const state = await this.get()
+      lifecycle.signal.throwIfAborted()
       if (!state.pending || this.leases.size) return state
       try {
-        const applied = this.publish(await this.dependencies.apply(state.revision))
+        const result = await this.dependencies.apply(state.revision)
+        lifecycle.signal.throwIfAborted()
+        const applied = this.publish(result)
         if (!applied.pending && applied.appliedRevision !== state.appliedRevision)
           await this.dependencies.applied?.(applied)
         return applied
       } catch (error) {
+        lifecycle.signal.throwIfAborted()
         if (!pendingError(error) && !String(error).includes('resource_revision_mismatch')) throw error
         this.scheduleRetry()
         return this.get()
       }
     })()
+    this.applying = applying
     try {
-      return await this.applying
+      return await applying
     } finally {
-      this.applying = undefined
+      if (this.applying === applying) this.applying = undefined
     }
   }
 
@@ -319,6 +361,7 @@ export class LocalResourceController {
   async acquireGroup(key: string, signal?: AbortSignal, parent?: LocalResourceWork) {
     const existing = this.groups.get(key)
     const lease = await this.acquire(signal, parent ?? existing)
+    this.assertWork(lease.work)
     if (!existing) this.groups.set(key, lease.work)
     return {
       work: lease.work,
@@ -334,6 +377,8 @@ export class LocalResourceController {
     parent?: LocalResourceWork,
     priority: 'foreground' | 'background' = 'foreground'
   ): Promise<{ work: LocalResourceWork; release(): Promise<void> }> {
+    const lifecycle = this.lifecycle
+    signal = signal ? AbortSignal.any([signal, lifecycle.signal]) : lifecycle.signal
     signal?.throwIfAborted()
     const inherited = parent && this.leases.get(parent.leaseId)
     if (parent && (!inherited || inherited.work !== parent || inherited.closing))
@@ -359,6 +404,7 @@ export class LocalResourceController {
           if (background) await background.drained
           signal?.throwIfAborted()
           foreground = await this.foregroundAdmission?.(signal)
+          signal.throwIfAborted()
         }
         let work: LocalResourceWork
         const leaseId = crypto.randomUUID()
@@ -369,6 +415,11 @@ export class LocalResourceController {
             signal?.throwIfAborted()
             try {
               work = await this.dependencies.begin(leaseId)
+              if (lifecycle.signal.aborted) {
+                // A late IPC reply may describe only this retired lease, never a new owner's lease.
+                void this.dependencies.end(leaseId).catch(() => undefined)
+                lifecycle.signal.throwIfAborted()
+              }
               break
             } catch (error) {
               if (!pendingError(error)) throw error
@@ -385,12 +436,13 @@ export class LocalResourceController {
         foreground?.release()
         throw error
       } finally {
-        if (isForeground) this.foregroundPending -= 1
+        if (isForeground && this.lifecycle === lifecycle) this.foregroundPending -= 1
       }
     }
     let released = false
     let releasing: Promise<void> | undefined
     const release = async () => {
+      if (this.leases.get(lease.work.leaseId) !== lease) return
       if (releasing) return releasing
       if (released) return
       if (lease.references > 1) {
@@ -421,6 +473,7 @@ export class LocalResourceController {
     group?: string
   ): Promise<T> {
     const lease = await this.acquire(signal, parent)
+    this.assertWork(lease.work)
     if (group) this.groups.set(group, lease.work)
     try {
       return await operation(lease.work)
@@ -433,12 +486,17 @@ export class LocalResourceController {
   /** Trusted idle scheduler only; never exposed to tools or persisted configuration. */
   async runBackground<T>(operation: (work: LocalResourceWork) => Promise<T>, signal: AbortSignal): Promise<T> {
     const lease = await this.acquire(signal, undefined, 'background')
+    this.assertWork(lease.work)
     try {
       signal.throwIfAborted()
       return await operation(lease.work)
     } finally {
       await lease.release()
     }
+  }
+
+  private assertWork(work: LocalResourceWork): void {
+    if (this.leases.get(work.leaseId)?.work !== work) throw new DOMException('Expired resource work', 'AbortError')
   }
 
   /** Bounded resident-only maintenance. Foreground acquisition aborts and drains this owner first. */

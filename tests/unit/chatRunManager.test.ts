@@ -19,6 +19,72 @@ function deferred() {
 const input = (conversationId: string) => ({ principalId: 'person', projectId: 'project', conversationId })
 
 describe('persistent chat run owner', () => {
+  it('bounds a stuck worker stop and ignores late completion after native-confirmed recovery', async () => {
+    vi.useFakeTimers()
+    try {
+      const manager = createChatRunManager(createChatRunJournal(false))
+      const oldWork = deferred()
+      let signal!: AbortSignal
+      const old = manager.submit({ ...input('one'), runId: 'old' }, async handle => {
+        signal = handle.signal
+        await oldWork.promise
+      })
+      await vi.waitFor(() => expect(signal).toBeDefined())
+      const generation = manager.requestStopAll()
+      expect(signal.aborted).toBe(true)
+      const wait = manager.waitForStop(20)
+      await vi.advanceTimersByTimeAsync(20)
+      expect(await wait).toEqual({ settled: false, pendingIds: ['old'] })
+      expect(manager.resumeAfterStop()).toBe(false)
+      expect(manager.recoverStopped({ generation: generation - 1, nativeStopped: true })).toBe(0)
+      expect(manager.recoverStopped({ generation, nativeStopped: true })).toBe(1)
+      await old
+      expect(manager.resumeAfterStop()).toBe(true)
+      const freshWork = deferred()
+      const start = vi.fn(async () => freshWork.promise)
+      const fresh = manager.submit({ ...input('one'), runId: 'fresh' }, start)
+      await vi.waitFor(() => expect(start).toHaveBeenCalledOnce())
+      oldWork.resolve()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(manager.records.value.find(run => run.runId === 'old')?.state).toBe('cancelled')
+      expect(manager.records.value.find(run => run.runId === 'fresh')?.state).toBe('running')
+      freshWork.resolve()
+      await fresh
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops and recovers admission stuck before its first durable commit without later executing it', async () => {
+    vi.useFakeTimers()
+    try {
+      const preview = createChatRunJournal(false)
+      const commit = deferred()
+      const manager = createChatRunManager({
+        ...preview,
+        write: async (record, revision) => {
+          if (!revision) await commit.promise
+          return preview.write(record, revision)
+        },
+      })
+      const start = vi.fn(async () => undefined)
+      const submission = manager.submit({ ...input('one'), runId: 'admitting' }, start)
+      const generation = manager.requestStopAll()
+      await expect(manager.submit(input('two'), start)).rejects.toThrow('gestoppt')
+      const wait = manager.waitForStop(10)
+      await vi.advanceTimersByTimeAsync(10)
+      expect(await wait).toEqual({ settled: false, pendingIds: ['admitting'] })
+      expect(manager.recoverStopped({ generation, nativeStopped: true })).toBe(1)
+      await submission
+      commit.resolve()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(start).not.toHaveBeenCalled()
+      expect((await preview.list('person'))[0]?.state).toBe('cancelled')
+      expect(await manager.waitForStop()).toEqual({ settled: true, pendingIds: [] })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
   it('preserves submission order even when the second initial disk commit returns first', async () => {
     const preview = createChatRunJournal(false)
     const firstCommit = deferred()

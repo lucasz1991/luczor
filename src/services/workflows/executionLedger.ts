@@ -50,8 +50,14 @@ const durableStorage: WorkflowExecutionStorage = {
 
 /** A durable started marker is written before effects. An uncertain invocation never runs again implicitly. */
 export function createWorkflowExecutionLedger(storage: WorkflowExecutionStorage = durableStorage) {
-  const locks = new Set<string>()
+  const locks = new Map<string, symbol>()
+  let generation = 0
   return {
+    /** A native-confirmed stop frees local locks, but keeps durable uncertain-effect markers. */
+    recoverAfterStop(): void {
+      generation++
+      locks.clear()
+    },
     async recover(scope: string, id: string, payload: unknown) {
       const record = await storage.read(`${scope}:${id}`)
       if (!record) return undefined
@@ -63,10 +69,17 @@ export function createWorkflowExecutionLedger(storage: WorkflowExecutionStorage 
     async execute(scope: string, id: string, payload: unknown, execute: () => Promise<Record<string, unknown>>) {
       const key = `${scope}:${id}`
       if (locks.has(key)) throw new Error('workflow_execution_busy')
-      locks.add(key)
+      const owner = Symbol(id)
+      const epoch = generation
+      const assertCurrent = () => {
+        if (epoch !== generation) throw new Error('workflow_execution_stopped')
+      }
+      locks.set(key, owner)
       try {
         const hash = await workflowHash(payload)
+        assertCurrent()
         const previous = await storage.read(key)
+        assertCurrent()
         if (previous) {
           // Request fingerprints contain no secrets and are compared locally, not across a remote authentication boundary.
           // eslint-disable-next-line security/detect-possible-timing-attacks
@@ -77,11 +90,13 @@ export function createWorkflowExecutionLedger(storage: WorkflowExecutionStorage 
           return previous.result
         }
         await storage.write(key, { id, hash, state: 'started', updatedAt: Date.now() })
+        assertCurrent()
         const result = await execute()
+        assertCurrent()
         await storage.write(key, { id, hash, state: 'completed', result, updatedAt: Date.now() })
         return result
       } finally {
-        locks.delete(key)
+        if (locks.get(key) === owner) locks.delete(key)
       }
     },
     async acknowledge(scope: string, id: string) {

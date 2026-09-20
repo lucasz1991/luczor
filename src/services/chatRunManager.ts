@@ -2,6 +2,7 @@ import { shallowRef } from 'vue'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import type { AppState } from '@/state/types'
 import { finishChatActivity } from '@/services/chatActivity'
+import { waitForRuntimeDrain, type NativeStopAcknowledgement } from '@/services/runs/drain'
 
 export type ChatRunState =
   'queued' | 'running' | 'waiting_resource' | 'waiting_approval' | 'interrupted' | 'completed' | 'failed' | 'cancelled'
@@ -103,6 +104,18 @@ type OwnedRun = {
   drained: Promise<void>
   drain: () => void
   finishState?: ChatRunState
+  detached?: boolean
+  stoppingQueued?: boolean
+}
+type Admission = {
+  conversationId: string
+  controller: AbortController
+  drained: Promise<void>
+  drain: () => void
+  recovered: Promise<void>
+  detach: () => void
+  detached: boolean
+  stopGeneration?: number
 }
 
 /** Views observe records; only this owner may start, stop or settle an execution. */
@@ -111,8 +124,10 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
   const jobs = new Map<string, OwnedRun>()
   // Reserve order before asynchronous disk commits. A fast second commit must
   // never overtake the first submitted message in the same conversation.
-  const admissions = new Map<string, string>()
+  const admissions = new Map<string, Admission>()
   const executing = new Set<string>()
+  let admissionPaused = false
+  let stopGeneration = 0
   const publish = (record: ChatRunRecord) => {
     records.value = [...records.value.filter(item => item.runId !== record.runId), { ...record }].sort(
       (left, right) => left.createdAt - right.createdAt
@@ -120,22 +135,24 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
   }
   const update = (job: OwnedRun, patch: Partial<Pick<ChatRunRecord, 'state' | 'checkpoint'>>) => {
     const operation = job.writes.then(async () => {
+      if (job.detached) return
       job.record = await journal.write({ ...job.record, ...patch }, job.record.revision)
-      publish(job.record)
+      if (!job.detached) publish(job.controller.signal.aborted ? { ...job.record, state: 'cancelled' } : job.record)
     })
     job.writes = operation.catch(() => undefined)
     return operation
   }
   const pump = () => {
-    if (executing.size >= concurrency) return
+    if (admissionPaused || executing.size >= concurrency) return
     const occupied = new Set([...executing].map(id => jobs.get(id)?.record.conversationId))
     const firstAdmission = new Map<string, string>()
-    for (const [runId, conversationId] of admissions)
-      if (!firstAdmission.has(conversationId)) firstAdmission.set(conversationId, runId)
+    for (const [runId, admission] of admissions)
+      if (!firstAdmission.has(admission.conversationId)) firstAdmission.set(admission.conversationId, runId)
     for (const job of jobs.values()) {
       if (executing.size >= concurrency) break
       if (
         job.record.state !== 'queued' ||
+        job.controller.signal.aborted ||
         executing.has(job.record.runId) ||
         occupied.has(job.record.conversationId) ||
         firstAdmission.get(job.record.conversationId) !== job.record.runId
@@ -165,25 +182,57 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
           }).catch(() => {
             // The durable record remains recoverable on next launch. Do not keep
             // a dead process spinning in this session when storage is unavailable.
-            publish({
-              ...job.record,
-              state: 'interrupted',
-              checkpoint: {
-                ...job.record.checkpoint,
-                summary: 'Auftrag beendet; das lokale Laufjournal konnte nicht aktualisiert werden.',
-              },
-            })
+            if (!job.detached)
+              publish({
+                ...job.record,
+                state: 'interrupted',
+                checkpoint: {
+                  ...job.record.checkpoint,
+                  summary: 'Auftrag beendet; das lokale Laufjournal konnte nicht aktualisiert werden.',
+                },
+              })
           })
           job.reject(error)
         } finally {
-          executing.delete(job.record.runId)
-          jobs.delete(job.record.runId)
-          job.drain()
-          pump()
+          if (!job.detached) {
+            executing.delete(job.record.runId)
+            jobs.delete(job.record.runId)
+            job.drain()
+            pump()
+          }
         }
       })()
     }
   }
+  const cancelQueued = (job: OwnedRun) => {
+    if (executing.has(job.record.runId) || job.stoppingQueued) return
+    job.stoppingQueued = true
+    void update(job, { state: 'cancelled' })
+      .catch(() => undefined)
+      .finally(() => {
+        if (job.detached) return
+        publish({ ...job.record, state: 'cancelled' })
+        jobs.delete(job.record.runId)
+        job.resolve(undefined)
+        job.drain()
+        pump()
+      })
+  }
+  const requestStop = (reason?: unknown, pause = true) => {
+    if (pause) admissionPaused = true
+    const generation = ++stopGeneration
+    for (const admission of admissions.values()) {
+      admission.stopGeneration = generation
+      admission.controller.abort(reason ?? new DOMException('Alle Aufträge gestoppt.', 'AbortError'))
+    }
+    for (const job of jobs.values()) {
+      publish({ ...job.record, state: 'cancelled' })
+      cancelQueued(job)
+    }
+    return generation
+  }
+  const waitForStop = (timeoutMs = 1500) =>
+    waitForRuntimeDrain(() => [...admissions].map(([id, admission]) => ({ id, drained: admission.drained })), timeoutMs)
   return {
     records,
     hasLive: (conversationId?: string) =>
@@ -213,22 +262,53 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
       start: (handle: ChatRunHandle) => Promise<Result>,
       signal?: AbortSignal
     ): Promise<Result> {
+      if (admissionPaused) throw new Error('Chatläufe sind gestoppt. Ausführung ausdrücklich wieder erlauben.')
       signal?.throwIfAborted()
       const runId = input.runId ?? crypto.randomUUID()
       if (admissions.has(runId)) throw new Error('Auftrag bereits vorhanden.')
-      admissions.set(runId, input.conversationId)
       const controller = new AbortController()
-      const abort = () => controller.abort(signal?.reason)
+      let drainAdmission!: () => void
+      let detachAdmission!: () => void
+      const admission: Admission = {
+        conversationId: input.conversationId,
+        controller,
+        detached: false,
+        drained: new Promise<void>(resolve => {
+          drainAdmission = resolve
+        }),
+        drain: () => drainAdmission(),
+        recovered: new Promise<void>(resolve => {
+          detachAdmission = resolve
+        }),
+        detach: () => {
+          admission.detached = true
+          detachAdmission()
+        },
+      }
+      admissions.set(runId, admission)
+      const abort = () => {
+        controller.abort(signal?.reason)
+        const job = jobs.get(runId)
+        if (job) cancelQueued(job)
+      }
       signal?.addEventListener('abort', abort, { once: true })
       const timestamp = Date.now()
       try {
-        const record = await journal.write(
-          { ...input, kind: 'chat', runId, state: 'queued', revision: 0, createdAt: timestamp, updatedAt: timestamp },
-          0
-        )
-        if (signal?.aborted) {
+        const initialWrite = journal
+          .write(
+            { ...input, kind: 'chat', runId, state: 'queued', revision: 0, createdAt: timestamp, updatedAt: timestamp },
+            0
+          )
+          .then(record => {
+            if (admission.detached)
+              void journal.write({ ...record, state: 'cancelled' }, record.revision).catch(() => undefined)
+            return record
+          })
+        const record = await Promise.race([initialWrite, admission.recovered.then(() => undefined)])
+        if (!record || admission.detached) return undefined as Result
+        if (controller.signal.aborted) {
           publish(await journal.write({ ...record, state: 'cancelled' }, record.revision))
-          signal.throwIfAborted()
+          controller.signal.throwIfAborted()
         }
         return await new Promise<Result>((resolve, reject) => {
           let drain!: () => void
@@ -251,38 +331,53 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
         })
       } finally {
         signal?.removeEventListener('abort', abort)
-        admissions.delete(runId)
+        if (admissions.get(runId) === admission) admissions.delete(runId)
+        admission.drain()
         pump()
       }
     },
-    async stop(runId: string, reason?: unknown) {
+    async stop(runId: string, reason?: unknown, timeoutMs = 1500) {
+      admissions.get(runId)?.controller.abort(reason ?? new DOMException('Von dir gestoppt.', 'AbortError'))
       const job = jobs.get(runId)
-      if (!job) return
-      job.controller.abort(reason ?? new DOMException('Von dir gestoppt.', 'AbortError'))
-      if (!executing.has(runId)) {
-        try {
-          await update(job, { state: 'cancelled' })
-        } finally {
+      if (job) cancelQueued(job)
+      return waitForRuntimeDrain(() => {
+        const admission = admissions.get(runId)
+        return admission ? [{ id: runId, drained: admission.drained }] : []
+      }, timeoutMs)
+    },
+    requestStopAll: (reason?: unknown) => requestStop(reason),
+    waitForStop,
+    recoverStopped(acknowledgement: NativeStopAcknowledgement): number {
+      if (!acknowledgement.nativeStopped || acknowledgement.generation !== stopGeneration) return 0
+      let recovered = 0
+      for (const [runId, admission] of admissions) {
+        if (admission.stopGeneration !== acknowledgement.generation || !admission.controller.signal.aborted) continue
+        const job = jobs.get(runId)
+        if (job) {
+          job.detached = true
           publish({ ...job.record, state: 'cancelled' })
-          jobs.delete(runId)
           job.resolve(undefined)
           job.drain()
-          pump()
+          jobs.delete(runId)
+          executing.delete(runId)
         }
+        admission.detach()
+        admission.drain()
+        admissions.delete(runId)
+        recovered++
       }
-      await job.drained
+      return recovered
     },
-    async stopAll(reason?: unknown) {
-      const owned = [...jobs.values()]
-      for (const job of owned) job.controller.abort(reason ?? new DOMException('Alle Aufträge gestoppt.', 'AbortError'))
-      for (const job of [...jobs.values()]) {
-        if (executing.has(job.record.runId)) continue
-        await update(job, { state: 'cancelled' }).catch(() => undefined)
-        jobs.delete(job.record.runId)
-        job.resolve(undefined)
-        job.drain()
-      }
-      await Promise.all(owned.map(job => job.drained))
+    resumeAfterStop(): boolean {
+      if (admissions.size || executing.size) return false
+      admissionPaused = false
+      pump()
+      return true
+    },
+    async stopAll(reason?: unknown, timeoutMs = 1500) {
+      // Account changes stop existing work without permanently disabling the new account.
+      requestStop(reason, false)
+      return waitForStop(timeoutMs)
     },
   }
 }

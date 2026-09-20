@@ -172,11 +172,30 @@ export function useAutonomousGoal(input: {
       revision.value++
     }
   }
-  const pauseAll = async () => {
-    stopSchedulingWatch()
-    await Promise.all(
-      activeGoalIds.value.map(id => controller.stop(id, 'App wird beendet. Ziel bei Bedarf erneut aktivieren.'))
-    )
+  const pauseAll = async (reason = 'Alle Agenten gestoppt. Ziel bei Bedarf erneut aktivieren.') => {
+    identityGeneration++
+    const chats = state.conversations ?? []
+    controller.cancelAll(chats.map(chat => chat.id), reason)
+    // Persist logical cancellation before waiting for any worker. A stuck model cannot keep a goal active on restart.
+    for (const chat of chats) {
+      const goal = chat.autonomousGoal
+      if (!goal || (!goal.active && !['running', 'checking'].includes(goal.status))) continue
+      chat.autonomousGoal = {
+        ...goal,
+        active: false,
+        status: goal.status === 'completed' ? 'completed' : 'waiting',
+        phase: 'work',
+        revision: goal.revision + 1,
+        reason,
+        updatedAt: Date.now(),
+      }
+    }
+    revision.value++
+    await saveAppStateStrict(state)
+  }
+  const recoverAfterStop = () => {
+    controller.recoverAfterStop()
+    revision.value++
   }
   const identityChanged = () => {
     identityGeneration++
@@ -222,5 +241,5 @@ export function useAutonomousGoal(input: {
     controller.dispose()
     window.removeEventListener('luczor:api-identity-changing', identityChanged)
   })
-  return { model, error, running, isRunning, runAttached, save, toggle, interrupt, stop, pauseAll }
+  return { model, error, running, isRunning, runAttached, save, toggle, interrupt, stop, pauseAll, recoverAfterStop }
 }

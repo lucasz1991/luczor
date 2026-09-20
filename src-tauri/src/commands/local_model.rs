@@ -317,17 +317,7 @@ struct VerifiedArtifactFiles {
 #[cfg(windows)]
 #[derive(Debug)]
 struct ProcessLifetimeGuard {
-    handle: isize,
-}
-
-#[cfg(windows)]
-impl Drop for ProcessLifetimeGuard {
-    fn drop(&mut self) {
-        use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-        unsafe {
-            let _ = CloseHandle(self.handle as HANDLE);
-        }
-    }
+    job: Arc<super::owned_processes::WindowsJob>,
 }
 
 #[cfg(target_os = "linux")]
@@ -372,6 +362,8 @@ impl ManagedRuntime {
             }
         }
         if let Some(mut child) = self.child.take() {
+            #[cfg(windows)]
+            let _ = self._process_lifetime_guard.job.terminate();
             terminate_process(&mut child);
         }
         let _ = fs::remove_file(&self.api_key_file);
@@ -1171,6 +1163,7 @@ pub async fn local_model_prepare(
     installed_only: Option<bool>,
 ) -> Result<NativeReadiness, String> {
     ensure_main_webview(&window)?;
+    let (operation, cancellation) = super::owned_processes::Operation::begin()?;
     if installed_only.unwrap_or(false) {
         let operation_id = request_id
             .filter(|id| safe_id(id))
@@ -1189,6 +1182,8 @@ pub async fn local_model_prepare(
             resource_revision,
         )?;
         return tauri::async_runtime::spawn_blocking(move || {
+            let _operation = operation;
+            if cancellation.check().is_err() { cancel.store(true, Ordering::Release); }
             finish_prepare_release(
                 &app,
                 &operation_id,
@@ -1204,6 +1199,8 @@ pub async fn local_model_prepare(
         .map_err(|error| error.to_string())?;
     }
     tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
+        cancellation.check()?;
         let started = Instant::now();
         let result = prepare_release(
             &app,
@@ -1227,6 +1224,7 @@ pub async fn local_model_infer(
     on_event: Channel<LocalInferenceEvent>,
 ) -> Result<LocalInferenceResult, String> {
     ensure_main_webview(&window)?;
+    let (operation, cancellation) = super::owned_processes::Operation::begin()?;
     let preparation = (|| {
         validate_inference_request(&request)?;
         let mut guard = state()
@@ -1239,7 +1237,11 @@ pub async fn local_model_infer(
         send_preparation_failure(&request.request_id, &on_event);
         return Err(error);
     }
-    tauri::async_runtime::spawn_blocking(move || infer_blocking(&app, request, on_event))
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = operation;
+        cancellation.check()?;
+        infer_blocking(&app, request, on_event)
+    })
         .await
         .map_err(|error| error.to_string())?
 }
@@ -1453,18 +1455,27 @@ pub async fn local_model_stop(
     stop_runtime_async(runtime).await
 }
 
-pub fn shutdown_all() {
-    let mut runtime = if let Ok(mut guard) = state().lock() {
+pub(crate) fn signal_stop_all() -> Result<(), String> {
+    let guard = state().try_lock().map_err(|_| "local_runtime_stop_pending")?;
+    if let Some(cancel) = guard.cancel.as_ref() { cancel.store(true, Ordering::SeqCst); }
+    Ok(())
+}
+
+pub(crate) fn shutdown_all() -> Result<bool, String> {
+    let (mut runtime, active) = if let Ok(mut guard) = state().try_lock() {
         if let Some(cancel) = guard.cancel.as_ref() {
             cancel.store(true, Ordering::SeqCst);
         }
-        guard.runtime.take()
+        (guard.runtime.take(), guard.active_request_id.is_some())
     } else {
-        None
+        return Err("local_runtime_stop_pending".into());
     };
     if let Some(runtime) = runtime.as_mut() {
+        // Emergency stop must not block on a KV cache HTTP save.
+        runtime.slot_cache_dir = None;
         runtime.stop();
     }
+    Ok(!active)
 }
 
 fn verify_envelope_with_trust(
@@ -5187,7 +5198,7 @@ fn spawn_owned_runtime(command: Command) -> Result<(Child, ProcessLifetimeGuard)
 #[cfg(windows)]
 fn configure_process(command: &mut Command) {
     use std::os::windows::process::CommandExt;
-    command.creation_flags(0x0000_0200 | 0x0800_0000);
+    command.creation_flags(0x0000_0004 | 0x0000_0200 | 0x0800_0000);
 }
 
 #[cfg(windows)]
@@ -5222,9 +5233,11 @@ fn attach_process_lifetime_guard(child: &Child) -> Result<ProcessLifetimeGuard, 
                 "Windows runtime process could not be bound to its kill-on-close job.".into(),
             );
         }
-        Ok(ProcessLifetimeGuard {
-            handle: handle as isize,
-        })
+        let guard = ProcessLifetimeGuard {
+            job: super::owned_processes::WindowsJob::register(handle as isize)?,
+        };
+        super::codex::resume_suspended_child(child.id())?;
+        Ok(guard)
     }
 }
 
@@ -5260,14 +5273,6 @@ fn terminate_process(child: &mut Child) {
     if child.try_wait().is_ok_and(|status| status.is_some()) {
         return;
     }
-    let mut command = Command::new("taskkill.exe");
-    command
-        .args(["/PID", &child.id().to_string(), "/T", "/F"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    configure_process(&mut command);
-    let _ = command.status();
     let _ = child.kill();
     let _ = child.wait();
 }

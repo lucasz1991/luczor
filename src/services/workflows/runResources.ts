@@ -74,6 +74,16 @@ export async function releaseWorkflowAccountResources(config: LuczorApiConfigSna
       .map(item => releaseWorkflowResources(item.scope))
   )
 }
+/** Release only this renderer's retained local browser resources, not remote workflow state. */
+export async function releaseAllWorkflowResources(): Promise<void> {
+  const results = await Promise.allSettled([...resources.values()].map(item => releaseWorkflowResources(item.scope)))
+  const failure = results.find(result => result.status === 'rejected')
+  if (failure?.status === 'rejected') throw failure.reason
+}
+/** Native global cleanup already closed these sessions; discard stale renderer ownership. */
+export function recoverWorkflowResourcesAfterStop(): void {
+  resources.clear()
+}
 export async function sweepWorkflowResources(config: LuczorApiConfigSnapshot, signal: AbortSignal) {
   for (const item of [...resources.values()]) {
     if (signal.aborted || !sameAccount(item.config, config)) continue

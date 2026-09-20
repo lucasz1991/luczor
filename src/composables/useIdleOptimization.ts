@@ -19,6 +19,7 @@ export function useIdleOptimization(context: IdleOptimizationContext & { draft()
   const identityChanging = ref(false)
   const optimizer = createIdleOptimization({ ...context, busy: () => context.busy() || identityChanging.value })
   let disposed = false
+  let globallyStopped = false
   const unlistenStores: Array<() => void> = []
   const releaseAdmission = localResources.setForegroundAdmission(signal => optimizer.acquireForeground(signal))
   const releaseManualRequest = registerIdleOptimizationRequest(
@@ -47,7 +48,7 @@ export function useIdleOptimization(context: IdleOptimizationContext & { draft()
   }
   watch([context.busy, context.draft, () => context.project()?.id], activity, { flush: 'sync' })
   watch(idleOptimizationEnabled, enabled => {
-    if (!disposed && enabled) optimizer.start()
+    if (!disposed && !globallyStopped && enabled) optimizer.start()
     else void optimizer.stop()
   })
   onMounted(async () => {
@@ -84,7 +85,7 @@ export function useIdleOptimization(context: IdleOptimizationContext & { draft()
       }
       unlistenStores.push(disposeSettings)
       await loadIdleOptimizationSetting()
-      if (!disposed && idleOptimizationEnabled.value) optimizer.start()
+      if (!disposed && !globallyStopped && idleOptimizationEnabled.value) optimizer.start()
     } catch {
       idleOptimizationEnabled.value = false
     }
@@ -104,5 +105,16 @@ export function useIdleOptimization(context: IdleOptimizationContext & { draft()
     window.removeEventListener('luczor:api-identity-changed', changed)
     window.removeEventListener('beforeunload', changing)
   })
-  return optimizer
+  return {
+    stop: () => {
+      globallyStopped = true
+      return optimizer.stop()
+    },
+    recoverAfterStop: () => optimizer.recoverAfterStop(),
+    /** Only the user's explicit execution-resume action re-enables the saved idle preference. */
+    start: () => {
+      globallyStopped = false
+      if (!disposed && idleOptimizationEnabled.value) optimizer.start()
+    },
+  }
 }

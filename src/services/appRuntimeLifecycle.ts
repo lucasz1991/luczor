@@ -72,6 +72,8 @@ export type AppRuntimeLifecycleDependencies = {
 export type AppRuntimeLifecycle = {
   start: () => Promise<void>
   stop: () => void
+  suspendWork: () => void
+  resumeWork: () => void
 }
 
 function isLuczorMode(value: unknown): value is LuczorMode {
@@ -134,6 +136,7 @@ export function createAppRuntimeLifecycle(
   let runtimeActive = false
   let runtimeReady = false
   let identityChanging = false
+  let workSuspended = false
   let deviceChannelGeneration = 0
   let identityListenersInstalled = false
 
@@ -145,12 +148,18 @@ export function createAppRuntimeLifecycle(
     knownStop?.()
   }
   const startCurrentDeviceChannel = () => {
-    if (!runtimeActive || !runtimeReady || identityChanging) return
+    if (!runtimeActive || !runtimeReady || identityChanging || workSuspended) return
     const generation = ++deviceChannelGeneration
     void dependencies
       .startDeviceJobChannel()
       .then(stopChannel => {
-        if (!runtimeActive || !runtimeReady || identityChanging || generation !== deviceChannelGeneration) {
+        if (
+          !runtimeActive ||
+          !runtimeReady ||
+          identityChanging ||
+          workSuspended ||
+          generation !== deviceChannelGeneration
+        ) {
           stopChannel()
           return
         }
@@ -289,5 +298,17 @@ export function createAppRuntimeLifecycle(
     void stopNativeNotificationActions?.()
   }
 
-  return { start, stop }
+  return {
+    start,
+    stop,
+    suspendWork() {
+      workSuspended = true
+      invalidateDeviceChannel()
+    },
+    resumeWork() {
+      if (!workSuspended) return
+      workSuspended = false
+      startCurrentDeviceChannel()
+    },
+  }
 }

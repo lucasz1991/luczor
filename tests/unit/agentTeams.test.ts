@@ -62,6 +62,46 @@ afterEach(() => {
 })
 
 describe('agent team DAG scheduler', () => {
+  it('recovers cancelling team nodes only after native stop and ignores late executor output and resource cleanup', async () => {
+    vi.useFakeTimers()
+    const pending = deferred<AgentRunResult>()
+    const release = vi.fn(async () => undefined)
+    const requests: AgentTeamExecutionRequest[] = []
+    const teams = new AgentTeamOrchestrator({
+      executor: async request => {
+        requests.push(request)
+        return pending.promise
+      },
+      acquireResources: async () => release,
+    })
+    const definition = { ...twoRoots(), nodes: twoRoots().nodes.slice(0, 1) }
+    const run = teams.prepare(definition, {
+      project: PROJECT,
+      objective: 'Perform current task.',
+      approvalMode: 'team',
+    })
+    teams.approveRun(run.id)
+    await flush()
+    expect(requests).toHaveLength(1)
+    const generation = teams.requestStopAll()
+    expect(requests[0]!.signal.aborted).toBe(true)
+    const waiting = teams.waitForStop(10)
+    await vi.advanceTimersByTimeAsync(10)
+    expect(await waiting).toEqual({ settled: false, pendingIds: [run.id] })
+    expect(release).not.toHaveBeenCalled()
+    expect(teams.resumeAfterStop()).toBe(false)
+    expect(teams.recoverStopped({ generation: generation - 1, nativeStopped: true })).toBe(0)
+    expect(teams.recoverStopped({ generation, nativeStopped: true })).toBe(1)
+    expect(teams.getRun(run.id)?.status).toBe('cancelled')
+    expect(teams.resumeAfterStop()).toBe(true)
+    requests[0]!.onOutput('late old output')
+    pending.resolve({ output: 'late completion' })
+    await flush()
+    expect(teams.getRun(run.id)).toMatchObject({ status: 'cancelled', nodes: [{ status: 'cancelled', output: '' }] })
+    expect(release).not.toHaveBeenCalled()
+    expect(await teams.waitForStop()).toEqual({ settled: true, pendingIds: [] })
+    teams.dispose()
+  })
   it('carries the starting chat mode to scope checks and every worker request', async () => {
     const calls: AgentTeamExecutionRequest[] = []
     const scopes: Array<string | undefined> = []

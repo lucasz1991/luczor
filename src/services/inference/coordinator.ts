@@ -696,6 +696,21 @@ export class LocalInferenceCoordinator {
     this.preparationRetries.clear()
   }
 
+  /** Native-confirmed global stop discards blocked JS queues, never signed policy or user settings. */
+  recoverAfterStop(): void {
+    this.dependencies.manager.recoverAfterStop()
+    this.generation++
+    this.resourceEpoch++
+    this.preparationTail = Promise.resolve()
+    this.preparation = undefined
+    this.recovery = undefined
+    this.localScope = undefined
+    this.readiness.clear()
+    this.assessments.clear()
+    this.preparationFailures.clear()
+    this.preparationRetries.clear()
+  }
+
   beginBootstrap(): number {
     this.dependencies.manager.invalidateCatalogBoundary()
     this.generation += 1

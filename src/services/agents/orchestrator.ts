@@ -11,6 +11,7 @@ import type {
 } from './types'
 import { validateAgentExecutionOptions } from './effort'
 import { freezeAgentWorkflowScope } from './workflowScope'
+import { waitForRuntimeDrain, type NativeStopAcknowledgement, type RuntimeDrainResult } from '@/services/runs/drain'
 
 type InternalJob = {
   metadata: AgentJobMetadata
@@ -24,6 +25,10 @@ type InternalJob = {
   executing: boolean
   discard: boolean
   approvalTimer?: ReturnType<typeof setTimeout>
+  drained: Promise<void>
+  drain: () => void
+  stopGeneration?: number
+  detached?: boolean
 }
 
 const TERMINAL = new Set<AgentJobStatus>(['completed', 'failed', 'cancelled'])
@@ -86,6 +91,8 @@ export class AgentOrchestrator {
   private scheduleSequence = 0
   private scheduling = false
   private disposed = false
+  private admissionPaused = false
+  private stopGeneration = 0
 
   constructor(private readonly options: AgentOrchestratorOptions) {
     this.maxConcurrent = boundedInteger(options.maxConcurrent, 2, 8)
@@ -115,6 +122,8 @@ export class AgentOrchestrator {
   enqueue(input: AgentJobInput): AgentJob {
     validateAgentExecutionOptions(input)
     if (this.disposed) throw new Error('Die Agentenzentrale ist geschlossen.')
+    if (this.admissionPaused)
+      throw new Error('Die Agentenzentrale ist gestoppt. Ausführung ausdrücklich wieder erlauben.')
     const adapter = this.adapters.get(input.adapterId)
     if (!adapter) throw new Error('Der gewählte Agent ist nicht verfügbar.')
     if (!PERMISSIONS.includes(input.permission) || !adapter.permissions.includes(input.permission)) {
@@ -155,7 +164,13 @@ export class AgentOrchestrator {
     const id = this.createId()
     if (!safeIdentifier(id) || this.jobs.has(id))
       throw new Error('Es konnte keine eindeutige Agenten-ID erstellt werden.')
+    let drain!: () => void
+    const drained = new Promise<void>(resolve => {
+      drain = resolve
+    })
     const job: InternalJob = {
+      drained,
+      drain,
       project,
       workflowScope,
       prompt: input.prompt,
@@ -198,6 +213,7 @@ export class AgentOrchestrator {
         finishedAt: this.now(),
         errorCode: 'approval_expired',
       })
+      current.drain()
       this.prune()
       this.schedule()
     }, this.approvalTimeoutMs)
@@ -208,7 +224,7 @@ export class AgentOrchestrator {
   /** Only a trusted user approval UI should call this method. */
   approve(id: string): boolean {
     const job = this.jobs.get(id)
-    if (this.disposed || !job || job.metadata.status !== 'awaiting_approval') return false
+    if (this.disposed || this.admissionPaused || !job || job.metadata.status !== 'awaiting_approval') return false
     this.clearApprovalTimer(job)
     this.update(job, { status: 'queued', approvalExpiresAt: undefined })
     this.schedule()
@@ -223,6 +239,7 @@ export class AgentOrchestrator {
     job.prompt = ''
     job.resumeThreadId = undefined
     this.update(job, { status: 'cancelled', finishedAt: this.now() })
+    if (!job.executing) job.drain()
     this.prune()
     this.schedule()
     return true
@@ -283,20 +300,56 @@ export class AgentOrchestrator {
     this.listeners.clear()
   }
 
-  /** Stop admission and wait for native adapters to release every owned worker. */
-  async shutdown(): Promise<void> {
+  /** Revocation is synchronous; resource ownership survives until actual settlement. */
+  requestStopAll(reason?: unknown): number {
+    this.admissionPaused = true
+    const generation = ++this.stopGeneration
+    for (const job of this.jobs.values()) {
+      job.stopGeneration = generation
+      job.controller.abort(reason)
+      this.cancel(job.metadata.id)
+    }
+    return generation
+  }
+
+  waitForStop(timeoutMs = 1500): Promise<RuntimeDrainResult> {
+    return waitForRuntimeDrain(
+      () =>
+        [...this.jobs.values()]
+          .filter(job => job.executing)
+          .map(job => ({ id: job.metadata.id, drained: job.drained })),
+      timeoutMs
+    )
+  }
+
+  /** Trusted coordinator only, after the native/local worker stop was verified. */
+  recoverStopped(acknowledgement: NativeStopAcknowledgement): number {
+    if (!acknowledgement.nativeStopped || acknowledgement.generation !== this.stopGeneration) return 0
+    let recovered = 0
+    for (const job of this.jobs.values()) {
+      if (!job.executing || job.stopGeneration !== acknowledgement.generation || !job.controller.signal.aborted)
+        continue
+      job.detached = true
+      job.executing = false
+      job.drain()
+      recovered++
+    }
+    this.prune()
+    this.notify()
+    return recovered
+  }
+
+  resumeAfterStop(): boolean {
+    if (this.disposed || [...this.jobs.values()].some(job => job.executing)) return false
+    this.admissionPaused = false
+    return true
+  }
+
+  /** Permanent shutdown stays bounded without falsely releasing a live worker. */
+  async shutdown(timeoutMs = 1500): Promise<RuntimeDrainResult> {
     this.disposed = true
-    for (const job of this.jobs.values()) this.cancel(job.metadata.id)
-    if (![...this.jobs.values()].some(job => job.executing)) return
-    await new Promise<void>(resolve => {
-      const inspect = () => {
-        if ([...this.jobs.values()].some(job => job.executing)) return
-        unsubscribe()
-        resolve()
-      }
-      const unsubscribe = this.subscribe(inspect)
-      inspect()
-    })
+    this.requestStopAll()
+    return this.waitForStop(timeoutMs)
   }
 
   private sameProject(left: AgentProjectSnapshot, right: AgentProjectSnapshot): boolean {
@@ -366,11 +419,11 @@ export class AgentOrchestrator {
   }
 
   private schedule(): void {
-    if (this.scheduling || this.disposed) return
+    if (this.scheduling || this.disposed || this.admissionPaused) return
     this.scheduling = true
     queueMicrotask(() => {
       this.scheduling = false
-      if (this.disposed) return
+      if (this.disposed || this.admissionPaused) return
       const running = [...this.jobs.values()].filter(candidate => candidate.executing)
       while (running.length < this.maxConcurrent) {
         const candidates = [...this.jobs.values()]
@@ -483,7 +536,9 @@ export class AgentOrchestrator {
         })
       }
     } finally {
+      if (job.detached) return
       job.executing = false
+      job.drain()
       this.clearApprovalTimer(job)
       job.prompt = ''
       job.resumeThreadId = undefined

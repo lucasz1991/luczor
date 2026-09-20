@@ -115,6 +115,7 @@ export class LocalModelManager {
   }> = []
   private slotOccupied = false
   private boundaryEpoch = 0
+  private slotGeneration = 0
 
   constructor(
     private readonly transport: LocalRuntimeTransport,
@@ -179,6 +180,14 @@ export class LocalModelManager {
     this.health.clear()
   }
 
+  /** Call only after native global cleanup acknowledged all old local work has stopped. */
+  recoverAfterStop(): void {
+    this.invalidateCatalogBoundary()
+    this.slotGeneration++
+    this.active.clear()
+    this.slotOccupied = false
+  }
+
   gateway(
     release: LocalModelReleaseManifest,
     readiness: LocalReadinessEvidence,
@@ -237,6 +246,7 @@ export class LocalModelManager {
     request: InferenceRequest,
     idleOptimization = false
   ): Promise<InferenceResult> {
+    const slotGeneration = this.slotGeneration
     const slot = this.acquireSlot(gatewayEpoch, request.signal)
     if (slot !== true) await slot
     try {
@@ -250,7 +260,7 @@ export class LocalModelManager {
         idleOptimization
       )
     } finally {
-      this.releaseSlot()
+      if (this.slotGeneration === slotGeneration) this.releaseSlot()
     }
   }
 
@@ -521,7 +531,7 @@ export class LocalModelManager {
       )
     } finally {
       request.signal?.removeEventListener('abort', parentAbort)
-      this.active.delete(requestId)
+      if (this.active.get(requestId) === active) this.active.delete(requestId)
       // The enclosing stream retains the inference slot until cancellation has
       // settled as well. Neither a new request nor a foreground lease can race
       // an untracked cancellation from the previous background request.

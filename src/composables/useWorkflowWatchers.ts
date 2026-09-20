@@ -57,4 +57,12 @@ export function useWorkflowWatchers() {
     window.removeEventListener('luczor:api-identity-changed', changed)
     window.removeEventListener('luczor:workflow-automation-changed', restart)
   })
+  return {
+    /** Stop old setup ownership after native acknowledgement; restart waits for explicit gate permission. */
+    recoverAfterStop() {
+      generation++
+      stopWorkflowWatchers()
+      queue = Promise.resolve()
+    },
+  }
 }

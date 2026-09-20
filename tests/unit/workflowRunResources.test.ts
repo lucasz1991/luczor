@@ -10,6 +10,8 @@ import {
   retainWorkflowResources,
   releaseWorkflowAccountResources,
   sweepWorkflowResources,
+  releaseAllWorkflowResources,
+  recoverWorkflowResourcesAfterStop,
 } from '@/services/workflows/runResources'
 const config = { baseUrl: 'https://test', clientId: 'device', deviceKey: 'key' }
 const scope = {
@@ -35,6 +37,18 @@ it('retains the original cleanup scope when a rebound workspace attempts to reus
     retainWorkflowResources({ ...scope, expectedRootPath: 'E:/other', expectedWorkspaceUpdatedAt: 3 }, config)
   ).toThrow('scope_changed')
   await vi.waitFor(() => expect(mock.invoke).toHaveBeenCalledWith('wf_browser_cleanup', { payload: scope }))
+})
+it('clears native-confirmed ownership without letting a late cleanup forget a new session', async () => {
+  retainWorkflowResources(scope, config)
+  let finish!: () => void
+  mock.invoke.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+  const old = releaseAllWorkflowResources()
+  recoverWorkflowResourcesAfterStop()
+  retainWorkflowResources(scope, config)
+  finish()
+  await old
+  await releaseAllWorkflowResources()
+  expect(mock.invoke).toHaveBeenCalledTimes(2)
 })
 it('closes a granted browser immediately on local revocation between steps', async () => {
   retainWorkflowResources(scope, config, { accountScope: 'account', definitionId: 3, revision: 1 })

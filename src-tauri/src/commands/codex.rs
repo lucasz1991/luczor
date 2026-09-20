@@ -97,7 +97,7 @@ struct Job {
 
 impl CodexJobs {
     pub fn cancel_all(&self) {
-        if let Ok(entries) = self.entries.lock() {
+        if let Ok(entries) = self.entries.try_lock() {
             for job in entries.values() {
                 job.cancel.store(true, Ordering::Release);
             }
@@ -454,15 +454,17 @@ pub async fn codex_job_start(
         runtime_id: state.runtime_id.clone(),
         snapshot: Mutex::new(initial.clone()),
     });
+    let (operation, cancellation) = super::owned_processes::Operation::begin()?;
     check_execution(&job)?;
     persist_job_admitted(&database, &state.runtime_id, &initial)?;
     entries.insert(initial.id.clone(), Arc::clone(&job));
     drop(entries);
     thread::spawn(move || {
+        let _operation = operation;
         let _lease = lease;
-        let result = run_job(&app, &database, &executable, &job, &payload);
+        let result = cancellation.check().and_then(|_| run_job(&app, &database, &executable, &job, &payload));
         if let Err(error) = result {
-            finish(&job, "failed", Some(error));
+            finish(&job, if job.cancel.load(Ordering::Acquire) || cancellation.check().is_err() { "cancelled" } else { "failed" }, Some(error));
         }
     });
     Ok(initial)
@@ -1402,7 +1404,8 @@ pub(crate) fn configure_process(command: &mut Command) {
 pub(crate) fn configure_process(_command: &mut Command) {}
 
 pub(crate) struct LifetimeGuard {
-    handle: isize,
+    #[cfg(windows)]
+    _job: Arc<super::owned_processes::WindowsJob>,
 }
 
 #[cfg(windows)]
@@ -1430,7 +1433,7 @@ impl LifetimeGuard {
                 return Err("Codex process could not be bound to its protected lifetime.".into());
             }
             let guard = Self {
-                handle: handle as isize,
+                _job: super::owned_processes::WindowsJob::register(handle as isize)?,
             };
             // The child was created suspended. No user code can create an
             // escaping descendant before the Job Object owns its lifetime.
@@ -1441,7 +1444,7 @@ impl LifetimeGuard {
 }
 
 #[cfg(windows)]
-fn resume_suspended_child(child: &Child) -> Result<(), String> {
+pub(crate) fn resume_suspended_child(child: &Child) -> Result<(), String> {
     use windows_sys::Win32::{
         Foundation::{CloseHandle, INVALID_HANDLE_VALUE},
         System::{
@@ -1490,15 +1493,6 @@ fn resume_suspended_child(child: &Child) -> Result<(), String> {
     }
 }
 
-#[cfg(windows)]
-impl Drop for LifetimeGuard {
-    fn drop(&mut self) {
-        unsafe {
-            windows_sys::Win32::Foundation::CloseHandle(self.handle as _);
-        }
-    }
-}
-
 #[cfg(not(windows))]
 impl LifetimeGuard {
     pub(crate) fn attach(_child: &Child) -> Result<Self, String> {
@@ -1506,13 +1500,6 @@ impl LifetimeGuard {
             "Managed Codex jobs require Windows process lifetime protection on this version."
                 .into(),
         )
-    }
-}
-
-#[cfg(not(windows))]
-impl Drop for LifetimeGuard {
-    fn drop(&mut self) {
-        let _ = self.handle;
     }
 }
 
