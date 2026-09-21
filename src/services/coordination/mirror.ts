@@ -25,11 +25,27 @@ export type MirrorEntry = {
 }
 type Scan = { manifestHash: string; snapshotId: string; totalEntries: number; entries: MirrorEntry[] }
 type Head = { revision: number; manifest_id: string | null }
-type Manifest = Head & { entries?: MirrorEntry[]; next_offset?: number | null; status?: string; base_revision?: number }
-type Cursor = { revision: number; localHash: string; proposalHash?: string; paused?: boolean }
-type ProposalConflict = { proposalId: string; headId: string | null; revision: number }
-const CONFLICT_MESSAGE =
-  'Überlappende Dateiänderungen benötigen eine Entscheidung am Master. Beide Fassungen bleiben erhalten; der unveränderte Vorschlag wird nicht erneut veröffentlicht.'
+type Manifest = Head & {
+  entries?: MirrorEntry[]
+  next_offset?: number | null
+  status?: string
+  base_revision?: number
+  merged_manifest_id?: string | null
+  conflict_count?: number
+}
+/**
+ * `revision`/`localHash` name the last server state this folder matched. `baseManifestId` is the exact
+ * manifest that content came from: after a server-side merge it is the device's own accepted upload,
+ * which no revision number identifies. `proposalHash` marks a device-job upload awaiting the master.
+ */
+type Cursor = {
+  revision: number
+  localHash: string
+  baseManifestId?: string | null
+  proposalHash?: string
+  paused?: boolean
+}
+export const MIRROR_WAKE_EVENT = 'luczor:mirror-wake'
 type UploadCheckpoint = {
   hash: string
   epoch: number
@@ -53,6 +69,7 @@ export const projectMirrorState = reactive<
       transferred: number
       bytes: number
       paused: boolean
+      conflicts: number
       backupPath?: string
     }
   >
@@ -74,6 +91,7 @@ function status(projectId: string) {
     transferred: 0,
     bytes: 0,
     paused: false,
+    conflicts: 0,
   }
   setSafeRecordValue(projectMirrorState, projectId, created)
   return getSafeRecordValue(projectMirrorState, projectId)!
@@ -88,14 +106,16 @@ export async function pauseProjectMirror(projectId: string, paused: boolean) {
   const key = cursorKey(account, projectId)
   const previous = await disk.get<Cursor>(key)
   await disk.set(key, { revision: 0, localHash: '', ...previous, paused })
-  // Explicitly resuming is also a manual retry after resolving a conflict.
-  if (!paused) await disk.delete(`${key}:proposal-conflict`)
   await disk.save()
   status(projectId).paused = paused
   if (paused) controllers.get(projectId)?.abort(new Error('Der Ordnerabgleich wurde pausiert.'))
 }
 
-/** All files are mirrored. AI-context filters are intentionally never used here. */
+/**
+ * All files are mirrored. AI-context filters are intentionally never used here.
+ * Every device pushes its own changes and pulls the shared head, like a repository with the server as
+ * origin: a stale push is merged on the server and the merged head is applied in the same run.
+ */
 export function syncProjectMirror(projectId: string, parentSignal?: AbortSignal, jobId?: string): Promise<void> {
   const existing = running.get(projectId)
   if (existing) return existing
@@ -116,6 +136,7 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
   const project = state.projects.find(project => project.id === projectId)
   if (!project?.cloud || project.cloud.principalId !== account.principalId)
     throw new Error('Dieses Projekt ist nicht mit deinem Cloud-Konto verbunden.')
+  const cloud = project.cloud
   let workspace = await getProjectWorkspace(projectId, account.principalId)
   if (workspace) {
     const recoveryTicket = executionGate.capture(signal, { projectId, runId: `mirror-recovery:${crypto.randomUUID()}` })
@@ -139,7 +160,7 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
     runId: `mirror:${crypto.randomUUID()}`,
     workspaceBindingId: String(workspace.updatedAt ?? 0),
   })
-  const base = `/projects/${project.cloud.projectId}/mirror`
+  const base = `/projects/${cloud.projectId}/mirror`
   const request = async <T>(
     path = '',
     method: 'GET' | 'POST' | 'PUT' = 'GET',
@@ -164,83 +185,48 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
     await disk.save()
     view.revision = value.revision
   }
+  const transientConflict = (error: unknown) =>
+    error instanceof Error &&
+    'status' in error &&
+    error.status === 409 &&
+    'code' in error &&
+    ['mirror_revision_conflict', 'mirror_lease_expired'].includes(String(error.code))
   view.busy = true
   view.error = ''
   view.transferred = 0
   view.bytes = 0
   view.paused = false
+  view.conflicts = 0
   try {
     const cluster = (await coordinationApi(account.config, ticket.signal).state()).data
     const master = cluster.leader_device_id === account.config.clientId
     let head = await request<Head>()
-    // Proposals use a server-side three-way merge and retain both sides on conflict.
-    if (master) {
-      const proposals = await request<Array<Manifest>>('/proposals')
-      const conflictKey = `${key}:proposal-conflict`
-      const conflict = await disk.get<ProposalConflict>(conflictKey)
-      if (conflict && !proposals.some(proposal => proposal.manifest_id === conflict.proposalId)) {
-        await disk.delete(conflictKey)
-        await disk.save()
-      }
-      for (const proposal of proposals) {
-        if (
-          conflict?.proposalId === proposal.manifest_id &&
-          conflict.headId === head.manifest_id &&
-          conflict.revision === head.revision
-        )
-          throw new Error(CONFLICT_MESSAGE)
-        const lease = await request<{ lease_id: string }>('/lease', 'POST', {
-          master_epoch: cluster.epoch,
-          expected_revision: head.revision,
-        })
+    /** Publishes a sealed manifest against the live head; the server merges a stale base and keeps both sides of overlaps. */
+    const publish = async (manifestId: string, operationId: string): Promise<Manifest> => {
+      for (let attempt = 0; ; attempt++) {
+        const latest = await request<Head>()
         try {
-          await request(`/manifests/${proposal.manifest_id}/publish`, 'POST', {
-            operation_id: crypto.randomUUID(),
+          const lease = await request<{ lease_id: string }>('/lease', 'POST', {
+            master_epoch: cluster.epoch,
+            expected_revision: latest.revision,
+          })
+          return await request<Manifest>(`/manifests/${manifestId}/publish`, 'POST', {
+            operation_id: operationId,
             master_epoch: cluster.epoch,
             lease_id: lease.lease_id,
-            expected_revision: head.revision,
+            expected_revision: latest.revision,
           })
         } catch (error) {
-          // Only a confirmed merge conflict is durable. Lease/revision races and
-          // unknown 409 responses must remain retryable against a fresh head.
-          if (
-            error instanceof Error &&
-            'status' in error &&
-            error.status === 409 &&
-            'code' in error &&
-            error.code === 'mirror_merge_conflict' &&
-            proposal.manifest_id
-          ) {
-            executionGate.assert(ticket)
-            await disk.set(conflictKey, {
-              proposalId: proposal.manifest_id,
-              headId: head.manifest_id,
-              revision: head.revision,
-            } satisfies ProposalConflict)
-            await disk.save()
-            throw new Error(CONFLICT_MESSAGE)
-          }
-          throw error
+          // Another device published in between: the operation id stays stable, so retrying is idempotent.
+          if (attempt >= 2 || !transientConflict(error)) throw error
         }
-        await disk.delete(conflictKey)
-        await disk.save()
-        head = await request<Head>()
       }
     }
-    view.stage = 'Vollständigen Ordner erfassen'
-    const snapshot = await withRunResources([`workspace:${projectId}`], ticket.signal, () =>
-      native<Scan>('project_mirror_scan')
-    )
-    view.files = snapshot.totalEntries
-    const unchanged = cursor?.localHash === snapshot.manifestHash || cursor?.proposalHash === snapshot.manifestHash
-    const localEmpty = snapshot.totalEntries === 0
-    if (head.manifest_id && head.revision !== (cursor?.revision ?? 0) && (unchanged || (!cursor && localEmpty))) {
+    /** Downloads the head and applies only the differing files in place; replaced or removed files are backed up. */
+    const pull = async (expectedLocalManifestHash: string) => {
+      if (!head.manifest_id) return
       view.stage = 'Gemeinsamen Projektstand herunterladen'
-      const stage = await native<{ stageId: string }>(
-        'project_mirror_stage_begin',
-        { expectedLocalManifestHash: snapshot.manifestHash },
-        true
-      )
+      const stage = await native<{ stageId: string }>('project_mirror_stage_begin', { expectedLocalManifestHash }, true)
       let staged = 0
       let offset: number | null = 0
       const downloaded = new Set<string>()
@@ -256,12 +242,7 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
                 await native('project_mirror_chunk_read', { sha256: chunk.sha256 })
               } catch {
                 const bytes =
-                  (await readLanChunk(
-                    project.cloud.externalId,
-                    chunk.sha256,
-                    cluster.leader_device_id,
-                    ticket.signal
-                  )) ??
+                  (await readLanChunk(cloud.externalId, chunk.sha256, cluster.leader_device_id, ticket.signal)) ??
                   (await binaryRequest(account.config, `${base}/chunks/${chunk.sha256}`, undefined, ticket.signal))
                 await native(
                   'project_mirror_chunk_put',
@@ -282,7 +263,7 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
         staged += pageEntries.length
         offset = page.next_offset ?? null
       }
-      view.stage = 'Dateien prüfen und atomar übernehmen'
+      view.stage = 'Geänderte Dateien prüfen und übernehmen'
       const applied = await withRunResources([`workspace:${projectId}`], ticket.signal, () =>
         native<{ manifestHash: string; backupPath: string }>(
           'project_mirror_stage_commit',
@@ -290,17 +271,28 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
           true
         )
       )
-      view.backupPath = applied.backupPath
-      await save({ revision: head.revision, localHash: applied.manifestHash })
-    } else if (!unchanged && cursor?.proposalHash !== snapshot.manifestHash) {
-      if (head.manifest_id && !cursor && !localEmpty)
-        throw new Error(
-          'Auf diesem Gerät und in der Cloud existieren getrennte Ordnerstände. Zuerst die gemeinsame Basis zuordnen; beide Fassungen bleiben erhalten.'
-        )
-      if (!master && !jobId) {
-        view.stage = 'Lokale Änderungen warten auf einen Master-Teilauftrag'
-        return
+      view.backupPath = applied.backupPath || undefined
+      await save({ revision: head.revision, localHash: applied.manifestHash, baseManifestId: head.manifest_id })
+    }
+    // Device-job proposals are merged by the master; direct device pushes below never wait for it.
+    if (master) {
+      const proposals = await request<Array<Manifest>>('/proposals')
+      for (const proposal of proposals) {
+        if (!proposal.manifest_id) continue
+        const published = await publish(proposal.manifest_id, crypto.randomUUID())
+        if (published.conflict_count) view.conflicts += published.conflict_count
+        head = await request<Head>()
       }
+    }
+    view.stage = 'Vollständigen Ordner erfassen'
+    const snapshot = await withRunResources([`workspace:${projectId}`], ticket.signal, () =>
+      native<Scan>('project_mirror_scan')
+    )
+    view.files = snapshot.totalEntries
+    const unchanged = cursor?.localHash === snapshot.manifestHash || cursor?.proposalHash === snapshot.manifestHash
+    const localEmpty = snapshot.totalEntries === 0
+    if (!unchanged && !(!cursor && localEmpty)) {
+      const proposal = Boolean(jobId) && !master
       view.stage = 'Dateiblöcke übertragen'
       // Draft and chunk identities are durable server-side; repeated chunks never duplicate data.
       const uploadKey = `${key}:upload`
@@ -326,9 +318,10 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
       const draft = await request<Manifest>('/manifests', 'POST', {
         operation_id: upload.operationId,
         base_revision: upload.baseRevision,
+        base_manifest_id: cursor?.baseManifestId ?? null,
         master_epoch: cluster.epoch,
         draft: true,
-        proposal: !master,
+        proposal,
         ...(jobId ? { job_id: jobId } : {}),
         entries: [],
       })
@@ -336,8 +329,13 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
       await disk.set(uploadKey, upload)
       await disk.save()
       if (draft.status === 'published' || draft.status === 'accepted') {
+        // A lost acknowledgement: the upload already reached the head; read it back next.
         const currentHead = await request<Head>()
-        await save({ revision: Math.max(0, currentHead.revision - 1), localHash: snapshot.manifestHash })
+        await save({
+          revision: Math.max(0, currentHead.revision - 1),
+          localHash: snapshot.manifestHash,
+          baseManifestId: draft.manifest_id,
+        })
         await disk.delete(uploadKey)
         await disk.save()
         return
@@ -352,7 +350,7 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
           for (const chunk of entry.chunks ?? [])
             if (!uploaded.has(chunk.sha256)) {
               view.bytes += chunk.size
-              if (await hasRemoteChunk(account.config, project.cloud.projectId, chunk.sha256, ticket.signal)) {
+              if (await hasRemoteChunk(account.config, cloud.projectId, chunk.sha256, ticket.signal)) {
                 uploaded.add(chunk.sha256)
                 continue
               }
@@ -374,29 +372,12 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
         await disk.set(uploadKey, upload)
         await disk.save()
       }
-      if (master) {
-        const latest = await request<Head>()
-        if (latest.revision !== upload.baseRevision && draft.status === 'draft')
-          await request(`/manifests/${draft.manifest_id}/propose`, 'POST', {})
-        const lease = await request<{ lease_id: string }>('/lease', 'POST', {
-          master_epoch: cluster.epoch,
-          expected_revision: latest.revision,
-        })
-        const published = await request<Manifest>(`/manifests/${draft.manifest_id}/publish`, 'POST', {
-          operation_id: upload.publishId,
-          master_epoch: cluster.epoch,
-          lease_id: lease.lease_id,
-          expected_revision: latest.revision,
-        })
-        // Re-read the published manifest next time: a three-way merge may include other devices' changes.
-        await save({ revision: published.revision - 1, localHash: snapshot.manifestHash })
-        await disk.delete(uploadKey)
-        await disk.save()
-      } else {
+      if (proposal) {
         await request(`/manifests/${draft.manifest_id}/propose`, 'POST', {})
         await save({
           revision: cursor?.revision ?? 0,
           localHash: cursor?.localHash ?? '',
+          baseManifestId: cursor?.baseManifestId ?? null,
           proposalHash: snapshot.manifestHash,
         })
         await disk.delete(uploadKey)
@@ -404,8 +385,40 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
         view.stage = 'Änderungen beim Master zur Übernahme'
         return
       }
+      if (!draft.manifest_id) throw new Error('Der Server hat keinen Entwurf für die Veröffentlichung geliefert.')
+      view.stage = 'Eigene Änderungen veröffentlichen'
+      const published = await publish(draft.manifest_id, upload.publishId)
+      await disk.delete(uploadKey)
+      await disk.save()
+      if (published.manifest_id === draft.manifest_id) {
+        // Fast-forward: the head is exactly this folder.
+        await save({
+          revision: published.revision,
+          localHash: snapshot.manifestHash,
+          baseManifestId: published.manifest_id,
+        })
+      } else {
+        // Merged with other devices' changes: this folder equals the accepted upload, the head has more.
+        await save({
+          revision: published.revision - 1,
+          localHash: snapshot.manifestHash,
+          baseManifestId: draft.manifest_id,
+        })
+        view.conflicts = published.conflict_count ?? 0
+        head = { revision: published.revision, manifest_id: published.manifest_id }
+        await pull(snapshot.manifestHash)
+      }
+    } else if (head.manifest_id && head.revision !== (cursor?.revision ?? 0)) {
+      await pull(snapshot.manifestHash)
+    } else if (!cursor && localEmpty && !head.manifest_id) {
+      await save({ revision: 0, localHash: snapshot.manifestHash, baseManifestId: null })
     }
-    view.stage = 'Ordner vollständig abgeglichen'
+    view.stage =
+      cursor?.proposalHash === snapshot.manifestHash
+        ? 'Änderungen beim Master zur Übernahme'
+        : view.conflicts
+          ? `Ordner abgeglichen · ${view.conflicts} Konfliktkopie${view.conflicts === 1 ? '' : 'n'} angelegt`
+          : 'Ordner vollständig abgeglichen'
     await native('project_mirror_watch_start')
   } catch (error) {
     view.error = error instanceof Error ? error.message : String(error)
@@ -448,14 +461,29 @@ export async function startProjectMirrorChannel(signal: AbortSignal): Promise<()
     if (stopped || signal.aborted || failures.has(event.payload.projectId)) return
     due.set(event.payload.projectId, Date.now() + 1500)
   })
+  // Another device published a revision: pull it right away instead of waiting for the next poll.
+  const wake = (event: Event) => {
+    if (stopped || signal.aborted) return
+    const detail = (event as CustomEvent<{ project_id?: number; external_id?: string }>).detail
+    for (const project of state.projects)
+      if (
+        project.cloud &&
+        !failures.has(project.id) &&
+        (project.cloud.projectId === detail?.project_id || project.cloud.externalId === detail?.external_id)
+      )
+        due.set(project.id, Math.min(due.get(project.id) ?? Infinity, Date.now() + 500))
+    setTimeout(tick, 600)
+  }
   const timer = await listen('luczor://worker-tick', tick)
   window.addEventListener('online', tick)
+  window.addEventListener(MIRROR_WAKE_EVENT, wake)
   const stop = () => {
     if (stopped) return
     stopped = true
     dirty()
     timer()
     window.removeEventListener('online', tick)
+    window.removeEventListener(MIRROR_WAKE_EVENT, wake)
     signal.removeEventListener('abort', stop)
   }
   signal.addEventListener('abort', stop, { once: true })

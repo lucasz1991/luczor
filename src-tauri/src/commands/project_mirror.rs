@@ -1,5 +1,7 @@
 //! Full workspace mirroring. This is deliberately separate from filtered AI context reads.
 //! Chunks and manifests are owner scoped; symlinks are recorded, never traversed.
+//! Shared revisions are applied in place like a checkout: only differing entries change,
+//! and every replaced or removed local file is moved into a per-transaction backup first.
 use super::{
     codex::acquire_workspace_lease,
     execution::{admit, Guarded},
@@ -259,7 +261,7 @@ fn recover_transaction(
         .parent()
         .filter(|_| root.file_name().is_some())
         .ok_or("mirror_recovery_root_invalid")?;
-    if record.schema_version != 1
+    if !matches!(record.schema_version, 1 | 2)
         || record.root != root
         || record.stage != parent.join(format!(".luczor-stage-{id}"))
         || record.backup != parent.join(format!(".luczor-backup-{id}"))
@@ -287,6 +289,14 @@ fn recover_transaction(
     );
     check()?;
     let outcome = match state {
+        // An interrupted in-place apply keeps the workspace as the next scan finds it: the
+        // originals remain in the backup tree and the server merge restores the shared head.
+        _ if record.schema_version == 2 => {
+            if state.1 {
+                remove_empty_tree(&record.stage);
+            }
+            "in_place_interrupted"
+        }
         // A crash between renames must restore the known original, never replay
         // the incoming write or destroy either the original or staged data.
         (false, true, true) => {
@@ -518,9 +528,85 @@ fn read_private_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, S
     }
     serde_json::from_slice(&bytes).map_err(|_| "mirror_metadata_invalid".into())
 }
+/// Persistent size/mtime index of hashed files so a repeated scan of an unchanged
+/// workspace reads no file content. Entries newer than two seconds are never trusted,
+/// because a same-size rewrite within the timestamp resolution would go unnoticed.
+fn stat_cache(cache: &Path) -> Result<rusqlite::Connection, String> {
+    let path = cache.join("scan-cache.sqlite3");
+    if fs::symlink_metadata(&path).is_ok_and(|m| is_link(&m)) {
+        return Err("mirror_snapshot_link_rejected".into());
+    }
+    let db = rusqlite::Connection::open(path).map_err(|_| "mirror_snapshot_unavailable")?;
+    db.execute_batch("PRAGMA synchronous=NORMAL;CREATE TABLE IF NOT EXISTS files(path TEXT PRIMARY KEY,size INTEGER NOT NULL,mtime_ms INTEGER NOT NULL,sha256 TEXT NOT NULL,chunks TEXT NOT NULL)")
+        .map_err(|_| "mirror_snapshot_write_failed")?;
+    Ok(db)
+}
+const STAT_CACHE_SETTLE_MS: u64 = 2000;
+fn cached_file(
+    stat: Option<&rusqlite::Connection>,
+    cache: Option<&Path>,
+    path: &str,
+    size: u64,
+    mtime_ms: Option<u64>,
+) -> Option<(String, Vec<Chunk>)> {
+    use rusqlite::OptionalExtension;
+    let (stat, mtime_ms) = (stat?, mtime_ms?);
+    let now = std::time::SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis() as u64;
+    if now.saturating_sub(mtime_ms) < STAT_CACHE_SETTLE_MS {
+        return None;
+    }
+    let row: (String, String) = stat
+        .query_row(
+            "SELECT sha256,chunks FROM files WHERE path=?1 AND size=?2 AND mtime_ms=?3",
+            rusqlite::params![path, size as i64, mtime_ms as i64],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .ok()??;
+    let chunks: Vec<Chunk> = serde_json::from_str(&row.1).ok()?;
+    if !valid_hash(&row.0)
+        || chunks
+            .iter()
+            .try_fold(0_u64, |sum, c| sum.checked_add(c.size))
+            != Some(size)
+    {
+        return None;
+    }
+    // An upload reads chunk bodies from the cache; a pruned chunk forces a fresh read.
+    if let Some(cache) = cache {
+        if chunks
+            .iter()
+            .any(|chunk| !chunk_path(cache, &chunk.sha256).is_ok_and(|p| p.is_file()))
+        {
+            return None;
+        }
+    }
+    Some((row.0, chunks))
+}
+fn remember_file(
+    stat: Option<&rusqlite::Connection>,
+    path: &str,
+    size: u64,
+    mtime_ms: Option<u64>,
+    sha256: &str,
+    chunks: &[Chunk],
+) {
+    if let (Some(stat), Some(mtime_ms), Ok(chunks)) =
+        (stat, mtime_ms, serde_json::to_string(chunks))
+    {
+        let _ = stat.execute(
+            "INSERT OR REPLACE INTO files(path,size,mtime_ms,sha256,chunks) VALUES(?1,?2,?3,?4,?5)",
+            rusqlite::params![path, size as i64, mtime_ms as i64, sha256, chunks],
+        );
+    }
+}
 fn walk_root(
     root: &Path,
     cache: Option<&Path>,
+    stat: Option<&rusqlite::Connection>,
     check: &impl Fn() -> Result<(), String>,
     mut accept: impl FnMut(Entry) -> Result<(), String>,
 ) -> Result<(), String> {
@@ -574,6 +660,14 @@ fn walk_root(
             } else if before.is_dir() {
                 entry.kind = EntryType::Directory;
                 pending.push(path);
+            } else if let Some((sha256, chunks)) = before
+                .is_file()
+                .then(|| cached_file(stat, cache, &entry.path, before.len(), entry.mtime_ms))
+                .flatten()
+            {
+                entry.size = Some(before.len());
+                entry.sha256 = Some(sha256);
+                entry.chunks = chunks;
             } else if before.is_file() {
                 let mut file = open_regular_no_follow(&path)?;
                 let mut file_hash = Sha256::new();
@@ -616,7 +710,16 @@ fn walk_root(
                     return Err("mirror_scan_changed".into());
                 }
                 entry.size = Some(size);
-                entry.sha256 = Some(format!("{:x}", file_hash.finalize()));
+                let digest = format!("{:x}", file_hash.finalize());
+                remember_file(
+                    stat,
+                    &entry.path,
+                    size,
+                    entry.mtime_ms,
+                    &digest,
+                    &entry.chunks,
+                );
+                entry.sha256 = Some(digest);
             } else {
                 return Err("mirror_special_file_unsupported".into());
             }
@@ -631,7 +734,7 @@ fn scan_root(
     check: &impl Fn() -> Result<(), String>,
 ) -> Result<Vec<Entry>, String> {
     let mut entries = Vec::new();
-    walk_root(root, cache, check, |entry| {
+    walk_root(root, cache, None, check, |entry| {
         entries.push(entry);
         Ok(())
     })?;
@@ -685,6 +788,37 @@ fn snapshot_digest(db: &rusqlite::Connection) -> Result<(String, usize), String>
     }
     digest.update(b"]");
     Ok((format!("{:x}", digest.finalize()), count))
+}
+/// Every scan leaves an immutable snapshot database for paging. Old ones are removed once
+/// no stage refers to them and they are not the applied-metadata snapshot.
+fn prune_snapshots(cache: &Path, keep: &str) {
+    let applied: Option<String> = read_private_json(&cache.join("applied-metadata.json")).ok();
+    let Ok(listing) = fs::read_dir(cache) else {
+        return;
+    };
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(24 * 3600);
+    for item in listing.flatten() {
+        let name = item.file_name();
+        let Some(id) = name
+            .to_str()
+            .and_then(|n| n.strip_prefix("snapshot-"))
+            .and_then(|n| n.strip_suffix(".sqlite3"))
+        else {
+            continue;
+        };
+        if id == keep
+            || applied.as_deref() == Some(id)
+            || cache.join(format!("stage-{id}.json")).exists()
+            || cache.join(format!("transaction-{id}.json")).exists()
+            || !item
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|modified| modified < cutoff)
+        {
+            continue;
+        }
+        let _ = fs::remove_file(item.path());
+    }
 }
 fn snapshot_page(
     db: &rusqlite::Connection,
@@ -1041,22 +1175,29 @@ pub async fn project_mirror_scan(
         let snapshot_id = uuid::Uuid::new_v4().to_string();
         let mut db = snapshot_database(&cache, &snapshot_id, true)?;
         let previous_metadata = applied_metadata(&cache)?;
+        let stat = stat_cache(&cache)?;
         let transaction = db
             .transaction()
             .map_err(|_| "mirror_snapshot_write_failed")?;
-        walk_root(&root, Some(&cache), &|| lease.check(), |mut entry| {
-            retain_foreign_metadata(&mut entry, previous_metadata.as_ref())?;
-            transaction
-                .execute(
-                    "INSERT INTO entries(path,body) VALUES(?1,?2)",
-                    rusqlite::params![
-                        entry.path,
-                        serde_json::to_string(&entry).map_err(|_| "mirror_manifest_invalid")?
-                    ],
-                )
-                .map_err(|_| "mirror_snapshot_write_failed")?;
-            Ok(())
-        })?;
+        walk_root(
+            &root,
+            Some(&cache),
+            Some(&stat),
+            &|| lease.check(),
+            |mut entry| {
+                retain_foreign_metadata(&mut entry, previous_metadata.as_ref())?;
+                transaction
+                    .execute(
+                        "INSERT INTO entries(path,body) VALUES(?1,?2)",
+                        rusqlite::params![
+                            entry.path,
+                            serde_json::to_string(&entry).map_err(|_| "mirror_manifest_invalid")?
+                        ],
+                    )
+                    .map_err(|_| "mirror_snapshot_write_failed")?;
+                Ok(())
+            },
+        )?;
         transaction
             .commit()
             .map_err(|_| "mirror_snapshot_write_failed")?;
@@ -1065,6 +1206,7 @@ pub async fn project_mirror_scan(
         {
             return Err("mirror_workspace_changed".into());
         }
+        prune_snapshots(&cache, &snapshot_id);
         let (digest, total_entries) = snapshot_digest(&db)?;
         Ok(Scan {
             manifest_hash: digest,
@@ -1244,16 +1386,15 @@ fn entry_with_parents(entry: &Entry) -> Vec<Entry> {
     }
     result
 }
-fn build_snapshot_tree(
-    stage: &Path,
-    cache: &Path,
+/// Validates parent types, platform names, case collisions and link types across every page
+/// before a single file is written.
+fn validate_snapshot_tree(
     db: &rusqlite::Connection,
     check: &impl Fn() -> Result<(), String>,
 ) -> Result<(), String> {
     #[cfg(windows)]
     db.execute_batch("CREATE TEMP TABLE IF NOT EXISTS mirror_case_keys(path TEXT PRIMARY KEY); DELETE FROM mirror_case_keys;")
         .map_err(|_| "mirror_snapshot_read_failed")?;
-    // Validate parent types across every page before any file materialization.
     let mut statement = db
         .prepare("SELECT body FROM entries ORDER BY path")
         .map_err(|_| "mirror_snapshot_read_failed")?;
@@ -1290,6 +1431,38 @@ fn build_snapshot_tree(
             .map_err(|_| "mirror_case_collision")?;
         }
     }
+    Ok(())
+}
+/// Reads a snapshot entry in the form materialization expects on this platform.
+fn snapshot_entry(entry: &mut Entry, db: &rusqlite::Connection) -> Result<(), String> {
+    #[cfg(windows)]
+    if entry.kind == EntryType::Symlink {
+        let directory = snapshot_link_directory(entry, db)?;
+        entry
+            .metadata
+            .get_or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or("mirror_metadata_invalid")?
+            .insert("directoryLink".into(), serde_json::Value::Bool(directory));
+    }
+    #[cfg(not(windows))]
+    let _ = db;
+    if entry.kind == EntryType::Directory {
+        entry.mode = None;
+        entry.mtime_ms = None;
+    }
+    Ok(())
+}
+fn build_snapshot_tree(
+    stage: &Path,
+    cache: &Path,
+    db: &rusqlite::Connection,
+    check: &impl Fn() -> Result<(), String>,
+) -> Result<(), String> {
+    validate_snapshot_tree(db, check)?;
+    let mut statement = db
+        .prepare("SELECT body FROM entries ORDER BY path")
+        .map_err(|_| "mirror_snapshot_read_failed")?;
     let rows = statement
         .query_map([], |row| row.get::<_, String>(0))
         .map_err(|_| "mirror_snapshot_read_failed")?;
@@ -1298,20 +1471,7 @@ fn build_snapshot_tree(
         let mut entry: Entry =
             serde_json::from_str(&row.map_err(|_| "mirror_snapshot_read_failed")?)
                 .map_err(|_| "mirror_manifest_invalid")?;
-        #[cfg(windows)]
-        if entry.kind == EntryType::Symlink {
-            let directory = snapshot_link_directory(&entry, db)?;
-            entry
-                .metadata
-                .get_or_insert_with(|| serde_json::json!({}))
-                .as_object_mut()
-                .ok_or("mirror_metadata_invalid")?
-                .insert("directoryLink".into(), serde_json::Value::Bool(directory));
-        }
-        if entry.kind == EntryType::Directory {
-            entry.mode = None;
-            entry.mtime_ms = None;
-        }
+        snapshot_entry(&mut entry, db)?;
         materialize_files(stage, cache, &entry_with_parents(&entry), check)?;
     }
     // Creating later siblings changes directory times; restore directory metadata last.
@@ -1342,10 +1502,11 @@ fn fingerprint_root_with_metadata(
 ) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let mut db = snapshot_database(cache, &id, true)?;
+    let stat = stat_cache(cache).ok();
     let transaction = db
         .transaction()
         .map_err(|_| "mirror_snapshot_write_failed")?;
-    walk_root(root, None, check, |mut entry| {
+    walk_root(root, None, stat.as_ref(), check, |mut entry| {
         retain_foreign_metadata(&mut entry, metadata)?;
         transaction
             .execute(
@@ -1434,6 +1595,235 @@ pub async fn project_mirror_stage_page(
     let lease = admit(&payload.execution, true)?;
     tauri::async_runtime::spawn_blocking(move||{let request=payload.request;if request.entries.len()>1000||request.offset>i64::MAX as usize{return Err("mirror_page_invalid".into());}let scope=MirrorScope{principal_id:request.principal_id,project_id:request.project_id};let cache=cache(&app,&scope)?;let metadata=stage_metadata(&cache,&request.stage_id)?;if metadata.principal_id!=scope.principal_id||metadata.project_id!=scope.project_id{return Err("mirror_scope_invalid".into());}let mut db=snapshot_database(&cache,&request.stage_id,true)?;let transaction=db.transaction().map_err(|_|"mirror_stage_write_failed")?;let count:i64=transaction.query_row("SELECT COUNT(*) FROM entries",[],|row|row.get(0)).map_err(|_|"mirror_stage_read_failed")?;if count as usize!=request.offset{return Err("mirror_stage_offset_conflict".into());}for entry in &request.entries{lease.check()?;validate_entries(&entry_with_parents(entry))?;transaction.execute("INSERT INTO entries(path,body)VALUES(?1,?2)",rusqlite::params![entry.path,serde_json::to_string(entry).map_err(|_|"mirror_manifest_invalid")?]).map_err(|_|"mirror_stage_duplicate_path")?;}transaction.commit().map_err(|_|"mirror_stage_write_failed")?;Ok(serde_json::json!({"stageId":request.stage_id,"offset":request.offset+request.entries.len()}))}).await.map_err(|_|"mirror_worker_failed")?
 }
+/// Scans the workspace into a path-keyed map with retained foreign metadata and returns its fingerprint.
+fn scan_current(
+    root: &Path,
+    cache: &Path,
+    check: &impl Fn() -> Result<(), String>,
+) -> Result<(BTreeMap<String, Entry>, String), String> {
+    let metadata = applied_metadata(cache)?;
+    let stat = stat_cache(cache).ok();
+    let mut current = BTreeMap::new();
+    walk_root(root, None, stat.as_ref(), check, |mut entry| {
+        retain_foreign_metadata(&mut entry, metadata.as_ref())?;
+        current.insert(entry.path.clone(), entry);
+        Ok(())
+    })?;
+    let entries = current.values().cloned().collect::<Vec<_>>();
+    Ok((current, manifest_hash(&entries)?))
+}
+fn set_entry_times(path: &Path, entry: &Entry) -> Result<(), String> {
+    if let Some(ms) = entry.mtime_ms {
+        let time = UNIX_EPOCH
+            .checked_add(std::time::Duration::from_millis(ms))
+            .ok_or("mirror_timestamp_invalid")?;
+        let mut options = OpenOptions::new();
+        options.read(true);
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.access_mode(0x100).custom_flags(0x02000000);
+        }
+        options
+            .open(path)
+            .and_then(|file| file.set_times(fs::FileTimes::new().set_modified(time)))
+            .map_err(|_| "mirror_metadata_failed")?;
+    }
+    #[cfg(unix)]
+    if let Some(mode) = entry.mode {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o7777))
+            .map_err(|_| "mirror_metadata_failed")?;
+    }
+    Ok(())
+}
+/// True when the local entry already carries the target content; only metadata may differ.
+fn same_content(current: &Entry, target: &Entry) -> bool {
+    current.kind == target.kind
+        && match target.kind {
+            EntryType::File => current.sha256 == target.sha256 && current.size == target.size,
+            EntryType::Directory => true,
+            EntryType::Symlink => {
+                current.target == target.target
+                    && current
+                        .metadata
+                        .as_ref()
+                        .and_then(|m| m.get("directoryLink"))
+                        == target
+                            .metadata
+                            .as_ref()
+                            .and_then(|m| m.get("directoryLink"))
+            }
+        }
+}
+fn same_times(current: &Entry, target: &Entry) -> bool {
+    let times = target.mtime_ms.is_none() || current.mtime_ms == target.mtime_ms;
+    #[cfg(unix)]
+    let modes = target.mode.is_none() || current.mode == target.mode;
+    #[cfg(not(unix))]
+    let modes = true;
+    times && modes
+}
+fn move_to_backup(root: &Path, backup: &Path, path: &str) -> Result<(), String> {
+    let destination = backup.join(path);
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).map_err(|_| "mirror_backup_unavailable")?;
+    }
+    fs::rename(root.join(path), destination).map_err(|_| "mirror_workspace_in_use".to_string())
+}
+fn remove_empty_tree(path: &Path) {
+    // Only directories are removed, and only while empty; files never are.
+    if let Ok(listing) = fs::read_dir(path) {
+        for item in listing.flatten() {
+            if item
+                .file_type()
+                .is_ok_and(|kind| kind.is_dir() && !kind.is_symlink())
+            {
+                remove_empty_tree(&item.path());
+            }
+        }
+    }
+    let _ = fs::remove_dir(path);
+}
+/// Applies a staged snapshot to the workspace in place. Entries that already match are untouched;
+/// replaced or removed entries are moved into `backup` before the staged versions move in.
+fn apply_snapshot_in_place(
+    root: &Path,
+    cache: &Path,
+    db: &rusqlite::Connection,
+    current: &BTreeMap<String, Entry>,
+    stage: &Path,
+    backup: &Path,
+    check: &impl Fn() -> Result<(), String>,
+) -> Result<bool, String> {
+    validate_snapshot_tree(db, check)?;
+    let stat = stat_cache(cache).ok();
+    let mut target = BTreeMap::new();
+    let mut statement = db
+        .prepare("SELECT body FROM entries ORDER BY path")
+        .map_err(|_| "mirror_snapshot_read_failed")?;
+    for row in statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| "mirror_snapshot_read_failed")?
+    {
+        check()?;
+        let mut entry: Entry =
+            serde_json::from_str(&row.map_err(|_| "mirror_snapshot_read_failed")?)
+                .map_err(|_| "mirror_manifest_invalid")?;
+        snapshot_entry(&mut entry, db)?;
+        target.insert(entry.path.clone(), entry);
+    }
+    // Everything the target replaces or lacks leaves the workspace first, deepest paths inside
+    // an already moved directory are skipped because they travelled with it.
+    let mut moved: Vec<String> = Vec::new();
+    let mut backed_up = false;
+    let mut replaced = HashSet::new();
+    for (path, entry) in current {
+        check()?;
+        if moved
+            .iter()
+            .any(|parent| path.starts_with(parent) && path[parent.len()..].starts_with('/'))
+        {
+            continue;
+        }
+        let keep = target
+            .get(path)
+            .is_some_and(|wanted| same_content(entry, wanted));
+        if keep {
+            continue;
+        }
+        if !backed_up {
+            fs::create_dir(backup).map_err(|_| "mirror_backup_unavailable")?;
+            backed_up = true;
+        }
+        move_to_backup(root, backup, path)?;
+        replaced.insert(path.clone());
+        moved.push(path.clone());
+    }
+    // Only entries that are not already in place are materialized, into a staging tree on the same volume.
+    let incoming = target
+        .values()
+        .filter(|entry| {
+            entry.kind != EntryType::Directory
+                && !current.get(&entry.path).is_some_and(|local| {
+                    same_content(local, entry) && !replaced.contains(&entry.path)
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if !incoming.is_empty() {
+        fs::create_dir(stage).map_err(|_| "mirror_stage_exists_or_unavailable")?;
+        let mut with_parents = BTreeMap::new();
+        for entry in &incoming {
+            for item in entry_with_parents(entry) {
+                with_parents.entry(item.path.clone()).or_insert(item);
+            }
+        }
+        materialize_files(
+            stage,
+            cache,
+            &with_parents.into_values().collect::<Vec<_>>(),
+            check,
+        )?;
+    }
+    for (path, entry) in &target {
+        check()?;
+        let local = root.join(path);
+        match entry.kind {
+            EntryType::Directory => {
+                if !current
+                    .get(path)
+                    .is_some_and(|c| c.kind == EntryType::Directory)
+                    || replaced.contains(path)
+                {
+                    fs::create_dir_all(&local).map_err(|_| "mirror_stage_directory_failed")?;
+                }
+            }
+            EntryType::File | EntryType::Symlink => {
+                match current.get(path).filter(|_| !replaced.contains(path)) {
+                    Some(existing) if same_content(existing, entry) => {
+                        if entry.kind == EntryType::File && !same_times(existing, entry) {
+                            set_entry_times(&local, entry)?;
+                        }
+                    }
+                    _ => {
+                        fs::rename(stage.join(path), &local)
+                            .map_err(|_| "mirror_workspace_in_use")?;
+                        if let (EntryType::File, Some(size), Some(sha256)) =
+                            (&entry.kind, entry.size, entry.sha256.as_deref())
+                        {
+                            remember_file(
+                                stat.as_ref(),
+                                path,
+                                size,
+                                entry.mtime_ms,
+                                sha256,
+                                &entry.chunks,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Creating or moving children changes directory times; restore them last, deepest first.
+    for (path, entry) in target.iter().rev() {
+        if entry.kind == EntryType::Directory {
+            let body: String = db
+                .query_row("SELECT body FROM entries WHERE path=?1", [path], |row| {
+                    row.get(0)
+                })
+                .map_err(|_| "mirror_snapshot_read_failed")?;
+            let stored: Entry =
+                serde_json::from_str(&body).map_err(|_| "mirror_manifest_invalid")?;
+            set_entry_times(&root.join(path), &stored)?;
+        }
+    }
+    if stage.exists() {
+        remove_empty_tree(stage);
+    }
+    Ok(backed_up)
+}
 #[tauri::command]
 pub async fn project_mirror_stage_commit(
     app: AppHandle,
@@ -1442,22 +1832,71 @@ pub async fn project_mirror_stage_commit(
 ) -> Result<Applied, String> {
     super::ensure_main_webview(&window)?;
     let lease = admit(&payload.execution, true)?;
-    tauri::async_runtime::spawn_blocking(move||{
-    let request=payload.request;let scope=MirrorScope{principal_id:request.principal_id,project_id:request.project_id};let cache=cache(&app,&scope)?;let metadata=stage_metadata(&cache,&request.stage_id)?;let(root,revision)=agent_workspace_snapshot(&app,&scope.principal_id,&scope.project_id)?;
-    if metadata.principal_id!=scope.principal_id||metadata.project_id!=scope.project_id||metadata.root!=root||metadata.workspace_revision!=revision{return Err("mirror_workspace_changed".into());}
-    let _workspace=acquire_workspace_lease(&root,true)?;let db=snapshot_database(&cache,&request.stage_id,false)?;let _source_hash=snapshot_digest(&db)?.0;
-    if fingerprint_root(&root,&cache,&||lease.check())?!=metadata.expected_local_manifest_hash{return Err("mirror_local_revision_conflict".into());}
-    let parent=root.parent().filter(|_|root.file_name().is_some()).ok_or("mirror_root_swap_unsupported")?;let stage=parent.join(format!(".luczor-stage-{}",request.stage_id));let backup=parent.join(format!(".luczor-backup-{}",request.stage_id));
-    fs::create_dir(&stage).map_err(|_|"mirror_stage_exists_or_unavailable")?;build_snapshot_tree(&stage,&cache,&db,&||lease.check())?;
-    // The local cursor fingerprints the materialized platform metadata, not the foreign OS manifest.
-    let hash=fingerprint_root_with_metadata(&stage,&cache,Some(&db),&||lease.check())?;
-    if agent_workspace_snapshot(&app,&scope.principal_id,&scope.project_id)?!=(root.clone(),revision)||fingerprint_root(&root,&cache,&||lease.check())?!=metadata.expected_local_manifest_hash{return Err("mirror_local_revision_conflict".into());}lease.check()?;
-    let marker=cache.join(format!("transaction-{}.json",request.stage_id));let mut file=OpenOptions::new().create_new(true).write(true).open(&marker).map_err(|_|"mirror_recovery_journal_failed")?;file.write_all(&serde_json::to_vec(&serde_json::json!({"schemaVersion":1,"root":root,"stage":stage,"backup":backup,"manifestHash":hash,"previousManifestHash":metadata.expected_local_manifest_hash,"snapshotId":request.stage_id})).map_err(|_|"mirror_manifest_invalid")?).and_then(|_|file.sync_all()).map_err(|_|"mirror_recovery_journal_failed")?;drop(file);
-    fs::rename(&root,&backup).map_err(|_|"mirror_workspace_in_use")?;if fs::rename(&stage,&root).is_err(){if fs::rename(&backup,&root).is_err(){return Err("mirror_recovery_required".into());}return Err("mirror_commit_failed_original_restored".into());}
-    persist_applied_metadata(&cache,&request.stage_id)?;
-    super::execution::revoke_project_scopes(&scope.project_id)?;
-    fs::remove_file(marker).map_err(|_|"mirror_committed_recovery_marker_retained")?;Ok(Applied{manifest_hash:hash,source_manifest_hash:_source_hash,backup_path:backup.to_string_lossy().into_owned()})
-}).await.map_err(|_|"mirror_worker_failed")?
+    tauri::async_runtime::spawn_blocking(move || {
+        let request = payload.request;
+        let scope = MirrorScope {
+            principal_id: request.principal_id,
+            project_id: request.project_id,
+        };
+        let cache = cache(&app, &scope)?;
+        let metadata = stage_metadata(&cache, &request.stage_id)?;
+        let (root, revision) =
+            agent_workspace_snapshot(&app, &scope.principal_id, &scope.project_id)?;
+        if metadata.principal_id != scope.principal_id
+            || metadata.project_id != scope.project_id
+            || metadata.root != root
+            || metadata.workspace_revision != revision
+        {
+            return Err("mirror_workspace_changed".into());
+        }
+        let _workspace = acquire_workspace_lease(&root, true)?;
+        let db = snapshot_database(&cache, &request.stage_id, false)?;
+        let source_hash = snapshot_digest(&db)?.0;
+        let check = || lease.check();
+        let (current, local_hash) = scan_current(&root, &cache, &check)?;
+        if local_hash != metadata.expected_local_manifest_hash {
+            return Err("mirror_local_revision_conflict".into());
+        }
+        let parent = root
+            .parent()
+            .filter(|_| root.file_name().is_some())
+            .ok_or("mirror_root_swap_unsupported")?;
+        let stage = parent.join(format!(".luczor-stage-{}", request.stage_id));
+        let backup = parent.join(format!(".luczor-backup-{}", request.stage_id));
+        if stage.exists() || backup.exists() {
+            return Err("mirror_stage_exists_or_unavailable".into());
+        }
+        // The marker records an in-place transaction: originals live in the backup tree, and an
+        // interrupted apply is finished by the next ordinary sync instead of a root swap.
+        let marker = cache.join(format!("transaction-{}.json", request.stage_id));
+        let mut file = OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&marker)
+            .map_err(|_| "mirror_recovery_journal_failed")?;
+        file.write_all(&serde_json::to_vec(&serde_json::json!({"schemaVersion":2,"root":root,"stage":stage,"backup":backup,"manifestHash":source_hash,"previousManifestHash":metadata.expected_local_manifest_hash,"snapshotId":request.stage_id})).map_err(|_|"mirror_manifest_invalid")?)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "mirror_recovery_journal_failed")?;
+        drop(file);
+        let backed_up =
+            apply_snapshot_in_place(&root, &cache, &db, &current, &stage, &backup, &check)?;
+        let hash = fingerprint_root_with_metadata(&root, &cache, Some(&db), &check)?;
+        persist_applied_metadata(&cache, &request.stage_id)?;
+        // The stage descriptor is spent; its snapshot lives on as applied metadata until superseded.
+        let _ = fs::remove_file(cache.join(format!("stage-{}.json", request.stage_id)));
+        fs::remove_file(marker).map_err(|_| "mirror_committed_recovery_marker_retained")?;
+        Ok(Applied {
+            manifest_hash: hash,
+            source_manifest_hash: source_hash,
+            backup_path: if backed_up {
+                backup.to_string_lossy().into_owned()
+            } else {
+                String::new()
+            },
+        })
+    })
+    .await
+    .map_err(|_| "mirror_worker_failed")?
 }
 #[tauri::command]
 pub async fn project_mirror_test_workspace(
@@ -1933,6 +2372,151 @@ mod tests {
         assert_eq!(changed[0].mode, Some(0o755));
         assert_ne!(changed[0].sha256, entries[0].sha256);
         drop(db);
+        fs::remove_dir_all(temp).unwrap();
+    }
+    #[test]
+    fn in_place_apply_changes_only_differing_entries_and_backs_up_replaced_files() {
+        let temp = temp();
+        let root = temp.join("root");
+        let cache = temp.join("cache");
+        fs::create_dir_all(root.join("keep-dir")).unwrap();
+        fs::create_dir_all(root.join("gone-dir/nested")).unwrap();
+        fs::create_dir_all(cache.join("chunks")).unwrap();
+        fs::write(root.join("keep-dir/same"), b"same").unwrap();
+        fs::write(root.join("changed"), b"old").unwrap();
+        fs::write(root.join("removed"), b"bye").unwrap();
+        fs::write(root.join("gone-dir/nested/file"), b"deep").unwrap();
+        let before = scan_root(&root, Some(&cache), &|| Ok(())).unwrap();
+        let same_mtime = before
+            .iter()
+            .find(|e| e.path == "keep-dir/same")
+            .unwrap()
+            .mtime_ms;
+        // Target: keep-dir/same unchanged, changed rewritten, removed and gone-dir gone, added new.
+        let mut target = Vec::new();
+        for entry in &before {
+            if entry.path == "keep-dir" || entry.path == "keep-dir/same" {
+                target.push(entry.clone());
+            }
+        }
+        for (path, body) in [("changed", b"new".as_slice()), ("added", b"fresh")] {
+            let digest = hash(body);
+            write_chunk(&cache, &digest, body).unwrap();
+            let mut entry = manifest_entry(path, EntryType::File, None);
+            entry.size = Some(body.len() as u64);
+            entry.sha256 = Some(digest.clone());
+            entry.chunks = vec![Chunk {
+                sha256: digest,
+                size: body.len() as u64,
+            }];
+            entry.mtime_ms = Some(1_600_000_000_000);
+            target.push(entry);
+        }
+        let id = uuid::Uuid::new_v4().to_string();
+        let db = snapshot_database(&cache, &id, true).unwrap();
+        for entry in &target {
+            db.execute(
+                "INSERT INTO entries(path,body)VALUES(?1,?2)",
+                rusqlite::params![entry.path, serde_json::to_string(entry).unwrap()],
+            )
+            .unwrap();
+        }
+        let (current, _) = scan_current(&root, &cache, &|| Ok(())).unwrap();
+        let stage = temp.join(".luczor-stage-x");
+        let backup = temp.join(".luczor-backup-x");
+        assert!(
+            apply_snapshot_in_place(&root, &cache, &db, &current, &stage, &backup, &|| Ok(()))
+                .unwrap()
+        );
+        assert_eq!(fs::read(root.join("keep-dir/same")).unwrap(), b"same");
+        assert_eq!(fs::read(root.join("changed")).unwrap(), b"new");
+        assert_eq!(fs::read(root.join("added")).unwrap(), b"fresh");
+        assert!(!root.join("removed").exists());
+        assert!(!root.join("gone-dir").exists());
+        assert_eq!(fs::read(backup.join("changed")).unwrap(), b"old");
+        assert_eq!(fs::read(backup.join("removed")).unwrap(), b"bye");
+        assert_eq!(
+            fs::read(backup.join("gone-dir/nested/file")).unwrap(),
+            b"deep"
+        );
+        assert!(!stage.exists());
+        let after = scan_root(&root, None, &|| Ok(())).unwrap();
+        assert_eq!(
+            after
+                .iter()
+                .find(|e| e.path == "keep-dir/same")
+                .unwrap()
+                .mtime_ms,
+            same_mtime
+        );
+        assert_eq!(
+            after.iter().find(|e| e.path == "changed").unwrap().mtime_ms,
+            Some(1_600_000_000_000)
+        );
+        // A second apply of the same snapshot touches nothing and needs no backup.
+        let (current, _) = scan_current(&root, &cache, &|| Ok(())).unwrap();
+        let stage2 = temp.join(".luczor-stage-y");
+        let backup2 = temp.join(".luczor-backup-y");
+        assert!(
+            !apply_snapshot_in_place(&root, &cache, &db, &current, &stage2, &backup2, &|| Ok(()))
+                .unwrap()
+        );
+        assert!(!backup2.exists() && !stage2.exists());
+        drop(db);
+        fs::remove_dir_all(temp).unwrap();
+    }
+    #[test]
+    fn stat_cache_skips_unchanged_reads_but_never_trusts_a_fresh_or_resized_file() {
+        let temp = temp();
+        let root = temp.join("root");
+        let cache = temp.join("cache");
+        fs::create_dir_all(cache.join("chunks")).unwrap();
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("file"), b"content").unwrap();
+        let old = UNIX_EPOCH + std::time::Duration::from_millis(1_500_000_000_000);
+        OpenOptions::new()
+            .write(true)
+            .open(root.join("file"))
+            .unwrap()
+            .set_times(fs::FileTimes::new().set_modified(old))
+            .unwrap();
+        let stat = stat_cache(&cache).unwrap();
+        let mut first = Vec::new();
+        walk_root(&root, Some(&cache), Some(&stat), &|| Ok(()), |e| {
+            first.push(e);
+            Ok(())
+        })
+        .unwrap();
+        let count: i64 = stat
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        // Same size and mtime: the cached hash is reused without reading the file.
+        assert!(cached_file(
+            Some(&stat),
+            Some(&cache),
+            "file",
+            7,
+            Some(1_500_000_000_000)
+        )
+        .is_some());
+        // Different size or a freshly written file is always re-read.
+        assert!(cached_file(
+            Some(&stat),
+            Some(&cache),
+            "file",
+            8,
+            Some(1_500_000_000_000)
+        )
+        .is_none());
+        let now = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        stat.execute("UPDATE files SET mtime_ms=?1", [now as i64])
+            .unwrap();
+        assert!(cached_file(Some(&stat), Some(&cache), "file", 7, Some(now)).is_none());
+        drop(stat);
         fs::remove_dir_all(temp).unwrap();
     }
     #[test]

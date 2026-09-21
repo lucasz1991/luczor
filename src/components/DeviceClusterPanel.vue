@@ -518,8 +518,9 @@ async function startWorkflow(matrix: boolean) {
       <section v-else-if="tab === 'files'">
         <h3>Vollständiger Projektordner</h3>
         <p>
-          Alle Dateien, versteckten Ordner und Binärdateien werden versioniert übertragen. Der lokale Ordner wird beim
-          Übernehmen vorher gesichert.
+          Alle Dateien, versteckten Ordner und Binärdateien werden versioniert übertragen. Jedes Gerät veröffentlicht
+          eigene Änderungen automatisch und übernimmt die Änderungen der anderen Geräte laufend. Ersetzte oder gelöschte
+          Dateien werden vorher gesichert; überlappende Änderungen bleiben als Konfliktkopie („.konflikt-…“) erhalten.
         </p>
         <p v-if="!project?.cloud" class="cluster__empty">
           Dieses Projekt zuerst unter „Globale Projekte“ mit deinem Benutzerkonto verbinden und einen lokalen Ordner
@@ -537,6 +538,10 @@ async function startWorkflow(matrix: boolean) {
             </div>
           </div>
           <p v-if="mirror?.error" class="cluster__error">{{ mirror.error }}</p>
+          <p v-if="mirror?.conflicts" class="cluster__empty">
+            {{ mirror.conflicts }} überlappende Änderung{{ mirror.conflicts === 1 ? '' : 'en' }}: Die Fassung des
+            anderen Geräts behält den Namen, deine Fassung liegt als Konfliktkopie daneben.
+          </p>
           <progress v-if="mirror?.busy" aria-label="Projektabgleich läuft" />
           <div class="cluster__actions">
             <button

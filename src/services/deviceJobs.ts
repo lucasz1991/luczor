@@ -385,6 +385,10 @@ async function connectRealtime(
     channel.bind('device.coordination.changed', () => {
       if (current.isCurrent()) window.dispatchEvent(new Event('luczor:coordination-wake'))
     })
+    channel.bind('project.mirror.changed', (payload: unknown) => {
+      // Another device published a project folder revision; the mirror channel pulls it at once.
+      if (current.isCurrent()) window.dispatchEvent(new CustomEvent('luczor:mirror-wake', { detail: payload }))
+    })
     channel.bind('device.job.created', (job: DeviceJob) => {
       if (current.isCurrent()) void safeProcessJob(config.clientId, job, current)
     })

@@ -49,7 +49,12 @@ vi.mock('@/services/coordination/binaryTransport', () => ({
   decodeBase64: () => new Uint8Array([1]),
   encodeBase64: () => 'AQ==',
 }))
-import { projectMirrorState, startProjectMirrorChannel, syncProjectMirror } from '@/services/coordination/mirror'
+import {
+  MIRROR_WAKE_EVENT,
+  projectMirrorState,
+  startProjectMirrorChannel,
+  syncProjectMirror,
+} from '@/services/coordination/mirror'
 
 const base = '/projects/7/mirror'
 const sha = 'a'.repeat(64)
@@ -83,51 +88,148 @@ afterEach(() => {
 })
 
 describe('durable full project mirror upload', () => {
-  it('persists a confirmed merge conflict and retries only when the server head changes', async () => {
-    mock.entries.set('owner:local', { revision: 3, localHash: 'changed' })
-    let revision = 2
-    let publishes = 0
-    mock.request.mockImplementation(async (path: string) => {
-      if (path === base) return { data: { revision, manifest_id: `head-${revision}` } }
-      if (path.endsWith('/proposals')) return { data: [{ manifest_id: 'proposal', base_revision: 1 }] }
+  function server(options: {
+    revision: number
+    merged?: boolean
+    conflicts?: number
+    publish?: (body: Record<string, unknown>) => void
+    create?: (body: Record<string, unknown>) => void
+  }) {
+    const calls: string[] = []
+    let revision = options.revision
+    mock.request.mockImplementation(async (path: string, request: Options) => {
+      calls.push(`${request.method ?? 'GET'} ${path.slice(base.length) || '/'}`)
+      if (path === base) return { data: { revision, manifest_id: revision ? `head-${revision}` : null } }
+      if (path.endsWith('/proposals')) return { data: [] }
+      if (path.endsWith('/manifests')) {
+        options.create?.(request.body ?? {})
+        return {
+          data: { manifest_id: 'draft', base_revision: request.body?.base_revision, revision: null, status: 'draft' },
+        }
+      }
       if (path.endsWith('/lease')) return { data: { lease_id: 'lease' } }
       if (path.endsWith('/publish')) {
-        publishes++
-        if (revision === 2)
-          throw Object.assign(new Error('Overlapping file changes'), { status: 409, code: 'mirror_merge_conflict' })
-        return { data: { revision, manifest_id: 'merged', status: 'published' } }
+        options.publish?.(request.body ?? {})
+        revision++
+        return {
+          data: {
+            revision,
+            manifest_id: options.merged ? `head-${revision}` : 'draft',
+            status: 'published',
+            conflict_count: options.conflicts ?? 0,
+          },
+        }
       }
+      if (path.includes('/manifests/head-'))
+        return {
+          data: {
+            revision,
+            manifest_id: `head-${revision}`,
+            entries: [{ path: 'peer', type: 'file', size: 1, sha256: sha, chunks: [{ sha256: sha, size: 1 }] }],
+            next_offset: null,
+          },
+        }
       return { data: {} }
     })
-    await expect(syncProjectMirror('local')).rejects.toThrow('Entscheidung am Master')
-    expect(mock.entries.get('owner:local:proposal-conflict')).toEqual({
-      proposalId: 'proposal',
-      headId: 'head-2',
-      revision: 2,
+    return calls
+  }
+  function applyNative() {
+    mock.native.mockImplementation(async (command: string) => {
+      if (command === 'project_mirror_scan')
+        return {
+          manifestHash: 'changed',
+          snapshotId: 'snapshot',
+          totalEntries: 1,
+          entries: [{ path: '.env', type: 'file', size: 1, sha256: sha, chunks: [{ sha256: sha, size: 1 }] }],
+        }
+      if (command === 'project_mirror_chunk_read') return { dataBase64: 'AQ==' }
+      if (command === 'project_mirror_stage_begin') return { stageId: 'stage' }
+      if (command === 'project_mirror_stage_commit') return { manifestHash: 'applied', backupPath: '' }
+      return undefined
     })
-    for (let attempt = 0; attempt < 4; attempt++)
-      await expect(syncProjectMirror('local')).rejects.toThrow('unveränderte Vorschlag')
-    expect(publishes).toBe(1)
-    expect(projectMirrorState.local).toMatchObject({ busy: false, error: expect.stringContaining('Beide Fassungen') })
-    expect(mock.native).not.toHaveBeenCalledWith(
-      'project_mirror_stage_commit',
-      expect.anything(),
-      expect.anything(),
-      expect.anything()
-    )
-    revision = 3
+  }
+
+  it('pushes a stale base directly, lets the server merge and applies the merged head in the same run', async () => {
+    mock.entries.set('owner:local', { revision: 1, localHash: 'previous', baseManifestId: 'head-1' })
+    applyNative()
+    const bodies: Record<string, unknown>[] = []
+    const calls = server({
+      revision: 2,
+      merged: true,
+      conflicts: 1,
+      create: body => bodies.push(body),
+      publish: body => bodies.push(body),
+    })
     await syncProjectMirror('local')
-    expect(publishes).toBe(2)
-    expect(mock.entries.has('owner:local:proposal-conflict')).toBe(false)
+    expect(bodies[0]).toMatchObject({ base_revision: 1, base_manifest_id: 'head-1', proposal: false, draft: true })
+    expect(bodies[1]).toMatchObject({ expected_revision: 2 })
+    expect(calls).not.toContain('POST /manifests/draft/propose')
+    expect(mock.native).toHaveBeenCalledWith(
+      'project_mirror_stage_begin',
+      expect.objectContaining({ expectedLocalManifestHash: 'changed' }),
+      expect.anything(),
+      true
+    )
+    expect(mock.native).toHaveBeenCalledWith(
+      'project_mirror_stage_commit',
+      expect.objectContaining({ stageId: 'stage' }),
+      expect.anything(),
+      true
+    )
+    expect(mock.entries.get('owner:local')).toEqual({ revision: 3, localHash: 'applied', baseManifestId: 'head-3' })
+    expect(mock.entries.has('owner:local:upload')).toBe(false)
+    expect(projectMirrorState.local).toMatchObject({ busy: false, error: '', conflicts: 1 })
+    expect(projectMirrorState.local?.stage).toContain('1 Konfliktkopie')
   })
 
-  it.each(['mirror_revision_conflict', 'mirror_lease_expired', undefined])(
-    'does not persist a transient or unclassified 409 (%s)',
+  it('lets an assistant device publish without a job or master role', async () => {
+    mock.account.mockResolvedValue({
+      accountId: 1,
+      principalId: 'owner',
+      config: { clientId: 'assistant', baseUrl: 'https://server', deviceKey: 'key' },
+    })
+    const calls = server({ revision: 0 })
+    await syncProjectMirror('local')
+    expect(calls).toContain('POST /manifests/draft/publish')
+    expect(calls).not.toContain('POST /manifests/draft/propose')
+    expect(mock.entries.get('owner:local')).toEqual({ revision: 1, localHash: 'changed', baseManifestId: 'draft' })
+    expect(projectMirrorState.local?.stage).toBe('Ordner vollständig abgeglichen')
+  })
+
+  it('keeps device-job uploads on assistants as proposals for the master', async () => {
+    mock.account.mockResolvedValue({
+      accountId: 1,
+      principalId: 'owner',
+      config: { clientId: 'assistant', baseUrl: 'https://server', deviceKey: 'key' },
+    })
+    const bodies: Record<string, unknown>[] = []
+    const calls = server({ revision: 1, create: body => bodies.push(body) })
+    await syncProjectMirror('local', undefined, 'job')
+    expect(bodies[0]).toMatchObject({ proposal: true, job_id: 'job' })
+    expect(calls).toContain('POST /manifests/draft/propose')
+    expect(calls).not.toContain('POST /manifests/draft/publish')
+    expect(mock.entries.get('owner:local')).toMatchObject({ proposalHash: 'changed' })
+  })
+
+  it('pulls a newer head when the folder is unchanged and applies only in place', async () => {
+    mock.entries.set('owner:local', { revision: 1, localHash: 'changed', baseManifestId: 'head-1' })
+    applyNative()
+    const calls = server({ revision: 2 })
+    await syncProjectMirror('local')
+    expect(calls).not.toContain('POST /manifests')
+    expect(calls).toContain('GET /manifests/head-2')
+    expect(mock.entries.get('owner:local')).toEqual({ revision: 2, localHash: 'applied', baseManifestId: 'head-2' })
+  })
+
+  it.each(['mirror_revision_conflict', 'mirror_lease_expired'])(
+    'retries a transient publish race against the fresh head and then fails visibly (%s)',
     async code => {
       let publishes = 0
       mock.request.mockImplementation(async (path: string) => {
         if (path === base) return { data: { revision: 2, manifest_id: 'head' } }
-        if (path.endsWith('/proposals')) return { data: [{ manifest_id: 'proposal' }] }
+        if (path.endsWith('/proposals')) return { data: [] }
+        if (path.endsWith('/manifests'))
+          return { data: { manifest_id: 'draft', base_revision: 0, revision: null, status: 'draft' } }
         if (path.endsWith('/lease')) return { data: { lease_id: 'lease' } }
         if (path.endsWith('/publish')) {
           publishes++
@@ -136,11 +238,31 @@ describe('durable full project mirror upload', () => {
         return { data: {} }
       })
       await expect(syncProjectMirror('local')).rejects.toThrow('Conflict')
-      await expect(syncProjectMirror('local')).rejects.toThrow('Conflict')
-      expect(publishes).toBe(2)
-      expect(mock.entries.has('owner:local:proposal-conflict')).toBe(false)
+      expect(publishes).toBe(3)
+      expect(mock.entries.has('owner:local:upload')).toBe(true)
+      expect(projectMirrorState.local).toMatchObject({ busy: false, error: 'Conflict' })
     }
   )
+
+  it('wakes a project immediately when another device publishes a revision', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal('window', new EventTarget())
+    vi.stubGlobal('navigator', { onLine: true })
+    server({ revision: 0 })
+    const controller = new AbortController()
+    const stop = await startProjectMirrorChannel(controller.signal)
+    try {
+      await vi.advanceTimersByTimeAsync(0)
+      const before = mock.request.mock.calls.length
+      window.dispatchEvent(new CustomEvent(MIRROR_WAKE_EVENT, { detail: { project_id: 7, revision: 2 } }))
+      await vi.advanceTimersByTimeAsync(300)
+      expect(mock.request.mock.calls.length).toBe(before)
+      await vi.advanceTimersByTimeAsync(400)
+      expect(mock.request.mock.calls.length).toBeGreaterThan(before)
+    } finally {
+      stop()
+    }
+  })
 
   it('backs off failed background syncs even when filesystem events keep arriving and stops after cleanup', async () => {
     vi.useFakeTimers()
@@ -178,35 +300,6 @@ describe('durable full project mirror upload', () => {
     } finally {
       stop()
     }
-  })
-
-  it('seals stale-base master changes as a proposal so disjoint assistant changes can merge', async () => {
-    mock.entries.set('owner:local', { revision: 1, localHash: 'previous' })
-    let proposed = false
-    mock.request.mockImplementation(async (path: string) => {
-      if (path === base) return { data: { revision: 2, manifest_id: 'current' } }
-      if (path.endsWith('/proposals')) return { data: [] }
-      if (path.endsWith('/manifests'))
-        return { data: { manifest_id: 'draft', base_revision: 1, revision: null, status: 'draft' } }
-      if (path.endsWith('/propose')) {
-        proposed = true
-        return { data: { status: 'proposed' } }
-      }
-      if (path.endsWith('/lease')) return { data: { lease_id: 'lease' } }
-      if (path.endsWith('/publish')) {
-        if (!proposed) throw new Error('mirror_revision_conflict: stale draft cannot be merged')
-        return { data: { revision: 3, manifest_id: 'merged', status: 'published' } }
-      }
-      return { data: {} }
-    })
-    await syncProjectMirror('local')
-    expect(proposed).toBe(true)
-    expect(mock.request).toHaveBeenCalledWith(
-      `${base}/manifests/draft/publish`,
-      expect.objectContaining({ body: expect.objectContaining({ expected_revision: 2 }) }),
-      expect.anything()
-    )
-    expect(mock.entries.get('owner:local')).toMatchObject({ revision: 2, localHash: 'changed' })
   })
 
   it('reuses the same append operation after a lost ACK and skips an already uploaded private chunk', async () => {
@@ -272,6 +365,10 @@ describe('durable full project mirror upload', () => {
     })
     await syncProjectMirror('local')
     expect(mock.entries.has('owner:local:upload')).toBe(false)
-    expect(mock.entries.get('owner:local')).toMatchObject({ revision: 2, localHash: 'changed' })
+    expect(mock.entries.get('owner:local')).toMatchObject({
+      revision: 2,
+      localHash: 'changed',
+      baseManifestId: 'draft',
+    })
   })
 })
