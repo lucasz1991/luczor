@@ -2,6 +2,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import AiIcon from './AiIcon.vue'
 import ThinkingSelector from './ThinkingSelector.vue'
+import DropdownMenu, { type DropdownOption } from './DropdownMenu.vue'
 import type { ThinkingTier } from '@/services/inference/thinking'
 import type { ChatRouteMode } from '@/services/inference/modelUsageSettings'
 import type { LuczorMode } from '@/services/openrouter.service'
@@ -55,16 +56,47 @@ const emit = defineEmits<{
   command: [id: string]
 }>()
 
-/** The select is the only writer; an unknown value is discarded rather than emitted. */
-function onRouteMode(event: Event): void {
-  const value = (event.target as HTMLSelectElement).value
-  if (value === 'local' || value === 'auto' || value === 'external') emit('update:routeMode', value)
-}
-/** Same pattern: the parent owns the confirmation flow for "unrestricted" and may leave `mode` unchanged. */
-function onMode(event: Event): void {
-  const value = (event.target as HTMLSelectElement).value
+/** The dropdown is the only writer; the parent owns the confirmation flow for "unrestricted" and may leave `mode` unchanged. */
+function onMode(value: LuczorMode): void {
   if (value === 'observe' || value === 'act' || value === 'unrestricted') emit('update:mode', value)
 }
+function onRouteMode(value: ChatRouteMode): void {
+  if (value === 'local' || value === 'auto' || value === 'external') emit('update:routeMode', value)
+}
+const modeOptions = computed<DropdownOption<LuczorMode>[]>(() => [
+  { value: 'observe', label: 'Beobachten', description: 'Nur lesen und antworten – keine Werkzeuge.' },
+  { value: 'act', label: 'Handeln', description: 'Werkzeuge mit Bestätigung je Aktion.', tone: 'success' },
+  ...(props.allowUnrestricted
+    ? [
+        {
+          value: 'unrestricted' as const,
+          label: 'Vollzugriff',
+          description: 'Werkzeuge ohne Rückfrage – nur nach ausdrücklicher Freigabe.',
+          tone: 'danger' as const,
+        },
+      ]
+    : []),
+])
+const routeOptions = computed<DropdownOption<ChatRouteMode>[]>(() => [
+  {
+    value: 'local',
+    label: 'Lokal',
+    description: 'Nur das lokale Modell; Inhalte bleiben auf dem Gerät.',
+    tone: 'accent',
+  },
+  {
+    value: 'auto',
+    label: 'Lokal + extern',
+    description: 'Lokal zuerst, externe Unterstützung bei Bedarf.',
+    disabled: !props.externalAllowed,
+  },
+  {
+    value: 'external',
+    label: 'Nur extern',
+    description: 'Externe Modelle bearbeiten die Anfrage.',
+    disabled: !props.externalAllowed,
+  },
+])
 /** The mode permits model routes; delegation is chosen for the actual request. */
 const routeModeHint = computed(() => {
   if (!props.externalAllowed) return 'Externe Modelle zuerst unter Einstellungen → Chat & Agenten zulassen.'
@@ -143,20 +175,20 @@ defineExpose({ focus: () => field.value?.focus() })
           <AiIcon name="folder" :size="13" />{{ contextLabel }}
         </button>
         <div class="ai-prompt__controls">
-          <label class="ai-mode-select" :class="`is-${mode}`" :title="modeTitle">
-            <span class="ai-mode-select__dot" aria-hidden="true" />
-            <select
-              class="ai-route-mode__select"
-              :value="mode"
-              :disabled="modeBusy"
-              aria-label="Steuerungsmodus wählen"
-              @change="onMode($event)"
-            >
-              <option value="observe">Beobachten</option>
-              <option value="act">Handeln</option>
-              <option v-if="allowUnrestricted" value="unrestricted">Vollzugriff</option>
-            </select>
-          </label>
+          <DropdownMenu
+            :model-value="mode"
+            :options="modeOptions"
+            label="Steuerungsmodus"
+            heading="Steuerungsmodus"
+            :title="modeTitle"
+            :disabled="modeBusy"
+            :trigger-class="`ai-mode-select is-${mode}`"
+            @update:model-value="onMode"
+          >
+            <template #trigger>
+              <span class="ai-mode-select__dot" aria-hidden="true" />
+            </template>
+          </DropdownMenu>
           <slot name="heading-start" />
           <VoiceInputSettings
             class="voice-input-settings--composer"
@@ -166,20 +198,21 @@ defineExpose({ focus: () => field.value?.focus() })
             @start="emit('voice-start', $event)"
             @stop="emit('voice-stop')"
           />
-          <label class="ai-route-mode" :class="{ 'is-active': routeMode !== 'local' }" :title="routeModeHint">
-            <AiIcon name="shield" :size="13" />
-            <select
-              class="ai-route-mode__select"
-              :value="externalAllowed ? routeMode : 'local'"
-              :disabled="busy || !externalAllowed"
-              aria-label="Erlaubte Modelle für diesen Chat wählen"
-              @change="onRouteMode($event)"
-            >
-              <option value="local">Lokal</option>
-              <option value="auto">Lokal + extern</option>
-              <option value="external">Nur extern</option>
-            </select>
-          </label>
+          <DropdownMenu
+            :model-value="externalAllowed ? routeMode : 'local'"
+            :options="routeOptions"
+            label="Erlaubte Modelle für diesen Chat"
+            heading="Modelle"
+            :title="routeModeHint"
+            :disabled="busy"
+            :trigger-class="`ai-route-mode${routeMode !== 'local' && externalAllowed ? ' is-active' : ''}`"
+            :menu-width="260"
+            @update:model-value="onRouteMode"
+          >
+            <template #trigger>
+              <AiIcon name="shield" :size="13" />
+            </template>
+          </DropdownMenu>
         </div>
       </div>
       <textarea

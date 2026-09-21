@@ -389,8 +389,13 @@ async function startWorkflow(matrix: boolean) {
             <p v-if="lanState.error">{{ lanState.error }}</p>
             <p v-if="lanState.cachedTrust">Verbindung mit gespeicherter, signierter Gerätezuordnung.</p>
             <p v-if="lanState.lease">
-              Lesende LAN-Agenten freigegeben bis {{ new Date(lanState.lease.expires_at).toLocaleTimeString() }}.
-              Gemeinsame Änderungen benötigen weiterhin bestätigte Serverrechte.
+              {{
+                Date.parse(lanState.lease.expires_at) > Date.now()
+                  ? 'Lesende LAN-Agenten freigegeben bis'
+                  : 'LAN-Freigabe abgelaufen seit'
+              }}
+              {{ new Date(lanState.lease.expires_at).toLocaleTimeString() }}. Gemeinsame Änderungen benötigen weiterhin
+              bestätigte Serverrechte.
             </p>
           </div>
         </div>

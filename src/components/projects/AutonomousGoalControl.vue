@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, useId, watch } from 'vue'
 import AiIcon from '@/components/ai/AiIcon.vue'
+import { useDismissible } from '@/composables/useDismissible'
 
 type GoalModel = {
   text: string
@@ -23,7 +24,10 @@ const props = withDefaults(defineProps<{ model?: GoalModel; busy?: boolean; comp
 const emit = defineEmits<{ save: [text: string]; toggle: [active: boolean] }>()
 const id = useId()
 const open = ref(false)
+const root = ref<HTMLElement | null>(null)
 const trigger = ref<HTMLButtonElement | null>(null)
+// Clicking anywhere else (or moving focus away) closes the popover; the draft stays in memory.
+useDismissible(open, root, { escape: false })
 const editor = ref<HTMLTextAreaElement | null>(null)
 const savedText = computed(() => props.model?.text ?? '')
 const draft = ref(savedText.value)
@@ -80,7 +84,7 @@ function save(): void {
 </script>
 
 <template>
-  <div class="goal-control" @keydown.esc.stop.prevent="setOpen(false)">
+  <div ref="root" class="goal-control" @keydown.esc.stop.prevent="setOpen(false)">
     <button
       :id="`${id}-trigger`"
       ref="trigger"

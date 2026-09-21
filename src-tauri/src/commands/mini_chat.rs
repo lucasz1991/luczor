@@ -97,6 +97,12 @@ pub enum MiniAction {
         session_id: String,
         panel: MiniWorkspacePanel,
     },
+    /// The nudge's Systemstatus pane is (not) visible; the main window samples metrics accordingly.
+    SystemWatch {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        active: bool,
+    },
     WorkflowOpen {
         #[serde(rename = "sessionId")]
         session_id: String,
@@ -218,7 +224,8 @@ fn validate_action(action: &MiniAction) -> Result<(), String> {
         | MiniAction::WorkflowOpen { session_id, .. }
         | MiniAction::WorkflowImprove { session_id, .. }
         | MiniAction::WorkflowAction { session_id, .. }
-        | MiniAction::WorkspaceOpen { session_id, .. } => validate_identifier(session_id)?,
+        | MiniAction::WorkspaceOpen { session_id, .. }
+        | MiniAction::SystemWatch { session_id, .. } => validate_identifier(session_id)?,
         _ => {}
     }
     if let MiniAction::SelectProject { project_id, .. }
@@ -647,6 +654,7 @@ mod tests {
             serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "desktop"}),
             serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "planning"}),
             serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "workflows"}),
+            serde_json::json!({"type": "system_watch", "sessionId": "session", "active": true}),
             serde_json::json!({"type": "workflow_open", "sessionId": "session", "messageId": "message", "workflowId": 7}),
             serde_json::json!({"type": "workflow_improve", "sessionId": "session", "messageId": "message", "workflowId": 7}),
             serde_json::json!({"type": "workflow_action", "sessionId": "session", "messageId": "message", "workflowId": 7, "action": "test"}),
@@ -663,6 +671,7 @@ mod tests {
         for payload in [
             serde_json::json!({"type": "view", "sessionId": "session", "view": "unrestricted"}),
             serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "shell"}),
+            serde_json::json!({"type": "system_watch", "sessionId": "session", "active": "yes"}),
             serde_json::json!({"type": "view", "sessionId": "session", "view": "chat", "command": "whoami"}),
             serde_json::json!({"type": "select_project", "sessionId": "session", "projectId": "project", "path": "C:/"}),
             serde_json::json!({"type": "workspace_open", "sessionId": "session", "panel": "desktop", "approved": true}),

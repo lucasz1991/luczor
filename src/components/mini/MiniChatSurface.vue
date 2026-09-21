@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke } from '@tauri-apps/api/core'
 import StatusOrb from './StatusOrb.vue'
+import MiniSystemPane from './MiniSystemPane.vue'
 import AiIcon from '../ai/AiIcon.vue'
 import VoiceInputSettings from '../ai/VoiceInputSettings.vue'
 import { createVoiceInputSession, idleVoiceInput, type VoiceInputMode } from '@/services/voice/voiceInputSession'
@@ -33,7 +34,7 @@ const props = withDefaults(defineProps<{ snapshot: MiniSnapshot; native?: boolea
 const emit = defineEmits<{ action: [action: MiniAction]; hide: []; showMain: [] }>()
 // The screen-edge nudge has one window mode: the capsule, with a fly-out per icon. "Chats" is the
 // one pane that can grow into the full chat page — that replaces the old separate Mini "expand" modus.
-type GripPane = 'status' | 'chats' | 'decision' | 'tools' | 'link'
+type GripPane = 'status' | 'chats' | 'decision' | 'tools' | 'system' | 'link'
 const gripHover = ref(false)
 const hoverPane = ref<GripPane | null>(null)
 const pinnedPane = ref<GripPane | null>(null)
@@ -46,8 +47,22 @@ const paneTitles: Record<GripPane, string> = {
   chats: 'Chats',
   decision: 'Entscheidung',
   tools: 'Werkzeuge',
+  system: 'Systemstatus',
   link: 'Verbindung',
 }
+// The main window samples metrics only while this pane is actually on screen (hovered or pinned).
+const systemWatching = computed(
+  () => activePane.value === 'system' && (gripHover.value || pinnedPane.value === 'system')
+)
+watch(systemWatching, active => {
+  emit('action', { type: 'system_watch', sessionId: props.snapshot.sessionId, active })
+})
+const systemState = computed(() => {
+  const availability = props.snapshot.system?.availability
+  if (!availability || availability === 'idle') return 'idle'
+  if (availability === 'unavailable') return 'error'
+  return props.snapshot.system?.model.running ? 'busy' : 'ok'
+})
 function enterGrip() {
   gripHover.value = true
 }
@@ -702,6 +717,20 @@ onBeforeUnmount(() => {
         <button
           type="button"
           class="mini-grip__icon"
+          data-kind="system"
+          :class="{ 'is-pinned': pinnedPane === 'system', 'is-active': activePane === 'system' }"
+          :data-state="systemState"
+          title="Systemstatus · CPU, GPU, RAM, Temperaturen und lokales Modell"
+          aria-label="Systemstatus öffnen"
+          @pointerenter="hoverPane = 'system'"
+          @focus="hoverPane = 'system'"
+          @click="pinPane('system')"
+        >
+          <AiIcon name="gauge" :size="13" />
+        </button>
+        <button
+          type="button"
+          class="mini-grip__icon"
           data-kind="link"
           :class="{ 'is-pinned': pinnedPane === 'link', 'is-active': activePane === 'link' }"
           :data-state="connectionError ? 'error' : 'ok'"
@@ -1167,6 +1196,9 @@ onBeforeUnmount(() => {
                 </li>
               </ul>
               <p v-else class="mini-grip-panel__empty">In diesem Chat wurde noch kein Werkzeug ausgeführt.</p>
+            </template>
+            <template v-else-if="activePane === 'system'">
+              <MiniSystemPane :system="snapshot.system ?? null" />
             </template>
             <template v-else>
               <dl class="mini-grip-panel__kv">

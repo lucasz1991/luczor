@@ -5,6 +5,9 @@ import type { TokenUsage } from '@/services/tokenUsage'
 import type { WorkflowChatReference } from '@/services/workflows/presentation'
 import type { WorkflowRun } from '@/services/workflows/types'
 import type { ThinkingTier, ThinkingBudgetProgress, ThinkingControlAction } from '@/services/inference/thinking'
+import type { DeepReadonly } from 'vue'
+import type { SystemMetrics } from '@/services/systemMetrics'
+import type { SystemStatusAvailability, SystemStatusPoint } from '@/services/systemStatusMonitor'
 
 export type MiniWorkflowReference = WorkflowChatReference & { projectId: string }
 export type MiniWorkflowAction = 'test' | 'start' | 'stop' | 'stop_after_step'
@@ -34,7 +37,17 @@ export type MiniDecision = {
   description: string
   detail: string
 }
+/** Display-only copy of the main window's system monitor for the nudge's Systemstatus pane. */
+export type MiniSystemSnapshot = {
+  sample: DeepReadonly<SystemMetrics> | null
+  history: ReadonlyArray<DeepReadonly<SystemStatusPoint>>
+  availability: SystemStatusAvailability
+  lastUpdatedAt: number | null
+  model: { name: string; label: string; state: string; running: boolean | null }
+}
 export type MiniSnapshot = {
+  /** Present only while the nudge watches the Systemstatus pane; otherwise omitted to keep snapshots small. */
+  system?: MiniSystemSnapshot | null
   workflowRuns?: WorkflowRun[]
   workflowRunsVerified?: boolean
   thinkingTier?: ThinkingTier
@@ -103,6 +116,8 @@ export type MiniAction =
   | { type: 'mode'; mode: 'observe' | 'act' }
   | { type: 'main_decide'; id: string; approved: boolean }
   | { type: 'kill_switch'; enabled: boolean }
+  /** The nudge asks the main window to sample system metrics while its Systemstatus pane is visible. */
+  | { type: 'system_watch'; sessionId: string; active: boolean }
 
 export const MINI_ACTION_EVENT = 'luczor://mini-action'
 export const MINI_STATE_EVENT = 'luczor://mini-state'

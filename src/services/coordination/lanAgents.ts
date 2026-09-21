@@ -22,6 +22,8 @@ export type LanAgentTask = {
   operation: 'run'
   jobId: string
   lease: AgentLease
+  issuedAtMs: number
+  expiresAtMs: number
   task: string
   role: string
   context: string
@@ -29,14 +31,81 @@ export type LanAgentTask = {
   tools: string[]
 }
 type Journal = Record<string, unknown> & {
+  runId: string
   revision: number
   state: string
   payloadHash: string
+  checkpoint?: { lastEventSequence: number }
   result?: Record<string, unknown>
 }
 const active = new Map<string, { controller: AbortController; source: string }>()
 export const hasLanAgentRuns = () => active.size > 0
 export const deviceAgentJobs = new Map<string, string>()
+
+function journalRecord(account: VerifiedAccountSnapshot, journal: Journal) {
+  return {
+    kind: 'device',
+    principalId: account.principalId,
+    deviceId: account.config.clientId,
+    runId: journal.runId,
+    payloadHash: journal.payloadHash,
+    state: journal.state,
+    ...(journal.result ? { result: journal.result } : {}),
+    ...(journal.checkpoint ? { checkpoint: journal.checkpoint } : {}),
+  }
+}
+
+async function flushResult(account: VerifiedAccountSnapshot, journal: Journal) {
+  const { lanReply, ...result } = journal.result ?? {}
+  const route = lanReply as { protocol?: string; source?: string; target?: string } | undefined
+  if (route?.protocol !== 'luczor.agent.v1' || route.source !== account.config.clientId || !route.target) return
+  // A false delivery result still means native SQLite has durably queued this exact reply.
+  await sendLan(route.target, 'result', { protocol: route.protocol, jobId: journal.runId, result }, journal.runId)
+  if (journal.checkpoint?.lastEventSequence === 1) return
+  await invoke('device_run_journal_transition', {
+    payload: {
+      ownerPrincipalId: account.principalId,
+      expectedRevision: journal.revision,
+      record: { ...journalRecord(account, journal), checkpoint: { lastEventSequence: 1 } },
+    },
+  })
+}
+
+/** Recover result delivery, never restart uncertain model/tool work after an app crash. */
+export async function recoverLanAgentResults(account: VerifiedAccountSnapshot, signal: AbortSignal) {
+  const records = await invoke<Journal[]>('device_run_journal_list', {
+    payload: {
+      ownerPrincipalId: account.principalId,
+      kind: 'device',
+      limit: 20,
+      pendingLanRepliesOnly: true,
+      states: ['queued', 'started', 'completed', 'failed', 'cancelled'],
+    },
+  })
+  for (let record of records) {
+    signal.throwIfAborted()
+    if (active.has(`${account.principalId}:${record.runId}`)) continue
+    if (['queued', 'started'].includes(record.state)) {
+      record = await invoke<Journal>('device_run_journal_transition', {
+        payload: {
+          ownerPrincipalId: account.principalId,
+          expectedRevision: record.revision,
+          record: {
+            ...journalRecord(account, record),
+            state: 'failed',
+            result: {
+              ...record.result,
+              status: 'incomplete',
+              output: '',
+              error: 'lan_agent_previous_outcome_unknown',
+            },
+          },
+        },
+      })
+    }
+    await flushResult(account, record)
+  }
+}
 
 export async function verifyLanLease(
   account: VerifiedAccountSnapshot,
@@ -52,11 +121,52 @@ export async function verifyLanLease(
 /** The native inbox is acknowledged only after a durable journal transition. */
 export async function receiveLanAgent(envelope: Envelope, account: VerifiedAccountSnapshot, parentSignal: AbortSignal) {
   const data = envelope.payload
-  if (typeof data.jobId !== 'string' || !/^[a-f0-9-]{36}$/.test(data.jobId)) return
+  if (
+    typeof data.jobId !== 'string' ||
+    !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/.test(data.jobId)
+  )
+    return
   const key = `${account.principalId}:${data.jobId}`
   if (data.operation === 'cancel') {
     const entry = active.get(key)
-    if (entry?.source === envelope.fromDeviceId) entry.controller.abort()
+    if (entry) {
+      if (entry.source === envelope.fromDeviceId) entry.controller.abort()
+      return
+    }
+    try {
+      await verifyLanLease(account, data.lease as AgentLease, envelope.fromDeviceId, account.config.clientId)
+    } catch {
+      return /* An expired/invalid cancellation must not block the rest of the inbox. */
+    }
+    const previous = await invoke<Journal | null>('device_run_journal_read', {
+      payload: { ownerPrincipalId: account.principalId, runId: data.jobId },
+    })
+    if (previous) return
+    // A cancel can overtake a queued request. Persist the tombstone before acknowledging it.
+    const tombstone: Journal = {
+      runId: data.jobId,
+      revision: 0,
+      state: 'cancelled',
+      payloadHash: await sha256(new TextEncoder().encode(`cancel:${envelope.fromDeviceId}:${data.jobId}`)),
+      result: {
+        status: 'cancelled',
+        output: '',
+        cancelledBeforeStart: true,
+        lanReply: {
+          protocol: 'luczor.agent.v1',
+          source: account.config.clientId,
+          target: envelope.fromDeviceId,
+        },
+      },
+    }
+    const saved = await invoke<Journal>('device_run_journal_transition', {
+      payload: {
+        ownerPrincipalId: account.principalId,
+        expectedRevision: 0,
+        record: journalRecord(account, tombstone),
+      },
+    })
+    await flushResult(account, saved)
     return
   }
   if (data.operation !== 'run' || active.has(key)) return
@@ -67,20 +177,20 @@ export async function receiveLanAgent(envelope: Envelope, account: VerifiedAccou
   let launched = false
   const job = data as unknown as LanAgentTask
   const signal = AbortSignal.any([parentSignal, controller.signal])
+  const withRoute = (result: Record<string, unknown>) => ({
+    ...result,
+    lanReply: {
+      protocol: 'luczor.agent.v1',
+      source: account.config.clientId,
+      target: envelope.fromDeviceId,
+    },
+  })
   const save = async (state: string, result?: Record<string, unknown>) => {
     journal = await invoke<Journal>('device_run_journal_transition', {
       payload: {
         ownerPrincipalId: account.principalId,
         expectedRevision: journal?.revision ?? 0,
-        record: {
-          kind: 'device',
-          principalId: account.principalId,
-          deviceId: account.config.clientId,
-          runId: job.jobId,
-          payloadHash: journal!.payloadHash,
-          state,
-          ...(result ? { result } : {}),
-        },
+        record: { ...journalRecord(account, journal!), state, result: result ? withRoute(result) : journal!.result },
       },
     })
   }
@@ -102,15 +212,30 @@ export async function receiveLanAgent(envelope: Envelope, account: VerifiedAccou
       throw new Error('lan_agent_task_invalid')
     await verifyLanLease(account, job.lease, envelope.fromDeviceId, account.config.clientId)
     signal.throwIfAborted()
+    if (
+      !Number.isSafeInteger(job.issuedAtMs) ||
+      !Number.isSafeInteger(job.expiresAtMs) ||
+      job.issuedAtMs > Date.now() + 60_000 ||
+      job.expiresAtMs <= Date.now() ||
+      job.expiresAtMs <= job.issuedAtMs ||
+      job.expiresAtMs - job.issuedAtMs > 5 * 60_000 ||
+      job.expiresAtMs > Date.parse(job.lease.expires_at)
+    )
+      throw new Error('lan_agent_task_expired')
     const hash = await sha256(new TextEncoder().encode(JSON.stringify(data)))
     journal = await invoke<Journal | null>('device_run_journal_read', {
       payload: { ownerPrincipalId: account.principalId, runId: job.jobId },
     })
     if (journal) {
-      if (journal.payloadHash !== hash) throw new Error('lan_agent_id_conflict')
-      await sendResult(
-        journal.result ?? { status: 'incomplete', error: 'lan_agent_previous_outcome_unknown', output: '' }
-      )
+      const route = journal.result?.lanReply as { target?: string } | undefined
+      const cancelledEarly =
+        journal.state === 'cancelled' &&
+        journal.result?.cancelledBeforeStart === true &&
+        route?.target === envelope.fromDeviceId
+      if (journal.payloadHash !== hash && !cancelledEarly) throw new Error('lan_agent_id_conflict')
+      if (['queued', 'started'].includes(journal.state))
+        await save('failed', { status: 'incomplete', error: 'lan_agent_previous_outcome_unknown', output: '' })
+      await flushResult(account, journal)
       return
     }
     if (active.size > 3) throw new Error('lan_agent_busy')
@@ -119,17 +244,22 @@ export async function receiveLanAgent(envelope: Envelope, account: VerifiedAccou
       : `device:${account.config.clientId}`
     const ticket = executionGate.capture(signal, { projectId, runId: job.jobId })
     executionGate.assert(ticket)
-    journal = { revision: 0, state: 'queued', payloadHash: hash }
+    journal = {
+      runId: job.jobId,
+      revision: 0,
+      state: 'queued',
+      payloadHash: hash,
+      result: withRoute({ status: 'running', output: '' }),
+    }
     await save('queued')
     await save('started')
-    timeout = setTimeout(
-      () => controller.abort(),
-      Math.max(1, Math.min(5 * 60_000, Date.parse(job.lease.expires_at) - Date.now()))
-    )
+    timeout = setTimeout(() => controller.abort(), Math.max(1, Math.min(5 * 60_000, job.expiresAtMs - Date.now())))
     const beforeToolExecution = async () => {
       executionGate.assert(ticket)
+      if (Date.now() >= job.expiresAtMs) throw new Error('lan_agent_task_expired')
       await verifyLanLease(account, job.lease, envelope.fromDeviceId, account.config.clientId)
       executionGate.assert(ticket)
+      if (Date.now() >= job.expiresAtMs) throw new Error('lan_agent_task_expired')
     }
     launched = true
     void (async () => {
@@ -173,9 +303,12 @@ export async function receiveLanAgent(envelope: Envelope, account: VerifiedAccou
           toolSession: { queue: () => {}, update: () => {}, approve: async () => false },
         })
         await beforeToolExecution()
+        const truncated = response.finalText.length > 32000
+        const end = truncated ? Math.max(0, response.finalText.lastIndexOf('\n', 32000)) : response.finalText.length
         result = {
-          status: response.interrupted || response.continuation ? 'incomplete' : 'completed',
-          output: response.finalText.slice(0, 32000),
+          status: response.interrupted || response.continuation || truncated ? 'incomplete' : 'completed',
+          output: response.finalText.slice(0, end),
+          ...(truncated ? { incomplete: true, error: 'lan_agent_output_limit' } : {}),
           tokenUsage: response.tokenUsage,
           model: response.model,
         }
@@ -191,7 +324,7 @@ export async function receiveLanAgent(envelope: Envelope, account: VerifiedAccou
           result.status === 'completed' ? 'completed' : result.status === 'cancelled' ? 'cancelled' : 'failed',
           result
         )
-        await sendResult(result)
+        await flushResult(account, journal!)
       } finally {
         clearTimeout(timeout)
         active.delete(key)
@@ -212,7 +345,7 @@ export async function receiveLanAgent(envelope: Envelope, account: VerifiedAccou
 export async function runLanAgent(
   account: VerifiedAccountSnapshot,
   target: string,
-  task: Omit<LanAgentTask, 'protocol' | 'operation' | 'jobId' | 'lease'>,
+  task: Omit<LanAgentTask, 'protocol' | 'operation' | 'jobId' | 'lease' | 'issuedAtMs' | 'expiresAtMs'>,
   signal: AbortSignal
 ): Promise<Record<string, unknown>> {
   const lease = lanState.lease
@@ -221,7 +354,15 @@ export async function runLanAgent(
   await verifyLanLease(account, lease, account.config.clientId, target)
   signal.throwIfAborted()
   const jobId = crypto.randomUUID()
-  const packet: LanAgentTask = { ...task, protocol: 'luczor.agent.v1', operation: 'run', jobId, lease }
+  const packet: LanAgentTask = {
+    ...task,
+    protocol: 'luczor.agent.v1',
+    operation: 'run',
+    jobId,
+    lease,
+    issuedAtMs: Date.now(),
+    expiresAtMs: Math.min(Date.now() + 5 * 60_000, Date.parse(lease.expires_at)),
+  }
   deviceAgentJobs.set(jobId, target)
   return new Promise((resolve, reject) => {
     let settled = false
@@ -236,7 +377,7 @@ export async function runLanAgent(
       else resolve(result!)
     }
     const cancel = () => {
-      void sendLan(target, 'job', { protocol: 'luczor.agent.v1', operation: 'cancel', jobId }).catch(() => {})
+      void sendLan(target, 'job', { protocol: 'luczor.agent.v1', operation: 'cancel', jobId, lease }).catch(() => {})
     }
     const abort = () => {
       cancel()
@@ -262,7 +403,7 @@ export async function runLanAgent(
         cancel()
         finish(undefined, new Error('lan_agent_result_timeout'))
       },
-      Math.max(1, Math.min(5 * 60_000, Date.parse(lease.expires_at) - Date.now()))
+      Math.max(1, packet.expiresAtMs - Date.now())
     )
     window.addEventListener('luczor://lan-result', receive)
     signal.addEventListener('abort', abort, { once: true })

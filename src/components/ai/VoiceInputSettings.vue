@@ -2,6 +2,7 @@
 import { computed, ref, useId } from 'vue'
 import AiIcon from './AiIcon.vue'
 import AudioTriggerSettings from './AudioTriggerSettings.vue'
+import { useDismissible } from '@/composables/useDismissible'
 import {
   getVoiceConfig,
   saveVoiceConfig,
@@ -14,6 +15,9 @@ withDefaults(defineProps<{ busy?: boolean; active?: boolean; compact?: boolean }
 const emit = defineEmits<{ start: [mode: 'push_to_talk' | 'hands_free']; stop: [] }>()
 const id = useId()
 const open = ref(false)
+const root = ref<HTMLElement | null>(null)
+// Clicking anywhere else closes the settings; unsaved edits are dropped, saved ones persist.
+useDismissible(open, root, { escape: false })
 const loading = ref(false)
 const saving = ref(false)
 const audioEnabled = ref(false)
@@ -60,6 +64,7 @@ async function save(start = false) {
 </script>
 <template>
   <div
+    ref="root"
     class="voice-input-settings"
     :class="{ 'voice-input-settings--compact': compact }"
     @keydown.esc.stop="open = false"

@@ -94,6 +94,8 @@ pub struct JournalList {
     states: Vec<RunState>,
     #[serde(default)]
     transport_jobs_only: bool,
+    #[serde(default)]
+    pending_lan_replies_only: bool,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -351,22 +353,41 @@ pub async fn device_run_journal_list(
     payload: JournalList,
 ) -> Result<Vec<StoredRun>, String> {
     super::ensure_main_webview(&window)?;
+    tauri::async_runtime::spawn_blocking(move || list(&connection(&app)?, payload))
+        .await
+        .map_err(|_| "journal_worker_failed")?
+}
+fn list(connection: &Connection, payload: JournalList) -> Result<Vec<StoredRun>, String> {
     if !id(&payload.owner_principal_id)
         || payload.states.len() > 11
         || payload.limit.is_some_and(|limit| limit == 0 || limit > 200)
     {
         return Err("journal_query_invalid".into());
     }
-    tauri::async_runtime::spawn_blocking(move || {
-        let connection = connection(&app)?;
-        let mut statement = connection.prepare("SELECT record FROM run_journal WHERE owner=?1 AND (?2 IS NULL OR kind=?2)
-            AND (?3='[]' OR state IN (SELECT value FROM json_each(?3))) AND (?5=0 OR json_extract(record,'$.jobId') IS NOT NULL) ORDER BY updated_at DESC,run_id LIMIT ?4")
+    let mut statement = connection.prepare("SELECT record FROM run_journal WHERE owner=?1 AND (?2 IS NULL OR kind=?2)
+            AND (?3='[]' OR state IN (SELECT value FROM json_each(?3))) AND (?5=0 OR json_extract(record,'$.jobId') IS NOT NULL)
+            AND (?6=0 OR (json_extract(record,'$.result.lanReply.protocol')='luczor.agent.v1' AND COALESCE(json_extract(record,'$.checkpoint.lastEventSequence'),0)=0))
+            ORDER BY updated_at DESC,run_id LIMIT ?4")
             .map_err(|_| "journal_read_failed")?;
-        let states = serde_json::to_string(&payload.states).map_err(|_| "journal_query_invalid")?;
-        let rows = statement.query_map(params![payload.owner_principal_id, payload.kind.as_ref().map(kind_text), states, payload.limit.unwrap_or(100), payload.transport_jobs_only],
-            |row| row.get::<_, String>(0)).map_err(|_| "journal_read_failed")?;
-        rows.map(|value| serde_json::from_str(&value.map_err(|_| "journal_read_failed")?).map_err(|_| "journal_record_invalid".into())).collect()
-    }).await.map_err(|_| "journal_worker_failed")?
+    let states = serde_json::to_string(&payload.states).map_err(|_| "journal_query_invalid")?;
+    let rows = statement
+        .query_map(
+            params![
+                payload.owner_principal_id,
+                payload.kind.as_ref().map(kind_text),
+                states,
+                payload.limit.unwrap_or(100),
+                payload.transport_jobs_only,
+                payload.pending_lan_replies_only
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .map_err(|_| "journal_read_failed")?;
+    rows.map(|value| {
+        serde_json::from_str(&value.map_err(|_| "journal_read_failed")?)
+            .map_err(|_| "journal_record_invalid".into())
+    })
+    .collect()
 }
 
 #[cfg(test)]
@@ -468,6 +489,47 @@ mod tests {
             put(&mut connection, retry, 2).unwrap_err(),
             "journal_terminal_state"
         );
+    }
+    #[test]
+    fn pending_lan_replies_exclude_delivered_records_and_other_owners_before_limit() {
+        let mut connection = open(Path::new(":memory:")).unwrap();
+        for (owner, run, delivered) in [
+            ("alice", "pending", false),
+            ("alice", "delivered", true),
+            ("bob", "foreign", false),
+        ] {
+            let mut item = record(owner);
+            item.kind = RunKind::Device;
+            item.run_id = run.into();
+            item.state = RunState::Completed;
+            item.result = Some(
+                serde_json::json!({"output":"saved answer", "lanReply":{"protocol":"luczor.agent.v1"}}),
+            );
+            if delivered {
+                item.checkpoint = Some(PublicCheckpoint {
+                    message_id: None,
+                    summary: None,
+                    last_event_sequence: Some(1),
+                    attempt_id: None,
+                    master_epoch: None,
+                });
+            }
+            put(&mut connection, item, 0).unwrap();
+        }
+        let rows = list(
+            &connection,
+            JournalList {
+                owner_principal_id: "alice".into(),
+                kind: Some(RunKind::Device),
+                limit: Some(1),
+                states: vec![RunState::Completed],
+                transport_jobs_only: false,
+                pending_lan_replies_only: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].record.run_id, "pending");
     }
     #[test]
     fn private_chat_fields_and_cross_owner_writes_are_rejected() {

@@ -7,6 +7,7 @@ const mock = vi.hoisted(() => ({
   listen: vi.fn(),
   metadata: vi.fn(),
   lan: vi.fn(),
+  forgetLan: vi.fn(),
   request: vi.fn(),
   api: {
     heartbeat: vi.fn(),
@@ -34,6 +35,7 @@ vi.mock('@/services/coordination/lan', () => ({
   refreshLan: mock.lan,
   updateLanAuthority: async () => {},
   stopLan: () => {},
+  forgetLanTrust: mock.forgetLan,
   sendLan: async () => false,
   lanState: {},
 }))
@@ -104,6 +106,15 @@ afterEach(async () => {
 })
 
 describe('coordinated effect recovery', () => {
+  it('stops and discards cached LAN authority when account verification is rejected before heartbeat', async () => {
+    mock.account.mockRejectedValueOnce(new Error('Account rejected'))
+    const execute = vi.fn()
+    await startCoordinationChannel(execute)
+    expect(mock.forgetLan).toHaveBeenCalledOnce()
+    expect(mock.lan).not.toHaveBeenCalled()
+    expect(mock.api.heartbeat).not.toHaveBeenCalled()
+    expect(execute).not.toHaveBeenCalled()
+  })
   it('starts cached LAN discovery even when the server heartbeat fails', async () => {
     mock.api.heartbeat.mockRejectedValueOnce(new Error('offline'))
     await startCoordinationChannel(vi.fn())

@@ -577,9 +577,12 @@ struct DeadlineSocket {
 }
 impl DeadlineSocket {
     fn new(stream: TcpStream) -> Self {
+        Self::bounded(stream, Duration::from_secs(25))
+    }
+    fn bounded(stream: TcpStream, timeout: Duration) -> Self {
         Self {
             stream,
-            end: Instant::now() + Duration::from_secs(25),
+            end: Instant::now() + timeout,
         }
     }
     fn remaining(&self) -> std::io::Result<Duration> {
@@ -726,12 +729,42 @@ fn connect_send(state: &PeerState, envelope: &Envelope) -> Result<(), String> {
     )
     .map_err(|_| "lan_tls_unavailable")?;
     // Try every suitable address, rather than choosing an arbitrary VPN/loopback address.
+    let probing = matches!(envelope.kind, EnvelopeKind::Probe);
+    let deadline = Instant::now() + Duration::from_secs(if probing { 6 } else { 25 });
     let mut last = Err("lan_peer_offline".to_string());
     for address in addresses.iter().take(8) {
-        match TcpStream::connect_timeout(address, Duration::from_millis(600)) {
+        if state.stop.load(Ordering::Acquire) {
+            return Err("lan_stopped".into());
+        }
+        let Some(remaining) = deadline
+            .checked_duration_since(Instant::now())
+            .filter(|value| !value.is_zero())
+        else {
+            break;
+        };
+        match TcpStream::connect_timeout(address, remaining.min(Duration::from_millis(600))) {
             Ok(stream) => {
-                last = exchange(state, envelope, &identity.client_id, &config, stream);
+                let Some(remaining) = deadline
+                    .checked_duration_since(Instant::now())
+                    .filter(|value| !value.is_zero())
+                else {
+                    break;
+                };
+                last = exchange(
+                    state,
+                    envelope,
+                    &identity.client_id,
+                    &config,
+                    stream,
+                    remaining.min(Duration::from_secs(if probing { 2 } else { 25 })),
+                );
                 if last.is_ok() {
+                    if let Ok(mut peers) = state.addresses.lock() {
+                        if let Some(peer) = peers.get_mut(&identity.client_id) {
+                            peer.addresses.retain(|value| value != address);
+                            peer.addresses.insert(0, *address);
+                        }
+                    }
                     return last;
                 }
             }
@@ -751,6 +784,7 @@ fn exchange(
     device: &str,
     config: &rustls::ClientConfig,
     stream: TcpStream,
+    timeout: Duration,
 ) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
@@ -763,7 +797,7 @@ fn exchange(
         ServerName::try_from("luczor-peer.local").map_err(|_| "lan_tls_unavailable")?,
     )
     .map_err(|_| "lan_tls_unavailable")?;
-    let mut tls = rustls::StreamOwned::new(connection, DeadlineSocket::new(stream));
+    let mut tls = rustls::StreamOwned::new(connection, DeadlineSocket::bounded(stream, timeout));
     write_frame(
         &mut tls,
         &serde_json::to_vec(envelope).map_err(|_| "lan_message_invalid")?,
@@ -861,10 +895,17 @@ pub async fn lan_peer_start(
         std::thread::spawn(move || {
             while !probe_state.stop.load(Ordering::Acquire) {
                 let peers = probe_state.addresses.lock().map(|peers| peers.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
-                for target in peers {
+                for batch in peers.chunks(4) {
                     if probe_state.stop.load(Ordering::Acquire) { break; }
-                    let envelope = Envelope { id: uuid::Uuid::new_v4().to_string(), from_device_id: probe_state.device.clone(), to_device_id: target, kind: EnvelopeKind::Probe, payload: serde_json::json!({}) };
-                    let _ = connect_send(&probe_state, &envelope);
+                    std::thread::scope(|scope| {
+                        for target in batch {
+                            let probe_state = &probe_state;
+                            scope.spawn(move || {
+                                let envelope = Envelope { id: uuid::Uuid::new_v4().to_string(), from_device_id: probe_state.device.clone(), to_device_id: target.clone(), kind: EnvelopeKind::Probe, payload: serde_json::json!({}) };
+                                let _ = connect_send(probe_state, &envelope);
+                            });
+                        }
+                    });
                 }
                 for _ in 0..50 { if probe_state.stop.load(Ordering::Acquire) { break; } std::thread::sleep(Duration::from_millis(100)); }
             }
@@ -912,9 +953,14 @@ pub fn lan_peer_status(
         .map_err(|_| "lan_discovery_unavailable")?;
     let workers: BTreeMap<String, Presence> = discovered
         .iter()
-        .filter(|(_, peer)| {
-            peer.confirmed
-                .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
+        .filter(|(id, peer)| {
+            state
+                .peers
+                .iter()
+                .any(|identity| &identity.client_id == *id && verify_identity(identity).is_ok())
+                && peer
+                    .confirmed
+                    .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
         })
         .map(|(id, peer)| (id.clone(), peer.presence.clone()))
         .collect();

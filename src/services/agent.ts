@@ -949,7 +949,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     !ephemeralDataUsed &&
     !!opts.externalBaseMessages?.length
   const deviceAssistanceAllowed = () =>
-    !opts.workspaceScope && !ephemeralDataUsed && !!opts.externalBaseMessages?.length
+    opts.contextEgress !== 'local_only' &&
+    opts.routingSettings?.preference !== 'local_only' &&
+    opts.agentTeamPreset !== 'local' &&
+    !opts.workspaceScope &&
+    !ephemeralDataUsed &&
+    !!opts.externalBaseMessages?.length
   const assistance =
     opts.agentMode && !opts.forceAgentTeam && !resolvedRoute.externalOneShot && opts.toolAccess !== 'none'
       ? createAdaptiveAssistance({
@@ -1275,6 +1280,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       nextToolChoice = 'none'
       if (assistance?.hasUncollected()) {
         const outcomes = await assistance.collect()
+        if (outcomes.some(outcome => ['local', 'device'].includes(outcome.target))) ephemeralDataUsed = true
         messages.push({
           role: 'user',
           content:
@@ -1525,6 +1531,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     // A final answer must incorporate all started jobs, even if the model forgot to poll.
     if (!res.toolCalls.length && assistance?.hasUncollected()) {
       const outcomes = await assistance.collect()
+      if (outcomes.some(outcome => ['local', 'device'].includes(outcome.target))) ephemeralDataUsed = true
       messages.push({
         role: 'user',
         content:

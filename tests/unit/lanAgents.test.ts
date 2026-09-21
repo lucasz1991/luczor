@@ -30,7 +30,12 @@ vi.mock('@/services/tools/registry', () => ({
     { name: 'device_dispatch', mutating: true },
   ],
 }))
-import { receiveLanAgent, runLanAgent, hasLanAgentRuns } from '@/services/coordination/lanAgents'
+import {
+  receiveLanAgent,
+  runLanAgent,
+  hasLanAgentRuns,
+  recoverLanAgentResults,
+} from '@/services/coordination/lanAgents'
 const account = { principalId: 'account', accountId: 1, config: { clientId: 'worker' } } as VerifiedAccountSnapshot
 const jobId = '43414f8d-1fa9-44fc-a5a5-32ba5ba25df0'
 const lease = (): AgentLease => ({
@@ -56,6 +61,8 @@ function envelope(): Envelope {
       operation: 'run',
       jobId,
       lease: lease(),
+      issuedAtMs: Date.now(),
+      expiresAtMs: Date.now() + 30000,
       task: 'Analyze supplied facts',
       role: 'review',
       context: 'facts',
@@ -72,6 +79,7 @@ beforeEach(() => {
   mock.send.mockResolvedValue(true)
   mock.invoke.mockImplementation(async (command: string, { payload }: { payload: Record<string, unknown> }) => {
     if (command === 'device_run_journal_read') return mock.journal
+    if (command === 'device_run_journal_list') return mock.journal ? [mock.journal] : []
     if (command === 'device_run_journal_transition') {
       mock.journal = { ...(payload.record as object), revision: Number(payload.expectedRevision) + 1 }
       return mock.journal
@@ -96,7 +104,8 @@ describe('durable LAN analysis jobs', () => {
     expect(mock.send).toHaveBeenCalledWith(
       'master',
       'result',
-      expect.objectContaining({ jobId, result: expect.objectContaining({ output: 'Evidence result' }) })
+      expect.objectContaining({ jobId, result: expect.objectContaining({ output: 'Evidence result' }) }),
+      jobId
     )
   })
   it('does not repeat a completed job when the exact request is delivered again', async () => {
@@ -115,6 +124,68 @@ describe('durable LAN analysis jobs', () => {
     mock.invoke.mockRejectedValueOnce(new Error('expired lease'))
     await receiveLanAgent(envelope(), account, new AbortController().signal)
     expect(mock.run).not.toHaveBeenCalled()
+  })
+  it('does not execute when cancellation arrives before the queued request', async () => {
+    const request = envelope()
+    await receiveLanAgent(
+      {
+        ...request,
+        payload: { protocol: 'luczor.agent.v1', operation: 'cancel', jobId, lease: request.payload.lease },
+      },
+      account,
+      new AbortController().signal
+    )
+    await receiveLanAgent(request, account, new AbortController().signal)
+    expect(mock.run).not.toHaveBeenCalled()
+    expect(mock.journal).toMatchObject({ state: 'cancelled', result: { cancelledBeforeStart: true } })
+  })
+  it('does not start a job delivered after its own deadline, even with an unexpired device lease', async () => {
+    const request = envelope()
+    request.payload.issuedAtMs = Date.now() - 60000
+    request.payload.expiresAtMs = Date.now() - 1
+    await receiveLanAgent(request, account, new AbortController().signal)
+    expect(mock.run).not.toHaveBeenCalled()
+    expect(mock.send).toHaveBeenCalledWith(
+      'master',
+      'result',
+      expect.objectContaining({ result: expect.objectContaining({ error: 'lan_agent_task_expired' }) })
+    )
+  })
+  it('recovers a saved answer after send failure without repeating the model or tools', async () => {
+    mock.send.mockRejectedValue(new Error('LAN restarting'))
+    await receiveLanAgent(envelope(), account, new AbortController().signal)
+    await vi.waitFor(() => expect(hasLanAgentRuns()).toBe(false))
+    expect(mock.journal).toMatchObject({ state: 'completed', result: { output: 'Evidence result' } })
+    expect(mock.journal!.checkpoint).toBeUndefined()
+    mock.send.mockResolvedValue(false) // Persisted outbox, network still offline.
+    await recoverLanAgentResults(account, new AbortController().signal)
+    expect(mock.journal).toMatchObject({ checkpoint: { lastEventSequence: 1 } })
+    expect(mock.run).toHaveBeenCalledOnce()
+    expect(mock.send.mock.calls.at(-1)?.[3]).toBe(jobId)
+  })
+  it('reports unknown outcome after restart without replaying a previously started job', async () => {
+    mock.journal = {
+      runId: jobId,
+      revision: 2,
+      state: 'started',
+      payloadHash: 'hash',
+      result: { status: 'running', lanReply: { protocol: 'luczor.agent.v1', source: 'worker', target: 'master' } },
+    }
+    await recoverLanAgentResults(account, new AbortController().signal)
+    expect(mock.run).not.toHaveBeenCalled()
+    expect(mock.journal).toMatchObject({
+      state: 'failed',
+      result: { status: 'incomplete', error: 'lan_agent_previous_outcome_unknown' },
+    })
+  })
+  it('marks oversized output as incomplete instead of certifying a truncated answer', async () => {
+    mock.run.mockResolvedValue({ finalText: 'x'.repeat(32001) })
+    await receiveLanAgent(envelope(), account, new AbortController().signal)
+    await vi.waitFor(() => expect(hasLanAgentRuns()).toBe(false))
+    expect(mock.journal).toMatchObject({
+      state: 'failed',
+      result: { status: 'incomplete', error: 'lan_agent_output_limit' },
+    })
   })
   it('cancels only the owned worker task and preserves late-result rejection', async () => {
     let done!: (value: unknown) => void

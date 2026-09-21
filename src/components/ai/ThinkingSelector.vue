@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import AiIcon from './AiIcon.vue'
+import { useDismissible } from '@/composables/useDismissible'
 import { isThinkingTier, THINKING_DEFAULTS, THINKING_TIERS, type ThinkingTier } from '@/services/inference/thinking'
 
 // Step-tier control from the design board: five bars show the depth, the label sits beside them,
@@ -47,14 +48,8 @@ function onKey(event: KeyboardEvent) {
     open.value = false
   }
 }
-function onDocumentPointer(event: PointerEvent) {
-  if (!root.value?.contains(event.target as Node)) open.value = false
-}
-watch(open, value => {
-  if (value) document.addEventListener('pointerdown', onDocumentPointer, true)
-  else document.removeEventListener('pointerdown', onDocumentPointer, true)
-})
-onBeforeUnmount(() => document.removeEventListener('pointerdown', onDocumentPointer, true))
+// Shared dismiss behaviour: outside pointer, focus loss and Escape close the listbox.
+useDismissible(open, root)
 </script>
 <template>
   <div ref="root" class="ai-thinking-select" :class="{ 'is-open': open }" :title="title">

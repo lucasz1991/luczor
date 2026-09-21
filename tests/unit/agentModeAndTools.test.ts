@@ -17,12 +17,19 @@ const mocks = vi.hoisted(() => ({
   resolveInferenceRouteForTurn: vi.fn(),
   hashInferenceEgressRequest: vi.fn(),
   getApiConfigSnapshot: vi.fn(),
+  resolveDeviceAssistance: vi.fn(),
+  executeDeviceAssistance: vi.fn(),
   hud: { killSwitch: false },
 }))
 
 vi.mock('@/services/agents/chatOrchestration', () => ({ runChatAgentTeam: mocks.runChatAgentTeam }))
 vi.mock('@/services/agents/externalSpecialists', () => ({
   prepareExternalSpecialists: mocks.prepareExternalSpecialists,
+}))
+vi.mock('@/services/agents/deviceAssistance', () => ({
+  resolveAssistanceTarget: mocks.resolveDeviceAssistance,
+  executeDeviceAssistance: mocks.executeDeviceAssistance,
+  assistanceWorkerSummary: () => ({ devices: [] }),
 }))
 vi.mock('@/services/openrouter.service', () => ({
   OpenRouterService: { streamChatWithTools: mocks.streamChatWithTools },
@@ -1159,9 +1166,92 @@ describe('agent mode and tool reliability', () => {
     expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
     const sent = mocks.streamChatWithTools.mock.calls[0]![0] as InferenceRequest
     expect(sent.tools).toEqual(
-      expect.arrayContaining([expect.objectContaining({ function: expect.objectContaining({ name: 'agent_assist' }) })])
+      expect.arrayContaining(
+        ['agent_assist', 'agent_assist_status', 'agent_assist_stop'].map(name =>
+          expect.objectContaining({ function: expect.objectContaining({ name }) })
+        )
+      )
     )
     expect(response.finalText).toBe('Hallo!')
+  })
+
+  it.each([2, 4])(
+    'keeps working during own-device delegation and protects collected output with %i rounds',
+    async maxRounds => {
+      let finish!: (value: unknown) => void
+      mocks.resolveDeviceAssistance.mockImplementation(task => ({ ...task, target: 'device', device_id: 'laptop' }))
+      mocks.executeDeviceAssistance.mockImplementation(
+        () =>
+          new Promise(resolve => {
+            finish = resolve
+          })
+      )
+      const call = {
+        id: 'device-assist',
+        name: 'agent_assist',
+        arguments: { task: 'Check the supplied design', role: 'review', target: 'auto' },
+      }
+      mocks.streamChatWithTools
+        .mockResolvedValueOnce({
+          content: '',
+          toolCalls: [call],
+          rawToolCalls: [
+            { id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } },
+          ],
+          finishReason: 'tool_calls',
+        })
+        .mockImplementationOnce(async () => {
+          expect(mocks.executeDeviceAssistance).toHaveBeenCalledOnce()
+          finish({ status: 'completed', output: 'PRIVATE DEVICE EVIDENCE' })
+          return { content: 'Local independent work done', toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
+        })
+        .mockImplementationOnce(async (request: InferenceRequest) => {
+          expect(JSON.stringify(request.messages)).toContain('PRIVATE DEVICE EVIDENCE')
+          return { content: 'Combined device result', toolCalls: [], rawToolCalls: [], finishReason: 'stop' }
+        })
+      const response = await runAgent({
+        projectId: 'project-2',
+        baseMessages: [{ role: 'user', content: 'Analyze design and verify independently' }],
+        externalBaseMessages: [{ role: 'user', content: 'Approved design context' }],
+        mode: 'act',
+        agentMode: true,
+        maxRounds,
+        inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+      })
+      expect(response.finalText).toBe('Combined device result')
+      expect(response.ephemeralDataUsed).toBe(true)
+      expect(mocks.prepareExternalSpecialists).not.toHaveBeenCalled()
+    }
+  )
+
+  it('keeps explicitly local-only context on this device even if a peer was selected', async () => {
+    mocks.resolveDeviceAssistance.mockImplementation(task => ({ ...task, target: 'device', device_id: 'laptop' }))
+    const call = {
+      id: 'private-device-assist',
+      name: 'agent_assist',
+      arguments: { task: 'Check design', role: 'review', target: 'device', device_id: 'laptop' },
+    }
+    mocks.streamChatWithTools
+      .mockResolvedValue({ content: 'Done locally', toolCalls: [], rawToolCalls: [], finishReason: 'stop' })
+      .mockResolvedValueOnce({
+        content: '',
+        toolCalls: [call],
+        rawToolCalls: [
+          { id: call.id, type: 'function', function: { name: call.name, arguments: JSON.stringify(call.arguments) } },
+        ],
+        finishReason: 'tool_calls',
+      })
+    await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Check design' }],
+      externalBaseMessages: [{ role: 'user', content: 'Must remain here' }],
+      contextEgress: 'local_only',
+      mode: 'act',
+      agentMode: true,
+      maxRounds: 2,
+      inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(mocks.executeDeviceAssistance).not.toHaveBeenCalled()
   })
 
   it('continues local inference while an external subtask runs and reserves a tools-free synthesis round', async () => {
@@ -2159,6 +2249,7 @@ describe('agent mode and tool reliability', () => {
 
   beforeEach(() => {
     vi.resetAllMocks()
+    mocks.resolveDeviceAssistance.mockImplementation(task => task)
     mocks.resolveInferenceRouteForTurn.mockResolvedValue({
       gateway: {
         id: 'test-laravel',

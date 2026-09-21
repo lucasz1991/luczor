@@ -7,7 +7,7 @@ import { projectLocalIdForServer } from '@/services/cloudProjectAccess'
 import { coordinationApi, type CoordinatedJob, type CoordinationState } from './api'
 import { hasActiveChatRuns } from '@/services/chatRunManager'
 import { syncConversations } from './conversations'
-import { refreshLan, sendLan, stopLan, lanState, updateLanAuthority } from './lan'
+import { refreshLan, sendLan, stopLan, forgetLanTrust, lanState, updateLanAuthority } from './lan'
 import { createProgressReporter } from './progress'
 import { coordinationMetadata } from './preferences'
 import { hasLanAgentRuns } from './lanAgents'
@@ -357,7 +357,17 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
     if (!current() || checking || Date.now() < retryAt) return
     checking = true
     try {
-      const verified = await getVerifiedAccountSnapshot()
+      let verified: VerifiedAccountSnapshot | null
+      try {
+        // Offline transport failures resolve through the authenticated account cache. A rejection here is not offline permission.
+        verified = await getVerifiedAccountSnapshot()
+        if (!verified) throw new Error('Für den Geräteverbund bitte am Server anmelden.')
+      } catch (error) {
+        stop()
+        await forgetLanTrust(identity ?? undefined)
+        deviceCluster.error = error instanceof Error ? error.message : 'Die Account-Zuordnung wurde abgelehnt.'
+        return
+      }
       assert()
       if (!verified) throw new Error('Für den Geräteverbund bitte am Server anmelden.')
       if (

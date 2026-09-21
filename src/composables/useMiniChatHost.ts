@@ -31,6 +31,10 @@ type Dependencies = MiniWorkspaceBinding & {
   agentMode: () => boolean
   voice: () => MiniSnapshot['voice']
   appearance: () => NonNullable<MiniSnapshot['appearance']>
+  /** System metrics for the nudge's Systemstatus pane; null while nobody watches. */
+  system?: () => MiniSnapshot['system']
+  /** The nudge started/stopped watching the Systemstatus pane. */
+  watchSystem?: (active: boolean) => void
 }
 export function useMiniChatHost(deps: Dependencies) {
   const controller = createMiniChatController({
@@ -135,6 +139,7 @@ export function useMiniChatHost(deps: Dependencies) {
     agentMode: deps.agentMode(),
     voice: deps.voice(),
     appearance: deps.appearance(),
+    system: deps.system?.() ?? null,
   }))
   function dispatch(action: MiniAction) {
     if (action.type === 'main_decide') {
@@ -144,6 +149,11 @@ export function useMiniChatHost(deps: Dependencies) {
     if (action.type === 'kill_switch') {
       deps.killSwitch(action.enabled)
       if (action.enabled) controller.stop()
+      return
+    }
+    if (action.type === 'system_watch') {
+      // The bridge session is what the nudge sees; stale windows must not start sampling.
+      if (action.sessionId === bridge.snapshot.value.sessionId) deps.watchSystem?.(action.active)
       return
     }
     return bridge.dispatch(action)

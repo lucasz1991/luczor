@@ -24,6 +24,7 @@ vi.mock('@tauri-apps/plugin-store', () => ({
         get: async (key: string) => data.get(key),
         set: async (key: string, value: unknown) => data.set(key, value),
         delete: async (key: string) => data.delete(key),
+        clear: async () => data.clear(),
         save: async () => {},
         entries: async () => [...data.entries()],
       }
@@ -40,7 +41,11 @@ vi.mock('@/services/chatRunManager', () => ({ hasActiveChatRuns: () => false }))
 vi.mock('@/services/coordination/preferences', () => ({
   coordinationMetadata: async () => ({ platform: 'windows', active_model_id: 'model', model_ready: true }),
 }))
-vi.mock('@/services/coordination/lanAgents', () => ({ hasLanAgentRuns: () => false, receiveLanAgent: vi.fn() }))
+vi.mock('@/services/coordination/lanAgents', () => ({
+  hasLanAgentRuns: () => false,
+  receiveLanAgent: vi.fn(),
+  recoverLanAgentResults: vi.fn(),
+}))
 import type { VerifiedAccountSnapshot } from '@/services/accountPrincipal'
 const account = {
   principalId: 'account',
@@ -126,5 +131,14 @@ describe('LAN trust lifecycle', () => {
     expect(lan.lanState.active).toBe(false)
     expect(mock.listeners.size).toBe(0)
     expect(mock.invoke).toHaveBeenCalledWith('lan_peer_stop')
+  })
+  it('removes stored authority after rejection before discovery endpoints can be reached', async () => {
+    cache()
+    const lan = await import('@/services/coordination/lan')
+    stop = lan.stopLan
+    await lan.refreshLan(account, new AbortController().signal)
+    await lan.forgetLanTrust(account)
+    expect(lan.lanState.active).toBe(false)
+    expect(mock.disks.get('luczor.lan-trust.json')?.has('account:master')).toBe(false)
   })
 })

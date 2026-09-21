@@ -12,6 +12,8 @@ import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import MemoryExplorerPage from '@/features/memory/MemoryExplorerPage.vue'
 import MemoryGraphBackdrop from '@/features/memory/MemoryGraphBackdrop.vue'
 import { hasLiveWork, liveWork, setModelPhase } from '@/services/memory/modelActivity'
+import { createSystemStatusMonitor } from '@/services/systemStatusMonitor'
+import { lastLocalModelStatus, readLocalModelStatus } from '@/services/localModelStatus'
 import { useMemoryObservatoryHost } from '@/features/memory/observatory'
 import ToastHost from './components/ai/ToastHost.vue'
 import ContextInspector from './components/ContextInspector.vue'
@@ -2616,6 +2618,14 @@ watch(
   () => scheduleSave(state),
   { deep: true }
 )
+// Metrics for the nudge's Systemstatus pane: sampled every 2 s only while the pane is visible.
+const miniSystemMonitor = createSystemStatusMonitor({ intervalMs: 2_000, maxHistory: 24 })
+const miniSystemWatchers = ref(0)
+let miniSystemTimeout: ReturnType<typeof setTimeout> | undefined
+onBeforeUnmount(() => {
+  if (miniSystemTimeout) clearTimeout(miniSystemTimeout)
+  miniSystemMonitor.dispose()
+})
 const miniChat = useMiniChatHost({
   thinkingTier: () => thinkingTier.value,
   thinkingBudget: () => visibleThinkingBudget.value,
@@ -2689,6 +2699,34 @@ const miniChat = useMiniChatHost({
   togglePushToTalk,
   toggleWakeWord: toggleListening,
   appearance: () => ({ accent: appearanceAccentColor(), assistantName: appearance.assistantName }),
+  system: () =>
+    miniSystemWatchers.value > 0 && miniSystemMonitor.state.availability !== 'idle'
+      ? {
+          sample: miniSystemMonitor.state.sample,
+          history: miniSystemMonitor.state.history,
+          availability: miniSystemMonitor.state.availability,
+          lastUpdatedAt: miniSystemMonitor.state.lastUpdatedAt,
+          model: {
+            name: lastLocalModelStatus.value?.modelName ?? 'Lokales Modell',
+            label: lastLocalModelStatus.value?.label ?? 'Status noch nicht gelesen',
+            state: lastLocalModelStatus.value?.state ?? 'unavailable',
+            running: miniSystemMonitor.state.sample?.model_running ?? null,
+          },
+        }
+      : null,
+  watchSystem: active => {
+    // The nudge samples only while its Systemstatus pane is open; a stale watcher expires on its own.
+    miniSystemWatchers.value = active ? 1 : 0
+    if (miniSystemTimeout) clearTimeout(miniSystemTimeout)
+    if (active) {
+      miniSystemMonitor.setActive(true)
+      void readLocalModelStatus().catch(() => undefined)
+      miniSystemTimeout = setTimeout(() => {
+        miniSystemWatchers.value = 0
+        miniSystemMonitor.setActive(false)
+      }, 600_000)
+    } else miniSystemMonitor.setActive(false)
+  },
   context: () => ({
     project: activeProject.value ? { id: activeProject.value.id, name: activeProject.value.name } : null,
     mode: mode.value,

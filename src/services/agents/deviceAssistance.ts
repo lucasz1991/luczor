@@ -72,15 +72,15 @@ export function deviceWorkers() {
               : 'unreachable',
       transport: 'server',
     }
-    if (prior >= 0) workers[prior] = worker
+    if (prior >= 0) workers.splice(prior, 1, worker)
     else workers.push(worker)
   }
   return workers.sort(
-    (a, b) =>
-      Number(b.ready) - Number(a.ready) ||
-      Number(b.transport === 'lan') - Number(a.transport === 'lan') ||
-      b.tier - a.tier ||
-      a.id.localeCompare(b.id)
+    (left, right) =>
+      Number(right.ready) - Number(left.ready) ||
+      Number(right.transport === 'lan') - Number(left.transport === 'lan') ||
+      right.tier - left.tier ||
+      left.id.localeCompare(right.id)
   )
 }
 
@@ -119,12 +119,12 @@ export async function executeDeviceAssistance(
     throw new Error('Gerätedelegation benötigt die bestätigte eigene Koordinator-Freigabe.')
   // Never export arbitrary runtime/system/tool messages. Choose complete bounded user/assistant entries.
   const selected = task.context_indices ?? messages.map((_, index) => index)
-  if (selected.some(index => !Number.isInteger(index) || index < 0 || !messages[index]))
+  if (selected.some(index => !Number.isInteger(index) || index < 0 || !messages.at(index)))
     throw new Error('Invalid device context selection.')
   const context: string[] = []
-  let remaining = 24000
+  let remaining = 23000 // Leave room for the subtask and wrapper in the server's 30,000 character packet.
   for (const index of [...selected].reverse()) {
-    const message = messages[index]!
+    const message = messages.at(index)!
     if (!['user', 'assistant'].includes(message.role) || ('tool_calls' in message && message.tool_calls?.length))
       continue
     const text = `[${index} ${message.role}]\n${message.content}`
@@ -134,26 +134,26 @@ export async function executeDeviceAssistance(
   }
   const worker = deviceWorkers().find(worker => worker.id === task.device_id && worker.ready)
   if (!worker) throw new Error('Arbeitsgerät inzwischen belegt oder nicht bereit; kein Auftrag gestartet.')
-  const externalProjectId = task.tools.length ? projectExternalIdForServer(projectId, account.principalId) : undefined
-  if (worker.transport === 'lan')
-    return runLanAgent(
-      account,
-      task.device_id,
-      {
-        task: task.task,
-        role: task.role,
-        context: context.join('\n\n'),
-        tools: task.tools,
-        projectId: externalProjectId,
-      },
-      signal
-    )
-  const api = coordinationApi(account.config, signal)
-  const cluster = (await api.state()).data
   const operationId = crypto.randomUUID()
-  // Stable operation ID; uncertain admission never triggers a second transport or provider.
   deviceAgentJobs.set(operationId, task.device_id)
   try {
+    const externalProjectId = task.tools.length ? projectExternalIdForServer(projectId, account.principalId) : undefined
+    if (worker.transport === 'lan')
+      return await runLanAgent(
+        account,
+        task.device_id,
+        {
+          task: task.task,
+          role: task.role,
+          context: context.join('\n\n'),
+          tools: task.tools,
+          projectId: externalProjectId,
+        },
+        signal
+      )
+    const api = coordinationApi(account.config, signal)
+    const cluster = (await api.state()).data
+    // Stable operation ID; uncertain admission never triggers a second transport or provider.
     const { data: job } = await api.dispatch({
       operation_id: operationId,
       target_device_id: task.device_id,
@@ -175,9 +175,9 @@ export async function executeDeviceAssistance(
         if (['completed', 'failed', 'cancelled', 'outcome_unknown'].includes(current.status)) {
           const result = current.result ?? {}
           return {
+            ...result,
             status: current.status,
             output: result.answer ?? '',
-            ...result,
             ...(result.continuation_required ? { incomplete: true } : {}),
           }
         }

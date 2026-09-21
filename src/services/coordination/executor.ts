@@ -72,7 +72,8 @@ export const executeCoordinatedJob: CoordinatedExecutor = async (job, account, t
     })
     assert()
     return {
-      ok: !result.continuation,
+      ok: !result.interrupted && !result.continuation,
+      interrupted: !!result.interrupted,
       answer: result.finalText,
       model: result.model,
       tokenUsage: result.tokenUsage,

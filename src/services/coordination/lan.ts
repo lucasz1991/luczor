@@ -239,6 +239,7 @@ async function activateLan(account: VerifiedAccountSnapshot, signal: AbortSignal
         lanState.reachablePeers = (status.reachablePeers ?? []).filter(id => id !== account.config.clientId)
         lanState.workers = status.workers ?? {}
         lanState.error = status.discoveryError ?? ''
+        await (await import('./lanAgents')).recoverLanAgentResults(account, ticket.signal)
         const received = await invoke<Envelope[]>('lan_peer_drain', { payload: { principalId: account.principalId } })
         for (const envelope of received) {
           if (signal.aborted || owner !== account) return
@@ -262,7 +263,7 @@ async function activateLan(account: VerifiedAccountSnapshot, signal: AbortSignal
             ].slice(-100)
             window.dispatchEvent(new CustomEvent('luczor://lan-result', { detail: envelope }))
           }
-          // Job envelopes are notification only. Server claims + native signature checks remain mandatory before effects.
+          // Analysis jobs require a native-verified read lease and journal; legacy jobs only notify server claims.
           await invoke('lan_peer_ack', { payload: { principalId: account.principalId, ids: [envelope.id] } })
         }
         await invoke('lan_peer_flush', { payload: { principalId: account.principalId } })
@@ -292,13 +293,23 @@ async function activateLan(account: VerifiedAccountSnapshot, signal: AbortSignal
 export function stopLan() {
   stopCurrent?.()
 }
+export async function forgetLanTrust(account?: VerifiedAccountSnapshot) {
+  stopLan()
+  const disk = await (trustDisk ??= Store.load('luczor.lan-trust.json'))
+  if (account) {
+    await disk.delete(trustKey(account))
+    await disk.delete(`${trustKey(account)}:lease`)
+  } else await disk.clear()
+  await disk.save()
+}
 export async function sendLan(
   target: string,
   kind: Envelope['kind'],
   payload: Record<string, unknown>,
-  messageId = crypto.randomUUID()
+  messageId: string = crypto.randomUUID()
 ): Promise<boolean> {
-  if (!owner || !lanState.active || target === owner.config.clientId || !lanState.peers.includes(target)) return false
+  if (!owner || !lanState.active || target === owner.config.clientId) throw new Error('lan_not_started')
+  // Native checks the paired identity and persists first, even when discovery temporarily loses the address.
   const result = await invoke<{ delivered: boolean }>('lan_peer_send', {
     payload: {
       principalId: owner.principalId,
@@ -315,13 +326,25 @@ export async function updateLanAuthority(
   signal: AbortSignal
 ) {
   if (!Number.isSafeInteger(epoch) || epoch < 0) return
+  signal.throwIfAborted()
+  if (owner !== account || !lanState.active) return
   lanState.authorityEpoch = Math.max(lanState.authorityEpoch, epoch)
+  await invoke('lan_peer_status', {
+    payload: { principalId: account.principalId, authorityEpoch: lanState.authorityEpoch },
+  })
+  signal.throwIfAborted()
+  if (owner !== account) return
   if (leader !== account.config.clientId) {
     lanState.lease = null
     return
   }
   const previous = lanState.lease
-  if (previous?.epoch === epoch && Date.parse(previous.expires_at) - Date.now() > 5 * 60_000) return
+  if (
+    previous?.epoch === epoch &&
+    Date.parse(previous.expires_at) - Date.now() > 5 * 60_000 &&
+    lanState.peers.every(id => previous.target_device_ids.includes(id))
+  )
+    return
   const { data } = await requestWithConfig<{ data: AgentLease }>(
     '/coordination/agent-lease',
     { method: 'POST', body: { epoch }, signal },
