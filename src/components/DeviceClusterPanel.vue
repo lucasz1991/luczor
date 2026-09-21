@@ -10,6 +10,7 @@ import { projectExternalIdForServer } from '@/services/cloudProjectAccess'
 import { pauseProjectMirror, projectMirrorState, syncProjectMirror } from '@/services/coordination/mirror'
 import { binaryRequest } from '@/services/coordination/binaryTransport'
 import { lanState } from '@/services/coordination/lan'
+import { deviceWorkers } from '@/services/agents/deviceAssistance'
 import { coordinationMetadata, setCoordinationRank } from '@/services/coordination/preferences'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import { executionGate, invokeGuarded } from '@/services/executionGate'
@@ -57,6 +58,7 @@ const project = computed(() => state.projects.find(value => value.id === project
 const mirror = computed(() => projectMirrorState[projectId.value])
 const workflow = computed(() => workflows.value.find(value => value.id === workflowId.value))
 const devices = computed(() => deviceCluster.coordinator?.devices ?? [])
+const lanWorkers = computed(() => deviceWorkers())
 const labels: Record<string, string> = {
   queued: 'Wartet',
   running: 'Arbeitet',
@@ -375,18 +377,48 @@ async function startWorkflow(matrix: boolean) {
           <div>
             <strong>{{
               lanState.active
-                ? 'Direkte LAN-Verbindung bereit'
+                ? 'LAN-Erkennung aktiv'
                 : nativeAvailable
                   ? 'LAN-Verbindung wird vorbereitet'
                   : 'LAN-Verbindung in der Desktop-App'
             }}</strong>
             <p>
-              {{ lanState.peers.length }} bestätigte Geräte · {{ (lanState.transferred / 1048576).toFixed(1) }} MiB
-              direkt übertragen
+              {{ lanState.peers.length }} gefunden · {{ lanState.reachablePeers.length }} verschlüsselt erreichbar ·
+              {{ (lanState.transferred / 1048576).toFixed(1) }} MiB direkt übertragen
             </p>
             <p v-if="lanState.error">{{ lanState.error }}</p>
+            <p v-if="lanState.cachedTrust">Verbindung mit gespeicherter, signierter Gerätezuordnung.</p>
+            <p v-if="lanState.lease">
+              Lesende LAN-Agenten freigegeben bis {{ new Date(lanState.lease.expires_at).toLocaleTimeString() }}.
+              Gemeinsame Änderungen benötigen weiterhin bestätigte Serverrechte.
+            </p>
           </div>
         </div>
+        <ul v-if="lanWorkers.length" class="cluster__devices" aria-label="Arbeitsagenten auf eigenen Geräten">
+          <li v-for="worker in lanWorkers" :key="worker.id">
+            <AiIcon name="network" :size="22" />
+            <div>
+              <strong>{{ devices.find(device => device.client_id === worker.id)?.name || worker.id }}</strong>
+              <small
+                >{{ worker.model || 'Kein Modell gemeldet' }} · {{ worker.platform || 'Gerät' }} ·
+                {{ worker.transport === 'lan' ? 'Direkt im LAN' : 'Über Server' }}</small
+              >
+            </div>
+            <span>{{
+              worker.ready
+                ? 'Agent bereit'
+                : worker.reason === 'busy'
+                  ? 'Beschäftigt'
+                  : worker.reason === 'model_not_ready'
+                    ? 'Modell vorbereiten'
+                    : worker.reason === 'agent_lease_unavailable'
+                      ? 'Koordinator-Freigabe fehlt'
+                      : worker.reason === 'client_update_required'
+                        ? 'App aktualisieren'
+                        : 'Verbindung prüfen'
+            }}</span>
+          </li>
+        </ul>
         <div class="cluster__summary">
           <span class="cluster__dot" :class="{ 'is-online': deviceCluster.connected }" />
           <div>

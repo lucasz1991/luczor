@@ -20,6 +20,9 @@ export type CoordinationState = {
     model_tier?: number | null
     active_model_id?: string | null
     model_tier_source?: 'explicit' | 'published_model' | null
+    model_ready?: boolean
+    agent_protocol?: number
+    busy?: boolean
   }>
 }
 export type CoordinatedJob = DeviceJob & {
@@ -61,7 +64,14 @@ export function coordinationApi(config: LuczorApiConfigSnapshot, signal?: AbortS
     heartbeat: (
       busy: boolean,
       available = true,
-      metadata: { platform?: string; model_tier?: number; preferred?: boolean; active_model_id?: string | null } = {}
+      metadata: {
+        platform?: string
+        model_tier?: number
+        preferred?: boolean
+        active_model_id?: string | null
+        model_ready?: boolean
+        agent_protocol?: number
+      } = {}
     ) =>
       post<{ data: CoordinationState }>('/coordination/heartbeat', {
         client_id: config.clientId,

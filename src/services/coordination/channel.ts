@@ -7,9 +7,10 @@ import { projectLocalIdForServer } from '@/services/cloudProjectAccess'
 import { coordinationApi, type CoordinatedJob, type CoordinationState } from './api'
 import { hasActiveChatRuns } from '@/services/chatRunManager'
 import { syncConversations } from './conversations'
-import { refreshLan, sendLan, stopLan, lanState } from './lan'
+import { refreshLan, sendLan, stopLan, lanState, updateLanAuthority } from './lan'
 import { createProgressReporter } from './progress'
 import { coordinationMetadata } from './preferences'
+import { hasLanAgentRuns } from './lanAgents'
 
 export const deviceCluster = reactive({
   running: false,
@@ -370,17 +371,25 @@ export async function startCoordinationChannel(execute: CoordinatedExecutor): Pr
         return
       }
       identity ??= verified
+      // Discovery can resume from signed cached trust even when heartbeat fails.
+      const lan = refreshLan(identity, controller.signal).catch(error => {
+        if (current()) lanState.error = error instanceof Error ? error.message : String(error)
+      })
       const api = coordinationApi(identity.config, controller.signal)
       const heartbeat = await api.heartbeat(
-        ownExecutions.size > 0 || hasActiveChatRuns(),
+        ownExecutions.size > 0 || hasActiveChatRuns() || hasLanAgentRuns(),
         true,
         await coordinationMetadata(identity)
       )
       assert()
       deviceCluster.coordinator = heartbeat.data
-      void refreshLan(identity, controller.signal).catch(error => {
-        if (current()) lanState.error = error instanceof Error ? error.message : String(error)
-      })
+      void lan
+        .then(() =>
+          updateLanAuthority(identity!, heartbeat.data.epoch, heartbeat.data.leader_device_id, controller.signal)
+        )
+        .catch(error => {
+          if (current()) lanState.error = error instanceof Error ? error.message : String(error)
+        })
       deviceCluster.connected = true
       deviceCluster.error = ''
       const pending = await api.pending()

@@ -35,6 +35,145 @@ const KEY_ACCOUNT: &str = "luczor_lan_tls_identity_v1";
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+fn eligible_addresses(mut addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    addresses.retain(|address| matches!(address.ip(), IpAddr::V4(ip) if !ip.is_loopback() && (ip.is_private() || ip.is_link_local())) && address.port() != 0);
+    addresses.sort_by_key(|address| {
+        (
+            matches!(address.ip(), IpAddr::V4(ip) if ip.is_link_local()),
+            *address,
+        )
+    });
+    addresses.dedup();
+    addresses.truncate(8);
+    addresses
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentLease {
+    protocol_version: u8,
+    scope: String,
+    user_id: u64,
+    source_device_id: String,
+    target_device_ids: Vec<String>,
+    epoch: u64,
+    issued_at: String,
+    expires_at: String,
+    algorithm: String,
+    signature: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerifyAgentLease {
+    principal_id: String,
+    source_device_id: String,
+    target_device_id: String,
+    lease: AgentLease,
+}
+fn validate_agent_lease(
+    lease: &AgentLease,
+    user: u64,
+    source: &str,
+    target: &str,
+    current_epoch: u64,
+    now: i128,
+) -> Result<Vec<u8>, String> {
+    let issued = super::device_jobs::parse_rfc3339_millis(&lease.issued_at)?;
+    let expiry = super::device_jobs::parse_rfc3339_millis(&lease.expires_at)?;
+    if lease.protocol_version != 1
+        || lease.scope != "agent.read"
+        || lease.algorithm != "RSA-SHA256"
+        || lease.user_id != user
+        || lease.source_device_id != source
+        || source == target
+        || lease.epoch == 0
+        || lease.epoch < current_epoch
+        || lease.target_device_ids.len() > 256
+        || !lease.target_device_ids.iter().any(|id| id == target)
+    {
+        return Err("lan_agent_authority_invalid".into());
+    }
+    if issued > now + 60_000 || expiry <= now || expiry <= issued || expiry - issued > 15 * 60_000 {
+        return Err("lan_agent_lease_expired".into());
+    }
+    // Preserve the server's canonical field order (JSON map ordering is not a signing contract).
+    #[derive(Serialize)]
+    struct Canonical<'a> {
+        protocol_version: u8,
+        scope: &'a str,
+        user_id: u64,
+        source_device_id: &'a str,
+        target_device_ids: &'a [String],
+        epoch: u64,
+        issued_at: &'a str,
+        expires_at: &'a str,
+    }
+    serde_json::to_vec(&Canonical {
+        protocol_version: lease.protocol_version,
+        scope: &lease.scope,
+        user_id: lease.user_id,
+        source_device_id: &lease.source_device_id,
+        target_device_ids: &lease.target_device_ids,
+        epoch: lease.epoch,
+        issued_at: &lease.issued_at,
+        expires_at: &lease.expires_at,
+    })
+    .map_err(|_| "lan_agent_lease_invalid".into())
+}
+fn remember_epoch(state: &PeerState, epoch: u64) -> Result<u64, String> {
+    if epoch > 9_007_199_254_740_991 {
+        return Err("lan_epoch_invalid".into());
+    }
+    let db = db(&state.database)?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS authority(id INTEGER PRIMARY KEY CHECK(id=1), epoch INTEGER NOT NULL);").map_err(|_| "lan_epoch_store_failed")?;
+    db.execute("INSERT INTO authority(id,epoch)VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET epoch=MAX(epoch,excluded.epoch)", [epoch as i64]).map_err(|_| "lan_epoch_store_failed")?;
+    db.query_row("SELECT epoch FROM authority WHERE id=1", [], |row| {
+        row.get::<_, i64>(0)
+    })
+    .map(|value| value as u64)
+    .map_err(|_| "lan_epoch_store_failed".into())
+}
+#[tauri::command]
+pub fn lan_agent_lease_verify(
+    window: super::CallerWebview,
+    payload: VerifyAgentLease,
+) -> Result<(), String> {
+    super::ensure_main_webview(&window)?;
+    let state = peer(&payload.principal_id)?;
+    if state.device != payload.source_device_id && state.device != payload.target_device_id {
+        return Err("lan_agent_device_mismatch".into());
+    }
+    for id in [&payload.source_device_id, &payload.target_device_id] {
+        let identity = if *id == state.device {
+            &state.identity
+        } else {
+            state
+                .peers
+                .iter()
+                .find(|peer| &peer.client_id == id)
+                .ok_or("lan_peer_unpaired")?
+        };
+        verify_identity(identity)?;
+    }
+    let bytes = validate_agent_lease(
+        &payload.lease,
+        state.identity.user_id,
+        &payload.source_device_id,
+        &payload.target_device_id,
+        remember_epoch(&state, 0)?,
+        now()?,
+    )?;
+    let signature = base64::engine::general_purpose::STANDARD
+        .decode(&payload.lease.signature)
+        .map_err(|_| "lan_agent_signature_invalid")?;
+    let signature =
+        Signature::try_from(signature.as_slice()).map_err(|_| "lan_agent_signature_invalid")?;
+    VerifyingKey::<Sha256>::new(super::device_jobs::trusted_device_job_key()?)
+        .verify(&bytes, &signature)
+        .map_err(|_| "lan_agent_signature_invalid")?;
+    remember_epoch(&state, payload.lease.epoch)?;
+    Ok(())
+}
 fn now() -> Result<i128, String> {
     Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -269,6 +408,7 @@ pub struct Envelope {
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum EnvelopeKind {
+    Probe,
     Job,
     Result,
     Chunk,
@@ -295,6 +435,33 @@ pub struct QueueRequest {
     principal_id: String,
     #[serde(default)]
     ids: Vec<String>,
+    #[serde(default)]
+    presence: Option<Presence>,
+    #[serde(default)]
+    authority_epoch: Option<u64>,
+}
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Presence {
+    #[serde(default)]
+    protocol: u8,
+    #[serde(default)]
+    ready: bool,
+    #[serde(default)]
+    busy: bool,
+    #[serde(default)]
+    model_id: Option<String>,
+    #[serde(default)]
+    platform: Option<String>,
+    #[serde(default)]
+    tier: Option<u8>,
+}
+#[derive(Clone)]
+struct DiscoveredPeer {
+    fullname: String,
+    addresses: Vec<SocketAddr>,
+    confirmed: Option<Instant>,
+    presence: Presence,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -303,6 +470,9 @@ pub struct Status {
     device_id: Option<String>,
     port: Option<u16>,
     peers: Vec<String>,
+    reachable_peers: Vec<String>,
+    workers: BTreeMap<String, Presence>,
+    discovery_error: Option<String>,
 }
 struct PeerState {
     principal: String,
@@ -311,7 +481,9 @@ struct PeerState {
     peers: Vec<SignedIdentity>,
     port: u16,
     stop: Arc<AtomicBool>,
-    addresses: Arc<Mutex<BTreeMap<String, SocketAddr>>>,
+    addresses: Arc<Mutex<BTreeMap<String, DiscoveredPeer>>>,
+    presence: Mutex<Presence>,
+    discovery_error: Mutex<Option<String>>,
     database: PathBuf,
     material: KeyMaterial,
     lease: ExecutionLease,
@@ -498,13 +670,25 @@ fn receive(
         return Err("lan_stopped".into());
     }
     state.lease.check()?;
-    store(&state.database, "in", &envelope)?;
+    let probe = matches!(envelope.kind, EnvelopeKind::Probe);
+    if !probe {
+        store(&state.database, "in", &envelope)?;
+    }
+    let presence = state
+        .presence
+        .lock()
+        .map_err(|_| "lan_state_unavailable")?
+        .clone();
     write_frame(
         &mut tls,
-        &serde_json::to_vec(&serde_json::json!({"accepted":true,"id":envelope.id}))
-            .map_err(|_| "lan_message_invalid")?,
+        &serde_json::to_vec(
+            &serde_json::json!({"accepted":true,"id":envelope.id,"presence":presence}),
+        )
+        .map_err(|_| "lan_message_invalid")?,
     )?;
-    let _=app.emit_to("main","luczor://lan-message",serde_json::json!({"principalId":state.principal,"id":envelope.id,"fromDeviceId":envelope.from_device_id}));
+    if !probe {
+        let _=app.emit_to("main","luczor://lan-message",serde_json::json!({"principalId":state.principal,"id":envelope.id,"fromDeviceId":envelope.from_device_id}));
+    }
     Ok(())
 }
 fn connect_send(state: &PeerState, envelope: &Envelope) -> Result<(), String> {
@@ -519,12 +703,14 @@ fn connect_send(state: &PeerState, envelope: &Envelope) -> Result<(), String> {
         .find(|identity| identity.client_id == envelope.to_device_id)
         .ok_or("lan_peer_unpaired")?;
     verify_identity(identity)?;
-    let address = *state
+    let addresses = state
         .addresses
         .lock()
         .map_err(|_| "lan_discovery_unavailable")?
         .get(&identity.client_id)
-        .ok_or("lan_peer_offline")?;
+        .ok_or("lan_peer_offline")?
+        .addresses
+        .clone();
     let config = rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -539,8 +725,33 @@ fn connect_send(state: &PeerState, envelope: &Envelope) -> Result<(), String> {
         private_key(&state.material)?,
     )
     .map_err(|_| "lan_tls_unavailable")?;
-    let stream = TcpStream::connect_timeout(&address, Duration::from_secs(3))
-        .map_err(|_| "lan_peer_offline")?;
+    // Try every suitable address, rather than choosing an arbitrary VPN/loopback address.
+    let mut last = Err("lan_peer_offline".to_string());
+    for address in addresses.iter().take(8) {
+        match TcpStream::connect_timeout(address, Duration::from_millis(600)) {
+            Ok(stream) => {
+                last = exchange(state, envelope, &identity.client_id, &config, stream);
+                if last.is_ok() {
+                    return last;
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    if let Ok(mut peers) = state.addresses.lock() {
+        if let Some(peer) = peers.get_mut(&identity.client_id) {
+            peer.confirmed = None;
+        }
+    }
+    last
+}
+fn exchange(
+    state: &PeerState,
+    envelope: &Envelope,
+    device: &str,
+    config: &rustls::ClientConfig,
+    stream: TcpStream,
+) -> Result<(), String> {
     stream
         .set_read_timeout(Some(Duration::from_secs(10)))
         .map_err(|_| "lan_socket_failed")?;
@@ -548,7 +759,7 @@ fn connect_send(state: &PeerState, envelope: &Envelope) -> Result<(), String> {
         .set_write_timeout(Some(Duration::from_secs(10)))
         .map_err(|_| "lan_socket_failed")?;
     let connection = rustls::ClientConnection::new(
-        Arc::new(config),
+        Arc::new(config.clone()),
         ServerName::try_from("luczor-peer.local").map_err(|_| "lan_tls_unavailable")?,
     )
     .map_err(|_| "lan_tls_unavailable")?;
@@ -561,6 +772,19 @@ fn connect_send(state: &PeerState, envelope: &Envelope) -> Result<(), String> {
         serde_json::from_slice(&read_frame(&mut tls)?).map_err(|_| "lan_ack_invalid")?;
     if ack["accepted"] != true || ack["id"].as_str() != Some(&envelope.id) {
         return Err("lan_ack_invalid".into());
+    }
+    let presence = serde_json::from_value::<Presence>(ack["presence"].clone()).unwrap_or_default();
+    if let Some(peer) = state
+        .addresses
+        .lock()
+        .map_err(|_| "lan_state_unavailable")?
+        .get_mut(device)
+    {
+        peer.confirmed = Some(Instant::now());
+        peer.presence = presence;
+    }
+    if matches!(envelope.kind, EnvelopeKind::Probe) {
+        return Ok(());
     }
     db(&state.database)?
         .execute(
@@ -595,15 +819,58 @@ pub async fn lan_peer_start(
         let mut unique=std::collections::HashSet::new();for identity in &request.peers{verify_identity(identity)?;if identity.user_id!=request.signed_identity.user_id||!unique.insert(&identity.client_id){return Err("lan_cross_account_peer_rejected".into());}}
         let listener=TcpListener::bind("0.0.0.0:0").map_err(|_|"lan_listener_unavailable")?;listener.set_nonblocking(true).map_err(|_|"lan_listener_unavailable")?;let port=listener.local_addr().map_err(|_|"lan_listener_unavailable")?.port();
         let directory=app.path().app_local_data_dir().map_err(|_|"lan_queue_unavailable")?.join("lan-peers").join(digest(request.principal_id.as_bytes()));std::fs::create_dir_all(&directory).map_err(|_|"lan_queue_unavailable")?;let database=directory.join("queue.sqlite3");db(&database)?;
-        let mdns=mdns_sd::ServiceDaemon::new().map_err(|_|"lan_discovery_unavailable")?;let public_id=digest(request.device_id.as_bytes());let properties=[("device",public_id.as_str()),("protocol","1")];
+        let mdns=mdns_sd::ServiceDaemon::new().map_err(|_|"lan_discovery_unavailable")?; let monitor=mdns.monitor().map_err(|_|"lan_discovery_unavailable")?;mdns.set_ip_check_interval(5).map_err(|_|"lan_discovery_unavailable")?;let public_id=digest(request.device_id.as_bytes());let properties=[("device",public_id.as_str()),("protocol","1")];
         let info=mdns_sd::ServiceInfo::new(SERVICE,&public_id[..24],&format!("luczor-{}.local.",&public_id[..24]),"",port,&properties[..]).map_err(|_|"lan_discovery_unavailable")?.enable_addr_auto();mdns.register(info).map_err(|_|"lan_discovery_unavailable")?;let discovered=mdns.browse(SERVICE).map_err(|_|"lan_discovery_unavailable")?;
         let config=rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider())).with_protocol_versions(&[&rustls::version::TLS13]).map_err(|_|"lan_tls_unavailable")?.with_client_cert_verifier(Arc::new(Pins{identities:request.peers.clone()})).with_single_cert(vec![certificate(&material)?],private_key(&material)?).map_err(|_|"lan_tls_unavailable")?;
-        let state=Arc::new(PeerState{principal:request.principal_id,device:request.device_id,identity:request.signed_identity,peers:request.peers,port,stop:Arc::new(AtomicBool::new(false)),addresses:Arc::new(Mutex::new(BTreeMap::new())),database,material,lease,mdns});
+        let state=Arc::new(PeerState{principal:request.principal_id,device:request.device_id,identity:request.signed_identity,peers:request.peers,port,stop:Arc::new(AtomicBool::new(false)),addresses:Arc::new(Mutex::new(BTreeMap::new())),presence:Mutex::new(Presence::default()),discovery_error:Mutex::new(None),database,material,lease,mdns});
         state.lease.check()?;
         let mut current=PEER.get_or_init(Mutex::default).lock().map_err(|_|"lan_state_unavailable")?;if SESSION_GENERATION.load(Ordering::Acquire)!=generation{return Err("lan_session_changed".into());}if let Some(old)=current.take(){old.stop.store(true,Ordering::Release);let _=old.mdns.shutdown();}*current=Some(state.clone());drop(current);
-        let discovery_state=state.clone();std::thread::spawn(move||{while !discovery_state.stop.load(Ordering::Acquire){if let Ok(mdns_sd::ServiceEvent::ServiceResolved(info))=discovered.recv_timeout(Duration::from_secs(1)){if let Some(device)=info.get_property_val_str("device"){if let Some(identity)=discovery_state.peers.iter().find(|identity|digest(identity.client_id.as_bytes())==device){if let Some(address)=info.get_addresses_v4().into_iter().find(|ip|ip.is_private()||ip.is_link_local()||ip.is_loopback()){if let Ok(mut addresses)=discovery_state.addresses.lock(){addresses.insert(identity.client_id.to_string(),SocketAddr::new(IpAddr::V4(address),info.get_port()));}}}}}}});
+        let discovery_state = state.clone();
+        std::thread::spawn(move || {
+            while !discovery_state.stop.load(Ordering::Acquire) {
+                match discovered.recv_timeout(Duration::from_secs(1)) {
+                    Ok(mdns_sd::ServiceEvent::ServiceResolved(info)) => {
+                        if let Some(device) = info.get_property_val_str("device") {
+                            if let Some(identity) = discovery_state.peers.iter().find(|id| id.client_id != discovery_state.device && digest(id.client_id.as_bytes()) == device) {
+                                let addresses = eligible_addresses(info.get_addresses_v4().into_iter().map(|ip| SocketAddr::new(IpAddr::V4(ip), info.get_port())).collect());
+                                if !addresses.is_empty() {
+                                    if let Ok(mut peers) = discovery_state.addresses.lock() {
+                                        let old = peers.get(&identity.client_id);
+                                        let unchanged = old.is_some_and(|peer| peer.addresses == addresses);
+                                        let confirmed = if unchanged { old.and_then(|peer| peer.confirmed) } else { None };
+                                        let presence = if unchanged { old.map(|peer| peer.presence.clone()).unwrap_or_default() } else { Presence::default() };
+                                        peers.insert(identity.client_id.clone(), DiscoveredPeer { fullname: info.get_fullname().to_string(), addresses, confirmed, presence });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Ok(mdns_sd::ServiceEvent::ServiceRemoved(_, fullname)) => {
+                        if let Ok(mut peers) = discovery_state.addresses.lock() { peers.retain(|_, peer| peer.fullname != fullname); }
+                    }
+                    _ => {}
+                }
+                while let Ok(event) = monitor.try_recv() {
+                    if matches!(event, mdns_sd::DaemonEvent::Error(_)) {
+                        if let Ok(mut error) = discovery_state.discovery_error.lock() { *error = Some("lan_multicast_interface_error".into()); }
+                    }
+                }
+            }
+        });
+        let probe_state = state.clone();
+        std::thread::spawn(move || {
+            while !probe_state.stop.load(Ordering::Acquire) {
+                let peers = probe_state.addresses.lock().map(|peers| peers.keys().cloned().collect::<Vec<_>>()).unwrap_or_default();
+                for target in peers {
+                    if probe_state.stop.load(Ordering::Acquire) { break; }
+                    let envelope = Envelope { id: uuid::Uuid::new_v4().to_string(), from_device_id: probe_state.device.clone(), to_device_id: target, kind: EnvelopeKind::Probe, payload: serde_json::json!({}) };
+                    let _ = connect_send(&probe_state, &envelope);
+                }
+                for _ in 0..50 { if probe_state.stop.load(Ordering::Acquire) { break; } std::thread::sleep(Duration::from_millis(100)); }
+            }
+        });
         let server_state=state.clone();let config=Arc::new(config);std::thread::spawn(move||{let active=Arc::new(AtomicUsize::new(0));while !server_state.stop.load(Ordering::Acquire){match listener.accept(){Ok((stream,address))=>{if !matches!(address.ip(),IpAddr::V4(ip)if ip.is_private()||ip.is_link_local()||ip.is_loopback())||active.load(Ordering::Acquire)>=8{continue;}active.fetch_add(1,Ordering::AcqRel);let count=active.clone();let state=server_state.clone();let config=config.clone();let app=app.clone();std::thread::spawn(move||{let _=receive(stream,state,config,app);count.fetch_sub(1,Ordering::AcqRel);});},Err(error)if error.kind()==std::io::ErrorKind::WouldBlock=>std::thread::sleep(Duration::from_millis(100)),Err(_)=>break}}});
-        Ok(Status{active:true,device_id:Some(state.device.clone()),port:Some(port),peers:vec![]})
+        Ok(Status{active:true,device_id:Some(state.device.clone()),port:Some(port),peers:vec![],reachable_peers:vec![],workers:BTreeMap::new(),discovery_error:None})
     }).await.map_err(|_|"lan_worker_failed")?
 }
 #[tauri::command]
@@ -628,18 +895,42 @@ pub fn lan_peer_status(
 ) -> Result<Status, String> {
     super::ensure_main_webview(&window)?;
     let state = peer(&payload.principal_id)?;
-    let peers = state
+    if let Some(presence) = payload.presence {
+        if presence.model_id.as_ref().is_some_and(|id| id.len() > 120)
+            || presence.platform.as_ref().is_some_and(|id| id.len() > 20)
+        {
+            return Err("lan_presence_invalid".into());
+        }
+        *state.presence.lock().map_err(|_| "lan_state_unavailable")? = presence;
+    }
+    if let Some(epoch) = payload.authority_epoch {
+        remember_epoch(&state, epoch)?;
+    }
+    let discovered = state
         .addresses
         .lock()
-        .map_err(|_| "lan_discovery_unavailable")?
-        .keys()
-        .cloned()
+        .map_err(|_| "lan_discovery_unavailable")?;
+    let workers: BTreeMap<String, Presence> = discovered
+        .iter()
+        .filter(|(_, peer)| {
+            peer.confirmed
+                .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
+        })
+        .map(|(id, peer)| (id.clone(), peer.presence.clone()))
         .collect();
+    let discovery_error = state
+        .discovery_error
+        .lock()
+        .map_err(|_| "lan_state_unavailable")?
+        .clone();
     Ok(Status {
         active: true,
         device_id: Some(state.device.clone()),
         port: Some(state.port),
-        peers,
+        peers: discovered.keys().cloned().collect(),
+        reachable_peers: workers.keys().cloned().collect(),
+        workers,
+        discovery_error,
     })
 }
 #[tauri::command]
@@ -702,6 +993,53 @@ pub async fn lan_peer_flush(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn candidate_addresses_keep_all_private_interfaces_without_loopback_or_public_targets() {
+        let values = [
+            "127.0.0.1:5000",
+            "8.8.8.8:5000",
+            "192.168.1.5:5000",
+            "10.8.0.2:5000",
+            "169.254.1.1:5000",
+            "192.168.1.5:5000",
+            "192.168.1.5:0",
+        ]
+        .iter()
+        .map(|item| item.parse().unwrap())
+        .collect();
+        let selected = eligible_addresses(values);
+        assert_eq!(selected.len(), 3);
+        assert_eq!(selected.last().unwrap().ip().to_string(), "169.254.1.1");
+    }
+    #[test]
+    fn offline_agent_authority_is_bounded_to_owner_target_scope_epoch_and_expiry() {
+        let mut lease = AgentLease {
+            protocol_version: 1,
+            scope: "agent.read".into(),
+            user_id: 7,
+            source_device_id: "master".into(),
+            target_device_ids: vec!["laptop".into()],
+            epoch: 3,
+            issued_at: "2026-09-21T10:00:00Z".into(),
+            expires_at: "2026-09-21T10:15:00Z".into(),
+            algorithm: "RSA-SHA256".into(),
+            signature: "test".into(),
+        };
+        let time = super::super::device_jobs::parse_rfc3339_millis("2026-09-21T10:01:00Z").unwrap();
+        let canonical = validate_agent_lease(&lease, 7, "master", "laptop", 3, time).unwrap();
+        assert!(String::from_utf8(canonical)
+            .unwrap()
+            .starts_with("{\"protocol_version\":1,\"scope\":\"agent.read\",\"user_id\":7,"));
+        assert!(validate_agent_lease(&lease, 8, "master", "laptop", 3, time).is_err());
+        assert!(validate_agent_lease(&lease, 7, "master", "other", 3, time).is_err());
+        assert!(validate_agent_lease(&lease, 7, "master", "laptop", 4, time).is_err());
+        assert!(validate_agent_lease(&lease, 7, "master", "laptop", 3, time + 900_000).is_err());
+        lease.scope = "agent.write".into();
+        assert!(validate_agent_lease(&lease, 7, "master", "laptop", 3, time).is_err());
+        lease.scope = "agent.read".into();
+        lease.expires_at = "2026-09-21T11:00:00Z".into();
+        assert!(validate_agent_lease(&lease, 7, "master", "laptop", 3, time).is_err());
+    }
     #[test]
     fn oversized_frames_are_rejected_before_allocation() {
         let mut bytes = std::io::Cursor::new(((MAX_FRAME + 1) as u32).to_be_bytes());

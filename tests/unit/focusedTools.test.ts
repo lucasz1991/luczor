@@ -20,6 +20,28 @@ const pool = [
   'browser_dom_read',
 ].map(name => ({ type: 'function' as const, function: { name, description: name, parameters: { type: 'object' } } }))
 describe('focused local tool context', () => {
+  it('keeps delegation start, status and stop when requested file tools fill the budget', async () => {
+    const names = [
+      'agent_assist',
+      'agent_assist_status',
+      'agent_assist_stop',
+      'goal_report',
+      'goal_read_result',
+      ...Array.from({ length: 20 }, (_, index) => `fs_read_${index}`),
+    ]
+    const definitions = names.map(name => ({
+      type: 'function' as const,
+      function: { name, description: 'file project read', parameters: { type: 'object' } },
+    }))
+    const focus = focusedTools('Read all project files', () => [])
+    focus.select(definitions)
+    await focus.selector.execute({ names: names.slice(5, 10) }, { projectId: 'p' })
+    const selected = focus.select(definitions).map(tool => tool.function.name)
+    expect(selected).toEqual(expect.arrayContaining(names.slice(0, 5)))
+    expect(selected).toContain('tools_select')
+    expect(selected).toContain('context_read_history')
+    expect(selected).toHaveLength(10)
+  })
   it('finds exact archive indices without exposing system instructions or guessing offsets', async () => {
     const archive: WireMessage[] = [
       { role: 'system', content: 'Needle private policy' },

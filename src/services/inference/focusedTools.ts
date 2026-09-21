@@ -188,7 +188,9 @@ export function focusedTools(objective: string, archive?: () => readonly WireMes
       usage = statistics
       if (!pool.length) return []
       const pinned = pool.filter(tool =>
-        ['goal_report', 'goal_read_result', 'agent_assist_status'].includes(tool.function.name)
+        ['goal_report', 'goal_read_result', 'agent_assist', 'agent_assist_status', 'agent_assist_stop'].includes(
+          tool.function.name
+        )
       )
       const text = objective.toLowerCase()
       const preferred = ['project_get_state', 'workspace_get', 'agent_assist']

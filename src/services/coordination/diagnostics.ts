@@ -120,8 +120,13 @@ export function buildCoordinationDiagnostic(input: CoordinationDiagnosticInput, 
       ),
     },
     lan: {
-      ...select(lan, ['active', 'transferred']),
+      ...select(lan, ['active', 'transferred', 'cachedTrust', 'serverOnline', 'authorityEpoch']),
       peerCount: Array.isArray(lan.peers) ? lan.peers.length : 0,
+      reachablePeerCount: Array.isArray(lan.reachablePeers) ? lan.reachablePeers.length : 0,
+      workers: Object.values(record(lan.workers))
+        .slice(0, 64)
+        .map(worker => select(worker, ['protocol', 'ready', 'busy', 'modelId', 'platform', 'tier'])),
+      agentLease: select(lan.lease, ['scope', 'epoch', 'expires_at']),
       storedResultCount: Array.isArray(lan.received) ? lan.received.length : 0,
       errorPresent: !!lan.error,
     },

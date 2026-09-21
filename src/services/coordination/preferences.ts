@@ -10,10 +10,19 @@ export async function coordinationMetadata(account: VerifiedAccountSnapshot) {
   const detected = await (platform ??= invoke<{ build: { platform: string } }>('wf_runtime_capabilities')
     .then(value => value.build.platform)
     .catch(() => 'unknown'))
-  const active = await invoke<{ activeModelId?: string | null }>('local_model_status').catch(() => null)
+  const active = await invoke<{
+    activeModelId?: string | null
+    readiness?: Array<{ modelReleaseId: string; ready: boolean; validUntilMs: number }>
+  }>('local_model_status').catch(() => null)
   return {
     platform: ['windows', 'linux', 'macos'].includes(detected) ? detected : 'unknown',
     active_model_id: active?.activeModelId ?? null,
+    model_ready:
+      !!active?.activeModelId &&
+      !!active.readiness?.some(
+        item => item.modelReleaseId === active.activeModelId && item.ready && item.validUntilMs > Date.now()
+      ),
+    agent_protocol: 1,
     ...(Number.isInteger(rank) && rank! >= 1 && rank! <= 5 ? { model_tier: rank } : {}),
   }
 }

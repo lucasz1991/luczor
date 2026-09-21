@@ -117,6 +117,7 @@ pub fn run() {
             commands::voice_input::voice_input_stt,
             commands::voice::install_voice_runtime,
             commands::lan_peer::lan_peer_identity,
+            commands::lan_peer::lan_agent_lease_verify,
             commands::lan_peer::lan_peer_start,
             commands::lan_peer::lan_peer_stop,
             commands::lan_peer::lan_peer_status,

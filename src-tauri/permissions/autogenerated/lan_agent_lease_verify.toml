@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-lan-agent-lease-verify"
+description = "Enables the lan_agent_lease_verify command without any pre-configured scope."
+commands.allow = ["lan_agent_lease_verify"]
+
+[[permission]]
+identifier = "deny-lan-agent-lease-verify"
+description = "Denies the lan_agent_lease_verify command without any pre-configured scope."
+commands.deny = ["lan_agent_lease_verify"]

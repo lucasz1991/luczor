@@ -1,4 +1,10 @@
 import { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
+import {
+  assistanceWorkerSummary,
+  executeDeviceAssistance,
+  resolveAssistanceTarget,
+} from '@/services/agents/deviceAssistance'
+import { DEVICE_READ_TOOLS } from '@/services/coordination/lanAgents'
 import { RESEARCH_HANDOFF_INSTRUCTIONS } from '@/services/agents/researchHarness'
 import {
   isTextToolOutput,
@@ -934,21 +940,32 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         !name.startsWith('workspace_agent')
       )
     })
+  const externalAssistanceAllowed = () =>
+    modelUsageSettings.value.externalEnabled &&
+    opts.agentTeamPreset !== 'local' &&
+    opts.contextEgress !== 'local_only' &&
+    opts.routingSettings?.preference !== 'local_only' &&
+    !opts.workspaceScope &&
+    !ephemeralDataUsed &&
+    !!opts.externalBaseMessages?.length
+  const deviceAssistanceAllowed = () =>
+    !opts.workspaceScope && !ephemeralDataUsed && !!opts.externalBaseMessages?.length
   const assistance =
     opts.agentMode && !opts.forceAgentTeam && !resolvedRoute.externalOneShot && opts.toolAccess !== 'none'
       ? createAdaptiveAssistance({
           signal,
-          externalAllowed: () =>
-            modelUsageSettings.value.externalEnabled &&
-            opts.agentTeamPreset !== 'local' &&
-            opts.contextEgress !== 'local_only' &&
-            opts.routingSettings?.preference !== 'local_only' &&
-            !opts.workspaceScope &&
-            !ephemeralDataUsed &&
-            !!opts.externalBaseMessages?.length,
+          externalAllowed: externalAssistanceAllowed,
+          deviceTools: () => DEVICE_READ_TOOLS,
+          workers: () => assistanceWorkerSummary(externalAssistanceAllowed()),
+          resolveTarget: async task =>
+            resolveAssistanceTarget(task, deviceAssistanceAllowed(), externalAssistanceAllowed()),
           localTools: localAssistantTools,
           externalTools: () => (modelUsageSettings.value.externalToolsEnabled ? [...SPECIALIST_CONTEXT_TOOLS] : []),
           execute: async (task, childSignal) => {
+            if (task.target === 'device') {
+              if (!deviceAssistanceAllowed()) throw new Error('Der Kontext ist nicht für andere Geräte freigegeben.')
+              return executeDeviceAssistance(task, projectId, opts.externalBaseMessages ?? [], childSignal)
+            }
             if (task.target === 'external') {
               const { prepareExternalSpecialists } = await import('@/services/agents/externalSpecialists')
               const source = opts.externalBaseMessages!
@@ -1019,7 +1036,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     messages.unshift({
       role: 'system',
       content:
-        '[LUCZOR-ASSISTENZ] Du entscheidest selbst: einfache Fragen direkt beantworten, Aufgaben mit vorhandenen Werkzeugen selbst erledigen. Nur wenn ein Teilauftrag einen Nutzen hat, agent_assist gezielt nutzen. Externe Teilaufträge laufen im Hintergrund; währenddessen andere nötige Arbeit erledigen, anschließend Ergebnisse mit agent_assist_status abholen und prüfen. Lokale Teilaufträge nutzen dasselbe Modell nacheinander. Keine feste Planer/Arbeiter/Prüfer-Zeremonie und kein internes Nachdenken veröffentlichen. Nur belegte kurze Fortschrittsmeldungen. Externe Modelle können lokal gesperrten Kontext nicht erhalten.',
+        '[LUCZOR-ASSISTENZ] Einfache Fragen und einzelne abhängige Schritte direkt bearbeiten. Bei umfangreichen Aufträgen mit unabhängiger Recherche, Analyse oder Prüfung standardmäßig einen klar abgegrenzten Teilauftrag mit agent_assist (target=auto) delegieren, sofern ein freier Arbeitsagent verfügbar ist. agent_assist_status ohne job_id zeigt Geräte, Bereitschaft und Sperrgründe. Auto bevorzugt ein einsatzbereites eigenes Gerät im LAN, anschließend erlaubte externe Modelle. Nenne kurz die öffentliche Arbeitsteilung. Während Geräte/externe Agenten rechnen, eigene unabhängige Arbeit erledigen. Anschließend Ergebnisse abholen, auf Belege prüfen und zusammenführen. Wenn kein Ziel verfügbar ist, direkt weiterarbeiten und den Grund einmal nennen; keine Such- oder Wiederholungsschleife. Lokale Teilagenten nutzen dieselbe Instanz nacheinander. Keine feste Rollen-Zeremonie, keine internen Denktexte. Nur ausdrücklich freigegebene Kontexte weitergeben.',
     })
   }
 

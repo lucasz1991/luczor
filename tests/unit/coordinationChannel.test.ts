@@ -6,6 +6,7 @@ const mock = vi.hoisted(() => ({
   account: vi.fn(),
   listen: vi.fn(),
   metadata: vi.fn(),
+  lan: vi.fn(),
   request: vi.fn(),
   api: {
     heartbeat: vi.fn(),
@@ -30,11 +31,13 @@ vi.mock('@/services/coordination/api', () => ({ coordinationApi: () => mock.api 
 vi.mock('@/services/coordination/conversations', () => ({ syncConversations: async () => {} }))
 vi.mock('@/services/coordination/preferences', () => ({ coordinationMetadata: mock.metadata }))
 vi.mock('@/services/coordination/lan', () => ({
-  refreshLan: async () => {},
+  refreshLan: mock.lan,
+  updateLanAuthority: async () => {},
   stopLan: () => {},
   sendLan: async () => false,
   lanState: {},
 }))
+vi.mock('@/services/coordination/lanAgents', () => ({ hasLanAgentRuns: () => false }))
 vi.mock('@/services/executionGate', () => ({
   executionGate: {
     capture: (signal: AbortSignal) => ({ signal }),
@@ -71,6 +74,7 @@ beforeEach(() => {
   mock.journal = null
   mock.listen.mockResolvedValue(() => {})
   mock.metadata.mockResolvedValue({})
+  mock.lan.mockResolvedValue(undefined)
   mock.account.mockResolvedValue({
     accountId: 1,
     principalId: 'owner',
@@ -100,6 +104,11 @@ afterEach(async () => {
 })
 
 describe('coordinated effect recovery', () => {
+  it('starts cached LAN discovery even when the server heartbeat fails', async () => {
+    mock.api.heartbeat.mockRejectedValueOnce(new Error('offline'))
+    await startCoordinationChannel(vi.fn())
+    expect(mock.lan).toHaveBeenCalledOnce()
+  })
   it('coalesces realtime wake-ups into an authenticated refresh and removes the listener on stop', async () => {
     vi.useFakeTimers()
     try {

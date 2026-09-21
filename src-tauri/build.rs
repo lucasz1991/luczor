@@ -104,6 +104,7 @@ const APP_COMMANDS: &[&str] = &[
     "voice_input_stt",
     "install_voice_runtime",
     "lan_peer_identity",
+    "lan_agent_lease_verify",
     "lan_peer_start",
     "lan_peer_stop",
     "lan_peer_status",
