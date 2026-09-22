@@ -19,6 +19,11 @@ import {
   explicitlyQuotesRuntimeStatus,
   isSilentLocalResponseFailure,
 } from '@/services/inference/localResponseGuard'
+import {
+  refreshContinuationContext,
+  resumeCheckpointMessages,
+  unresolvedCheckpointCalls,
+} from '@/services/agents/continuationHistory'
 import { focusedTools, cleanLocalHistory } from '@/services/inference/focusedTools'
 import { fitRequestContext } from '@/services/inference/contextBudget'
 import { recordTrace, debugScope, traceEnabled } from '@/services/debugTrace'
@@ -170,6 +175,8 @@ export type RunAgentOptions = {
     summary: import('./agents/externalSpecialists').TeamPacketApproval
   ) => boolean | Promise<boolean>
   continuation?: AgentCheckpoint
+  /** Fresh host retrieval material; only the scoped context block is replaced on resume. */
+  continuationContext?: string
   /** Principal-bound unresolved task writes carried into every project turn. */
   pendingTaskCreateVerifications?: readonly PendingTaskCreateVerification[]
   /** Stable account + server identity for checkpoints and pending write guards. */
@@ -193,6 +200,8 @@ export type RunAgentOptions = {
   contextEgress?: 'local_only' | 'external_allowed'
   /** Local history already contains host-only evidence, even before a new tool is called. */
   ephemeralContextUsed?: boolean
+  /** Locally retrieved private material: taints only a selected local route, never a clean external packet. */
+  localOnlyContextUsed?: boolean
   routingSettings?: Partial<HybridRoutingSettings>
   /** Separately assembled provider-safe packet plus packet-bound approval. */
   externalPackage?: ExternalTurnPackage
@@ -369,6 +378,8 @@ export type RunAgentResult = {
   tokenUsage: TokenUsage
   specialistOutcomes?: import('./agents/externalSpecialists').SpecialistOutcome[]
   continuation?: AgentCheckpoint
+  /** Complete local working state, including a successful final answer. Not an unfinished-run signal. */
+  workingContext?: AgentCheckpoint
   /** A model round stopped after tool progress was already recorded. */
   interrupted?: AgentInterruption
   /** Host-owned goal outcome; model prose cannot mark an objective complete. */
@@ -646,6 +657,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   if (
     opts.continuation &&
     (opts.continuation.projectId !== projectId ||
+      (!!opts.continuation.conversationId && opts.continuation.conversationId !== opts.conversationId) ||
       (!!opts.principalScopeId && opts.continuation.principalScopeId !== opts.principalScopeId) ||
       (opts.workspaceBindingId !== undefined && opts.continuation.workspaceBindingId !== opts.workspaceBindingId) ||
       opts.continuation.sessionId !== execution.sessionId ||
@@ -785,13 +797,17 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     }
   }
   const messages: WireMessage[] = [
-    ...(opts.continuation?.messages ?? resolvedRoute.replacementMessages ?? opts.baseMessages),
+    ...(opts.continuation
+      ? resumeCheckpointMessages(opts.continuation.messages)
+      : (resolvedRoute.replacementMessages ?? opts.baseMessages)),
   ].filter(
     message =>
       resolvedRoute.externalOneShot || message.role !== 'system' || !message.content.startsWith(GOAL_REPORT_MARKER)
   )
   if (opts.ephemeralContextUsed && resolvedRoute.gateway.target !== 'local_llama_cpp')
     throw new Error('Gerätelokaler Gesprächskontext darf nicht an einen externen Anbieter gesendet werden.')
+  if (opts.continuation && opts.continuationContext !== undefined && resolvedRoute.gateway.target === 'local_llama_cpp')
+    refreshContinuationContext(messages, opts.continuationContext)
   const completedMutations = new Map(opts.continuation?.completedMutations ?? [])
   const pendingSeedsByExternalId = new Map<string, PendingTaskCreateVerification>()
   for (const item of opts.pendingTaskCreateVerifications ?? [])
@@ -813,16 +829,42 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   let pendingTaskCreateTouched = !!opts.continuation?.pendingTaskCreateVerifications?.some(
     item => item.state === 'unknown' || item.state === 'verified_absent'
   )
-  let ephemeralDataUsed = !!opts.ephemeralContextUsed || !!opts.continuation?.ephemeralDataUsed
+  let ephemeralDataUsed =
+    !!opts.ephemeralContextUsed ||
+    !!opts.continuation?.ephemeralDataUsed ||
+    (resolvedRoute.gateway.target === 'local_llama_cpp' && !!opts.localOnlyContextUsed)
+  const focused =
+    resolvedRoute.gateway.target === 'local_llama_cpp' && !opts.workflowScope
+      ? focusedTools(
+          latestUserMessage,
+          opts.toolAccess === 'none' ? undefined : () => messages,
+          opts.continuation?.selectedTools
+        )
+      : undefined
+  let contextTargetTokens = opts.continuation?.recovery?.contextTargetTokens
+  const uncertainMutations = new Set([
+    ...(opts.continuation?.uncertainMutations ?? []),
+    ...unresolvedCheckpointCalls(opts.continuation?.messages ?? []).flatMap(call => {
+      try {
+        return [completedMutationKey(call.function.name, JSON.parse(call.function.arguments), projectId)]
+      } catch {
+        return []
+      }
+    }),
+  ])
   const checkpoint = (): AgentCheckpoint => ({
     projectId,
     principalScopeId: opts.principalScopeId,
     workspaceBindingId: opts.workspaceBindingId,
+    conversationId: opts.conversationId,
     sessionId: execution.sessionId,
     generation: execution.generation,
+    selectedTools: focused?.selected() ?? opts.continuation?.selectedTools,
+    ...(contextTargetTokens ? { recovery: { reason: 'context_compacted', contextTargetTokens } } : {}),
     objective: opts.continuation?.objective ?? latestUserMessage,
     messages: structuredClone(messages),
     completedMutations: structuredClone([...completedMutations]),
+    uncertainMutations: [...uncertainMutations],
     pendingTaskCreateVerifications: structuredClone([...pendingTaskCreateVerifications.values()]),
     ephemeralDataUsed: ephemeralDataUsed || !!opts.continuation?.ephemeralDataUsed,
     toolAccess: opts.toolAccess,
@@ -846,36 +888,9 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       // A noncritical UI progress observer cannot alter agent execution.
     }
   }
-  const safeProgressCheckpoint = (): AgentCheckpoint => {
-    const value = checkpoint()
-    const pending = value.pendingTaskCreateVerifications?.filter(
-      item => item.state === 'unknown' || item.state === 'verified_absent'
-    )
-    const pendingTaskCount = pending?.filter(item => (item.kind ?? 'task') === 'task').length ?? 0
-    const pendingConversationCount = pending?.filter(item => item.kind === 'conversation').length ?? 0
-    value.messages = [
-      ...messages.filter(message => message.role === 'system').map(message => structuredClone(message)),
-      {
-        role: 'user',
-        content: [
-          `Setze den begonnenen Auftrag fort: ${value.objective.slice(0, 6_000)}${value.objective.length > 6_000 ? '…' : ''}`,
-          'Der Zwischenstand wurde unmittelbar an einer Werkzeuggrenze gesichert. Lies den aktuellen Projekt- und Aufgabenstand neu ein, bevor du weitere Änderungen ausführst.',
-          value.completedMutations.length
-            ? `${value.completedMutations.length} bereits erfolgreiche Änderungen sind gegen identische Wiederholung geschützt.`
-            : '',
-          pendingTaskCount
-            ? `${pendingTaskCount} task_create-Vorgänge benötigen vor einer Wiederholung die im Werkzeugergebnis geforderte exakte external_id-Prüfung.`
-            : '',
-          pendingConversationCount
-            ? `${pendingConversationCount} chat_create-Vorgänge benötigen vor einer Wiederholung die exakte external_id-Prüfung mit chat_list.`
-            : '',
-        ]
-          .filter(Boolean)
-          .join('\n\n'),
-      },
-    ]
-    return value
-  }
+  // Preserve exact user constraints, tool receipts and public progress at every boundary.
+  // Missing tool replies are repaired conservatively only when a checkpoint resumes.
+  const safeProgressCheckpoint = checkpoint
   if (opts.continuation || pendingTaskCreateVerifications.size) await emitCheckpoint(safeProgressCheckpoint())
   if (planningDiscussion && !resolvedRoute.externalOneShot) {
     messages.unshift({
@@ -918,10 +933,6 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   }
   let nextToolChoice: ToolChoice = resolvedRoute.externalOneShot ? 'none' : (requestedToolChoice ?? 'auto')
   const inferenceGateway = resolvedRoute.gateway
-  const focused =
-    inferenceGateway.target === 'local_llama_cpp' && !opts.workflowScope
-      ? focusedTools(latestUserMessage, opts.toolAccess === 'none' ? undefined : () => messages)
-      : undefined
   if (focused) messages.splice(0, messages.length, ...cleanLocalHistory(messages))
   if (opts.workspaceScope && inferenceGateway.target !== 'local_llama_cpp') {
     throw new Error('Der Workspace-Modus verwendet ausschließlich das lokale Modell.')
@@ -929,6 +940,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   // Each reported goal progress boundary can admit another bounded section in
   // this same run. The cumulative round counter and all execution state stay live.
   let roundLimit = resolvedRoute.externalOneShot ? 1 : maxRounds
+  const successfulOperations = new Set<string>()
+  let sectionProgress = 0
 
   const localAssistantTools = allTools
     .map(tool => tool.function.name)
@@ -1147,55 +1160,13 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     if (publicControlPartial) {
       continuation.messages.push({ role: 'assistant', content: publicControlPartial })
       continuation.messages.push({
-        role: 'user',
+        role: 'system',
         content:
           'Die vorherige Antwort wurde an der Denkbudgetgrenze unterbrochen. Setze den bestehenden Auftrag anhand dieses öffentlichen Teilstands fort; bereits erfolgreiche Aktionen nicht wiederholen.',
       })
     }
-    const resetHistory =
-      interruption.code === 'team_node_interrupted' ||
-      (error instanceof LocalInferenceError &&
-        [
-          'runtime_context_exceeded',
-          'runtime_chat_history_rejected',
-          'runtime_tool_contract_rejected',
-          'runtime_text_tool_output',
-        ].includes(error.code))
     const retainedMutationCount = completedMutations.size
-    if (resetHistory) {
-      const objective = continuation.objective
-      const toolStatus = toolOutcomes
-        .slice(-20)
-        .map(item => `${item.name}: ${item.outcome.ok ? 'erfolgreich' : 'fehlgeschlagen'}`)
-        .join(', ')
-      const verificationStatus = [...pendingTaskCreateVerifications.values()]
-        .map(item => {
-          const conversation = item.kind === 'conversation'
-          const createTool = conversation ? 'chat_create' : 'task_create'
-          const listTool = conversation ? 'chat_list' : 'task_list'
-          if (item.state === 'unknown')
-            return `${createTool} „${item.title}“ in Projekt ${item.projectId}: exakte ${listTool}-Prüfung mit external_id ${item.externalId} erforderlich`
-          if (item.state === 'verified_absent')
-            return `${createTool} „${item.title}“ in Projekt ${item.projectId}: als nicht vorhanden verifiziert; ${createTool} mit derselben external_id ${item.externalId} erneut ausführen`
-          return `${createTool} „${item.title}“ in Projekt ${item.projectId}: als vorhanden verifiziert; nicht erneut anlegen`
-        })
-        .join(', ')
-      continuation.messages = [
-        ...messages.filter(message => message.role === 'system').map(message => structuredClone(message)),
-        {
-          role: 'user',
-          content: [
-            `Setze den begonnenen Auftrag fort: ${objective}`,
-            'Die vorherige lokale Nachrichtenstruktur wurde nach einer Laufzeitstörung zurückgesetzt. Lies den aktuellen Projekt- und Aufgabenstand erneut ein, bevor du weitere Änderungen ausführst.',
-            `Bisherige Toolbilanz: ${toolSuccesses} erfolgreich, ${toolFailures} fehlgeschlagen.${toolStatus ? ` ${toolStatus}.` : ''}`,
-            verificationStatus ? `Offene Schreibverifikation: ${verificationStatus}.` : '',
-            'Bereits erfolgreich ausgeführte, wiederholbare Änderungen sind im Fortsetzungs-Checkpoint geschützt und dürfen nicht doppelt ausgeführt werden.',
-          ]
-            .filter(Boolean)
-            .join('\n\n'),
-        },
-      ]
-    }
+    continuation.recovery = { reason: interruption.code, ...(contextTargetTokens ? { contextTargetTokens } : {}) }
     const diagnostic = interruption.diagnostic
     const finalText = repeatedOutput
       ? [
@@ -1212,7 +1183,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               publicControlPartial,
               `Die lokale Modellrunde ${round} wurde vor dem Abschluss unterbrochen: ${interruption.message}`,
               interruption.code === 'runtime_context_exceeded'
-                ? 'Aktuelle Tool-Ergebnisse wurden nicht abgeschnitten. Für die Fortsetzung bitte kleinere Dateiabschnitte, engere Suchfilter oder die Seitennavigation des jeweiligen Werkzeugs verwenden.'
+                ? 'Der vollständige Arbeitskontext bleibt lokal erhalten. Für das begrenzte Modellfenster werden ältere Abschnitte nur mit abrufbaren Originalen verdichtet; nicht passende Pflichtinhalte bleiben ausdrücklich offen.'
                 : '',
               diagnostic
                 ? `Diagnose: ${interruption.code}; Abschluss: ${diagnostic.finishReason}; Dauer: ${(diagnostic.durationMs / 1000).toFixed(1)} s; öffentliche Zeichen: ${diagnostic.receivedCharacters}${diagnostic.outputTokens !== undefined ? `; gemeldete Ausgabetokens: ${diagnostic.outputTokens}` : ''}.`
@@ -1222,7 +1193,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
                 ? `Der bisherige Arbeitsfortschritt bleibt erhalten (${toolSuccesses} Tool-Aufrufe erfolgreich, ${toolFailures} fehlgeschlagen).`
                 : retainedMutationCount
                   ? `Der Fortsetzungsstand bleibt erhalten; ${retainedMutationCount} bereits erfolgreiche Änderungen bleiben vor identischer Wiederholung geschützt.`
-                  : 'Der Auftrag wurde in einen bereinigten Fortsetzungsstand überführt.',
+                  : 'Der vollständige Auftrag und sein Arbeitskontext sind zur Fortsetzung gesichert.',
               'Du kannst direkt weiterarbeiten; Luczor liest dabei den aktuellen Zustand erneut ein und wiederholt bereits erfolgreiche Änderungen nicht.',
             ]
               .filter(Boolean)
@@ -1238,7 +1209,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               round,
               tool_successes: toolSuccesses,
               tool_failures: toolFailures,
-              history_reset: resetHistory,
+              history_reset: false,
             },
           },
         })
@@ -1370,6 +1341,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     let res
     const inferenceStarted = performance.now()
     let retryInRound = 0
+    let contextRecoveryAttempted = false
     while (true) {
       executionGate.assert(execution)
       if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
@@ -1392,6 +1364,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         ? { messages: candidateMessages, report: undefined }
         : fitRequestContext(candidateMessages, availableTools, {
             contextTokens: inferenceGateway.contextTokens,
+            targetTokens: contextTargetTokens,
+            compactCurrentTurn: true,
             retrievalAvailable: availableTools.some(tool => tool.function.name === 'context_read_history'),
           })
       const requestMessages = fittedContext.messages
@@ -1494,6 +1468,31 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
             statusEchoRetries++
             retryInRound++
             opts.onProgress?.({ phase: 'regenerating', round: round + 1, attempt: retryInRound })
+            continue
+          }
+        }
+        if (
+          !resolvedRoute.externalOneShot &&
+          inferenceGateway.target === 'local_llama_cpp' &&
+          error instanceof LocalInferenceError &&
+          error.code === 'runtime_context_exceeded' &&
+          !contextRecoveryAttempted &&
+          availableTools.some(tool => tool.function.name === 'context_read_history')
+        ) {
+          contextRecoveryAttempted = true
+          const target = Math.max(1024, Math.floor((fittedContext.report?.estimatedInputTokens ?? 8192) * 0.65))
+          const smaller = fitRequestContext(candidateMessages, availableTools, {
+            contextTokens: inferenceGateway.contextTokens,
+            targetTokens: target,
+            retrievalAvailable: true,
+            compactCurrentTurn: true,
+          })
+          // Retry only if fewer tokens are actually submitted; no tool is replayed.
+          if (smaller.report.estimatedInputTokens < (fittedContext.report?.estimatedInputTokens ?? 0)) {
+            contextTargetTokens = target
+            await emitCheckpoint(checkpoint())
+            opts.onResponseReset?.({ round: round + 1 })
+            opts.onProgress?.({ phase: 'regenerating', round: round + 1, attempt: 1 })
             continue
           }
         }
@@ -1756,6 +1755,9 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         routeDecisionId: resolvedRoute.decision?.id,
         tokenUsage: assistance?.withUsage(tokenCounter.snapshot()) ?? tokenCounter.snapshot(),
         continuation: pendingVerification && pendingTaskCreateTouched ? checkpoint() : undefined,
+        workingContext: resolvedRoute.externalOneShot
+          ? undefined
+          : { ...checkpoint(), messages: [...structuredClone(messages), { role: 'assistant', content: finalText }] },
         ...(inlineGoal ? { goalReport: lastGoalReport, goalReviewVerified } : {}),
       }
     }
@@ -2219,6 +2221,23 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         continue
       }
 
+      if (
+        tool.mutating &&
+        uncertainMutations.has(completedMutationKey(call.name, call.arguments, projectId)) &&
+        !['task_create', 'chat_create'].includes(call.name)
+      ) {
+        const outcome: Outcome = {
+          ok: false,
+          error:
+            'Dieser Schreibaufruf hat im gesicherten Kontext kein bestätigtes Ergebnis. Eine automatische Wiederholung ist gesperrt; aktuellen Zustand lesend prüfen und den Vorgang ausdrücklich klären.',
+        }
+        toolFailures++
+        toolOutcomes.push({ name: call.name, outcome })
+        recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
+        messages.push(outcomeMessage(call.id, call.name, outcome))
+        continue
+      }
+
       // Human-in-the-loop approval.
       // Input and process actions may legitimately repeat at a later desktop state.
       const reusableMutation =
@@ -2378,6 +2397,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           }
           executionGate.assert(execution)
           signal.throwIfAborted()
+          if (tool.mutating) {
+            uncertainMutations.add(completionKey)
+            await emitCheckpoint(safeProgressCheckpoint())
+            executionGate.assert(execution)
+            signal.throwIfAborted()
+          }
           const receipt = tool.mutating
             ? await opts.effectJournal?.before({ ...call, arguments: executionArguments })
             : undefined
@@ -2408,6 +2433,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         })
         executionGate.assert(execution)
         const outcome = toolRecovery.record(call.name, executionArguments, normalizeToolOutcome(output))
+        if (outcome.ok) {
+          uncertainMutations.delete(completionKey)
+          // Repeated identical reads or cached writes cannot renew a goal section.
+          if (![GOAL_REPORT_NAME, 'tools_select', 'agent_assist_status'].includes(call.name))
+            successfulOperations.add(mutationKey(call.name, executionArguments))
+        }
         const completeGoalTextRead =
           call.name !== GOAL_READ_RESULT_NAME ||
           (!!output && typeof output === 'object' && 'truncated' in output && output.truncated === false)
@@ -2615,6 +2646,19 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         throw new DOMException('Aborted', 'AbortError')
       }
     }
+    if (
+      inlineGoal &&
+      !synthesisOnly &&
+      round + 1 >= roundLimit &&
+      successfulOperations.size > sectionProgress &&
+      lastGoalReport?.status !== 'blocked'
+    ) {
+      // Continue inside this exact run while a section has made fresh tool
+      // progress. No synthetic user turn, new admission, or discarded history.
+      sectionProgress = successfulOperations.size
+      roundLimit = round + 1 + maxRounds
+      await emitCheckpoint(checkpoint())
+    }
   }
 
   return {
@@ -2628,7 +2672,15 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     inferenceTarget: inferenceGateway.target,
     routeDecisionId: resolvedRoute.decision?.id,
     tokenUsage: assistance?.withUsage(tokenCounter.snapshot()) ?? tokenCounter.snapshot(),
-    continuation: resolvedRoute.externalOneShot ? undefined : checkpoint(),
+    continuation: resolvedRoute.externalOneShot
+      ? undefined
+      : {
+          ...checkpoint(),
+          recovery: {
+            reason: inlineGoal ? 'stagnation' : 'round_limit',
+            ...(contextTargetTokens ? { contextTargetTokens } : {}),
+          },
+        },
     ...(inlineGoal
       ? {
           goalReport: {

@@ -399,6 +399,7 @@ pub async fn local_graph_read_snippets(
     project_id: String,
     evidence_ids: Vec<String>,
     max_total_bytes: Option<usize>,
+    query: Option<String>,
 ) -> Result<GraphSnippetResult, String> {
     ensure_main_webview(&window)?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -408,6 +409,7 @@ pub async fn local_graph_read_snippets(
             &project_id,
             evidence_ids,
             max_total_bytes,
+            query.as_deref(),
         )
     })
     .await
@@ -934,9 +936,13 @@ fn read_snippets<D: GraphDatabaseProvider>(
     project_id: &str,
     evidence_ids: Vec<String>,
     max_total_bytes: Option<usize>,
+    query: Option<&str>,
 ) -> Result<GraphSnippetResult, String> {
     validate_principal_id(principal_id)?;
     validate_project_id(project_id)?;
+    if query.is_some_and(|value| value.chars().count() > MAX_QUERY_CHARS) {
+        return Err("Repository snippet query exceeds 4096 characters.".into());
+    }
     if evidence_ids.len() > MAX_SEARCH_HITS {
         return Err("At most 30 repository evidence IDs can be materialized.".into());
     }
@@ -1021,13 +1027,13 @@ fn read_snippets<D: GraphDatabaseProvider>(
             continue;
         }
         let (redacted, redactions) = redact_sensitive_lines(&content);
-        let snippet = truncate_utf8_bytes(&redacted, MAX_SNIPPET_BYTES.min(remaining));
+        let (snippet, start_line, end_line) =
+            focused_snippet(&redacted, query, MAX_SNIPPET_BYTES.min(remaining));
         used += snippet.len();
-        let end_line = snippet.lines().count().max(1);
         snippets.push(GraphSnippet {
             evidence_id,
             relative_path,
-            start_line: 1,
+            start_line,
             end_line,
             content: snippet,
             content_hash: indexed_hash,
@@ -1036,6 +1042,60 @@ fn read_snippets<D: GraphDatabaseProvider>(
     }
 
     Ok(GraphSnippetResult { snippets, omitted })
+}
+
+/// Deliver evidence near the requested symbol/topic instead of always losing
+/// matches below the file header. Redaction and full-file hash checks happen first.
+fn focused_snippet(content: &str, query: Option<&str>, max_bytes: usize) -> (String, usize, usize) {
+    let terms: Vec<String> = query
+        .map(query_terms)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|term| term.len() >= 3)
+        .take(20)
+        .collect();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut best_line = 0;
+    let mut best_score = 0;
+    for (index, line) in lines.iter().enumerate() {
+        let lower = line.to_lowercase();
+        let matched = terms
+            .iter()
+            .filter(|term| lower.contains(term.as_str()))
+            .count();
+        let declaration = [
+            "function ",
+            "fn ",
+            "class ",
+            "struct ",
+            "const ",
+            "def ",
+            "interface ",
+            "type ",
+        ]
+        .iter()
+        .any(|marker| lower.contains(marker));
+        let score = matched * 4 + usize::from(matched > 0 && declaration) * 2;
+        if score > best_score {
+            best_line = index;
+            best_score = score;
+        }
+    }
+    let mut first_line = best_line.saturating_sub(4);
+    // Long preceding lines must not consume the entire budget before the hit.
+    while first_line < best_line
+        && lines[first_line..best_line]
+            .iter()
+            .map(|line| line.len() + 1)
+            .sum::<usize>()
+            > max_bytes / 3
+    {
+        first_line += 1;
+    }
+    let remainder = lines[first_line..].join("\n");
+    let snippet = truncate_utf8_bytes(&remainder, max_bytes);
+    let last_line = first_line + snippet.lines().count().max(1);
+    (snippet, first_line + 1, last_line)
 }
 
 fn unbind_repository<D: GraphDatabaseProvider>(
@@ -3085,6 +3145,46 @@ mod tests {
     }
 
     #[test]
+    fn query_snippet_reaches_late_symbol_and_preserves_line_numbers() {
+        let content = format!(
+            "{}\nexport function resumeAgent() {{\n  return 'bereit';\n}}\n",
+            (1..=500)
+                .map(|line| format!("// unrelated header {line}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let (snippet, first, last) = focused_snippet(&content, Some("resumeAgent"), 400);
+        assert_eq!(first, 497);
+        assert!(snippet.contains("function resumeAgent()"));
+        assert_eq!(last, first + snippet.lines().count() - 1);
+        assert!(snippet.len() <= 400);
+        assert_eq!(content.lines().nth(first - 1), snippet.lines().next());
+    }
+
+    #[test]
+    fn query_snippet_keeps_redaction_and_utf8_budget_with_long_prefix_lines() {
+        let content = format!(
+            "{}\nfunction resumeAgent() {{\nAPI_KEY=secret\nreturn 'Grüße';\n}}",
+            "界".repeat(800)
+        );
+        let (redacted, _) = redact_sensitive_lines(&content);
+        let (snippet, first, _) = focused_snippet(&redacted, Some("resumeAgent"), 75);
+        assert_eq!(first, 2);
+        assert!(snippet.contains("resumeAgent"));
+        assert!(snippet.contains("[REDACTED]"));
+        assert!(!snippet.contains("secret"));
+        assert!(snippet.len() <= 75);
+    }
+
+    #[test]
+    fn query_snippet_without_query_retains_legacy_head_behavior() {
+        let (snippet, first, last) = focused_snippet("first\nsecond\nthird", None, 12);
+        assert_eq!(first, 1);
+        assert_eq!(last, 2);
+        assert_eq!(snippet, "first\nsecond");
+    }
+
+    #[test]
     fn provider_tokens_jwts_and_credential_dsns_are_redacted() {
         let content = concat!(
             "provider_value = \"ghp_1234567890abcdefghijklmnopqrstuvwxyz\"\n",
@@ -3331,6 +3431,7 @@ mod tests {
             project,
             vec![alpha_hit.evidence_id.clone()],
             Some(32 * 1024),
+            None,
         )
         .expect("materialize alpha snippet");
         assert_eq!(alpha_snippets.snippets.len(), 1);
@@ -3373,6 +3474,7 @@ mod tests {
             project,
             vec![alpha_hit.evidence_id.clone()],
             Some(32 * 1024),
+            Some("MemoryStore"),
         )
         .expect("check stale snippet hash");
         assert!(stale_snippet.snippets.is_empty());

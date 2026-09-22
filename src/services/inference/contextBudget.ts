@@ -262,6 +262,15 @@ function archiveNote(
       index,
       type: label,
       ...(message.role === 'tool' ? { name: message.name, callId: message.tool_call_id } : {}),
+      ...(message.role === 'assistant' && message.tool_calls?.length
+        ? {
+            calls: message.tool_calls.map(call => ({
+              id: call.id,
+              name: call.function.name,
+              argumentsInOriginal: true,
+            })),
+          }
+        : {}),
       excerpt: structured ? content : completeLineExcerpt(content, perItem),
       truncated: compacted || content.length > perItem,
     }
@@ -293,6 +302,8 @@ export function fitRequestContext(
     retrievalAvailable?: boolean
     summarizeWithoutReader?: boolean
     readerName?: string
+    /** Local loop only: complete original tool rounds remain available through the reader. */
+    compactCurrentTurn?: boolean
   } = {}
 ): { messages: WireMessage[]; report: ContextBudgetReport } {
   const window = options.contextTokens && options.contextTokens > 0 ? options.contextTokens : 32768
@@ -337,6 +348,7 @@ export function fitRequestContext(
       )
     }
   }
+  const policyPrepared = structuredClone(messages)
   // Compact old complete user rounds only if removing optional context was
   // insufficient. Keep source indices stable for exact archive retrieval.
   const userIndices = source.flatMap((message, i) => (message.role === 'user' ? [i] : []))
@@ -363,9 +375,96 @@ export function fitRequestContext(
       if (total() <= target) break
     }
   }
-  // Current evidence is indivisible. A planning target is not permission to
-  // shorten tool responses; native tokenization/growth decides actual capacity.
-  // Only historical archive notes above contain explicitly labeled excerpts.
+  let shortenedToolResults = 0
+  if (total() > target && options.retrievalAvailable && options.compactCurrentTurn) {
+    // A long agent run has just one user turn. Archive complete assistant/tool
+    // batches too, or that run could never compact no matter how many tools ran.
+    // Preserve every user instruction and the two most recent batches verbatim.
+    const blocks: number[][] = []
+    for (let i = 0; i < source.length; i++) {
+      const message = source.at(i)!
+      if (message.role !== 'assistant') continue
+      const block = [i]
+      const outstanding = new Set(message.tool_calls?.map(call => call.id) ?? [])
+      while (source.at(i + 1)?.role === 'tool') {
+        const receipt = source.at(++i)!
+        block.push(i)
+        if (receipt.role === 'tool') outstanding.delete(receipt.tool_call_id)
+      }
+      if (!outstanding.size && block.every(index => !removed.includes(index))) blocks.push(block)
+    }
+    // Start from the already privacy/policy-fitted system messages. Original
+    // archive indices are retained explicitly, never inferred from this projection.
+    const prepared = policyPrepared
+    for (const block of blocks.slice(0, -2)) {
+      removed.push(...block)
+      const indices = [...new Set(removed)].sort((left, right) => left - right)
+      const omitted = new Set(indices)
+      messages.splice(0, messages.length, ...prepared.filter((_, index) => !omitted.has(index)))
+      const firstConversation = messages.findIndex(message => message.role !== 'system')
+      messages.splice(
+        firstConversation < 0 ? messages.length : firstConversation,
+        0,
+        archiveNote(source, indices, Math.min(2400, target), options.readerName)
+      )
+      if (total() <= target) break
+    }
+    // A single large tool response can exceed the whole window. Retain its
+    // original in the archive and provide an explicit retrievable projection,
+    // including complete tool IDs. User text and tool-call arguments never trim.
+    if (total() > target) {
+      for (const message of messages) {
+        if (message.role !== 'tool' || message.content.length < 1800) continue
+        const index = source.findIndex(
+          candidate =>
+            candidate.role === 'tool' &&
+            candidate.tool_call_id === message.tool_call_id &&
+            candidate.content === message.content
+        )
+        if (index < 0) continue
+        let projection: unknown
+        try {
+          projection = compactToolOutput(JSON.parse(message.content), 1000)
+        } catch {
+          projection = { textOmitted: true }
+        }
+        const content = JSON.stringify({
+          contextCompacted: true,
+          originalCharacters: message.content.length,
+          original: { tool: options.readerName ?? 'context_read_history', index, offset: 0 },
+          projection,
+          guidance:
+            'Auszug, kein vollständiger Beleg. Fehlende Details vor darauf beruhenden Entscheidungen mit dem Archivwerkzeug lesen. Bestätigte Aktionen nicht wiederholen.',
+        })
+        if (content.length >= message.content.length) continue
+        message.content = content
+        prepared.splice(index, 1, message)
+        shortenedToolResults++
+        if (total() <= target) break
+      }
+    }
+    // Even a single completed write can have arguments larger than the window.
+    // Archive the complete pair as a final step instead of corrupting its JSON
+    // or losing the mutation receipt. Its original stays readable in bounded pages.
+    if (total() > target) {
+      for (const block of blocks.slice(-2)) {
+        removed.push(...block)
+        const indices = [...new Set(removed)].sort((left, right) => left - right)
+        const omitted = new Set(indices)
+        messages.splice(0, messages.length, ...prepared.filter((_, index) => !omitted.has(index)))
+        const firstConversation = messages.findIndex(message => message.role !== 'system')
+        messages.splice(
+          firstConversation < 0 ? messages.length : firstConversation,
+          0,
+          archiveNote(source, indices, Math.min(2400, target), options.readerName)
+        )
+        if (total() <= target) break
+      }
+      shortenedToolResults = messages.filter(
+        message => message.role === 'tool' && message.content.startsWith('{"contextCompacted":true,')
+      ).length
+    }
+  }
   const categories = contextBreakdown(messages, tools)
   const estimatedInputTokens = total()
   return {
@@ -376,7 +475,7 @@ export function fitRequestContext(
       targetTokens: target,
       overTarget: estimatedInputTokens > target,
       summarizedMessages: removed.length,
-      shortenedToolResults: 0,
+      shortenedToolResults,
     },
   }
 }

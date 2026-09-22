@@ -6,8 +6,10 @@
 
 import { reactive } from 'vue'
 import { Store } from '@tauri-apps/plugin-store'
+import { isTauri } from '@tauri-apps/api/core'
 
 const FILE = 'luczor.settings.json'
+const BROWSER_THEME_KEY = 'luczor.ui.theme'
 
 export type AccentName = 'cyan' | 'emerald' | 'violet' | 'amber' | 'rose'
 export type HudPosition = 'br' | 'bl' | 'tr' | 'tl'
@@ -42,7 +44,7 @@ export function appearanceAccentColor(): string {
 
 export const appearance = reactive({
   accent: 'violet' as AccentName,
-  theme: 'dark' as ThemeName,
+  theme: readBrowserTheme() ?? ('dark' as ThemeName),
   hudVisible: true,
   hudPosition: 'br' as HudPosition,
   reduceMotion: false,
@@ -131,10 +133,28 @@ export function isThemeName(value: unknown): value is ThemeName {
   return value === 'dark' || value === 'light' || value === 'system'
 }
 
+function readBrowserTheme(): ThemeName | null {
+  if (isTauri()) return null
+  try {
+    const value = window.localStorage.getItem(BROWSER_THEME_KEY)
+    return isThemeName(value) ? value : null
+  } catch {
+    return null
+  }
+}
+
 /** Persist the theme for this device and apply it immediately. */
 export async function setTheme(theme: ThemeName): Promise<void> {
   appearance.theme = theme
   applyAppearance()
+  if (!isTauri()) {
+    try {
+      window.localStorage.setItem(BROWSER_THEME_KEY, theme)
+    } catch {
+      // Restricted browser storage must not prevent changing the current theme.
+    }
+    return
+  }
   try {
     const store = await Store.load(FILE)
     await store.set('ui_theme', theme)
@@ -151,6 +171,11 @@ export async function toggleTheme(): Promise<void> {
 }
 
 export async function loadAppearance(): Promise<void> {
+  if (!isTauri()) {
+    appearance.theme = readBrowserTheme() ?? appearance.theme
+    applyAppearance()
+    return
+  }
   try {
     const store = await Store.load(FILE)
     const acc = await store.get<string>('ui_accent')

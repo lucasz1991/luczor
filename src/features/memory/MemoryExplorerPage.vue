@@ -2,15 +2,15 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import AiIcon from '@/components/ai/AiIcon.vue'
 import MemoryDreamPanel from './MemoryDreamPanel.vue'
+import MemoryGraphBackdrop from './MemoryGraphBackdrop.vue'
 import MemoryMetadataEditor from './MemoryMetadataEditor.vue'
 import { MEMORY_SYSTEMS } from './graph'
 import { loadMemoryGraphDisplay } from './graphDisplay'
 import { useMemoryGraphData } from './useMemoryGraphData'
 
 /**
- * The knowledge space itself is the app backdrop (MemoryGraphBackdrop, sharp while this page is
- * open). This page only floats the controls over it: a glass toolbar, a dream sidebar on the
- * left, the inspector on the right and a modal for the shared server search.
+ * This page owns the graph renderer and its visual data lifetime. Closing the page removes
+ * both, while chat inference and memory maintenance remain owned by the app.
  */
 const props = defineProps<{ projects: Array<{ id: string; name: string }>; projectId: string }>()
 const emit = defineEmits<{ close: []; settings: [] }>()
@@ -52,9 +52,13 @@ onMounted(() => {
   void nextTick(() => heading.value?.focus())
   window.addEventListener('keydown', onKey)
 })
-onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKey)
+  data.stopListening()
+})
 </script>
 <template>
+  <MemoryGraphBackdrop />
   <main class="main-col memory-page" :class="{ 'has-dream': showDream, 'has-inspector': showInspector }">
     <!-- Floating toolbar -->
     <header class="memory-bar">

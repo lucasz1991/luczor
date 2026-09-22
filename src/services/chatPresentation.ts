@@ -78,21 +78,11 @@ export function compactHistory(messages: WireMessage[], maxTokens: number): Wire
   return selected
 }
 
-/** Local inference budgets the complete prompt with its actual tokenizer.
- * Only bound the IPC envelope here; do not apply the old 2,400-token estimate.
+/** Keep the complete local archive. Only the actual model request is budgeted;
+ * clipping here would make earlier requirements unreachable by the archive tool.
  */
 export function localConversationHistory(messages: WireMessage[]): WireMessage[] {
-  // Remove UI diagnostics before adjacent assistant messages are merged. Storage is unchanged.
-  const normalized = normalizeConversationHistory(cleanLocalHistory(messages))
-  let chars = 0
-  let start = normalized.length
-  while (start > 0 && normalized.length - start < 240) {
-    const next = normalized[start - 1]!
-    if (start < normalized.length && chars + next.content.length > 500_000) break
-    chars += next.content.length
-    start -= 1
-  }
-  return normalizeConversationHistory(normalized.slice(start))
+  return normalizeConversationHistory(cleanLocalHistory(messages))
 }
 
 /**

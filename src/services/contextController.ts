@@ -13,10 +13,15 @@ import {
 } from '@/services/api/luczorApi'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { luczorMemory, type MemoryRecord } from '@/services/memory/luczorMemory'
+import { sessionCandidateFragments } from '@/services/memory/chatContext'
 import { preparedContextFragments } from '@/services/memory/preparedContext'
 import type { MemoryUsageOrigin } from '@/services/memory/usage'
 import { resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
-import { buildLocalRepositoryContext, type LocalRepositoryContext } from '@/services/repositoryGraph'
+import {
+  buildLocalRepositoryContext,
+  type LocalRepositoryContext,
+  type RepositoryRetrievalDiagnostics,
+} from '@/services/repositoryGraph'
 
 const SETTINGS_FILE = 'luczor.settings.json'
 const MAX_CONTEXT_RESPONSE_BYTES = 1024 * 1024
@@ -44,6 +49,8 @@ export type PromptContextDetails = {
   commitSha?: string
   taskType: string
   repositoryApprovalRequired?: boolean
+  repositoryDiagnostics?: RepositoryRetrievalDiagnostics
+  memoryDiagnostics?: { enabled: boolean; active: number; conversationExcerpts: number; contextual: boolean }
 }
 
 function selectLocalMemories(
@@ -87,11 +94,15 @@ export async function buildLocalPromptContextDetails(
   query: string,
   limit = 5,
   taskType = inferTaskType(query),
-  origin: MemoryUsageOrigin = 'chat'
+  origin: MemoryUsageOrigin = 'chat',
+  options: { conversationId?: string; taskContext?: string; includeMemory?: boolean } = {}
 ): Promise<PromptContextDetails> {
   const account = await getVerifiedAccountSnapshot()
   const principalId = account?.principalId ?? (await resolveWorkspacePrincipalId())
+  const memoryPrincipalId = account?.principalId ?? 'device-local'
   const memoryLimit = Math.max(1, Math.min(20, Math.floor(limit)))
+  const includeMemory = options.includeMemory !== false
+  const memoryQuery = options.taskContext?.trim() || query
   const repositoryPromise = buildLocalRepositoryContext(
     principalId,
     projectId,
@@ -100,23 +111,51 @@ export async function buildLocalPromptContextDetails(
     Math.min(8, memoryLimit + 2),
     false,
     'local',
-    origin
+    origin,
+    options.taskContext
   ).catch(() => null)
-  const groupsPromise = Promise.all([
-    luczorMemory.recallLocal({ scope: 'project', projectId, query, limit: memoryLimit, origin }),
-    luczorMemory.recallLocal({ scope: 'user', query, limit: Math.min(2, memoryLimit), origin }),
-    luczorMemory.recallLocal({ scope: 'private', projectId, query, limit: Math.min(2, memoryLimit), origin }),
-  ])
+  const groupsPromise = includeMemory
+    ? Promise.all([
+        luczorMemory
+          .recallLocal({ scope: 'project', projectId, query: memoryQuery, limit: memoryLimit, origin })
+          .catch(() => []),
+        luczorMemory
+          .recallLocal({ scope: 'user', query: memoryQuery, limit: Math.min(2, memoryLimit), origin })
+          .catch(() => []),
+        luczorMemory
+          .recallLocal({ scope: 'private', projectId, query: memoryQuery, limit: Math.min(2, memoryLimit), origin })
+          .catch(() => []),
+      ])
+    : Promise.resolve([[], [], []] as [MemoryRecord[], MemoryRecord[], MemoryRecord[]])
+  const candidatesPromise =
+    includeMemory && options.conversationId
+      ? luczorMemory
+          .recallSessionCandidates({
+            projectId,
+            sessionId: options.conversationId,
+            query: memoryQuery,
+            limit: 2,
+            origin,
+            expectedPrincipalId: memoryPrincipalId,
+          })
+          .catch(() => [])
+      : Promise.resolve([])
   // Optional graph failure must not suppress independent user/project memory.
-  const [repository, groups] = await Promise.all([repositoryPromise, groupsPromise])
-  const prepared = await preparedContextFragments(projectId, query, origin).catch(() => [])
+  const [repository, groups, candidates] = await Promise.all([repositoryPromise, groupsPromise, candidatesPromise])
+  const prepared = includeMemory ? await preparedContextFragments(projectId, memoryQuery, origin).catch(() => []) : []
   const current = await getVerifiedAccountSnapshot()
-  if (current?.principalId !== account?.principalId || current?.serverInstance !== account?.serverInstance)
+  if (
+    current?.principalId !== account?.principalId ||
+    current?.serverInstance !== account?.serverInstance ||
+    (current?.principalId ?? (await resolveWorkspacePrincipalId())) !== principalId
+  )
     throw new Error('Konto während des lokalen Kontextabrufs geändert.')
   const memories = selectLocalMemories(groups, memoryLimit)
+  const recollections = options.conversationId ? sessionCandidateFragments(candidates, options.conversationId) : []
   return {
     fragments: [
       ...prepared,
+      ...recollections,
       ...(
         repository?.fragments ?? (repository?.text ? [{ id: 'repository', content: repository.text, score: 0 }] : [])
       ).map(fragment => ({
@@ -158,6 +197,13 @@ export async function buildLocalPromptContextDetails(
     commitSha: repository?.commitSha,
     taskType,
     repositoryApprovalRequired: false,
+    repositoryDiagnostics: repository?.diagnostics,
+    memoryDiagnostics: {
+      enabled: includeMemory,
+      active: memories.length,
+      conversationExcerpts: recollections.length,
+      contextual: memoryQuery !== query,
+    },
   }
 }
 

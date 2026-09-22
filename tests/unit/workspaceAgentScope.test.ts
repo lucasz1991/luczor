@@ -17,12 +17,14 @@ const mocks = vi.hoisted(() => ({
   invoke: vi.fn(),
   hud: { killSwitch: false },
 }))
-vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
+vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke, isTauri: () => false }))
 vi.mock('@/services/inference/coordinator', () => ({
   resolveInferenceRouteForTurn: mocks.resolve,
   hashInferenceEgressRequest: vi.fn(),
 }))
-vi.mock('@/services/api/luczorApi', () => ({ getApiConfigSnapshot: vi.fn() }))
+vi.mock('@/services/api/luczorApi', () => ({
+  getApiConfigSnapshot: vi.fn(async () => ({ baseUrl: '', deviceKey: '', clientId: 'scope-fixture' })),
+}))
 vi.mock('@/services/tools/registry', () => ({ getTool: mocks.getTool, toOpenAITools: mocks.descriptors }))
 vi.mock('@/services/approvals', () => ({ awaitApproval: mocks.approve }))
 vi.mock('@/services/executionPolicy', () => ({

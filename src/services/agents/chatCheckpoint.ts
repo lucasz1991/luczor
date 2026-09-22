@@ -25,11 +25,19 @@ export type AgentCheckpoint = {
   principalScopeId?: string
   /** Workspace binding active when this checkpoint was produced. */
   workspaceBindingId?: string
+  /** Bound chat identity; legacy checkpoints are still scoped by their caller. */
+  conversationId?: string
   sessionId: string
   generation: number
   objective: string
   messages: WireMessage[]
+  /** Exact, user/model-selected IDs; revalidated against the current authorized pool. */
+  selectedTools?: string[]
+  /** Request projection hints only. Never replace the original message archive. */
+  recovery?: { reason: string; contextTargetTokens?: number }
   completedMutations: [string, ToolOutcome][]
+  /** Exact payloads whose side effects have no confirmed success; never replay automatically. */
+  uncertainMutations?: string[]
   /** Ambiguous task/conversation POSTs must be checked before the same logical create can run again. */
   pendingTaskCreateVerifications?: PendingTaskCreateVerification[]
   ephemeralDataUsed: boolean

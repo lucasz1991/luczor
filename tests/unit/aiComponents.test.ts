@@ -34,6 +34,8 @@ describe('AI component rendering contracts', () => {
     expect(html).toContain('Chats in My project')
     expect(html).toContain('Freigabe nötig')
     expect(html).toContain('Neuer Chat im Projekt')
+    expect(html).toContain('aria-label="Projektordner öffnen"')
+    expect(html).not.toContain('ai-rail__toggle')
     expect(html).toContain('&lt;script&gt;title&lt;/script&gt;')
     expect(html).not.toContain('<script>title</script>')
     expect(html).toMatch(/class="[^"]*is-current[^"]*" aria-current="page"/)
@@ -137,7 +139,7 @@ describe('AI component rendering contracts', () => {
           }),
       })
     )
-    expect(html).toContain('aria-label="Erlaubte Modelle für diesen Chat wählen"')
+    expect(html).toContain('aria-label="Erlaubte Modelle für diesen Chat: Nur extern"')
     expect(html).toContain('ai-route-mode')
     expect(html).toContain('ai-prompt__heading')
     expect(html).not.toContain('ai-model-button')

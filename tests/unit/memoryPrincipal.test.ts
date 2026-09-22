@@ -136,6 +136,156 @@ describe('desktop memory account isolation', () => {
     expect(harness.fetch).not.toHaveBeenCalled()
   })
 
+  it('recalls durable automatic observations only in their source conversation without promoting or synchronizing them', async () => {
+    await setServerEnabled(true)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { planAutomaticChatCapture } = await import('@/services/memory/chatContext')
+    const memory = new LuczorMemoryService()
+    const [input] = planAutomaticChatCapture({
+      projectId: 'p1',
+      conversationId: 'chat-1',
+      expectedPrincipalId: harness.currentSnapshot.principalId,
+      message: {
+        id: 'user-1',
+        role: 'user',
+        content: 'Laravel Queue Jobs müssen vor dem Release getestet werden.',
+        ts: Date.now(),
+      },
+    })
+    const record = await memory.remember(input!)
+    expect(record).toMatchObject({ status: 'candidate', retention: 'durable', visibility: 'private', synced: false })
+    expect(record.expiresAt).toBeUndefined()
+    vi.advanceTimersByTime(2 * 24 * 60 * 60_000)
+    const restarted = new LuczorMemoryService()
+    const query = { projectId: 'p1', sessionId: 'chat-1', query: 'Laravel Queue' }
+    expect(await restarted.recallSessionCandidates(query)).toEqual([
+      expect.objectContaining({ id: record.id, status: 'candidate' }),
+    ])
+    expect(await restarted.recallSessionCandidates({ ...query, sessionId: 'chat-2' })).toEqual([])
+    expect(await restarted.recallSessionCandidates({ ...query, projectId: 'p2' })).toEqual([])
+    expect(await restarted.recallSessionCandidates({ ...query, query: 'Urlaubsplanung' })).toEqual([])
+    expect(await restarted.recallLocal({ projectId: 'p1', query: 'Laravel Queue' })).toEqual([])
+    expect(await restarted.pendingSyncCount()).toBe(0)
+    expect(harness.fetch).not.toHaveBeenCalled()
+    harness.currentSnapshot = accountSnapshot(2, 'key-b')
+    expect(await restarted.recallSessionCandidates(query)).toEqual([])
+  })
+
+  it('does not rewrite identical automatic source excerpts or inflate their interest during repeated capture and recall', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { planAutomaticChatCapture } = await import('@/services/memory/chatContext')
+    const memory = new LuczorMemoryService()
+    const [input] = planAutomaticChatCapture({
+      projectId: 'p1',
+      conversationId: 'chat-1',
+      expectedPrincipalId: harness.currentSnapshot.principalId,
+      message: {
+        id: 'assistant-1',
+        role: 'assistant',
+        content: 'Der Laravel Queue Fehler wurde laut Analyse behoben.',
+        ts: Date.now(),
+      },
+    })
+    const original = await memory.remember(input!)
+    const encrypted = harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')
+    vi.advanceTimersByTime(1000)
+    const repeated = await memory.remember(input!)
+    expect(repeated.id).toBe(original.id)
+    expect(repeated.updatedAt).toBe(original.updatedAt)
+    expect(harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')).toBe(encrypted)
+    for (let count = 0; count < 3; count++)
+      await memory.recallSessionCandidates({ projectId: 'p1', sessionId: 'chat-1', query: 'Laravel' })
+    expect(harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')).toBe(encrypted)
+    expect(repeated.meta?.memory_metadata).toMatchObject({
+      interest: null,
+      evidence: { status: 'inferred', verifiedAt: null },
+    })
+  })
+
+  it('enforces persisted message quotas across progress bursts, concurrent capture and restart while reserving final results', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { planAutomaticChatCapture } = await import('@/services/memory/chatContext')
+    const memory = new LuczorMemoryService()
+    const inputs = (offset: number, phase: 'progress' | 'completed' = 'progress') =>
+      planAutomaticChatCapture({
+        projectId: 'p1',
+        conversationId: 'chat-1',
+        expectedPrincipalId: harness.currentSnapshot.principalId,
+        phase,
+        message: {
+          id: 'assistant-1',
+          segmentId: `commentary-${offset}`,
+          role: 'assistant',
+          content: Array.from(
+            { length: 8 },
+            (_, index) => `Ergebnis ${offset + index}: Der Queue Test benötigt die passende Konfiguration.`
+          ).join('\n\n'),
+          ts: Date.now(),
+        },
+      })
+    expect(
+      await Promise.all([
+        memory.captureChatExcerpts(inputs(0)),
+        memory.captureChatExcerpts(inputs(8)),
+        memory.captureChatExcerpts(inputs(16)),
+      ])
+    ).toEqual([8, 8, 0])
+    const restarted = new LuczorMemoryService()
+    expect(await restarted.captureChatExcerpts(inputs(16))).toBe(0)
+    expect(await restarted.captureChatExcerpts(inputs(16, 'completed'))).toBe(8)
+    expect(await restarted.captureChatExcerpts(inputs(24, 'completed'))).toBe(0)
+    const inspected = await restarted.inspectLocal()
+    expect(inspected.total).toBe(24)
+    expect(inspected.records.every(record => record.status === 'candidate')).toBe(true)
+    expect(harness.fetch).not.toHaveBeenCalled()
+  })
+
+  it('requires host chat evidence and honors disabled injection and erasure for candidate context', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    await memory.remember({
+      content: 'Laravel without an actual source message.',
+      projectId: 'p1',
+      sessionId: 'chat-1',
+      source: 'assistant',
+    })
+    const actual = await memory.remember({
+      content: 'Laravel requires a release check.',
+      projectId: 'p1',
+      sessionId: 'chat-1',
+      source: 'user',
+      writeIntent: 'automatic',
+      origin: { messageId: 'actual', conversationId: 'chat-1', role: 'user' },
+    })
+    const query = { projectId: 'p1', sessionId: 'chat-1', query: 'Laravel' }
+    expect((await memory.recallSessionCandidates(query)).map(record => record.id)).toEqual([actual.id])
+    harness.files.get('luczor.settings.json')!.set('memory_inject', false)
+    expect(await memory.recallSessionCandidates(query)).toEqual([])
+    harness.files.get('luczor.settings.json')!.set('memory_inject', true)
+    await memory.forget('project', actual.id, { projectId: 'p1' })
+    expect(await memory.recallSessionCandidates(query)).toEqual([])
+  })
+
+  it('discards session candidate results if the account changes during local retrieval', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    await memory.remember({
+      content: 'Laravel uses the first account.',
+      projectId: 'p1',
+      source: 'user',
+      writeIntent: 'automatic',
+      origin: { messageId: 'actual', conversationId: 'chat-1', role: 'user' },
+    })
+    harness.getVerifiedAccountSnapshot
+      .mockResolvedValueOnce(harness.currentSnapshot)
+      .mockResolvedValueOnce(accountSnapshot(2, 'key-b'))
+    expect(await memory.recallSessionCandidates({ projectId: 'p1', sessionId: 'chat-1', query: 'Laravel' })).toEqual([])
+  })
+
   it('fills capture tags from known categories while respecting explicit tags and real user priority', async () => {
     await setServerEnabled(false)
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')

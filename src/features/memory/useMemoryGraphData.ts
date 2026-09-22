@@ -15,9 +15,8 @@ import {
 import type { PreparedContextArtifact } from '@/services/memory/maintenance'
 
 /**
- * One shared data source for the knowledge space: the ambient app backdrop and the
- * memory page render the same graph, so loading, filters, selection and the transient
- * born/ghost effects live here instead of in a page component that unmounts.
+ * Shared by the knowledge page's controls and render layer. Only the mounted page owns
+ * subscriptions; closing it releases visual data and invalidates pending results.
  */
 const project = ref('')
 const query = ref('')
@@ -144,6 +143,7 @@ async function load(options: { soft?: boolean } = {}) {
   }
   try {
     const account = await memoryExplorerData.account()
+    if (epoch !== request) return
     const [memories, graphPage, contexts] = await Promise.allSettled([
       memoryExplorerData.inventory({ query: query.value, offset: offset.value, limit: 80 }),
       account && project.value
@@ -151,6 +151,7 @@ async function load(options: { soft?: boolean } = {}) {
         : Promise.reject(new Error('No verified project')),
       account ? memoryExplorerData.artifacts(account.principalId, project.value) : [],
     ])
+    if (epoch !== request) return
     const current = await memoryExplorerData.account()
     if (epoch !== request || current?.principalId !== account?.principalId) return
     inventory.value = memories.status === 'fulfilled' ? memories.value : null
@@ -180,6 +181,7 @@ async function sharedSearch() {
   remoteNotice.value = ''
   try {
     const account = await memoryExplorerData.account()
+    if (epoch !== request) return
     if (!account) throw new Error('No verified account')
     const records = await memoryExplorerData.recall({
       origin: 'inspector',
@@ -188,6 +190,7 @@ async function sharedSearch() {
       query: query.value.slice(0, 256),
       limit: 20,
     })
+    if (epoch !== request) return
     const current = await memoryExplorerData.account()
     if (request !== epoch || current?.principalId !== account.principalId) return
     remote.value = records.map(record => ({
@@ -253,7 +256,7 @@ const memoryChanged = () => {
   }, 900)
 }
 
-/** Idempotent: the first consumer (the app backdrop) wires the listeners for the app's lifetime. */
+/** Idempotent; the mounted knowledge page owns these listeners and timers. */
 function ensureListening() {
   if (listening || typeof window === 'undefined') return
   listening = true
@@ -266,7 +269,7 @@ function ensureListening() {
   }, 1000)
 }
 
-/** Loads once per project unless data is missing or stale (used by the ambient backdrop). */
+/** Loads once per project unless data is missing or stale. */
 function ensureLoaded(projectId: string, maxAgeMs = 300_000) {
   ensureListening()
   if (project.value !== projectId) {
@@ -307,12 +310,13 @@ export function useMemoryGraphData() {
     setSystem,
     focusDreamTarget,
     ensureListening,
+    stopListening,
     ensureLoaded,
   }
 }
 
-/** Test hook: drop listeners and timers created by ensureListening(). */
-export function resetMemoryGraphDataForTests(): void {
+/** Release visualization-only work. Does not stop chat, tracing or memory maintenance. */
+function stopListening(): void {
   if (listening && typeof window !== 'undefined') {
     window.removeEventListener('luczor:api-identity-changing', identityChange)
     window.removeEventListener('luczor:api-identity-changed', identityChanged)
@@ -326,6 +330,14 @@ export function resetMemoryGraphDataForTests(): void {
   transientTimer = undefined
   reloadTimer = undefined
   clear()
+  identityChanging = false
+  transient.value = { born: new Set(), ghosts: [], until: 0 }
+  loadedAt.value = 0
+}
+
+/** Test hook also resets retained view filters. */
+export function resetMemoryGraphDataForTests(): void {
+  stopListening()
   project.value = ''
   query.value = ''
   system.value = ''

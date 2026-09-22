@@ -4,6 +4,111 @@ import { focusedTools } from '@/services/inference/focusedTools'
 import type { WireMessage } from '@/services/inference/types'
 
 describe('shared request budget and evidence retention', () => {
+  it('archives even a huge completed tool-call pair atomically without clipping arguments', async () => {
+    const call = {
+      id: 'large-write',
+      type: 'function' as const,
+      function: { name: 'fs_write', arguments: JSON.stringify({ path: 'exact.ts', content: 'x'.repeat(30000) }) },
+    }
+    const history: WireMessage[] = [
+      { role: 'user', content: 'Write and verify.' },
+      { role: 'assistant', content: '', tool_calls: [call] },
+      { role: 'tool', tool_call_id: call.id, content: '{"ok":true,"revision":"exact-revision"}' },
+    ]
+    const result = fitRequestContext(history, [], {
+      targetTokens: 2000,
+      retrievalAvailable: true,
+      compactCurrentTurn: true,
+    })
+    expect(result.report.overTarget).toBe(false)
+    expect(result.report.summarizedMessages).toBe(2)
+    expect(result.messages.some(message => message.role === 'tool')).toBe(false)
+    expect(JSON.stringify(result.messages)).toContain('exact-revision')
+    expect(history[1]).toEqual({ role: 'assistant', content: '', tool_calls: [call] })
+    const reader = focusedTools('read', () => history).reader
+    const page = (await reader.execute({ index: 1 }, { projectId: 'p' })) as { text: string; nextOffset: number }
+    expect(page.text).toContain('large-write')
+    expect(page.nextOffset).toBe(4000)
+  })
+  it('compacts a long single user task without losing the archive or splitting tool batches', async () => {
+    const history: WireMessage[] = [
+      { role: 'system', content: 'Mandatory policy.' },
+      { role: 'user', content: 'Implement everything. Never delete original.ts.' },
+    ]
+    for (let index = 0; index < 30; index++) {
+      history.push(
+        {
+          role: 'assistant',
+          content: `Progress ${index}`,
+          tool_calls: [
+            {
+              id: `call-${index}`,
+              type: 'function',
+              function: { name: 'fs_read', arguments: JSON.stringify({ path: `src/Ä-${index}.ts` }) },
+            },
+          ],
+        },
+        {
+          role: 'tool',
+          name: 'fs_read',
+          tool_call_id: `call-${index}`,
+          content: JSON.stringify({ ok: true, path: `src/Ä-${index}.ts`, content: 'Exact evidence\n'.repeat(300) }),
+        }
+      )
+    }
+    const original = structuredClone(history)
+    const result = fitRequestContext(history, [], {
+      targetTokens: 6000,
+      retrievalAvailable: true,
+      compactCurrentTurn: true,
+    })
+    expect(result.report.overTarget).toBe(false)
+    expect(result.report.summarizedMessages).toBeGreaterThan(0)
+    expect(result.messages).toContainEqual(history[1])
+    for (const message of result.messages) {
+      if (message.role !== 'tool') continue
+      expect(
+        result.messages.some(
+          parent => parent.role === 'assistant' && parent.tool_calls?.some(call => call.id === message.tool_call_id)
+        )
+      ).toBe(true)
+    }
+    expect(history).toEqual(original)
+    const reader = focusedTools('read', () => history).reader
+    const retained = await reader.execute({ index: 3, limit: 8000 }, { projectId: 'p' })
+    expect(retained).toMatchObject({ text: history[3]!.content, nextOffset: null })
+  })
+
+  it('projects a single oversized tool result only with an available exact reader', () => {
+    const history: WireMessage[] = [
+      { role: 'user', content: 'Read the exact source.' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'huge', type: 'function', function: { name: 'fs_read', arguments: '{"path":"exact.ts"}' } }],
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'huge',
+        content: JSON.stringify({ ok: true, path: 'exact.ts', content: 'x'.repeat(60000) }),
+      },
+    ]
+    const result = fitRequestContext(history, [], {
+      targetTokens: 2000,
+      retrievalAvailable: true,
+      compactCurrentTurn: true,
+    })
+    expect(result.report.overTarget).toBe(false)
+    expect(result.report.shortenedToolResults).toBe(1)
+    expect(result.messages[1]).toEqual(history[1])
+    expect(JSON.parse(result.messages[2]!.content)).toMatchObject({
+      contextCompacted: true,
+      original: { tool: 'context_read_history', index: 2, offset: 0 },
+    })
+    expect(history[2]!.content).toContain('x'.repeat(60000))
+    expect(fitRequestContext(history, [], { targetTokens: 2000, compactCurrentTurn: true }).messages).toEqual(history)
+  })
+
   it('uses the available model window instead of a fixed ten-thousand-token history ceiling', () => {
     const history: WireMessage[] = [{ role: 'system', content: 'Retain the conversation requirements.' }]
     for (let index = 0; index < 12; index++)

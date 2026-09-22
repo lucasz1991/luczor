@@ -1,5 +1,7 @@
 .ai-workspace {
   --ai-accent: var(--cy-bright);
+  --ai-composer-width: 780px;
+  --ai-composer-gutter: 30px;
   grid-template-columns: 296px minmax(0, 1fr) auto;
   padding: 0;
   gap: 0;
@@ -142,7 +144,7 @@
   background: var(--ai-hover);
 }
 .ai-main-composer {
-  padding: 14px 30px 20px;
+  padding: 14px var(--ai-composer-gutter) 20px;
 }
 /* Mini system status is a full-height column beside the navigation; the conversation narrows to make room. */
 .ai-workspace--system-mini .main-col {
@@ -298,6 +300,35 @@
   max-height: 24vh;
   overflow-y: auto;
 }
+/* Status belongs to the same reading column as the prompt, including narrow layouts. */
+.ai-workspace .main-col > :is(.audit, .speech-output, .voice-input-status) {
+  box-sizing: border-box;
+  width: min(var(--ai-composer-width), calc(100% - 2 * var(--ai-composer-gutter)));
+  min-width: 0;
+  margin: 0 auto 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--ai-line);
+  border-radius: 10px;
+  background: var(--ai-canvas);
+  color: var(--ai-muted);
+  font-size: 12px;
+}
+.ai-workspace .speech-output > :first-child,
+.ai-workspace .voice-input-status > div {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.ai-workspace .voice-input-status.is-error {
+  border-color: var(--ai-red);
+}
+.ai-workspace :is(.speech-output, .voice-input-status) button {
+  background: transparent;
+  color: var(--ai-ink);
+  border-color: var(--ai-line-strong);
+}
+.ai-workspace :is(.speech-output, .voice-input-status) button:hover {
+  background: var(--ai-hover);
+}
 .system-panel {
   display: none;
 }
@@ -331,6 +362,9 @@
   }
 }
 @media (max-width: 700px) {
+  .ai-workspace {
+    --ai-composer-gutter: 12px;
+  }
   .ai-workspace,
   .ai-workspace--collapsed {
     grid-template-columns: 56px minmax(0, 1fr) auto;
@@ -349,7 +383,10 @@
     font-size: 12px;
   }
   .ai-main-composer {
-    padding: 8px 12px 14px;
+    padding: 8px var(--ai-composer-gutter) 14px;
+  }
+  .ai-workspace .speech-output {
+    flex-wrap: wrap;
   }
   .ai-workspace--system-mini .main-col {
     margin-inline-start: 160px;

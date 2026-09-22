@@ -77,7 +77,27 @@ describe('focused local tool context', () => {
     await expect(focus.reader.execute({ index: 1, query: 'needle' }, { projectId: 'p' })).rejects.toThrow('wählen')
     await expect(focus.reader.execute({ offset: -1 }, { projectId: 'p' })).rejects.toThrow('Archivsuche')
   })
-  it('returns whole archived JSON and paginates prose only at complete line boundaries', async () => {
+  it('retains exact selected IDs on resume but drops permissions revoked from the current pool', () => {
+    const focus = focusedTools('read', undefined, ['fs_write', 'does_not_exist'])
+    const names = focus.select(pool).map(tool => tool.function.name)
+    expect(names).toContain('fs_write')
+    expect(names).not.toContain('does_not_exist')
+    expect(focus.selected()).toEqual(['fs_write'])
+    focus.select(pool.filter(tool => tool.function.name !== 'fs_write'))
+    expect(focus.selected()).toEqual([])
+  })
+  it('searches and retrieves original tool arguments even with empty assistant prose', async () => {
+    const calls = [
+      { id: 'exact', type: 'function' as const, function: { name: 'fs_write', arguments: '{"path":"src/Ä.ts"}' } },
+    ]
+    const focus = focusedTools('read', () => [{ role: 'assistant', content: '', tool_calls: calls }])
+    expect(await focus.reader.execute({ query: 'src/Ä.ts' }, { projectId: 'p' })).toMatchObject({
+      matches: [{ index: 0 }],
+    })
+    const original = (await focus.reader.execute({ index: 0 }, { projectId: 'p' })) as { text: string }
+    expect(JSON.parse(original.text)).toEqual({ content: '', tool_calls: calls })
+  })
+  it('retrieves huge JSON and long Unicode lines exactly through bounded explicit fragments', async () => {
     const path = '/projekte/' + 'nested/'.repeat(700) + 'e\u0301📁.ts'
     const json = JSON.stringify({ path, output: 'x'.repeat(9000) })
     const prose = `first line\n${path}\nlast line`
@@ -85,16 +105,26 @@ describe('focused local tool context', () => {
       { role: 'tool', tool_call_id: 'a', content: json },
       { role: 'assistant', content: prose },
     ])
-    const structured = await focus.reader.execute({ index: 0 }, { projectId: 'p' })
-    expect(structured).toMatchObject({ text: json, nextOffset: null })
-    const first = (await focus.reader.execute({ index: 1 }, { projectId: 'p' })) as { text: string; nextOffset: number }
-    expect(first.text).toBe(`first line\n${path}\n`)
-    const second = (await focus.reader.execute({ index: 1, offset: first.nextOffset }, { projectId: 'p' })) as {
-      text: string
+    for (const [index, expected] of [json, prose].entries()) {
+      let offset: number | null = 0
+      let result = ''
+      do {
+        const page = (await focus.reader.execute({ index, offset, limit: 4000 }, { projectId: 'p' })) as {
+          text: string
+          nextOffset: number | null
+          fragmentOnly: boolean
+        }
+        expect(page.text.length).toBeLessThanOrEqual(4000)
+        expect(page.fragmentOnly).toBe(true)
+        expect(page.text).not.toMatch(/^[\uDC00-\uDFFF]/u)
+        result += page.text
+        offset = page.nextOffset
+      } while (offset !== null)
+      expect(result).toBe(expected)
     }
-    expect(first.text + second.text).toBe(prose)
-    await expect(focus.reader.execute({ index: 0, offset: 4000 }, { projectId: 'p' })).rejects.toThrow('nextOffset')
-    await expect(focus.reader.execute({ index: 1, offset: 4000 }, { projectId: 'p' })).rejects.toThrow('nextOffset')
+    await expect(focus.reader.execute({ index: 0, limit: 90000 }, { projectId: 'p' })).rejects.toThrow(
+      'Abschnittsgröße'
+    )
   })
   it.each([
     'Die nächste Modellrunde wurde unterbrochen: Tokenzählung und Kontextprüfung · HTTP 200: erfolgreich. Tokenbudget: Eingabe (gezählt) 28.000 · Kontext 43.000 · Ausgabelimit 7.000.',

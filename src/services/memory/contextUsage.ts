@@ -24,7 +24,8 @@ export function createContextUsageObserver(fragments: readonly PromptFragment[],
     let newlyIncluded = 0
     const graphLinks = new Map<string, { id: string; kind: 'memory' | 'artifact'; included: boolean }>()
     for (const fragment of fragments) {
-      if (fragment.source !== 'memory' && fragment.source !== 'repository') continue
+      const sessionCandidate = fragment.source === 'history' && fragment.id.startsWith('session-memory-candidate:')
+      if (fragment.source !== 'memory' && fragment.source !== 'repository' && !sessionCandidate) continue
       const line = records.get(fragment.id)
       const included = !!line && systemText.some(text => text.includes(line))
       const identity = `${target}:${fragment.id}`

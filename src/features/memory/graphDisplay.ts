@@ -9,8 +9,6 @@ export type MemoryGraphDisplay = {
   dreamAnimation: boolean
   autoRotate: boolean
   nodeScale: number
-  /** Show the slowly turning knowledge space blurred behind the whole app. */
-  ambientBackdrop: boolean
 }
 
 export const MEMORY_GRAPH_DISPLAY_KEY = 'memory_graph_display'
@@ -23,7 +21,6 @@ export const DEFAULT_MEMORY_GRAPH_DISPLAY: MemoryGraphDisplay = {
   dreamAnimation: true,
   autoRotate: false,
   nodeScale: 1,
-  ambientBackdrop: true,
 }
 
 export const memoryGraphDisplay = shallowRef<MemoryGraphDisplay>({ ...DEFAULT_MEMORY_GRAPH_DISPLAY })
@@ -38,7 +35,6 @@ export function normalizeMemoryGraphDisplay(value: unknown): MemoryGraphDisplay 
     dreamAnimation: raw.dreamAnimation !== false,
     autoRotate: raw.autoRotate === true,
     nodeScale: Math.min(1.6, Math.max(0.6, scale)),
-    ambientBackdrop: raw.ambientBackdrop !== false,
   }
 }
 

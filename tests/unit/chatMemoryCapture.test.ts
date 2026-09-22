@@ -13,44 +13,73 @@ const compiled = ts.transpileModule(`${app.slice(start, end)}\nrememberExchange`
 function capture(autoRemember = true) {
   const remember = vi.fn()
   const messages = [
-    { id: 'actual-user', role: 'user', content: 'Eine echte Nutzerentscheidung.', ts: 10 },
-    { id: 'previous-answer', role: 'assistant', content: 'Vorheriges Ergebnis.', ts: 20 },
-    { id: 'answer', role: 'assistant', content: 'Die ausgeführte Entscheidung.', ts: 30 },
+    {
+      id: 'actual-user',
+      role: 'user',
+      content: 'Eine echte Nutzerentscheidung.',
+      ts: 10,
+      meta: {} as Record<string, unknown>,
+    },
+    {
+      id: 'previous-answer',
+      role: 'assistant',
+      content: 'Vorheriges Ergebnis.',
+      ts: 20,
+      meta: {} as Record<string, unknown>,
+    },
+    {
+      id: 'answer',
+      role: 'assistant',
+      content: 'Die ausgeführte Entscheidung.',
+      ts: 30,
+      meta: {} as Record<string, unknown>,
+    },
   ]
   const read = vi.fn(() => messages)
   const fn = runInNewContext(compiled, {
     getMemoryPrefs: async () => ({ autoRemember }),
     executionGate: { assert: vi.fn() },
     mutations: { getConversationMessages: read },
-    luczorMemory: { remember },
+    captureAutomaticChatMemory: remember,
     safeTrim: (value: unknown) => (typeof value === 'string' ? value.trim() : ''),
     refreshMemoryCandidates: async () => undefined,
     refreshStatus: async () => undefined,
     console,
   }) as (...args: unknown[]) => Promise<void>
-  return { remember, read, fn }
+  return { remember, read, fn, messages }
 }
 
 describe('App chat memory provenance integration', () => {
   it('captures the submitted conversation and actual message roles instead of current UI state', async () => {
     const { fn, read, remember } = capture()
-    await fn('p1', 'chat-1', 'actual-user', 'answer', 'account-1', { scope: { runId: 'run-1' } })
+    await fn('p1', 'chat-1', 'actual-user', 'answer', 'account-1', { scope: { runId: 'run-1' } }, true)
     expect(read).toHaveBeenCalledWith('p1', 'chat-1')
     expect(remember.mock.calls.map(([input]) => input)).toEqual([
       expect.objectContaining({
-        content: 'Eine echte Nutzerentscheidung.',
-        source: 'user',
-        sourceRef: 'actual-user',
+        message: {
+          id: 'actual-user',
+          role: 'user',
+          content: 'Eine echte Nutzerentscheidung.',
+          ts: 10,
+          ephemeral: false,
+        },
         expectedPrincipalId: 'account-1',
-        sessionId: 'chat-1',
-        origin: { conversationId: 'chat-1', runId: 'run-1', messageId: 'actual-user', role: 'user', observedAt: 10 },
+        conversationId: 'chat-1',
+        runId: 'run-1',
+        phase: 'completed',
       }),
       expect.objectContaining({
-        content: 'Die ausgeführte Entscheidung.',
-        source: 'assistant',
-        sourceRef: 'answer',
+        message: {
+          id: 'answer',
+          role: 'assistant',
+          content: 'Die ausgeführte Entscheidung.',
+          ts: 30,
+          ephemeral: false,
+        },
         expectedPrincipalId: 'account-1',
-        origin: { conversationId: 'chat-1', runId: 'run-1', messageId: 'answer', role: 'assistant', observedAt: 30 },
+        conversationId: 'chat-1',
+        runId: 'run-1',
+        phase: 'completed',
       }),
     ])
   })
@@ -59,9 +88,10 @@ describe('App chat memory provenance integration', () => {
     'never manufactures a user source for an autonomous goal boundary %s',
     async boundary => {
       const { fn, remember } = capture()
-      await fn('p1', 'chat-1', boundary, 'answer', 'account-1', { scope: { runId: 'run-1' } })
+      await fn('p1', 'chat-1', boundary, 'answer', 'account-1', { scope: { runId: 'run-1' } }, true)
       expect(remember).toHaveBeenCalledExactlyOnceWith(
-        expect.objectContaining({ source: 'assistant', sourceRef: 'answer' })
+        expect.objectContaining({ message: expect.objectContaining({ role: 'assistant', id: 'answer' }) }),
+        expect.objectContaining({ assertCurrent: expect.any(Function) })
       )
     }
   )
@@ -70,5 +100,18 @@ describe('App chat memory provenance integration', () => {
     const { fn, remember } = capture(false)
     await fn('p1', 'chat-1', 'actual-user', 'answer', 'account-1', {})
     expect(remember).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])('preserves actual ephemeral flags and the assistant retention gate (%s)', async allowed => {
+    const { fn, messages, remember } = capture()
+    messages[0]!.meta.dataHandling = 'ephemeral'
+    messages[2]!.meta.dataHandling = 'ephemeral'
+    await fn('p1', 'chat-1', 'actual-user', 'answer', 'device-local', {}, allowed)
+    expect(remember.mock.calls.map(([input]) => input.message.ephemeral)).toEqual([true, true])
+    messages[0]!.meta = {}
+    messages[2]!.meta = {}
+    remember.mockClear()
+    await fn('p1', 'chat-1', 'actual-user', 'answer', 'device-local', {}, allowed)
+    expect(remember.mock.calls.map(([input]) => input.message.ephemeral)).toEqual([false, !allowed])
   })
 })

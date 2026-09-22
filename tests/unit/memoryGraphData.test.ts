@@ -105,4 +105,47 @@ describe('shared knowledge-space data', () => {
     data.focusDreamTarget({ kind: 'memory', id: 'a' })
     expect(data.selected.value).toBe('memory:a')
   })
+
+  it('releases visual timers, caches and subscriptions on close and reloads on reopen', async () => {
+    const data = useMemoryGraphData()
+    const inventorySpy = vi.spyOn(memoryExplorerData, 'inventory')
+    data.ensureLoaded('p1')
+    await vi.advanceTimersByTimeAsync(50)
+    window.dispatchEvent(new Event('luczor:memory-changed'))
+    expect(vi.getTimerCount()).toBeGreaterThan(0)
+    data.stopListening()
+    expect(vi.getTimerCount()).toBe(0)
+    expect(data.inventory.value).toBeNull()
+    inventorySpy.mockClear()
+    window.dispatchEvent(new Event('luczor:memory-changed'))
+    window.dispatchEvent(new Event('luczor:api-identity-changed'))
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(inventorySpy).not.toHaveBeenCalled()
+    records = [record('fresh', 'New account data')]
+    data.ensureLoaded('p1')
+    await vi.advanceTimersByTimeAsync(50)
+    expect(inventorySpy).toHaveBeenCalledOnce()
+    expect(data.graph.value.nodes.map(node => node.id)).toContain('memory:fresh')
+    data.stopListening()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('ignores an outstanding load after the page closes', async () => {
+    const data = useMemoryGraphData()
+    let finish!: (value: Awaited<ReturnType<typeof memoryExplorerData.inventory>>) => void
+    memoryExplorerData.inventory = vi.fn<typeof memoryExplorerData.inventory>(
+      () =>
+        new Promise(resolve => {
+          finish = resolve
+        })
+    )
+    data.ensureLoaded('p1')
+    await vi.advanceTimersByTimeAsync(1)
+    data.stopListening()
+    finish({ records: [], total: 0, filtered: 0, offset: 0, active: 0, candidates: 0, pending: 0, synced: 0 })
+    await vi.advanceTimersByTimeAsync(1)
+    expect(data.inventory.value).toBeNull()
+    expect(data.loading.value).toBe(false)
+    expect(vi.getTimerCount()).toBe(0)
+  })
 })

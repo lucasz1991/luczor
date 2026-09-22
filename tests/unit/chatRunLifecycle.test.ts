@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
+import ts from 'typescript'
 import { stopCapturedChatRun, type ChatStopSnapshot } from '@/services/chatRunLifecycle'
 import { executionAbortReason } from '@/services/inference/interruption'
 import { isSilentLocalResponseFailure } from '@/services/inference/localResponseGuard'
@@ -88,7 +89,13 @@ describe('captured chat cancellation', () => {
   ])('does not automatically read stopped loops or exhausted correction diagnostics: %j', interrupted => {
     const app = readFileSync('src/App.vue', 'utf8')
     const start = app.indexOf('if (isSilentLocalResponseFailure(interrupted?.code)) progressiveSpeech.cancel()')
-    const source = app.slice(start, app.indexOf('\n    if (!ephemeralDataUsed', start))
+    expect(start).toBeGreaterThan(0)
+    // Execute exactly the speech decision, independent of subsequent memory or
+    // goal finalization statements and their return values.
+    const parsed = ts.createSourceFile('speech.ts', app.slice(start), ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS)
+    const decision = parsed.statements[0]!
+    expect(ts.isIfStatement(decision)).toBe(true)
+    const source = decision.getText(parsed)
     const cancel = vi.fn(),
       completeAnswer = vi.fn()
     runInNewContext(source, {

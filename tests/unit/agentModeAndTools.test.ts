@@ -99,6 +99,127 @@ const durableTaskCreate = {
 } as const
 
 describe('agent mode and tool reliability', () => {
+  it.each(['local_llama_cpp', 'laravel_proxy'] as const)(
+    'marks private retrieval only when its local packet is used: %s',
+    async target => {
+      mocks.streamChatWithTools.mockResolvedValueOnce({ content: 'Answer', toolCalls: [], rawToolCalls: [] })
+      const result = await runAgent({
+        projectId: 'project-2',
+        mode: 'observe',
+        toolAccess: 'none',
+        baseMessages: [{ role: 'user', content: 'Question' }],
+        localOnlyContextUsed: true,
+        inferenceGateway: { id: 'fixture', target, streamChatWithTools: mocks.streamChatWithTools },
+      })
+      expect(result.ephemeralDataUsed).toBe(target === 'local_llama_cpp')
+    }
+  )
+  it('keeps exact context at side-effect checkpoints and on completed answers, bound to the conversation', async () => {
+    const objective = 'Requirement\n'.repeat(1000) + 'Never modify protected.ts'
+    const saved: import('@/services/agents/chatCheckpoint').AgentCheckpoint[] = []
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(toolCallResult)
+      .mockResolvedValueOnce({ content: 'Completed public answer', toolCalls: [], rawToolCalls: [] })
+    const result = await runAgent({
+      projectId: 'project-2',
+      conversationId: 'conversation-a',
+      mode: 'act',
+      baseMessages: [{ role: 'user', content: objective }],
+      onCheckpoint: value => {
+        saved.push(value)
+      },
+      maxRounds: 2,
+    })
+    expect(saved.length).toBeGreaterThan(0)
+    expect(
+      saved.every(value => value.messages.some(message => message.role === 'user' && message.content === objective))
+    ).toBe(true)
+    expect(result.continuation).toBeUndefined()
+    expect(result.workingContext?.messages).toContainEqual({ role: 'user', content: objective })
+    expect(result.workingContext?.messages.some(message => message.role === 'tool')).toBe(true)
+    expect(result.workingContext?.messages.at(-1)).toEqual({ role: 'assistant', content: 'Completed public answer' })
+    await expect(
+      runAgent({
+        projectId: 'project-2',
+        conversationId: 'conversation-b',
+        mode: 'act',
+        baseMessages: [],
+        continuation: result.workingContext,
+      })
+    ).rejects.toThrow('Kontositzung')
+  })
+
+  it('does not repeat a write with an uncertain result under a new model call', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'project',
+      mutating: true,
+      requiresApproval: false,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.execute.mockRejectedValueOnce(new Error('Connection lost after write'))
+    mocks.streamChatWithTools.mockResolvedValueOnce(toolCallResult)
+    const first = await runAgent({
+      projectId: 'project-2',
+      mode: 'act',
+      baseMessages: [{ role: 'user', content: 'Update project' }],
+      maxRounds: 1,
+    })
+    expect(first.continuation?.uncertainMutations).toHaveLength(1)
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce({
+        ...toolCallResult,
+        toolCalls: toolCallResult.toolCalls.map(call => ({ ...call, id: 'different-id' })),
+        rawToolCalls: toolCallResult.rawToolCalls.map(call => ({ ...call, id: 'different-id' })),
+      })
+      .mockResolvedValueOnce({ content: 'Write remains unverified.', toolCalls: [], rawToolCalls: [] })
+    const next = await runAgent({
+      projectId: 'project-2',
+      mode: 'act',
+      baseMessages: [],
+      continuation: first.continuation,
+      maxRounds: 2,
+    })
+    expect(mocks.execute).toHaveBeenCalledOnce()
+    expect(next.toolFailures).toBe(1)
+    expect(next.workingContext?.uncertainMutations).toHaveLength(1)
+  })
+
+  it('recovers a native context limit with a smaller retrievable projection and no tool replay', async () => {
+    const evidence = 'Original source evidence\n'.repeat(3000)
+    mocks.execute.mockResolvedValueOnce({ ok: true, path: 'exact.ts', content: evidence })
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(toolCallResult)
+      .mockRejectedValueOnce(new LocalInferenceError('Context full', 'runtime_context_exceeded', false, false))
+      .mockResolvedValueOnce({ content: 'Continued after compaction.', toolCalls: [], rawToolCalls: [] })
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'Read the project' }],
+      maxRounds: 2,
+      inferenceGateway: {
+        id: 'local',
+        target: 'local_llama_cpp',
+        contextTokens: 131072,
+        streamChatWithTools: mocks.streamChatWithTools,
+      },
+    })
+    expect(result.interrupted).toBeUndefined()
+    expect(result.finalText).toBe('Continued after compaction.')
+    expect(mocks.execute).toHaveBeenCalledOnce()
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(3)
+    const second = mocks.streamChatWithTools.mock.calls[1]![0] as InferenceRequest
+    const third = mocks.streamChatWithTools.mock.calls[2]![0] as InferenceRequest
+    expect(JSON.stringify(third.messages).length).toBeLessThan(JSON.stringify(second.messages).length)
+    expect(JSON.stringify(third.messages)).toContain('contextCompacted')
+    expect(
+      result.workingContext!.messages.some(
+        message => message.role === 'tool' && message.content.includes(evidence.slice(0, 24))
+      )
+    ).toBe(true)
+  })
+
   it.each([
     ['local', 'local_llama_cpp', 'LOCAL_SYSTEM'],
     ['free', 'local_llama_cpp', 'COORDINATOR_SYSTEM'],
@@ -952,8 +1073,8 @@ describe('agent mode and tool reliability', () => {
       inferenceGateway: { id: 'local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
     })
     expect(result.interrupted?.code).toBe('runtime_context_exceeded')
-    expect(result.continuation?.messages.at(-1)?.content).toContain(objective)
-    expect(result.finalText).toContain('Aktuelle Tool-Ergebnisse wurden nicht abgeschnitten.')
+    expect(result.continuation?.messages).toContainEqual({ role: 'user', content: objective })
+    expect(result.finalText).toContain('Der vollständige Arbeitskontext bleibt lokal erhalten.')
     expect(result.tokenUsage).toMatchObject({
       inputTokens: 19363,
       outputTokens: 20,
@@ -1786,7 +1907,7 @@ describe('agent mode and tool reliability', () => {
     expect(interrupted.continuation?.pendingTaskCreateVerifications).toEqual([
       expect.objectContaining({ kind: 'conversation', externalId, state: 'unknown' }),
     ])
-    expect(interrupted.continuation?.messages.at(-1)?.content).toContain('chat_list-Prüfung')
+    expect(interrupted.continuation?.messages.at(-1)?.content).toContain('chat_list')
     expect(interrupted.continuation?.messages.at(-1)?.content).not.toContain('exakte task_list-Prüfung')
 
     mocks.streamChatWithTools
@@ -1879,7 +2000,7 @@ describe('agent mode and tool reliability', () => {
     expect(response.continuation?.pendingTaskCreateVerifications).toEqual([
       expect.objectContaining({ externalId, state: 'unknown' }),
     ])
-    expect(response.continuation?.messages.some(message => message.role === 'tool')).toBe(false)
+    expect(response.continuation?.messages.some(message => message.role === 'tool')).toBe(true)
   })
 
   it('keeps other uncertain creates untouched during an exact task lookup', async () => {
@@ -2025,7 +2146,7 @@ describe('agent mode and tool reliability', () => {
 
     expect(interrupted.interrupted).toMatchObject({ code: 'runtime_tool_contract_rejected', round: 2 })
     expect(interrupted.continuation?.completedMutations).toHaveLength(1)
-    expect(interrupted.continuation?.messages.some(message => message.role === 'tool')).toBe(false)
+    expect(interrupted.continuation?.messages.some(message => message.role === 'tool')).toBe(true)
     expect(interrupted.finalText).toContain('Arbeitsfortschritt bleibt erhalten')
 
     mocks.streamChatWithTools
@@ -2181,7 +2302,7 @@ describe('agent mode and tool reliability', () => {
     })
 
     expect(result.interrupted?.code).toBe('runtime_chat_history_rejected')
-    expect(result.continuation?.messages.some(message => message.role === 'tool')).toBe(false)
+    expect(result.continuation?.messages.some(message => message.role === 'tool')).toBe(true)
   })
 
   it('does not advertise or execute an internally disabled team-start tool', async () => {

@@ -43,7 +43,7 @@ const status = computed(() => {
     idle: 'Bereit',
     running: 'Arbeitet am Ziel',
     checking: 'Prüft das Ergebnis',
-    waiting: 'Wartet auf Fortsetzung',
+    waiting: 'Wartet auf Ausführung',
     blocked: 'Benötigt Unterstützung',
     completed: 'Ziel erreicht',
   }[props.model.status]
@@ -160,7 +160,8 @@ function save(): void {
         </button>
       </div>
       <p class="goal-control__hint">
-        Luczor arbeitet am gespeicherten Ziel weiter und prüft das Ergebnis. Du kannst jederzeit pausieren.
+        Luczor übernimmt den bestehenden Arbeitskontext, arbeitet am Ziel weiter und prüft das Ergebnis. Du kannst
+        jederzeit pausieren.
       </p>
       <div v-if="hasGoal" class="goal-control__status" aria-live="polite" aria-atomic="true">
         <span>{{ status }}</span>

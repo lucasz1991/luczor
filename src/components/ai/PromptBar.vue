@@ -171,8 +171,14 @@ defineExpose({ focus: () => field.value?.focus() })
     </div>
     <div class="ai-prompt" :class="{ 'is-busy': busy }">
       <div class="ai-prompt__heading">
-        <button v-if="contextLabel" type="button" class="ai-prompt__context" @click="emit('context')">
-          <AiIcon name="folder" :size="13" />{{ contextLabel }}
+        <button
+          v-if="contextLabel"
+          type="button"
+          class="ai-prompt__context"
+          :title="contextLabel"
+          @click="emit('context')"
+        >
+          <AiIcon name="folder" :size="12" /><span>{{ contextLabel }}</span>
         </button>
         <div class="ai-prompt__controls">
           <DropdownMenu

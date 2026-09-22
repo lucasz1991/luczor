@@ -5,6 +5,7 @@ import * as VueRuntime from 'vue'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
 import source from '@/components/projects/AutonomousGoalControl.vue?raw'
+import { useDismissible } from '@/composables/useDismissible'
 
 const descriptor = parse(source, { filename: 'AutonomousGoalControl.vue' }).descriptor
 const compiled = compileScript(descriptor, {
@@ -25,6 +26,7 @@ runInNewContext(
       // This client-renderer harness tests interactions; the decorative SVG has
       // separate SSR coverage and must not load Vite's server-only component.
       if (id === '@/components/ai/AiIcon.vue') return { default: () => h('svg', { 'aria-hidden': 'true' }) }
+      if (id === '@/composables/useDismissible') return { useDismissible }
       throw new Error(`Unexpected import ${id}`)
     },
   }

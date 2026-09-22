@@ -87,6 +87,18 @@ describe('actual submitted memory context attribution', () => {
     expect(packages.external.text).not.toContain('Private evidence private')
   })
 
+  it('attributes unconfirmed session recollections only when actually submitted to the local model', async () => {
+    const { packages, observe } = await setup([
+      memory('candidate', { id: 'session-memory-candidate:candidate', source: 'history', scope: 'session' }),
+    ])
+    observe({ target: 'laravel_proxy', messages: [{ role: 'system', content: packages.external.text }] })
+    expect(included()).toBe(0)
+    expect(activeMemoryLinks()).toEqual([])
+    observe({ target: 'local_llama_cpp', messages: [{ role: 'system', content: packages.local.text }] })
+    expect(included()).toBe(1)
+    expect(activeMemoryLinks()).toMatchObject([{ id: 'candidate', state: 'included' }])
+  })
+
   it('ignores removed or rewritten fitted records and user text that happens to quote them', async () => {
     const { packages, observe } = await setup([memory('one')])
     observe({

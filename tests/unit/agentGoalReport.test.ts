@@ -409,18 +409,17 @@ describe('goal reports in the real agent loop', () => {
     expect(result.goalReviewVerified).toBe(false)
   })
 
-  it('keeps an unfinished tool section bounded even when its reads succeed', async () => {
+  it('renews a tool section once and stops when identical successful reads make no new progress', async () => {
     const execute = registerReadTool()
-    mocks.stream
-      .mockResolvedValueOnce(toolResponse({}, 'fs_read', 'read-one'))
-      .mockResolvedValueOnce(toolResponse({}, 'fs_read', 'read-two'))
+    let read = 0
+    mocks.stream.mockImplementation(async () => toolResponse({}, 'fs_read', `read-${++read}`))
     const result = await runAgent(
       options({ maxRounds: 2, goalTracking: { phase: 'work', continueInline: true, report: vi.fn() } })
     )
-    expect(mocks.stream).toHaveBeenCalledTimes(2)
-    expect(execute).toHaveBeenCalledTimes(2)
+    expect(mocks.stream).toHaveBeenCalledTimes(4)
+    expect(execute).toHaveBeenCalledTimes(4)
     expect(result.goalReport).toMatchObject({ status: 'blocked', summary: expect.stringContaining('Rundenlimit') })
-    expect(result.continuation?.messages.filter(message => message.role === 'tool')).toHaveLength(2)
+    expect(result.continuation?.messages.filter(message => message.role === 'tool')).toHaveLength(4)
   })
 
   it('stops after three unchanged inline goal sections', async () => {

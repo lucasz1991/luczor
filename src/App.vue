@@ -3,6 +3,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
+import { captureChatSubmission } from '@/services/chatSubmission'
 import { fitRequestContext } from '@/services/inference/contextBudget'
 import { loadPendingTaskCreates, replacePendingTaskCreates } from '@/services/agents/taskCreateRecoveryLedger'
 import Settings from './components/Settings.vue'
@@ -10,7 +11,6 @@ import DeviceClusterPanel from './components/DeviceClusterPanel.vue'
 import { modelUsageSettings, type ChatRouteMode } from '@/services/inference/modelUsageSettings'
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import MemoryExplorerPage from '@/features/memory/MemoryExplorerPage.vue'
-import MemoryGraphBackdrop from '@/features/memory/MemoryGraphBackdrop.vue'
 import { hasLiveWork, liveWork, setModelPhase } from '@/services/memory/modelActivity'
 import { createSystemStatusMonitor } from '@/services/systemStatusMonitor'
 import { lastLocalModelStatus, readLocalModelStatus } from '@/services/localModelStatus'
@@ -149,6 +149,7 @@ import ReadAloudText from '@/components/ai/ReadAloudText.vue'
 import { loadLocalSpeechConsent } from '@/services/voice/speechConsent'
 import { createVoiceInputSession, idleVoiceInput } from '@/services/voice/voiceInputSession'
 import { luczorMemory, getMemoryPrefs, type MemoryRecord } from '@/services/memory/luczorMemory'
+import { buildMemoryContextQuery, captureAutomaticChatMemory } from '@/services/memory/chatContext'
 import { MEMORY_PRIORITIES, memoryPriority } from '@/services/memory/memoryPriority'
 import { buildLocalPromptContextDetails, inferTaskType, type PromptContextDetails } from '@/services/contextController'
 import { LuczorApi } from '@/services/api/luczorApi'
@@ -312,9 +313,12 @@ const activeThinkingBudget = computed(() => {
   return messageId ? (getSafeRecordValue(thinkingBudgets.value, messageId) ?? null) : null
 })
 const continuations = shallowRef<Record<string, AgentCheckpoint>>({})
+// Keep only the latest completed goal context per chat; unfinished work remains in continuations.
+const goalWorkingContexts = new Map<string, { messageId: string; checkpoint: AgentCheckpoint }>()
 const resetChatRouting = () => {
   thinkingBudgets.value = {}
   continuations.value = {}
+  goalWorkingContexts.clear()
 }
 window.addEventListener('luczor:api-identity-changing', resetChatRouting)
 onBeforeUnmount(() => window.removeEventListener('luczor:api-identity-changing', resetChatRouting))
@@ -1662,7 +1666,8 @@ async function rememberExchange(
   userMessageId: string | undefined,
   assistantId: string,
   expectedPrincipalId: string,
-  execution: ExecutionTicket
+  execution: ExecutionTicket,
+  assistantRetentionAllowed: boolean
 ) {
   try {
     const prefs = await getMemoryPrefs()
@@ -1671,35 +1676,28 @@ async function rememberExchange(
     const messages = mutations.getConversationMessages(pid, conversationId)
     const msg = messages.find(m => m.id === assistantId && m.role === 'assistant')
     const user = userMessageId ? messages.find(m => m.id === userMessageId && m.role === 'user') : undefined
-    const userText = safeTrim(user?.content)
-    const origin = { conversationId, runId: execution.scope?.runId }
-    const summary = safeTrim(msg?.content)
-    if (userText) {
-      await luczorMemory.remember({
-        content: userText,
-        scope: 'project',
-        projectId: pid,
-        source: 'user',
-        writeIntent: 'automatic',
-        expectedPrincipalId,
-        sessionId: conversationId,
-        sourceRef: user!.id,
-        origin: { ...origin, messageId: user!.id, role: 'user', observedAt: user!.ts },
-      })
-    }
-    if (summary && !summary.startsWith('[Fehler]') && summary !== 'Fertig.') {
-      executionGate.assert(execution)
-      await luczorMemory.remember({
-        content: summary,
-        scope: 'project',
-        projectId: pid,
-        source: 'assistant',
-        writeIntent: 'automatic',
-        expectedPrincipalId,
-        sessionId: conversationId,
-        sourceRef: assistantId,
-        origin: { ...origin, messageId: assistantId, role: 'assistant', observedAt: msg!.ts },
-      })
+    for (const item of [user, msg]) {
+      if (!item || (item.role !== 'user' && item.role !== 'assistant')) continue
+      await captureAutomaticChatMemory(
+        {
+          projectId: pid,
+          conversationId,
+          expectedPrincipalId,
+          runId: execution.scope?.runId,
+          message: {
+            id: item.id,
+            role: item.role,
+            content: item.content,
+            ts: item.ts,
+            ephemeral:
+              item.role === 'user'
+                ? item.meta.dataHandling === 'ephemeral'
+                : !assistantRetentionAllowed || item.meta.dataHandling === 'ephemeral',
+          },
+          phase: 'completed',
+        },
+        { assertCurrent: () => executionGate.assert(execution) }
+      )
     }
     executionGate.assert(execution)
     await refreshMemoryCandidates()
@@ -1715,13 +1713,18 @@ async function rememberExchange(
 async function resumeWork(messageId: string) {
   const checkpoint = Object.entries(continuations.value).find(([id]) => id === messageId)?.[1]
   if (!checkpoint || conversationBusy.value) return
-  await send(false, { checkpoint, messageId })
+  try {
+    await send(false, { checkpoint, messageId })
+  } catch (error) {
+    pushToast(error instanceof Error ? error.message : 'Arbeitsstand kann nicht fortgesetzt werden.', 'error')
+  }
 }
 type CapturedChatTurn = {
   readOnlyReview: boolean
   pid: string
   conversationId: string
   principalId: string
+  memoryPrincipalId: string
   userMessageId: string
   text: string
   prj: typeof activeProject.value
@@ -1795,8 +1798,24 @@ async function collectContextFragments(opts: {
   // Add query-specific Memory/Repository retrieval. Repository snippets enter
   // only after a fresh per-turn approval when the local policy requires it.
   try {
-    if (memoryPrefs.inject) {
-      promptContext = await buildLocalPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType, opts.origin)
+    {
+      const taskContext = buildMemoryContextQuery({
+        text,
+        objective: mutations.getConversation(conversationId)?.goal,
+        messages: mutations
+          .getConversationMessages(pid, conversationId)
+          .filter(message => message.visibility === 'visible' && !message.meta.isLoading)
+          .map(message => ({
+            role: message.role,
+            content: message.content,
+            ephemeral: message.meta.dataHandling === 'ephemeral',
+          })),
+      })
+      promptContext = await buildLocalPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType, opts.origin, {
+        conversationId,
+        taskContext,
+        includeMemory: memoryPrefs.inject,
+      })
       if (promptContext.fragments?.length) {
         contextFragments.push(...promptContext.fragments)
       } else if (promptContext.text) {
@@ -1812,7 +1831,7 @@ async function collectContextFragments(opts: {
       }
     }
   } catch (e) {
-    console.warn('[memory] context injection skipped:', e)
+    console.warn('[context] query retrieval skipped:', e)
   }
   if (workspace?.rootPath)
     contextFragments.push({
@@ -1884,7 +1903,7 @@ async function refreshContextPreview() {
         audiences: ['local_model', 'external_provider'],
         contentHash: '',
       })),
-      budget: { maxChars: 6_000, maxFragments: 12, maxFragmentChars: 1_200 },
+      budget: { maxChars: 16_000, maxFragments: 24, maxFragmentChars: 4_000 },
     })
     if (generation !== contextPreviewGeneration) return
     contextPreview.value = {
@@ -1897,6 +1916,7 @@ async function refreshContextPreview() {
       fragments: gathered.fragments,
       local: packages.local,
       external: packages.external,
+      retrieval: gathered.promptContext,
     }
   } catch (error) {
     if (generation !== contextPreviewGeneration) return
@@ -1942,7 +1962,15 @@ async function send(
   const conversationId = miniInput?.conversationId ?? mutations.getActiveConversationId(pid)
   if (mutations.getConversation(conversationId)?.projectId !== pid) return
   const submittedText = miniInput?.text ?? input.value
-  const rawText = resume?.checkpoint.objective ?? submittedText.trim()
+  const submission = captureChatSubmission({
+    projectId: pid,
+    conversationId,
+    text: submittedText,
+    messages: mutations.getConversationMessages(pid, conversationId),
+    continuation: resume,
+    goal: !!goalInput,
+  })
+  const rawText = submission.text
   if (!rawText || admittingConversations.value.has(conversationId)) return
   const command = planningCommandObjective(rawText)
   const text = command === null ? rawText : planningDiscussionMessage(command)
@@ -1978,6 +2006,7 @@ async function send(
     pid,
     conversationId,
     principalId: '',
+    memoryPrincipalId: '',
     userMessageId: '',
     text,
     prj: prj ? JSON.parse(JSON.stringify(prj)) : undefined,
@@ -1989,7 +2018,7 @@ async function send(
       : captureThinking(thinkingTierFor(conversationId)),
     routeMode: !resume ? routeModeFor(conversationId) : 'local',
     expectedLocalModelId: modelUsageSettings.value.localModelId,
-    inputSource: miniInput ? 'keyboard' : consumeInputSource(),
+    inputSource: miniInput || !submission.consumesDraft ? 'keyboard' : consumeInputSource(),
   }
   admittingConversations.value = new Set([...admittingConversations.value, conversationId])
   let responseStarted = false
@@ -1997,14 +2026,20 @@ async function send(
     if (!goalInput && autonomousGoal.isRunning(conversationId)) await autonomousGoal.interrupt(conversationId)
     executionGate.assert(execution)
     captured.principalId = await resolveWorkspacePrincipalId()
+    const memoryAccount = await getVerifiedAccountSnapshot()
+    if ((memoryAccount?.principalId ?? (await resolveWorkspacePrincipalId())) !== captured.principalId)
+      throw new Error('Das Benutzerkonto des Auftrags hat sich geändert.')
+    // Workspace bindings use an OS-key-derived device namespace; the encrypted
+    // memory store keeps its existing device-local namespace without an account.
+    captured.memoryPrincipalId = memoryAccount?.principalId ?? 'device-local'
     executionGate.assert(execution)
     if (!automaticVoice) void voiceInputSession.stop()
-    if (goalInput) {
+    if (!submission.createsUserMessage) {
       // The saved goal is the instruction. Capture the existing transcript boundary
       // without manufacturing another user turn for each autonomous section.
-      captured.userMessageId = mutations.getConversationMessages(pid, conversationId).at(-1)?.id ?? ''
+      captured.userMessageId = submission.historyBoundaryMessageId
     } else {
-      const userMsg = mutations.makeMsg('user', resume ? 'Weiterarbeiten' : text, pid, conversationId)
+      const userMsg = mutations.makeMsg('user', text, pid, conversationId)
       userMsg.meta = {
         ...userMsg.meta,
         runId,
@@ -2018,11 +2053,43 @@ async function send(
     // Keep the submitted request on disk before the journal can admit any effects.
     await saveAppStateStrict(state)
     executionGate.assert(execution)
-    if (!resume && !miniInput && activeConversationId.value === conversationId && input.value === submittedText)
+    if (submission.createsUserMessage) {
+      const user = mutations
+        .getConversationMessages(pid, conversationId)
+        .find(item => item.id === captured.userMessageId)
+      if (user)
+        void captureAutomaticChatMemory(
+          {
+            projectId: pid,
+            conversationId,
+            expectedPrincipalId: captured.memoryPrincipalId,
+            runId,
+            message: {
+              id: user.id,
+              role: 'user',
+              content: user.content,
+              ts: user.ts,
+              ephemeral: user.meta.dataHandling === 'ephemeral',
+            },
+            phase: 'submitted',
+          },
+          { assertCurrent: () => executionGate.assert(execution) }
+        ).catch(() => undefined)
+      // Older controls must not restart a superseded user request.
+      const obsolete = new Set(mutations.getConversationMessages(pid, conversationId).map(item => item.id))
+      continuations.value = Object.fromEntries(Object.entries(continuations.value).filter(([id]) => !obsolete.has(id)))
+      goalWorkingContexts.delete(conversationId)
+    }
+    if (
+      submission.consumesDraft &&
+      !miniInput &&
+      activeConversationId.value === conversationId &&
+      input.value === submittedText
+    )
       input.value = ''
     const chat = state.conversations?.find(item => item.id === conversationId)
     if (chat) {
-      chat.draft = ''
+      if (submission.consumesDraft) chat.draft = ''
       chat.updatedAt = Date.now()
       if (chat.title === 'Neuer Chat') chat.title = text.slice(0, 80)
     }
@@ -2115,28 +2182,25 @@ async function executeChatTurn(
     void commentarySpeech.enqueueStatus({ scope: speechScope, key: 'context', text: 'Kontext vorbereiten' })
   let checkpointMemoryPrincipal = ''
   let latestPublicCheckpoint = ''
+  let latestPublicCheckpointSegment: string | undefined
 
-  const retainMemoryCheckpoint = (content: string, final = false) => {
+  const retainMemoryCheckpoint = (content: string, final = false, segmentId?: string) => {
     if (!checkpointMemoryPrincipal || !content.trim()) return
-    void luczorMemory
-      .captureCheckpoint({
-        content,
-        scope: 'project',
+    // Only source-safe public prose reaches this callback. Local/private tool
+    // evidence can contain transient data; paraphrasing must not remove that protection.
+    void captureAutomaticChatMemory(
+      {
         projectId: pid,
-        sessionId: assistant.id,
+        conversationId,
         expectedPrincipalId: checkpointMemoryPrincipal,
-        origin: {
-          messageId: assistant.id,
-          role: 'assistant',
-          conversationId,
-          runId: handle.runId,
-          observedAt: assistant.ts,
-        },
-        final,
-      })
-      .catch(() => {
-        // Memory is best-effort; never replace a chat result with a checkpoint error.
-      })
+        runId: handle.runId,
+        message: { id: assistant.id, role: 'assistant', content, ts: assistant.ts, segmentId },
+        phase: final && !segmentId ? 'completed' : 'progress',
+      },
+      { assertCurrent: () => executionGate.assert(turnExecution) }
+    ).catch(() => {
+      // Memory is best-effort; never replace a chat result with a checkpoint error.
+    })
   }
 
   try {
@@ -2203,7 +2267,7 @@ async function executeChatTurn(
       taskType,
     }
     const principalScopeId = JSON.stringify([scopeKey.serverInstance, scopeKey.principalId])
-    checkpointMemoryPrincipal = scopeKey.principalId
+    checkpointMemoryPrincipal = accountScope?.principalId ?? 'device-local'
     let taskCreateRecoveryReady = true
     const pendingTaskCreateVerifications = await loadPendingTaskCreates(principalScopeId, pid).catch(error => {
       taskCreateRecoveryReady = false
@@ -2221,7 +2285,7 @@ async function executeChatTurn(
         audiences: ['local_model', 'external_provider'],
         contentHash: '',
       })),
-      budget: { maxChars: 6_000, maxFragments: 12, maxFragmentChars: 1_200 },
+      budget: { maxChars: 16_000, maxFragments: 24, maxFragmentChars: 4_000 },
     })
     executionGate.assert(turnExecution)
     lastRunContext.value = {
@@ -2235,6 +2299,7 @@ async function executeChatTurn(
       fragments: contextFragments,
       local: packages.local,
       external: packages.external,
+      retrieval: promptContext,
     }
     const observeContextRequest = createContextUsageObserver(contextFragments, packages)
     const baseMessages: WireMessage[] = [
@@ -2291,12 +2356,17 @@ async function executeChatTurn(
       specialistOutcomes,
       agentRunEvaluations,
       continuation,
+      workingContext,
       interrupted,
       goalReport,
       goalReviewVerified,
     } = await runAgent({
       ...turnThinking,
       ephemeralContextUsed: turnRouteMode !== 'external' && localHistory.ephemeralDataUsed,
+      localOnlyContextUsed: contextFragments.some(
+        fragment =>
+          fragment.egress === 'local_only' && packages.local.selected.some(selected => selected.id === fragment.id)
+      ),
       effectJournal: createChatEffectJournal({
         principalId: captured.principalId,
         projectId: pid,
@@ -2351,6 +2421,7 @@ async function executeChatTurn(
           turnExecution.signal
         ),
       continuation: resume?.checkpoint,
+      continuationContext: resume ? packages.local.text : undefined,
       pendingTaskCreateVerifications,
       principalScopeId,
       workspaceBindingId: scopeKey.workspaceBindingId,
@@ -2426,10 +2497,9 @@ async function executeChatTurn(
         if (turnExecution.signal.aborted || round.kind !== 'commentary') return
         const entry = completedCommentary(round)
         if (!entry) return
-        if (entry.serverSpeechAllowed) {
-          latestPublicCheckpoint = entry.content
-          retainMemoryCheckpoint(entry.content)
-        }
+        latestPublicCheckpoint = round.serverSpeechAllowed ? entry.content : ''
+        latestPublicCheckpointSegment = round.serverSpeechAllowed ? entry.id : undefined
+        if (round.serverSpeechAllowed) retainMemoryCheckpoint(entry.content, false, entry.id)
         const current = mutations.getProjectMessages(pid).find(message => message.id === assistant.id)
         const previous = current?.meta.commentary ?? []
         if (previous.some(item => item.id === entry.id)) return
@@ -2479,6 +2549,11 @@ async function executeChatTurn(
       if (continuation) next[assistant.id] = continuation
       else delete next[assistant.id]
       continuations.value = next
+      if (goalInput && (continuation ?? workingContext))
+        goalWorkingContexts.set(conversationId, {
+          messageId: assistant.id,
+          checkpoint: (continuation ?? workingContext)!,
+        })
     }
     if (continuation || interrupted)
       await handle.interrupt('Fortschritt gesichert. Aktuellen Zustand prüfen und weiterarbeiten.')
@@ -2528,14 +2603,15 @@ async function executeChatTurn(
     if (isVisible()) setStatus('idle')
     if (isSilentLocalResponseFailure(interrupted?.code)) progressiveSpeech.cancel()
     else if (isVisible() && turnSpeechGeneration === speechGeneration) progressiveSpeech.completeAnswer()
-    if (!ephemeralDataUsed && !continuation && !interrupted)
+    if (!interrupted)
       void rememberExchange(
         pid,
         conversationId,
-        goalInput && !goalInput.foreground ? undefined : captured.userMessageId,
+        resume || (goalInput && !goalInput.foreground) ? undefined : captured.userMessageId,
         assistant.id,
-        scopeKey.principalId,
-        turnExecution
+        checkpointMemoryPrincipal,
+        turnExecution,
+        !ephemeralDataUsed
       )
     if (goalInput) {
       if (interrupted)
@@ -2548,8 +2624,8 @@ async function executeChatTurn(
       const report = goalReport ?? reportedGoal
       if (continuation && !report)
         return {
-          status: 'blocked',
-          summary: 'Das Laufbudget ist erreicht. Fortschritt ist gesichert; das Ziel bleibt offen.',
+          status: 'continue',
+          summary: 'Der nächste Zielabschnitt übernimmt den vollständigen bisherigen Arbeitsstand.',
           messageId: assistant.id,
         }
       if (!report) throw new Error('Das Modell hat keinen prüfbaren Zielstatus geliefert. Das Ziel bleibt offen.')
@@ -2600,7 +2676,7 @@ async function executeChatTurn(
     })
     throw e
   } finally {
-    retainMemoryCheckpoint(latestPublicCheckpoint, true)
+    retainMemoryCheckpoint(latestPublicCheckpoint, true, latestPublicCheckpointSegment)
     if (isVisible()) stopSfx('loading')
     const next = { ...thinkingBudgets.value }
     delete next[assistant.id]
@@ -2843,9 +2919,12 @@ const autonomousGoal = useAutonomousGoal({
   run: async (conversationId, goal, signal) => {
     const projectId = mutations.getConversation(conversationId)?.projectId
     if (!projectId) throw new Error('Der Chat dieses Ziels ist nicht mehr verfügbar.')
-    const previous = goal.lastMessageId ? continuations.value[goal.lastMessageId] : undefined
-    const checkpoint =
-      goal.phase === 'work' && previous ? { checkpoint: previous, messageId: goal.lastMessageId! } : undefined
+    const saved = goalWorkingContexts.get(conversationId)
+    const previous = goal.lastMessageId
+      ? (continuations.value[goal.lastMessageId] ??
+        (saved?.messageId === goal.lastMessageId ? saved.checkpoint : undefined))
+      : undefined
+    const checkpoint = previous ? { checkpoint: previous, messageId: goal.lastMessageId! } : undefined
     const text = goalRunInstruction(goal)
     const result = await send(false, checkpoint, { text, projectId, conversationId }, { state: goal, signal })
     if (!result) throw new Error('Zielrunde konnte noch nicht gestartet werden.')
@@ -3095,7 +3174,6 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       'ai-workspace--system-mini': showSystemPanel && systemStatusDisplayMode === 'mini',
     }"
   >
-    <MemoryGraphBackdrop :project-id="activeProjectId" :focused="showMemoryExplorer" />
     <SidebarNav
       v-model:collapsed="sidebarCollapsed"
       :title="appearance.assistantName"
@@ -3520,9 +3598,16 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
               />
               <AgentTeamResults v-if="m.meta.specialistOutcomes?.length" :outcomes="m.meta.specialistOutcomes" />
               <div v-if="continuations[m.id]" class="ai-continuation">
-                <button class="ai-model-button" type="button" :disabled="conversationBusy" @click="resumeWork(m.id)">
+                <button
+                  class="ai-model-button"
+                  type="button"
+                  :disabled="conversationBusy"
+                  title="Mit dem erhaltenen Arbeitskontext fortsetzen. Es wird keine neue Nutzernachricht angelegt."
+                  @click="resumeWork(m.id)"
+                >
                   Weiterarbeiten
                 </button>
+                <span>Arbeitskontext erhalten · {{ continuations[m.id]?.messages.length }} Einträge</span>
               </div>
             </template>
             <p v-else class="ai-message__user-text">{{ m.content }}</p>

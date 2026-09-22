@@ -149,6 +149,12 @@ export type RecallQuery = {
   limit?: number
 }
 
+export type SessionCandidateQuery = RecallQuery & {
+  projectId: string
+  sessionId: string
+  expectedPrincipalId?: string
+}
+
 type MemoryContext = {
   principalId: string
   scope: MemoryScope
@@ -656,11 +662,16 @@ class OfflineMemoryStore {
     return this.encryptionKey
   }
 
-  private mutate<T>(operation: (state: MemoryState) => T | Promise<T>, maintenance = false): Promise<T> {
+  private mutate<T>(
+    operation: (state: MemoryState) => T | Promise<T>,
+    maintenance = false,
+    skipUnchanged = false
+  ): Promise<T> {
     const next = this.writes.then(async () => {
       const state = await this.load()
+      const before = skipUnchanged ? JSON.stringify(state) : undefined
       const result = await operation(state)
-      await this.save(state, maintenance)
+      if (!skipUnchanged || JSON.stringify(state) !== before) await this.save(state, maintenance)
       return result
     })
     this.writes = next.then(
@@ -710,120 +721,142 @@ class OfflineMemoryStore {
   }
 
   async remember(record: MemoryRecord, enqueueServer: boolean): Promise<MemoryRecord> {
-    return this.mutate(state => {
-      enqueueServer = enqueueServer && !containsSensitiveMemoryData(memoryRecordDlpPayload(record))
-      let duplicate = state.records
-        .slice()
-        .reverse()
-        .find(
-          item =>
-            item.principalId === record.principalId &&
-            item.contentHash === record.contentHash &&
-            item.dataset === record.dataset &&
-            item.status === record.status &&
-            item.source === record.source &&
-            item.writeIntent === record.writeIntent &&
-            item.visibility === record.visibility &&
-            item.retention === record.retention &&
-            item.featureKey === record.featureKey &&
-            (!enqueueServer || sameSyncedWrite(item, record))
-        )
-      let mergedMetadata: ReturnType<typeof mergeMemoryMetadata> | undefined
-      if (duplicate && !enqueueServer) {
-        try {
-          mergedMetadata = mergeMemoryMetadata([duplicate, record], record.updatedAt)
-          if (new Set([...duplicate.tags, ...record.tags]).size > 32) duplicate = undefined
-        } catch (error) {
-          if (
-            !(error instanceof Error) ||
-            !['memory_metadata_merge_too_large', 'memory_metadata_override_conflict'].includes(error.message)
+    const automaticExcerpt = record.provenance?.capture_policy === 'chat-excerpts-v1'
+    return this.mutate(
+      state => {
+        enqueueServer = enqueueServer && !containsSensitiveMemoryData(memoryRecordDlpPayload(record))
+        let duplicate = state.records
+          .slice()
+          .reverse()
+          .find(
+            item =>
+              item.principalId === record.principalId &&
+              item.contentHash === record.contentHash &&
+              item.dataset === record.dataset &&
+              item.status === record.status &&
+              item.source === record.source &&
+              item.writeIntent === record.writeIntent &&
+              item.visibility === record.visibility &&
+              item.retention === record.retention &&
+              item.featureKey === record.featureKey &&
+              (!enqueueServer || sameSyncedWrite(item, record))
           )
-            throw error
-          // Keep both complete observations when their identities or protected
-          // annotations cannot safely fit in one bounded record.
-          duplicate = undefined
-        }
-      }
-      if (duplicate) {
-        // A persisted write ID is immutable. Repeated capture must not mutate
-        // provenance/priority and replay a different fingerprint under that ID.
-        if (enqueueServer) return duplicate
-        duplicate.content = record.content
-        duplicate.updatedAt = record.updatedAt
-        duplicate.expiresAt = record.expiresAt
-        // Repetition is an observation, not independent confirmation or authority.
-        duplicate.source = record.source
-        if (!memoryMetadataOf(duplicate)?.overrides.includes('tags'))
-          duplicate.tags = [...new Set([...duplicate.tags, ...record.tags])]
-        duplicate.provenance = {
-          ...(record.provenance ?? {}),
-          ...(duplicate.provenance ?? {}),
-          captured_at: record.provenance?.captured_at,
-          observation_count: Math.max(1, Number(duplicate.provenance?.observation_count ?? 1)) + 1,
-        }
-        const previousMetadata = memoryMetadataOf(duplicate)
-        duplicate.meta = {
-          ...(duplicate.meta ?? {}),
-          ...(record.meta ?? {}),
-          memory_metadata: mergedMetadata!,
-        }
-        if (previousMetadata && mergedMetadata) {
-          mergedMetadata.evidence.status = previousMetadata.evidence.status
-          mergedMetadata.evidence.verifiedAt = previousMetadata.evidence.verifiedAt
-          duplicate.meta.memory_metadata = mergedMetadata
-        }
-        if (enqueueServer) {
-          duplicate.synced = false
+        let mergedMetadata: ReturnType<typeof mergeMemoryMetadata> | undefined
+        if (duplicate && automaticExcerpt && !enqueueServer) {
+          const observed = memoryMetadataOf(duplicate)?.evidence.sources ?? []
+          const incoming = memoryMetadataOf(record)?.evidence.sources ?? []
           if (
-            !state.outbox.some(
-              event =>
-                event.operation === 'upsert' &&
-                event.recordId === duplicate.id &&
-                event.principalId === duplicate.principalId
+            incoming.length > 0 &&
+            incoming.every(source =>
+              observed.some(
+                previous =>
+                  previous.kind === source.kind &&
+                  previous.id === source.id &&
+                  previous.role === source.role &&
+                  previous.conversationId === source.conversationId
+              )
             )
-          ) {
-            state.outbox.push(newOutboxEvent(duplicate.id, 'upsert', duplicate.principalId))
+          )
+            return duplicate
+        }
+        if (duplicate && !enqueueServer) {
+          try {
+            mergedMetadata = mergeMemoryMetadata([duplicate, record], record.updatedAt)
+            if (new Set([...duplicate.tags, ...record.tags]).size > 32) duplicate = undefined
+          } catch (error) {
+            if (
+              !(error instanceof Error) ||
+              !['memory_metadata_merge_too_large', 'memory_metadata_override_conflict'].includes(error.message)
+            )
+              throw error
+            // Keep both complete observations when their identities or protected
+            // annotations cannot safely fit in one bounded record.
+            duplicate = undefined
           }
         }
-        return duplicate
-      }
+        if (duplicate) {
+          // A persisted write ID is immutable. Repeated capture must not mutate
+          // provenance/priority and replay a different fingerprint under that ID.
+          if (enqueueServer) return duplicate
+          duplicate.content = record.content
+          duplicate.updatedAt = record.updatedAt
+          duplicate.expiresAt = record.expiresAt
+          // Repetition is an observation, not independent confirmation or authority.
+          duplicate.source = record.source
+          if (!memoryMetadataOf(duplicate)?.overrides.includes('tags'))
+            duplicate.tags = [...new Set([...duplicate.tags, ...record.tags])]
+          duplicate.provenance = {
+            ...(record.provenance ?? {}),
+            ...(duplicate.provenance ?? {}),
+            captured_at: record.provenance?.captured_at,
+            observation_count: Math.max(1, Number(duplicate.provenance?.observation_count ?? 1)) + 1,
+          }
+          const previousMetadata = memoryMetadataOf(duplicate)
+          duplicate.meta = {
+            ...(duplicate.meta ?? {}),
+            ...(record.meta ?? {}),
+            memory_metadata: mergedMetadata!,
+          }
+          if (previousMetadata && mergedMetadata) {
+            mergedMetadata.evidence.status = previousMetadata.evidence.status
+            mergedMetadata.evidence.verifiedAt = previousMetadata.evidence.verifiedAt
+            duplicate.meta.memory_metadata = mergedMetadata
+          }
+          if (enqueueServer) {
+            duplicate.synced = false
+            if (
+              !state.outbox.some(
+                event =>
+                  event.operation === 'upsert' &&
+                  event.recordId === duplicate.id &&
+                  event.principalId === duplicate.principalId
+              )
+            ) {
+              state.outbox.push(newOutboxEvent(duplicate.id, 'upsert', duplicate.principalId))
+            }
+          }
+          return duplicate
+        }
 
-      if (record.status === 'active' && record.featureKey) {
-        const previous = state.records
-          .filter(
-            item =>
+        if (record.status === 'active' && record.featureKey) {
+          const previous = state.records
+            .filter(
+              item =>
+                item.principalId === record.principalId &&
+                item.dataset === record.dataset &&
+                item.featureKey === record.featureKey &&
+                item.status === 'active'
+            )
+            .sort((left, right) => right.updatedAt - left.updatedAt)[0]
+          if (record.expectedPreviousServerVersionId === undefined) {
+            // CAS is explicit even for a first local write. Unknown remote state
+            // therefore conflicts instead of being silently overwritten.
+            record.expectedPreviousServerVersionId = previous?.serverVersionId ?? null
+          }
+          for (const item of state.records) {
+            if (
               item.principalId === record.principalId &&
               item.dataset === record.dataset &&
               item.featureKey === record.featureKey &&
               item.status === 'active'
-          )
-          .sort((left, right) => right.updatedAt - left.updatedAt)[0]
-        if (record.expectedPreviousServerVersionId === undefined) {
-          // CAS is explicit even for a first local write. Unknown remote state
-          // therefore conflicts instead of being silently overwritten.
-          record.expectedPreviousServerVersionId = previous?.serverVersionId ?? null
-        }
-        for (const item of state.records) {
-          if (
-            item.principalId === record.principalId &&
-            item.dataset === record.dataset &&
-            item.featureKey === record.featureKey &&
-            item.status === 'active'
-          ) {
-            item.status = 'superseded'
-            item.updatedAt = Date.now()
+            ) {
+              item.status = 'superseded'
+              item.updatedAt = Date.now()
+            }
           }
         }
-      }
-      state.records.push(record)
-      if (enqueueServer)
-        state.outbox.push({
-          ...newOutboxEvent(record.id, 'upsert', record.principalId),
-          writeSnapshot: structuredClone(record),
-        })
-      pruneState(state)
-      return record
-    })
+        state.records.push(record)
+        if (enqueueServer)
+          state.outbox.push({
+            ...newOutboxEvent(record.id, 'upsert', record.principalId),
+            writeSnapshot: structuredClone(record),
+          })
+        pruneState(state)
+        return record
+      },
+      false,
+      automaticExcerpt
+    )
   }
 
   async recall(context: MemoryContext, query: string, limit: number, includePrivate = false): Promise<MemoryRecord[]> {
@@ -926,6 +959,56 @@ class OfflineMemoryStore {
       .filter(record => !containsSensitiveMemoryData(memoryRecordDlpPayload(record)))
       .sort((left, right) => right.updatedAt - left.updatedAt)
       .slice(0, limit)
+  }
+
+  /** Unconfirmed observations can only reconstruct their own conversation on this device. */
+  async sessionCandidates(context: MemoryContext, query: string, limit: number): Promise<MemoryRecord[]> {
+    await this.writes
+    const state = await this.load()
+    const now = Date.now()
+    const terms = queryTerms(query)
+    return state.records
+      .filter(
+        record =>
+          record.principalId === context.principalId &&
+          record.dataset === context.dataset &&
+          record.status === 'candidate' &&
+          record.sensitivity === 'normal' &&
+          ['automatic', 'inferred'].includes(record.writeIntent) &&
+          (!record.expiresAt || record.expiresAt > now) &&
+          !state.tombstones.some(tombstone => tombstone.recordId === record.id) &&
+          !containsSensitiveMemoryData(memoryRecordDlpPayload(record)) &&
+          memoryMetadataOf(record)?.evidence.sources.some(
+            source =>
+              source.kind === 'chat' &&
+              source.conversationId === context.sessionId &&
+              ['user', 'assistant'].includes(source.role ?? '')
+          ) &&
+          matchesRecallQuery(record, query, terms)
+      )
+      .map(record => ({ record, rank: memoryRank(record, terms) }))
+      .sort(compareRankedMemories)
+      .slice(0, limit)
+      .map(item => item.record)
+  }
+
+  async capturedChatContents(context: MemoryContext, messageId: string, role: string): Promise<Set<string>> {
+    await this.writes
+    const state = await this.load()
+    return new Set(
+      state.records
+        .filter(
+          record =>
+            record.principalId === context.principalId &&
+            record.dataset === context.dataset &&
+            record.source === role &&
+            record.provenance?.capture_policy === 'chat-excerpts-v1' &&
+            memoryMetadataOf(record)?.evidence.sources.some(
+              source => source.kind === 'chat' && source.id === messageId && source.conversationId === context.sessionId
+            )
+        )
+        .map(record => record.content.replace(/\s+/gu, ' ').trim())
+    )
   }
 
   async promote(recordId: string, principalId: string): Promise<MemoryRecord | null> {
@@ -1486,6 +1569,7 @@ export class LuczorMemoryService {
   private syncTimer: ReturnType<typeof setTimeout> | null = null
   private syncRequestedDuringFlush = false
   private checkpoints = new Map<string, { content: string; at: number }>()
+  private chatCaptureWrites: Promise<unknown> = Promise.resolve()
 
   constructor() {
     if (typeof window !== 'undefined') {
@@ -1828,6 +1912,41 @@ export class LuczorMemoryService {
     return record
   }
 
+  /** Persisted per-message quotas survive restarts; final results retain room after long progress runs. */
+  captureChatExcerpts(inputs: readonly RememberInput[], assertCurrent?: () => void): Promise<number> {
+    const next = this.chatCaptureWrites.then(async () => {
+      if (!(await getMemoryPrefs()).autoRemember) return 0
+      const first = inputs[0]
+      if (!first?.projectId || !first.sessionId || !first.origin?.messageId || !first.expectedPrincipalId) return 0
+      const snapshot = await this.operationSnapshot()
+      if (snapshot.principalId !== first.expectedPrincipalId) throw new Error('scope_changed')
+      const context = this.context('project', first, snapshot.principalId)
+      const known = await this.offline.capturedChatContents(context, first.origin.messageId, first.source ?? '')
+      let captured = 0
+      for (const input of inputs.slice(0, 8)) {
+        assertCurrent?.()
+        if (
+          input.projectId !== first.projectId ||
+          input.sessionId !== first.sessionId ||
+          input.origin?.messageId !== first.origin.messageId ||
+          input.source !== first.source ||
+          input.expectedPrincipalId !== snapshot.principalId ||
+          input.provenance?.capture_policy !== 'chat-excerpts-v1'
+        )
+          continue
+        const identity = input.content.replace(/\s+/gu, ' ').trim()
+        const limit = input.provenance.capture_phase === 'progress' ? 16 : 24
+        if (known.has(identity) || known.size >= limit) continue
+        await this.remember(input)
+        known.add(identity)
+        captured++
+      }
+      return captured
+    })
+    this.chatCaptureWrites = next.catch(() => undefined)
+    return next
+  }
+
   private async rememberOperation(input: RememberInput): Promise<MemoryRecord> {
     const content = input.content.trim()
     if (!content) throw new Error('Memory content must not be empty.')
@@ -2135,6 +2254,36 @@ export class LuczorMemoryService {
       return []
     }
     return fuseMemories(records, [], query.query, limit)
+  }
+
+  /** No candidate, query or private source is ever sent to the server by this path. */
+  async recallSessionCandidates(query: SessionCandidateQuery): Promise<MemoryRecord[]> {
+    if (!query.projectId.trim() || !query.sessionId.trim() || !query.query.trim()) return []
+    if (!(await getMemoryPrefs()).inject) return []
+    return trackMemoryUsage(
+      'localRecall',
+      markUsageFailed =>
+        trackMemoryActivity('read', async markFailed => {
+          const snapshot = await this.operationSnapshot()
+          if (query.expectedPrincipalId && query.expectedPrincipalId !== snapshot.principalId) return []
+          const context = this.context('project', query, snapshot.principalId)
+          const limit = Number.isFinite(query.limit) ? Math.max(1, Math.min(4, Math.floor(query.limit!))) : 2
+          const records = await this.offline.sessionCandidates(context, query.query, limit)
+          const current = await getVerifiedAccountSnapshot()
+          if ((current?.principalId ?? 'device-local') !== snapshot.principalId) {
+            markFailed()
+            markUsageFailed()
+            return []
+          }
+          recordMemoryLinks(
+            records.map(record => record.id),
+            'recalled',
+            query.origin ?? 'chat'
+          )
+          return records
+        }),
+      query.origin
+    )
   }
 
   async promote(recordId: string): Promise<MemoryRecord | null> {

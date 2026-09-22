@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
+import { captureChatSubmission } from '@/services/chatSubmission'
 import {
   createAutonomousGoalController,
   createGoalRunState,
@@ -152,24 +153,67 @@ describe('App goal admission integration', () => {
     }
   })
 
-  it('captures autonomous transcript boundaries without adding a synthetic user message', () => {
-    const start = app.indexOf('    if (goalInput) {', app.indexOf('async function send('))
-    const end = app.indexOf('    // Keep the submitted request on disk', start)
-    expect(start).toBeGreaterThan(0)
-    expect(end).toBeGreaterThan(start)
-    const existing = [{ id: 'last-answer', role: 'assistant' }]
-    const captured = { userMessageId: '' }
-    const makeMsg = vi.fn(),
-      addMessage = vi.fn()
-    runInNewContext(javascript(app.slice(start, end)), {
-      goalInput: { state: createGoalRunState('Stored goal', true) },
-      captured,
-      pid: 'project',
-      conversationId: 'chat',
-      mutations: { getConversationMessages: () => existing, makeMsg, addMessage },
-    })
-    expect(captured.userMessageId).toBe('last-answer')
-    expect(makeMsg).not.toHaveBeenCalled()
-    expect(addMessage).not.toHaveBeenCalled()
-  })
+  it.each(['goal', 'resume'] as const)(
+    'captures %s transcript boundaries without adding a synthetic user message',
+    kind => {
+      const start = app.indexOf('if (!submission.createsUserMessage) {', app.indexOf('async function send('))
+      expect(start).toBeGreaterThan(0)
+      const parsed = ts.createSourceFile(
+        'admission.ts',
+        app.slice(start),
+        ts.ScriptTarget.ES2022,
+        true,
+        ts.ScriptKind.TS
+      )
+      const decision = parsed.statements[0]!
+      expect(ts.isIfStatement(decision)).toBe(true)
+      const existing = [
+        {
+          id: 'last-answer',
+          role: 'assistant' as const,
+          projectId: 'project',
+          conversationId: 'chat',
+          content: 'Saved answer',
+          visibility: 'visible' as const,
+          meta: {},
+        },
+      ]
+      const submission = captureChatSubmission({
+        projectId: 'project',
+        conversationId: 'chat',
+        text: 'Stored goal',
+        messages: existing,
+        goal: kind === 'goal',
+        continuation:
+          kind === 'resume'
+            ? {
+                messageId: 'last-answer',
+                checkpoint: {
+                  projectId: 'project',
+                  conversationId: 'chat',
+                  objective: 'Original task',
+                  messages: [{ role: 'user', content: 'Original task' }],
+                  sessionId: 'session',
+                  generation: 1,
+                  completedMutations: [],
+                  ephemeralDataUsed: false,
+                },
+              }
+            : undefined,
+      })
+      const captured = { userMessageId: '' }
+      const makeMsg = vi.fn(),
+        addMessage = vi.fn()
+      runInNewContext(javascript(decision.getText(parsed)), {
+        submission,
+        captured,
+        pid: 'project',
+        conversationId: 'chat',
+        mutations: { getConversationMessages: () => existing, makeMsg, addMessage },
+      })
+      expect(captured.userMessageId).toBe('last-answer')
+      expect(makeMsg).not.toHaveBeenCalled()
+      expect(addMessage).not.toHaveBeenCalled()
+    }
+  )
 })

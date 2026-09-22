@@ -206,22 +206,12 @@ const runLabels: Record<string, string> = {
         <AiIcon name="plus" /><span>Neuer Chat</span>
       </button>
       <button
-        class="ai-icon-button ai-rail__toggle"
-        type="button"
-        :title="collapsed ? 'Projekte andocken' : 'Projekte einklappen'"
-        :aria-label="collapsed ? 'Projekte andocken' : 'Projekte einklappen'"
-        :aria-expanded="!collapsed"
-        @pointerenter="showPane('projects')"
-        @click="emit('update:collapsed', !collapsed)"
-      >
-        <AiIcon name="panel" />
-      </button>
-      <button
         class="ai-sidebar__action"
         type="button"
         title="Projektordner öffnen"
         aria-label="Projektordner öffnen"
         @pointerenter="showPane('projects')"
+        @focus="showPane('projects')"
         @click="emit('addProject')"
       >
         <AiIcon name="folder" /><span>Projektordner öffnen</span>
@@ -523,7 +513,6 @@ const runLabels: Record<string, string> = {
 }
 .ai-rail .ai-sidebar__new,
 .ai-rail .ai-sidebar__action,
-.ai-rail .ai-rail__toggle,
 .ai-rail footer button {
   width: 38px;
   min-height: 38px;
@@ -532,16 +521,6 @@ const runLabels: Record<string, string> = {
   justify-content: center;
   border-radius: 11px;
   flex-shrink: 0;
-}
-.ai-rail .ai-rail__toggle {
-  color: var(--ai-faint);
-  border: 0;
-  background: transparent;
-}
-.ai-rail .ai-rail__toggle:hover,
-.ai-sidebar:not(.is-collapsed) .ai-rail .ai-rail__toggle {
-  color: var(--ai-ink);
-  background: var(--ai-hover);
 }
 .ai-rail footer {
   margin-top: auto;

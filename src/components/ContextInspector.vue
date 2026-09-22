@@ -59,6 +59,18 @@ function state(fragment: PromptFragment): { label: string; tone: 'in' | 'out' } 
   return { label: reason ? (CONTEXT_OMISSION_LABELS[reason] ?? reason) : 'nicht enthalten', tone: 'out' }
 }
 const showRaw = ref(false)
+const repositoryStatus = computed(() => {
+  const graph = props.snapshot?.retrieval?.repositoryDiagnostics
+  if (!graph) return ''
+  return {
+    not_relevant: 'Für diese Anfrage nicht benötigt',
+    unavailable: 'Kein Repository verfügbar',
+    not_ready: 'Repository noch nicht bereit',
+    no_matches: 'Keine passenden Treffer',
+    blocked: 'Zugriff nicht freigegeben',
+    ready: 'Repository durchsucht',
+  }[graph.status]
+})
 </script>
 
 <template>
@@ -94,6 +106,23 @@ const showRaw = ref(false)
           <dd>{{ snapshot.taskType }}</dd>
         </div>
       </dl>
+      <div v-if="snapshot.retrieval" class="context-inspector__hint" aria-label="Automatische Kontextsuche">
+        <p v-if="snapshot.retrieval.repositoryDiagnostics">
+          {{ repositoryStatus }} · {{ snapshot.retrieval.repositoryDiagnostics.matchedFiles }} Dateitreffer,
+          {{ snapshot.retrieval.repositoryDiagnostics.materializedFiles }} gelesene Auszüge,
+          {{ snapshot.retrieval.repositoryDiagnostics.relationCount }} Beziehungen.
+          <template v-if="snapshot.retrieval.repositoryDiagnostics.contextual"
+            >Der bisherige Auftrag wurde bei der Suche berücksichtigt.</template
+          >
+        </p>
+        <p v-if="snapshot.retrieval.memoryDiagnostics">
+          <template v-if="snapshot.retrieval.memoryDiagnostics.enabled">
+            {{ snapshot.retrieval.memoryDiagnostics.active }} aktive Erinnerungen und
+            {{ snapshot.retrieval.memoryDiagnostics.conversationExcerpts }} unbestätigte Auszüge dieses Chats gefunden.
+          </template>
+          <template v-else>Automatischer Gedächtniskontext ist ausgeschaltet.</template>
+        </p>
+      </div>
       <p v-if="snapshot.kind === 'preview' && !snapshot.prompt" class="context-inspector__hint">
         Noch keine Eingabe – das ist der Grundkontext. Treffer zur Anfrage kommen mit dem Entwurf dazu.
       </p>

@@ -132,17 +132,19 @@ describe('chat presentation helpers', () => {
     expect(compactHistory(history, 2400)).toEqual([history[2]])
   })
 
-  it('bounds the local IPC history while retaining the latest complete user message', () => {
+  it('preserves the complete local archive beyond former IPC limits', () => {
     const history: WireMessage[] = Array.from({ length: 301 }, (_, index) => ({
       role: index % 2 === 0 ? 'user' : 'assistant',
       content: String(index),
     }))
     const result = localConversationHistory(history)
-    expect(result.length).toBeLessThanOrEqual(240)
+    expect(result).toEqual(history)
     expect(result[0]?.role).toBe('user')
     expect(result.at(-1)).toEqual(history.at(-1))
     const huge: WireMessage = { role: 'user', content: 'x'.repeat(600000) }
-    expect(localConversationHistory([...history, huge]).at(-1)?.content).toContain(huge.content)
+    const complete = localConversationHistory([...history, huge])
+    expect(complete.at(-1)?.content).toContain(huge.content)
+    expect(complete[0]).toEqual(history[0])
   })
 
   it('keeps the newest messages within the estimated history budget', () => {

@@ -1,5 +1,6 @@
 import type { ContextPackage } from '@/services/inference/contextBroker'
 import type { PromptFragment, PromptFragmentSource } from '@/services/prompt/promptContextAssembler'
+import type { PromptContextDetails } from '@/services/contextController'
 
 /** One assembled start context: either a live preview of the current draft or what a run received. */
 export type ContextSnapshot = {
@@ -14,6 +15,7 @@ export type ContextSnapshot = {
   fragments: PromptFragment[]
   local: ContextPackage
   external: ContextPackage
+  retrieval?: Pick<PromptContextDetails, 'repositoryDiagnostics' | 'memoryDiagnostics'>
 }
 
 export const CONTEXT_SOURCE_LABELS: Record<PromptFragmentSource, string> = {
@@ -73,6 +75,8 @@ export function fragmentTitle(fragment: PromptFragment): string {
     'local-workspace-path': 'Lokaler Projektpfad',
   }
   if (known[fragment.id]) return known[fragment.id]!
+  if (fragment.id.startsWith('session-memory-candidate:')) return 'Unbestätigter Auszug dieses Chats'
+  if (fragment.id.startsWith('query-memory-')) return 'Passende aktive Erinnerung'
   if (fragment.id.startsWith('memory-')) {
     const type = fragment.provenance?.type
     return type ? `Erinnerung · ${type}` : 'Erinnerung'

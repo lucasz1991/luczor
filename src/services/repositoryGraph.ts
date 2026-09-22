@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core'
 import { Store } from '@tauri-apps/plugin-store'
 import { trackMemoryUsage, type MemoryUsageOrigin } from './memory/usage'
+import { buildRepositoryContextQuery, hasRepositoryTaskSignal } from './repositoryContextQuery'
+import { repositoryEvidence } from './repositoryEvidence'
 
 const SETTINGS_FILE = 'luczor.settings.json'
 
@@ -89,6 +91,21 @@ export type LocalRepositoryContext = {
   commitSha?: string
   policy: RepositoryExternalPolicy
   requiresApproval: boolean
+  diagnostics?: RepositoryRetrievalDiagnostics
+}
+
+/** Local inspector telemetry; contains counts/reasons, never source text or query. */
+export type RepositoryRetrievalDiagnostics = {
+  status: 'not_relevant' | 'unavailable' | 'not_ready' | 'no_matches' | 'blocked' | 'ready'
+  graphStatus?: RepositoryGraphStatus['status']
+  queryCount: number
+  contextual: boolean
+  matchedFiles: number
+  selectedFiles: number
+  materializedFiles: number
+  relationCount: number
+  omittedFiles: number
+  omissionReasons: string[]
 }
 
 export async function bindRepository(
@@ -166,11 +183,19 @@ export async function readRepositorySnippets(
   projectId: string,
   evidenceIds: string[],
   maxTotalBytes = 32 * 1024,
-  origin: MemoryUsageOrigin = 'chat'
+  origin: MemoryUsageOrigin = 'chat',
+  query?: string
 ): Promise<{ snippets: GraphSnippet[]; omitted: Array<{ evidence_id: string; reason: string }> }> {
   return trackMemoryUsage(
     'graphRead',
-    () => invoke('local_graph_read_snippets', { principalId, projectId, evidenceIds, maxTotalBytes }),
+    () =>
+      invoke('local_graph_read_snippets', {
+        principalId,
+        projectId,
+        evidenceIds,
+        maxTotalBytes,
+        ...(query ? { query } : {}),
+      }),
     origin
   )
 }
@@ -210,8 +235,12 @@ export async function getRepositoryExternalPolicy(): Promise<RepositoryExternalP
   }
 }
 
-export function shouldUseRepositoryGraph(taskType: string): boolean {
-  return taskType.startsWith('coding.') || taskType === 'planning.architecture'
+export function shouldUseRepositoryGraph(taskType: string, query = '', taskContext = ''): boolean {
+  return (
+    taskType.startsWith('coding.') ||
+    taskType === 'planning.architecture' ||
+    hasRepositoryTaskSignal(query, taskContext)
+  )
 }
 
 export function canShareRepositoryContext(policy: RepositoryExternalPolicy, approvedForTurn = false): boolean {
@@ -231,41 +260,132 @@ export async function buildLocalRepositoryContext(
   limit = 6,
   approvedForTurn = false,
   target: 'local' | 'external' = 'external',
-  origin: MemoryUsageOrigin = 'chat'
+  origin: MemoryUsageOrigin = 'chat',
+  taskContext = ''
 ): Promise<LocalRepositoryContext> {
   const policy = await getRepositoryExternalPolicy()
+  const retrieval = buildRepositoryContextQuery(query, taskContext)
+  const diagnostics: RepositoryRetrievalDiagnostics = {
+    status: 'not_relevant',
+    queryCount: 0,
+    contextual: retrieval.contextual,
+    matchedFiles: 0,
+    selectedFiles: 0,
+    materializedFiles: 0,
+    relationCount: 0,
+    omittedFiles: 0,
+    omissionReasons: [],
+  }
   const empty = (requiresApproval = false): LocalRepositoryContext => ({
     text: '',
     hints: [],
     policy,
     requiresApproval,
+    diagnostics: { ...diagnostics },
   })
-  if (!shouldUseRepositoryGraph(taskType)) return empty()
+  if (!shouldUseRepositoryGraph(taskType, query, taskContext)) return empty()
 
   try {
     const status = await repositoryGraphStatus(principalId, projectId)
-    if (status.status !== 'ready') return empty()
-    const result = await searchRepository(principalId, projectId, query, limit, origin)
-    if (!result.hits.length) return empty()
-    if (target !== 'local' && !canShareRepositoryContext(policy, approvedForTurn)) return empty(policy === 'ask')
+    diagnostics.graphStatus = status.status
+    if (status.status !== 'ready') {
+      diagnostics.status = 'not_ready'
+      return empty()
+    }
+    const selectionLimit = Number.isFinite(limit) ? Math.max(1, Math.min(8, Math.floor(limit))) : 6
+    const candidates = new Map<string, GraphSearchHit>()
+    let result: GraphSearchResult | undefined
+    for (const searchQuery of retrieval.queries) {
+      diagnostics.queryCount++
+      const response = await searchRepository(
+        principalId,
+        projectId,
+        searchQuery,
+        Math.min(24, selectionLimit * 3),
+        origin
+      )
+      // A rebind/reindex between searches invalidates the entire package.
+      if (
+        result &&
+        (result.repository_id !== response.repository_id ||
+          result.commit_sha !== response.commit_sha ||
+          result.branch !== response.branch)
+      ) {
+        diagnostics.status = 'not_ready'
+        diagnostics.omissionReasons = ['repository_changed']
+        return empty()
+      }
+      result = response
+      response.hits.forEach((hit, rank) => {
+        const path = hit.relative_path.replaceAll('\\', '/').toLocaleLowerCase()
+        const pathMatch = retrieval.identifiers.some(
+          id => path === id.toLocaleLowerCase() || path.endsWith(`/${id.toLocaleLowerCase()}`)
+        )
+        const symbolMatch = retrieval.identifiers.some(id =>
+          hit.symbols.some(symbol => symbol.name.toLocaleLowerCase() === id.toLocaleLowerCase())
+        )
+        // Native BM25 rank order is authoritative; its exported reciprocal score
+        // is not comparable across separate FTS queries. Exact names win first.
+        const score = ((pathMatch ? 4 : 0) + (symbolMatch ? 2 : 0) + 1 / (rank + 1)) / 7
+        const previous = candidates.get(hit.evidence_id)
+        if (!previous || previous.score < score) candidates.set(hit.evidence_id, { ...hit, score })
+      })
+    }
+    diagnostics.matchedFiles = candidates.size
+    if (!result || !candidates.size) {
+      diagnostics.status = 'no_matches'
+      return empty()
+    }
+    if (target !== 'local' && !canShareRepositoryContext(policy, approvedForTurn)) {
+      diagnostics.status = 'blocked'
+      return empty(policy === 'ask')
+    }
 
-    const selected = result.hits.filter(hit => !hit.stale).slice(0, limit)
+    const selected = [...candidates.values()]
+      .filter(hit => !hit.stale)
+      .sort((left, right) => right.score - left.score || left.relative_path.localeCompare(right.relative_path))
+      .slice(0, selectionLimit)
+    diagnostics.selectedFiles = selected.length
     const materialized = await readRepositorySnippets(
       principalId,
       projectId,
       selected.map(hit => hit.evidence_id),
       32 * 1024,
-      origin
+      origin,
+      retrieval.focusQuery
     )
-    const snippetsById = new Map(materialized.snippets.map(snippet => [snippet.evidence_id, snippet]))
+    const selectedById = new Map(selected.map(hit => [hit.evidence_id, hit]))
+    const snippetsById = new Map(
+      materialized.snippets
+        .filter(snippet => {
+          const hit = selectedById.get(snippet.evidence_id)
+          return hit?.content_hash === snippet.content_hash && hit.relative_path === snippet.relative_path
+        })
+        .map(snippet => [snippet.evidence_id, snippet])
+    )
+    const evidenceById = new Map(
+      selected.flatMap(hit => {
+        const snippet = snippetsById.get(hit.evidence_id)
+        const evidence = snippet ? repositoryEvidence(hit, snippet, retrieval.focusQuery) : undefined
+        return evidence ? [[hit.evidence_id, evidence] as const] : []
+      })
+    )
+    diagnostics.materializedFiles = evidenceById.size
+    diagnostics.omittedFiles = candidates.size - evidenceById.size
+    diagnostics.omissionReasons = [
+      ...new Set([
+        ...materialized.omitted.map(item => item.reason),
+        ...(candidates.size > selected.length ? ['selection_limit_or_stale'] : []),
+        ...(materialized.snippets.length !== snippetsById.size ? ['evidence_changed'] : []),
+        ...(evidenceById.size !== snippetsById.size ? ['source_line_exceeds_context_budget'] : []),
+        ...([...evidenceById.values()].some(evidence => evidence.shortened) ? ['focused_source_window'] : []),
+      ]),
+    ]
+    diagnostics.relationCount = [...evidenceById.values()].reduce((sum, evidence) => sum + evidence.relationCount, 0)
+    diagnostics.status = evidenceById.size ? 'ready' : 'no_matches'
     const sections = selected.flatMap(hit => {
-      const snippet = snippetsById.get(hit.evidence_id)
-      if (!snippet) return []
-      return [
-        `Datei: ${snippet.relative_path}:${snippet.start_line}-${snippet.end_line}\n` +
-          `Hash: ${snippet.content_hash}\n${(hit.relations ?? []).join('\n')}\n` +
-          `\`\`\`${hit.language}\n${snippet.content}\n\`\`\``,
-      ]
+      const evidence = evidenceById.get(hit.evidence_id)
+      return evidence ? [evidence.content] : []
     })
     const text = sections.length
       ? [
@@ -277,35 +397,39 @@ export async function buildLocalRepositoryContext(
     return {
       text,
       fragments: selected.flatMap(hit => {
-        const snippet = snippetsById.get(hit.evidence_id)
-        return snippet
+        const evidence = evidenceById.get(hit.evidence_id)
+        return evidence
           ? [
               {
                 id: hit.evidence_id,
                 score: hit.score,
-                content: `Datei: ${snippet.relative_path}:${snippet.start_line}-${snippet.end_line}\nHash: ${snippet.content_hash}\n${(hit.relations ?? []).join('\n')}\n${snippet.content}`,
+                content: evidence.content,
               },
             ]
           : []
       }),
-      hints: selected.map(hit => ({
-        path: hit.relative_path,
-        reason: hit.reasons[0] ?? 'local_graph',
-        score: hit.score,
-        meta: {
-          evidence_id: hit.evidence_id,
-          content_hash: hit.content_hash,
-          symbols: hit.symbols.slice(0, 20).map(symbol => symbol.name),
-        },
-      })),
+      hints: selected
+        .filter(hit => evidenceById.has(hit.evidence_id))
+        .map(hit => ({
+          path: hit.relative_path,
+          reason: hit.reasons[0] ?? 'local_graph',
+          score: hit.score,
+          meta: {
+            evidence_id: hit.evidence_id,
+            content_hash: hit.content_hash,
+            symbols: hit.symbols.slice(0, 20).map(symbol => symbol.name),
+          },
+        })),
       repositoryId: result.repository_id,
       branch: result.branch,
       commitSha: result.commit_sha,
       policy,
       requiresApproval: false,
+      diagnostics,
     }
   } catch (error) {
     console.warn('[repository-graph] local retrieval unavailable:', error)
+    diagnostics.status = 'unavailable'
     return empty()
   }
 }
