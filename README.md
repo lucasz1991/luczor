@@ -10,7 +10,8 @@ Tauri-2-/Vue-3-Desktop-Client für Luczor. Die App besitzt Chat, lokale Inferenz
 - Node.js 22.22.0 über `.nvmrc`; unterstützter Bereich: Node 22.12 bis kleiner 23
 - Corepack und pnpm 10.27.0
 - Rust Stable und die Tauri-2-Systemvoraussetzungen
-- CMake und Clang auf dem Buildrechner für die mitgelieferte Whisper-Spracherkennung
+- Windows-Build: Visual Studio 2019/2022 mit „Desktopentwicklung mit C++“ und Windows-SDK; CMake und libclang werden vom Tauri-Starter automatisch vorbereitet
+- Linux/macOS-Build: CMake und Clang für die mitgelieferte Whisper-Spracherkennung
 - für die isolierten Modelltests die bereits gepinnten Assets unter standardmäßig `D:\Luczor\local-model-test`
 
 ## Entwicklung
@@ -28,6 +29,19 @@ powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/with-pin
 ```
 
 Der Wrapper aktiviert die gepinnte NVM-Version nur für seinen Kindprozess und verändert den globalen NVM-Symlink nicht.
+
+Auch `npm run tauri build` und `pnpm tauri dev` wählen die installierte Node-Version aus `.nvmrc` automatisch für ihre Kindprozesse. Die Node-Version anderer Terminals bleibt unverändert.
+
+Unter Windows x64 bereitet der Starter vor dem Frontend-/Rust-Build CMake 3.31.10 und libclang 18.1.1 im gemeinsamen `.lmzdev/artifacts/build/voice-tools` vor. Die Downloads und ausführbaren Dateien sind per SHA-256 gepinnt; vorhandene geprüfte Werkzeuge werden wiederverwendet. Python und eine globale Clang-/CMake-Installation sind dafür nicht erforderlich. Der erste Build braucht Internetzugang für fehlende Werkzeuge und das Sprachmodell. Visual Studio wird gezielt nach dem C++-Werkzeugsatz ausgewählt, damit eine zusätzliche IDE ohne C++ den Build nicht stört.
+
+Explizite `CMAKE`, `CMAKE_GENERATOR`, `CMAKE_GENERATOR_INSTANCE` und `LIBCLANG_PATH` bleiben berücksichtigt; fehlende Werkzeuge und unpassende Visual-Studio-Instanzen werden vor dem eigentlichen Build gemeldet. Für direkte Cargo-Aufrufe unter Windows denselben Starter verwenden, zum Beispiel:
+
+```powershell
+node scripts/prepare-voice-runtime.mjs
+node scripts/prepare-windows-voice-build.cjs cargo test --manifest-path src-tauri/Cargo.toml
+```
+
+Diese Werkzeuge werden nur zum Kompilieren benötigt. Die installierte App enthält die Whisper-Engine und ihr Modell bereits.
 
 ## Qualitätsprüfungen
 

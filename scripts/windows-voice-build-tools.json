@@ -1,0 +1,22 @@
+{
+  "cmake": {
+    "archive": "cmake-3.31.10-windows-x86_64.zip",
+    "url": "https://github.com/Kitware/CMake/releases/download/v3.31.10/cmake-3.31.10-windows-x86_64.zip",
+    "bytes": 46660154,
+    "sha256": "13d1a463d7130df5339baedd63d8ae990aaf385062b2f42f372796143ae94086",
+    "directory": "cmake-3.31.10-windows-x86_64",
+    "extractTo": ".",
+    "binary": "bin/cmake.exe",
+    "binarySha256": "3c05de86fbc0ec0610bbee201588e4fc1017347ec61b0f8080981fc6bfe93681"
+  },
+  "libclang": {
+    "archive": "libclang.zip",
+    "url": "https://files.pythonhosted.org/packages/0b/2d/3f480b1e1d31eb3d6de5e3ef641954e5c67430d5ac93b7fa7e07589576c7/libclang-18.1.1-py2.py3-none-win_amd64.whl",
+    "bytes": 26415083,
+    "sha256": "4dd2d3b82fab35e2bf9ca717d7b63ac990a3519c7e312f19fa8e86dcc712f7fb",
+    "directory": "libclang",
+    "extractTo": "libclang",
+    "binary": "libclang-18.1.1.data/platlib/clang/native/libclang.dll",
+    "binarySha256": "b13ec96d9a036d6c6c36dd09e00415ead7acc7fcfd40e721bf33ea86b3490f9d"
+  }
+}

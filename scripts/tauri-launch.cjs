@@ -5,6 +5,8 @@ const path = require('node:path')
 const { pathToFileURL } = require('node:url')
 const { spawn, spawnSync } = require('node:child_process')
 const { reportLinuxMedia } = require('./linux-media-check.cjs')
+const { pinnedNodeEnvironment } = require('./build-environment.cjs')
+const { prepareWindowsVoiceBuild } = require('./prepare-windows-voice-build.cjs')
 
 const appRoot = path.resolve(__dirname, '..')
 const managedRuntimeRoot = path.resolve(appRoot, '../.lmzdev/artifacts/runtime/claude-agent')
@@ -133,11 +135,34 @@ function dynamicTauriConfig(devUrl, includeManagedRuntime, includeLspRuntime = f
   return config
 }
 
+function forwardChild(child) {
+  for (const signal of ['SIGINT', 'SIGTERM']) {
+    process.on(signal, () => child.kill(signal))
+  }
+  child.once('error', error => {
+    console.error(error.message)
+    process.exitCode = 1
+  })
+  child.once('exit', (code, signal) => {
+    process.exitCode = code ?? (signal ? 130 : 1)
+  })
+}
+
 async function main() {
   const args = process.argv.slice(2)
-  const env = { ...process.env }
+  let env = { ...process.env }
   const command = args[0]
   const isHelp = args.includes('--help') || args.includes('-h')
+  if (!isHelp && ['dev', 'build', 'bundle'].includes(command)) {
+    const node = pinnedNodeEnvironment(appRoot)
+    env = node.env
+    if (node.reexec) {
+      console.log(`Luczor build uses Node ${node.version} (current shell remains unchanged).`)
+      forwardChild(spawn(node.executable, [__filename, ...args], { env, stdio: 'inherit', windowsHide: true }))
+      return
+    }
+    env = await prepareWindowsVoiceBuild(env, { target: targetTripleFromArgs(args, env) })
+  }
   if (!isHelp && ['dev', 'build', 'bundle'].includes(command)) ensureWorkspaceDependencies(env)
   if (!isHelp && command === 'dev') reportLinuxMedia()
   let devUrl
@@ -174,16 +199,7 @@ async function main() {
   }
   const cli = path.join(path.dirname(require.resolve('@tauri-apps/cli/package.json')), 'tauri.js')
   const child = spawn(process.execPath, [cli, ...args], { env, stdio: 'inherit' })
-  for (const signal of ['SIGINT', 'SIGTERM']) {
-    process.on(signal, () => child.kill(signal))
-  }
-  child.once('error', error => {
-    console.error(error.message)
-    process.exitCode = 1
-  })
-  child.once('exit', (code, signal) => {
-    process.exitCode = code ?? (signal ? 130 : 1)
-  })
+  forwardChild(child)
 }
 
 module.exports = {
