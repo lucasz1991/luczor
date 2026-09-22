@@ -217,7 +217,7 @@ pub(super) fn local_stt_sync(
 ) -> Result<LocalSttResponse, String> {
     #[cfg(feature = "whisper_rs")]
     {
-        return whisper_rs_stt(app, payload);
+        whisper_rs_stt(app, payload)
     }
     #[cfg(not(feature = "whisper_rs"))]
     local_stt_cli(app, payload)
@@ -271,7 +271,7 @@ pub async fn local_stt_rs(
     #[cfg(feature = "whisper_rs")]
     {
         let (operation, cancellation) = super::owned_processes::Operation::begin()?;
-        return tauri::async_runtime::spawn_blocking(move || {
+        tauri::async_runtime::spawn_blocking(move || {
             let _operation = operation;
             cancellation.check()?;
             let result = whisper_rs_stt(&app, payload);
@@ -279,7 +279,7 @@ pub async fn local_stt_rs(
             result
         })
         .await
-        .map_err(|error| structured_error("task_join", &error.to_string()))?;
+        .map_err(|error| structured_error("task_join", &error.to_string()))?
     }
     #[cfg(not(feature = "whisper_rs"))]
     {

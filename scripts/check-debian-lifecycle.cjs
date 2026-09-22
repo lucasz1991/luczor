@@ -47,7 +47,7 @@ function inspectArtifact(file, run = command) {
     throw new Error('Invalid artifact version or architecture.')
   const contents = run('dpkg-deb', ['--contents', artifact])
   const files = contents.split('\n').flatMap(line => {
-    const match = /^-\S+\s+\S+\s+\d+\s+\S+\s+\S+\s+\.\/(.+)$/u.exec(line)
+    const match = /^-\S+\s+\S+\s+\d+\s+\S+\s+\S+\s+(?:\.\/)?(.+)$/u.exec(line)
     return match ? [`/${match[1]}`] : []
   })
   for (const expected of definition.files) {

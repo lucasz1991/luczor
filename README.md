@@ -10,6 +10,7 @@ Tauri-2-/Vue-3-Desktop-Client für Luczor. Die App besitzt Chat, lokale Inferenz
 - Node.js 22.22.0 über `.nvmrc`; unterstützter Bereich: Node 22.12 bis kleiner 23
 - Corepack und pnpm 10.27.0
 - Rust Stable und die Tauri-2-Systemvoraussetzungen
+- CMake und Clang auf dem Buildrechner für die mitgelieferte Whisper-Spracherkennung
 - für die isolierten Modelltests die bereits gepinnten Assets unter standardmäßig `D:\Luczor\local-model-test`
 
 ## Entwicklung
@@ -36,6 +37,7 @@ pnpm type-check
 pnpm test --run
 pnpm test --run --coverage
 pnpm build
+node scripts/prepare-voice-runtime.mjs
 cargo fmt --manifest-path src-tauri/Cargo.toml --check
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 cargo test --manifest-path src-tauri/Cargo.toml

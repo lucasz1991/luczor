@@ -11,7 +11,8 @@ bash scripts/setup-desktop.sh --install
 The script installs Debian/Ubuntu or Fedora build libraries, the Node version in
 `.nvmrc`, pnpm 10.27.0, Rust and locked frontend dependencies. On macOS it uses
 Apple Command Line Tools; if absent, finish Apple's installer and rerun the script.
-No Homebrew installation is needed for the default desktop build.
+CMake and Clang are also required on the build machine for the bundled Whisper engine.
+On macOS, install CMake separately if it is missing (for example `brew install cmake`).
 
 Open a new terminal, then:
 
@@ -41,7 +42,15 @@ and macOS without changing the locked dependency versions.
 
 ## Installing the app without development tools
 
-Node, pnpm and Rust are build tools and are not required by end users.
+Node, pnpm, Rust, CMake and Clang are build tools and are not required by end users.
+Whisper is linked into the app and the installer includes a multilingual speech model
+(about 60 MB). Speech input works locally without Python, a system Whisper installation,
+CUDA or a voice-server account. Microphone access still requires OS permission.
+
+`pnpm tauri dev/build/bundle` prepares and verifies the pinned model automatically on
+the build machine. Before invoking Cargo directly, run `node scripts/prepare-voice-runtime.mjs`
+from the app directory. Release builds reject a missing or corrupt model and a disabled
+`whisper_rs` feature. A previous standalone Whisper installation is not needed.
 
 On Debian/Ubuntu, install the `.deb` through the package manager, which resolves
 WebKitGTK, GTK, PipeWire, GBM, X11/Wayland and libxdo runtime dependencies:

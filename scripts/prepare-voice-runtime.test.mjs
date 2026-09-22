@@ -1,3 +1,4 @@
+/* eslint-disable security/detect-non-literal-fs-filename -- Isolated generated fixture directories under tmpdir(), checked before cleanup. */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'

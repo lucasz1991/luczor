@@ -1,3 +1,4 @@
+/* eslint-disable security/detect-non-literal-fs-filename -- Build-owned staging directory and pinned model metadata; no application/user paths. */
 import { createReadStream } from 'node:fs'
 import { copyFile, mkdir, open, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { createHash } from 'node:crypto'

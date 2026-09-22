@@ -1,6 +1,12 @@
 # Spracheingabe am Eingabefeld
 
-Im Hauptchat und Mini-Chat öffnet **Sprache** die Einstellungen direkt am jeweiligen Eingabefeld. **Speichern & starten** übernimmt die Einstellungen und startet die lokale Erkennung. Das Mikrofon öffnet sich erst nach diesem Klick und nach der Vorbereitung der lokalen Whisper-Laufzeit. Eine fehlende Laufzeit wird im Hauptfenster installiert; der Mini-Chat erhält keine Installations- oder Zugangsdatenrechte.
+Im Hauptchat und Mini-Chat öffnet **Sprache** die Einstellungen direkt am jeweiligen Eingabefeld. **Speichern & starten** übernimmt die Einstellungen und startet die lokale Erkennung. Das Mikrofon öffnet sich erst nach diesem Klick und der lokalen Bereitschaftsprüfung. Whisper und ein mehrsprachiges Modell einschließlich Deutsch werden mit der App installiert. Eine separate Whisper-/Python-Installation oder Anmeldung am Sprachserver ist für das Diktieren nicht erforderlich.
+
+## Fortlaufende Erkennung
+
+Während des Zuhörens erscheinen erkannte Wörter und Sätze bereits als Vorschau im Eingabefeld. Die Erkennung verarbeitet kurze, wachsende Audioabschnitte; sie wartet nicht auf das Ende des gesamten Diktats. Eine Vorschau darf noch korrigiert werden. Sprechpausen und **Aufnahme stoppen** lassen bereits erkannte Wörter sichtbar, während der letzte Abschnitt bestätigt wird. Das Modell bleibt zwischen Abschnitten geladen. Die Geschwindigkeit hängt vom Gerät ab; dies ist keine garantierte Erkennung jedes einzelnen Wortes ohne Verzögerung.
+
+Bei älteren Installationen die vollständige aktuelle App installieren. Falls Sprachdateien fehlen oder beschädigt sind, wird die Erkennung nicht als bereit gemeldet. Mikrofonberechtigungen werden weiterhin vom Betriebssystem verwaltet.
 
 ## Steuerwörter oder eigene Audioaufnahmen
 

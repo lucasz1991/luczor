@@ -6,7 +6,10 @@ import { voiceModel } from './prepare-voice-runtime.mjs'
 const file = resolve(process.argv[2] || '')
 if (!file.endsWith('.deb')) throw new Error('Provide the built Luczor .deb package.')
 const contents = execFileSync('dpkg-deb', ['--contents', file], { encoding: 'utf8', maxBuffer: 32 * 1024 * 1024 })
-const entries = contents.split('\n').map(line => line.slice(line.indexOf('./')))
+const entries = contents.split('\n').flatMap(line => {
+  const entry = line.match(/^-\S+\s+\S+\s+\d+\s+\S+\s+\S+\s+(.+)$/u)
+  return entry ? [entry[1]] : []
+})
 const models = entries.filter(entry => entry.endsWith(`/voice/${voiceModel.file}`))
 if (models.length !== 1 || !entries.some(entry => entry.endsWith('/voice/LICENSES.txt')))
   throw new Error('Installer is missing the bundled Whisper model or licenses.')

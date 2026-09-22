@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-require-imports -- Tauri's launcher executes directly in Node's CommonJS runtime. */
 const net = require('node:net')
 const fs = require('node:fs')
 const path = require('node:path')

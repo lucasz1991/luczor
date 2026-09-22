@@ -30,7 +30,7 @@ function fixture(changes = {}) {
           return { Package: changes.packageName || packageName, Version: '2.9.3', Architecture: 'amd64' }[args[2]]
         return owned
           .filter(file => file !== changes.missingFile)
-          .map(file => `-rwxr-xr-x root/root 123 2026-09-20 12:00 .${file}`)
+          .map(file => `-rwxr-xr-x root/root 123 2026-09-20 12:00 ${changes.noDotPrefix ? file.slice(1) : `.${file}`}`)
           .join('\n')
       }
       if (command === 'dpkg-query') {
@@ -59,6 +59,12 @@ test('artifact inspection is read-only unless the explicit disposable CI removal
   const result = checkLifecycle(['luczor.deb'], options)
   assert.equal(result.removed, false)
   assert.equal(files.size, 0)
+  assert.ok(calls.every(call => call.command === 'dpkg-deb'))
+})
+
+test('accepts regular package members without a leading dot slash, as emitted by current Tauri', () => {
+  const { options, calls } = fixture({ noDotPrefix: true })
+  assert.equal(checkLifecycle(['luczor.deb'], options).packageName, 'luczor')
   assert.ok(calls.every(call => call.command === 'dpkg-deb'))
 })
 
