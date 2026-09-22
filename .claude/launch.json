@@ -5,7 +5,15 @@
       "name": "vite",
       "runtimeExecutable": "pnpm",
       "runtimeArgs": ["vite:dev"],
-      "port": 1420
+      "port": 1420,
+      "autoPort": true
+    },
+    {
+      "name": "vite-preview",
+      "runtimeExecutable": "pnpm",
+      "runtimeArgs": ["vite:dev"],
+      "port": 1421,
+      "autoPort": true
     }
   ]
 }

@@ -232,9 +232,9 @@ describe('local STT live snapshots', () => {
     frames(engine, 13)
     expect(transcribe).toHaveBeenCalledTimes(1)
 
-    first.resolve('Veraltete Vorschau')
+    first.resolve('Erste Vorschau')
     await flush()
-    expect(opts.onPartial).not.toHaveBeenCalled()
+    expect(opts.onPartial).toHaveBeenLastCalledWith('Erste Vorschau')
     expect(transcribe).toHaveBeenCalledTimes(2)
     expect(JSON.parse(transcribe.mock.calls[1]![0]).samples).toBe(22 * 4800)
 
@@ -581,9 +581,9 @@ describe('explicit PTT finalization', () => {
     expect(engine.finalize()).toBe(completed)
     expect(firstStream.stop).toHaveBeenCalledOnce()
     frames(engine, 20)
-    preview.resolve('Überholte Vorschau')
+    preview.resolve('Vorläufig erkannte Wörter')
     await flush()
-    expect(opts.onPartial).not.toHaveBeenCalled()
+    expect(opts.onPartial).toHaveBeenLastCalledWith('Vorläufig erkannte Wörter')
     first.resolve('Erster Teil')
     await flush()
     expect(JSON.parse(transcribe.mock.calls[2]![0]).samples).toBe(4 * 4800)

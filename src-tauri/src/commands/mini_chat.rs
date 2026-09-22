@@ -596,7 +596,8 @@ pub fn mini_chat_window(
         // Wider than before: the grip icons stay visible to the right of the expanded chat page.
         MiniWindowAction::Expand => resize(&window, 480.0, 640.0, false),
         MiniWindowAction::Collapse => resize(&window, COLLAPSED_WIDTH, COLLAPSED_HEIGHT, false),
-        MiniWindowAction::Peek => resize(&window, 380.0, 380.0, false),
+        // Tall enough for the Systemstatus column (rings, flows, model, tools) without scrolling.
+        MiniWindowAction::Peek => resize(&window, 380.0, 540.0, false),
         MiniWindowAction::Hide => window.hide().map_err(|e| e.to_string()),
         MiniWindowAction::Pin => window.set_always_on_top(true).map_err(|e| e.to_string()),
         MiniWindowAction::Unpin => window.set_always_on_top(false).map_err(|e| e.to_string()),

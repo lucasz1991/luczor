@@ -70,18 +70,21 @@ if [[ "$mode" == --install ]]; then
         sudo apt-get update
         sudo apt-get install -y curl ca-certificates git build-essential pkg-config \
           libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev \
-          patchelf libpipewire-0.3-dev clang libclang-dev libgbm-dev libxdo-dev \
+          patchelf cmake libpipewire-0.3-dev clang libclang-dev libgbm-dev libxdo-dev \
           libwayland-dev libegl1-mesa-dev libxcb1-dev
       elif command -v dnf >/dev/null; then
         sudo dnf install -y curl ca-certificates git gcc gcc-c++ make pkgconf-pkg-config \
           openssl-devel webkit2gtk4.1-devel libappindicator-gtk3-devel librsvg2-devel \
-          patchelf pipewire-devel clang clang-devel mesa-libgbm-devel libxdo-devel \
+          patchelf cmake pipewire-devel clang clang-devel mesa-libgbm-devel libxdo-devel \
           wayland-devel mesa-libEGL-devel libxcb-devel
       else
         echo 'Unsupported package manager. Install Tauri 2, PipeWire, GBM, Clang and libxdo development packages.'; exit 1
       fi
       ;;
     Darwin)
+      if ! command -v cmake >/dev/null; then
+        echo 'Install CMake on the build machine (for example: brew install cmake), then retry.'; exit 1
+      fi
       if ! xcode-select -p >/dev/null 2>&1; then
         xcode-select --install
         echo 'Complete the Apple Command Line Tools installer, then run this script again.'; exit 1
@@ -125,7 +128,7 @@ if [[ -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]]; then
   set -u
 fi
 failed=0
-for tool in node pnpm cargo rustc clang; do
+for tool in node pnpm cargo rustc clang cmake; do
   if command -v "$tool" >/dev/null; then "$tool" --version; else echo "Missing: $tool"; failed=1; fi
 done
 if command -v node >/dev/null; then node scripts/release-readiness.cjs --mode node || failed=1; fi

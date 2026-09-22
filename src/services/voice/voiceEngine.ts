@@ -98,6 +98,7 @@ export class VoiceEngine {
   private generation = 0
   private epoch = 0
   private segmentId = 0
+  private committedSegmentId = 0
   private segmentSamples = 0
   private lastInterimSamples = 0
   private finalizing = false
@@ -512,12 +513,15 @@ export class VoiceEngine {
       const text = cleanSttTranscript(await opts.transcribe(wav, 'audio/wav'))
       if (!this.valid(generation, opts, epoch) || this.muted) return
       if (!job.final) {
-        // Once the final snapshot exists, an older hypothesis must not overwrite its draft.
-        if (!this.speaking || this.finalizing || this.segmentId !== job.segmentId) return
+        // Keep showing useful words if the speaker paused while inference was running.
+        // The serial decoder guarantees the queued final will replace this preview next.
+        // Previously every such result was discarded, leaving the field empty until the final.
+        if (job.segmentId <= this.committedSegmentId) return
         if (this.machine) this.machine.previewSegment(text)
         else if (opts.mode === 'continuous') opts.onPartial?.(text)
         return
       }
+      this.committedSegmentId = job.segmentId
       if (!text) {
         // A rejected/no-speech final must retract its speculative preview while preserving committed text.
         if (this.machine) this.machine.pushSegment('', Date.now())

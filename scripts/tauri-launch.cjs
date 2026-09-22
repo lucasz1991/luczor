@@ -151,6 +151,8 @@ async function main() {
   }
   let includeManagedRuntime = false
   if (!isHelp && ['dev', 'build', 'bundle'].includes(command)) {
+    const { prepareVoiceRuntime } = await import(pathToFileURL(path.join(__dirname, 'prepare-voice-runtime.mjs')).href)
+    await prepareVoiceRuntime()
     includeManagedRuntime = await prepareManagedRuntime(args, env, command !== 'dev')
     const lsp = spawnSync(process.execPath, [path.join(__dirname, 'build-lsp-runtime.mjs')], {
       cwd: appRoot,

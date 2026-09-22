@@ -15,6 +15,9 @@ use super::ensure_main_webview;
 
 const MANIFEST_PUBLIC_KEY_B64: Option<&str> = option_env!("LUCZOR_VOICE_MANIFEST_PUBLIC_KEY_B64");
 
+#[cfg(feature = "whisper_rs")]
+mod bundled_stt;
+
 #[derive(Debug, Deserialize)]
 pub struct VoiceManifestInstallPayload {
     pub payload_json: String,
@@ -212,6 +215,16 @@ pub(super) fn local_stt_sync(
     app: &AppHandle,
     payload: LocalSttPayload,
 ) -> Result<LocalSttResponse, String> {
+    #[cfg(feature = "whisper_rs")]
+    {
+        return whisper_rs_stt(app, payload);
+    }
+    #[cfg(not(feature = "whisper_rs"))]
+    local_stt_cli(app, payload)
+}
+
+#[cfg(not(feature = "whisper_rs"))]
+fn local_stt_cli(app: &AppHandle, payload: LocalSttPayload) -> Result<LocalSttResponse, String> {
     let runtime = ready_runtime(app, "stt_binary", "stt_model")?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(normalize_base64(&payload.base64))
@@ -246,10 +259,8 @@ pub(super) fn local_stt_sync(
     })
 }
 
-/// SOLL §14 P5 — native whisper-rs STT with a long-lived context (selectable in
-/// the admin as engine `whisper_rs`). Only functional when the app is built with
-/// `--features whisper_rs` (needs CMake); otherwise it returns a clear error so
-/// the client can fall back to the `whisper_local` (whisper.cpp) engine.
+/// Compatibility entry point for saved `whisper_rs` settings. Installed apps use
+/// the same cached native decoder through both STT commands, including mini chat.
 #[tauri::command]
 pub async fn local_stt_rs(
     window: crate::commands::CallerWebview,
@@ -280,83 +291,24 @@ pub async fn local_stt_rs(
     }
 }
 
-/// Native whisper-rs transcription. The context is loaded once per model path and
-/// reused across segments (raw f32 PCM in). Feature-gated: unbuilt in CMake-less
-/// environments; validate the exact whisper-rs 0.12 API on the first native build.
+/// Prefer the package model, also when old runtime.json contains stale paths.
 #[cfg(feature = "whisper_rs")]
 fn whisper_rs_stt(app: &AppHandle, payload: LocalSttPayload) -> Result<LocalSttResponse, String> {
-    use std::sync::{Arc, Mutex, OnceLock};
-    use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+    let path = stt_model_path(app)?;
+    bundled_stt::transcribe(&path, payload)
+}
 
-    static CTX: OnceLock<Mutex<Option<(String, Arc<WhisperContext>)>>> = OnceLock::new();
-
-    let runtime = ready_runtime(app, "stt_binary", "stt_model")?;
-    let model_path = runtime.paths["stt_model"].clone();
-
-    // Decode the incoming 16 kHz mono PCM16 WAV to f32 samples.
-    let bytes = base64::engine::general_purpose::STANDARD
-        .decode(normalize_base64(&payload.base64))
-        .map_err(|error| structured_error("audio_decode", &error.to_string()))?;
-    let wav_path = write_temp(&bytes, "wav")?;
-    let opened = hound::WavReader::open(&wav_path);
-    let _ = std::fs::remove_file(&wav_path);
-    let mut reader = opened.map_err(|error| structured_error("wav_open", &error.to_string()))?;
-    let samples: Vec<f32> = reader
-        .samples::<i16>()
-        .map(|sample| sample.map(|value| value as f32 / 32768.0).unwrap_or(0.0))
-        .collect();
-
-    // Long-lived context, reused unless the model path changes.
-    let cell = CTX.get_or_init(|| Mutex::new(None));
-    let context = {
-        let mut guard = cell
-            .lock()
-            .map_err(|_| structured_error("ctx_lock", "Kontext-Mutex vergiftet."))?;
-        let needs_new = match guard.as_ref() {
-            Some((path, _)) => path != &model_path,
-            None => true,
-        };
-        if needs_new {
-            let loaded =
-                WhisperContext::new_with_params(&model_path, WhisperContextParameters::default())
-                    .map_err(|error| structured_error("whisper_load", &error.to_string()))?;
-            *guard = Some((model_path.clone(), Arc::new(loaded)));
-        }
-        guard.as_ref().map(|(_, ctx)| Arc::clone(ctx)).unwrap()
-    };
-
-    let mut state = context
-        .create_state()
-        .map_err(|error| structured_error("whisper_state", &error.to_string()))?;
-    let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-    params.set_print_progress(false);
-    params.set_print_special(false);
-    params.set_print_realtime(false);
-    params.set_no_timestamps(true);
-    if let Some(language) = payload
-        .language
-        .as_ref()
-        .filter(|value| !value.trim().is_empty())
-    {
-        params.set_language(Some(language.trim()));
-    }
-    state
-        .full(params, &samples)
-        .map_err(|error| structured_error("whisper_infer", &error.to_string()))?;
-
-    let segments = state
-        .full_n_segments()
-        .map_err(|error| structured_error("whisper_segments", &error.to_string()))?;
-    let mut text = String::new();
-    for index in 0..segments {
-        if let Ok(segment) = state.full_get_segment_text(index) {
-            text.push_str(&segment);
-            text.push(' ');
-        }
-    }
-
-    Ok(LocalSttResponse {
-        text: filter_recognizer_output(text.trim()),
+#[cfg(feature = "whisper_rs")]
+fn stt_model_path(app: &AppHandle) -> Result<PathBuf, String> {
+    bundled_stt::model_path(app).or_else(|bundled_error| {
+        let saved = read_state(app)
+            .ok()
+            .flatten()
+            .and_then(|state| state.paths.get("stt_model").cloned());
+        saved
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .ok_or(bundled_error)
     })
 }
 
@@ -482,7 +434,7 @@ fn ready_runtime(app: &AppHandle, first: &str, second: &str) -> Result<RuntimeSt
 }
 
 pub(super) fn status(app: &AppHandle) -> VoiceRuntimeStatus {
-    match read_state(app) {
+    let mut status = match read_state(app) {
         Ok(Some(state)) => {
             let stt_ready = state
                 .paths
@@ -544,7 +496,29 @@ pub(super) fn status(app: &AppHandle) -> VoiceRuntimeStatus {
             tts_ready: false,
             error: Some(error),
         },
+    };
+    #[cfg(feature = "whisper_rs")]
+    match stt_model_path(app) {
+        Ok(_) => {
+            status.stt_ready = true;
+            status.state = if status.tts_ready {
+                "ready"
+            } else {
+                "incomplete"
+            }
+            .into();
+            status
+                .version
+                .get_or_insert_with(|| "bundled-whisper-base-q5_1-v1".into());
+            // Optional TTS installation must not report the working input runtime as broken.
+            status.error = None;
+        }
+        Err(error) => {
+            status.stt_ready = false;
+            status.error = Some(error);
+        }
     }
+    status
 }
 
 fn verify_manifest(payload: &str, signature: &str) -> Result<(), String> {
@@ -724,6 +698,7 @@ fn write_state(app: &AppHandle, state: &RuntimeState) -> Result<(), String> {
         .map_err(|error| structured_error("runtime_state", &error.to_string()))
 }
 
+#[cfg(not(feature = "whisper_rs"))]
 fn write_temp(bytes: &[u8], ext: &str) -> Result<PathBuf, String> {
     let path = std::env::temp_dir().join(format!("luczor_voice_{}.{}", uuid::Uuid::new_v4(), ext));
     std::fs::write(&path, bytes)

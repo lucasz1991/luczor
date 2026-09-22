@@ -19,6 +19,9 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 // https://vitejs.dev/config/
+// Tauri's devUrl pins 1420; browser-only previews may run beside it on the port a launcher assigns via PORT.
+const DEV_PORT = Number(process.env.LUCZOR_DEV_PORT || process.env.PORT || 1420)
+
 export default defineConfig({
   plugins: [
     tailwind(),
@@ -52,7 +55,7 @@ export default defineConfig({
   clearScreen: false,
   envPrefix: ['VITE_', 'TAURI_'],
   server: {
-    port: Number(process.env.LUCZOR_DEV_PORT || 1420),
+    port: DEV_PORT,
     strictPort: true,
     host: process.env.LUCZOR_DEV_BIND_HOST || HOST || false,
     // The packaged WebView uses its server-approved Tauri origin. Vite relays
@@ -78,7 +81,7 @@ export default defineConfig({
       ? {
           protocol: 'ws',
           host: HOST,
-          port: Number(process.env.LUCZOR_DEV_PORT || 1420),
+          port: DEV_PORT,
         }
       : undefined,
     watch: {

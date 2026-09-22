@@ -5,6 +5,8 @@ import {
   dialScope,
   diskScopes,
   gibibytes,
+  meterTile,
+  meterUsage,
   type ResourceMeter,
   type ResourceDialSeries,
   type ResourceView,
@@ -16,32 +18,7 @@ const props = defineProps<{
   compact: boolean
   stale: boolean
 }>()
-const usage = computed(() => {
-  const series = props.meter.series.slice(0, 3)
-  const total = series[0]?.value
-  const app = series[1]?.value
-  const model = series[2]?.value
-  const modelInactive = series[2]?.detail.includes('nicht aktiv') ?? false
-  const disk = !!props.meter.disk
-  const raw = disk
-    ? [total, app, model]
-    : [
-        total === null || total === undefined || app === null || (model === null && !modelInactive)
-          ? null
-          : Math.max(0, total - (app ?? 0) - (model ?? 0)),
-        app,
-        model,
-      ]
-  const sum = raw.reduce<number>((sum, value) => sum + (value ?? 0), 0)
-  return series.map((series, index) => ({
-    ...series,
-    value: raw.at(index) ?? null,
-    label:
-      (disk ? ['Aktiv', 'Lesen', 'Schreiben'].at(index) : ['System', 'App', 'Lokales Modell'].at(index)) ??
-      series.label,
-    width: ((raw.at(index) ?? 0) / Math.max(100, sum)) * 100,
-  }))
-})
+const usage = computed(() => meterUsage(props.meter))
 const innerSeries = computed<ResourceDialSeries[]>(() =>
   props.meter.key === 'ram'
     ? [
@@ -54,36 +31,8 @@ const innerSeries = computed<ResourceDialSeries[]>(() =>
       ]
     : props.meter.series.slice(3)
 )
-/* Sidebar tile: headline value, secondary reading and a sparkline of the total series. */
-const tile = computed(() => {
-  const total = props.meter.series[0]
-  const temperature = props.meter.series.find(series => series.key === 'temperature')
-  const model = props.meter.series[2]
-  const value = total?.value ?? null
-  const level = props.meter.disk
-    ? 'ok'
-    : temperature?.tone === 'danger' || (value !== null && value >= 90)
-      ? 'bad'
-      : temperature?.tone === 'warning' || (value !== null && value >= 75)
-        ? 'warn'
-        : 'ok'
-  const sub = props.meter.disk
-    ? `${gibibytes(props.meter.disk.used_bytes)} / ${gibibytes(props.meter.disk.total_bytes)} GiB`
-    : temperature
-      ? temperature.value === null
-        ? ''
-        : dialDisplay(temperature)
-      : model && model.value !== null
-        ? `Modell ${dialDisplay(model)}`
-        : ''
-  return {
-    value: value === null ? '—' : value.toLocaleString('de-DE', { maximumFractionDigits: 0 }),
-    unit: value === null ? '' : '%',
-    sub,
-    subTone: temperature?.tone ?? 'safe',
-    level,
-  }
-})
+/* Sidebar tile: headline value, secondary reading and severity. */
+const tile = computed(() => meterTile(props.meter))
 function continuousColor(value: number | null, maximum = 100) {
   if (value === null) return 'var(--ai-muted)'
   const bounded = Math.min(maximum, Math.max(0, value))

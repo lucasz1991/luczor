@@ -112,6 +112,9 @@ import ResourceRecoveryDialog from '@/components/ai/ResourceRecoveryDialog.vue'
 import { localInferenceCoordinator } from '@/services/inference/coordinator'
 import { useIdleOptimization } from '@/composables/useIdleOptimization'
 import { miniStatus } from '@/services/miniChat/presentation'
+import type { MiniSnapshot } from '@/services/miniChat/types'
+import { snapshotMemoryActivity } from '@/services/memory/activity'
+import { snapshotNetworkActivity } from '@/services/networkActivity'
 import {
   activityLabel,
   createChatActivity,
@@ -2620,6 +2623,40 @@ watch(
 )
 // Metrics for the nudge's Systemstatus pane: sampled every 2 s only while the pane is visible.
 const miniSystemMonitor = createSystemStatusMonitor({ intervalMs: 2_000, maxHistory: 24 })
+/** Same counters the main window's activity charts sample; the nudge cannot measure them itself. */
+function miniSystemActivity(): NonNullable<MiniSnapshot['system']>['activity'] {
+  const network = snapshotNetworkActivity()
+  const native = miniSystemMonitor.state.availability === 'live' ? miniSystemMonitor.state.sample?.network_local : null
+  const counters = (value: typeof network.external) => ({
+    sentBytes: value.sentBytes,
+    receivedBytes: value.receivedBytes,
+    requests: value.requests,
+    activeRequests: value.activeRequests,
+    failedRequests: value.failedRequests,
+  })
+  const memory = snapshotMemoryActivity()
+  return {
+    at: Date.now(),
+    memory: {
+      reads: memory.reads,
+      writes: memory.writes,
+      activeReads: memory.activeReads,
+      activeWrites: memory.activeWrites,
+      failedReads: memory.failedReads,
+      failedWrites: memory.failedWrites,
+    },
+    external: counters(network.external),
+    local: native
+      ? {
+          sentBytes: network.local.sentBytes + native.sent_bytes,
+          receivedBytes: network.local.receivedBytes + native.received_bytes,
+          requests: network.local.requests + native.requests,
+          activeRequests: network.local.activeRequests + native.active_requests,
+          failedRequests: network.local.failedRequests + native.failed_requests,
+        }
+      : null,
+  }
+}
 const miniSystemWatchers = ref(0)
 let miniSystemTimeout: ReturnType<typeof setTimeout> | undefined
 onBeforeUnmount(() => {
@@ -2711,6 +2748,21 @@ const miniChat = useMiniChatHost({
             label: lastLocalModelStatus.value?.label ?? 'Status noch nicht gelesen',
             state: lastLocalModelStatus.value?.state ?? 'unavailable',
             running: miniSystemMonitor.state.sample?.model_running ?? null,
+          },
+          activity: miniSystemActivity(),
+          tools: {
+            channels: (
+              [
+                ['audio', 'Audio'],
+                ['network', 'Netz'],
+                ['file', 'Datei'],
+                ['os', 'System'],
+              ] as const
+            )
+              // Keys are the closed activity-channel union above, not external input.
+              // eslint-disable-next-line security/detect-object-injection
+              .map(([key, label]) => ({ key, label, level: Math.min(1, Math.max(0, hud.activity[key])) })),
+            lastTool: hud.lastTool,
           },
         }
       : null,

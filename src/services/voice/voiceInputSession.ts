@@ -225,7 +225,7 @@ export function createVoiceInputSession(deps: Dependencies) {
           error instanceof Error && error.name === 'NotAllowedError'
             ? 'Mikrofonzugriff wurde nicht freigegeben. Bitte die Mikrofonberechtigung prüfen.'
             : !microphoneStage
-              ? 'Lokale Spracherkennung konnte nicht vorbereitet werden. Bitte Sprachaufnahmen und Einstellungen prüfen; eine fehlende Whisper-Installation einmal im Hauptfenster über die Spracheingabe vorbereiten.'
+              ? 'Die mitgelieferte Spracherkennung ist nicht verfügbar. Bitte die aktuelle vollständige Luczor-App installieren und erneut starten.'
               : 'Die lokale Spracheingabe konnte nicht gestartet werden. Bitte Mikrofon und Voice-Einstellungen prüfen.',
       })
     }

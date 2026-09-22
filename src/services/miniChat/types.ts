@@ -38,12 +38,35 @@ export type MiniDecision = {
   detail: string
 }
 /** Display-only copy of the main window's system monitor for the nudge's Systemstatus pane. */
+export type MiniActivityCounters = {
+  sentBytes: number
+  receivedBytes: number
+  requests: number
+  activeRequests: number
+  failedRequests: number
+}
 export type MiniSystemSnapshot = {
   sample: DeepReadonly<SystemMetrics> | null
   history: ReadonlyArray<DeepReadonly<SystemStatusPoint>>
   availability: SystemStatusAvailability
   lastUpdatedAt: number | null
   model: { name: string; label: string; state: string; running: boolean | null }
+  /** Cumulative counters from the main window; the nudge derives rates from consecutive snapshots. */
+  activity?: {
+    at: number
+    memory: {
+      reads: number
+      writes: number
+      activeReads: number
+      activeWrites: number
+      failedReads: number
+      failedWrites: number
+    } | null
+    external: MiniActivityCounters
+    local: MiniActivityCounters | null
+  }
+  /** Tool channel levels and the last executed tool, as in the main window's Werkzeuge card. */
+  tools?: { channels: Array<{ key: string; label: string; level: number }>; lastTool: string }
 }
 export type MiniSnapshot = {
   /** Present only while the nudge watches the Systemstatus pane; otherwise omitted to keep snapshots small. */

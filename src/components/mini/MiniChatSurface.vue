@@ -1198,7 +1198,14 @@ onBeforeUnmount(() => {
               <p v-else class="mini-grip-panel__empty">In diesem Chat wurde noch kein Werkzeug ausgeführt.</p>
             </template>
             <template v-else-if="activePane === 'system'">
-              <MiniSystemPane :system="snapshot.system ?? null" />
+              <MiniSystemPane
+                :system="snapshot.system ?? null"
+                :phase="{
+                  label: status.label,
+                  moving: ['thinking', 'executing', 'listening', 'speaking'].includes(status.phase),
+                  locked: snapshot.hud.killSwitch,
+                }"
+              />
             </template>
             <template v-else>
               <dl class="mini-grip-panel__kv">

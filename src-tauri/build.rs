@@ -203,6 +203,30 @@ const APP_COMMANDS: &[&str] = &[
 ];
 
 fn main() {
+    if env::var("PROFILE").as_deref() == Ok("release")
+        && env::var_os("CARGO_FEATURE_WHISPER_RS").is_none()
+    {
+        panic!("Release packages must include Whisper. Do not disable the whisper_rs feature.");
+    }
+    if env::var("PROFILE").as_deref() == Ok("release") {
+        let model: serde_json::Value = serde_json::from_str(include_str!("voice-model.json"))
+            .expect("pinned voice model metadata");
+        let path = Path::new("../../.lmzdev/artifacts/runtime/voice")
+            .join(model["file"].as_str().expect("voice model filename"));
+        let bytes = fs::read(&path).expect("Prepare bundled Whisper with `node scripts/prepare-voice-runtime.mjs` before building a release.");
+        assert_eq!(
+            bytes.len() as u64,
+            model["bytes"].as_u64().unwrap(),
+            "Bundled Whisper is incomplete."
+        );
+        assert_eq!(
+            format!("{:x}", Sha256::digest(&bytes)),
+            model["sha256"].as_str().unwrap(),
+            "Bundled Whisper checksum mismatch."
+        );
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    println!("cargo:rerun-if-changed=voice-model.json");
     println!("cargo:rerun-if-env-changed=LUCZOR_VOICE_MANIFEST_PUBLIC_KEY_B64");
     println!("cargo:rerun-if-env-changed=LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64");
     println!("cargo:rerun-if-env-changed=LUCZOR_LOCAL_MODEL_MANIFEST_KEY_ID");
@@ -218,7 +242,7 @@ fn main() {
             key.trim()
         );
     } else {
-        println!("cargo:warning=Voice manifest public key is not configured; local STT/TTS installation will stay disabled.");
+        println!("cargo:warning=Voice manifest key is absent; bundled STT works offline, optional voice downloads are disabled.");
     }
     let local_public_key = env::var("LUCZOR_LOCAL_MODEL_MANIFEST_PUBLIC_KEY_B64")
         .ok()

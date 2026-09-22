@@ -59,6 +59,73 @@ export function gibibytes(bytes: number): string {
   return (bytes / 1024 ** 3).toLocaleString('de-DE', { maximumFractionDigits: 1 })
 }
 
+export type MeterUsageSegment = ResourceDialSeries & { width: number }
+/** Stacked dial segments: the rest of the system, the app and the local model share one 100 % arc. */
+export function meterUsage(meter: ResourceMeter): MeterUsageSegment[] {
+  const series = meter.series.slice(0, 3)
+  const total = series[0]?.value
+  const app = series[1]?.value
+  const model = series[2]?.value
+  const modelInactive = series[2]?.detail.includes('nicht aktiv') ?? false
+  const disk = !!meter.disk
+  const raw = disk
+    ? [total, app, model]
+    : [
+        total === null || total === undefined || app === null || (model === null && !modelInactive)
+          ? null
+          : Math.max(0, total - (app ?? 0) - (model ?? 0)),
+        app,
+        model,
+      ]
+  const sum = raw.reduce<number>((sum, value) => sum + (value ?? 0), 0)
+  return series.map((series, index) => ({
+    ...series,
+    value: raw.at(index) ?? null,
+    label:
+      (disk ? ['Aktiv', 'Lesen', 'Schreiben'].at(index) : ['System', 'App', 'Lokales Modell'].at(index)) ??
+      series.label,
+    width: ((raw.at(index) ?? 0) / Math.max(100, sum)) * 100,
+  }))
+}
+
+export type MeterTile = {
+  value: string
+  unit: string
+  sub: string
+  subTone: NonNullable<ResourceDialSeries['tone']>
+  level: 'ok' | 'warn' | 'bad'
+}
+/** Headline value, secondary reading and severity of a compact meter tile. */
+export function meterTile(meter: ResourceMeter): MeterTile {
+  const total = meter.series[0]
+  const temperature = meter.series.find(series => series.key === 'temperature')
+  const model = meter.series[2]
+  const value = total?.value ?? null
+  const level = meter.disk
+    ? 'ok'
+    : temperature?.tone === 'danger' || (value !== null && value >= 90)
+      ? 'bad'
+      : temperature?.tone === 'warning' || (value !== null && value >= 75)
+        ? 'warn'
+        : 'ok'
+  const sub = meter.disk
+    ? `${gibibytes(meter.disk.used_bytes)} / ${gibibytes(meter.disk.total_bytes)} GiB`
+    : temperature
+      ? temperature.value === null
+        ? ''
+        : dialDisplay(temperature)
+      : model && model.value !== null
+        ? `Modell ${dialDisplay(model)}`
+        : ''
+  return {
+    value: value === null ? '—' : value.toLocaleString('de-DE', { maximumFractionDigits: 0 }),
+    unit: value === null ? '' : '%',
+    sub,
+    subTone: temperature?.tone ?? 'safe',
+    level,
+  }
+}
+
 export function useSystemResourceModel(metrics: DeepReadonly<SystemStatusState>) {
   function chart(
     key: ResourceKey,

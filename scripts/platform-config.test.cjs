@@ -132,12 +132,12 @@ test('Debian packages require the WebKit multimedia plugins even without recomme
   }
 })
 
-test('optional Claude resources are not required by static Tauri configs', () => {
+test('all installers carry mandatory offline speech resources without requiring optional Claude resources', () => {
   const base = readJson('src-tauri/tauri.conf.json')
   const linux = readJson('src-tauri/tauri.linux.conf.json')
   const macos = readJson('src-tauri/tauri.macos.conf.json')
   const windows = readJson('src-tauri/tauri.windows.conf.json')
-  assert.equal(base.bundle.resources, undefined)
+  assert.deepEqual(base.bundle.resources, { '../../.lmzdev/artifacts/runtime/voice/': 'voice/' })
   assert.equal(windows.bundle?.resources, undefined)
   assert.equal(linux.bundle.resources, undefined)
   assert.equal(macos.bundle.resources, undefined)

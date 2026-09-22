@@ -18,6 +18,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 sha2 = "0.10"
+serde_json = "1"
 
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png", "unstable"] }
@@ -55,11 +56,9 @@ webbrowser = "1.0"
 nvml-wrapper = "0.11"
 netstat2 = "0.11.2"
 
-# Optional native STT engine (SOLL §14 P5, "whisper_rs"). It compiles whisper.cpp
-# from source and therefore requires CMake + a C/C++ toolchain at build time.
-# Default OFF so the normal build needs no CMake. Enable with:
-#   cargo build --features whisper_rs   (or set it in tauri.conf release build)
-whisper-rs = { version = "0.12", optional = true }
+# Installed clients contain Whisper; CMake is needed only on the build machine.
+# Keep a feature gate for narrowly scoped tooling, never for release packages.
+whisper-rs = { version = "=0.16.0", optional = true }
 hound = { version = "3", optional = true }
 tauri-plugin-notification = "2.3.3"
 notify-rust = "4.18.0"
@@ -120,11 +119,18 @@ cairo-rs = { version = "0.18", features = ["png"] }
 javascriptcore-rs = "=1.1.2"
 
 [features]
+default = ["whisper_rs"]
 native-browser-smoke = []
 whisper_rs = ["dep:whisper-rs", "dep:hound"]
 
 [profile.dev]
 incremental = true # Compile your binary in smaller steps.
+
+# Streaming STT needs optimized C++ kernels in development and native tests too.
+[profile.dev.package.whisper-rs-sys]
+opt-level = 3
+debug = false
+debug-assertions = false
 
 # Local-model startup deliberately hashes the complete GGUF again inside the
 # trusted native boundary. Keep that cryptographic hot path representative in
@@ -142,4 +148,7 @@ strip = true      # Ensures debug symbols are removed.
 # Full GGUF verification is CPU-bound on processors without SHA extensions.
 # Preserve the complete cancellable hash while optimizing only its hot path.
 [profile.release.package.sha2]
+opt-level = 3
+
+[profile.release.package.whisper-rs-sys]
 opt-level = 3
