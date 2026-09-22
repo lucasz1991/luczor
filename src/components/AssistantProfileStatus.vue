@@ -1,6 +1,12 @@
 <script setup lang="ts">
-import { watch } from 'vue'
-import { assistantProfileState as state, refreshAssistantProfile } from '@/services/assistantProfile'
+import { computed, watch } from 'vue'
+import {
+  assistantProfileState as state,
+  refreshAssistantProfile,
+  selectedInternalModelProfile,
+} from '@/services/assistantProfile'
+const standard = computed(() => selectedInternalModelProfile(state.profile, 'standard'))
+const externalAgents = computed(() => selectedInternalModelProfile(state.profile, 'external_agents'))
 const props = defineProps<{ active: boolean }>()
 watch(
   () => props.active,
@@ -19,18 +25,36 @@ watch(
       </button>
     </header>
     <p>{{ state.message }}</p>
-    <details v-if="state.profile.persona">
+    <details v-if="standard">
+      <summary>Interne Modelle · eigenes Profil</summary>
+      <strong>Persönlichkeit</strong>
+      <p class="profile-prompt">{{ standard.personality || 'Keine eigene Persönlichkeit vorgegeben.' }}</p>
+      <strong>System-Prompt</strong>
+      <p class="profile-prompt">{{ standard.system_prompt || 'Kein eigener System-Prompt vorgegeben.' }}</p>
+    </details>
+    <details v-else-if="state.profile.persona">
       <summary>{{ state.profile.persona.name }}</summary>
       <p class="profile-prompt">{{ state.profile.persona.prompt }}</p>
     </details>
     <p v-else>Keine Persönlichkeit ausgewählt.</p>
+    <details v-if="state.profile.internal_models?.external_agents.enabled && externalAgents">
+      <summary>Externagentenmodus · eigenes Profil für interne Modelle</summary>
+      <strong>Persönlichkeit</strong>
+      <p class="profile-prompt">{{ externalAgents.personality || 'Keine eigene Persönlichkeit vorgegeben.' }}</p>
+      <strong>System-Prompt</strong>
+      <p class="profile-prompt">{{ externalAgents.system_prompt || 'Kein eigener System-Prompt vorgegeben.' }}</p>
+    </details>
+    <p v-else>Externagentenmodus: Interne Modelle übernehmen das Profil des internen Betriebs.</p>
     <details v-for="skill in state.profile.skills" :key="skill.slug">
       <summary>{{ skill.name }}</summary>
       <p>{{ skill.description }}</p>
       <p class="profile-prompt">{{ skill.prompt }}</p>
     </details>
     <p v-if="!state.profile.skills.length">Keine Prompt-Skills aktiv.</p>
-    <small>Stil und Fachwissen für den lokalen Chat. In der Admin-App bearbeitbar.</small>
+    <small
+      >Globale interne Profile: Admin-App → Server-Einstellungen. Sie gelten ausschließlich für lokale Modelle; externe
+      Provider und Coding-Agenten erhalten sie nicht.</small
+    >
   </section>
 </template>
 <style scoped>

@@ -17,6 +17,7 @@ const mocks = vi.hoisted(() => ({
   resolveInferenceRouteForTurn: vi.fn(),
   hashInferenceEgressRequest: vi.fn(),
   getApiConfigSnapshot: vi.fn(),
+  assistantProfileWithApiConfig: vi.fn(),
   resolveDeviceAssistance: vi.fn(),
   executeDeviceAssistance: vi.fn(),
   hud: { killSwitch: false },
@@ -40,6 +41,7 @@ vi.mock('@/services/inference/coordinator', () => ({
 }))
 vi.mock('@/services/api/luczorApi', () => ({
   getApiConfigSnapshot: mocks.getApiConfigSnapshot,
+  assistantProfileWithApiConfig: mocks.assistantProfileWithApiConfig,
 }))
 vi.mock('@/services/tools/registry', () => ({
   getTool: mocks.getTool,
@@ -71,6 +73,7 @@ import { ChatEffectJournalError } from '@/services/chatEffectJournal'
 import { executionGate } from '@/services/executionGate'
 import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 import type { InferenceRequest } from '@/services/inference/types'
+import { resetAssistantProfile } from '@/services/assistantProfile'
 import {
   buildLaravelProxyBody,
   hashLaravelProxyBody,
@@ -96,6 +99,86 @@ const durableTaskCreate = {
 } as const
 
 describe('agent mode and tool reliability', () => {
+  it.each([
+    ['local', 'local_llama_cpp', 'LOCAL_SYSTEM'],
+    ['free', 'local_llama_cpp', 'COORDINATOR_SYSTEM'],
+  ] as const)('applies the internal profile for preset %s and target %s only', async (preset, target, expected) => {
+    const previous = modelUsageSettings.value
+    modelUsageSettings.value = { ...previous, externalEnabled: true }
+    mocks.assistantProfileWithApiConfig.mockResolvedValue({
+      data: {
+        persona: { name: 'Old', slug: 'old', prompt: 'LEGACY_PERSONALITY' },
+        skills: [],
+        revision: 'profiles',
+        internal_models: {
+          standard: { enabled: true, personality: 'LOCAL_PERSONALITY', system_prompt: 'LOCAL_SYSTEM' },
+          external_agents: {
+            enabled: true,
+            personality: 'COORDINATOR_PERSONALITY',
+            system_prompt: 'COORDINATOR_SYSTEM',
+          },
+        },
+      },
+    })
+    const externalBaseMessages = [{ role: 'user' as const, content: 'Public question' }]
+    mocks.resolveInferenceRouteForTurn.mockResolvedValue({
+      gateway: { id: 'fixture', target, streamChatWithTools: mocks.streamChatWithTools },
+    })
+    mocks.streamChatWithTools.mockResolvedValue({
+      content: 'Ergebnis',
+      toolCalls: [],
+      rawToolCalls: [],
+      finishReason: 'stop',
+    })
+    try {
+      await runAgent({
+        projectId: 'project-2',
+        mode: 'observe',
+        maxRounds: 1,
+        baseMessages: [{ role: 'user', content: 'Local question' }],
+        externalBaseMessages,
+        agentMode: true,
+        agentTeamPreset: preset,
+        contextEgress: 'external_allowed',
+      })
+      const request = mocks.streamChatWithTools.mock.calls[0]![0] as InferenceRequest
+      const contents = JSON.stringify(request.messages)
+      expect(contents).toContain(expected)
+      expect(contents).not.toContain('LEGACY_PERSONALITY')
+      expect(contents).not.toContain(expected === 'LOCAL_SYSTEM' ? 'COORDINATOR_SYSTEM' : 'LOCAL_SYSTEM')
+      expect(request.contextBudget?.categories.profile).toBeGreaterThan(0)
+      expect(externalBaseMessages).toEqual([{ role: 'user', content: 'Public question' }])
+    } finally {
+      modelUsageSettings.value = previous
+    }
+  })
+  it('does not retrieve or inject internal profiles into an approved external turn', async () => {
+    const messages = [{ role: 'user' as const, content: 'Public question' }]
+    mocks.resolveInferenceRouteForTurn.mockResolvedValue({
+      gateway: { id: 'external', target: 'laravel_proxy', streamChatWithTools: mocks.streamChatWithTools },
+      externalOneShot: true,
+      replacementMessages: messages,
+    })
+    mocks.assistantProfileWithApiConfig.mockRejectedValue(new Error('Must not be called for external turns'))
+    mocks.streamChatWithTools.mockResolvedValue({
+      content: 'Ergebnis',
+      toolCalls: [],
+      rawToolCalls: [],
+      finishReason: 'stop',
+    })
+    await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      maxRounds: 1,
+      baseMessages: [{ role: 'user', content: 'LOCAL_ONLY' }],
+      externalBaseMessages: messages,
+      agentMode: true,
+      agentTeamPreset: 'free',
+      internalProfileMode: 'external_agents',
+    })
+    expect(mocks.streamChatWithTools.mock.calls[0]![0].messages).toEqual(messages)
+    expect(mocks.assistantProfileWithApiConfig).not.toHaveBeenCalled()
+  })
   it('observes the selected fitted request before inference, even when diagnostics fail', async () => {
     const onContextRequest = vi.fn(() => {
       throw new Error('diagnostics unavailable')
@@ -2249,6 +2332,8 @@ describe('agent mode and tool reliability', () => {
 
   beforeEach(() => {
     vi.resetAllMocks()
+    resetAssistantProfile()
+    mocks.assistantProfileWithApiConfig.mockResolvedValue({ data: { persona: null, skills: [], revision: 'empty' } })
     mocks.resolveDeviceAssistance.mockImplementation(task => task)
     mocks.resolveInferenceRouteForTurn.mockResolvedValue({
       gateway: {

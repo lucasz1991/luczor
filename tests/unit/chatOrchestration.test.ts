@@ -65,7 +65,13 @@ it('runs a sequential planner-worker-reviewer graph with configured worker limit
     }
   })
   const response = await runChatAgentTeam(
-    { projectId: 'p', baseMessages: checkpoint.messages, mode: 'act', agentMode: true },
+    {
+      projectId: 'p',
+      baseMessages: checkpoint.messages,
+      mode: 'act',
+      agentMode: true,
+      internalProfileMode: 'external_agents',
+    },
     gateway,
     { ...checkpoint },
     execute
@@ -77,6 +83,7 @@ it('runs a sequential planner-worker-reviewer graph with configured worker limit
   expect(preparedDefinition.mock.lastCall?.[0].deadlineMs).toBe(81 * 60_000)
   expect(calls.map(call => call.toolAccess)).toEqual(['none', undefined, 'read-only'])
   expect(calls.map(call => call.localReasoningMode)).toEqual([undefined, undefined, undefined])
+  expect(calls.map(call => call.internalProfileMode)).toEqual(['external_agents', 'external_agents', 'external_agents'])
   expect(
     calls.every(
       call =>

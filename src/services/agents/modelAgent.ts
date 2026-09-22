@@ -1,3 +1,4 @@
+import { prepareInternalModelMessages } from '../assistantProfile'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { localResources } from '@/services/inference/resources'
 import {
@@ -252,13 +253,20 @@ export function createModelAgentAdapter(
       }
     }
 
+    const profiledMessages = await prepareInternalModelMessages(
+      route.replacementMessages ?? messages,
+      route.gateway.target,
+      { taskType, configuredOnly: true, signal }
+    )
+    if (!sameAccount(account, await cancellable(signal, dependencies.accountSnapshot)))
+      throw new Error('Das Konto oder die Serververbindung hat sich während des Agentenstarts geändert.')
     let output = ''
     // The gateway owns native cancellation. Keep the orchestration slot until
     // it has acknowledged stopping the local worker, rather than racing it.
     assertNotAborted(signal)
     const result = await route.gateway.streamChatWithTools({
       ...inferenceRequest,
-      messages: route.replacementMessages ?? messages,
+      messages: profiledMessages,
       onToken: content => {
         if (signal.aborted) return
         const next = content.slice(0, MAX_OUTPUT_CHARS)

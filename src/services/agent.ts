@@ -1,3 +1,4 @@
+import { prepareInternalModelMessages } from './assistantProfile'
 import { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
 import {
   assistanceWorkerSummary,
@@ -121,6 +122,8 @@ function pulseForCategory(category: ToolCategory) {
 }
 
 export type RunAgentOptions = {
+  /** Inherited only by internal children of the same locally orchestrated turn. */
+  internalProfileMode?: import('./assistantProfileTypes').InternalModelProfileMode
   /** Optional remote-authority guard; normal device-local chats perform no extra requests. */
   beforeToolExecution?: () => Promise<void>
   workflowScope?: import('@/services/workflows/browser').WorkflowArtifactScope
@@ -948,6 +951,17 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     !opts.workspaceScope &&
     !ephemeralDataUsed &&
     !!opts.externalBaseMessages?.length
+  const internalProfileMode =
+    opts.internalProfileMode ??
+    ((opts.agentMode || opts.forceAgentTeam) && externalAssistanceAllowed() ? 'external_agents' : 'standard')
+  const profiledMessages = await prepareInternalModelMessages(messages, inferenceGateway.target, {
+    mode: internalProfileMode,
+    taskType: opts.taskType,
+    signal,
+  })
+  executionGate.assert(execution)
+  signal.throwIfAborted()
+  messages.splice(0, messages.length, ...profiledMessages)
   const deviceAssistanceAllowed = () =>
     opts.contextEgress !== 'local_only' &&
     opts.routingSettings?.preference !== 'local_only' &&
@@ -1001,6 +1015,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
                 },
               ],
               agentMode: false,
+              internalProfileMode,
               forceAgentTeam: false,
               goalTracking: undefined,
               continuation: undefined,
@@ -1265,7 +1280,13 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       throw new Error('Der Chat-Agentenmodus benötigt das lokale Modell.')
     const { runChatAgentTeam } = await import('@/services/agents/chatOrchestration')
     return runChatAgentTeam(
-      { ...opts, goalTracking: undefined, signal, toolAccess: planningDiscussion ? 'read-only' : opts.toolAccess },
+      {
+        ...opts,
+        internalProfileMode,
+        goalTracking: undefined,
+        signal,
+        toolAccess: planningDiscussion ? 'read-only' : opts.toolAccess,
+      },
       inferenceGateway,
       checkpoint(),
       runAgent

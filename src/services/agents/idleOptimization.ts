@@ -1,3 +1,4 @@
+import { prepareInternalModelMessages } from '../assistantProfile'
 import { shallowRef } from 'vue'
 import { Store } from '@tauri-apps/plugin-store'
 import type { Project } from '@/state/types'
@@ -316,8 +317,8 @@ export function createLegacyIdleOptimization(context: IdleOptimizationContext, d
           const gateway = await deps.gateway(binding.projectId, binding.modelId)
           signal.throwIfAborted()
           if (gateway.target !== 'local_llama_cpp') throw new Error('local_only_required')
-          const result = await gateway.streamChatWithTools({
-            messages: [
+          const messages = await prepareInternalModelMessages(
+            [
               {
                 role: 'system',
                 content:
@@ -325,6 +326,12 @@ export function createLegacyIdleOptimization(context: IdleOptimizationContext, d
               },
               { role: 'user', content: job.prompt },
             ],
+            gateway.target,
+            { taskType: 'context.optimize', configuredOnly: true, signal }
+          )
+          signal.throwIfAborted()
+          const result = await gateway.streamChatWithTools({
+            messages,
             projectId: binding.projectId,
             taskType: 'context.optimize',
             tools: [],

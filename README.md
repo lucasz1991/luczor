@@ -4,6 +4,15 @@ Stichtag: 2026-09-06
 
 Tauri-2-/Vue-3-Desktop-Client für Luczor. Die App besitzt Chat, lokale Inferenz, privaten Gerätezustand und native Werkzeuge. Laravel bleibt eine getrennte Control-Plane für Identität, Policy, signierte Kataloge und gemeinsame Daten.
 
+## Globale Profile interner Modelle
+
+Globale Persönlichkeit und System-Prompt interner Modelle lassen sich in der Admin-App unter **Server-Einstellungen → Persönlichkeit & System-Prompt interner Modelle** bearbeiten. Es gibt ein Profil für den internen Betrieb und ein separates Profil für interne Agenten bei zugelassener externer Zusammenarbeit (Auto-/Teammodus). Rein externe Modellläufe sowie Codex/Claude bekommen diese Profile nicht.
+
+Jedes Profil ist ausdrücklich aktivierbar. Ein deaktiviertes Externagentenprofil übernimmt den internen Standard; ein deaktivierter interner Standard verwendet die bisherige globale Persönlichkeit. Aktivierte leere Felder bleiben leer. Relevante Prompt-Skills, konkrete Aufgabenregeln und die bestehenden Ausführungsfreigaben gelten weiterhin. Die vollständigen eigenen Texte sind auf 2.000 Zeichen Persönlichkeit und 4.000 Zeichen System-Prompt begrenzt.
+
+Die App lädt die Vorgaben über die authentifizierte Assistant-Profile-API, mit höchstens 60 Sekunden Wiederverwendung zwischen Abrufen und manueller Aktualisierung in der Profilanzeige. Laufende Chatrunden behalten das zu Beginn geladene Profil. Zuerst den aktualisierten Admin-Server, dann den aktualisierten Desktop-Client ausliefern; die neuen Einstellungen benötigen keine Datenbankmigration.
+
+
 ## Voraussetzungen
 
 - Windows für den aktuell implementierten lokalen `llama.cpp`-Produkt- und Testpfad

@@ -1,3 +1,4 @@
+import { prepareInternalModelMessages } from '../assistantProfile'
 import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { executionGate, type ExecutionTicket } from '@/services/executionGate'
 import {
@@ -143,7 +144,13 @@ export async function runWorkflowLlm(
     }
     const gateway =
       input.inference === 'external' ? await deps.external(request, ticket) : await deps.local(context.projectId)
+    request.messages = await prepareInternalModelMessages(request.messages, gateway.target, {
+      taskType: request.taskType,
+      configuredOnly: true,
+      signal,
+    })
     deps.assert(ticket)
+    signal.throwIfAborted()
     const result = await gateway.streamChatWithTools(request)
     deps.assert(ticket)
     signal.throwIfAborted()

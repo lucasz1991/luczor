@@ -21,7 +21,6 @@ import type { ContextSnapshot } from '@/services/contextInspector'
 import { pushToast } from '@/services/toast'
 import type { SystemStatusDisplayMode } from '@/features/system-status/model'
 import AgentTeamResults from './components/ai/AgentTeamResults.vue'
-import { localAssistantProfilePrompt, refreshAssistantProfile } from '@/services/assistantProfile'
 import PlanPanel from './components/PlanPanel.vue'
 import ChatProjectOverlay from './components/ChatProjectOverlay.vue'
 import SidebarNav from './components/ai/SidebarNav.vue'
@@ -2238,15 +2237,12 @@ async function executeChatTurn(
       external: packages.external,
     }
     const observeContextRequest = createContextUsageObserver(contextFragments, packages)
-    const assistantProfile = await refreshAssistantProfile()
-    executionGate.assert(turnExecution)
-    const localProfilePrompt = localAssistantProfilePrompt(assistantProfile, text, taskType)
     const baseMessages: WireMessage[] = [
       {
         role: 'system',
         content: composeProviderSystemPrompt(
           buildSystemPreamble(captured.mode, prj?.name ?? pid, appearance.assistantName),
-          [localProfilePrompt, packages.local.text].filter(Boolean).join('\n\n')
+          packages.local.text
         ),
       },
       ...sanitizeInferenceMessagesForTarget(localConversationHistory(localHistory.messages), 'local_llama_cpp'),
