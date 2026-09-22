@@ -6,6 +6,7 @@ const { pathToFileURL } = require('node:url')
 const { spawn, spawnSync } = require('node:child_process')
 const { reportLinuxMedia } = require('./linux-media-check.cjs')
 const { pinnedNodeEnvironment } = require('./build-environment.cjs')
+const { prepareLinuxVoiceBuild } = require('./prepare-linux-voice-build.cjs')
 const { prepareWindowsVoiceBuild } = require('./prepare-windows-voice-build.cjs')
 
 const appRoot = path.resolve(__dirname, '..')
@@ -162,6 +163,7 @@ async function main() {
       return
     }
     env = await prepareWindowsVoiceBuild(env, { target: targetTripleFromArgs(args, env) })
+    env = await prepareLinuxVoiceBuild(env, { target: targetTripleFromArgs(args, env) })
   }
   if (!isHelp && ['dev', 'build', 'bundle'].includes(command)) ensureWorkspaceDependencies(env)
   if (!isHelp && command === 'dev') reportLinuxMedia()

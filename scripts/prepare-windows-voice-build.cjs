@@ -25,7 +25,13 @@ async function matchesHash(file, sha256, bytes) {
   }
 }
 
-async function preparePortableTool(tool, root = defaultRoot, request = fetch, run = spawnSync) {
+async function preparePortableTool(
+  tool,
+  root = defaultRoot,
+  request = fetch,
+  run = spawnSync,
+  archiveCommand = process.platform === 'win32' ? 'tar.exe' : 'tar'
+) {
   const binary = path.join(root, tool.directory, tool.binary)
   const marker = path.join(root, tool.directory, '.luczor-verified')
   const prepared = await fsp.readFile(marker, 'utf8').catch(() => '')
@@ -59,8 +65,8 @@ async function preparePortableTool(tool, root = defaultRoot, request = fetch, ru
   }
   const destination = path.join(root, tool.extractTo)
   await fsp.mkdir(destination, { recursive: true })
-  // Windows' built-in bsdtar supports ZIP/wheel archives. Only verified bytes reach extraction.
-  const extracted = run('tar.exe', ['-xf', archive, '-C', destination], {
+  // Only verified bytes reach the platform archive extractor.
+  const extracted = run(archiveCommand, ['-xf', archive, '-C', destination], {
     encoding: 'utf8',
     timeout: 120_000,
     windowsHide: true,

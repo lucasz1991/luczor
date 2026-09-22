@@ -1,0 +1,22 @@
+{
+  "x64": {
+    "archive": "cmake-3.31.10-linux-x86_64.tar.gz",
+    "url": "https://github.com/Kitware/CMake/releases/download/v3.31.10/cmake-3.31.10-linux-x86_64.tar.gz",
+    "bytes": 55010952,
+    "sha256": "3cb3dd247b6a1de2d0f4b20c6fd4326c9024e894cebc9dc8699758887e566ca7",
+    "directory": "cmake-3.31.10-linux-x86_64",
+    "extractTo": ".",
+    "binary": "bin/cmake",
+    "binarySha256": "d3e82424070c90e5b6ef84dd0c018ff2c32fab698c98f6407958496badf60fff"
+  },
+  "arm64": {
+    "archive": "cmake-3.31.10-linux-aarch64.tar.gz",
+    "url": "https://github.com/Kitware/CMake/releases/download/v3.31.10/cmake-3.31.10-linux-aarch64.tar.gz",
+    "bytes": 56317563,
+    "sha256": "a343c6294f770742904e6a6792e0956b5ff8212abfb63cac99237de2e210fa0f",
+    "directory": "cmake-3.31.10-linux-aarch64",
+    "extractTo": ".",
+    "binary": "bin/cmake",
+    "binarySha256": "6309fd63177dea7d9318eb51ee2f59c3a9206687c2b177273fd6c76de7246e86"
+  }
+}
