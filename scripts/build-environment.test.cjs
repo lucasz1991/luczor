@@ -6,6 +6,7 @@ const os = require('node:os')
 const path = require('node:path')
 const { createHash } = require('node:crypto')
 const { pinnedNodeEnvironment, prependPath } = require('./build-environment.cjs')
+const { cmakeWorks, prepareLinuxVoiceBuild } = require('./prepare-linux-voice-build.cjs')
 const {
   preparePortableTool,
   selectVisualStudio,
@@ -113,6 +114,93 @@ test('leaves non-Windows builds unchanged and rejects Linux fallback bindings on
   )
 })
 
+test('uses system CMake on Linux without downloading and validates explicit overrides', async () => {
+  const env = { PATH: '/usr/bin' }
+  let downloads = 0
+  const run = command => ({ status: command === 'cmake' ? 0 : 1, stdout: 'cmake version 3.28.3\n' })
+  assert.equal(cmakeWorks('cmake', env, run), true)
+  assert.equal(
+    cmakeWorks('cmake', env, () => ({ status: 0, stdout: 'cmake version 4.1.0\n' })),
+    true
+  )
+  assert.equal(
+    cmakeWorks('cmake', env, () => ({ status: 0, stdout: 'cmake version 3.13.5\n' })),
+    false
+  )
+  assert.equal(
+    await prepareLinuxVoiceBuild(env, {
+      platform: 'linux',
+      run,
+      request: async () => {
+        downloads++
+      },
+    }),
+    env
+  )
+  assert.equal(downloads, 0)
+  await assert.rejects(
+    prepareLinuxVoiceBuild({ ...env, CMAKE: '/missing/cmake' }, { platform: 'linux', run }),
+    /Configured CMake cannot be executed/
+  )
+})
+
+test('leaves other hosts and non-Linux cross targets unchanged', async () => {
+  const env = { KEEP: 'yes' }
+  assert.equal(await prepareLinuxVoiceBuild(env, { platform: 'win32' }), env)
+  assert.equal(await prepareLinuxVoiceBuild(env, { platform: 'linux', target: 'aarch64-apple-darwin' }), env)
+})
+
+test('prepares checksum-verified portable CMake when Linux has no system command', async context => {
+  const root = fixture(context)
+  const archive = Buffer.from('linux-cmake-archive')
+  const binary = Buffer.from('linux-cmake-binary')
+  const sha = value => createHash('sha256').update(value).digest('hex')
+  const tool = {
+    archive: 'cmake.tar.gz',
+    url: 'https://example.invalid/cmake',
+    bytes: archive.length,
+    sha256: sha(archive),
+    directory: 'cmake-linux',
+    extractTo: '.',
+    binary: 'bin/cmake',
+    binarySha256: sha(binary),
+  }
+  const cmake = path.join(root, tool.directory, tool.binary)
+  const commands = []
+  const run = (command, args) => {
+    commands.push(command)
+    if (command === 'cmake') return { status: 1, stdout: '' }
+    if (command === 'tar') {
+      fs.mkdirSync(path.dirname(cmake), { recursive: true })
+      fs.writeFileSync(cmake, binary)
+      return { status: 0, stdout: '' }
+    }
+    if (command === cmake && args[0] === '--version') return { status: 0, stdout: 'cmake version 3.31.10\n' }
+    return { status: 1, stdout: '' }
+  }
+  const env = await prepareLinuxVoiceBuild(
+    { PATH: '/usr/bin' },
+    {
+      platform: 'linux',
+      arch: 'x64',
+      root,
+      run,
+      request: async () => ({ ok: true, body: [archive] }),
+      toolset: new Map([['x64', tool]]),
+    }
+  )
+  assert.equal(env.CMAKE, cmake)
+  assert.equal(env.PATH, `${path.dirname(cmake)}:/usr/bin`)
+  assert.deepEqual(commands, ['cmake', 'tar', cmake])
+})
+
+test('reports unsupported Linux host architecture only when CMake is actually missing', async () => {
+  await assert.rejects(
+    prepareLinuxVoiceBuild({}, { platform: 'linux', arch: 'riscv64', run: () => ({ status: 1, stdout: '' }) }),
+    /does not support host architecture riscv64/
+  )
+})
+
 test('verifies downloads before extraction, caches valid tools and repairs changed binaries', async context => {
   const root = fixture(context)
   const archive = Buffer.from('verified-archive')
@@ -141,12 +229,12 @@ test('verifies downloads before extraction, caches valid tools and repairs chang
     extractions++
     return { status: 0 }
   }
-  const executable = await preparePortableTool(tool, root, request, run)
-  await preparePortableTool(tool, root, request, run)
+  const executable = await preparePortableTool(tool, root, request, run, 'tar.exe')
+  await preparePortableTool(tool, root, request, run, 'tar.exe')
   assert.equal(downloads, 1)
   assert.equal(extractions, 1)
   fs.writeFileSync(executable, 'damaged')
-  await preparePortableTool(tool, root, request, run)
+  await preparePortableTool(tool, root, request, run, 'tar.exe')
   assert.equal(downloads, 1)
   assert.equal(extractions, 2)
 })

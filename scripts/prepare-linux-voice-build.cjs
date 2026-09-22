@@ -16,7 +16,11 @@ function cmakeWorks(command, env, run = spawnSync) {
     windowsHide: true,
     env,
   })
-  return !result.error && result.status === 0 && /^cmake version 3\./m.test(result.stdout || '')
+  const version = (result.stdout || '').match(/^cmake version (\d+)\.(\d+)/m)
+  if (result.error || result.status !== 0 || !version) return false
+  const major = Number(version[1])
+  const minor = Number(version[2])
+  return major > 3 || (major === 3 && minor >= 14)
 }
 
 async function prepareLinuxVoiceBuild(env, options = {}) {
@@ -27,6 +31,7 @@ async function prepareLinuxVoiceBuild(env, options = {}) {
     root = defaultRoot,
     request = fetch,
     run = spawnSync,
+    toolset = new Map(Object.entries(tools)),
   } = options
   if (platform !== 'linux' || (target && !target.includes('linux'))) return env
 
@@ -36,7 +41,7 @@ async function prepareLinuxVoiceBuild(env, options = {}) {
   }
   if (cmakeWorks('cmake', env, run)) return env
 
-  const tool = tools[arch]
+  const tool = toolset instanceof Map ? toolset.get(arch) : Object.entries(toolset).find(([name]) => name === arch)?.[1]
   if (!tool) {
     throw new Error(
       `CMake is missing and automatic Linux preparation does not support host architecture ${arch}. Run bash scripts/setup-desktop.sh --install.`
@@ -45,7 +50,9 @@ async function prepareLinuxVoiceBuild(env, options = {}) {
   const cmake = await preparePortableTool(tool, root, request, run, 'tar')
   await fsp.chmod(cmake, 0o755)
   if (!fs.existsSync(cmake) || !cmakeWorks(cmake, env, run)) {
-    throw new Error('The verified portable CMake binary cannot run on this Linux system. Run bash scripts/setup-desktop.sh --install.')
+    throw new Error(
+      'The verified portable CMake binary cannot run on this Linux system. Run bash scripts/setup-desktop.sh --install.'
+    )
   }
   console.log(`Linux build uses verified portable CMake 3.31.10 (${arch}); no system installation required.`)
   return prependPath({ ...env, CMAKE: cmake }, [path.dirname(cmake)], platform)

@@ -40,7 +40,7 @@ async function preparePortableTool(
   await fsp.mkdir(root, { recursive: true })
   const archive = path.join(root, tool.archive)
   if (!(await matchesHash(archive, tool.sha256, tool.bytes))) {
-    console.log(`Preparing Windows Whisper build tool: ${tool.archive} …`)
+    console.log(`Preparing native Whisper build tool: ${tool.archive} …`)
     const partial = `${archive}.${process.pid}.part`
     try {
       const response = await request(tool.url, { signal: AbortSignal.timeout(300_000) })

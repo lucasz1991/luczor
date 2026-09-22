@@ -11,7 +11,8 @@ Tauri-2-/Vue-3-Desktop-Client für Luczor. Die App besitzt Chat, lokale Inferenz
 - Corepack und pnpm 10.27.0
 - Rust Stable und die Tauri-2-Systemvoraussetzungen
 - Windows-Build: Visual Studio 2019/2022 mit „Desktopentwicklung mit C++“ und Windows-SDK; CMake und libclang werden vom Tauri-Starter automatisch vorbereitet
-- Linux/macOS-Build: CMake und Clang für die mitgelieferte Whisper-Spracherkennung
+- Linux-Build: Clang/libclang für die mitgelieferte Whisper-Spracherkennung; fehlendes CMake wird vom Tauri-Starter automatisch vorbereitet
+- macOS-Build: CMake und Clang für die mitgelieferte Whisper-Spracherkennung
 - für die isolierten Modelltests die bereits gepinnten Assets unter standardmäßig `D:\Luczor\local-model-test`
 
 ## Entwicklung
@@ -42,6 +43,8 @@ node scripts/prepare-windows-voice-build.cjs cargo test --manifest-path src-taur
 ```
 
 Diese Werkzeuge werden nur zum Kompilieren benötigt. Die installierte App enthält die Whisper-Engine und ihr Modell bereits.
+
+Unter Linux x64 und ARM64 verwendet der Tauri-Starter zuerst ein vorhandenes CMake. Falls es fehlt, lädt er das offizielle, per SHA-256 gepinnte CMake 3.31.10 in denselben projektbezogenen Build-Cache und setzt es nur für den Buildprozess. Daher funktioniert `npm run tauri build` auch ohne global installiertes CMake. Die übrigen nativen Tauri-/Whisper-Abhängigkeiten, einschließlich Compiler und libclang, richtet weiterhin `bash scripts/setup-desktop.sh --install` ein.
 
 ## Qualitätsprüfungen
 
