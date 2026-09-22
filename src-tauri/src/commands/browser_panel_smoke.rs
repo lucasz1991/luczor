@@ -24,14 +24,30 @@ fn native_browser_panel_smoke() {
     let host = listener.local_addr().unwrap().to_string();
     let shutdown = Arc::new(AtomicBool::new(false));
     let server_stop = shutdown.clone();
+    let server_host = host.clone();
     let server = std::thread::spawn(move || {
         while !server_stop.load(Ordering::Acquire) {
             if let Ok((mut socket, _)) = listener.accept() {
                 let _ = socket.set_read_timeout(Some(Duration::from_secs(1)));
                 let mut request = [0u8; 4096];
                 let _ = socket.read(&mut request);
-                let page = "<!doctype html><html><body><h1>Browser probe</h1><label>Name<input id='name'></label><button id='apply' onclick=\"document.getElementById('result').textContent=document.getElementById('name').value\">Apply</button><p id='result'>Pending</p></body></html>";
-                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",page.len(),page);
+                let request = String::from_utf8_lossy(&request);
+                let alternate = server_host.replace("127.0.0.1", "localhost");
+                let (mime, page) = if request.starts_with("GET /asset.js ") {
+                    (
+                        "application/javascript",
+                        "document.getElementById('cross').textContent='Cross-domain asset loaded';"
+                            .to_string(),
+                    )
+                } else if request.starts_with("GET /frame ") {
+                    (
+                        "text/html",
+                        "<!doctype html><label>Frame field<input></label>".to_string(),
+                    )
+                } else {
+                    ("text/html", format!("<!doctype html><html><body><h1>Browser probe</h1><label>Name<input id='name'></label><button id='apply' onclick=\"document.getElementById('result').textContent=document.getElementById('name').value\">Apply</button><p id='result'>Pending</p><p id='cross'>Waiting</p><div id='shadow'></div><iframe src='/frame'></iframe><iframe src='http://{alternate}/frame'></iframe><canvas></canvas><script>window.__luczorDomV1={{refs:'page-controlled'}};document.getElementById('shadow').attachShadow({{mode:'open'}}).innerHTML='<button onclick=\"this.textContent=String.fromCharCode(68,111,110,101)\">Shadow action</button>';</script><script src='http://{alternate}/asset.js'></script></body></html>"))
+                };
+                let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",page.len(),page);
                 let _ = socket.write_all(response.as_bytes());
             } else {
                 std::thread::sleep(Duration::from_millis(10));
@@ -68,7 +84,7 @@ fn native_browser_panel_smoke() {
                 let result = probe(&app, &root, &host).await;
                 let exit_code = if result.is_ok() { 0 } else { 1 };
                 match &result {
-                    Ok(()) => println!("NATIVE_BROWSER_PROBE_OK: child view, form fill/click/read, navigation, collapse/restore, caller isolation, cleanup"),
+                    Ok(()) => println!("NATIVE_BROWSER_PROBE_OK: child view, semantic scan/refs, isolated world, open shadow root, frames, cross-domain resources/download, local file, stale-ref refusal, form fill/click/read, navigation, collapse/restore, caller isolation, cleanup"),
                     Err(error) => eprintln!("NATIVE_BROWSER_PROBE_FAILED: {error}"),
                 }
                 let _ = sender.send(result);
@@ -104,7 +120,7 @@ async fn probe(app: &AppHandle, root: &std::path::Path, host: &str) -> Result<()
     let scope = json!({"principalId":"probe","projectId":"probe","expectedRootPath":workspace["rootPath"],"expectedWorkspaceUpdatedAt":workspace["updatedAt"],"runId":run});
     let execution = json!({"sessionId":identity,"generation":1,"workflowExecutionId":run});
     crate::commands::desktop_control_smoke::run(app, execution.clone()).await?;
-    let base = json!({"scope":scope,"execution":execution,"automated":true,"allowedHosts":[host]});
+    let base = json!({"scope":scope,"execution":execution,"automated":true});
     let action = |name: &str, fields: Value| {
         let mut value = base.clone();
         value["action"] = json!(name);
@@ -151,12 +167,64 @@ async fn probe(app: &AppHandle, root: &std::path::Path, host: &str) -> Result<()
             .width,
         520.0
     );
+    let started = std::time::Instant::now();
+    let scan =
+        workflow_browser::wf_browser_action(app.clone(), caller(app), action("scan", json!({})))
+            .await?;
+    assert!(scan.data["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|el| el["name"] == "Name"));
+    assert!(scan.data["frames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|frame| frame["status"] == "dom_unavailable"));
+    let apply_ref = scan.data["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|el| el["name"] == "Apply")
+        .unwrap()["ref"]
+        .clone();
+    let shadow_ref = scan.data["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|el| el["name"] == "Shadow action")
+        .unwrap()["ref"]
+        .clone();
+    workflow_browser::wf_browser_action(
+        app.clone(),
+        caller(app),
+        action("click", json!({"selector":shadow_ref})),
+    )
+    .await?;
+    let shadow = workflow_browser::wf_browser_action(
+        app.clone(),
+        caller(app),
+        action("scan", json!({"query":"Done"})),
+    )
+    .await?;
+    assert_eq!(shadow.data["elements"].as_array().unwrap().len(), 1);
+    let cross = workflow_browser::wf_browser_action(
+        app.clone(),
+        caller(app),
+        action("read", json!({"selector":"#cross"})),
+    )
+    .await?;
+    assert_eq!(cross.data["text"], "Cross-domain asset loaded");
+    println!(
+        "DOM_PROBE_SCAN_AND_SHADOW_MS={}",
+        started.elapsed().as_millis()
+    );
     workflow_browser::wf_browser_action(
         app.clone(),
         caller(app),
         action(
             "fill",
-            json!({"sessionId":opened["sessionId"],"selector":"#name","value":"Luczor probe"}),
+            json!({"sessionId":opened["sessionId"],"selector":"label=Name","value":"Luczor probe"}),
         ),
     )
     .await?;
@@ -165,7 +233,7 @@ async fn probe(app: &AppHandle, root: &std::path::Path, host: &str) -> Result<()
         caller(app),
         action(
             "click",
-            json!({"sessionId":opened["sessionId"],"selector":"#apply"}),
+            json!({"sessionId":opened["sessionId"],"selector":apply_ref}),
         ),
     )
     .await?;
@@ -201,6 +269,42 @@ async fn probe(app: &AppHandle, root: &std::path::Path, host: &str) -> Result<()
         .as_str()
         .unwrap()
         .ends_with("/second"));
+    let stale = workflow_browser::wf_browser_action(
+        app.clone(),
+        caller(app),
+        action("click", json!({"selector":apply_ref})),
+    )
+    .await;
+    assert!(matches!(stale,Err(ref code) if code == "browser_ref_stale"));
+    let downloaded = workflow_browser::wf_browser_action(app.clone(),caller(app),action("download",json!({"url":format!("http://{}/asset.js",host.replace("127.0.0.1","localhost")),"name":"cross-domain.js"}))).await?;
+    assert!(downloaded.data["bytes"].as_u64().unwrap() > 0);
+    let local = root.join("Local ä #1.html");
+    std::fs::write(
+        &local,
+        "<!doctype html><h1>Local file loaded</h1><button>Local action</button>",
+    )
+    .map_err(|e| e.to_string())?;
+    workflow_browser::wf_browser_action(
+        app.clone(),
+        caller(app),
+        action("navigate", json!({"url":local})),
+    )
+    .await?;
+    let local_scan =
+        workflow_browser::wf_browser_action(app.clone(), caller(app), action("scan", json!({})))
+            .await?;
+    assert!(local_scan.data["elements"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|el| el["name"] == "Local action"));
+    let file_download = workflow_browser::wf_browser_action(
+        app.clone(),
+        caller(app),
+        action("download", json!({"url":local,"name":"local.html"})),
+    )
+    .await?;
+    assert!(file_download.data["bytes"].as_u64().unwrap() > 0);
     let foreign = CallerWebview {
         window: browser.window(),
         webview: browser,

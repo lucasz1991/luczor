@@ -38,19 +38,19 @@ beforeEach(() => {
 })
 
 describe('chat browser native session', () => {
-  it('does not poison the session when the first URL is outside its host boundary', async () => {
+  it('rejects executable URLs before reserving a session and ignores legacy host lists', async () => {
     await expect(
-      execute('browser_open', { url: 'https://example.test', allowed_hosts: ['wrong.test'] })
-    ).rejects.toThrow('außerhalb')
+      execute('browser_open', { url: 'javascript:alert(1)', allowed_hosts: ['wrong.test'] })
+    ).rejects.toThrow('workflow_browser_url_invalid')
     expect(listToolSessions()).toEqual([])
     await execute('browser_open', { url: 'https://example.test', allowed_hosts: ['Example.TEST', 'example.test'] })
-    expect(listToolSessions()[0]?.allowedHosts).toEqual(['example.test'])
+    expect(listToolSessions()[0]?.allowedHosts).toEqual([])
   })
   it('reports the owned boundary and closes without guessed hosts through native owner cleanup', async () => {
     await execute('browser_open', { allowed_hosts: ['example.test'] })
     const id = listToolSessions()[0]!.id
     await expect(execute('browser_status', {})).resolves.toMatchObject({
-      session: { id, allowed_hosts: ['example.test'] },
+      session: { id, allowed_hosts: [] },
     })
     await expect(execute('browser_close', { allowed_hosts: ['wrong.test'] })).resolves.toEqual({
       ok: true,
@@ -68,7 +68,7 @@ describe('chat browser native session', () => {
     })
     expect(listToolSessions()).toEqual([])
     await execute('browser_open', { allowed_hosts: ['other.test'] })
-    expect(listToolSessions()[0]?.allowedHosts).toEqual(['other.test'])
+    expect(listToolSessions()[0]?.allowedHosts).toEqual([])
   })
   it('does not create sessions for reads, status or idempotent close', async () => {
     await expect(execute('browser_dom_read', {})).rejects.toThrow('browser_open')
@@ -112,7 +112,7 @@ describe('chat browser native session', () => {
     expect(listToolSessions()[0]?.status).toBe('expired')
     await open.execute({ allowed_hosts: ['other.test'] }, secondCtx)
     expect(listToolSessions()).toHaveLength(1)
-    expect(listToolSessions()[0]?.allowedHosts).toEqual(['other.test'])
+    expect(listToolSessions()[0]?.allowedHosts).toEqual([])
     const commands = native.invoke.mock.calls.map(([command]) => command)
     expect(commands.indexOf('wf_browser_cleanup')).toBeLessThan(commands.lastIndexOf('wf_browser_action'))
   })
@@ -151,25 +151,33 @@ describe('chat browser native session', () => {
     const second = calls[1]![1].payload
     expect(first.execution.workflowExecutionId).toBe(first.scope.runId)
     expect(second.execution.workflowExecutionId).toBe(first.execution.workflowExecutionId)
-    expect(second.allowedHosts).toEqual(['example.test'])
+    expect(second.allowedHosts).toBeUndefined()
     expect(second.expectedUrl).toBeUndefined()
     expect(second.sessionId).toBe('native-session')
     expect(browserPanel.expanded).toBe(true)
   })
-  it('rejects absent host boundaries before native calls and rejects cross-host navigation', async () => {
-    await expect(execute('browser_open', {})).rejects.toThrow()
-    expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_action')).toBe(false)
-    await execute('browser_open', { allowed_hosts: ['example.test:8443'] })
-    await expect(execute('browser_navigate', { url: 'https://example.test:8443/a' })).resolves.toMatchObject({
-      ok: true,
-    })
-    await expect(execute('browser_navigate', { url: 'https://example.test/a' })).rejects.toThrow('außerhalb')
-    await expect(execute('browser_navigate', { url: 'https://sub.example.test:8443/a' })).rejects.toThrow('außerhalb')
+  it('navigates between domains and files without closing the owned session', async () => {
+    await execute('browser_open', {})
+    const first = listToolSessions()[0]!.id
+    for (const url of ['https://example.test:8443/a', 'https://other.test/a', 'file:///home/user/index.html']) {
+      await expect(execute('browser_navigate', { url })).resolves.toMatchObject({ ok: true })
+      expect(listToolSessions()[0]!.id).toBe(first)
+    }
   })
-  it('never silently changes the hosts of an existing session', async () => {
+  it('does not bind sessions to a host list', async () => {
     const first = await getToolSession(context, 'browser', ['example.test'])
-    await expect(getToolSession(context, 'browser', ['other.test'])).rejects.toThrow('andere Hosts')
-    expect((await getToolSession(context, 'browser')).meta.id).toBe(first.meta.id)
+    expect((await getToolSession(context, 'browser', ['other.test'])).meta.id).toBe(first.meta.id)
+  })
+  it('passes bounded scans as reads without requesting a screenshot', async () => {
+    await execute('browser_open', { url: 'https://example.test' })
+    await execute('browser_dom_scan', { query: 'Save', offset: 80, limit: 20 })
+    expect(native.invoke).toHaveBeenLastCalledWith(
+      'wf_browser_action',
+      expect.objectContaining({
+        payload: expect.objectContaining({ action: 'scan', query: 'Save', offset: 80, limit: 20 }),
+      })
+    )
+    expect(native.invoke.mock.calls.some(([, input]) => input?.payload?.action === 'screenshot')).toBe(false)
   })
   it('surfaces actionable native failures and allows explicit session closure', async () => {
     native.invoke.mockImplementation(async command => {

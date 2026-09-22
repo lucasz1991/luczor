@@ -26,6 +26,7 @@ vi.mock('@tauri-apps/plugin-store', () => ({
   },
 }))
 vi.mock('@/state/store', () => ({ state: mock.state }))
+vi.mock('@/services/persistence', () => ({ saveAppStateStrict: async () => {} }))
 vi.mock('@/services/accountPrincipal', () => ({ getVerifiedAccountSnapshot: mock.account }))
 vi.mock('@/services/projectWorkspace', () => ({ getProjectWorkspace: async () => ({ status: 'ready', updatedAt: 1 }) }))
 vi.mock('@/services/executionGate', () => ({
@@ -52,6 +53,7 @@ vi.mock('@/services/coordination/binaryTransport', () => ({
 import {
   MIRROR_WAKE_EVENT,
   projectMirrorState,
+  setProjectFolderShared,
   startProjectMirrorChannel,
   syncProjectMirror,
 } from '@/services/coordination/mirror'
@@ -90,6 +92,7 @@ afterEach(() => {
 describe('durable full project mirror upload', () => {
   function server(options: {
     revision: number
+    shared?: boolean
     merged?: boolean
     conflicts?: number
     publish?: (body: Record<string, unknown>) => void
@@ -99,7 +102,12 @@ describe('durable full project mirror upload', () => {
     let revision = options.revision
     mock.request.mockImplementation(async (path: string, request: Options) => {
       calls.push(`${request.method ?? 'GET'} ${path.slice(base.length) || '/'}`)
-      if (path === base) return { data: { revision, manifest_id: revision ? `head-${revision}` : null } }
+      if (path === base)
+        return {
+          data: { revision, manifest_id: revision ? `head-${revision}` : null, folder_shared: options.shared ?? true },
+        }
+      if (path.endsWith('/settings'))
+        return { data: { revision, manifest_id: null, folder_shared: request.body?.folder_shared } }
       if (path.endsWith('/proposals')) return { data: [] }
       if (path.endsWith('/manifests')) {
         options.create?.(request.body ?? {})
@@ -226,7 +234,7 @@ describe('durable full project mirror upload', () => {
     async code => {
       let publishes = 0
       mock.request.mockImplementation(async (path: string) => {
-        if (path === base) return { data: { revision: 2, manifest_id: 'head' } }
+        if (path === base) return { data: { revision: 2, manifest_id: 'head', folder_shared: true } }
         if (path.endsWith('/proposals')) return { data: [] }
         if (path.endsWith('/manifests'))
           return { data: { manifest_id: 'draft', base_revision: 0, revision: null, status: 'draft' } }
@@ -243,6 +251,33 @@ describe('durable full project mirror upload', () => {
       expect(projectMirrorState.local).toMatchObject({ busy: false, error: 'Conflict' })
     }
   )
+
+  it('does not touch the folder while the server switch is off and remembers the switch locally', async () => {
+    const calls = server({ revision: 3, shared: false })
+    await syncProjectMirror('local')
+    expect(calls).toEqual(['GET /'])
+    expect(mock.native).not.toHaveBeenCalled()
+    expect(mock.state.projects[0]?.cloud).toMatchObject({ folderShared: false })
+    expect(projectMirrorState.local).toMatchObject({
+      shared: false,
+      stage: 'Projektordner wird nicht global gespeichert',
+    })
+  })
+
+  it('turns the account-wide switch on through the server and starts the first sync at once', async () => {
+    const calls = server({ revision: 0 })
+    await setProjectFolderShared('local', true)
+    expect(mock.request).toHaveBeenCalledWith(
+      `${base}/settings`,
+      expect.objectContaining({ method: 'PUT', body: { folder_shared: true } }),
+      expect.anything()
+    )
+    expect(mock.state.projects[0]?.cloud).toMatchObject({ folderShared: true })
+    await vi.waitFor(() => expect(calls).toContain('POST /manifests/draft/publish'))
+    await setProjectFolderShared('local', false)
+    expect(mock.state.projects[0]?.cloud).toMatchObject({ folderShared: false })
+    expect(projectMirrorState.local).toMatchObject({ shared: false })
+  })
 
   it('wakes a project immediately when another device publishes a revision', async () => {
     vi.useFakeTimers()
@@ -312,7 +347,7 @@ describe('durable full project mirror upload', () => {
       return new Uint8Array()
     })
     mock.request.mockImplementation(async (path: string, options: Options) => {
-      if (path === base) return { data: { revision: 0, manifest_id: null } }
+      if (path === base) return { data: { revision: 0, manifest_id: null, folder_shared: true } }
       if (path.endsWith('/proposals')) return { data: [] }
       if (path.endsWith('/manifests'))
         return { data: { manifest_id: 'same-draft', base_revision: 0, revision: null, status: 'draft' } }
@@ -347,7 +382,7 @@ describe('durable full project mirror upload', () => {
       publishId: 'publish',
     })
     mock.request.mockImplementation(async (path: string) => {
-      if (path === base) return { data: { revision: 3, manifest_id: 'merged' } }
+      if (path === base) return { data: { revision: 3, manifest_id: 'merged', folder_shared: true } }
       if (path.endsWith('/proposals')) return { data: [] }
       if (path.endsWith('/manifests'))
         return {

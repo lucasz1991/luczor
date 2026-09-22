@@ -22,10 +22,17 @@ export function browserFailure(error: unknown): string {
       'Die Zielhosts müssen ohne Protokoll oder Pfad angegeben werden, z. B. example.com.',
     workflow_browser_host_not_allowed:
       'Diese Adresse liegt außerhalb der bestätigten Hosts. browser_status mit {} zeigt die Bindung. Zum Wechseln browser_close mit {} und anschließend browser_open mit den bestätigten Zielhosts verwenden. Keine Hosts raten.',
-    workflow_browser_url_invalid: 'Browser-URL ist ungültig. Eine HTTP(S)-Adresse ohne Zugangsdaten verwenden.',
+    workflow_browser_url_invalid:
+      'Eine HTTP(S)-Adresse, file://-URL oder einen absoluten Dateipfad ohne eingebettete Zugangsdaten verwenden.',
     workflow_browser_host_boundary_unavailable: 'Die sichere Browser-Steuerung ist auf diesem System nicht verfügbar.',
     workflow_browser_requires_windows_webview2: 'Diese Browser-Funktion benötigt Windows/WebView2.',
-    workflow_browser_session_unavailable: 'Bitte zuerst browser_open mit den erlaubten Hosts ausführen.',
+    workflow_browser_session_unavailable: 'Bitte zuerst browser_open mit der gewünschten Adresse oder Datei ausführen.',
+    browser_ref_stale:
+      'Das beobachtete Element hat sich geändert. Mit browser_dom_scan neu erfassen und die neue Referenz verwenden.',
+    browser_target_ambiguous: 'Mehrere Elemente passen. Mit browser_dom_scan das genaue Ziel auswählen.',
+    browser_target_not_actionable:
+      'Das Ziel ist verdeckt, deaktiviert oder bewegt sich noch. DOM erneut prüfen; keine unklare Eingabe wiederholen.',
+    browser_selector_invalid: 'Ungültiges Elementziel. Eine beobachtete Referenz aus browser_dom_scan verwenden.',
     workflow_browser_owned_by_another_run:
       'Ein anderer Auftrag verwendet den Browser. Dessen Abschluss abwarten; eigene Hostlisten oder browser_close können seine Sitzung nicht übernehmen.',
     workflow_browser_cleanup_pending:

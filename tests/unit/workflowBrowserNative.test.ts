@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 import vm from 'node:vm'
+import { webcrypto } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { createWorkflowBrowser, type WorkflowNativeInvoke } from '@/services/workflows/browser'
 import { runWorkflowImage } from '@/services/workflows/image'
@@ -16,9 +17,19 @@ type Params = {
   url?: string
   maxBytes?: number
   showCursor?: boolean
+  operation?: string
+  prepared?: boolean
+  query?: string
+  offset?: number
+  limit?: number
 }
 function page() {
   class Element {
+    nodeType = 1
+    tagName = 'INPUT'
+    children: Element[] = []
+    attributes: Record<string, string> = {}
+    scrollIntoView = vi.fn()
     isConnected = true
     disabled = false
     readOnly = false
@@ -35,8 +46,8 @@ function page() {
     getBoundingClientRect() {
       return { left: 0, top: 0, width: 20, height: 20 }
     }
-    getAttribute() {
-      return null
+    getAttribute(key: string) {
+      return Reflect.get(this.attributes, key) ?? null
     }
     contains() {
       return false
@@ -80,6 +91,8 @@ function page() {
   }
   const document = {
     readyState: 'complete',
+    title: 'Fixture',
+    body: element,
     querySelectorAll: vi.fn(() => [element] as Element[]),
     elementFromPoint: () => element,
     querySelector: vi.fn(() => null as typeof marker | null),
@@ -89,6 +102,7 @@ function page() {
   const context = {
     location: { href: 'https://example.test/form', origin: 'https://example.test' },
     document,
+    crypto: webcrypto,
     innerWidth: 800,
     innerHeight: 600,
     getComputedStyle: () => ({ visibility: 'visible', display: 'block' }),
@@ -129,16 +143,15 @@ describe('fixed native browser DOM protocol', () => {
     await fixture.execute({ ...base, action: 'fill', value: 'test', showCursor: false })
     expect(fixture.marker.remove).toHaveBeenCalledOnce()
   })
-  it('refuses a target that moves while the cursor frame is painted', async () => {
+  it('refuses a target that moves after the admitted preparation', async () => {
     const fixture = page()
-    fixture.context.requestAnimationFrame = callback => {
-      fixture.element.getBoundingClientRect = () => ({ left: 80, top: 0, width: 20, height: 20 })
-      callback(0)
-    }
-    expect(await fixture.execute({ ...base, action: 'click', showCursor: true })).toMatchObject({
-      ok: false,
-      code: 'browser_target_not_actionable',
-    })
+    expect(await fixture.execute({ ...base, action: 'prepare', operation: 'click' })).toMatchObject({ ok: false })
+    const prepared = await fixture.execute({ ...base, action: 'prepare', operation: 'click' })
+    expect(prepared).toMatchObject({ ok: true })
+    fixture.element.getBoundingClientRect = () => ({ left: 80, top: 0, width: 20, height: 20 })
+    expect(
+      await fixture.execute({ ...base, action: 'click', selector: String(prepared.ref), prepared: true })
+    ).toMatchObject({ ok: false, code: 'browser_target_not_actionable' })
     expect(fixture.element.clicked).toBe(false)
   })
   it('fills through the native setter and treats code-like content as literal data', async () => {
@@ -170,46 +183,54 @@ describe('fixed native browser DOM protocol', () => {
       code: 'browser_option_missing',
     })
     expect(await fixture.execute({ ...base, action: 'select', value: 'one' })).toEqual({ ok: true, applied: true })
-    select.innerText = 'x'.repeat(30)
+    select.innerText = 'first full line\n' + 'x'.repeat(30)
     expect(await fixture.execute({ ...base, action: 'read' })).toEqual({
       ok: true,
-      text: 'x'.repeat(20),
+      text: 'first full line',
       truncated: true,
     })
   })
-  it('downloads within the same session origin and cancels oversized responses', async () => {
+  it('keeps download execution out of page JavaScript', async () => {
     const fixture = page()
-    expect(
-      await fixture.execute({
-        ...base,
-        action: 'download',
-        url: 'https://foreign.test/file',
-        timeoutMs: 50,
-        maxBytes: 20,
-      })
-    ).toMatchObject({ ok: false, code: 'browser_download_same_origin_required' })
-    expect(fixture.context.fetch).not.toHaveBeenCalled()
-    const cancel = vi.fn(async () => undefined)
-    fixture.context.fetch.mockResolvedValue({
-      ok: true,
-      url: 'https://example.test/file',
-      headers: new Headers({ 'content-type': 'text/plain' }),
-      body: { getReader: () => ({ read: async () => ({ done: false, value: new Uint8Array(30) }), cancel }) },
+    expect(await fixture.execute({ ...base, action: 'download', url: 'https://foreign.test/file' })).toMatchObject({
+      ok: false,
+      code: 'browser_action_unknown',
     })
+    expect(fixture.context.fetch).not.toHaveBeenCalled()
+  })
+  it('scans semantic refs without exposing form values and rejects changed or replaced targets', async () => {
+    const fixture = page()
+    fixture.element.value = 'private form value'
+    fixture.element.attributes['aria-label'] = 'Email'
+    const scan = await fixture.execute({ expectedUrl: base.expectedUrl, action: 'scan' })
+    const elements = scan.elements as Array<{ ref: string; name: string }>
+    expect(elements).toHaveLength(1)
+    expect(elements[0]).toMatchObject({ role: 'textbox', name: 'Email' })
+    expect(JSON.stringify(scan)).not.toContain('private form value')
     expect(
-      await fixture.execute({
-        ...base,
-        action: 'download',
-        url: 'https://example.test/file',
-        timeoutMs: 100,
-        maxBytes: 20,
-      })
-    ).toMatchObject({ ok: false, code: 'browser_download_size_exceeded' })
-    expect(cancel).toHaveBeenCalledOnce()
-    expect(fixture.context.fetch).toHaveBeenCalledWith(
-      'https://example.test/file',
-      expect.objectContaining({ redirect: 'error', credentials: 'same-origin' })
-    )
+      await fixture.execute({ ...base, action: 'fill', selector: elements[0]!.ref, value: 'hello' })
+    ).toMatchObject({ ok: true })
+    fixture.element.attributes['aria-label'] = 'Different field'
+    expect(
+      await fixture.execute({ ...base, action: 'fill', selector: elements[0]!.ref, value: 'wrong' })
+    ).toMatchObject({ ok: false, code: 'browser_ref_stale' })
+    expect(fixture.element.value).toBe('hello')
+    expect(await fixture.execute({ ...base, action: 'fill', selector: 'ref:invented', value: 'wrong' })).toMatchObject({
+      ok: false,
+      code: 'browser_ref_stale',
+    })
+  })
+  it('finds a unique label and never chooses an arbitrary ambiguous target', async () => {
+    const fixture = page()
+    fixture.element.attributes['aria-label'] = 'Email'
+    expect(await fixture.execute({ ...base, action: 'fill', selector: 'label=Email', value: 'hello' })).toMatchObject({
+      ok: true,
+    })
+    fixture.document.querySelectorAll.mockReturnValue([fixture.element, fixture.element])
+    expect(await fixture.execute({ ...base, action: 'click' })).toMatchObject({
+      ok: false,
+      code: 'browser_target_ambiguous',
+    })
   })
 })
 
@@ -260,7 +281,7 @@ describe('workflow session and image IPC contracts', () => {
       })
     ).rejects.toThrow('session_changed')
   })
-  it('copies reviewed host restrictions and cannot expand them through an operation payload', async () => {
+  it('removes obsolete host restrictions but retains native session identity', async () => {
     const invokeTask = vi.fn(async () => ({
       ok: true,
       sessionId: 'session',
@@ -282,7 +303,7 @@ describe('workflow session and image IPC contracts', () => {
     })
     expect(invokeTask).toHaveBeenCalledWith(
       'wf_browser_action',
-      expect.objectContaining({ allowedHosts: ['example.test'], automated: true, expectedTabId: 'reviewed-tab' }),
+      expect.objectContaining({ allowedHosts: undefined, automated: true, expectedTabId: 'reviewed-tab' }),
       true
     )
   })

@@ -1,152 +1,50 @@
-//! Linux WebKitGTK adapter. Compiled native content filters protect all requests;
-//! fixed automation code runs in an isolated JS world and returns through native callbacks.
+//! WebKitGTK uses its own isolated world; no Luczor domain/content filters.
 use super::*;
-use glib::translate::ToGlibPtr;
 use javascriptcore::ValueExt;
 use webkit2gtk::{LoadEvent, SnapshotOptions, SnapshotRegion, WebViewExt};
 
-fn filters(hosts: Option<&[String]>) -> Value {
-    let mut rules = vec![json!({"trigger":{"url-filter":".*"},"action":{"type":"block"}})];
-    let patterns = match hosts {
-        None => vec!["^https?://[^/@]+/".to_string()],
-        Some(hosts) => hosts
-            .iter()
-            .map(|host| {
-                let escaped = regex::escape(host);
-                if host.contains(':') {
-                    format!("^https?://{escaped}/")
-                } else {
-                    format!("^(http://{escaped}(:80)?/|https://{escaped}(:443)?/)")
-                }
-            })
-            .collect(),
-    };
-    for pattern in patterns.into_iter().chain(["^about:blank$".into()]) {
-        rules.push(json!({"trigger":{"url-filter":pattern,"url-filter-is-case-sensitive":false},"action":{"type":"ignore-previous-rules"}}));
-    }
-    Value::Array(rules)
-}
-struct FilterCallback {
-    manager: webkit2gtk::UserContentManager,
-    sender: mpsc::SyncSender<Result<(), String>>,
-    app: AppHandle,
-    session: Arc<Session>,
-}
-unsafe extern "C" fn filter_ready(
-    source: *mut glib::gobject_ffi::GObject,
-    result: *mut gio::ffi::GAsyncResult,
-    data: glib::ffi::gpointer,
-) {
-    let callback = Box::from_raw(data.cast::<FilterCallback>());
-    let mut error = std::ptr::null_mut();
-    let filter = webkit2gtk::ffi::webkit_user_content_filter_store_save_finish(
-        source.cast(),
-        result,
-        &mut error,
-    );
-    let outcome = if filter.is_null() {
-        if !error.is_null() {
-            glib::ffi::g_error_free(error);
-        }
-        Err("workflow_browser_host_boundary_unavailable".into())
-    } else {
-        let outcome = check_session(&callback.app, &callback.session);
-        if outcome.is_ok() {
-            webkit2gtk::ffi::webkit_user_content_manager_add_filter(
-                callback.manager.to_glib_none().0,
-                filter,
-            );
-        }
-        webkit2gtk::ffi::webkit_user_content_filter_unref(filter);
-        outcome
-    };
-    glib::gobject_ffi::g_object_unref(source);
-    let _ = callback.sender.try_send(outcome);
-}
-pub(super) async fn install_request_boundary(
+pub(super) async fn install_navigation_tracking(
     window: &Webview,
     app: AppHandle,
     session: Arc<Session>,
 ) -> Result<(), String> {
-    let path = app
-        .path()
-        .app_cache_dir()
-        .map_err(|_| "workflow_browser_cache_unavailable")?
-        .join("webkit-host-filters");
-    std::fs::create_dir_all(&path).map_err(|_| "workflow_browser_cache_unavailable")?;
-    let path = std::ffi::CString::new(path.to_string_lossy().as_bytes())
-        .map_err(|_| "workflow_browser_cache_unavailable")?;
-    let encoded = filters(session.allowed_hosts.as_deref()).to_string();
     let (sender, receiver) = mpsc::sync_channel(1);
-    let cb_app = app.clone();
-    let cb_session = session.clone();
     window
         .with_webview(move |platform| {
-            let view = platform.inner();
-            let Some(manager) = view.user_content_manager() else {
-                let _ = sender.send(Err("workflow_browser_host_boundary_unavailable".into()));
-                return;
-            };
-            let navigation_session = cb_session.clone();
-            view.connect_load_changed(move |view, event| {
-                if let Ok(mut tracker) = navigation_session.navigation.lock() {
-                    let id = tracker.generation;
-                    match event {
-                        LoadEvent::Started => {
-                            tracker.started(id, view.uri().as_deref().unwrap_or(""))
+            let result = check_session(&app, &session);
+            if result.is_ok() {
+                let view = platform.inner();
+                let navigation = session.clone();
+                view.connect_load_changed(move |view, event| {
+                    if let Ok(mut tracker) = navigation.navigation.lock() {
+                        let id = tracker.generation;
+                        match event {
+                            LoadEvent::Started => {
+                                tracker.started(id, view.uri().as_deref().unwrap_or(""))
+                            }
+                            LoadEvent::Finished => tracker.finished(id, true),
+                            _ => {}
                         }
-                        LoadEvent::Finished => tracker.finished(id, true),
-                        _ => {}
                     }
-                }
-            });
-            let failed_session = cb_session.clone();
-            view.connect_load_failed(move |_, _, _, _| {
-                if let Ok(mut tracker) = failed_session.navigation.lock() {
-                    let id = tracker.generation;
-                    tracker.finished(id, false);
-                }
-                false
-            });
-            let bytes = glib::Bytes::from_owned(encoded.into_bytes());
-            let identifier = std::ffi::CString::new(format!("luczor-{}", cb_session.id))
-                .expect("UUID identifier");
-            unsafe {
-                let store = webkit2gtk::ffi::webkit_user_content_filter_store_new(path.as_ptr());
-                if store.is_null() {
-                    let _ = sender.send(Err("workflow_browser_host_boundary_unavailable".into()));
-                    return;
-                }
-                let callback = Box::new(FilterCallback {
-                    manager,
-                    sender,
-                    app: cb_app,
-                    session: cb_session,
                 });
-                webkit2gtk::ffi::webkit_user_content_filter_store_save(
-                    store,
-                    identifier.as_ptr(),
-                    bytes.to_glib_none().0,
-                    std::ptr::null_mut(),
-                    Some(filter_ready),
-                    Box::into_raw(callback).cast(),
-                );
+                view.connect_load_failed(move |_, _, _, _| {
+                    if let Ok(mut tracker) = session.navigation.lock() {
+                        let id = tracker.generation;
+                        tracker.finished(id, false);
+                    }
+                    false
+                });
             }
+            let _ = sender.try_send(result);
         })
-        .map_err(|_| "workflow_browser_host_boundary_unavailable")?;
+        .map_err(|_| "workflow_browser_navigation_tracking_unavailable")?;
     tauri::async_runtime::spawn_blocking(move || {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        loop {
-            check_session(&app, &session)?;
-            match receiver.recv_timeout(Duration::from_millis(40)) {
-                Ok(result) => return result,
-                Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() < deadline => {}
-                _ => return Err("workflow_browser_host_boundary_unavailable".into()),
-            }
-        }
+        receiver
+            .recv_timeout(Duration::from_secs(3))
+            .map_err(|_| "workflow_browser_navigation_tracking_unavailable".to_string())?
     })
     .await
-    .map_err(|_| "workflow_browser_task_failed")?
+    .map_err(|_| "workflow_browser_task_failed".to_string())?
 }
 pub(super) async fn devtools(
     window: &Webview,
@@ -206,23 +104,4 @@ pub(super) async fn devtools(
     .map_err(|_| "workflow_browser_task_failed")?;
     cancelled.store(true, Ordering::Release);
     result
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn compiled_filter_does_not_allow_suffix_hosts_or_arbitrary_ports() {
-        let rules = filters(Some(&["example.com".into()]));
-        let pattern = rules[1]["trigger"]["url-filter"].as_str().unwrap();
-        let pattern = regex::Regex::new(pattern).unwrap();
-        assert!(pattern.is_match("https://example.com/path"));
-        for url in [
-            "https://example.com.evil/path",
-            "https://evil@example.com/path",
-            "https://example.com:444/path",
-        ] {
-            assert!(!pattern.is_match(url));
-        }
-    }
 }

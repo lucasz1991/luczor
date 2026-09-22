@@ -96,13 +96,7 @@ pub async fn browser_action_admit(
 }
 
 fn valid_http_url(raw: &str) -> Result<String, String> {
-    let url = raw.trim();
-    if !(url.starts_with("https://") || url.starts_with("http://"))
-        || url.chars().any(char::is_control)
-    {
-        return Err("Only valid http(s) URLs may be opened.".into());
-    }
-    Ok(url.to_string())
+    super::workflow_browser::url(raw).map(|url| url.to_string())
 }
 
 /// A short id without Date/rand (uuid v4 is available and deterministic-safe).
@@ -563,7 +557,7 @@ mod tests {
     fn url_validation_rejects_non_http() {
         assert!(valid_http_url("https://example.org").is_ok());
         assert!(valid_http_url("http://localhost:8010").is_ok());
-        assert!(valid_http_url("file:///etc/passwd").is_err());
+        assert!(valid_http_url("file:///etc/passwd").is_ok());
         assert!(valid_http_url("javascript:alert(1)").is_err());
     }
 

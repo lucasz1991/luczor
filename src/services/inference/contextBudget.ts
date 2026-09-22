@@ -62,6 +62,8 @@ function completeLineExcerpt(text: string, limit: number): string {
 
 /** Return a valid JSON projection, with explicit omissions instead of broken JSON. */
 export function compactToolOutput(value: unknown, maxChars = 6000): unknown {
+  const browser = compactBrowserSnapshot(value, maxChars)
+  if (browser !== undefined) return browser
   const catalog = compactToolCatalog(value, maxChars)
   if (catalog !== undefined) return catalog
   const original = JSON.stringify(value) ?? 'null'
@@ -115,6 +117,67 @@ export function compactToolOutput(value: unknown, maxChars = 6000): unknown {
   const result = { truncated: true, originalCharacters: original.length, projection: visit(value) }
   // Never slice serialized JSON: it can cut a filename, escape or surrogate pair.
   return JSON.stringify(result).length <= maxChars ? result : { truncated: true, omitted: true }
+}
+
+/** Keep scan refs atomic and pagination accurate when a model has a smaller tool budget. */
+function compactBrowserSnapshot(value: unknown, maxChars: number): unknown | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const outer = value as Record<string, unknown>
+  const nested = !!outer.data && typeof outer.data === 'object'
+  const data = (nested ? outer.data : outer) as Record<string, unknown>
+  if (data.version !== 1 || !Array.isArray(data.elements) || typeof data.offset !== 'number') return undefined
+  if (JSON.stringify(value).length <= maxChars) return value
+  const elements: unknown[] = []
+  const snapshot = {
+    ...data,
+    elements,
+    truncated: true,
+    nextOffset: data.offset as number | null,
+    contextCompacted: true,
+  }
+  const result = nested ? { ...outer, data: snapshot } : snapshot
+  // Long page labels are evidence, not tool identities; omit them as whole fields.
+  delete (snapshot as Record<string, unknown>).title
+  for (const element of data.elements) {
+    elements.push(element)
+    snapshot.nextOffset = data.offset + elements.length
+    if (JSON.stringify(result).length > maxChars) {
+      elements.pop()
+      snapshot.nextOffset = data.offset + elements.length
+      // A large first link/options list must not produce an endless empty page.
+      // Keep its exact action identity; omit evidence fields explicitly, never slice them.
+      if (!elements.length && element && typeof element === 'object' && typeof element.ref === 'string') {
+        const target: Record<string, unknown> = {
+          ref: element.ref,
+          role: element.role,
+          name: element.name,
+          detailsOmitted: true,
+        }
+        elements.push(target)
+        snapshot.nextOffset = data.offset + 1
+        if (JSON.stringify(result).length > maxChars) {
+          delete target.name
+          target.nameOmitted = true
+        }
+        if (JSON.stringify(result).length > maxChars) {
+          elements.pop()
+          snapshot.nextOffset = data.offset
+        }
+      }
+      break
+    }
+  }
+  if (elements.length === data.elements.length)
+    snapshot.nextOffset = typeof data.nextOffset === 'number' ? data.nextOffset : null
+  if (JSON.stringify(result).length > maxChars)
+    return {
+      truncated: true,
+      omitted: true,
+      next_tool: 'browser_dom_scan',
+      next_arguments: { offset: data.offset, limit: 1 },
+      reason: 'Scan metadata exceeds context budget; use a narrower query.',
+    }
+  return result
 }
 
 export function contextBreakdown(messages: readonly WireMessage[], tools: readonly unknown[]) {

@@ -141,6 +141,7 @@ export async function getToolSession(
   if (existing && existing.ticket.sessionId === ticket.sessionId && existing.ticket.generation === ticket.generation) {
     executionGate.assert(existing.ticket, kind !== 'vision')
     if (
+      kind !== 'browser' &&
       allowedHosts.length &&
       JSON.stringify([...allowedHosts].sort()) !== JSON.stringify([...existing.meta.allowedHosts].sort())
     )
@@ -195,14 +196,13 @@ export async function getToolSession(
       status: 'active',
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      allowedHosts: Object.freeze([...allowedHosts]),
+      allowedHosts: Object.freeze(kind === 'browser' ? [] : [...allowedHosts]),
     })
     const internal: InternalSession = { meta, ticket, scope, invokeTask }
     if (kind === 'browser') {
       internal.browser = createWorkflowBrowser({
         scope,
         invokeTask,
-        allowedHosts,
         automated: true,
       })
     }

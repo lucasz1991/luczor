@@ -18,8 +18,16 @@ const pool = [
   'browser_status',
   'browser_open',
   'browser_dom_read',
+  'browser_dom_scan',
 ].map(name => ({ type: 'function' as const, function: { name, description: name, parameters: { type: 'object' } } }))
 describe('focused local tool context', () => {
+  it('offers DOM scanning for web tasks before visual fallback', () => {
+    const selected = focusedTools('browser web website', () => [])
+      .select(pool)
+      .map(tool => tool.function.name)
+    expect(selected).toContain('browser_dom_scan')
+    expect(selected).not.toContain('browser_screenshot')
+  })
   it('keeps delegation start, status and stop when requested file tools fill the budget', async () => {
     const names = [
       'agent_assist',

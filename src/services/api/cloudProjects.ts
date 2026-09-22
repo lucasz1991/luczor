@@ -33,6 +33,7 @@ export type CloudProjectListItem = {
   name: string
   cloud_revision?: number
   cloud_enabled?: boolean
+  folder_shared?: boolean
   user_id?: number
 }
 export type CloudProjectFile = {
@@ -395,6 +396,7 @@ async function saveLink(current: Session, local: Project, remote: CloudProjectDo
     fingerprint: hash,
     syncedAt: Date.now(),
     paused: local.cloud?.paused ?? false,
+    ...(local.cloud?.folderShared !== undefined ? { folderShared: local.cloud.folderShared } : {}),
   }
   try {
     await saveAppStateStrict(state)
@@ -494,6 +496,15 @@ export async function listCloudProjects(): Promise<CloudProjectListItem[]> {
     }
     if (!batch.length || page >= (response.data.last_page ?? page)) {
       cloudProjectsState.projects = result
+      // The folder switch lives on the server; mirror the latest value into the local link.
+      for (const item of result)
+        for (const project of state.projects)
+          if (
+            project.cloud?.projectId === item.id &&
+            project.cloud.principalId === current.account.principalId &&
+            typeof item.folder_shared === 'boolean'
+          )
+            project.cloud.folderShared = item.folder_shared
       return result
     }
   }

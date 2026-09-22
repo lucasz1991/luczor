@@ -3,32 +3,36 @@ import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import { state } from '@/state/store'
 import {
   cloudProjectsState,
-  cloudProjectFiles,
   copyCloudProject,
   importCloudProject,
   listCloudProjects,
   pauseCloudProject,
   publishCloudProject,
-  readCloudProjectFile,
-  saveCloudProjectFile,
   syncCloudProjects,
-  type CloudProjectFile,
 } from '@/services/api/cloudProjects'
+import {
+  pauseProjectMirror,
+  projectMirrorState,
+  setProjectFolderShared,
+  syncProjectMirror,
+} from '@/services/coordination/mirror'
+import type { ProjectWorkspaceBinding } from '@/services/projectWorkspace'
 import AiIcon from '@/components/ai/AiIcon.vue'
 
-const props = defineProps<{ open: boolean; projectId: string; busy: boolean }>()
-const emit = defineEmits<{ 'update:open': [value: boolean]; select: [id: string] }>()
+const props = defineProps<{
+  open: boolean
+  projectId: string
+  busy: boolean
+  /** Device-local folder binding of the current project; folders are never synchronized as settings. */
+  workspace?: ProjectWorkspaceBinding | null
+  workspaceBusy?: boolean
+}>()
+const emit = defineEmits<{ 'update:open': [value: boolean]; select: [id: string]; 'select-folder': [] }>()
 const dialog = ref<HTMLDialogElement | null>(null)
 const working = ref(false)
 const error = ref('')
 const notice = ref('')
 const tab = ref<'projects' | 'files'>('projects')
-const files = ref<CloudProjectFile[]>([])
-const filePath = ref('')
-const fileContent = ref('')
-const fileRevision = ref(0)
-const openedFilePath = ref('')
-const fileDirty = ref(false)
 let viewGeneration = 0
 let focusReturn: HTMLElement | null = null
 const current = computed(() => state.projects.find(project => project.id === props.projectId))
@@ -36,6 +40,9 @@ const linked = computed(() =>
   current.value?.cloud?.principalId === cloudProjectsState.principalId ? current.value.cloud : undefined
 )
 const status = computed(() => cloudProjectsState.status[props.projectId])
+const mirror = computed(() => projectMirrorState[props.projectId])
+const folderShared = computed(() => linked.value?.folderShared ?? mirror.value?.shared ?? false)
+const folderReady = computed(() => props.workspace?.status === 'ready')
 const disabled = computed(
   () => working.value || props.busy || cloudProjectsState.busy || !cloudProjectsState.principalId
 )
@@ -43,6 +50,7 @@ const localId = (serverId: number) =>
   state.projects.find(
     project => project.cloud?.projectId === serverId && project.cloud.principalId === cloudProjectsState.principalId
   )?.id
+const megabytes = (bytes: number) => (bytes / 1048576).toFixed(1)
 
 async function perform(action: () => Promise<void>) {
   if (working.value) return
@@ -98,81 +106,31 @@ async function togglePaused() {
     await pauseCloudProject(id, !linked.value?.paused)
   })
 }
-async function refreshFiles() {
-  const captured = viewGeneration
-  const result = await cloudProjectFiles(props.projectId)
-  if (captured === viewGeneration) files.value = result
-}
-async function openFile(file: CloudProjectFile) {
-  if (fileDirty.value) {
-    error.value = 'Dateientwurf zuerst speichern oder über „Neue Datei“ verwerfen.'
-    return
-  }
+/** The switch lives on the server: one decision for the project, every device follows it. */
+async function toggleFolderShared() {
   const id = props.projectId
-  const captured = viewGeneration
+  const next = !folderShared.value
   await perform(async () => {
-    const result = await readCloudProjectFile(id, file.path)
-    if (captured !== viewGeneration) return
-    filePath.value = result.path
-    openedFilePath.value = result.path
-    fileContent.value = result.content
-    fileRevision.value = result.revision
-    fileDirty.value = false
+    await setProjectFolderShared(id, next)
+    notice.value = next
+      ? folderReady.value
+        ? 'Der Projektordner wird jetzt global gespeichert und auf allen Geräten automatisch abgeglichen.'
+        : 'Global aktiviert. Wähle jetzt den lokalen Projektordner, damit der Abgleich auf diesem Gerät startet.'
+      : 'Der Abgleich ist auf allen Geräten beendet. Lokale Dateien und die Serverkopie bleiben erhalten.'
   })
 }
-function newFile() {
-  filePath.value = ''
-  openedFilePath.value = ''
-  fileContent.value = ''
-  fileRevision.value = 0
-  fileDirty.value = false
-}
-async function chooseFile(event: Event) {
-  const input = event.target as HTMLInputElement
-  const selected = input.files?.[0]
-  input.value = ''
-  if (!selected) return
-  if (fileDirty.value) {
-    error.value = 'Den offenen Dateientwurf zuerst speichern oder verwerfen.'
-    return
-  }
-  const captured = viewGeneration
-  await perform(async () => {
-    if (selected.size > 1024 * 1024) throw new Error('Bitte eine Textdatei bis 1 MiB auswählen.')
-    const bytes = await selected.arrayBuffer()
-    const content = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
-    if (content.includes('\0')) throw new Error('Binärdateien werden im Projekt-Dateispeicher nicht unterstützt.')
-    if (captured !== viewGeneration) return
-    filePath.value = selected.name
-    openedFilePath.value = ''
-    fileContent.value = content
-    fileRevision.value = 0
-    fileDirty.value = true
-  })
-}
-async function saveFile() {
+/** Background folder sync; errors stay in the mirror status instead of the dialog. */
+function syncFolder() {
   const id = props.projectId
-  const captured = viewGeneration
-  const path = filePath.value.trim()
-  const content = fileContent.value
-  const revision = openedFilePath.value === path ? fileRevision.value : 0
-  await perform(async () => {
-    const saved = await saveCloudProjectFile(id, path, content, revision)
-    if (captured !== viewGeneration) return
-    fileRevision.value = saved.revision
-    openedFilePath.value = saved.path
-    fileDirty.value = content !== fileContent.value || path !== filePath.value.trim()
-    notice.value = `Datei gespeichert · Version ${saved.revision}`
-    await refreshFiles()
-  })
+  if (!linked.value || !folderShared.value || !folderReady.value) return
+  void syncProjectMirror(id).catch(() => undefined)
 }
-function downloadFile() {
-  const url = URL.createObjectURL(new Blob([fileContent.value], { type: 'text/plain;charset=utf-8' }))
-  const anchor = document.createElement('a')
-  anchor.href = url
-  anchor.download = filePath.value.split('/').at(-1) || 'projekt.txt'
-  anchor.click()
-  window.setTimeout(() => URL.revokeObjectURL(url), 1000)
+async function toggleFolderPaused() {
+  const id = props.projectId
+  await perform(async () => {
+    await pauseProjectMirror(id, !mirror.value?.paused)
+    syncFolder()
+  })
 }
 function close() {
   emit('update:open', false)
@@ -184,18 +142,14 @@ watch(
     working.value = false
     error.value = ''
     notice.value = ''
-    files.value = []
-    newFile()
     await nextTick()
     if (open) {
       if (!dialog.value?.open) {
         focusReturn = document.activeElement instanceof HTMLElement ? document.activeElement : null
         dialog.value?.showModal()
       }
-      await perform(async () => {
-        await refresh()
-        if (tab.value === 'files' && linked.value) await refreshFiles()
-      })
+      await perform(refresh)
+      if (tab.value === 'files') syncFolder()
     } else {
       dialog.value?.close()
       focusReturn?.focus()
@@ -204,13 +158,18 @@ watch(
   { immediate: true }
 )
 watch(tab, value => {
-  if (value === 'files' && linked.value) void perform(refreshFiles)
+  if (value === 'files') syncFolder()
 })
+// A newly chosen folder on a second device downloads the shared files without waiting for the next poll.
+watch(
+  () => [props.workspace?.rootPath, props.workspace?.status] as const,
+  ([rootPath, workspaceStatus], previous) => {
+    if (props.open && rootPath && workspaceStatus === 'ready' && rootPath !== previous?.[0]) syncFolder()
+  }
+)
 const identityChanged = () => {
   viewGeneration++
   error.value = ''
-  files.value = []
-  newFile()
   close()
 }
 window.addEventListener('luczor:api-identity-changing', identityChanged)
@@ -249,7 +208,8 @@ onBeforeUnmount(() => {
           </div>
           <p>
             Projektziele, öffentliche Chats, Projekterinnerungen und Zusammenfassungen stehen auf deinen Geräten zur
-            Verfügung. Lokale Ordner bleiben pro Gerät zugeordnet.
+            Verfügung. Der Projektordner wird unter „Projektdateien“ freigegeben; welcher lokale Ordner dazugehört,
+            bleibt pro Gerät gewählt.
           </p>
           <template v-if="linked">
             <p role="status" class="subtle">
@@ -281,9 +241,10 @@ onBeforeUnmount(() => {
           <li v-for="project in cloudProjectsState.projects" :key="project.id">
             <div>
               <strong>{{ project.name }}</strong
-              ><span class="subtle">{{
-                localId(project.id) ? 'Auf diesem Gerät vorhanden' : 'Vom Server öffnen'
-              }}</span>
+              ><span class="subtle"
+                >{{ localId(project.id) ? 'Auf diesem Gerät vorhanden' : 'Vom Server öffnen'
+                }}{{ project.folder_shared ? ' · Projektordner global' : '' }}</span
+              >
             </div>
             <button type="button" :disabled="disabled" @click="openProject(project.id)">Öffnen</button>
           </li>
@@ -292,44 +253,77 @@ onBeforeUnmount(() => {
       </template>
       <template v-else>
         <p>
-          Ausgewählte UTF-8-Textdateien gemeinsam bearbeiten. Bis 1 MiB pro Datei; das Projektverzeichnis wird nicht
-          automatisch hochgeladen.
+          Der gesamte Projektordner wird auf dem Server gespeichert und auf allen angemeldeten Geräten automatisch
+          abgeglichen – wie ein gemeinsames Repository, nur ohne manuelles Commit, Push und Pull.
         </p>
         <p v-if="!linked" class="subtle">Stelle das aktuelle Projekt zuerst im Tab „Projekte“ global bereit.</p>
         <template v-else>
-          <div class="actions">
-            <button type="button" :disabled="working" @click="perform(refreshFiles)">Dateiliste aktualisieren</button
-            ><button type="button" :disabled="working" @click="newFile">
-              {{ fileDirty ? 'Entwurf verwerfen / neue Datei' : 'Neue Datei' }}</button
-            ><label class="file-picker"
-              >Datei auswählen<input type="file" :disabled="working" @change="chooseFile"
-            /></label>
-          </div>
-          <ul class="file-list">
-            <li v-for="file in files" :key="file.path">
-              <button type="button" :disabled="working" @click="openFile(file)">
-                {{ file.path }} <span class="subtle">v{{ file.revision }} · {{ file.bytes }} Bytes</span>
+          <section class="folder">
+            <div class="section-title">
+              <h3>Lokaler Projektordner auf diesem Gerät</h3>
+              <button type="button" :disabled="disabled || props.workspaceBusy" @click="emit('select-folder')">
+                {{ props.workspace ? 'Anderen Ordner wählen' : 'Projektordner auswählen' }}
               </button>
-            </li>
-          </ul>
-          <label class="field"
-            >Pfad im Cloud-Projekt<input
-              v-model="filePath"
-              placeholder="docs/README.md"
-              maxlength="240"
-              @input="fileDirty = true"
-          /></label>
-          <label class="field"
-            >Dateiinhalt<textarea v-model="fileContent" rows="12" spellcheck="false" @input="fileDirty = true" />
-          </label>
-          <div class="actions">
-            <button type="button" :disabled="working || !filePath.trim() || !fileDirty" @click="saveFile">
-              In Cloud speichern</button
-            ><button type="button" :disabled="!filePath.trim()" @click="downloadFile">Datei herunterladen</button>
-          </div>
-          <p class="subtle">
-            Gleichzeitige Änderungen werden als Konflikt angezeigt. Dein Dateientwurf bleibt dabei erhalten.
-          </p>
+            </div>
+            <p v-if="props.workspace">
+              <code>{{ props.workspace.rootPath }}</code>
+              <span v-if="!folderReady" class="subtle"> · derzeit nicht verfügbar ({{ props.workspace.status }})</span>
+            </p>
+            <p v-else class="subtle">
+              Noch kein Ordner zugeordnet. Wähle den Ordner, der global gespeichert werden soll – oder auf einem
+              weiteren Gerät einen leeren Zielordner, in den die Serverdateien geladen werden. Einzelne Dateien werden
+              nicht ausgewählt; es zählt immer der ganze Ordner.
+            </p>
+          </section>
+          <section class="folder">
+            <label class="switch">
+              <input
+                type="checkbox"
+                role="switch"
+                :checked="folderShared"
+                :disabled="disabled"
+                @change="toggleFolderShared"
+              />
+              <span>Projektordner global speichern</span>
+            </label>
+            <p class="subtle">
+              Ein: Der Ordner wird auf den Server geladen und auf jedem Gerät mit zugeordnetem Ordner laufend aktuell
+              gehalten; alle Dateien, versteckte Ordner und Binärdateien eingeschlossen. Aus: Der Abgleich endet auf
+              allen Geräten; lokale Dateien und die Serverkopie bleiben erhalten.
+            </p>
+          </section>
+          <section v-if="folderShared" class="folder">
+            <div class="status-row">
+              <AiIcon name="folder" :size="22" />
+              <div>
+                <strong>{{
+                  folderReady ? mirror?.stage || 'Zum Abgleich bereit' : 'Lokalen Projektordner zuordnen'
+                }}</strong>
+                <p class="subtle">
+                  Revision {{ mirror?.revision ?? 0 }} · {{ (mirror?.files ?? 0).toLocaleString('de-DE') }} Einträge ·
+                  {{ megabytes(mirror?.transferred ?? 0) }} MiB übertragen
+                </p>
+              </div>
+            </div>
+            <p v-if="mirror?.error" class="error">{{ mirror.error }}</p>
+            <p v-if="mirror?.conflicts" class="subtle">
+              {{ mirror.conflicts }} überlappende Änderung{{ mirror.conflicts === 1 ? '' : 'en' }}: Die Fassung des
+              anderen Geräts behält den Namen, deine Fassung liegt als Konfliktkopie („.konflikt-…“) daneben.
+            </p>
+            <progress v-if="mirror?.busy" aria-label="Projektordner wird abgeglichen" />
+            <div class="actions">
+              <button type="button" :disabled="disabled || !folderReady || mirror?.busy" @click="syncFolder">
+                Jetzt abgleichen
+              </button>
+              <button type="button" :disabled="disabled || !folderReady" @click="toggleFolderPaused">
+                {{ mirror?.paused ? 'Abgleich auf diesem Gerät fortsetzen' : 'Auf diesem Gerät pausieren' }}
+              </button>
+            </div>
+            <details v-if="mirror?.backupPath" class="details">
+              <summary>Letzte lokale Sicherung ersetzter oder gelöschter Dateien</summary>
+              <code>{{ mirror.backupPath }}</code>
+            </details>
+          </section>
         </template>
       </template>
     </div>
@@ -392,7 +386,8 @@ p {
   font-size: 13px;
   line-height: 1.65;
 }
-.current {
+.current,
+.folder {
   display: grid;
   gap: 14px;
   padding-bottom: 20px;
@@ -418,8 +413,7 @@ p {
 .error {
   color: var(--danger, #f394a0);
 }
-button,
-.file-picker {
+button {
   font: inherit;
   font-size: 12px;
   padding: 9px 12px;
@@ -437,13 +431,11 @@ button[aria-pressed='true'] {
   border-color: var(--ai-accent, #7c9cff);
 }
 button:focus-visible,
-input:focus-visible,
-textarea:focus-visible {
+input:focus-visible {
   outline: 2px solid var(--ai-accent, #7c9cff);
   outline-offset: 3px;
 }
-.project-list,
-.file-list {
+.project-list {
   list-style: none;
   margin: 0;
   padding: 0;
@@ -462,31 +454,70 @@ textarea:focus-visible {
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.file-list li {
-  margin-bottom: 6px;
-}
-.file-picker input {
-  max-width: 190px;
-  margin-left: 10px;
-}
-.field {
-  display: grid;
-  gap: 7px;
+code {
   font-size: 12px;
+  overflow-wrap: anywhere;
 }
-.field input,
-.field textarea {
-  padding: 10px;
-  background: var(--ai-page, #15171a);
-  color: inherit;
+.switch {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.switch input {
+  appearance: none;
+  width: 38px;
+  height: 22px;
+  margin: 0;
+  border-radius: 11px;
   border: 1px solid var(--ai-line, #34383e);
-  border-radius: 7px;
-  width: 100%;
-  box-sizing: border-box;
+  background: var(--ai-page, #15171a);
+  position: relative;
+  cursor: pointer;
+  flex: none;
 }
-.field textarea {
-  font-family: monospace;
-  resize: vertical;
+.switch input::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--text-muted, #98a2b1);
+  transition:
+    transform 0.15s ease,
+    background 0.15s ease;
+}
+.switch input:checked {
+  border-color: var(--ai-accent, #7c9cff);
+  background: color-mix(in srgb, var(--ai-accent, #7c9cff) 35%, transparent);
+}
+.switch input:checked::after {
+  transform: translateX(16px);
+  background: var(--ai-accent, #7c9cff);
+}
+.switch input:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.status-row {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.status-row strong {
+  display: block;
+  margin-bottom: 4px;
+}
+progress {
+  width: 100%;
+}
+.details summary {
+  cursor: pointer;
+  font-size: 12px;
 }
 @media (max-width: 600px) {
   header,
@@ -495,10 +526,6 @@ textarea:focus-visible {
   }
   .tabs {
     padding-inline: 16px;
-  }
-  .file-picker input {
-    display: block;
-    margin: 8px 0 0;
   }
   .actions {
     align-items: stretch;

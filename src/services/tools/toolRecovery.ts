@@ -23,15 +23,16 @@ function recovery(name: string, outcome: Outcome): Recovery | undefined {
     }
   }
   if (name.startsWith('browser_')) {
-    const code =
-      error.match(/\b(?:workflow_browser_[a-z_]+|browser_session_hosts_changed)\b/u)?.[0] ?? 'browser_action_failed'
+    const code = error.match(/\b(?:workflow_browser_[a-z_]+|browser_[a-z_]+)\b/u)?.[0] ?? 'browser_action_failed'
+    const targetError = /browser_(ref_stale|target_|selector_|page_not_ready)/u.test(code)
     return {
       code,
-      guidance:
-        code === 'workflow_browser_owned_by_another_run'
+      guidance: targetError
+        ? 'No action was confirmed. Scan the DOM again and use the exact observed ref. Do not guess selectors or retry uncertain writes. Use screenshot and image_analyze only for an explicit visual exception.'
+        : code === 'workflow_browser_owned_by_another_run'
           ? 'Ein anderer Auftrag hält den Browser. Andere Arbeit fortsetzen; keine Hosts raten und die fremde Sitzung nicht übernehmen.'
           : 'Die eigene Bindung mit browser_status {} prüfen. Bei einer falschen Bindung browser_close {} und erst danach gezielt browser_open verwenden. Keine Hostvarianten durchprobieren.',
-      next_tool: 'browser_status',
+      next_tool: targetError ? 'browser_dom_scan' : 'browser_status',
       next_arguments: {},
     }
   }
@@ -65,7 +66,7 @@ export class ToolRecoveryGuard {
   private observedFiles = new Map<string, { path: string; file_ref?: string }>()
 
   canOffer(name: string): boolean {
-    if (name === 'browser_status') return true
+    if (name === 'browser_status' || name === 'browser_dom_scan') return true
     if (name === 'browser_close') return this.closeFailures < 3
     return !name.startsWith('browser_') || this.browserFailures < 3
   }

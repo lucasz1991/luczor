@@ -75,6 +75,7 @@ const titles: Record<string, string> = {
   browser_open: 'Luczor-Browser öffnen',
   browser_navigate: 'Browser navigieren',
   browser_dom_read: 'DOM lesen',
+  browser_dom_scan: 'DOM durchsuchen',
   browser_screenshot: 'Browser-Screenshot',
   browser_click: 'Browserklick',
   browser_fill: 'Formularfeld füllen',

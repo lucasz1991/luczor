@@ -2952,8 +2952,11 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
     :open="showCloudProjects"
     :project-id="activeProjectId"
     :busy="conversationBusy || Object.values(projectActivity).some(Boolean)"
+    :workspace="activeWorkspace"
+    :workspace-busy="workspaceBusy"
     @update:open="showCloudProjects = $event"
     @select="openProject"
+    @select-folder="activeWorkspace ? changeProjectWorkspace() : bindCurrentProjectWorkspace()"
   />
   <WorkflowWorkspace
     :open="showWorkflows"

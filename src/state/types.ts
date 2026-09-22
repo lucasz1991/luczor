@@ -124,6 +124,8 @@ export type Project = {
     fingerprint: string
     syncedAt: number
     paused?: boolean
+    /** Server-side switch: the whole project folder is stored globally and mirrored to every device. */
+    folderShared?: boolean
   }
 
   /**

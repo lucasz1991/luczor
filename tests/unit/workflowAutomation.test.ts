@@ -134,6 +134,32 @@ async function approvedBundle(): Promise<{ bundle: WorkflowTaskBundle; scope: st
   }
 }
 describe('local workflow automation grant', () => {
+  it('allows internal browser domains and files independently from the API host grant', async () => {
+    const { bundle, scope } = await approvedBundle()
+    await configureWorkflowAutomation(
+      workflow,
+      {
+        export_results: true,
+        allowed_tasks: ['browser.navigate', 'browser.read', 'api.call'],
+        egress_hosts: [],
+      },
+      { projectId: 'project-1' }
+    )
+    bundle.workflow.grant = grant
+    for (const url of ['https://new-domain.test/page', 'file:///home/user/Projekt/index.html']) {
+      bundle.task_key = 'browser.navigate'
+      bundle.params = { url }
+      await expect(workflowAutomationAllows(bundle, scope, 'user:1', apiConfig)).resolves.toBe(true)
+    }
+    bundle.task_key = 'browser.read'
+    bundle.params = { browser_session_id: 'session-a' }
+    await expect(workflowAutomationAllows(bundle, scope, 'user:1', apiConfig)).resolves.toBe(true)
+    bundle.task_key = 'api.call'
+    bundle.params = { url: 'https://new-domain.test/page' }
+    await expect(workflowAutomationAllows(bundle, scope, 'user:1', apiConfig)).resolves.toBe(false)
+    bundle.task_key = 'browser.click'
+    await expect(workflowAutomationAllows(bundle, scope, 'user:1', apiConfig)).resolves.toBe(false)
+  })
   it('requires an actual local confirmation before posting and persists exact raw program hashes', async () => {
     mock.confirm.mockResolvedValueOnce({ approved: false })
     await expect(

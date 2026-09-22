@@ -518,7 +518,8 @@ export async function workflowAutomationAllows(
   }
   if ((bundle.task_key === 'llm' || bundle.task_key.startsWith('llm.')) && bundle.params.inference === 'external')
     return false
-  if (bundle.task_key === 'api.call' || bundle.task_key.startsWith('browser.')) {
+  // Internal browser navigation is unrestricted; API egress retains its own grant.
+  if (bundle.task_key === 'api.call') {
     try {
       if (!config.egress_hosts.includes(new URL(String(bundle.params.expected_url || bundle.params.url)).host))
         return false

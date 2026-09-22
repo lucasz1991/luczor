@@ -19,6 +19,7 @@ import { workflowLlmInput, checkWorkflowLlmResult } from '@/services/workflows/t
 import { validateToolArguments } from '@/services/tools/validateArguments'
 import type { ThinkingTier } from '@/services/inference/thinking'
 import { isThinkingTier } from '@/services/inference/thinking'
+import { browserNavigationUrl } from '@/services/browserNavigation'
 
 export type WorkflowTaskBundle = {
   task_version?: number
@@ -351,10 +352,13 @@ async function runBrowserTask(
     throw new Error(`${task} requires a selector.`)
   switch (task) {
     case 'browser.open':
-      return browser.open(url ? assertHttpUrl(url) : undefined, { ...options, expectedUrl: undefined })
+      return browser.open(url ? browserNavigationUrl(url) : undefined, { ...options, expectedUrl: undefined })
     case 'browser.open_url':
     case 'browser.navigate':
-      return browser.navigate(assertHttpUrl(url), { ...options, expectedUrl: str(params.expected_url) || undefined })
+      return browser.navigate(browserNavigationUrl(url), {
+        ...options,
+        expectedUrl: str(params.expected_url) || undefined,
+      })
     case 'browser.click':
       return browser.click(selector, options)
     case 'browser.fill':
@@ -371,7 +375,7 @@ async function runBrowserTask(
     case 'browser.screenshot':
       return browser.screenshot(str(params.name) || undefined, options)
     case 'browser.download':
-      return browser.download(assertHttpUrl(url), str(params.name) || undefined, {
+      return browser.download(browserNavigationUrl(url), str(params.name) || undefined, {
         ...options,
         expectedUrl: str(params.expected_url) || undefined,
       })

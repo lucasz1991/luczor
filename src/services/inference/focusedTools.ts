@@ -197,7 +197,7 @@ export function focusedTools(objective: string, archive?: () => readonly WireMes
       if (/datei|repo|code|file|ordner|software/.test(text))
         preferred.push('fs_list', 'fs_read', 'fs_search', 'project_terminal_run')
       if (/browser|web|url|internet|seite/.test(text))
-        preferred.push('browser_status', 'browser_open', 'browser_dom_read', 'browser_click', 'browser_fill')
+        preferred.push('browser_status', 'browser_open', 'browser_dom_scan', 'browser_click', 'browser_fill')
       if (/gerät|system|linux|windows|leistung|hardware/.test(text))
         preferred.push('os_environment', 'os_system_diagnostics', 'local_model_status')
       if (/erinner|memory/.test(text)) preferred.push('memory_recall', 'memory_remember')

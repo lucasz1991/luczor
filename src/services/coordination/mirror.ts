@@ -2,6 +2,7 @@ import { reactive } from 'vue'
 import { Store } from '@tauri-apps/plugin-store'
 import { listen } from '@tauri-apps/api/event'
 import { state } from '@/state/store'
+import { saveAppStateStrict } from '@/services/persistence'
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { executionGate, invokeGuarded, type ExecutionTicket } from '@/services/executionGate'
 import { getProjectWorkspace } from '@/services/projectWorkspace'
@@ -24,7 +25,7 @@ export type MirrorEntry = {
   metadata?: Record<string, unknown>
 }
 type Scan = { manifestHash: string; snapshotId: string; totalEntries: number; entries: MirrorEntry[] }
-type Head = { revision: number; manifest_id: string | null }
+type Head = { revision: number; manifest_id: string | null; folder_shared?: boolean }
 type Manifest = Head & {
   entries?: MirrorEntry[]
   next_offset?: number | null
@@ -70,6 +71,8 @@ export const projectMirrorState = reactive<
       bytes: number
       paused: boolean
       conflicts: number
+      /** Server-side folder switch as last read; null until the first successful read. */
+      shared: boolean | null
       backupPath?: string
     }
   >
@@ -92,12 +95,50 @@ function status(projectId: string) {
     bytes: 0,
     paused: false,
     conflicts: 0,
+    shared: null,
   }
   setSafeRecordValue(projectMirrorState, projectId, created)
   return getSafeRecordValue(projectMirrorState, projectId)!
 }
 function cursorKey(account: VerifiedAccountSnapshot, projectId: string) {
   return `${account.principalId}:${projectId}`
+}
+function linkedCloud(projectId: string, account: VerifiedAccountSnapshot) {
+  const project = state.projects.find(project => project.id === projectId)
+  if (!project?.cloud || project.cloud.principalId !== account.principalId)
+    throw new Error('Dieses Projekt ist nicht mit deinem Cloud-Konto verbunden.')
+  return project.cloud
+}
+async function rememberFolderShared(cloud: NonNullable<(typeof state.projects)[number]['cloud']>, shared: boolean) {
+  if (cloud.folderShared === shared) return
+  cloud.folderShared = shared
+  await saveAppStateStrict(state).catch(() => undefined)
+}
+/**
+ * Switches whole-folder storage for this project on the server, for every device of the account.
+ * Turning it on starts the first upload or download right away; turning it off leaves local files as they are.
+ */
+export async function setProjectFolderShared(projectId: string, shared: boolean): Promise<void> {
+  const account = await getVerifiedAccountSnapshot()
+  if (!account) throw new Error('Für den Ordnerabgleich bitte anmelden.')
+  const cloud = linkedCloud(projectId, account)
+  const head = await requestWithConfig<{ data: Head }>(
+    `/projects/${cloud.projectId}/mirror/settings`,
+    { method: 'PUT', body: { folder_shared: shared }, timeoutMs: 30000 },
+    account.config
+  )
+  const enabled = head.data.folder_shared === true
+  await rememberFolderShared(cloud, enabled)
+  const view = status(projectId)
+  view.shared = enabled
+  view.error = ''
+  if (enabled) {
+    view.stage = 'Abgleich wird gestartet'
+    void syncProjectMirror(projectId).catch(() => undefined)
+  } else {
+    controllers.get(projectId)?.abort(new Error('Der Projektordner wird nicht mehr global gespeichert.'))
+    view.stage = 'Projektordner wird nicht global gespeichert'
+  }
 }
 export async function pauseProjectMirror(projectId: string, paused: boolean) {
   const account = await getVerifiedAccountSnapshot()
@@ -133,10 +174,18 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
   const view = status(projectId)
   const account = await getVerifiedAccountSnapshot()
   if (!account) throw new Error('Für den Ordnerabgleich bitte anmelden.')
-  const project = state.projects.find(project => project.id === projectId)
-  if (!project?.cloud || project.cloud.principalId !== account.principalId)
-    throw new Error('Dieses Projekt ist nicht mit deinem Cloud-Konto verbunden.')
-  const cloud = project.cloud
+  const cloud = linkedCloud(projectId, account)
+  const base = `/projects/${cloud.projectId}/mirror`
+  // The folder switch is account-wide and decided on the server; read it before touching the workspace.
+  const shared = (await requestWithConfig<{ data: Head }>(base, { signal, timeoutMs: 30000 }, account.config)).data
+  const folderShared = shared.folder_shared === true
+  await rememberFolderShared(cloud, folderShared)
+  view.shared = folderShared
+  if (!folderShared) {
+    view.stage = 'Projektordner wird nicht global gespeichert'
+    view.error = ''
+    return
+  }
   let workspace = await getProjectWorkspace(projectId, account.principalId)
   if (workspace) {
     const recoveryTicket = executionGate.capture(signal, { projectId, runId: `mirror-recovery:${crypto.randomUUID()}` })
@@ -160,7 +209,6 @@ async function synchronize(projectId: string, signal?: AbortSignal, jobId?: stri
     runId: `mirror:${crypto.randomUUID()}`,
     workspaceBindingId: String(workspace.updatedAt ?? 0),
   })
-  const base = `/projects/${cloud.projectId}/mirror`
   const request = async <T>(
     path = '',
     method: 'GET' | 'POST' | 'PUT' = 'GET',

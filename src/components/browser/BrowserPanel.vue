@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import AiIcon from '@/components/ai/AiIcon.vue'
 import { browserFailure, browserPanel } from '@/services/browserPanel'
+import { browserNavigationUrl } from '@/services/browserNavigation'
 import { browserTools } from '@/services/tools/browser'
 import { closeToolSession, listToolSessions } from '@/services/tools/toolSessionCoordinator'
 
@@ -116,13 +117,14 @@ async function navigate() {
   busy.value = true
   browserPanel.error = ''
   try {
-    const target = new URL(address.value.includes('://') ? address.value : `https://${address.value}`)
-    if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password)
-      throw new Error('Bitte eine HTTP(S)-Adresse ohne Zugangsdaten eingeben.')
+    const target = browserNavigationUrl(address.value)
     const tool = browserTools.find(tool => tool.name === (opened.value ? 'browser_navigate' : 'browser_open'))!
-    await tool.execute(opened.value ? { url: target.href } : { url: target.href, allowed_hosts: [target.host] }, {
-      projectId: props.projectId,
-    })
+    await tool.execute(
+      { url: target },
+      {
+        projectId: props.projectId,
+      }
+    )
     await refresh()
   } catch (error) {
     browserPanel.error = browserFailure(error)
@@ -283,7 +285,7 @@ onBeforeUnmount(() => {
         id="browser-address"
         v-model="address"
         aria-label="Browser-Adresse"
-        placeholder="https://…"
+        placeholder="Webadresse oder lokaler Dateipfad…"
         autocomplete="off"
         spellcheck="false"
         :disabled="!native || busy"

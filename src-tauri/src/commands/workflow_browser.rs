@@ -1,4 +1,4 @@
-//! One run-bound WebView2 session; only fixed, typed operations are exposed to IPC.
+//! Run-bound internal browser. Unrestricted web/file navigation; typed, isolated DOM automation.
 use super::execution::{admit, ExecutionLease, Guarded};
 use super::workflow_artifacts::{self, WorkflowArtifactScope, MAX_ARTIFACT_BYTES};
 use super::BROWSER_WEBVIEW_LABEL;
@@ -134,6 +134,7 @@ pub enum BrowserOperation {
     Select,
     Wait,
     Read,
+    Scan,
     Screenshot,
     Download,
     Close,
@@ -154,6 +155,9 @@ pub struct WorkflowBrowserAction {
     pub value: Option<String>,
     pub name: Option<String>,
     pub timeout_ms: Option<u64>,
+    pub query: Option<String>,
+    pub offset: Option<usize>,
+    pub limit: Option<usize>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -167,6 +171,12 @@ pub struct WorkflowBrowserResult {
 
 fn validate(input: &WorkflowBrowserAction) -> Result<(), String> {
     validate_hosts(input.allowed_hosts.as_deref(), input.automated)?;
+    if input.query.as_ref().is_some_and(|q| q.len() > 800)
+        || input.offset.is_some_and(|v| v > 20000)
+        || input.limit.is_some_and(|v| v == 0 || v > 200)
+    {
+        return Err("workflow_browser_scan_options_invalid".into());
+    }
     if input
         .expected_tab_id
         .as_deref()
@@ -222,59 +232,39 @@ fn validate(input: &WorkflowBrowserAction) -> Result<(), String> {
     }
     Ok(())
 }
-fn validate_hosts(hosts: Option<&[String]>, automated: bool) -> Result<(), String> {
-    if automated && hosts.is_none_or(|values| values.is_empty()) {
-        return Err("workflow_browser_host_boundary_required".into());
-    }
+fn validate_hosts(hosts: Option<&[String]>, _automated: bool) -> Result<(), String> {
+    // Accepted for older workflow payloads only; domain restrictions were explicitly removed.
     if let Some(hosts) = hosts {
-        if hosts.is_empty()
-            || hosts.len() > 30
-            || hosts.iter().any(|host| {
-                host.len() > 260
-                    || host.is_empty()
-                    || host
-                        .chars()
-                        .any(|c| !c.is_ascii_alphanumeric() && !matches!(c, '.' | '-' | ':'))
-                    || tauri::Url::parse(&format!("https://{host}/"))
-                        .ok()
-                        .is_none_or(|parsed| host_key(&parsed) != host.to_ascii_lowercase())
-            })
-        {
+        if hosts.len() > 30 || hosts.iter().any(|host| host.len() > 260) {
             return Err("workflow_browser_allowed_hosts_invalid".into());
         }
     }
     Ok(())
 }
-fn host_key(url: &tauri::Url) -> String {
-    match url.port() {
-        Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
-        None => url.host_str().unwrap_or_default().to_string(),
-    }
-}
-fn host_allowed(url: &tauri::Url, hosts: Option<&[String]>) -> bool {
+fn host_allowed(url: &tauri::Url, _hosts: Option<&[String]>) -> bool {
     if url.as_str() == "about:blank" {
         return true;
     }
-    if !matches!(url.scheme(), "http" | "https")
-        || url.host_str().is_none()
+    if !matches!(url.scheme(), "http" | "https" | "file")
+        || (url.scheme() != "file" && url.host_str().is_none())
         || !url.username().is_empty()
         || url.password().is_some()
     {
         return false;
     }
-    hosts.is_none_or(|hosts| {
-        hosts
-            .iter()
-            .any(|host| host.eq_ignore_ascii_case(&host_key(url)))
-    })
+    true
 }
-fn url(value: &str) -> Result<tauri::Url, String> {
-    let parsed = tauri::Url::parse(value).map_err(|_| "workflow_browser_url_invalid")?;
-    if !matches!(parsed.scheme(), "http" | "https")
-        || parsed.host_str().is_none()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-    {
+pub(super) fn url(value: &str) -> Result<tauri::Url, String> {
+    let value = value.trim();
+    if value.is_empty() || value.chars().any(char::is_control) {
+        return Err("workflow_browser_url_invalid".into());
+    }
+    let parsed = if std::path::Path::new(value).is_absolute() {
+        tauri::Url::from_file_path(value).map_err(|_| "workflow_browser_url_invalid")?
+    } else {
+        tauri::Url::parse(value).map_err(|_| "workflow_browser_url_invalid")?
+    };
+    if !host_allowed(&parsed, None) {
         return Err("workflow_browser_url_invalid".into());
     }
     Ok(parsed)
@@ -367,7 +357,10 @@ pub async fn wf_browser_action(
     }
     let writing = !matches!(
         payload.action,
-        BrowserOperation::Read | BrowserOperation::Wait | BrowserOperation::Screenshot
+        BrowserOperation::Read
+            | BrowserOperation::Scan
+            | BrowserOperation::Wait
+            | BrowserOperation::Screenshot
     );
     let gate = admit(&payload.execution, writing)?;
     let input = payload.request;
@@ -384,7 +377,6 @@ pub async fn wf_browser_action(
         }
         if let Some(session) = current.as_ref() {
             if session.scope != input.scope
-                || session.allowed_hosts != input.allowed_hosts
                 || session.automated != input.automated
                 || input
                     .session_id
@@ -405,7 +397,7 @@ pub async fn wf_browser_action(
                 id: uuid::Uuid::new_v4().to_string(),
                 scope: input.scope.clone(),
                 busy: AtomicBool::new(false),
-                allowed_hosts: input.allowed_hosts.clone(),
+                allowed_hosts: None,
                 automated: input.automated,
                 gate: Mutex::new(None),
                 policy_violation: AtomicBool::new(false),
@@ -485,7 +477,20 @@ async fn run(
             }
             check_session(&navigation_app, &navigation_session).is_ok()
         })
-        .on_new_window(|_, _| tauri::webview::NewWindowResponse::Deny);
+        .on_new_window({
+            let popup_app = app.clone();
+            let popup_session = session.clone();
+            move |target, _| {
+                // Keep target=_blank links inside the owned internal surface.
+                if host_allowed(&target, None) && check_session(&popup_app, &popup_session).is_ok()
+                {
+                    if let Some(view) = popup_app.get_webview(BROWSER_WEBVIEW_LABEL) {
+                        let _ = view.navigate(target);
+                    }
+                }
+                tauri::webview::NewWindowResponse::Deny
+            }
+        });
         let main = app
             .get_window("main")
             .ok_or("browser_panel_main_unavailable")?;
@@ -498,7 +503,7 @@ async fn run(
             .map_err(|e| format!("workflow_browser_create_failed: {e}"))?;
         browser.hide().map_err(|e| e.to_string())?;
         super::browser_panel::apply(app, &browser, &session.scope.project_id)?;
-        install_request_boundary(&browser, app.clone(), session.clone()).await?;
+        install_navigation_tracking(&browser, app.clone(), session.clone()).await?;
         check(app, session, gate)?;
         navigation_generation = Some(
             session
@@ -572,7 +577,7 @@ async fn run(
                 } else {
                     true
                 };
-                let state = devtools(&browser, "Runtime.evaluate", json!({"expression":"({url:location.href,ready:document.readyState})","returnByValue":true}), app.clone(), session.clone(), gate.clone(), Duration::from_secs(2)).await;
+                let state = evaluate(&browser, json!({"expression":"({url:location.href,ready:document.readyState})","returnByValue":true}), app.clone(), session.clone(), gate.clone(), Duration::from_secs(2)).await;
                 if let Ok(state) = state {
                     let value = &state["result"]["value"];
                     let actual = browser
@@ -596,6 +601,9 @@ async fn run(
                 .map_err(|_| "workflow_browser_task_failed")?;
             }
             json!({"opened":true,"readiness":"ready"})
+        }
+        BrowserOperation::Download => {
+            download::download(app, &browser, session, gate, input, timeout).await?
         }
         BrowserOperation::Screenshot => {
             let raw = devtools(
@@ -642,18 +650,62 @@ async fn run(
                 BrowserOperation::Select => "select",
                 BrowserOperation::Wait => "wait",
                 BrowserOperation::Read => "read",
-                BrowserOperation::Download => "download",
+                BrowserOperation::Scan => "scan",
                 _ => return Err("workflow_browser_action_invalid".into()),
             };
-            let params = json!({"action":action,"selector":input.selector,"value":input.value,"url":input.url,"expectedUrl":current_url,"timeoutMs":timeout.as_millis(),"maxChars":20000,"maxBytes":MAX_ARTIFACT_BYTES,"showCursor":super::desktop_control::config()?.show_cursor});
+            let mut params = json!({"action":action,"selector":input.selector,"value":input.value,"url":input.url,"expectedUrl":current_url,"timeoutMs":timeout.as_millis(),"maxChars":20000,"query":input.query,"offset":input.offset,"limit":input.limit,"showCursor":super::desktop_control::config()?.show_cursor});
+            if matches!(
+                input.action,
+                BrowserOperation::Click | BrowserOperation::Fill | BrowserOperation::Select
+            ) {
+                let deadline = Instant::now() + timeout;
+                loop {
+                    check(app, session, gate)?;
+                    let mut probe = params.clone();
+                    probe["action"] = json!("prepare");
+                    probe["operation"] = json!(action);
+                    let prepared = dom_call(
+                        &browser,
+                        probe,
+                        app.clone(),
+                        session.clone(),
+                        gate.clone(),
+                        Duration::from_secs(2),
+                    )
+                    .await?;
+                    if prepared["ok"] == true {
+                        params["selector"] = prepared["ref"].clone();
+                        params["prepared"] = json!(true);
+                        break;
+                    }
+                    let code = prepared["code"]
+                        .as_str()
+                        .unwrap_or("workflow_browser_action_failed_outcome_unknown");
+                    if !matches!(
+                        code,
+                        "browser_target_not_actionable"
+                            | "browser_target_missing_or_ambiguous"
+                            | "browser_page_not_ready"
+                    ) || Instant::now() >= deadline
+                    {
+                        return Err(code.to_string());
+                    }
+                    tauri::async_runtime::spawn_blocking(|| {
+                        std::thread::sleep(Duration::from_millis(50))
+                    })
+                    .await
+                    .map_err(|_| "workflow_browser_task_failed")?;
+                }
+            }
+            // Admission is rechecked after waiting. The effect phase is never retried.
+            check(app, session, gate)?;
             let expression = format!(
                 "{}\nluczorWorkflowBrowser({});",
                 include_str!("workflow_browser_script.js"),
                 params
             );
-            let raw = devtools(
+            let raw = evaluate(
                 &browser,
-                "Runtime.evaluate",
                 json!({"expression":expression,"returnByValue":true,"awaitPromise":true}),
                 app.clone(),
                 session.clone(),
@@ -672,29 +724,7 @@ async fn run(
                     .unwrap_or("workflow_browser_action_failed_outcome_unknown")
                     .to_string());
             }
-            if input.action == BrowserOperation::Download {
-                let encoded = value["base64"]
-                    .as_str()
-                    .ok_or("workflow_browser_download_invalid")?;
-                if encoded.len() > MAX_ARTIFACT_BYTES * 2 {
-                    return Err("workflow_artifact_size_exceeded".into());
-                }
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(encoded)
-                    .map_err(|_| "workflow_browser_download_invalid")?;
-                let mime = value["mime"].as_str().unwrap_or("application/octet-stream");
-                serde_json::to_value(workflow_artifacts::store(
-                    app,
-                    &session.scope,
-                    &bytes,
-                    mime,
-                    input.name.as_deref().unwrap_or("download"),
-                    &|| check(app, session, gate),
-                )?)
-                .map_err(|_| "workflow_artifact_invalid")?
-            } else {
-                value
-            }
+            value
         }
     };
     check(app, session, gate)?;
@@ -711,16 +741,89 @@ async fn run(
     })
 }
 
-/// The request filter is installed on a blank page before any permitted target URL is loaded.
-/// Redirects and subresources are checked at WebView2's request boundary; no page script supplies this policy.
+#[path = "workflow_browser_download.rs"]
+mod download;
+
+async fn dom_call(
+    browser: &Webview,
+    params: Value,
+    app: AppHandle,
+    session: Arc<Session>,
+    gate: ExecutionLease,
+    timeout: Duration,
+) -> Result<Value, String> {
+    let expression = format!(
+        "{}\nluczorWorkflowBrowser({});",
+        include_str!("workflow_browser_script.js"),
+        params
+    );
+    let raw = evaluate(
+        browser,
+        json!({"expression":expression,"returnByValue":true,"awaitPromise":true}),
+        app,
+        session,
+        gate,
+        timeout,
+    )
+    .await?;
+    if raw.get("exceptionDetails").is_some() {
+        return Err("workflow_browser_action_failed_outcome_unknown".into());
+    }
+    Ok(raw["result"]["value"].clone())
+}
+
+/// State and element refs cannot be overwritten by the visited page's JavaScript.
+async fn evaluate(
+    browser: &Webview,
+    params: Value,
+    app: AppHandle,
+    session: Arc<Session>,
+    gate: ExecutionLease,
+    timeout: Duration,
+) -> Result<Value, String> {
+    #[cfg(windows)]
+    let params = {
+        let tree = devtools(
+            browser,
+            "Page.getFrameTree",
+            json!({}),
+            app.clone(),
+            session.clone(),
+            gate.clone(),
+            timeout,
+        )
+        .await?;
+        let frame = tree["frameTree"]["frame"]["id"]
+            .as_str()
+            .ok_or("workflow_browser_frame_unavailable")?;
+        let world = devtools(browser, "Page.createIsolatedWorld", json!({"frameId":frame,"worldName":"luczor-native-automation","grantUniveralAccess":false}), app.clone(), session.clone(), gate.clone(), timeout).await?;
+        let id = world["executionContextId"]
+            .as_u64()
+            .ok_or("workflow_browser_world_unavailable")?;
+        let mut params = params;
+        params["contextId"] = json!(id);
+        params
+    };
+    devtools(
+        browser,
+        "Runtime.evaluate",
+        params,
+        app,
+        session,
+        gate,
+        timeout,
+    )
+    .await
+}
+
+/// Track actual navigation completion; WebView security and IPC isolation remain unchanged.
 #[cfg(windows)]
-async fn install_request_boundary(
+async fn install_navigation_tracking(
     window: &Webview,
     app: AppHandle,
     session: Arc<Session>,
 ) -> Result<(), String> {
-    use webview2_com::Microsoft::Web::WebView2::Win32::*;
-    use windows_webview::core::{Interface, PWSTR};
+    use windows_webview::core::PWSTR;
     let (sender, receiver) = mpsc::sync_channel(1);
     let callback_app = app.clone();
     let callback_session = session.clone();
@@ -728,23 +831,10 @@ async fn install_request_boundary(
         .with_webview(move |view| {
             let result = (|| {
                 check_session(&callback_app, &callback_session)?;
-                let environment = view.environment();
-                let controller = view.controller();
                 unsafe {
                     let webview = view
                         .controller()
                         .CoreWebView2()
-                        .map_err(|_| "workflow_browser_host_boundary_unavailable")?;
-                    let extended: ICoreWebView2_22 = webview
-                        .cast()
-                        .map_err(|_| "workflow_browser_host_boundary_unavailable")?;
-                    let wildcard = webview2_com::CoTaskMemPWSTR::from("*");
-                    extended
-                        .AddWebResourceRequestedFilterWithRequestSourceKinds(
-                            *wildcard.as_ref().as_pcwstr(),
-                            COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL,
-                            COREWEBVIEW2_WEB_RESOURCE_REQUEST_SOURCE_KINDS_ALL,
-                        )
                         .map_err(|_| "workflow_browser_host_boundary_unavailable")?;
                     let starting_session = callback_session.clone();
                     let starting = webview2_com::NavigationStartingEventHandler::create(Box::new(
@@ -785,58 +875,6 @@ async fn install_request_boundary(
                     webview
                         .add_NavigationCompleted(&completed, &mut completed_token)
                         .map_err(|_| "workflow_browser_navigation_tracking_unavailable")?;
-                    let handler = webview2_com::WebResourceRequestedEventHandler::create(Box::new(
-                        move |_, args| {
-                            let args = args.ok_or_else(|| {
-                                windows_webview::core::Error::from_hresult(
-                                    windows_webview::core::HRESULT(0x80004005u32 as i32),
-                                )
-                            })?;
-                            let mut raw = PWSTR::null();
-                            let target = args
-                                .Request()
-                                .and_then(|request| request.Uri(&mut raw))
-                                .ok()
-                                .map(|_| webview2_com::take_pwstr(raw));
-                            let host_matches = target
-                                .as_deref()
-                                .and_then(|value| tauri::Url::parse(value).ok())
-                                .is_some_and(|target| {
-                                    host_allowed(&target, callback_session.allowed_hosts.as_deref())
-                                });
-                            // Denied subresources receive a blocked response. They must not
-                            // invalidate an otherwise allowed page (e.g. third-party analytics).
-                            // Top-level navigation remains fail-closed in on_navigation.
-                            let allowed = host_matches
-                                && check_session(&callback_app, &callback_session).is_ok();
-                            if !allowed {
-                                let reason = webview2_com::CoTaskMemPWSTR::from(
-                                    "Blocked by workflow host policy",
-                                );
-                                let headers = webview2_com::CoTaskMemPWSTR::from(
-                                    "Content-Type: text/plain\r\nCache-Control: no-store",
-                                );
-                                let denied = environment
-                                    .CreateWebResourceResponse(
-                                        None::<&windows_webview::Win32::System::Com::IStream>,
-                                        403,
-                                        *reason.as_ref().as_pcwstr(),
-                                        *headers.as_ref().as_pcwstr(),
-                                    )
-                                    .and_then(|response| args.SetResponse(&response));
-                                if let Err(error) = denied {
-                                    // If WebView2 cannot install the synthetic blocked response, close the controller synchronously.
-                                    let _ = controller.Close();
-                                    return Err(error);
-                                }
-                            }
-                            Ok(())
-                        },
-                    ));
-                    let mut token = 0;
-                    webview
-                        .add_WebResourceRequested(&handler, &mut token)
-                        .map_err(|_| "workflow_browser_host_boundary_unavailable")?;
                 }
                 Ok(())
             })();
@@ -861,9 +899,9 @@ async fn install_request_boundary(
 #[path = "workflow_browser_linux.rs"]
 mod linux;
 #[cfg(target_os = "linux")]
-use linux::{devtools, install_request_boundary};
+use linux::{devtools, install_navigation_tracking};
 #[cfg(not(any(windows, target_os = "linux")))]
-async fn install_request_boundary(
+async fn install_navigation_tracking(
     _window: &Webview,
     _app: AppHandle,
     _session: Arc<Session>,
@@ -885,11 +923,11 @@ pub(crate) fn capabilities() -> Value {
         .ok()
         .map(|_| webview2_com::take_pwstr(raw))
         .filter(|value| !value.trim().is_empty() && value.len() < 200);
-        json!({"available":version.is_some(),"backend":"webview2","version":version,"hostBoundary":"verified-at-session-start"})
+        json!({"available":version.is_some(),"backend":"webview2","version":version,"navigation":"all-http-https-and-local-files","domScan":true,"vision":"explicit-only"})
     }
     #[cfg(target_os = "linux")]
     {
-        json!({"available":true,"backend":"webkitgtk","hostBoundary":"verified-at-session-start","platformAcceptance":"requires-device-test"})
+        json!({"available":true,"backend":"webkitgtk","navigation":"all-http-https-and-local-files","domScan":true,"vision":"explicit-only","platformAcceptance":"requires-device-test"})
     }
     #[cfg(not(any(windows, target_os = "linux")))]
     {
@@ -1014,40 +1052,28 @@ mod tests {
         assert!(lock_session(&session).is_ok());
     }
     #[test]
-    fn automated_hosts_are_explicit_exact_and_do_not_allow_redirect_destinations() {
-        assert!(validate_hosts(None, true).is_err());
-        assert!(validate_hosts(Some(&[]), true).is_err());
-        for invalid in [
-            "*.example.com",
-            "example.com/path",
-            "user@example.com",
-            "example.com:bad",
-            "example.com:65536",
-        ] {
-            assert!(validate_hosts(Some(&[invalid.into()]), true).is_err());
-        }
-        let hosts = vec!["example.com".into(), "localhost:1442".into()];
-        assert!(validate_hosts(Some(&hosts), true).is_ok());
-        assert!(host_allowed(
-            &url("https://example.com/form").unwrap(),
-            Some(&hosts)
-        ));
-        assert!(host_allowed(
-            &url("http://localhost:1442/form").unwrap(),
-            Some(&hosts)
-        ));
+    fn internal_navigation_accepts_all_domains_and_local_files() {
+        assert!(validate_hosts(None, true).is_ok());
+        assert!(validate_hosts(Some(&[]), true).is_ok());
+        let legacy = vec!["previous.test".to_string()];
         for target in [
-            "https://foreign.com/redirect",
-            "https://example.com.evil.test/",
-            "https://sub.example.com/",
+            "https://foreign.test/redirect",
             "http://localhost:8080/",
+            "https://[::1]:443/",
+            "file:///C:/my%20project/index.html",
+            "file:///home/user/index.html",
+            "about:blank",
         ] {
-            assert!(!host_allowed(&url(target).unwrap(), Some(&hosts)));
+            assert!(host_allowed(&url(target).unwrap(), Some(&legacy)));
         }
-        assert!(!host_allowed(
-            &tauri::Url::parse("file:///C:/secret.txt").unwrap(),
-            None
-        ));
+        for target in [
+            "javascript:alert(1)",
+            "data:text/html,hello",
+            "tauri://localhost",
+            "https://user:pass@example.com",
+        ] {
+            assert!(url(target).is_err());
+        }
     }
 
     #[test]

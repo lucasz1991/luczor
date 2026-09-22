@@ -313,9 +313,6 @@ function workflowPrimitives(
       scope: artifactScope,
       invokeTask,
       automated,
-      allowedHosts: automated
-        ? (bundle.workflow.grant as { config: { egress_hosts: string[] } }).config.egress_hosts
-        : undefined,
     }),
     runImage: input =>
       runWorkflowImage(input, {

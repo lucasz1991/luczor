@@ -28,7 +28,8 @@ export type WorkflowBrowserResult = Readonly<{
   url: string
   data: Record<string, unknown>
 }>
-type BrowserOptions = { sessionId?: string; expectedTabId?: string; expectedUrl?: string; timeoutMs?: number }
+export type BrowserOptions = { sessionId?: string; expectedTabId?: string; expectedUrl?: string; timeoutMs?: number }
+export type BrowserScanOptions = BrowserOptions & { selector?: string; query?: string; offset?: number; limit?: number }
 
 /** The original run can release its own window even after its execution ticket was revoked. */
 export function cleanupWorkflowBrowser(scope: WorkflowArtifactScope): Promise<boolean> {
@@ -42,7 +43,6 @@ export function createWorkflowBrowser(context: {
   automated?: boolean
 }) {
   const scope = Object.freeze({ ...context.scope })
-  const allowedHosts = context.allowedHosts ? Object.freeze([...context.allowedHosts]) : undefined
   let sessionId: string | undefined
   const execute = async (action: string, options: Record<string, unknown> = {}, mutating = true) => {
     const requestedSession = typeof options.sessionId === 'string' ? options.sessionId : sessionId
@@ -51,7 +51,8 @@ export function createWorkflowBrowser(context: {
       {
         ...options,
         scope,
-        allowedHosts,
+        // Legacy host lists no longer restrict the user's internal browser.
+        allowedHosts: undefined,
         automated: context.automated === true,
         action,
         sessionId: requestedSession,
@@ -72,11 +73,13 @@ export function createWorkflowBrowser(context: {
     select: (selector: string, value: string, options: BrowserOptions = {}) =>
       execute('select', { ...options, selector, value }),
     wait: (selector?: string, options: BrowserOptions = {}) => execute('wait', { ...options, selector }, false),
+    scan: (options: BrowserScanOptions = {}) => execute('scan', options, false),
     read: async (selector?: string, options: BrowserOptions = {}) => {
       const result = await execute('read', { ...options, selector }, false)
       if (typeof result.data.text !== 'string' || typeof result.data.truncated !== 'boolean')
         throw new Error('workflow_browser_read_invalid')
       return {
+        ...result.data,
         ok: true,
         sessionId: result.sessionId,
         tabId: result.tabId,

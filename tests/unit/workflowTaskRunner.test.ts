@@ -29,6 +29,36 @@ function primitives(overrides: Partial<WorkflowTaskPrimitives> = {}): WorkflowTa
 }
 
 describe('versioned workflow adapters', () => {
+  it.each(['browser.open', 'browser.open_url', 'browser.navigate', 'browser.download'])(
+    'allows exact local paths in the internal %s adapter without an OS-browser fallback',
+    async task => {
+      const native = vi.fn().mockResolvedValue({ ok: true, sessionId: 'session-a', tabId: 'tab-a', url: 'about:blank' })
+      const runtime = primitives({
+        browserSession: createWorkflowBrowser({
+          scope: {
+            principalId: 'user',
+            projectId: 'project',
+            runId: 'root',
+            expectedRootPath: 'E:/project',
+            expectedWorkspaceUpdatedAt: 2,
+          },
+          invokeTask: native,
+        }),
+      })
+      await runWorkflowTask(bundle(task, { url: 'E:\\Projekt\\Prüfung #1.html' }), runtime)
+      expect(native).toHaveBeenCalledWith(
+        'wf_browser_action',
+        expect.objectContaining({ url: 'file:///E:/Projekt/Pr%C3%BCfung%20%231.html' }),
+        true
+      )
+      expect(runtime.openUrl).not.toHaveBeenCalled()
+      native.mockClear()
+      await expect(runWorkflowTask(bundle(task, { url: 'javascript:alert(1)' }), runtime)).rejects.toThrow(
+        'workflow_browser_url_invalid'
+      )
+      expect(native).not.toHaveBeenCalled()
+    }
+  )
   it('rejects unknown versions before running a primitive', async () => {
     const runtime = primitives()
     await expect(runWorkflowTask({ ...bundle('node.run', { code: '42' }), task_version: 2 }, runtime)).rejects.toThrow(
