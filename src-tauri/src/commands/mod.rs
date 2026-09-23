@@ -20,6 +20,7 @@ mod desktop_window_input;
 pub mod device_jobs;
 pub mod device_key;
 pub mod device_run_journal;
+pub mod run_archive;
 pub mod execution;
 pub mod lan_peer;
 pub mod local_model;

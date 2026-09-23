@@ -185,11 +185,12 @@ export const mutations = {
     this.touchProject(projectId)
   },
 
-  addProject(project: { id: AppTypes.Id; name: string }, activate = true) {
+  addProject(project: { id: AppTypes.Id; name: string; kind?: AppTypes.Project['kind'] }, activate = true) {
     if (!state.projects.some(existing => existing.id === project.id)) {
       state.projects.unshift({
         id: project.id,
         name: project.name,
+        ...(project.kind ? { kind: project.kind } : {}),
         goal: undefined,
         goals: [],
         summary: '',
@@ -229,11 +230,14 @@ export const mutations = {
       throw new Error('Das aktive Projekt kann nicht als unbestätigt verworfen werden.')
     state.projects = state.projects.filter(project => project.id !== projectId)
     state.messages = state.messages.filter(message => message.projectId !== projectId)
+    state.conversations = state.conversations?.filter(chat => chat.projectId !== projectId)
     state.todos = state.todos.filter(item => item?.projectId !== projectId)
     state.todoSteps = state.todoSteps.filter(item => item?.projectId !== projectId)
     state.projectMemories = state.projectMemories.filter(item => item?.projectId !== projectId)
     state.summaries = state.summaries.filter(summary => summary.projectId !== projectId)
     deleteSafeRecordValue(state.pending.toolCallsByProject, projectId)
+    if (state.global.ui?.lastConversationByProject)
+      deleteSafeRecordValue(state.global.ui.lastConversationByProject, projectId)
   },
 
   touchProject(projectId: AppTypes.Id) {
@@ -353,6 +357,20 @@ export const mutations = {
       item => item.id === conversationId && item.projectId === projectId && !item.archivedAt
     )
     if (!chat) return
+    const project = state.projects.find(item => item.id === projectId)
+    const otherChat = state.conversations?.some(
+      item => item.projectId === projectId && item.id !== conversationId && !item.archivedAt
+    )
+    const fallbackProject = state.projects.find(item => item.id !== projectId && !item.archivedAt)
+    if (project?.kind === 'standalone-chat' && !otherChat && fallbackProject) {
+      // A standalone row owns its scope; deleting it must not leave a replacement row behind.
+      if (state.global.ui?.lastProjectId === projectId) this.setActiveProject(fallbackProject.id)
+      project.archivedAt = now()
+      project.updatedAt = project.archivedAt
+      chat.archivedAt = now()
+      chat.updatedAt = chat.archivedAt
+      return
+    }
     state.global.ui!.lastConversationByProject ??= {}
     const wasActive = getSafeRecordValue(state.global.ui!.lastConversationByProject!, projectId) === conversationId
     // Line up the replacement selection BEFORE archiving: getActiveConversationId() runs

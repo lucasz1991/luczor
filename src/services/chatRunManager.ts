@@ -70,7 +70,33 @@ export function createChatRunJournal(native = isTauri()): ChatRunJournal {
   return {
     async list(principalId) {
       if (!native) return [...preview.values()].filter(run => run.principalId === principalId)
-      return invoke('device_run_journal_list', { payload: { ownerPrincipalId: principalId, kind: 'chat', limit: 200 } })
+      // Recovery is independent of recent completed history. Include stopped
+      // records too: a crash after the journal transition but before UI-state
+      // persistence must not strand old approval/loading flags on the next boot.
+      const live: ChatRunRecord[] = []
+      let after: { updatedAt: number; runId: string } | undefined
+      for (;;) {
+        const page = await invoke<ChatRunRecord[]>('device_run_journal_list', {
+          payload: {
+            ownerPrincipalId: principalId,
+            kind: 'chat',
+            limit: 200,
+            states: [...liveStates, 'interrupted', 'cancelled'],
+            ...(after ? { after } : {}),
+          },
+        })
+        live.push(...page)
+        if (page.length < 200) break
+        const last = page.at(-1)!
+        const next = { updatedAt: last.updatedAt, runId: last.runId }
+        if (after && next.updatedAt === after.updatedAt && next.runId === after.runId)
+          throw new Error('journal_cursor_not_advanced')
+        after = next
+      }
+      const recent = await invoke<ChatRunRecord[]>('device_run_journal_list', {
+        payload: { ownerPrincipalId: principalId, kind: 'chat', limit: 200 },
+      })
+      return [...new Map([...recent, ...live].map(run => [run.runId, run])).values()]
     },
     async write(record, expectedRevision) {
       if (native) {
@@ -107,6 +133,8 @@ type OwnedRun = {
   finishState?: ChatRunState
   detached?: boolean
   stoppingQueued?: boolean
+  slotSequence: number
+  resumeSlot?: { resolve: () => void; reject: (reason: unknown) => void; abort: () => void }
 }
 type Admission = {
   conversationId: string
@@ -117,6 +145,7 @@ type Admission = {
   detach: () => void
   detached: boolean
   stopGeneration?: number
+  sequence: number
 }
 
 /** Views observe records; only this owner may start, stop or settle an execution. */
@@ -127,6 +156,9 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
   // never overtake the first submitted message in the same conversation.
   const admissions = new Map<string, Admission>()
   const executing = new Set<string>()
+  // Logical ownership survives an approval wait; its runnable slot does not.
+  const runningSlots = new Set<string>()
+  let nextSlotSequence = 0
   let admissionPaused = false
   let stopGeneration = 0
   const publish = (record: ChatRunRecord) => {
@@ -144,13 +176,21 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
     return operation
   }
   const pump = () => {
-    if (admissionPaused || executing.size >= concurrency) return
+    if (admissionPaused || runningSlots.size >= concurrency) return
     const occupied = new Set([...executing].map(id => jobs.get(id)?.record.conversationId))
     const firstAdmission = new Map<string, string>()
     for (const [runId, admission] of admissions)
       if (!firstAdmission.has(admission.conversationId)) firstAdmission.set(admission.conversationId, runId)
-    for (const job of jobs.values()) {
-      if (executing.size >= concurrency) break
+    for (const job of [...jobs.values()].sort((left, right) => left.slotSequence - right.slotSequence)) {
+      if (runningSlots.size >= concurrency) break
+      if (job.resumeSlot && !job.controller.signal.aborted && !job.detached) {
+        const waiter = job.resumeSlot
+        job.resumeSlot = undefined
+        job.controller.signal.removeEventListener('abort', waiter.abort)
+        runningSlots.add(job.record.runId)
+        waiter.resolve()
+        continue
+      }
       if (
         job.record.state !== 'queued' ||
         job.controller.signal.aborted ||
@@ -160,6 +200,7 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
       )
         continue
       executing.add(job.record.runId)
+      runningSlots.add(job.record.runId)
       occupied.add(job.record.conversationId)
       void (async () => {
         try {
@@ -169,7 +210,36 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
             runId: job.record.runId,
             signal: job.controller.signal,
             setMessage: messageId => update(job, { checkpoint: { ...job.record.checkpoint, messageId } }),
-            setWaiting: waiting => update(job, { state: waiting ? `waiting_${waiting}` : 'running' }),
+            setWaiting: async waiting => {
+              job.controller.signal.throwIfAborted()
+              if (job.detached) throw new DOMException('Lauf nicht mehr aktiv.', 'AbortError')
+              if (waiting) {
+                await update(job, { state: `waiting_${waiting}` })
+                if (waiting === 'approval') {
+                  runningSlots.delete(job.record.runId)
+                  pump()
+                }
+                return
+              }
+              if (!runningSlots.has(job.record.runId)) {
+                await update(job, { state: 'waiting_resource' })
+                job.controller.signal.throwIfAborted()
+                await new Promise<void>((resolve, reject) => {
+                  const abort = () => {
+                    job.resumeSlot = undefined
+                    reject(job.controller.signal.reason ?? new DOMException('Aborted', 'AbortError'))
+                    pump()
+                  }
+                  job.slotSequence = nextSlotSequence++
+                  job.resumeSlot = { resolve, reject, abort }
+                  job.controller.signal.addEventListener('abort', abort, { once: true })
+                  pump()
+                })
+              }
+              job.controller.signal.throwIfAborted()
+              if (job.detached) throw new DOMException('Lauf nicht mehr aktiv.', 'AbortError')
+              await update(job, { state: 'running' })
+            },
             interrupt: async summary => {
               job.finishState = 'interrupted'
               await update(job, { checkpoint: { ...job.record.checkpoint, summary: summary.slice(0, 6000) } })
@@ -197,6 +267,7 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
         } finally {
           if (!job.detached) {
             executing.delete(job.record.runId)
+            runningSlots.delete(job.record.runId)
             jobs.delete(job.record.runId)
             job.drain()
             pump()
@@ -238,8 +309,10 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
     records,
     hasLive: (conversationId?: string) =>
       records.value.some(run => chatRunIsLive(run) && (!conversationId || run.conversationId === conversationId)),
-    async recover(principalId: string) {
+    async recover(principalId: string, assertCurrent: () => void = () => undefined) {
+      assertCurrent()
       const stored = await journal.list(principalId)
+      assertCurrent()
       for (const record of stored) {
         if (record.kind !== 'chat' || record.principalId !== principalId || jobs.has(record.runId)) continue
         const settled = chatRunIsLive(record)
@@ -255,6 +328,7 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
               record.revision
             )
           : record
+        assertCurrent()
         publish(settled)
       }
     },
@@ -274,6 +348,7 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
         conversationId: input.conversationId,
         controller,
         detached: false,
+        sequence: nextSlotSequence++,
         drained: new Promise<void>(resolve => {
           drainAdmission = resolve
         }),
@@ -325,6 +400,7 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
             writes: Promise.resolve(),
             drained,
             drain,
+            slotSequence: admission.sequence,
           }
           jobs.set(runId, job)
           publish(record)
@@ -372,6 +448,7 @@ export function createChatRunManager(journal: ChatRunJournal, concurrency = 4) {
           job.drain()
           jobs.delete(runId)
           executing.delete(runId)
+          runningSlots.delete(runId)
         }
         admission.detach()
         admission.drain()

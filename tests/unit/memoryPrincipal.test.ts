@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type TestAccountSnapshot = Readonly<{
   principalId: string
+  serverInstance: string
   serverOrigin: string
   accountId: number
   config: Readonly<{ baseUrl: string; deviceKey: string; clientId: string }>
@@ -9,6 +10,7 @@ type TestAccountSnapshot = Readonly<{
 
 const harness = vi.hoisted(() => {
   const files = new Map<string, Map<string, unknown>>()
+  const saved = vi.fn()
   const storeFor = (filename: string) => {
     let values = files.get(filename)
     if (!values) {
@@ -19,11 +21,14 @@ const harness = vi.hoisted(() => {
       get: vi.fn(async (key: string) => values?.get(key)),
       set: vi.fn(async (key: string, value: unknown) => values?.set(key, value)),
       delete: vi.fn(async (key: string) => values?.delete(key)),
-      save: vi.fn(async () => undefined),
+      save: vi.fn(async () => {
+        saved(filename)
+      }),
     }
   }
   return {
     files,
+    saved,
     loadStore: vi.fn(async (filename: string) => storeFor(filename)),
     invoke: vi.fn(async (command: string) => {
       if (command === 'memory_key_get_or_create') return '11'.repeat(32)
@@ -32,6 +37,7 @@ const harness = vi.hoisted(() => {
     getVerifiedAccountSnapshot: vi.fn(),
     currentSnapshot: {
       principalId: 'account:v2:account-a',
+      serverInstance: 'server-test',
       serverOrigin: 'https://memory.example.test',
       accountId: 1,
       config: Object.freeze({
@@ -53,6 +59,7 @@ vi.mock('@/services/accountPrincipal', () => ({
 function accountSnapshot(accountId: number, deviceKey: string) {
   return Object.freeze({
     principalId: `account:v2:account-${accountId}`,
+    serverInstance: 'server-test',
     serverOrigin: 'https://memory.example.test',
     accountId,
     config: Object.freeze({
@@ -97,6 +104,600 @@ describe('desktop memory account isolation', () => {
     vi.unstubAllGlobals()
   })
 
+  it('commits eight excerpts atomically and drains all fifty requirements after a restart with exact coverage', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { planAutomaticChatCapture } = await import('@/services/memory/chatContext')
+    const memory = new LuczorMemoryService()
+    const principalId = harness.currentSnapshot.principalId
+    const content = Array.from(
+      { length: 50 },
+      (_, i) => `- Anforderung ${i + 1}: Der passende Queue Test muss erfolgreich sein.`
+    ).join('\n')
+    const input = {
+      projectId: 'p1',
+      conversationId: 'c1',
+      expectedPrincipalId: principalId,
+      message: { id: 'm1', role: 'user' as const, content },
+    }
+    const planned = planAutomaticChatCapture(input, true)
+    expect(planned).toHaveLength(50)
+    const coverage = {
+      expectedPrincipalId: principalId,
+      projectId: 'p1',
+      conversationId: 'c1',
+      messageId: 'm1',
+      sourceLength: content.length,
+      spans: [],
+    }
+    await memory.inspectLocal()
+    harness.saved.mockClear()
+    expect(await memory.captureChatExcerpts(planned, undefined, coverage)).toBe(8)
+    expect(harness.saved.mock.calls.filter(([file]) => file === 'luczor.memory.json')).toHaveLength(1)
+    expect(await memory.captureStatus(principalId)).toMatchObject({ records: 8, deferred: 42 })
+    const encrypted = harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')
+    expect(await memory.captureChatExcerpts(planned, undefined, coverage)).toBe(0)
+    expect(await memory.captureStatus(principalId)).toMatchObject({ records: 8, deferred: 42 })
+    expect(harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')).toBe(encrypted)
+    const restarted = new LuczorMemoryService()
+    for (let i = 0; i < 6; i++) await restarted.processDeferredCapture(principalId)
+    const status = await restarted.captureStatus(principalId)
+    expect(status).toMatchObject({ records: 50, deferred: 0 })
+    expect(status.coverage).toHaveLength(1)
+    expect(status.coverage[0]!.spans).toHaveLength(50)
+    expect(status.coverage[0]!.spans.every(span => span.status === 'stored')).toBe(true)
+    const saved = harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')
+    expect(await restarted.processDeferredCapture(principalId)).toBe(0)
+    expect(await restarted.captureChatExcerpts(planned, undefined, coverage)).toBe(0)
+    expect(harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')).toBe(saved)
+    expect(await restarted.pendingSyncCount()).toBe(0)
+    expect(harness.fetch).not.toHaveBeenCalled()
+  })
+
+  it('retains more than five thousand explicit memories and reports only a soft storage warning', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const seed = await memory.remember({
+      content: 'Die Erinnerung bleibt dauerhaft erhalten.',
+      projectId: 'p1',
+      visibility: 'private',
+      writeIntent: 'confirmed',
+    })
+    harness.files.set(
+      'luczor.memory.json',
+      new Map([
+        [
+          'state_v2',
+          {
+            version: 2,
+            records: Array.from({ length: 5001 }, (_, i) => ({
+              ...seed,
+              id: `record-${i}`,
+              content: `Erinnerung ${i}`,
+              contentHash: `hash-${i}`,
+            })),
+            outbox: [],
+            tombstones: [],
+          },
+        ],
+      ])
+    )
+    const restarted = new LuczorMemoryService()
+    expect(await restarted.captureStatus(harness.currentSnapshot.principalId)).toMatchObject({
+      records: 5001,
+      softLimit: 5000,
+      storageWarning: true,
+    })
+    expect((await restarted.inspectLocal()).total).toBe(5001)
+  })
+
+  it.runIf(process.env.LUCZOR_MEMORY_LOAD_TESTS === '1').each([1000, 5000, 20000])(
+    'loads, searches and reports %i local records without discarding them',
+    async count => {
+      await setServerEnabled(false)
+      const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+      const seed = await new LuczorMemoryService().remember({
+        content: 'Laravel Queue bleibt erhalten.',
+        projectId: 'p1',
+        visibility: 'private',
+        writeIntent: 'confirmed',
+      })
+      harness.files.set(
+        'luczor.memory.json',
+        new Map([
+          [
+            'state_v2',
+            {
+              version: 2,
+              records: Array.from({ length: count }, (_, i) => ({
+                ...seed,
+                id: `load-${i}`,
+                content: `Laravel Queue Regel ${i}`,
+                contentHash: `load-hash-${i}`,
+              })),
+              outbox: [],
+              tombstones: [],
+            },
+          ],
+        ])
+      )
+      const started = vi.getRealSystemTime()
+      const memory = new LuczorMemoryService()
+      const result = await memory.recallLocal({ projectId: 'p1', query: `Laravel Queue Regel ${count - 1}`, limit: 5 })
+      const recallMs = vi.getRealSystemTime() - started
+      expect(result).toHaveLength(5)
+      expect((await memory.captureStatus(harness.currentSnapshot.principalId)).records).toBe(count)
+      process.stdout.write(`[memory-load] records=${count} encrypted-migration-and-recall-ms=${recallMs.toFixed(1)}\n`)
+    },
+    30000
+  )
+
+  it('applies a scoped baseline and cursor atomically, restores newer server versions after revocation and protects user erasure', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const identity = {
+      expectedPrincipalId: harness.currentSnapshot.principalId,
+      serverInstance: 'server-test',
+      scope: 'project' as const,
+      projectId: 'p1',
+    }
+    const upsert = (id: string, sequence: number, project = 'p1') => ({
+      sequence,
+      operation: 'upsert' as const,
+      record_id: id,
+      source_record_id: String(sequence),
+      memory: {
+        content: `Laravel Queue Einstellung ${sequence}`,
+        scope: 'project',
+        project_id: project,
+        status: 'active',
+        visibility: 'syncable',
+        retention: 'durable',
+        sensitivity: 'normal',
+        source: 'sql',
+        provenance: { source_type: 'user' },
+        tags: ['queue'],
+        importance: 0.6,
+      },
+    })
+    const first = {
+      version: 1 as const,
+      cursor: 'c1',
+      has_more: false,
+      reset: true,
+      changes: [upsert('server-a', 1), upsert('server-b', 2)],
+    }
+    await memory.applyChangeBatch({ ...identity, expectedCursor: null, page: first })
+    expect(await memory.recallLocal({ projectId: 'p1', query: 'Queue' })).toHaveLength(2)
+    const encrypted = harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')
+    await memory.applyChangeBatch({ ...identity, expectedCursor: null, page: first })
+    expect(harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')).toBe(encrypted)
+    const local = await memory.remember({
+      content: 'Private Laravel Vorgabe bleibt lokal.',
+      projectId: 'p1',
+      visibility: 'private',
+      writeIntent: 'confirmed',
+    })
+    await memory.updateSyncState({
+      ...identity,
+      deletionReceipt: { id: 'receipt-a', status: 'projection_pending', canonical_erased: true },
+    })
+    await memory.applyChangeBatch({
+      ...identity,
+      expectedCursor: 'c1',
+      page: {
+        ...first,
+        reset: false,
+        cursor: 'c2',
+        changes: [
+          { sequence: 3, operation: 'delete', record_id: 'server-a', source_record_id: '1' },
+          upsert('server-a', 4),
+        ],
+      },
+    })
+    expect(await memory.recallLocal({ projectId: 'p1', query: 'Einstellung 4' })).toEqual(
+      expect.arrayContaining([expect.objectContaining({ serverVersionId: 4, tags: ['queue'], source: 'user' })])
+    )
+    const beforeInvalid = harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')
+    await expect(
+      memory.applyChangeBatch({
+        ...identity,
+        expectedCursor: 'c2',
+        page: { ...first, reset: false, cursor: 'bad', changes: [upsert('foreign', 5, 'p2')] },
+      })
+    ).rejects.toThrow('invalid_memory_change_scope')
+    expect(harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')).toBe(beforeInvalid)
+    const serverA = (await memory.recallLocal({ projectId: 'p1', query: 'Laravel' })).find(
+      record => record.serverId === 'server-a'
+    )!
+    await memory.forget('project', serverA.id, { projectId: 'p1' })
+    await memory.applyChangeBatch({
+      ...identity,
+      expectedCursor: 'c2',
+      page: { ...first, reset: false, cursor: 'c3', changes: [upsert('server-a', 6)] },
+    })
+    expect((await memory.inspectLocal()).records.some(item => item.id === serverA.id)).toBe(false)
+    await expect(
+      memory.applyChangeBatch({
+        ...identity,
+        expectedCursor: null,
+        page: { ...first, cursor: 'new-baseline', changes: [] },
+      })
+    ).rejects.toThrow('stale_memory_cursor')
+    expect((await memory.inspectLocal()).records.some(item => item.id === local.id)).toBe(true)
+    const restarted = new LuczorMemoryService()
+    expect(await restarted.syncState(identity)).toMatchObject({
+      cursor: 'c3',
+      deletionReceipts: [{ id: 'receipt-a', status: 'projection_pending' }],
+    })
+    harness.currentSnapshot = accountSnapshot(2, 'key-b')
+    await expect(restarted.syncState(identity)).rejects.toThrow()
+  })
+
+  it('retains pending local edits as explicit conflicts and resolves to a full server snapshot', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const identity = {
+      expectedPrincipalId: harness.currentSnapshot.principalId,
+      serverInstance: 'server-test',
+      scope: 'project' as const,
+      projectId: 'p1',
+    }
+    const local = await memory.remember({
+      content: 'Laravel Queue muss geprüft werden.',
+      projectId: 'p1',
+      writeIntent: 'confirmed',
+    })
+    const current = {
+      content: 'Laravel Queue muss erneut geprüft werden.',
+      scope: 'project',
+      project_id: 'p1',
+      status: 'active',
+      visibility: 'syncable',
+      retention: 'durable',
+      sensitivity: 'normal',
+      source: 'sql',
+      tags: ['server'],
+      importance: 0.8,
+    }
+    await memory.applyChangeBatch({
+      ...identity,
+      expectedCursor: null,
+      page: {
+        version: 1,
+        cursor: 'c1',
+        has_more: false,
+        reset: true,
+        changes: [{ sequence: 1, operation: 'upsert', record_id: local.id, source_record_id: '11', memory: current }],
+      },
+    })
+    expect((await memory.syncState(identity)).metadataConflicts).toHaveLength(1)
+    expect((await memory.inspectLocal()).records[0]!.content).toBe(local.content)
+    await memory.resolveSyncConflict(identity, local.id, 'use_server')
+    expect((await memory.syncState(identity)).metadataConflicts).toEqual([])
+    expect((await memory.recallLocal({ projectId: 'p1', query: 'Laravel' }))[0]).toMatchObject({
+      content: current.content,
+      tags: ['server'],
+      importance: 0.8,
+      synced: true,
+      serverVersionId: 11,
+    })
+    expect(await memory.pendingSyncCount()).toBe(0)
+  })
+
+  it('counts only real server acknowledgements and exposes the complete 409 metadata conflict for resolution', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const local = await memory.remember({
+      content: 'Laravel Queue muss geprüft werden.',
+      projectId: 'p1',
+      writeIntent: 'confirmed',
+    })
+    await setServerEnabled(true)
+    harness.fetch.mockResolvedValue(
+      jsonResponse({ decision: 'accepted', persisted: true, id: local.id, memory_link_id: 11 })
+    )
+    expect(await memory.flushPendingSync()).toBe(1)
+    await memory.updateMetadata(
+      local.id,
+      { tags: ['local-edit'] },
+      (await memory.inspectLocal()).records[0]!.metadataRevision
+    )
+    const remote = {
+      id: local.id,
+      content: local.content,
+      scope: 'project',
+      project_id: 'p1',
+      status: 'active',
+      visibility: 'syncable',
+      retention: 'durable',
+      sensitivity: 'normal',
+      source: 'sql',
+      tags: ['server-edit'],
+      importance: 0.7,
+      meta: local.meta,
+      provenance: local.provenance,
+    }
+    harness.fetch.mockImplementation(async (url: string) =>
+      url.endsWith('/memory/capabilities')
+        ? jsonResponse({ capabilities: { memory_metadata_versions: [1], memory_metadata_cas: true } })
+        : jsonResponse({ metadata_conflict: { current_version_id: 12, current_memory: remote } }, 409)
+    )
+    expect(await memory.flushPendingSync({ force: true })).toBe(0)
+    const identity = {
+      expectedPrincipalId: harness.currentSnapshot.principalId,
+      serverInstance: 'server-test',
+      scope: 'project' as const,
+      projectId: 'p1',
+    }
+    expect((await memory.syncState(identity)).metadataConflicts[0]).toMatchObject({
+      serverVersionId: 12,
+      remote: { tags: ['server-edit'], importance: 0.7 },
+    })
+    await memory.resolveSyncConflict(identity, local.id, 'use_server')
+    expect((await memory.recallLocal({ projectId: 'p1', query: 'Laravel' }))[0]).toMatchObject({
+      tags: ['server-edit'],
+      serverVersionId: 12,
+    })
+    expect(await memory.pendingSyncCount()).toBe(0)
+  })
+
+  it('rebases only disjoint server-authorized metadata into a fresh immutable CAS write', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { memoryMetadataOf } = await import('@/services/memory/memoryMetadata')
+    const memory = new LuczorMemoryService()
+    const local = await memory.remember({
+      content: 'Laravel Queue muss geprüft werden.',
+      projectId: 'p1',
+      writeIntent: 'confirmed',
+    })
+    await setServerEnabled(true)
+    harness.fetch.mockResolvedValue(
+      jsonResponse({ decision: 'accepted', persisted: true, id: local.id, memory_link_id: 11 })
+    )
+    await memory.flushPendingSync()
+    const base = structuredClone(memoryMetadataOf(local))
+    await memory.updateMetadata(
+      local.id,
+      { tags: ['local-edit'] },
+      (await memory.inspectLocal()).records[0]!.metadataRevision
+    )
+    const remoteMetadata = { ...base, kind: 'decision' }
+    const remote = {
+      content: local.content,
+      scope: 'project',
+      project_id: 'p1',
+      status: 'active',
+      visibility: 'syncable',
+      retention: 'durable',
+      sensitivity: 'normal',
+      source: 'sql',
+      tags: local.tags,
+      importance: local.importance,
+      meta: { ...local.meta, memory_metadata: remoteMetadata },
+      provenance: local.provenance,
+    }
+    const payloads: Array<Record<string, unknown>> = []
+    let conflict = true
+    harness.fetch.mockImplementation(async (url: string, options: { body?: string }) => {
+      if (url.endsWith('/memory/capabilities'))
+        return jsonResponse({ capabilities: { memory_metadata_versions: [1], memory_metadata_cas: true } })
+      payloads.push(JSON.parse(options.body!))
+      return conflict
+        ? jsonResponse(
+            {
+              metadata_conflict: {
+                can_rebase: true,
+                base_version_id: 11,
+                current_version_id: 12,
+                base_metadata: base,
+                current_metadata: remoteMetadata,
+                base_tags: local.tags,
+                base_importance: local.importance,
+                current_memory: remote,
+              },
+            },
+            409
+          )
+        : jsonResponse({ decision: 'accepted', persisted: true, id: local.id, memory_link_id: 13 })
+    })
+    expect(await memory.flushPendingSync({ force: true })).toBe(0)
+    expect((await memory.recallLocal({ projectId: 'p1', query: 'Laravel' }))[0]).toMatchObject({
+      tags: ['local-edit'],
+      serverVersionId: 12,
+      meta: { memory_metadata: { kind: 'decision' } },
+    })
+    conflict = false
+    expect(await memory.flushPendingSync({ force: true })).toBe(1)
+    expect(payloads).toHaveLength(2)
+    expect(payloads[1]!.write_id).not.toBe(payloads[0]!.write_id)
+    expect(payloads[1]).toMatchObject({
+      expected_previous_id: 12,
+      tags: ['local-edit'],
+      meta: { memory_metadata: { kind: 'decision' } },
+    })
+    expect(await memory.pendingSyncCount()).toBe(0)
+  })
+
+  it('revokes only synchronized mirrors in an initial baseline, retaining pending, private and foreign records', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const seed = await new LuczorMemoryService().remember({
+      content: 'Laravel Queue bleibt erhalten.',
+      projectId: 'p1',
+      visibility: 'private',
+      writeIntent: 'confirmed',
+    })
+    const mirror = { ...seed, visibility: 'syncable', synced: true, serverId: 'old-server', id: 'old-local' }
+    const pending = { ...mirror, id: 'pending', serverId: 'pending-server' }
+    const foreign = { ...mirror, id: 'foreign', principalId: 'another-account' }
+    harness.files.set(
+      'luczor.memory.json',
+      new Map([
+        [
+          'state_v2',
+          {
+            version: 2,
+            records: [seed, mirror, pending, foreign],
+            tombstones: [],
+            outbox: [
+              {
+                id: 'event-pending',
+                principalId: seed.principalId,
+                recordId: pending.id,
+                operation: 'annotate',
+                annotation: pending,
+                attempts: 0,
+                nextAttemptAt: 0,
+                createdAt: Date.now(),
+              },
+            ],
+          },
+        ],
+      ])
+    )
+    const memory = new LuczorMemoryService()
+    const identity = {
+      expectedPrincipalId: harness.currentSnapshot.principalId,
+      serverInstance: 'server-test',
+      scope: 'project' as const,
+      projectId: 'p1',
+    }
+    await memory.applyChangeBatch({
+      ...identity,
+      expectedCursor: null,
+      page: { version: 1, cursor: 'baseline', has_more: false, reset: true, changes: [] },
+    })
+    const records = (await memory.inspectLocal()).records
+    expect(records.map(item => item.id).sort()).toEqual([seed.id, 'pending'].sort())
+    expect(await memory.pendingSyncCount()).toBe(1)
+    harness.currentSnapshot = { ...harness.currentSnapshot, principalId: 'another-account' }
+    expect((await memory.inspectLocal()).records.map(item => item.id)).toEqual(['foreign'])
+  })
+
+  it('keeps equal external server identifiers isolated across project stores and deletion markers', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const memory = new LuczorMemoryService()
+    const identity = {
+      expectedPrincipalId: harness.currentSnapshot.principalId,
+      serverInstance: 'server-test',
+      scope: 'project' as const,
+    }
+    const page = (projectId: string, sequence: number) => ({
+      version: 1 as const,
+      cursor: `${projectId}-${sequence}`,
+      has_more: false,
+      reset: sequence === 1,
+      changes: [
+        {
+          sequence,
+          operation: 'upsert' as const,
+          record_id: 'same-external-id',
+          source_record_id: String(sequence),
+          memory: {
+            content: `Laravel Queue ${projectId}`,
+            scope: 'project',
+            project_id: projectId,
+            status: 'active',
+            visibility: 'syncable',
+            retention: 'durable',
+            sensitivity: 'normal',
+          },
+        },
+      ],
+    })
+    await memory.applyChangeBatch({ ...identity, projectId: 'p1', expectedCursor: null, page: page('p1', 1) })
+    await memory.applyChangeBatch({ ...identity, projectId: 'p2', expectedCursor: null, page: page('p2', 1) })
+    const first = (await memory.recallLocal({ projectId: 'p1', query: 'Laravel' }))[0]!
+    const second = (await memory.recallLocal({ projectId: 'p2', query: 'Laravel' }))[0]!
+    expect(first.id).not.toBe(second.id)
+    await memory.updateMetadata(
+      first.id,
+      { tags: ['reviewed'] },
+      (await memory.inspectLocal({ projectId: 'p1' })).records[0]!.metadataRevision
+    )
+    await setServerEnabled(true)
+    harness.fetch.mockImplementation(async (url: string) =>
+      url.endsWith('/memory/capabilities')
+        ? jsonResponse({ capabilities: { memory_metadata_versions: [1], memory_metadata_cas: true } })
+        : jsonResponse({ decision: 'accepted', persisted: true, id: 'same-external-id', memory_link_id: 2 })
+    )
+    expect(await memory.flushPendingSync()).toBe(1)
+    const annotation = JSON.parse(harness.fetch.mock.calls.find(([url]) => String(url).endsWith('/remember'))![1].body)
+    expect(annotation.external_id).toBe('same-external-id')
+    expect(annotation.expected_previous_id).toBe(1)
+    await setServerEnabled(false)
+    await memory.forget('project', first.id, { projectId: 'p1' })
+    await memory.applyChangeBatch({ ...identity, projectId: 'p2', expectedCursor: 'p2-1', page: page('p2', 2) })
+    expect(await memory.recallLocal({ projectId: 'p1', query: 'Laravel' })).toEqual([])
+    expect(await memory.recallLocal({ projectId: 'p2', query: 'Laravel' })).toEqual([
+      expect.objectContaining({ id: second.id, serverVersionId: 2 }),
+    ])
+  })
+
+  it('cancels deferred capture on abort, disabled memory and account change before committing', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { planAutomaticChatCapture } = await import('@/services/memory/chatContext')
+    const memory = new LuczorMemoryService()
+    const principalId = harness.currentSnapshot.principalId
+    const inputs = planAutomaticChatCapture(
+      {
+        projectId: 'p1',
+        conversationId: 'c1',
+        expectedPrincipalId: principalId,
+        message: {
+          id: 'm1',
+          role: 'user',
+          content: Array.from(
+            { length: 12 },
+            (_, i) => `Anforderung ${i}: Die Queue muss alle Schritte abschließen.`
+          ).join('\n\n'),
+        },
+      },
+      true
+    )
+    await memory.captureChatExcerpts(inputs)
+    const stored = harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')
+    const abort = new AbortController()
+    abort.abort()
+    await expect(memory.processDeferredCapture(principalId, abort.signal)).rejects.toThrow()
+    harness.files.get('luczor.settings.json')!.set('memory_auto_remember', false)
+    expect(await memory.processDeferredCapture(principalId)).toBe(0)
+    harness.files.get('luczor.settings.json')!.set('memory_auto_remember', true)
+    harness.getVerifiedAccountSnapshot
+      .mockResolvedValueOnce(harness.currentSnapshot)
+      .mockResolvedValueOnce(accountSnapshot(2, 'key-b'))
+    await expect(memory.processDeferredCapture(principalId)).rejects.toThrow('scope_changed')
+    expect(harness.files.get('luczor.memory.json')!.get('state_v3_encrypted')).toBe(stored)
+    expect((await memory.captureStatus(principalId)).deferred).toBe(4)
+  })
+
+  it('keeps standalone and assistant captures conversation-bound even after explicit promotion', async () => {
+    await setServerEnabled(false)
+    const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
+    const { planAutomaticChatCapture } = await import('@/services/memory/chatContext')
+    const memory = new LuczorMemoryService()
+    const [input] = planAutomaticChatCapture({
+      projectId: 'p1',
+      conversationId: 'c1',
+      expectedPrincipalId: harness.currentSnapshot.principalId,
+      reuseScope: 'conversation',
+      message: { id: 'm1', role: 'user', content: 'Laravel benötigt eine eigene Datenbank.' },
+    })
+    const record = await memory.remember(input!)
+    expect(await memory.recallSessionCandidates({ projectId: 'p1', sessionId: 'c2', query: 'Laravel' })).toEqual([])
+    await memory.promote(record.id)
+    expect(await memory.recallLocal({ projectId: 'p1', sessionId: 'c1', query: 'Laravel' })).toHaveLength(1)
+    expect(await memory.recallLocal({ projectId: 'p1', sessionId: 'c2', query: 'Laravel' })).toEqual([])
+  })
+
   it('captures host-bound origins and merges repeated observations without inflating confidence or importance', async () => {
     await setServerEnabled(false)
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
@@ -136,7 +737,7 @@ describe('desktop memory account isolation', () => {
     expect(harness.fetch).not.toHaveBeenCalled()
   })
 
-  it('recalls durable automatic observations only in their source conversation without promoting or synchronizing them', async () => {
+  it('recalls unconfirmed user hints across project conversations without promotion or synchronization', async () => {
     await setServerEnabled(true)
     const { LuczorMemoryService } = await import('@/services/memory/luczorMemory')
     const { planAutomaticChatCapture } = await import('@/services/memory/chatContext')
@@ -161,7 +762,9 @@ describe('desktop memory account isolation', () => {
     expect(await restarted.recallSessionCandidates(query)).toEqual([
       expect.objectContaining({ id: record.id, status: 'candidate' }),
     ])
-    expect(await restarted.recallSessionCandidates({ ...query, sessionId: 'chat-2' })).toEqual([])
+    expect(await restarted.recallSessionCandidates({ ...query, sessionId: 'chat-2' })).toEqual([
+      expect.objectContaining({ id: record.id }),
+    ])
     expect(await restarted.recallSessionCandidates({ ...query, projectId: 'p2' })).toEqual([])
     expect(await restarted.recallSessionCandidates({ ...query, query: 'Urlaubsplanung' })).toEqual([])
     expect(await restarted.recallLocal({ projectId: 'p1', query: 'Laravel Queue' })).toEqual([])
@@ -367,7 +970,7 @@ describe('desktop memory account isolation', () => {
       journal.consent = { automaticRewrite: false, installedModelStart: false, metadataAnnotations: true }
     })
     harness.fetch.mockImplementation(async (url: string) =>
-      url.endsWith('/status')
+      url.endsWith('/memory/capabilities')
         ? jsonResponse({ data: [], capabilities: { memory_metadata_versions: [1], memory_metadata_cas: true } })
         : jsonResponse({ data: { changed: 1 } })
     )
@@ -717,7 +1320,7 @@ describe('desktop memory account isolation', () => {
     )
     await setServerEnabled(true)
     harness.fetch.mockImplementation(async (url: string) =>
-      url.endsWith('/maintenance/status')
+      url.endsWith('/memory/capabilities')
         ? jsonResponse({ data: [] })
         : jsonResponse({ decision: 'accepted', persisted: true, id: record.id, memory_link_id: 41 })
     )
@@ -731,10 +1334,11 @@ describe('desktop memory account isolation', () => {
     expect((await memory.inspectLocal()).records[0]?.syncError).toContain('remain saved locally and pending')
     harness.fetch.mockClear()
     harness.fetch.mockImplementation(async (url: string) =>
-      url.endsWith('/maintenance/status')
+      url.endsWith('/memory/capabilities')
         ? jsonResponse({ data: [], capabilities: { memory_metadata_versions: [1], memory_metadata_cas: true } })
         : jsonResponse({ decision: 'accepted', persisted: true, id: record.id, memory_link_id: 42 })
     )
+    ;(await import('@/services/memory/memoryServerCapabilities')).clearMemoryCapabilitiesCache()
     vi.advanceTimersByTime(11_000)
     await memory.flushPendingSync()
     const annotationWrite = JSON.parse(
@@ -773,7 +1377,7 @@ describe('desktop memory account isolation', () => {
     let version = 1
     const payloads: string[] = []
     harness.fetch.mockImplementation(async (url: string, init: RequestInit) => {
-      if (url.endsWith('/status'))
+      if (url.endsWith('/memory/capabilities'))
         return jsonResponse({ capabilities: { memory_metadata_versions: [1], memory_metadata_cas: true } })
       payloads.push(String(init.body))
       if (fail) throw new Error('offline')

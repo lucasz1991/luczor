@@ -95,6 +95,30 @@ describe('durable maintenance policy', () => {
       'invalid_annotation_source'
     )
   })
+  it('groups explicit feature corrections chronologically, independently of IDs and unrelated topics', async () => {
+    const confirmed = { status: 'active' as const, writeIntent: 'confirmed' as const }
+    const records = [
+      memory('z-old', {
+        ...confirmed,
+        featureKey: 'database-driver',
+        content: 'Datenbank verwendet MySQL.',
+        createdAt: 1,
+      }),
+      memory('a-new', {
+        ...confirmed,
+        featureKey: 'database-driver',
+        content: 'Korrektur: Datenbank verwendet SQLite.',
+        createdAt: 2,
+      }),
+      memory('middle', { ...confirmed, featureKey: 'http-port', content: 'HTTP Port ist 8080.', createdAt: 1 }),
+      memory('conversation', { ...confirmed, provenance: { reuse_scope: 'conversation' } }),
+    ]
+    const jobs = await planMaintenance({ principalId: 'owner', projects: [], records, now: 10 })
+    const groups = jobs.filter(job => job.kind === 'memory').map(job => job.sources.map(source => source.id))
+    expect(groups).toContainEqual(['z-old', 'a-new'])
+    expect(groups).toContainEqual(['middle'])
+    expect(groups.flat()).not.toContain('conversation')
+  })
 
   it('reviews the exact classification against originals without presenting an empty replacement body', () => {
     const changes = parseMemoryAnnotation('{"kind":"hypothesis","interest":null}', sources)

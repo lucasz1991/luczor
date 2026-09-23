@@ -169,4 +169,17 @@ describe('structured memory attribution and autonomous classification', () => {
     const secondProtected = { ...second, ...applyMemoryAnnotation(second, { interest: 1 }, { origin: 'user' }) }
     expect(() => mergeMemoryMetadata([firstProtected, secondProtected])).toThrow('memory_metadata_override_conflict')
   })
+  it('does not transfer the highest personal interest to unrelated merged topics', () => {
+    const first = record('Ich interessiere mich für Laravel.')
+    const second = record('Ich interessiere mich für Gartenarbeit.')
+    first.meta.memory_metadata.interest = 0.9
+    second.meta.memory_metadata.interest = 0.2
+    first.meta.memory_metadata.categories = [memoryCategory(['Technik', 'Laravel'])]
+    second.meta.memory_metadata.categories = [memoryCategory(['Freizeit', 'Garten'])]
+    expect(mergeMemoryMetadata([first, second]).interest).toBeNull()
+    second.meta.memory_metadata.categories = first.meta.memory_metadata.categories
+    expect(mergeMemoryMetadata([first, second]).interest).toBeCloseTo(0.55)
+    second.meta.memory_metadata.interest = null
+    expect(mergeMemoryMetadata([first, second]).interest).toBeNull()
+  })
 })

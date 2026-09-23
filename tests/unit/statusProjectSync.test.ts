@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   pushAllToServer: vi.fn(),
   pendingProjectSyncCount: vi.fn(),
   flushProjectSyncQueue: vi.fn(),
+  synchronizeMemory: vi.fn(),
 }))
 
 vi.mock('@tauri-apps/plugin-store', () => ({ Store: { load: vi.fn(async () => mocks.settings) } }))
@@ -21,6 +22,9 @@ vi.mock('@/services/api/luczorApi', () => ({
   LuczorApi: { getConfig: mocks.getConfig, health: mocks.health },
 }))
 vi.mock('@/services/api/sync', () => ({ pushAllToServer: mocks.pushAllToServer }))
+vi.mock('@/services/memory/memorySyncCoordinator', () => ({
+  memorySyncCoordinator: { synchronize: mocks.synchronizeMemory },
+}))
 vi.mock('@/services/api/projectSyncQueue', () => ({
   pendingProjectSyncCount: mocks.pendingProjectSyncCount,
   flushProjectSyncQueue: mocks.flushProjectSyncQueue,
@@ -38,6 +42,7 @@ describe('project-create queue status integration', () => {
     mocks.pendingProjectSyncCount.mockResolvedValue(0)
     mocks.flushProjectSyncQueue.mockResolvedValue({ attempted: 0, synced: 0, pending: 0 })
     mocks.pushAllToServer.mockResolvedValue({ ok: true, counts: {}, cursor: 'cursor' })
+    mocks.synchronizeMemory.mockResolvedValue({ uploaded: 0, received: 0, errors: [] })
   })
 
   it('retries queued project creates whenever the heartbeat sees the server online', async () => {
@@ -71,5 +76,6 @@ describe('project-create queue status integration', () => {
       signal: expect.any(AbortSignal),
     })
     expect(mocks.pushAllToServer).toHaveBeenCalledOnce()
+    expect(mocks.synchronizeMemory).toHaveBeenCalledWith({ force: true, signal: expect.any(AbortSignal) })
   })
 })

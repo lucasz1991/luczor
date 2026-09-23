@@ -1,4 +1,10 @@
 import { prepareInternalModelMessages } from './assistantProfile'
+import {
+  createCheckpointEntrySnapshot,
+  createCheckpointMessageSnapshot,
+  createCheckpointValueSnapshot,
+} from './agents/checkpointMessages'
+import { strictestDataPolicy, type SharedDataPolicy } from '@/services/runs/dataPolicy'
 import { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
 import {
   assistanceWorkerSummary,
@@ -202,6 +208,7 @@ export type RunAgentOptions = {
   ephemeralContextUsed?: boolean
   /** Locally retrieved private material: taints only a selected local route, never a clean external packet. */
   localOnlyContextUsed?: boolean
+  contextDataPolicy?: SharedDataPolicy
   routingSettings?: Partial<HybridRoutingSettings>
   /** Separately assembled provider-safe packet plus packet-bound approval. */
   externalPackage?: ExternalTurnPackage
@@ -373,6 +380,7 @@ export type RunAgentResult = {
   toolFailures: number
   toolSuccesses: number
   ephemeralDataUsed: boolean
+  progressEvidenceFingerprint?: string
   inferenceTarget?: 'local_llama_cpp' | 'laravel_proxy'
   routeDecisionId?: string
   tokenUsage: TokenUsage
@@ -822,9 +830,15 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   const pendingTaskCreateVerifications = new Map<string, PendingTaskCreateVerification>(
     pendingSeeds.map(item => [pendingTaskCreateKey(item), structuredClone(item)])
   )
-  const deletePendingCreate = (externalId: string, kind: 'task' | 'conversation') => {
+  const resolvedTaskCreateVerifications = new Map<string, PendingTaskCreateVerification>(
+    (opts.continuation?.resolvedTaskCreateVerifications ?? []).map(item => [pendingTaskCreateKey(item), item])
+  )
+  const deletePendingCreate = (externalId: string, kind: 'task' | 'conversation', resolved = false) => {
     for (const [key, item] of pendingTaskCreateVerifications)
-      if (item.externalId === externalId && (item.kind ?? 'task') === kind) pendingTaskCreateVerifications.delete(key)
+      if (item.externalId === externalId && (item.kind ?? 'task') === kind) {
+        if (resolved) resolvedTaskCreateVerifications.set(key, item)
+        pendingTaskCreateVerifications.delete(key)
+      }
   }
   let pendingTaskCreateTouched = !!opts.continuation?.pendingTaskCreateVerifications?.some(
     item => item.state === 'unknown' || item.state === 'verified_absent'
@@ -833,6 +847,17 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     !!opts.ephemeralContextUsed ||
     !!opts.continuation?.ephemeralDataUsed ||
     (resolvedRoute.gateway.target === 'local_llama_cpp' && !!opts.localOnlyContextUsed)
+  let dataPolicy = strictestDataPolicy(
+    opts.continuation?.dataPolicy ?? (opts.continuation?.ephemeralDataUsed ? 'ephemeral' : 'syncable'),
+    resolvedRoute.gateway.target === 'local_llama_cpp'
+      ? (opts.contextDataPolicy ??
+          (opts.ephemeralContextUsed ? 'ephemeral' : opts.localOnlyContextUsed ? 'local_only' : 'syncable'))
+      : 'syncable'
+  )
+  if (dataPolicy !== 'syncable') ephemeralDataUsed = true
+  const operationIds = new Map(opts.continuation?.operationIds ?? [])
+  const successfulOperations = new Set(opts.continuation?.progressEvidence?.receipts ?? [])
+  let progressEvidenceFingerprint = opts.continuation?.progressEvidence?.fingerprint
   const focused =
     resolvedRoute.gateway.target === 'local_llama_cpp' && !opts.workflowScope
       ? focusedTools(
@@ -852,6 +877,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       }
     }),
   ])
+  const snapshotMessages = createCheckpointMessageSnapshot()
+  const snapshotMutations = createCheckpointEntrySnapshot<Outcome>()
+  const snapshotOperationIds = createCheckpointEntrySnapshot<string>()
+  const snapshotPending = createCheckpointValueSnapshot<PendingTaskCreateVerification>()
   const checkpoint = (): AgentCheckpoint => ({
     projectId,
     principalScopeId: opts.principalScopeId,
@@ -862,10 +891,14 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     selectedTools: focused?.selected() ?? opts.continuation?.selectedTools,
     ...(contextTargetTokens ? { recovery: { reason: 'context_compacted', contextTargetTokens } } : {}),
     objective: opts.continuation?.objective ?? latestUserMessage,
-    messages: structuredClone(messages),
-    completedMutations: structuredClone([...completedMutations]),
+    messages: snapshotMessages(messages),
+    dataPolicy,
+    operationIds: snapshotOperationIds(operationIds),
+    progressEvidence: { receipts: [...successfulOperations], fingerprint: progressEvidenceFingerprint },
+    completedMutations: snapshotMutations(completedMutations),
     uncertainMutations: [...uncertainMutations],
-    pendingTaskCreateVerifications: structuredClone([...pendingTaskCreateVerifications.values()]),
+    pendingTaskCreateVerifications: [...pendingTaskCreateVerifications.values()].map(snapshotPending),
+    resolvedTaskCreateVerifications: [...resolvedTaskCreateVerifications.values()].map(snapshotPending),
     ephemeralDataUsed: ephemeralDataUsed || !!opts.continuation?.ephemeralDataUsed,
     toolAccess: opts.toolAccess,
     thinkingTier: opts.thinkingTier ?? opts.continuation?.thinkingTier ?? 'balanced',
@@ -940,8 +973,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   // Each reported goal progress boundary can admit another bounded section in
   // this same run. The cumulative round counter and all execution state stay live.
   let roundLimit = resolvedRoute.externalOneShot ? 1 : maxRounds
-  const successfulOperations = new Set<string>()
-  let sectionProgress = 0
+  let sectionProgress = successfulOperations.size
 
   const localAssistantTools = allTools
     .map(tool => tool.function.name)
@@ -1235,6 +1267,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       useCase: lastUseCase,
       toolFailures,
       toolSuccesses,
+      progressEvidenceFingerprint,
       ephemeralDataUsed,
       inferenceTarget: inferenceGateway.target,
       routeDecisionId: resolvedRoute.decision?.id,
@@ -1272,7 +1305,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       nextToolChoice = 'none'
       if (assistance?.hasUncollected()) {
         const outcomes = await assistance.collect()
-        if (outcomes.some(outcome => ['local', 'device'].includes(outcome.target))) ephemeralDataUsed = true
+        if (outcomes.some(outcome => ['local', 'device'].includes(outcome.target))) {
+          ephemeralDataUsed = true
+          dataPolicy = 'ephemeral'
+        }
         messages.push({
           role: 'user',
           content:
@@ -1379,6 +1415,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           /* Diagnostics are best effort, never an inference failure. */
         }
         res = await inferenceGateway.streamChatWithTools({
+          schedulingClass: opts.goalTracking ? 'goal' : 'foreground',
           debugScope: { conversationId: opts.conversationId, runId: opts.runId },
           contextBudget: fittedContext.report,
           messages: requestMessages,
@@ -1551,7 +1588,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     // A final answer must incorporate all started jobs, even if the model forgot to poll.
     if (!res.toolCalls.length && assistance?.hasUncollected()) {
       const outcomes = await assistance.collect()
-      if (outcomes.some(outcome => ['local', 'device'].includes(outcome.target))) ephemeralDataUsed = true
+      if (outcomes.some(outcome => ['local', 'device'].includes(outcome.target))) {
+        ephemeralDataUsed = true
+        dataPolicy = 'ephemeral'
+      }
       messages.push({
         role: 'user',
         content:
@@ -1688,17 +1728,11 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
             }
         } else {
           missingGoalReports = 0
-          const fingerprint = `${opts.goalTracking!.phase}:${report.status}:${report.summary.replace(/\s+/gu, ' ').trim()}`
+          const fingerprint = progressEvidenceFingerprint ?? ''
           stagnantGoalSections = fingerprint === lastGoalFingerprint ? stagnantGoalSections + 1 : 1
           lastGoalFingerprint = fingerprint
           if (report.status === 'blocked') {
             // A concrete blocker stops this run; the scheduler must not replay it.
-          } else if (stagnantGoalSections >= 3) {
-            lastGoalReport = {
-              status: 'blocked',
-              summary:
-                'Drei Zielabschnitte ohne erkennbaren Fortschritt. Das Ziel bleibt offen; Voraussetzungen prüfen.',
-            }
           } else if (
             reviewingGoal() &&
             report.status === 'completed' &&
@@ -1707,6 +1741,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
             toolFailures === goalPhaseFailures
           ) {
             goalReviewVerified = true
+          } else if (stagnantGoalSections >= 3) {
+            lastGoalReport = {
+              status: 'blocked',
+              summary:
+                'Drei Zielabschnitte ohne erkennbaren Fortschritt. Das Ziel bleibt offen; Voraussetzungen prüfen.',
+            }
           } else {
             const nextPhase = opts.goalTracking!.phase === 'work' && report.status === 'candidate' ? 'review' : 'work'
             setGoalPhase(nextPhase, nextPhase === 'review' ? content : undefined)
@@ -1750,6 +1790,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         useCase: lastUseCase,
         toolFailures,
         toolSuccesses,
+        progressEvidenceFingerprint,
         ephemeralDataUsed,
         inferenceTarget: inferenceGateway.target,
         routeDecisionId: resolvedRoute.decision?.id,
@@ -1757,7 +1798,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         continuation: pendingVerification && pendingTaskCreateTouched ? checkpoint() : undefined,
         workingContext: resolvedRoute.externalOneShot
           ? undefined
-          : { ...checkpoint(), messages: [...structuredClone(messages), { role: 'assistant', content: finalText }] },
+          : { ...checkpoint(), messages: snapshotMessages([...messages, { role: 'assistant', content: finalText }]) },
         ...(inlineGoal ? { goalReport: lastGoalReport, goalReviewVerified } : {}),
       }
     }
@@ -1844,7 +1885,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           : selectedTool
       const category = tool?.category ?? 'custom'
       const requiresApproval = !!tool?.requiresApproval
-      const dataHandling = tool?.dataHandling ?? 'syncable'
+      const dataHandling =
+        tool?.retentionPolicy && tool.retentionPolicy !== 'syncable' ? 'ephemeral' : (tool?.dataHandling ?? 'syncable')
       const initialStatus =
         requiresApproval && currentMode() === 'unrestricted' ? ('approved' as const) : ('proposed' as const)
 
@@ -2344,7 +2386,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       setLastTool(call.name)
       pulseForCategory(tool.category)
       const toolStarted = performance.now()
-      if (dataHandling === 'ephemeral') ephemeralDataUsed = true
+      if (dataHandling === 'ephemeral') {
+        ephemeralDataUsed = true
+      }
+      dataPolicy = strictestDataPolicy(dataPolicy, tool.retentionPolicy ?? dataHandling)
       if (guardedConversationCreate && conversationCreateOperation) {
         deletePendingCreate(conversationCreateOperation.externalId, 'conversation')
         if (pendingConversationKeyToReplace && pendingConversationKeyToReplace !== guardedConversationCreate.key)
@@ -2398,13 +2443,18 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           executionGate.assert(execution)
           signal.throwIfAborted()
           if (tool.mutating) {
+            if (!operationIds.has(completionKey)) operationIds.set(completionKey, crypto.randomUUID())
             uncertainMutations.add(completionKey)
-            await emitCheckpoint(safeProgressCheckpoint())
+            await emitCheckpoint(safeProgressCheckpoint(), !!opts.effectJournal)
             executionGate.assert(execution)
             signal.throwIfAborted()
           }
           const receipt = tool.mutating
-            ? await opts.effectJournal?.before({ ...call, arguments: executionArguments })
+            ? await opts.effectJournal?.before({
+                ...call,
+                arguments: executionArguments,
+                operationId: operationIds.get(completionKey),
+              })
             : undefined
           let invokedAt: number | undefined
           try {
@@ -2436,8 +2486,17 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         if (outcome.ok) {
           uncertainMutations.delete(completionKey)
           // Repeated identical reads or cached writes cannot renew a goal section.
-          if (![GOAL_REPORT_NAME, 'tools_select', 'agent_assist_status'].includes(call.name))
-            successfulOperations.add(mutationKey(call.name, executionArguments))
+          if (![GOAL_REPORT_NAME, 'tools_select', 'agent_assist_status'].includes(call.name)) {
+            // Host-observed result identity, never model narration or novelty of
+            // requested arguments. Identical empty reads cannot manufacture progress.
+            const receipt = await taskCreateFingerprintHash(
+              JSON.stringify([call.name, tool.mutating ? completionKey : null, outcome.output ?? null])
+            )
+            if (!successfulOperations.has(receipt)) {
+              successfulOperations.add(receipt)
+              progressEvidenceFingerprint = await taskCreateFingerprintHash([...successfulOperations].sort().join('|'))
+            }
+          }
         }
         const completeGoalTextRead =
           call.name !== GOAL_READ_RESULT_NAME ||
@@ -2453,7 +2512,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           goalReadReceipts.push(Object.freeze({ tool: call.name, callId: call.id }))
         }
         if (call.name === 'chat_create' && outcome.ok && guardedConversationCreate) {
-          if (conversationCreateOperation) deletePendingCreate(conversationCreateOperation.externalId, 'conversation')
+          if (conversationCreateOperation)
+            deletePendingCreate(conversationCreateOperation.externalId, 'conversation', true)
           else pendingTaskCreateVerifications.delete(guardedConversationCreate.key)
         }
         if (call.name === 'chat_create' && !outcome.ok) {
@@ -2485,12 +2545,13 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               })
             }
           } else if (guardedConversationCreate) {
-            if (conversationCreateOperation) deletePendingCreate(conversationCreateOperation.externalId, 'conversation')
+            if (conversationCreateOperation)
+              deletePendingCreate(conversationCreateOperation.externalId, 'conversation', true)
             else pendingTaskCreateVerifications.delete(guardedConversationCreate.key)
           }
         }
         if (call.name === 'task_create' && outcome.ok && guardedTaskCreate) {
-          if (taskCreateOperation) deletePendingCreate(taskCreateOperation.externalId, 'task')
+          if (taskCreateOperation) deletePendingCreate(taskCreateOperation.externalId, 'task', true)
           else pendingTaskCreateVerifications.delete(guardedTaskCreate.key)
         }
         if (call.name === 'task_create' && !outcome.ok) {
@@ -2525,7 +2586,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           } else if (guardedTaskCreate) {
             // A definitive rejection means no duplicate can exist. Drop the
             // operation guard so corrected arguments can start a new operation.
-            if (taskCreateOperation) deletePendingCreate(taskCreateOperation.externalId, 'task')
+            if (taskCreateOperation) deletePendingCreate(taskCreateOperation.externalId, 'task', true)
             else pendingTaskCreateVerifications.delete(guardedTaskCreate.key)
           }
         }
@@ -2668,6 +2729,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     requestId: lastRequestId,
     toolFailures,
     toolSuccesses,
+    progressEvidenceFingerprint,
     ephemeralDataUsed,
     inferenceTarget: inferenceGateway.target,
     routeDecisionId: resolvedRoute.decision?.id,

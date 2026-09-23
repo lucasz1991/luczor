@@ -6,6 +6,7 @@ import type { Message } from '@/state/types'
 import { createMaintenanceWorker } from './idleMaintenanceWorker'
 import { loadIdleEmergencyOffloadSetting } from './idleOffloadSetting'
 import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
+import { resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
 import { executionGate } from '@/services/executionGate'
 import { getMemoryPrefs, luczorMemory } from '@/services/memory/luczorMemory'
 import { readLocalModelStatus } from '@/services/localModelStatus'
@@ -85,6 +86,8 @@ export type IdleOptimizationContext = {
   messages?(): Message[]
   busy(): boolean
 }
+export const idleRepositoryPrincipal = (principalId: string): Promise<string> =>
+  principalId === 'device-local' ? resolveWorkspacePrincipalId() : Promise.resolve(principalId)
 export const idleOptimizationDependencies = {
   native: () => typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window,
   account: getVerifiedAccountSnapshot,
@@ -102,10 +105,22 @@ export const idleOptimizationDependencies = {
   candidates: luczorMemory.listCandidates.bind(luczorMemory),
   sharedRecall: luczorMemory.recall.bind(luczorMemory),
   improve: luczorMemory.scheduleImprovement.bind(luczorMemory),
-  graphStatus: repositoryGraphStatus,
-  graphIndex: maintainRepositoryIndex,
-  graphSearch: searchRepository,
-  graphSnippets: readRepositorySnippets,
+  graphStatus: async (...args: Parameters<typeof repositoryGraphStatus>) => {
+    args[0] = await idleRepositoryPrincipal(args[0])
+    return repositoryGraphStatus(...args)
+  },
+  graphIndex: async (...args: Parameters<typeof maintainRepositoryIndex>) => {
+    args[0] = await idleRepositoryPrincipal(args[0])
+    return maintainRepositoryIndex(...args)
+  },
+  graphSearch: async (...args: Parameters<typeof searchRepository>) => {
+    args[0] = await idleRepositoryPrincipal(args[0])
+    return searchRepository(...args)
+  },
+  graphSnippets: async (...args: Parameters<typeof readRepositorySnippets>) => {
+    args[0] = await idleRepositoryPrincipal(args[0])
+    return readRepositorySnippets(...args)
+  },
   remember: luczorMemory.remember.bind(luczorMemory),
   resources: localResources,
 }
@@ -132,13 +147,13 @@ export function createLegacyIdleOptimization(context: IdleOptimizationContext, d
     executionGate.assert(ticket)
     const project = context.project()
     const policy = deps.policy()
-    if (!account || !project || project.archivedAt || policy.mode !== 'active' || !policy.manifest) return null
+    if (!project || project.archivedAt || policy.mode !== 'active' || !policy.manifest) return null
     return {
-      principalId: account.principalId,
+      principalId: account?.principalId ?? 'device-local',
       project,
       key: JSON.stringify([
-        account.principalId,
-        account.serverInstance,
+        account?.principalId ?? 'device-local',
+        account?.serverInstance ?? 'device-local',
         ticket.sessionId,
         ticket.generation,
         project.id,

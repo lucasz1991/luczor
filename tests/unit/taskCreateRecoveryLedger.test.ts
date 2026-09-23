@@ -29,6 +29,32 @@ describe('durable task-create recovery ledger', () => {
     harness.values.clear()
     vi.clearAllMocks()
   })
+  it('merges concurrent chats, writes no unchanged snapshot and cannot resurrect a resolved operation', async () => {
+    const one = {
+      projectId: 'project-a',
+      title: 'One',
+      externalId: firstId,
+      fingerprintHash: 'a'.repeat(64),
+      state: 'unknown' as const,
+    }
+    const two = { ...one, title: 'Two', externalId: secondId, fingerprintHash: 'b'.repeat(64) }
+    await Promise.all([
+      replacePendingTaskCreates('owner', 'project-a', [one]),
+      replacePendingTaskCreates('owner', 'project-a', [two]),
+    ])
+    expect(await loadPendingTaskCreates('owner', 'project-a')).toHaveLength(2)
+    const writes = harness.store.save.mock.calls.length
+    await replacePendingTaskCreates('owner', 'project-a', [one])
+    expect(harness.store.save).toHaveBeenCalledTimes(writes)
+    await replacePendingTaskCreates('owner', 'project-a', [], [one])
+    await replacePendingTaskCreates('owner', 'project-a', [one])
+    expect(await loadPendingTaskCreates('owner', 'project-a')).toEqual([
+      expect.objectContaining({ externalId: secondId }),
+    ])
+    await expect(
+      replacePendingTaskCreates('owner', 'project-a', [{ ...two, fingerprintHash: 'c'.repeat(64) }])
+    ).rejects.toThrow('widersprüchliche')
+  })
 
   it('persists unresolved operations and excludes completed verification state', async () => {
     await replacePendingTaskCreates('server/account-a', 'project-a', [
@@ -60,7 +86,7 @@ describe('durable task-create recovery ledger', () => {
     expect(String(harness.values.get('entries'))).not.toContain('Analyse')
   })
 
-  it('replaces only the selected principal and project partition', async () => {
+  it('never deletes another live operation when a chat submits an empty snapshot', async () => {
     await replacePendingTaskCreates('server/account-a', 'project-a', [
       {
         projectId: 'project-a',
@@ -81,7 +107,9 @@ describe('durable task-create recovery ledger', () => {
     ])
     await replacePendingTaskCreates('server/account-a', 'project-a', [])
 
-    await expect(loadPendingTaskCreates('server/account-a', 'project-a')).resolves.toEqual([])
+    await expect(loadPendingTaskCreates('server/account-a', 'project-a')).resolves.toEqual([
+      expect.objectContaining({ externalId: firstId, title: 'A' }),
+    ])
     await expect(loadPendingTaskCreates('server/account-a', 'project-b')).resolves.toEqual([
       expect.objectContaining({ externalId: secondId, title: 'B' }),
     ])
@@ -183,6 +211,7 @@ describe('durable task-create recovery ledger', () => {
     await loading
     await replacing
     await expect(loadPendingTaskCreates('server/account-a', 'project-a')).resolves.toEqual([
+      expect.objectContaining({ externalId: firstId, title: 'Altbestand' }),
       expect.objectContaining({ externalId: secondId, title: 'Neuer Guard', state: 'verified_absent' }),
     ])
   })

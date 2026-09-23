@@ -28,13 +28,13 @@ async function hash(text: string): Promise<string> {
   const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
   return Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, '0')).join('')
 }
+const preview = new Map<string, EffectRecord>()
 function effectStore(native: boolean): EffectStore {
-  const preview = new Map<string, EffectRecord>()
   return {
     async read(principalId, runId) {
       return native
         ? invoke('device_run_journal_read', { payload: { ownerPrincipalId: principalId, runId } })
-        : (preview.get(runId) ?? null)
+        : (preview.get(`${principalId}\0${runId}`) ?? null)
     },
     async write(record, expectedRevision) {
       const payload = {
@@ -51,9 +51,10 @@ function effectStore(native: boolean): EffectStore {
         return invoke('device_run_journal_transition', {
           payload: { ownerPrincipalId: record.principalId, expectedRevision, record: payload },
         })
-      if ((preview.get(record.runId)?.revision ?? 0) !== expectedRevision) throw new ChatEffectJournalError()
+      const key = `${record.principalId}\0${record.runId}`
+      if ((preview.get(key)?.revision ?? 0) !== expectedRevision) throw new ChatEffectJournalError()
       const next = { ...record, revision: expectedRevision + 1 }
-      preview.set(record.runId, next)
+      preview.set(key, next)
       return next
     },
   }
@@ -65,8 +66,14 @@ export function createChatEffectJournal(
   store: EffectStore = effectStore(isTauri())
 ) {
   return {
-    async before(call: { id: string; name: string; arguments: Record<string, unknown> }) {
-      const fingerprint = await hash(JSON.stringify([owner.runId, call.id]))
+    async before(call: { id: string; name: string; arguments: Record<string, unknown>; operationId?: string }) {
+      const fingerprint = await hash(
+        JSON.stringify(
+          call.operationId
+            ? [owner.principalId, owner.projectId, owner.conversationId, call.operationId]
+            : [owner.runId, call.id]
+        )
+      )
       const payloadHash = await hash(mutationKey(call.name, call.arguments))
       // A stable ID makes an uncertain IPC reply discoverable before any retry.
       const runId = `${fingerprint.slice(0, 8)}-${fingerprint.slice(8, 12)}-4${fingerprint.slice(13, 16)}-a${fingerprint.slice(17, 20)}-${fingerprint.slice(20, 32)}`

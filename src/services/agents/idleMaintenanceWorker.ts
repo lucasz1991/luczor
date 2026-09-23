@@ -26,6 +26,7 @@ import { publicAnswerText } from '@/services/publicAnswerStream'
 import { localFailureTraceCode } from '@/services/inference/localFailure'
 import { IdleContextOptimizer, type IdleOptimizationJob } from './idleContextOptimizer'
 import type { idleOptimizationDependencies } from './idleOptimization'
+import { resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
 import { idleEmergencyOffload } from './idleOffloadSetting'
 import {
   MAINTENANCE_EVALUATION,
@@ -34,6 +35,10 @@ import {
 } from '@/services/memory/maintenanceEvaluation'
 import { canAccessCloudProject } from '@/services/cloudProjectAccess'
 import { inspectRepositoryGraph, type RepositoryGraphStatus } from '@/services/repositoryGraph'
+const inspectIdleRepository: typeof inspectRepositoryGraph = async (...args) => {
+  if (args[0] === 'device-local') args[0] = await resolveWorkspacePrincipalId()
+  return inspectRepositoryGraph(...args)
+}
 import { recordMemoryUsageEvent } from '@/services/memory/usage'
 import { memoryMaintenanceAdapters, writableMaintenanceAdapter } from '@/services/memory/maintenanceAdapters'
 import {
@@ -193,7 +198,7 @@ export function createMaintenanceWorker(
           maxChars: initialChars(),
           now: Date.now(),
           signal,
-          inspect: inspectRepositoryGraph,
+          inspect: inspectIdleRepository,
         })
         work.push(...page.work)
         pendingRepositoryScan ||= page.pendingScan
@@ -217,12 +222,12 @@ export function createMaintenanceWorker(
     const policy = deps.policy()
     signal.throwIfAborted()
     executionGate.assert(ticket)
-    if (!account || policy.mode !== 'active' || !policy.manifest) throw new Error('scope_unavailable')
+    if (policy.mode !== 'active' || !policy.manifest) throw new Error('scope_unavailable')
     return {
-      principalId: account.principalId,
+      principalId: account?.principalId ?? 'device-local',
       boundary: JSON.stringify([
-        account.principalId,
-        account.serverInstance,
+        account?.principalId ?? 'device-local',
+        account?.serverInstance ?? 'device-local',
         ticket.sessionId,
         ticket.generation,
         policy.manifest.payloadSha256,
@@ -358,7 +363,7 @@ export function createMaintenanceWorker(
       signal,
       maxChars: initialChars(),
       now: Date.now(),
-      inspect: inspectRepositoryGraph,
+      inspect: inspectIdleRepository,
     })
   }
   const assertCurrent = async (job: IdleOptimizationJob, signal: AbortSignal) => {
@@ -399,6 +404,7 @@ export function createMaintenanceWorker(
         signal.throwIfAborted()
         batchChars = Math.min(MAINTENANCE_CONTEXT_CHARS, maintenanceBatchChars(status.contextTokens))
         if (!prefs.autoRemember) return no('memory_disabled')
+        if (!running) await luczorMemory.processDeferredCapture(current.principalId, signal)
         if (status.resourceConfig?.pending) return no('resource_switch')
         const reserve = Math.max(4096, (status.resourceConfig?.applied.ramReserveBytes ?? 0) / 1048576)
         const freeRamMiB = metrics.ram_total_mb - metrics.ram_used_mb

@@ -1,355 +1,204 @@
+/* Mini chat shares the workspace palette in both the native window and browser overlay. */
 html.mini-window,
-.mini-window body,
-.mini-window #app {
+html.mini-window body,
+html.mini-window #app {
   background: transparent !important;
-  margin: 0;
   width: 100%;
   height: 100%;
+  min-height: 0;
   overflow: hidden;
 }
 .mini-surface {
-  /* Same aliases as the main workspace; all surfaces inherit the shared theme. */
-  --ai-accent: var(--cy-bright);
-  /* Target size of the fully-opened chats page — shared by the outer fly-out (what animates)
-     and the inner .mini-panel (what must NOT reflow while that animation runs). */
-  --mini-chat-w: min(400px, calc(100vw - 56px));
-  /* Never taller than the room above the (fixed) bottom edge — the icon column must not be pushed. */
-  --mini-pad-v: 12px;
-  --mini-room-h: calc(100vh - var(--mini-bottom, 0px) - var(--mini-pad-v));
-  --mini-chat-h: min(580px, var(--mini-room-h));
-  /* Lets the fly-out's `auto` height take part in the spring (no-op where unsupported). */
-  interpolate-size: allow-keywords;
-  /* The surface box is bigger than the drawn nudge; only the drawn parts may catch the pointer. */
-  pointer-events: none;
+  --ai-accent: var(--cy-bright, #b3a3ec);
   --text-primary: var(--ai-ink);
   --text-secondary: var(--ai-muted);
   --text-muted: var(--ai-muted);
   --text-faint: var(--ai-faint);
   --border-soft: var(--ai-line);
   --surface-1: var(--ai-surface);
+  --mini-chat-w: min(380px, calc(100vw - 24px));
+  --mini-pad-v: 12px;
+  --mini-room-h: calc(100vh - var(--mini-bottom, 0px) - var(--mini-pad-v));
+  --mini-chat-h: min(540px, var(--mini-room-h));
   position: fixed;
   z-index: 800;
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  justify-content: flex-end;
-  /* Shrink-to-fit: the edge box unrolls in-flow, so the surface must grow with it (in-app test
-     surface only — the native window is sized by the backend and fills 100%). */
   width: max-content;
   height: max-content;
-  min-width: 148px;
-  min-height: 184px;
   max-width: 100vw;
-  color: var(--text-primary);
-  font-family: var(--ai-font);
-  font-size: 13px;
-  line-height: 1.5;
+  min-width: 40px;
+  min-height: 146px;
+  pointer-events: none;
+  font: 13px/1.5 var(--ai-font);
+  color: var(--ai-ink);
   letter-spacing: -0.015em;
-  -webkit-user-select: none;
   user-select: none;
 }
 .mini-surface.is-native {
   inset: 0;
   width: 100% !important;
   height: 100% !important;
-  /* Room for the glass shadow below and toward the screen; the docked side stays flush. */
-  padding: 6px 18px 18px;
+  padding: 10px;
+  --mini-pad-v: 20px;
+  --mini-chat-w: calc(100vw - 20px);
+  --mini-chat-h: calc(100vh - 20px);
   box-sizing: border-box;
-  --mini-pad-v: 24px;
-  /* The chat page fills the native window exactly (backend sizes it to 480x640). */
-  --mini-chat-w: calc(100vw - 51px);
-  --mini-chat-h: calc(100vh - 24px);
-}
-/* Flush to the edge: no gap on the side the nudge is docked against. */
-.mini-surface.is-native[data-side='right'] {
-  padding-right: 0;
-}
-.mini-surface.is-native[data-side='left'] {
-  padding-left: 0;
+  justify-content: flex-end;
 }
 .mini-surface[data-side='left'] {
   align-items: flex-start;
 }
 .mini-surface.has-peek {
   width: min(380px, 100vw);
-  height: 370px;
 }
 .mini-surface button:where(:not(.ai-button)) {
-  cursor: pointer;
   font: inherit;
   color: inherit;
   border: 0;
   background: transparent;
+  cursor: pointer;
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 6px;
+  gap: 5px;
 }
 .mini-surface button:disabled {
-  opacity: 0.38;
+  opacity: 0.4;
   cursor: default;
 }
 .mini-surface button:focus-visible,
-.mini-surface [tabindex]:focus-visible,
+.mini-surface summary:focus-visible,
 .mini-surface select:focus-visible,
-.mini-surface textarea:focus-visible {
+.mini-chat-header__drag:focus-visible {
   outline: 2px solid var(--ai-accent);
-  outline-offset: 3px;
+  outline-offset: 2px;
 }
 .mini-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
+  width: var(--mini-chat-w);
+  height: var(--mini-chat-h);
   min-height: 0;
-  /* Fixed to the chats-open target size — not 100% — so it doesn't reflow while the ancestor
-     .mini-grip-panel is still animating its width/height open around it. */
-  width: var(--mini-chat-w, 100%);
-  height: var(--mini-chat-h, 100%);
-  border: 1px solid var(--ai-line-strong);
-  border-radius: 16px;
-  background: var(--ai-page);
-  box-shadow: 0 8px 28px #0004;
   overflow: hidden;
 }
-.mini-header {
+.mini-chat-header {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 12px 12px 9px;
-  border-bottom: 1px solid var(--ai-line);
+  gap: 2px;
+  flex: 0 0 50px;
+  padding: 0 10px;
 }
-.mini-header strong {
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  white-space: nowrap;
-}
-.mini-header strong span {
-  font-weight: 400;
-  color: var(--ai-muted);
-}
-.mini-header > svg {
-  color: var(--ai-accent);
-  flex-shrink: 0;
-}
-.mini-temp {
-  margin-right: auto;
-  color: var(--ai-muted);
-  border: 1px solid var(--ai-line);
-  background: var(--ai-inset);
-  border-radius: 5px;
-  padding: 1px 5px;
-  font-size: 10px;
-}
-.mini-header button,
-.mini-icon {
-  padding: 5px;
-  border-radius: 7px;
-}
-.mini-header button:hover,
-.mini-icon:hover {
-  background: var(--ai-hover);
-}
-.mini-header button[aria-pressed='true'] {
-  color: var(--ai-accent);
-  background: var(--ai-hover);
-}
-.mini-status-strip {
+.mini-chat-header__drag {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 4px 12px;
-  min-height: 40px;
-  flex-shrink: 0;
-}
-.mini-small-orb {
-  width: 32px;
-  flex-shrink: 0;
-}
-.mini-status-strip > div:nth-child(2) {
-  flex: 1;
   min-width: 0;
+  flex: 1;
+  cursor: grab;
+  touch-action: none;
+  border-radius: 8px;
 }
-.mini-status-strip strong {
-  font-size: 12px;
-  display: block;
+.mini-chat-header__drag:active {
+  cursor: grabbing;
 }
-.mini-status-strip span {
-  display: block;
-  color: var(--ai-muted);
-  font-size: 10px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  overflow: hidden;
-}
-.mini-legend {
-  padding: 10px 16px;
-  font-size: 11px;
-  background: var(--ai-canvas);
-  border-block: 1px solid var(--ai-line);
-  overflow: auto;
-  max-height: 175px;
-}
-.mini-legend p {
-  margin: 0 0 7px;
-}
-.mini-context {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 5px 14px;
-  border-block: 1px solid var(--ai-line);
-  font-size: 10.5px;
-  color: var(--ai-muted);
-}
-.mini-context > span {
-  max-width: 220px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.mini-context > button {
-  border: 1px solid var(--ai-line);
-  border-radius: 7px;
-  background: var(--ai-surface);
-  padding: 4px 7px;
+.mini-chat-header__orb {
+  width: 30px;
+  height: 30px;
   flex-shrink: 0;
 }
-.mini-context > button:hover {
-  background: var(--ai-hover);
-}
-.mini-scope-tabs {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 3px;
-  margin: 10px 14px 0;
-  padding: 3px;
-  border: 1px solid var(--ai-line);
-  border-radius: 9px;
-  background: var(--ai-canvas);
-  flex-shrink: 0;
-}
-.mini-scope-tabs button {
-  min-height: 30px;
-  padding: 5px 9px;
-  border-radius: 6px;
-  font-size: 11px;
-  color: var(--ai-muted);
-}
-.mini-scope-tabs button:hover:not(:disabled) {
-  color: var(--ai-ink);
-  background: var(--ai-hover);
-}
-.mini-scope-tabs button[aria-pressed='true'] {
-  color: var(--ai-ink);
-  background: var(--ai-hover);
-  box-shadow: 0 1px 3px #0002;
-}
-.mini-scope-tabs button[aria-pressed='true'] svg {
-  color: var(--ai-accent);
-}
-.mini-chat-picker {
+.mini-chat-header__identity {
   display: flex;
   flex-direction: column;
-  gap: 3px;
-  padding: 5px 14px 0;
-  min-width: 0;
-  flex-shrink: 0;
-}
-.mini-chat-picker:has(.ai-button) {
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-}
-.mini-chat-picker:has(.ai-button) label {
-  flex: 0 0 100%;
-}
-.mini-chat-picker:has(.ai-button) select {
-  flex: 1 1 auto;
   min-width: 0;
 }
-.mini-chat-picker label {
-  font-size: 10px;
-  color: var(--ai-faint);
-}
-.mini-chat-picker select {
-  display: block;
-  width: 100%;
-  min-width: 0;
-  min-height: 26px;
-  padding: 4px 8px;
-  border: 1px solid var(--ai-line);
-  border-radius: 7px;
-  color: var(--ai-ink);
-  background: var(--ai-surface);
-  font: 10.5px var(--ai-font);
+.mini-chat-header__identity strong {
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
   text-overflow: ellipsis;
-  cursor: pointer;
+  white-space: nowrap;
 }
-.mini-chat-picker select:hover:not(:disabled) {
-  border-color: var(--ai-line-strong);
-}
-.mini-chat-picker select:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-.mini-workspace-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 8px 14px 0;
-  flex-shrink: 0;
-}
-.mini-workspace-actions button {
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 29px;
-  padding: 5px 8px;
-  border: 1px solid var(--ai-line);
-  border-radius: 7px;
-  font-size: 10px;
+.mini-chat-header__identity > span {
   color: var(--ai-muted);
-  background: var(--ai-page);
+  font-size: 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.mini-workspace-actions button:hover:not(:disabled) {
-  border-color: var(--ai-line-strong);
+.mini-chat-header__identity > span[data-phase='waiting'] {
+  color: var(--ai-orange);
+}
+.mini-chat-header__identity > span[data-phase='error'],
+.mini-chat-header__identity > span[data-phase='stopped'] {
+  color: var(--ai-red);
+}
+.mini-chat-more {
+  font-size: 10px;
+  letter-spacing: 2px;
+}
+.mini-surface .mini-chat-icon {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  flex-shrink: 0;
+  justify-content: center;
+  border-radius: 7px;
+  color: var(--ai-muted);
+}
+.mini-surface .mini-chat-icon:hover,
+.mini-surface .mini-chat-icon[aria-pressed='true'] {
+  background: var(--ai-hover);
   color: var(--ai-ink);
+}
+.mini-surface .mini-chat-icon[aria-pressed='true'] {
+  color: var(--ai-accent);
+}
+.mini-chat-options {
+  display: grid;
+  gap: 2px;
+}
+.mini-chat-options > p {
+  margin: 3px 8px 6px;
+  color: var(--ai-faint);
+  font-size: 10px;
+}
+.mini-chat-options > button {
+  padding: 8px;
+  border-radius: 6px;
+  gap: 9px !important;
+  text-align: left;
+  font-size: 11px !important;
+}
+.mini-chat-options > button > span {
+  flex: 1;
+}
+.mini-chat-options > button:hover,
+.mini-chat-options > button:focus-visible {
   background: var(--ai-hover);
 }
-.mini-scope-note {
-  margin: 7px 14px 9px;
-  font-size: 10px;
-  line-height: 1.5;
-  color: var(--ai-muted);
-  overflow-wrap: anywhere;
-  flex-shrink: 0;
+.mini-chat-options > button[aria-pressed='true'] > svg {
+  color: var(--ai-accent);
 }
-.mini-project-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 10px;
-  padding: 7px 14px 0;
-  font-size: 10px;
-  color: var(--ai-faint);
-  flex-shrink: 0;
-}
-.mini-project-summary strong {
-  color: var(--ai-muted);
-  font-weight: 500;
+.mini-chat-options__divider {
+  height: 1px;
+  background: var(--ai-line);
+  margin: 5px;
 }
 .mini-panel > .ai-chat {
   flex: 1;
   min-height: 0;
 }
-.mini-surface.has-decision .mini-chat-picker,
-.mini-surface.has-decision .mini-workspace-actions {
-  display: none;
-}
 .mini-panel .ai-thread {
   width: 100%;
-  padding: 15px;
-  gap: 18px;
+  padding: 16px;
+  gap: 20px;
   box-sizing: border-box;
+}
+.mini-panel .ai-thread:has(> .mini-welcome) {
+  min-height: 100%;
+  justify-content: center;
 }
 .mini-panel .ai-chat__messages {
   scrollbar-width: thin;
@@ -361,78 +210,81 @@ html.mini-window,
 }
 .mini-message-label {
   display: block;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--ai-ink);
-  margin-bottom: 8px;
+  font-size: 10px;
+  font-weight: 500;
+  color: var(--ai-muted);
+  margin-bottom: 6px;
 }
 .mini-message.is-user {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
-  padding-top: 4px;
 }
 .mini-message.is-user > p {
   max-width: 88%;
-  padding: 10px 13px;
-  border: 1px solid var(--ai-line);
-  border-radius: 13px 13px 4px 13px;
-  background: var(--ai-surface);
-  line-height: 1.75;
+  padding: 9px 12px;
+  border-radius: 12px 12px 4px 12px;
+  background: var(--ai-hover);
+  line-height: 1.65;
 }
 .mini-message p {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.mini-message .rt {
+.mini-message .rt,
+.mini-message .ai-answer__body,
+.mini-message .ai-answer__question {
   font-size: 12px;
 }
 .mini-message .ai-thinking {
   margin-bottom: 8px;
   font-size: 10px;
 }
-.mini-message .ai-answer__body {
-  font-size: 12px;
-}
-.mini-message .ai-answer__question {
-  font-size: 12px;
+.mini-message .mini-message-status {
+  color: var(--ai-muted);
+  font-size: 11px;
+  margin-bottom: 8px;
 }
 .mini-welcome {
-  padding: 8px 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 12px 6px;
+}
+.mini-welcome > svg {
+  color: var(--ai-accent);
+  margin-bottom: 17px;
 }
 .mini-welcome > strong {
   font-size: 17px;
   font-weight: 500;
-  letter-spacing: -0.035em;
+  letter-spacing: -0.03em;
 }
-.mini-welcome p {
-  margin: 8px 0;
-  font-size: 12px;
+.mini-welcome > p {
+  margin: 6px 0 0;
   color: var(--ai-muted);
-}
-.mini-welcome > small {
-  font-size: 10px;
-  color: var(--ai-faint);
+  font-size: 12px;
 }
 .mini-welcome > div {
   display: flex;
-  flex-wrap: wrap;
-  gap: 7px;
-  margin-top: 18px;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 20px;
+  width: 100%;
 }
-.mini-welcome button,
-.mini-choices button {
-  border: 1px solid var(--ai-line);
-  border-radius: 9px;
-  padding: 7px 10px;
-  font-size: 11px;
+.mini-welcome button {
+  justify-content: space-between;
   text-align: left;
+  padding: 8px 0;
+  font-size: 11px !important;
+  color: var(--ai-muted) !important;
 }
-.mini-welcome button:hover,
-.mini-choices button:hover {
-  background: var(--ai-hover);
-  border-color: var(--ai-line-strong);
+.mini-welcome button + button {
+  border-top: 1px solid var(--ai-line) !important;
+}
+.mini-welcome button:hover {
+  color: var(--ai-ink) !important;
 }
 .mini-choices {
   display: flex;
@@ -441,29 +293,33 @@ html.mini-window,
   margin-top: 10px;
 }
 .mini-choices button {
-  justify-content: space-between;
+  border: 1px solid var(--ai-line) !important;
+  border-radius: 8px;
+  padding: 7px 10px;
+  text-align: left;
+  font-size: 11px !important;
+}
+.mini-choices button:hover {
+  background: var(--ai-hover);
 }
 .mini-tools {
-  padding: 5px 12px;
-  border-top: 1px solid var(--ai-line);
-  max-height: 68px;
+  flex-shrink: 0;
+  max-height: 72px;
   overflow: auto;
-}
-.mini-tools .ai-tool-chip summary {
-  font-size: 10px;
+  padding: 2px 12px;
 }
 .mini-decision {
-  max-height: 230px;
-  overflow: auto;
-  padding: 7px 10px;
   flex-shrink: 0;
+  max-height: min(220px, 38%);
+  overflow: auto;
+  padding: 6px 10px;
 }
 .mini-surface .ai-approval {
-  padding: 12px;
-  border-radius: var(--ai-radius);
+  padding: 10px;
+  border-radius: 10px;
 }
 .mini-surface .ai-approval h3 {
-  font-size: 13px;
+  font-size: 12px;
 }
 .mini-surface .ai-approval p,
 .mini-surface .ai-approval pre {
@@ -474,149 +330,148 @@ html.mini-window,
   overflow: auto;
 }
 .mini-surface .ai-approval__actions {
-  margin-top: 10px;
+  margin-top: 8px;
 }
 .mini-surface .ai-approval .ai-button {
   font-size: 11px;
   padding: 7px 10px;
 }
-.mini-composer {
+.mini-chat-composer {
+  position: relative;
   flex-shrink: 0;
-  margin: 5px 12px 0;
-  padding: 10px;
+  margin: 6px 10px 10px;
+  padding: 10px 9px 6px;
   border: 1px solid var(--ai-line-strong);
+  border-radius: 13px;
   background: var(--ai-surface);
-  border-radius: 16px;
-  box-shadow: 0 2px 8px #0002;
 }
-.mini-composer:focus-within {
-  border-color: var(--ai-faint);
+.mini-chat-composer:focus-within {
+  border-color: color-mix(in srgb, var(--ai-accent) 55%, var(--ai-line-strong));
 }
-.mini-composer textarea {
+.mini-chat-composer textarea {
   display: block;
-  resize: none;
   width: 100%;
-  min-height: 30px;
+  min-height: 40px;
+  max-height: 96px;
+  padding: 0 3px;
+  resize: none;
   box-sizing: border-box;
-  font: inherit;
-  font-size: 12px;
-  line-height: 1.5;
+  font: 12px/1.6 var(--ai-font);
   color: var(--ai-ink);
   background: transparent;
   border: 0;
   outline: none;
   user-select: text;
 }
-.mini-composer textarea::placeholder {
+.mini-chat-composer textarea::placeholder {
   color: var(--ai-faint);
 }
-.mini-composer > div {
+.mini-chat-composer__actions {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.mini-quick-controls {
-  display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-  gap: 5px;
-  padding: 6px 12px 0;
-}
-.mini-quick-controls button,
-.mini-upload {
+  gap: 2px;
   min-width: 0;
-  justify-content: center;
-  gap: 4px;
-  border: 1px solid var(--ai-line);
-  border-radius: 8px;
-  background: var(--ai-inset);
+}
+.mini-chat-composer__spacer {
+  flex: 1;
+}
+.mini-chat-attachment {
+  position: relative;
+  width: 28px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border-radius: 7px;
   color: var(--ai-muted);
-  padding: 5px 4px;
-  font-size: 9.5px;
-  white-space: nowrap;
+  overflow: hidden;
 }
-.mini-quick-controls button:hover,
-.mini-upload:hover,
-.mini-quick-controls button[aria-pressed='true'] {
-  color: var(--ai-ink);
-  border-color: var(--ai-line-strong);
-  background: var(--ai-hover);
-}
-.mini-quick-controls button[aria-pressed='true'] {
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--ai-accent) 38%, transparent);
-}
-.mini-upload {
-  display: inline-flex;
-  align-items: center;
+.mini-chat-attachment input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  opacity: 0;
   cursor: pointer;
 }
-.mini-upload input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-  pointer-events: none;
+.mini-chat-attachment:focus-within {
+  outline: 2px solid var(--ai-accent);
+  outline-offset: -2px;
 }
-.mini-composer small {
-  font-size: 9px;
-  color: var(--ai-faint);
+.mini-chat-attachment:hover {
+  background: var(--ai-hover);
 }
-.mini-composer > div:not(.voice-input-settings) > button {
+.mini-surface .mini-chat-send {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  flex-shrink: 0;
+  justify-content: center;
   border-radius: 50%;
   background: var(--ai-ink);
   color: var(--ai-page);
-  width: 31px;
-  height: 31px;
-  flex-shrink: 0;
-  padding: 0;
+  margin-left: 4px;
 }
-.mini-composer > div:not(.voice-input-settings) > button[type='button'] {
-  border-radius: 9px;
+.mini-surface .mini-chat-send.is-stop {
+  border-radius: 8px;
+  background: var(--ai-accent);
+  color: var(--ai-page);
 }
-.mini-footer {
-  flex-shrink: 0;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  padding: 8px 12px 10px;
-  color: var(--ai-faint);
+.mini-chat-composer .ai-thinking-select__trigger {
+  padding: 0 5px;
+  height: 30px;
+}
+.mini-chat-composer .ai-thinking-select__menu {
+  width: min(248px, calc(var(--mini-chat-w) - 68px));
+  max-height: calc(var(--mini-chat-h) - 140px);
+  overflow-y: auto;
+}
+.mini-panel .mini-chat-composer .voice-input-settings {
+  position: static;
+}
+.mini-chat-composer .voice-settings-panel {
+  left: auto;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: min(310px, 100%);
+  max-height: max(120px, calc(var(--mini-chat-h) - 240px));
+  overflow-y: auto;
+}
+.mini-chat-voice-status {
   font-size: 10px;
-}
-.mini-footer button:hover,
-.mini-copy:hover,
-.mini-read:hover {
-  color: var(--ai-ink);
-}
-.mini-footer button:first-child {
-  margin-right: auto;
-}
-.mini-footer .is-danger {
-  color: var(--ai-red);
+  color: var(--ai-accent);
+  margin: 0 3px 6px;
+  max-height: 50px;
+  overflow: auto;
 }
 .mini-error {
-  padding: 7px 14px;
+  padding: 6px 14px;
   margin: 0;
   font-size: 11px;
   color: var(--ai-red);
   overflow: auto;
   max-height: 65px;
   user-select: text;
+  flex-shrink: 0;
 }
-.mini-reset {
-  background: var(--ai-inset);
-  border-block: 1px solid var(--ai-line);
-  padding: 10px 14px;
-  font-size: 11px;
+.mini-chat-runs {
+  margin: 0 12px;
+  font-size: 10px;
+  max-height: 85px;
+  overflow: auto;
+  flex-shrink: 0;
+  color: var(--ai-muted);
 }
-.mini-reset p {
-  margin: 0 0 7px;
+.mini-chat-runs > summary {
+  cursor: pointer;
+  padding: 5px 0;
 }
-.mini-reset button {
-  padding: 5px 10px;
-  border: 1px solid var(--ai-line-strong);
-  border-radius: 8px;
-  margin-right: 7px;
+.mini-chat-runs > summary > svg {
+  display: inline-block;
+  vertical-align: middle;
+  margin-right: 4px;
 }
+
 /* The nudge is ONE box flush to the screen edge — the icon column sits on the edge, the panel
    unrolls out of it toward the screen, exactly the design board's .nudge (.gcol + .npanel).
    Square on the docked side, rounded on the inner side. */
@@ -1184,4 +1039,50 @@ html.mini-window,
   color: #fca5a5;
   font-size: 9px;
   cursor: pointer;
+}
+
+/* Expanded chat is one quiet window; the edge controls remain available when collapsed. */
+.mini-surface .mini-orb-dock.is-chat-open,
+html[data-theme] .mini-surface .mini-orb-dock.is-chat-open {
+  margin-inline: 10px;
+  border: 1px solid var(--ai-line-strong);
+  border-radius: 16px;
+  background: var(--ai-page);
+  backdrop-filter: none;
+  box-shadow: 0 10px 32px -12px #0004;
+}
+.mini-surface.is-native .mini-orb-dock.is-chat-open {
+  margin-inline: 0;
+}
+.mini-orb-dock.is-chat-open > .mini-grip {
+  display: none;
+}
+.mini-grip-panel.is-chat-open {
+  border: 0;
+}
+.mini-panel .mini-tool-session {
+  color: var(--ai-muted);
+  padding: 4px 0;
+}
+.mini-panel .mini-tool-session button {
+  color: var(--ai-red);
+  border-color: var(--ai-line-strong);
+}
+.mini-surface[data-reduce-motion='true'] * {
+  transition: none !important;
+}
+@media (max-height: 480px) {
+  .mini-chat-header {
+    flex-basis: 42px;
+  }
+  .mini-welcome {
+    padding-block: 0;
+  }
+  .mini-welcome > svg,
+  .mini-welcome > div {
+    display: none;
+  }
+  .mini-chat-composer textarea {
+    min-height: 32px;
+  }
 }

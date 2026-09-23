@@ -10,6 +10,18 @@ import { analyzeMemoryRecords, type MemoryAnalysis } from './memoryAnalysis'
 import { trackMemoryActivity } from './activity'
 import { trackMemoryUsage, type MemoryUsageOrigin } from './usage'
 import { recordMemoryLinks } from './modelActivity'
+import { getMemoryServerCapabilities } from './memoryServerCapabilities'
+import { safeDisjointMetadataMerge } from './metadataConflictMerge'
+import { canReuseMemory, type CaptureCoverage, type CaptureDescriptor } from './memoryPolicy'
+import {
+  emptyMemorySyncState,
+  memorySyncIdentityKey,
+  type MemorySyncIdentity,
+  type MemorySyncState,
+  type MemoryChangePage,
+  type MemoryServerCapabilities,
+  type MemoryDeletionReceipt,
+} from './memorySyncState'
 import { redactAbsoluteFilesystemPaths } from '@/services/prompt/promptContextAssembler'
 import {
   applyMemoryAnnotation,
@@ -77,6 +89,8 @@ export type MemoryRecord = {
   id: string
   principalId: string
   serverId?: string
+  /** Canonical logical identity for feed imports with a distinct, scoped local id. */
+  serverExternalId?: string
   serverVersionId?: number
   expectedPreviousServerVersionId?: number | null
   requiresServerVersionRefresh?: boolean
@@ -174,6 +188,7 @@ type MemoryOutboxEvent = {
   writeSnapshot?: MemoryRecord
   annotation?: MemoryRecord
   attempts: number
+  automaticRebases?: number
   nextAttemptAt: number
   createdAt: number
 }
@@ -187,6 +202,8 @@ type MemoryTombstone = {
   agentId?: string
   sessionId?: string
   createdAt: number
+  /** Feed revocations may be superseded by a newer server event; user erasure may not. */
+  serverSequence?: number
 }
 
 type MemoryState = {
@@ -195,6 +212,9 @@ type MemoryState = {
   outbox: MemoryOutboxEvent[]
   tombstones: MemoryTombstone[]
   maintenance?: Record<string, MaintenanceJournal>
+  captureCoverage?: CaptureCoverage[]
+  captureQueue?: MemoryRecord[]
+  synchronization?: MemorySyncState[]
 }
 
 type WritePlan = {
@@ -235,11 +255,23 @@ function positiveInteger(value: unknown): number | undefined {
 function conflictVersionFromResponse(value: unknown, depth = 0): number | undefined {
   if (depth > 3 || !value || typeof value !== 'object' || Array.isArray(value)) return undefined
   const body = value as Record<string, unknown>
-  for (const candidate of [body.current_memory_id, body.current_memory_link_id, body.source_record_id]) {
+  for (const candidate of [
+    body.current_version_id,
+    body.current_memory_id,
+    body.current_memory_link_id,
+    body.source_record_id,
+  ]) {
     const version = positiveInteger(candidate)
     if (version) return version
   }
-  for (const nested of [body.current_memory, body.current, body.conflict, body.data, body.error]) {
+  for (const nested of [
+    body.metadata_conflict,
+    body.current_memory,
+    body.current,
+    body.conflict,
+    body.data,
+    body.error,
+  ]) {
     const version = conflictVersionFromResponse(nested, depth + 1)
     if (version) return version
   }
@@ -249,11 +281,13 @@ function conflictVersionFromResponse(value: unknown, depth = 0): number | undefi
 type ServerForgetResult = {
   forgotten: boolean
   already_absent: boolean
+  deletion_receipt?: MemoryDeletionReceipt
 }
 
 type MemoryOperationSnapshot = Readonly<{
   principalId: string
   config: LuczorApiConfigSnapshot | null
+  serverInstance?: string
 }>
 
 const SECRET_TERMS = [
@@ -868,6 +902,11 @@ class OfflineMemoryStore {
         record =>
           record.principalId === context.principalId && record.dataset === context.dataset && record.status === 'active'
       )
+      .filter(
+        record =>
+          record.provenance?.reuse_scope !== 'conversation' ||
+          canReuseMemory(record, { conversationId: context.sessionId })
+      )
       .filter(record => !record.expiresAt || record.expiresAt > now)
       .filter(record => !state.tombstones.some(tombstone => tombstone.recordId === record.id))
       .filter(record =>
@@ -879,7 +918,7 @@ class OfflineMemoryStore {
       .map(record => ({ record, rank: memoryRank(record, terms) }))
       .sort(compareRankedMemories)
       .slice(0, limit)
-      .map(item => item.record)
+      .map(item => ({ ...item.record, retrievalScore: item.rank }))
   }
 
   /** Pending local erasure and privacy decisions also govern remote recall. */
@@ -978,18 +1017,13 @@ class OfflineMemoryStore {
           (!record.expiresAt || record.expiresAt > now) &&
           !state.tombstones.some(tombstone => tombstone.recordId === record.id) &&
           !containsSensitiveMemoryData(memoryRecordDlpPayload(record)) &&
-          memoryMetadataOf(record)?.evidence.sources.some(
-            source =>
-              source.kind === 'chat' &&
-              source.conversationId === context.sessionId &&
-              ['user', 'assistant'].includes(source.role ?? '')
-          ) &&
+          canReuseMemory(record, { conversationId: context.sessionId, allowProjectHints: true }) &&
           matchesRecallQuery(record, query, terms)
       )
       .map(record => ({ record, rank: memoryRank(record, terms) }))
       .sort(compareRankedMemories)
       .slice(0, limit)
-      .map(item => item.record)
+      .map(item => ({ ...item.record, retrievalScore: item.rank }))
   }
 
   async capturedChatContents(context: MemoryContext, messageId: string, role: string): Promise<Set<string>> {
@@ -1008,6 +1042,175 @@ class OfflineMemoryStore {
             )
         )
         .map(record => record.content.replace(/\s+/gu, ' ').trim())
+    )
+  }
+
+  async captureBatch(
+    records: MemoryRecord[],
+    descriptor: CaptureDescriptor,
+    assertCurrent?: () => void | Promise<void>
+  ): Promise<number> {
+    return this.mutate(
+      async state => {
+        await assertCurrent?.()
+        state.captureQueue ??= []
+        state.captureCoverage ??= []
+        const existingCoverage = state.captureCoverage.find(
+          item =>
+            item.principalId === descriptor.expectedPrincipalId &&
+            item.projectId === descriptor.projectId &&
+            item.conversationId === descriptor.conversationId &&
+            item.messageId === descriptor.messageId &&
+            item.segmentId === descriptor.segmentId &&
+            item.sourceLength === descriptor.sourceLength
+        )
+        const coverage: CaptureCoverage = {
+          ...descriptor,
+          principalId: descriptor.expectedPrincipalId,
+          updatedAt: Date.now(),
+          spans: [...descriptor.spans],
+        }
+        const storedForMessage = state.records.filter(
+          record =>
+            record.principalId === descriptor.expectedPrincipalId &&
+            record.provenance?.capture_policy === 'chat-excerpts-v1' &&
+            record.provenance?.source_ref === descriptor.messageId &&
+            record.provenance?.conversation_id === descriptor.conversationId
+        ).length
+        let captured = 0
+        for (const record of records) {
+          const start = Number(record.provenance?.source_start ?? 0)
+          const end = Number(record.provenance?.source_end ?? record.content.length)
+          const same = (item: MemoryRecord) =>
+            item.principalId === record.principalId &&
+            item.dataset === record.dataset &&
+            item.contentHash === record.contentHash &&
+            item.source === record.source &&
+            item.provenance?.source_ref === descriptor.messageId &&
+            item.provenance?.conversation_id === descriptor.conversationId
+          const previous = state.records.find(same)
+          const queued: MemoryRecord | undefined = state.captureQueue.find(same)
+          if (previous) {
+            coverage.spans.push({ start, end, status: 'stored', recordId: previous.id })
+            continue
+          }
+          if (
+            queued &&
+            !(record.provenance?.capture_phase === 'completed' && queued.provenance?.capture_phase === 'progress')
+          ) {
+            coverage.spans.push({ start, end, status: 'deferred', reason: 'foreground_quota', recordId: queued.id })
+            continue
+          }
+          const limit = record.provenance?.capture_phase === 'progress' ? 16 : 24
+          if (captured < 8 && storedForMessage + captured < limit) {
+            const stored = queued ?? record
+            state.records.push(stored)
+            if (queued) {
+              state.captureQueue = state.captureQueue.filter(item => item.id !== queued.id)
+              for (const prior of state.captureCoverage)
+                for (const span of prior.spans)
+                  if (span.recordId === queued.id && prior.principalId === descriptor.expectedPrincipalId) {
+                    span.status = 'stored'
+                    delete span.reason
+                  }
+            }
+            coverage.spans.push({ start, end, status: 'stored', recordId: stored.id })
+            captured++
+          } else {
+            if (!queued) state.captureQueue.push(record)
+            coverage.spans.push({
+              start,
+              end,
+              status: 'deferred',
+              reason: 'foreground_quota',
+              recordId: queued?.id ?? record.id,
+            })
+          }
+        }
+        coverage.spans.sort((left, right) => left.start - right.start || left.end - right.end)
+        if (existingCoverage) {
+          const before = JSON.stringify({ ...existingCoverage, updatedAt: 0 })
+          if (before !== JSON.stringify({ ...coverage, updatedAt: 0 })) Object.assign(existingCoverage, coverage)
+        } else state.captureCoverage.push(coverage)
+        await assertCurrent?.()
+        return captured
+      },
+      false,
+      true
+    )
+  }
+
+  async drainCapture(principalId: string, limit: number, assertCurrent?: () => void | Promise<void>): Promise<number> {
+    return this.mutate(
+      async state => {
+        await assertCurrent?.()
+        const selected = (state.captureQueue ?? []).filter(record => record.principalId === principalId).slice(0, limit)
+        for (const record of selected) {
+          const allowed =
+            !containsSensitiveMemoryData(memoryRecordDlpPayload(record)) &&
+            !state.tombstones.some(item => item.recordId === record.id)
+          if (allowed) state.records.push(record)
+          for (const coverage of state.captureCoverage ?? [])
+            for (const span of coverage.spans)
+              if (coverage.principalId === principalId && span.recordId === record.id) {
+                span.status = allowed ? 'stored' : 'excluded'
+                if (allowed) delete span.reason
+                else span.reason = 'erased_or_restricted'
+                coverage.updatedAt = Date.now()
+              }
+        }
+        const ids = new Set(selected.map(record => record.id))
+        state.captureQueue = (state.captureQueue ?? []).filter(record => !ids.has(record.id))
+        await assertCurrent?.()
+        return selected.length
+      },
+      false,
+      true
+    )
+  }
+
+  async captureStatus(principalId: string) {
+    await this.writes
+    const state = await this.load()
+    const records = state.records.filter(record => record.principalId === principalId)
+    return {
+      records: records.length,
+      softLimit: MAX_RECORDS,
+      storageWarning: records.length > MAX_RECORDS,
+      deferred: (state.captureQueue ?? []).filter(record => record.principalId === principalId).length,
+      coverage: (state.captureCoverage ?? []).filter(item => item.principalId === principalId),
+    }
+  }
+
+  async syncSnapshot(identity: MemorySyncIdentity): Promise<MemorySyncState> {
+    await this.writes
+    const state = await this.load()
+    return (
+      (state.synchronization ?? []).find(
+        item => memorySyncIdentityKey(item.identity) === memorySyncIdentityKey(identity)
+      ) ?? emptyMemorySyncState(identity)
+    )
+  }
+
+  async updateSynchronization(
+    identity: MemorySyncIdentity,
+    update: (value: MemorySyncState, state: MemoryState) => void | Promise<void>
+  ) {
+    return this.mutate(
+      async state => {
+        state.synchronization ??= []
+        let value = state.synchronization.find(
+          item => memorySyncIdentityKey(item.identity) === memorySyncIdentityKey(identity)
+        )
+        if (!value) {
+          value = emptyMemorySyncState(identity)
+          state.synchronization.push(value)
+        }
+        await update(value, state)
+        return value
+      },
+      false,
+      true
     )
   }
 
@@ -1104,12 +1307,12 @@ class OfflineMemoryStore {
     })
   }
 
-  async dueOutbox(principalId: string, limit = 20): Promise<MemoryOutboxEvent[]> {
+  async dueOutbox(principalId: string, limit = 20, force = false): Promise<MemoryOutboxEvent[]> {
     const state = await this.load()
     const now = Date.now()
     const importance = new Map(state.records.map(record => [record.id, record.importance]))
     return state.outbox
-      .filter(event => event.principalId === principalId && event.nextAttemptAt <= now)
+      .filter(event => event.principalId === principalId && (force || event.nextAttemptAt <= now))
       .sort(
         (left, right) =>
           Number(right.operation === 'delete') - Number(left.operation === 'delete') ||
@@ -1395,7 +1598,7 @@ class ServerMemoryBackend {
       source_type: record.source,
       source_ref: record.provenance?.source_ref,
       provenance: record.provenance,
-      external_id: record.id,
+      external_id: record.serverExternalId ?? record.id,
       write_id: annotationWriteId ?? record.id,
       expected_previous_id: annotationWriteId
         ? record.serverVersionId
@@ -1409,12 +1612,19 @@ class ServerMemoryBackend {
   }
 
   async supportsMetadata(context: MemoryContext): Promise<boolean> {
-    const result = await this.call<{
-      capabilities?: { memory_metadata_versions?: number[]; memory_metadata_cas?: boolean }
-    }>('/memory/maintenance/status', { scope: context.scope, project_id: context.projectId })
+    const account = await getVerifiedAccountSnapshot()
+    if (
+      !account ||
+      account.principalId !== context.principalId ||
+      account.config.baseUrl !== this.baseUrl ||
+      account.config.deviceKey !== this.deviceKey
+    )
+      return false
+    const capabilities = await getMemoryServerCapabilities(account)
     return (
-      result.capabilities?.memory_metadata_cas === true &&
-      result.capabilities.memory_metadata_versions?.includes(1) === true
+      capabilities.memory_metadata_cas === true &&
+      capabilities.memory_metadata_versions?.includes(1) === true &&
+      (!capabilities.memory_metadata_scopes || capabilities.memory_metadata_scopes.includes(context.scope))
     )
   }
 
@@ -1470,7 +1680,9 @@ class ServerMemoryBackend {
         importance: clamp(Number(item.importance ?? 0.5)),
         priority: memoryPriority(Number(item.importance ?? 0.5)),
         confidence: clamp(Number(item.confidence ?? 0.5)),
-        source: String(item.source ?? 'server'),
+        source: String(
+          (item.provenance as Record<string, unknown> | undefined)?.source_type ?? item.source ?? 'server'
+        ),
         tags: Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === 'string') : [],
         createdAt: parseDate(item.recorded_at) ?? Date.now(),
         updatedAt: parseDate(item.recorded_at) ?? Date.now(),
@@ -1563,7 +1775,7 @@ class ServerMemoryBackend {
 
 export class LuczorMemoryService {
   private offline = new OfflineMemoryStore()
-  private flushing: Promise<void> | null = null
+  private flushing: Promise<number> | null = null
   private sessionSecrets: MemoryRecord[] = []
   private migratedLegacyPrincipals = new Set<string>()
   private syncTimer: ReturnType<typeof setTimeout> | null = null
@@ -1579,9 +1791,11 @@ export class LuczorMemoryService {
 
   /** Main-view worker only. Private source text never enters the settings store or detached windows. */
   async maintenanceSnapshot(expectedPrincipalId: string) {
-    if ((await this.operationSnapshot()).principalId !== expectedPrincipalId) throw new Error('scope_changed')
+    if (((await getVerifiedAccountSnapshot())?.principalId ?? 'device-local') !== expectedPrincipalId)
+      throw new Error('scope_changed')
     const result = await this.offline.maintenanceSnapshot(expectedPrincipalId)
-    if ((await this.operationSnapshot()).principalId !== expectedPrincipalId) throw new Error('scope_changed')
+    if (((await getVerifiedAccountSnapshot())?.principalId ?? 'device-local') !== expectedPrincipalId)
+      throw new Error('scope_changed')
     return result
   }
 
@@ -1640,9 +1854,11 @@ export class LuczorMemoryService {
 
   async updateMaintenance<T>(principalId: string, update: (journal: MaintenanceJournal) => T | Promise<T>): Promise<T> {
     return this.offline.maintenanceTransaction(principalId, async journal => {
-      if ((await getVerifiedAccountSnapshot())?.principalId !== principalId) throw new Error('scope_changed')
+      if (((await getVerifiedAccountSnapshot())?.principalId ?? 'device-local') !== principalId)
+        throw new Error('scope_changed')
       const result = await update(journal)
-      if ((await getVerifiedAccountSnapshot())?.principalId !== principalId) throw new Error('scope_changed')
+      if (((await getVerifiedAccountSnapshot())?.principalId ?? 'device-local') !== principalId)
+        throw new Error('scope_changed')
       return result
     })
   }
@@ -1700,7 +1916,8 @@ export class LuczorMemoryService {
     await this.offline.maintenanceTransaction(input.principalId, async (journal, state) => {
       input.signal.throwIfAborted()
       await input.validate()
-      if ((await getVerifiedAccountSnapshot())?.principalId !== input.principalId) throw new Error('scope_changed')
+      if (((await getVerifiedAccountSnapshot())?.principalId ?? 'device-local') !== input.principalId)
+        throw new Error('scope_changed')
       const job = journal.jobs.find(item => item.id === input.jobId && item.revision === input.revision)
       if (!job || job.status !== 'running') throw new Error('stale_job')
       const records = state.records.filter(record => record.principalId === input.principalId)
@@ -1854,7 +2071,8 @@ export class LuczorMemoryService {
       }
       input.signal.throwIfAborted()
       await input.validate()
-      if ((await getVerifiedAccountSnapshot())?.principalId !== input.principalId) throw new Error('scope_changed')
+      if (((await getVerifiedAccountSnapshot())?.principalId ?? 'device-local') !== input.principalId)
+        throw new Error('scope_changed')
       job.status = 'completed'
       job.updatedAt = Date.now()
       journal.receipts = [
@@ -1913,47 +2131,419 @@ export class LuczorMemoryService {
   }
 
   /** Persisted per-message quotas survive restarts; final results retain room after long progress runs. */
-  captureChatExcerpts(inputs: readonly RememberInput[], assertCurrent?: () => void): Promise<number> {
+  captureChatExcerpts(
+    inputs: readonly RememberInput[],
+    assertCurrent?: () => void,
+    descriptor?: CaptureDescriptor
+  ): Promise<number> {
     const next = this.chatCaptureWrites.then(async () => {
       if (!(await getMemoryPrefs()).autoRemember) return 0
       const first = inputs[0]
-      if (!first?.projectId || !first.sessionId || !first.origin?.messageId || !first.expectedPrincipalId) return 0
+      const capture =
+        descriptor ??
+        (first?.projectId && first.sessionId && first.origin?.messageId && first.expectedPrincipalId
+          ? {
+              expectedPrincipalId: first.expectedPrincipalId,
+              projectId: first.projectId,
+              conversationId: first.sessionId,
+              messageId: first.origin.messageId,
+              segmentId: first.provenance?.source_segment_id as string | undefined,
+              sourceLength: Number(first.provenance?.source_length ?? first.content.length),
+              spans: [],
+            }
+          : undefined)
+      if (!capture) return 0
       const snapshot = await this.operationSnapshot()
-      if (snapshot.principalId !== first.expectedPrincipalId) throw new Error('scope_changed')
-      const context = this.context('project', first, snapshot.principalId)
-      const known = await this.offline.capturedChatContents(context, first.origin.messageId, first.source ?? '')
-      let captured = 0
-      for (const input of inputs.slice(0, 8)) {
+      if (snapshot.principalId !== capture.expectedPrincipalId) throw new Error('scope_changed')
+      const records: MemoryRecord[] = []
+      for (const input of inputs) {
         assertCurrent?.()
         if (
-          input.projectId !== first.projectId ||
-          input.sessionId !== first.sessionId ||
-          input.origin?.messageId !== first.origin.messageId ||
-          input.source !== first.source ||
+          input.projectId !== capture.projectId ||
+          input.sessionId !== capture.conversationId ||
+          input.origin?.messageId !== capture.messageId ||
           input.expectedPrincipalId !== snapshot.principalId ||
-          input.provenance?.capture_policy !== 'chat-excerpts-v1'
+          input.provenance?.capture_policy !== 'chat-excerpts-v1' ||
+          containsSensitiveMemoryData(rememberInputDlpPayload(input))
         )
           continue
-        const identity = input.content.replace(/\s+/gu, ' ').trim()
-        const limit = input.provenance.capture_phase === 'progress' ? 16 : 24
-        if (known.has(identity) || known.size >= limit) continue
-        await this.remember(input)
-        known.add(identity)
-        captured++
+        records.push(
+          await this.buildRecord(
+            { ...input, writeIntent: 'automatic', visibility: 'private', retention: 'durable' },
+            snapshot
+          )
+        )
       }
-      return captured
+      if (((await getVerifiedAccountSnapshot())?.principalId ?? 'device-local') !== snapshot.principalId)
+        throw new Error('scope_changed')
+      return this.offline.captureBatch(records, capture, async () => {
+        assertCurrent?.()
+        if (!(await getMemoryPrefs()).autoRemember) throw new Error('memory_capture_disabled')
+        if (((await getVerifiedAccountSnapshot())?.principalId ?? 'device-local') !== snapshot.principalId)
+          throw new Error('scope_changed')
+        assertCurrent?.()
+      })
     })
     this.chatCaptureWrites = next.catch(() => undefined)
     return next
   }
 
-  private async rememberOperation(input: RememberInput): Promise<MemoryRecord> {
+  async captureStatus(expectedPrincipalId?: string) {
+    const snapshot = await this.operationSnapshot()
+    if (expectedPrincipalId && snapshot.principalId !== expectedPrincipalId) throw new Error('scope_changed')
+    const status = await this.offline.captureStatus(snapshot.principalId)
+    if (((await getVerifiedAccountSnapshot())?.principalId ?? 'device-local') !== snapshot.principalId)
+      throw new Error('scope_changed')
+    return status
+  }
+
+  private async assertSyncIdentity(identity: MemorySyncIdentity) {
+    const account = await getVerifiedAccountSnapshot()
+    if (
+      !account ||
+      account.principalId !== identity.expectedPrincipalId ||
+      account.serverInstance !== identity.serverInstance ||
+      (identity.scope === 'project' && !identity.projectId?.trim())
+    )
+      throw new Error('scope_changed')
+    return account
+  }
+
+  async syncState(identity: MemorySyncIdentity) {
+    await this.assertSyncIdentity(identity)
+    const result = await this.offline.syncSnapshot(identity)
+    await this.assertSyncIdentity(identity)
+    return result
+  }
+
+  async updateSyncState(
+    input: MemorySyncIdentity & {
+      capabilities?: MemoryServerCapabilities
+      lastError?: string | null
+      deletionReceipt?: MemoryDeletionReceipt
+    }
+  ) {
+    await this.assertSyncIdentity(input)
+    return this.offline.updateSynchronization(input, async value => {
+      await this.assertSyncIdentity(input)
+      const before = JSON.stringify({ ...value, updatedAt: 0 })
+      if (input.capabilities) value.capabilities = structuredClone(input.capabilities)
+      if (input.lastError !== undefined)
+        value.lastError = input.lastError
+          ? containsSensitiveMemoryData(input.lastError)
+            ? 'memory_sync_failed'
+            : redactAbsoluteFilesystemPaths(input.lastError).slice(0, 200)
+          : null
+      if (input.deletionReceipt) {
+        value.deletionReceipts = [
+          ...value.deletionReceipts.filter(item => item.id !== input.deletionReceipt!.id),
+          structuredClone(input.deletionReceipt),
+        ]
+      }
+      if (JSON.stringify({ ...value, updatedAt: 0 }) !== before) value.updatedAt = Date.now()
+      await this.assertSyncIdentity(input)
+    })
+  }
+
+  private async remoteMemoryRecord(
+    context: MemoryContext,
+    item: Record<string, unknown> | undefined,
+    recordId: string,
+    versionId: number
+  ): Promise<MemoryRecord> {
+    if (
+      !item ||
+      typeof item.content !== 'string' ||
+      !item.content.trim() ||
+      item.status !== 'active' ||
+      !['syncable', 'public'].includes(String(item.visibility)) ||
+      !['durable', 'permanent'].includes(String(item.retention)) ||
+      !['normal', 'sensitive'].includes(String(item.sensitivity)) ||
+      item.scope !== context.scope ||
+      (context.scope === 'project' && item.project_id !== context.projectId) ||
+      containsSensitiveMemoryData(item) ||
+      containsLocalRepositorySource(item)
+    )
+      throw new Error('invalid_memory_change_scope')
+    return {
+      id: `remote:${await sha256(JSON.stringify([context.dataset, recordId]))}`,
+      serverId: recordId,
+      serverExternalId: recordId,
+      serverVersionId: positiveInteger(versionId),
+      principalId: context.principalId,
+      dataset: context.dataset,
+      scope: context.scope,
+      projectId: context.projectId,
+      content: item.content.trim(),
+      contentHash: await sha256(item.content.trim().replace(/\s+/gu, ' ')),
+      type: String(item.type ?? 'note'),
+      visibility: item.visibility as MemoryVisibility,
+      retention: item.retention as MemoryRetention,
+      sensitivity: item.sensitivity as MemorySensitivity,
+      status: 'active',
+      source: String((item.provenance as Record<string, unknown> | undefined)?.source_type ?? item.source ?? 'server'),
+      writeIntent: ['automatic', 'inferred', 'system', 'explicit', 'confirmed'].includes(String(item.write_intent))
+        ? (item.write_intent as MemoryWriteIntent)
+        : 'confirmed',
+      importance: clamp(Number(item.importance ?? 0.5)),
+      confidence: clamp(Number(item.confidence ?? 0.5)),
+      tags: Array.isArray(item.tags) ? item.tags.filter((tag): tag is string => typeof tag === 'string') : [],
+      meta: item.meta as Record<string, unknown> | undefined,
+      provenance: item.provenance as Record<string, unknown> | undefined,
+      createdAt: parseDate(item.recorded_at) ?? Date.now(),
+      updatedAt: parseDate(item.updated_at) ?? parseDate(item.recorded_at) ?? Date.now(),
+      expiresAt: parseDate(item.expires_at),
+      featureKey: typeof item.feature_key === 'string' ? item.feature_key : undefined,
+      synced: true,
+    }
+  }
+
+  async applyChangeBatch(
+    input: MemorySyncIdentity & {
+      page: MemoryChangePage
+      capabilities?: MemoryServerCapabilities
+      expectedCursor?: string | null
+    }
+  ) {
+    await this.assertSyncIdentity(input)
+    const context = this.context(input.scope, input, input.expectedPrincipalId)
+    if (
+      input.page.version !== 1 ||
+      typeof input.page.cursor !== 'string' ||
+      typeof input.page.reset !== 'boolean' ||
+      !Array.isArray(input.page.changes) ||
+      input.page.changes.length > 100
+    )
+      throw new Error('invalid_memory_change_page')
+    const changes: Array<MemoryChangePage['changes'][number] & { record?: MemoryRecord }> = []
+    for (const change of input.page.changes) {
+      if (
+        !Number.isSafeInteger(change.sequence) ||
+        change.sequence < 0 ||
+        !['upsert', 'delete'].includes(change.operation) ||
+        !change.record_id ||
+        !positiveInteger(change.source_record_id)
+      )
+        throw new Error('invalid_memory_change')
+      let record: MemoryRecord | undefined
+      if (change.operation === 'upsert') {
+        record = await this.remoteMemoryRecord(
+          context,
+          change.memory,
+          change.record_id,
+          Number(change.source_record_id)
+        )
+      }
+      changes.push({ ...change, record })
+    }
+    return this.offline.updateSynchronization(input, async (sync, state) => {
+      await this.assertSyncIdentity(input)
+      if (
+        input.expectedCursor !== undefined &&
+        sync.cursor !== input.expectedCursor &&
+        sync.cursor !== input.page.cursor
+      )
+        throw new Error('stale_memory_cursor')
+      if (sync.cursor === input.page.cursor) return
+      if (input.page.reset) {
+        if (input.expectedCursor !== null) throw new Error('invalid_memory_baseline')
+        // The first page starts a new server baseline. Only disposable, synchronized
+        // mirrors are reset; pending writes and local/private observations survive.
+        const removed = new Set(
+          state.records
+            .filter(
+              record =>
+                record.principalId === context.principalId &&
+                record.dataset === context.dataset &&
+                record.synced &&
+                record.serverId &&
+                isProviderSafeMemoryRecord(record) &&
+                !state.outbox.some(event => event.principalId === context.principalId && event.recordId === record.id)
+            )
+            .map(record => record.id)
+        )
+        state.records = state.records.filter(record => !removed.has(record.id))
+        state.tombstones = state.tombstones.filter(
+          item =>
+            !(
+              item.principalId === context.principalId &&
+              item.scope === context.scope &&
+              item.projectId === context.projectId &&
+              item.serverSequence !== undefined
+            )
+        )
+        const journal = state.maintenance?.[context.principalId]
+        if (journal)
+          journal.artifacts = journal.artifacts.filter(
+            artifact => !artifact.sources.some(source => removed.has(source.id))
+          )
+      }
+      for (const change of changes) {
+        const local = state.records.find(
+          record =>
+            record.principalId === context.principalId &&
+            record.dataset === context.dataset &&
+            (record.serverId === change.record_id || record.id === change.record_id)
+        )
+        if (local?.serverVersionId && local.serverVersionId > Number(change.source_record_id)) continue
+        if (
+          state.tombstones.some(
+            item =>
+              item.principalId === context.principalId &&
+              item.scope === context.scope &&
+              item.projectId === context.projectId &&
+              (item.serverId === change.record_id || item.recordId === change.record_id) &&
+              (item.serverSequence === undefined || item.serverSequence >= change.sequence)
+          )
+        )
+          continue
+        state.tombstones = state.tombstones.filter(
+          item =>
+            !(
+              item.principalId === context.principalId &&
+              item.scope === context.scope &&
+              item.projectId === context.projectId &&
+              (item.serverId === change.record_id || item.recordId === change.record_id) &&
+              item.serverSequence !== undefined &&
+              item.serverSequence < change.sequence
+            )
+        )
+        if (
+          local &&
+          (state.outbox.some(event => event.recordId === local.id && event.principalId === context.principalId) ||
+            !isProviderSafeMemoryRecord(local))
+        ) {
+          sync.metadataConflicts = [
+            ...sync.metadataConflicts.filter(item => item.recordId !== local.id),
+            {
+              recordId: local.id,
+              kind: change.operation === 'delete' ? 'remote_delete' : 'remote_update',
+              local: structuredClone(local),
+              remote: change.record,
+              serverVersionId: Number(change.source_record_id),
+              at: Date.now(),
+            },
+          ]
+          continue
+        }
+        if (local) state.records = state.records.filter(record => record !== local)
+        if (change.record) state.records.push({ ...change.record, id: local?.id ?? change.record.id })
+        else {
+          const recordId = local?.id ?? change.record_id
+          state.tombstones.push({
+            principalId: context.principalId,
+            scope: context.scope,
+            projectId: context.projectId,
+            recordId,
+            serverId: change.record_id,
+            serverSequence: change.sequence,
+            createdAt: Date.now(),
+          })
+          const journal = state.maintenance?.[context.principalId]
+          if (journal)
+            journal.artifacts = journal.artifacts.filter(
+              artifact => !artifact.sources.some(source => source.id === recordId)
+            )
+        }
+      }
+      if (input.capabilities) sync.capabilities = structuredClone(input.capabilities)
+      sync.cursor = input.page.cursor
+      sync.sequence = Math.max(sync.sequence, ...changes.map(change => change.sequence))
+      sync.lastError = null
+      sync.updatedAt = Date.now()
+      await this.assertSyncIdentity(input)
+    })
+  }
+
+  async processDeferredCapture(expectedPrincipalId: string, signal?: AbortSignal): Promise<number> {
+    signal?.throwIfAborted()
+    if (!(await getMemoryPrefs()).autoRemember) return 0
+    const snapshot = await this.operationSnapshot()
+    if (snapshot.principalId !== expectedPrincipalId) throw new Error('scope_changed')
+    return this.offline.drainCapture(snapshot.principalId, 8, async () => {
+      signal?.throwIfAborted()
+      if (!(await getMemoryPrefs()).autoRemember) throw new Error('memory_capture_disabled')
+      if (((await getVerifiedAccountSnapshot())?.principalId ?? 'device-local') !== expectedPrincipalId)
+        throw new Error('scope_changed')
+      signal?.throwIfAborted()
+    })
+  }
+
+  async resolveSyncConflict(
+    identity: MemorySyncIdentity,
+    recordId: string,
+    resolution: 'keep_local' | 'use_server' | 'keep_both'
+  ): Promise<MemorySyncState> {
+    await this.assertSyncIdentity(identity)
+    return this.offline.updateSynchronization(identity, async (sync, state) => {
+      await this.assertSyncIdentity(identity)
+      const conflict = sync.metadataConflicts.find(item => item.recordId === recordId)
+      const local = state.records.find(
+        item => item.id === recordId && item.principalId === identity.expectedPrincipalId
+      )
+      if (!conflict || !local || memoryRevision(local) !== memoryRevision(conflict.local))
+        throw new Error('memory_conflict_changed')
+      if (resolution !== 'keep_local' && conflict.kind !== 'remote_delete' && !conflict.remote)
+        throw new Error('memory_conflict_refresh_required')
+      state.outbox = state.outbox.filter(
+        event => event.recordId !== recordId || event.principalId !== identity.expectedPrincipalId
+      )
+      if (resolution === 'keep_local' && conflict.kind === 'remote_update') {
+        if (!conflict.serverVersionId) throw new Error('memory_conflict_refresh_required')
+        if (!isProviderSafeMemoryRecord(local)) throw new Error('memory_conflict_local_only')
+        local.serverVersionId = conflict.serverVersionId
+        local.synced = false
+        state.outbox.push({
+          ...newOutboxEvent(local.id, 'annotate', local.principalId),
+          annotation: structuredClone(local),
+          writeSnapshot: structuredClone(local),
+        })
+      } else {
+        if (resolution === 'keep_both' || resolution === 'keep_local') {
+          const copy = {
+            ...structuredClone(local),
+            id: uid(),
+            serverId: undefined,
+            serverExternalId: undefined,
+            serverVersionId: undefined,
+            expectedPreviousServerVersionId: undefined,
+            featureKey: undefined,
+            visibility: 'private' as const,
+            synced: false,
+            provenance: { ...local.provenance, conflict_copy_of: recordId },
+            updatedAt: Date.now(),
+          }
+          state.records.push(copy)
+        }
+        state.records = state.records.filter(record => record !== local)
+        if (conflict.remote) state.records.push({ ...structuredClone(conflict.remote), id: local.id })
+        else
+          state.tombstones.push({
+            principalId: local.principalId,
+            scope: local.scope,
+            projectId: local.projectId,
+            recordId: local.id,
+            serverId: local.serverId,
+            createdAt: Date.now(),
+          })
+      }
+      const journal = state.maintenance?.[identity.expectedPrincipalId]
+      if (journal)
+        journal.artifacts = journal.artifacts.filter(
+          artifact => !artifact.sources.some(source => source.id === recordId)
+        )
+      sync.metadataConflicts = sync.metadataConflicts.filter(item => item !== conflict)
+      sync.updatedAt = Date.now()
+      await this.assertSyncIdentity(identity)
+    })
+  }
+
+  private async buildRecord(input: RememberInput, snapshot: MemoryOperationSnapshot): Promise<MemoryRecord> {
     const content = input.content.trim()
     if (!content) throw new Error('Memory content must not be empty.')
     const scope = input.scope ?? 'project'
     const classified = classify(content)
     const plan = planMemoryWrite({ ...input, scope })
-    const snapshot = await this.operationSnapshot()
     const principalId = snapshot.principalId
     if (input.expectedPrincipalId !== undefined && input.expectedPrincipalId !== principalId) {
       throw new Error('The selected memory account changed before the write. Please review the import again.')
@@ -2028,12 +2618,18 @@ export class LuczorMemoryService {
       meta: { ...(input.meta ?? {}), memory_metadata: metadata },
       synced: false,
     }
-    if (plan.sensitivity === 'secret' || containsSensitiveMemoryData(memoryRecordDlpPayload(record))) {
+    return record
+  }
+
+  private async rememberOperation(input: RememberInput): Promise<MemoryRecord> {
+    const snapshot = await this.operationSnapshot()
+    const record = await this.buildRecord(input, snapshot)
+    if (record.sensitivity === 'secret' || containsSensitiveMemoryData(memoryRecordDlpPayload(record))) {
       // Secrets are usable for this process only. Even though the ordinary
       // store is encrypted, credentials must not become durable AI memory.
       record.retention = 'session'
       record.visibility = 'private'
-      record.expiresAt = now + 24 * 60 * 60_000
+      record.expiresAt = Date.now() + 24 * 60 * 60_000
       this.sessionSecrets.push(record)
       return record
     }
@@ -2378,16 +2974,20 @@ export class LuczorMemoryService {
     }
   }
 
-  async flushPendingSync(): Promise<void> {
+  async flushPendingSync(options: { force?: boolean } = {}): Promise<number> {
     if (this.syncTimer !== null) {
       clearTimeout(this.syncTimer)
       this.syncTimer = null
     }
     if (this.flushing) {
+      if (options.force) {
+        await this.flushing
+        return this.flushPendingSync(options)
+      }
       this.syncRequestedDuringFlush = true
       return this.flushing
     }
-    this.flushing = this.flushOutbox().finally(() => {
+    this.flushing = this.flushOutbox(options.force).finally(() => {
       this.flushing = null
       if (this.syncRequestedDuringFlush) {
         this.syncRequestedDuringFlush = false
@@ -2397,12 +2997,14 @@ export class LuczorMemoryService {
     return this.flushing
   }
 
-  private async flushOutbox(): Promise<void> {
+  private async flushOutbox(force = false): Promise<number> {
     const snapshot = await this.operationSnapshot()
     const server = await this.server(snapshot)
-    if (!server) return
+    if (!server) return 0
     const principalId = snapshot.principalId
-    for (const event of await this.offline.dueOutbox(principalId)) {
+    let acknowledged = 0
+    for (const event of await this.offline.dueOutbox(principalId, 20, force)) {
+      let submitted: MemoryRecord | undefined
       try {
         if (event.operation === 'upsert') {
           const currentRecord = await this.offline.recordForOutbox(event.recordId, principalId)
@@ -2431,6 +3033,7 @@ export class LuczorMemoryService {
             continue
           }
           await this.offline.acknowledge(event.id, result.id, result.memory_link_id)
+          acknowledged++
         } else if (event.operation === 'annotate') {
           const record = await this.offline.prepareAnnotation(event.id, principalId)
           if (!record) {
@@ -2443,10 +3046,12 @@ export class LuczorMemoryService {
           if (!(await server.supportsMetadata(this.context(record.scope, record, principalId)))) {
             throw new Error('Server metadata support is unavailable; annotations remain saved locally and pending.')
           }
+          submitted = structuredClone(record)
           const result = await server.remember(record, event.id)
           if (result.persisted === false || !result.memory_link_id || result.decision === 'local_only')
             throw new Error('Server did not acknowledge the metadata version; annotations remain pending.')
           await this.offline.acknowledge(event.id, result.id, result.memory_link_id)
+          acknowledged++
         } else {
           const tombstone = await this.offline.tombstoneForOutbox(event.recordId, principalId)
           if (!tombstone) {
@@ -2457,9 +3062,146 @@ export class LuczorMemoryService {
           if (result.forgotten !== true && result.already_absent !== true) {
             throw new Error('Server did not confirm that the memory was erased or already absent.')
           }
+          if (result.deletion_receipt && ['user', 'project'].includes(context.scope)) {
+            const account = await getVerifiedAccountSnapshot()
+            if (!account || account.principalId !== principalId || account.serverInstance !== snapshot.serverInstance)
+              throw new Error('scope_changed')
+            await this.updateSyncState({
+              expectedPrincipalId: principalId,
+              serverInstance: account.serverInstance,
+              scope: context.scope as 'user' | 'project',
+              projectId: context.projectId,
+              deletionReceipt: result.deletion_receipt,
+            })
+          }
           await this.offline.acknowledge(event.id)
+          acknowledged++
         }
       } catch (error) {
+        if (
+          (event.operation === 'annotate' || event.operation === 'upsert') &&
+          error instanceof MemoryHttpError &&
+          error.status === 409
+        ) {
+          const local = await this.offline.recordForOutbox(event.recordId, principalId)
+          const account = await getVerifiedAccountSnapshot()
+          if (
+            local &&
+            account?.principalId === principalId &&
+            account.serverInstance === snapshot.serverInstance &&
+            ['project', 'user'].includes(local.scope)
+          ) {
+            const conflictBody = (
+              error.responseBody as {
+                metadata_conflict?: {
+                  current_memory?: Record<string, unknown>
+                  can_rebase?: boolean
+                  base_version_id?: number
+                  base_metadata?: unknown
+                  current_metadata?: unknown
+                  base_tags?: string[]
+                  base_importance?: number
+                }
+              }
+            )?.metadata_conflict
+            const version = conflictVersionFromResponse(error.responseBody)
+            const remote =
+              conflictBody?.current_memory && version
+                ? await this.remoteMemoryRecord(
+                    this.context(local.scope, local, principalId),
+                    conflictBody.current_memory,
+                    local.serverId ?? local.id,
+                    version
+                  ).catch(() => undefined)
+                : undefined
+            let rebased = false
+            await this.offline.updateSynchronization(
+              {
+                expectedPrincipalId: principalId,
+                serverInstance: account.serverInstance,
+                scope: local.scope as 'project' | 'user',
+                projectId: local.projectId,
+              },
+              async (sync, state) => {
+                const currentAccount = await getVerifiedAccountSnapshot()
+                if (
+                  currentAccount?.principalId !== principalId ||
+                  currentAccount.serverInstance !== snapshot.serverInstance
+                )
+                  throw new Error('scope_changed')
+                const current = state.records.find(
+                  record => record.id === local.id && record.principalId === principalId
+                )
+                if (
+                  event.operation === 'annotate' &&
+                  !event.automaticRebases &&
+                  submitted &&
+                  remote &&
+                  version &&
+                  conflictBody?.can_rebase === true &&
+                  conflictBody.base_version_id === submitted.serverVersionId &&
+                  current &&
+                  memoryRevision(current) === memoryRevision(submitted) &&
+                  local.contentHash === remote.contentHash &&
+                  JSON.stringify(conflictBody.base_tags) === JSON.stringify(remote.tags) &&
+                  conflictBody.base_importance === remote.importance
+                ) {
+                  const outer = (value: MemoryRecord) =>
+                    JSON.stringify(
+                      Object.fromEntries(
+                        Object.entries(value.meta ?? {})
+                          .filter(([key]) => key !== 'memory_metadata')
+                          .sort(([left], [right]) => left.localeCompare(right))
+                      )
+                    )
+                  const metadata = safeDisjointMetadataMerge(
+                    conflictBody.base_metadata,
+                    memoryMetadataOf(current),
+                    memoryMetadataOf(remote)
+                  )
+                  if (metadata && outer(current) === outer(remote)) {
+                    const merged = {
+                      ...current,
+                      meta: { ...current.meta, memory_metadata: metadata },
+                      serverVersionId: version,
+                      updatedAt: Math.max(Date.now(), current.updatedAt + 1),
+                      synced: false,
+                      syncError: undefined,
+                    }
+                    if (memoryMetadataOf(merged) && !containsSensitiveMemoryData(memoryRecordDlpPayload(merged))) {
+                      Object.assign(current, merged)
+                      state.outbox = state.outbox.filter(item => item.id !== event.id)
+                      state.outbox.push({
+                        ...newOutboxEvent(current.id, 'annotate', principalId),
+                        automaticRebases: 1,
+                        annotation: structuredClone(current),
+                        writeSnapshot: structuredClone(current),
+                      })
+                      sync.metadataConflicts = sync.metadataConflicts.filter(item => item.recordId !== current.id)
+                      rebased = true
+                      return
+                    }
+                  }
+                }
+                sync.metadataConflicts = [
+                  ...sync.metadataConflicts.filter(item => item.recordId !== local.id),
+                  {
+                    recordId: local.id,
+                    kind: 'remote_update',
+                    local: structuredClone(local),
+                    remote,
+                    serverVersionId: version,
+                    at: Date.now(),
+                  },
+                ]
+              }
+            )
+            if (rebased) {
+              this.scheduleSync()
+              continue
+            }
+          }
+        }
         if (event.operation === 'annotate' && error instanceof MemoryHttpError && error.status === 409) {
           await this.offline.fail(
             event.id,
@@ -2481,6 +3223,7 @@ export class LuczorMemoryService {
         await this.offline.fail(event.id, error)
       }
     }
+    return acknowledged
   }
 
   classify = classify
@@ -2610,7 +3353,7 @@ export async function getMemoryPrefs(): Promise<{
   }
 }
 
-async function memoryUseServer(): Promise<boolean> {
+export async function memoryUseServer(): Promise<boolean> {
   try {
     const store = await Store.load(SETTINGS_FILE)
     return (await store.get<boolean>('memory_use_server')) ?? true
@@ -2635,7 +3378,7 @@ function normalizeState(state: MemoryState): MemoryState {
     .filter(record => record.status !== 'superseded' || record.updatedAt > now - 90 * 24 * 60 * 60_000)
     .filter(record => !record.expiresAt || record.expiresAt > now - 7 * 24 * 60 * 60_000)
   const protectedRecords = eligibleRecords.filter(record => protectedRecordIds.has(record.id))
-  const recentRecords = eligibleRecords.filter(record => !protectedRecordIds.has(record.id)).slice(-MAX_RECORDS)
+  const recentRecords = eligibleRecords.filter(record => !protectedRecordIds.has(record.id))
   const pendingDeletes = new Set(
     outbox.filter(event => event.operation === 'delete').map(event => `${event.principalId}:${event.recordId}`)
   )
@@ -2652,6 +3395,9 @@ function normalizeState(state: MemoryState): MemoryState {
   return {
     version: 2,
     maintenance: state.maintenance ?? {},
+    captureCoverage: state.captureCoverage ?? [],
+    captureQueue: state.captureQueue ?? [],
+    synchronization: state.synchronization ?? [],
     records: [...recentRecords, ...protectedRecords].filter(
       (record, index, all) => all.findIndex(candidate => candidate.id === record.id) === index
     ),

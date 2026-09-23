@@ -7,6 +7,7 @@ const STORE_KEY = 'entries'
 const STORE_VERSION = 1
 const ENVELOPE_VERSION = 1
 const MAX_ENTRIES = 500
+const MAX_RESOLVED_ENTRIES = 5_000
 const MAX_ENCRYPTED_BYTES = 1_000_000
 const ADDITIONAL_DATA = new TextEncoder().encode('luczor-task-create-recovery-v1')
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
@@ -14,12 +15,13 @@ const SHA256 = /^[0-9a-f]{64}$/u
 
 type StoredPendingTaskCreate = Omit<
   PendingTaskCreateVerification,
-  'fingerprint' | 'fingerprintHash' | 'taskId' | 'resourceId'
+  'fingerprint' | 'fingerprintHash' | 'taskId' | 'resourceId' | 'state'
 > & {
   kind: 'task' | 'conversation'
   principalScopeId: string
   fingerprintHash: string
   updatedAt: string
+  state: PendingTaskCreateVerification['state'] | 'resolved'
 }
 
 type StoredDocument = {
@@ -67,7 +69,7 @@ function normalize(value: unknown): StoredPendingTaskCreate | null {
     !UUID.test(externalId) ||
     !SHA256.test(fingerprintHash) ||
     (kind !== 'task' && kind !== 'conversation') ||
-    (state !== 'unknown' && state !== 'verified_absent')
+    !['unknown', 'verified_absent', 'verified_present', 'resolved'].includes(String(state))
   )
     return null
   return {
@@ -77,7 +79,7 @@ function normalize(value: unknown): StoredPendingTaskCreate | null {
     title,
     externalId,
     fingerprintHash,
-    state,
+    state: state as StoredPendingTaskCreate['state'],
     updatedAt: text(item.updatedAt, 64) || new Date(0).toISOString(),
   }
 }
@@ -117,7 +119,7 @@ function decodeEntries(raw: unknown): StoredPendingTaskCreate[] {
         : null
       : null
   if (!values) throw new Error('Der task_create-Recovery-Speicher hat ein unbekanntes Format.')
-  if (values.length > MAX_ENTRIES)
+  if (values.length > MAX_ENTRIES + MAX_RESOLVED_ENTRIES)
     throw new Error('Der task_create-Recovery-Speicher überschreitet die zulässige Eintragszahl.')
   const normalized = values.map(normalize)
   if (normalized.some(item => !item))
@@ -126,7 +128,10 @@ function decodeEntries(raw: unknown): StoredPendingTaskCreate[] {
 }
 
 async function encryptEntries(entries: StoredPendingTaskCreate[]): Promise<string> {
-  if (entries.length > MAX_ENTRIES)
+  if (
+    entries.filter(item => item.state !== 'resolved').length > MAX_ENTRIES ||
+    entries.length > MAX_ENTRIES + MAX_RESOLVED_ENTRIES
+  )
     throw new Error('Der task_create-Recovery-Speicher überschreitet die zulässige Eintragszahl.')
   const initializationVector = crypto.getRandomValues(new Uint8Array(12))
   const plaintext = new TextEncoder().encode(
@@ -198,35 +203,46 @@ export function loadPendingTaskCreates(
 ): Promise<PendingTaskCreateVerification[]> {
   return serializeLedgerOperation(async () =>
     (await readEntries())
-      .filter(item => item.principalScopeId === principalScopeId && item.projectId === projectId)
-      .map(({ updatedAt: _updatedAt, kind, ...item }) => (kind === 'conversation' ? { ...item, kind } : item))
+      .filter(
+        item =>
+          item.principalScopeId === principalScopeId &&
+          item.projectId === projectId &&
+          item.state !== 'resolved' &&
+          item.state !== 'verified_present'
+      )
+      .map(({ updatedAt: _updatedAt, kind, state, ...item }) => ({
+        ...item,
+        ...(kind === 'conversation' ? { kind } : {}),
+        state: state as PendingTaskCreateVerification['state'],
+      }))
   )
 }
 
 /**
- * Atomically replace one principal/project partition. The caller awaits this
- * before task_create, so a crash after the POST can always recover its UUID.
+ * Merge exact operations, never replace a project partition from a chat snapshot.
+ * Explicit terminal tombstones prevent a delayed checkpoint resurrecting a
+ * completed operation. Omitting an operation cannot resolve another chat's write.
  */
 export function replacePendingTaskCreates(
   principalScopeId: string,
   projectId: string,
-  pending: readonly PendingTaskCreateVerification[]
+  pending: readonly PendingTaskCreateVerification[],
+  resolved: readonly PendingTaskCreateVerification[] = []
 ): Promise<void> {
   return serializeLedgerOperation(async () => {
     const store = await Store.load(STORE_FILE)
     const raw = await store.get<unknown>(STORE_KEY)
     const existing = await decodeStoredEntries(raw)
-    const retained = existing.filter(item => item.principalScopeId !== principalScopeId || item.projectId !== projectId)
     const now = new Date().toISOString()
-    const unresolved = pending.filter(
+    const incoming = [...pending, ...resolved.map(item => ({ ...item, state: 'verified_present' as const }))].filter(
       item =>
         item.projectId === projectId &&
         (!item.principalScopeId || item.principalScopeId === principalScopeId) &&
-        (item.state === 'unknown' || item.state === 'verified_absent')
+        ['unknown', 'verified_absent', 'verified_present'].includes(item.state)
     )
-    if (unresolved.some(item => !item.fingerprintHash || !SHA256.test(item.fingerprintHash)))
+    if (incoming.some(item => !item.fingerprintHash || !SHA256.test(item.fingerprintHash)))
       throw new Error('Ein Create-Recovery-Eintrag besitzt keinen gültigen Payload-Hash.')
-    const replacement = unresolved
+    const replacement = incoming
       .map(item =>
         normalize({
           kind: item.kind ?? 'task',
@@ -234,15 +250,26 @@ export function replacePendingTaskCreates(
           title: item.title,
           externalId: item.externalId,
           fingerprintHash: item.fingerprintHash,
-          state: item.state,
+          state: item.state === 'verified_present' ? 'resolved' : item.state,
           principalScopeId,
           updatedAt: now,
         })
       )
       .filter((item): item is StoredPendingTaskCreate => !!item)
     const byExternalId = new Map<string, StoredPendingTaskCreate>()
-    for (const item of [...retained, ...replacement])
-      byExternalId.set(`${item.principalScopeId}\u0000${item.projectId}\u0000${item.externalId}`, item)
+    const key = (item: StoredPendingTaskCreate) =>
+      `${item.principalScopeId}\u0000${item.projectId}\u0000${item.kind}\u0000${item.externalId}`
+    for (const item of existing) byExternalId.set(key(item), item)
+    let changed = raw !== undefined && typeof raw !== 'string'
+    for (const item of replacement) {
+      const previous = byExternalId.get(key(item))
+      if (previous && previous.fingerprintHash !== item.fingerprintHash)
+        throw new Error('Die Recovery-Operation besitzt widersprüchliche Payload-Hashes.')
+      if (previous?.state === 'resolved' || (previous?.state === item.state && previous.title === item.title)) continue
+      byExternalId.set(key(item), item)
+      changed = true
+    }
+    if (!changed) return
     await store.set(STORE_KEY, await encryptEntries([...byExternalId.values()]))
     await store.save()
   })

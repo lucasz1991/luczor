@@ -96,6 +96,14 @@ pub struct JournalList {
     transport_jobs_only: bool,
     #[serde(default)]
     pending_lan_replies_only: bool,
+    #[serde(default)]
+    after: Option<JournalCursor>,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct JournalCursor {
+    updated_at: u64,
+    run_id: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -361,12 +369,17 @@ fn list(connection: &Connection, payload: JournalList) -> Result<Vec<StoredRun>,
     if !id(&payload.owner_principal_id)
         || payload.states.len() > 11
         || payload.limit.is_some_and(|limit| limit == 0 || limit > 200)
+        || payload
+            .after
+            .as_ref()
+            .is_some_and(|cursor| !id(&cursor.run_id) || cursor.updated_at > MAX_REVISION)
     {
         return Err("journal_query_invalid".into());
     }
     let mut statement = connection.prepare("SELECT record FROM run_journal WHERE owner=?1 AND (?2 IS NULL OR kind=?2)
             AND (?3='[]' OR state IN (SELECT value FROM json_each(?3))) AND (?5=0 OR json_extract(record,'$.jobId') IS NOT NULL)
             AND (?6=0 OR (json_extract(record,'$.result.lanReply.protocol')='luczor.agent.v1' AND COALESCE(json_extract(record,'$.checkpoint.lastEventSequence'),0)=0))
+            AND (?7 IS NULL OR updated_at < ?7 OR (updated_at = ?7 AND run_id > ?8))
             ORDER BY updated_at DESC,run_id LIMIT ?4")
             .map_err(|_| "journal_read_failed")?;
     let states = serde_json::to_string(&payload.states).map_err(|_| "journal_query_invalid")?;
@@ -378,7 +391,12 @@ fn list(connection: &Connection, payload: JournalList) -> Result<Vec<StoredRun>,
                 states,
                 payload.limit.unwrap_or(100),
                 payload.transport_jobs_only,
-                payload.pending_lan_replies_only
+                payload.pending_lan_replies_only,
+                payload
+                    .after
+                    .as_ref()
+                    .map(|cursor| cursor.updated_at as i64),
+                payload.after.as_ref().map(|cursor| cursor.run_id.as_str())
             ],
             |row| row.get::<_, String>(0),
         )
@@ -393,6 +411,49 @@ fn list(connection: &Connection, payload: JournalList) -> Result<Vec<StoredRun>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn keyset_live_recovery_is_not_hidden_by_recent_terminal_runs() {
+        let mut connection = open(Path::new(":memory:")).unwrap();
+        for index in 0..450 {
+            let mut item = record("owner");
+            item.run_id = format!("run-{index:04}");
+            item.state = if index < 250 {
+                RunState::Running
+            } else {
+                RunState::Completed
+            };
+            put(&mut connection, item, 0).unwrap();
+        }
+        let mut after = None;
+        let mut ids = std::collections::HashSet::new();
+        loop {
+            let page = list(
+                &connection,
+                JournalList {
+                    owner_principal_id: "owner".into(),
+                    kind: Some(RunKind::Chat),
+                    limit: Some(200),
+                    states: vec![RunState::Running],
+                    transport_jobs_only: false,
+                    pending_lan_replies_only: false,
+                    after,
+                },
+            )
+            .unwrap();
+            for item in &page {
+                assert!(ids.insert(item.record.run_id.clone()));
+            }
+            if page.len() < 200 {
+                break;
+            }
+            let last = page.last().unwrap();
+            after = Some(JournalCursor {
+                updated_at: last.updated_at,
+                run_id: last.record.run_id.clone(),
+            });
+        }
+        assert_eq!(ids.len(), 250);
+    }
     fn record(owner: &str) -> RunRecord {
         RunRecord {
             kind: RunKind::Chat,
@@ -525,6 +586,7 @@ mod tests {
                 states: vec![RunState::Completed],
                 transport_jobs_only: false,
                 pending_lan_replies_only: true,
+                after: None,
             },
         )
         .unwrap();

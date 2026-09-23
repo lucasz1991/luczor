@@ -32,6 +32,30 @@ describe('ephemeral tool argument persistence', () => {
     vi.resetAllMocks()
     storage.save.mockResolvedValue(undefined)
   })
+  it('retains local-only answers but persists an explicit gap for truly ephemeral content', () => {
+    const state = appState()
+    state.messages = ['local_only', 'ephemeral'].map((policy, index) => ({
+      id: String(index),
+      projectId: 'default',
+      role: 'assistant',
+      content: `${policy}_CONTENT`,
+      raw: `${policy}_RAW`,
+      parsed: null,
+      visibility: 'visible',
+      ts: 1,
+      createdAt: 1,
+      meta: {
+        dataHandling: 'ephemeral',
+        retentionPolicy: policy as 'local_only' | 'ephemeral',
+        summary: `${policy}_SUMMARY`,
+      },
+    }))
+    const saved = stateForPersistence(state)
+    expect(saved.messages[0]!.content).toBe('local_only_CONTENT')
+    expect(JSON.stringify(saved)).not.toMatch(/ephemeral_CONTENT|ephemeral_RAW|ephemeral_SUMMARY/)
+    expect(saved.messages[1]!.content).toContain('erneut lesen')
+    expect(state.messages[1]!.content).toBe('ephemeral_CONTENT')
+  })
 
   it('restores interrupted public commentary without leaving a running indicator', async () => {
     const state = appState()

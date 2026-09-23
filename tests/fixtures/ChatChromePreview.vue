@@ -29,7 +29,7 @@ applyAppearance()
       </header>
       <ChatComposer>
         <StreamingText
-          content="## Vorschau der Chatoberfläche\n\nTool-Protokoll, Vorleseleiste und Spracheingabe richten sich an der Promptbar aus."
+          :content="'## Vorschau der Chatoberfläche\n\nTool-Protokoll, Vorleseleiste und Spracheingabe richten sich an der Promptbar aus.'"
         />
       </ChatComposer>
       <div class="audit">

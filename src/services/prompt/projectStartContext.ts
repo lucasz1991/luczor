@@ -1,5 +1,6 @@
 import { luczorMemory, type MemoryRecord } from '@/services/memory/luczorMemory'
 import type { MemoryUsageOrigin } from '@/services/memory/usage'
+import { memoryRevision } from '@/services/memory/maintenance'
 import type { ProjectWorkspaceBinding } from '@/services/projectWorkspace'
 import type { Project } from '@/state/types'
 import { canAccessCloudProject } from '@/services/cloudProjectAccess'
@@ -17,6 +18,7 @@ export type ProjectStartContextOptions = {
   memoryLimit?: number
   /** Who reads the memory (shown as such in the knowledge space). */
   memoryOrigin?: MemoryUsageOrigin
+  conversationId?: string
   assembly?: AssemblePromptContextOptions
 }
 
@@ -46,6 +48,7 @@ function memoryFragment(record: MemoryRecord, index: number): PromptFragment {
     priority: Math.round((record.importance * 0.6 + record.confidence * 0.4) * 100),
     provenance: {
       recordId: record.id,
+      revision: memoryRevision(record),
       type: record.type,
       staleness: staleness(record),
       score: record.importance * 0.6 + record.confidence * 0.4,
@@ -156,7 +159,13 @@ export async function buildProjectStartContext(
     const projectLimit = Math.max(1, memoryLimit - userLimit)
     const [userMemory, projectMemory] = await Promise.all([
       dependencies
-        .recall({ scope: 'user', query: '', limit: userLimit, origin: options.memoryOrigin })
+        .recall({
+          scope: 'user',
+          sessionId: options.conversationId,
+          query: '',
+          limit: userLimit,
+          origin: options.memoryOrigin,
+        })
         .catch((): MemoryRecord[] => []),
       dependencies
         .recall({
@@ -165,6 +174,7 @@ export async function buildProjectStartContext(
           query: '',
           limit: projectLimit,
           origin: options.memoryOrigin,
+          sessionId: options.conversationId,
         })
         .catch((): MemoryRecord[] => []),
     ])

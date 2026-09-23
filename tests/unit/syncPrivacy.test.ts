@@ -1,5 +1,8 @@
-import { describe, expect, it } from 'vitest'
-import { messagesForSync, projectsForSync } from '@/services/api/sync'
+import { describe, expect, it, vi } from 'vitest'
+import { messagesForSync, projectsForSync, pushAllToServer } from '@/services/api/sync'
+import { LuczorApi } from '@/services/api/luczorApi'
+import { mutations, state } from '@/state/store'
+import { DEFAULT_STATE } from '@/state/defaults'
 import type { Message } from '@/state/types'
 
 function message(id: string, dataHandling: 'syncable' | 'ephemeral'): Message {
@@ -17,6 +20,27 @@ function message(id: string, dataHandling: 'syncable' | 'ephemeral'): Message {
 }
 
 describe('sync privacy allowlists', () => {
+  it('excludes standalone scopes and their data from the project archive', async () => {
+    mutations.hydrate(structuredClone(DEFAULT_STATE))
+    const existingId = state.projects[0]!.id
+    mutations.addProject({ id: 'personal-chat', name: 'Chat ohne Projekt', kind: 'standalone-chat' })
+    mutations.addMessage(mutations.makeMsg('user', 'Personal conversation', 'personal-chat'))
+    state.summaries.push({ id: 'personal-summary', projectId: 'personal-chat', text: 'Personal summary', createdAt: 1 })
+    expect(projectsForSync(state.projects).some(project => project.id === 'personal-chat')).toBe(false)
+    const config = vi.spyOn(LuczorApi, 'getConfig').mockResolvedValue({ clientId: 'test' } as never)
+    const push = vi.spyOn(LuczorApi, 'syncPush').mockResolvedValue({} as never)
+    try {
+      await pushAllToServer()
+      const payload = JSON.stringify(push.mock.calls[0])
+      expect(payload).not.toContain('personal-chat')
+      expect(payload).not.toContain('Personal conversation')
+      expect(payload).not.toContain('Personal summary')
+      expect(payload).toContain(existingId)
+    } finally {
+      config.mockRestore()
+      push.mockRestore()
+    }
+  })
   it('keeps live and canceled unclassified answers local until final classification', () => {
     const live = {
       ...message('live', 'syncable'),

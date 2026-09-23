@@ -29,6 +29,9 @@ const props = withDefaults(
 // Which egress view to inspect: what the local model receives vs. what an external provider would.
 const target = ref<'local' | 'external'>('local')
 const pkg = computed(() => (props.snapshot ? props.snapshot[target.value] : null))
+const planning = computed(() =>
+  target.value === 'local' ? props.snapshot?.planning?.local : props.snapshot?.planning?.external
+)
 const selectedIds = computed(() => new Set(pkg.value?.selected.map(item => item.id) ?? []))
 const omittedById = computed(() => new Map(pkg.value?.omitted.map(item => [item.id, item.reason]) ?? []))
 const groups = computed(() => {
@@ -52,6 +55,13 @@ const stamp = computed(() =>
     : ''
 )
 function state(fragment: PromptFragment): { label: string; tone: 'in' | 'out' } {
+  if (
+    selectedIds.value.has(fragment.id) &&
+    planning.value?.submitted !== null &&
+    planning.value?.submitted !== undefined &&
+    !planning.value.submittedIds.includes(fragment.id)
+  )
+    return { label: 'im letzten Modellaufruf ausgelassen', tone: 'out' }
   if (selectedIds.value.has(fragment.id)) return { label: 'enthalten', tone: 'in' }
   const reason = omittedById.value.get(fragment.id)
   // `reason` is one of the broker's fixed ContextOmissionReason values.
@@ -106,6 +116,14 @@ const repositoryStatus = computed(() => {
           <dd>{{ snapshot.taskType }}</dd>
         </div>
       </dl>
+      <p v-if="planning" class="context-inspector__hint" aria-label="Kontextauswahl">
+        {{ planning.found }} gefunden · {{ planning.selected }} ausgewählt ·
+        {{ planning.submitted === null ? 'noch nicht übergeben' : `${planning.submitted} tatsächlich übergeben` }} ·
+        {{ planning.omitted }} bei der Auswahl ausgelassen. Kontextbudget ≈
+        {{ planning.contextBudgetTokens.toLocaleString('de-DE') }} Tokens ({{
+          planning.windowKnown ? 'Modellfenster' : 'vorsichtige Schätzung, Modellfenster unbekannt'
+        }}: {{ planning.windowTokens.toLocaleString('de-DE') }}).
+      </p>
       <div v-if="snapshot.retrieval" class="context-inspector__hint" aria-label="Automatische Kontextsuche">
         <p v-if="snapshot.retrieval.repositoryDiagnostics">
           {{ repositoryStatus }} · {{ snapshot.retrieval.repositoryDiagnostics.matchedFiles }} Dateitreffer,
@@ -188,7 +206,7 @@ const repositoryStatus = computed(() => {
         :open="showRaw"
         @toggle="showRaw = ($event.target as HTMLDetailsElement).open"
       >
-        <summary>Übergebener Kontextblock ({{ target === 'local' ? 'lokal' : 'extern' }})</summary>
+        <summary>Ausgewählter Kontextblock ({{ target === 'local' ? 'lokal' : 'extern' }})</summary>
         <pre>{{ pkg?.text || '— leer —' }}</pre>
       </details>
     </template>

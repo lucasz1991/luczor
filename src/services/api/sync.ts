@@ -22,7 +22,10 @@ export type ConnectionResult = { ok: boolean; message: string }
 /** Explicit allowlist: native repository paths/graph metadata must never sync. */
 export function projectsForSync(projects: unknown[]): Array<Record<string, unknown>> {
   return projects
-    .filter(project => !(project as { cloud?: unknown } | null)?.cloud)
+    .filter(project => {
+      const value = project as { cloud?: unknown; kind?: string } | null
+      return !value?.cloud && value?.kind !== 'standalone-chat'
+    })
     .map(project => {
       const value = (project ?? {}) as Record<string, unknown>
       return plain({
@@ -67,15 +70,17 @@ export async function testConnection(): Promise<ConnectionResult> {
 /** Push the entire local state as an idempotent batch. */
 export async function pushAllToServer(): Promise<SyncPushResponse> {
   const cfg = await LuczorApi.getConfig()
-  const cloudIds = new Set(state.projects.filter(project => project.cloud).map(project => project.id))
+  const excludedIds = new Set(
+    state.projects.filter(project => project.cloud || project.kind === 'standalone-chat').map(project => project.id)
+  )
   return LuczorApi.syncPush({
     client_id: cfg.clientId,
     projects: projectsForSync(state.projects ?? []),
-    messages: messagesForSync((state.messages ?? []).filter(message => !cloudIds.has(message.projectId))),
+    messages: messagesForSync((state.messages ?? []).filter(message => !excludedIds.has(message.projectId))),
     memories: plain(
-      (state.global?.memories ?? []).filter(memory => !memory.projectId || !cloudIds.has(memory.projectId))
+      (state.global?.memories ?? []).filter(memory => !memory.projectId || !excludedIds.has(memory.projectId))
     ),
-    summaries: plain((state.summaries ?? []).filter(summary => !cloudIds.has(summary.projectId))),
+    summaries: plain((state.summaries ?? []).filter(summary => !excludedIds.has(summary.projectId))),
   })
 }
 

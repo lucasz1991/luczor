@@ -19,6 +19,76 @@ function deferred() {
 const input = (conversationId: string) => ({ principalId: 'person', projectId: 'project', conversationId })
 
 describe('persistent chat run owner', () => {
+  it('does not publish a delayed recovery transition after its account boundary changed', async () => {
+    const storage = createChatRunJournal(false)
+    const old = {
+      ...input('old-chat'),
+      kind: 'chat' as const,
+      runId: 'old-run',
+      state: 'running' as const,
+      revision: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    }
+    await storage.write(old, 0)
+    const delayed = deferred()
+    let current = true
+    let transitionStarted = false
+    const manager = createChatRunManager({
+      ...storage,
+      write: async (record, revision) => {
+        transitionStarted = true
+        await delayed.promise
+        return storage.write(record, revision)
+      },
+    })
+    const recovery = manager
+      .recover('person', () => {
+        if (!current) throw new Error('identity_changed')
+      })
+      .catch(error => error as Error)
+    await vi.waitFor(() => expect(transitionStarted).toBe(true))
+    current = false
+    delayed.resolve()
+    expect(await recovery).toMatchObject({ message: 'identity_changed' })
+    expect(manager.records.value).toEqual([])
+  })
+  it('releases all four approval slots and fairly reacquires before work, draining a cancelled resumer', async () => {
+    const manager = createChatRunManager(createChatRunJournal(false), 4)
+    const approvals = Array.from({ length: 4 }, () => deferred())
+    const finishing = deferred()
+    const waiting = new Set<number>()
+    const resumed = new Set<number>()
+    const turns = approvals.map((approval, index) =>
+      manager
+        .submit({ ...input(`approval-${index}`), runId: `approval-${index}` }, async handle => {
+          await handle.setWaiting('approval')
+          waiting.add(index)
+          await approval.promise
+          await handle.setWaiting(null)
+          resumed.add(index)
+          await finishing.promise
+        })
+        .catch(error => error)
+    )
+    await vi.waitFor(() => expect(waiting.size).toBe(4))
+    const interactiveDone = deferred()
+    const interactiveStarted = vi.fn()
+    const interactive = manager.submit({ ...input('interactive'), runId: 'interactive' }, async () => {
+      interactiveStarted()
+      await interactiveDone.promise
+    })
+    await vi.waitFor(() => expect(interactiveStarted).toHaveBeenCalledOnce())
+    approvals.forEach(approval => approval.resolve())
+    await vi.waitFor(() => expect(resumed.size).toBe(3))
+    const suspended = [0, 1, 2, 3].find(index => !resumed.has(index))!
+    expect(await manager.stop(`approval-${suspended}`)).toMatchObject({ settled: true })
+    expect(resumed.has(suspended)).toBe(false)
+    interactiveDone.resolve()
+    finishing.resolve()
+    await Promise.all([...turns, interactive])
+    expect(manager.hasLive()).toBe(false)
+  })
   it('bounds a stuck worker stop and ignores late completion after native-confirmed recovery', async () => {
     vi.useFakeTimers()
     try {

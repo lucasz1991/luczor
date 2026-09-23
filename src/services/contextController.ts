@@ -15,6 +15,7 @@ import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/serv
 import { luczorMemory, type MemoryRecord } from '@/services/memory/luczorMemory'
 import { sessionCandidateFragments } from '@/services/memory/chatContext'
 import { preparedContextFragments } from '@/services/memory/preparedContext'
+import { memoryRevision } from '@/services/memory/maintenance'
 import type { MemoryUsageOrigin } from '@/services/memory/usage'
 import { resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
 import {
@@ -117,13 +118,33 @@ export async function buildLocalPromptContextDetails(
   const groupsPromise = includeMemory
     ? Promise.all([
         luczorMemory
-          .recallLocal({ scope: 'project', projectId, query: memoryQuery, limit: memoryLimit, origin })
+          .recallLocal({
+            scope: 'project',
+            projectId,
+            sessionId: options.conversationId,
+            query: memoryQuery,
+            limit: memoryLimit,
+            origin,
+          })
           .catch(() => []),
         luczorMemory
-          .recallLocal({ scope: 'user', query: memoryQuery, limit: Math.min(2, memoryLimit), origin })
+          .recallLocal({
+            scope: 'user',
+            sessionId: options.conversationId,
+            query: memoryQuery,
+            limit: Math.min(2, memoryLimit),
+            origin,
+          })
           .catch(() => []),
         luczorMemory
-          .recallLocal({ scope: 'private', projectId, query: memoryQuery, limit: Math.min(2, memoryLimit), origin })
+          .recallLocal({
+            scope: 'private',
+            projectId,
+            sessionId: options.conversationId,
+            query: memoryQuery,
+            limit: Math.min(2, memoryLimit),
+            origin,
+          })
           .catch(() => []),
       ])
     : Promise.resolve([[], [], []] as [MemoryRecord[], MemoryRecord[], MemoryRecord[]])
@@ -177,6 +198,8 @@ export async function buildLocalPromptContextDetails(
         content: record.content,
         provenance: {
           recordId: record.id,
+          revision: memoryRevision(record),
+          score: record.retrievalScore,
           type: record.type,
           source: record.source,
           confidence: record.confidence,

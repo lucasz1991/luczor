@@ -2,6 +2,7 @@ import type { Message, Project } from '@/state/types'
 import type { MemoryRecord } from './luczorMemory'
 import { canAccessCloudProject } from '@/services/cloudProjectAccess'
 import { memoryMetadataOf, needsMemoryAnnotation } from './memoryMetadata'
+import { memoryCanPrepareProjectContext, memoryReuse } from './memoryPolicy'
 import {
   MAINTENANCE_BATCH_CHARS,
   maintenanceEligible,
@@ -14,6 +15,52 @@ import {
 } from './maintenance'
 
 export type HydratedMaintenanceJob = MaintenanceJob & { material: MaintenanceSource[] }
+
+/** Stable thematic identity groups corrections with their subject, never with arbitrary UUID neighbours. */
+export function memoryConsolidationKey(record: MemoryRecord): string {
+  const metadata = memoryMetadataOf(record)
+  const subject =
+    record.featureKey ||
+    metadata?.files
+      .map(file => `${file.repositoryId ?? ''}:${file.path}`)
+      .sort()
+      .join('|') ||
+    metadata?.categories
+      .map(category => category.id)
+      .sort()
+      .join('|') ||
+    (record.content.toLocaleLowerCase().match(/[\p{L}\p{N}_-]{4,}/gu) ?? [])
+      .filter(
+        word =>
+          ![
+            'diese',
+            'dieser',
+            'einer',
+            'eine',
+            'wurde',
+            'werden',
+            'jetzt',
+            'vorher',
+            'nicht',
+            'statt',
+            'korrektur',
+            'correction',
+            'fehler',
+            'updated',
+            'previous',
+            'using',
+            'uses',
+            'project',
+            'projekt',
+            'neuer',
+            'neue',
+          ].includes(word)
+      )
+      .slice(0, 2)
+      .join('|') ||
+    'general'
+  return JSON.stringify([memoryReuse(record), subject])
+}
 export const memoryMaintenanceSource = (record: MemoryRecord): MaintenanceSource => ({
   id: record.id,
   kind: 'memory',
@@ -88,11 +135,18 @@ export async function planMaintenance(input: {
         record =>
           record.principalId === input.principalId &&
           maintenanceEligible(record, input.now, true) &&
+          memoryCanPrepareProjectContext(record) &&
           (project ? record.projectId === (project.cloud?.externalId ?? project.id) : !record.projectId)
       )
-      .sort((left, right) => left.id.localeCompare(right.id))
+      .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
     const partitionKey = (record: MemoryRecord) =>
-      JSON.stringify([record.dataset, record.visibility, !!record.synced, record.tags.includes('maintenance-derived')])
+      JSON.stringify([
+        record.dataset,
+        record.visibility,
+        !!record.synced,
+        record.tags.includes('maintenance-derived'),
+        memoryConsolidationKey(record),
+      ])
     const partitions = [...new Set(records.map(partitionKey))]
     for (const partitionId of partitions) {
       const partition = records.filter(record => partitionKey(record) === partitionId)
@@ -114,7 +168,7 @@ export async function planMaintenance(input: {
         await append(`context:${project?.id ?? 'user'}:${dataset}:${material[0]!.id}`, 'context', project?.id, material)
       }
     }
-    if (!project) continue
+    if (!project || project.kind === 'standalone-chat') continue
     const content = JSON.stringify({
       name: project.name,
       goal: project.goal,

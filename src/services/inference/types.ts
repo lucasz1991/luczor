@@ -64,6 +64,8 @@ export type InferenceResult = {
 }
 
 export type InferenceRequest = {
+  /** Host scheduler metadata, excluded from provider bodies. */
+  schedulingClass?: 'foreground' | 'goal' | 'background'
   /** Numeric planning diagnostics only; never serialized to a provider. */
   contextBudget?: import('./contextBudget').ContextBudgetReport
   /** Local diagnostics only, never serialized into the provider request. */

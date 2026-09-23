@@ -9,6 +9,7 @@ const fixture = vi.hoisted(() => ({
   journal: null as MaintenanceJournal | null,
   writes: [] as string[],
   apply: vi.fn(),
+  drain: vi.fn(async () => 0),
   records: [] as MemoryRecord[],
   beforeUpdate: null as (() => Promise<void>) | null,
   afterUpdate: null as (() => Promise<void>) | null,
@@ -18,6 +19,7 @@ vi.mock('@/services/executionGate', () => ({
 }))
 vi.mock('@/services/memory/luczorMemory', () => ({
   luczorMemory: {
+    processDeferredCapture: fixture.drain,
     maintenanceSnapshot: async () => ({
       journal: structuredClone(fixture.journal),
       records: structuredClone(fixture.records),
@@ -99,6 +101,7 @@ beforeEach(() => {
   fixture.beforeUpdate = null
   fixture.afterUpdate = null
   fixture.apply.mockReset()
+  fixture.drain.mockClear()
 })
 afterEach(() => {
   vi.clearAllTimers()
@@ -111,6 +114,24 @@ async function run(optimizer: ReturnType<typeof createMaintenanceWorker>) {
   await vi.waitFor(() => expect(['cooldown', 'paused']).toContain(optimizer.snapshot().phase))
 }
 describe('mounted persistent maintenance worker', () => {
+  it('drains guest capture locally only with an active runtime policy', async () => {
+    const testCase = setup()
+    testCase.deps.account = async () => null
+    const worker = testCase.create()
+    worker.start()
+    worker.requestNow()
+    await vi.advanceTimersByTimeAsync(2)
+    await vi.waitFor(() => expect(fixture.drain).toHaveBeenCalledWith('device-local', expect.any(AbortSignal)))
+    await worker.stop()
+    fixture.drain.mockClear()
+    testCase.deps.policy = () => ({ mode: 'blocked' }) as ReturnType<typeof testCase.deps.policy>
+    const blocked = testCase.create()
+    blocked.start()
+    blocked.requestNow()
+    await vi.advanceTimersByTimeAsync(2)
+    expect(fixture.drain).not.toHaveBeenCalled()
+    await blocked.stop()
+  })
   it.each(['beforeUpdate', 'afterUpdate'] as const)(
     'fences a late %s transaction from replacing the recovered dream state',
     async checkpoint => {

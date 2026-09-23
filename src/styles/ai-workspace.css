@@ -113,6 +113,8 @@
   display: none;
 }
 .header {
+  position: relative;
+  z-index: 20;
   min-height: 72px;
   padding: 12px 26px;
   border-bottom: 1px solid var(--ai-line);

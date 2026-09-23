@@ -5,6 +5,44 @@ import ts from 'typescript'
 import { stopCapturedChatRun, type ChatStopSnapshot } from '@/services/chatRunLifecycle'
 import { executionAbortReason } from '@/services/inference/interruption'
 import { isSilentLocalResponseFailure } from '@/services/inference/localResponseGuard'
+import { ExecutionGate } from '@/services/executionGate'
+
+function executeRuntimeRecovery(context: Record<string, unknown>) {
+  const app = readFileSync('src/App.vue', 'utf8')
+  const start = app.indexOf('let stopRunRecoveryListeners:')
+  const source = app.slice(start, app.indexOf('\nonBeforeUnmount', start))
+  let result!: Promise<void>
+  runInNewContext(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, {
+    getLocalSpeechConsent: async () => undefined,
+    refreshPlanPrincipal: vi.fn(),
+    stopAllVoice: vi.fn(),
+    stopVoiceInputForSettings: vi.fn(),
+    window: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
+    executionGate: new ExecutionGate(),
+    mutations: { getConversation: vi.fn() },
+    hud: { killSwitch: false },
+    ...context,
+    onMounted: (callback: () => Promise<void>) => {
+      result = callback()
+    },
+  })
+  return result
+}
+
+function workingContextFunction(name: string, context: Record<string, unknown>) {
+  const app = readFileSync('src/App.vue', 'utf8')
+  const start = app.indexOf(`async function ${name}(`)
+  const end =
+    name === 'prepareWorkingContext'
+      ? app.indexOf('\nasync function restoreWorkingContexts', start)
+      : app.indexOf('\ntype CapturedChatTurn', start)
+  return runInNewContext(
+    ts.transpileModule(app.slice(start, end) + `\n${name}`, {
+      compilerOptions: { target: ts.ScriptTarget.ES2022 },
+    }).outputText,
+    context
+  )
+}
 
 function deferred() {
   let resolve!: () => void
@@ -43,6 +81,225 @@ function fixture(controller: AbortController | null = new AbortController()) {
     },
   }
 }
+
+describe('working-context recovery identity boundaries', () => {
+  it.each(['principal', 'workspace', 'archive'])('rejects an identity change during %s preparation', async stage => {
+    const gate = new ExecutionGate()
+    const waiting = deferred()
+    const prepareResume = vi.fn(async () => {
+      if (stage === 'archive') await waiting.promise
+      return { status: 'ready', checkpoint: {} }
+    })
+    const getProjectWorkspace = vi.fn(async () => {
+      if (stage === 'workspace') await waiting.promise
+      return { status: 'ready', rootPath: '/synthetic', updatedAt: 1 }
+    })
+    const currentArchivePrincipal = vi.fn(async () => {
+      if (stage === 'principal') await waiting.promise
+      return 'person'
+    })
+    const prepare = workingContextFunction('prepareWorkingContext', {
+      executionGate: gate,
+      currentArchivePrincipal,
+      isTauri: () => true,
+      getProjectWorkspace,
+      runCoordinator: { prepareResume },
+    })
+    const pending = prepare({ scope: { principalId: 'person', projectId: 'p' }, messageId: 'answer' })
+    const probe =
+      stage === 'archive' ? prepareResume : stage === 'workspace' ? getProjectWorkspace : currentArchivePrincipal
+    await vi.waitFor(() => expect(probe).toHaveBeenCalledOnce())
+    gate.invalidate()
+    waiting.resolve()
+    await expect(pending).rejects.toThrow('Ausführung verworfen')
+    expect(prepareResume).toHaveBeenCalledTimes(stage === 'archive' ? 1 : 0)
+  })
+
+  function restoreFixture() {
+    const gate = new ExecutionGate()
+    const goal = {
+      text: 'Synthetisches Ziel',
+      active: false,
+      status: 'waiting',
+      revision: 2,
+      iterations: 1,
+      lastMessageId: 'answer',
+      updatedAt: 1,
+    }
+    const chat = { id: 'chat', projectId: 'p', autonomousGoal: goal }
+    const reference = {
+      scope: { principalId: 'person', projectId: 'p', conversationId: 'chat', runId: 'run' },
+      messageId: 'answer',
+      state: 'working',
+      updatedAt: 2,
+    }
+    const context = {
+      executionGate: gate,
+      currentArchivePrincipal: async () => 'person',
+      runCoordinator: { listRecoverable: vi.fn(async () => [reference]) },
+      state: { projects: [{ id: 'p' }], conversations: [chat], messages: [{ id: 'answer', conversationId: 'chat' }] },
+      mutations: { getConversation: () => chat },
+      canAccessCloudProject: () => true,
+      continuations: { value: {} },
+      goalWorkingContexts: new Map(),
+      prepareWorkingContext: vi.fn(async (): Promise<void> => undefined),
+    }
+    return { gate, goal, chat, context, restore: workingContextFunction('restoreWorkingContexts', context) }
+  }
+
+  it.each(['listing', 'preparation'])(
+    'publishes no stale references or goals after identity changes during %s',
+    async stage => {
+      const { gate, chat, context, restore } = restoreFixture()
+      const waiting = deferred()
+      if (stage === 'listing')
+        context.runCoordinator.listRecoverable.mockImplementation(async () => {
+          await waiting.promise
+          return []
+        })
+      else context.prepareWorkingContext.mockImplementation(() => waiting.promise)
+      const pending = restore(new Map([['chat', 2]]), gate.capture())
+      await vi.waitFor(() =>
+        expect(
+          stage === 'listing' ? context.runCoordinator.listRecoverable : context.prepareWorkingContext
+        ).toHaveBeenCalledOnce()
+      )
+      gate.invalidate()
+      const newGoal = { ...chat.autonomousGoal, revision: 3 }
+      chat.autonomousGoal = newGoal
+      waiting.resolve()
+      await expect(pending).rejects.toThrow('Ausführung verworfen')
+      expect(chat.autonomousGoal).toBe(newGoal)
+      expect(context.continuations.value).toEqual({})
+      expect(context.goalWorkingContexts.size).toBe(0)
+    }
+  )
+
+  it('preserves a newer user goal revision while preparing an otherwise valid archive', async () => {
+    const { gate, chat, context, restore } = restoreFixture()
+    const waiting = deferred()
+    context.prepareWorkingContext.mockImplementation(() => waiting.promise)
+    const pending = restore(new Map([['chat', 2]]), gate.capture())
+    await vi.waitFor(() => expect(context.prepareWorkingContext).toHaveBeenCalledOnce())
+    const edited = { ...chat.autonomousGoal, revision: 3, text: 'Geändertes Ziel' }
+    chat.autonomousGoal = edited
+    waiting.resolve()
+    await pending
+    expect(chat.autonomousGoal).toBe(edited)
+  })
+
+  it('does not publish another principal archive even if a stale provider returns it', async () => {
+    const { gate, context, restore } = restoreFixture()
+    const records = await context.runCoordinator.listRecoverable()
+    context.runCoordinator.listRecoverable.mockResolvedValue(
+      records.map(record => ({
+        ...record,
+        scope: { ...record.scope, principalId: 'other-person' },
+      }))
+    )
+    await restore(new Map(), gate.capture())
+    expect(context.continuations.value).toEqual({})
+    expect(context.goalWorkingContexts.size).toBe(0)
+    expect(context.prepareWorkingContext).not.toHaveBeenCalled()
+  })
+
+  it.each([false, true])(
+    'binds restored goals to reconciliation without reviving a user edit (edited=%s)',
+    async edited => {
+      const waiting = deferred()
+      const chat = { id: 'chat', autonomousGoal: { active: true, revision: 1 } }
+      const restore = vi.fn(async (_goals: ReadonlyMap<string, number>) => undefined)
+      const recover = vi.fn(() => waiting.promise)
+      const records = [{ principalId: 'person' }, { principalId: 'other-person' }]
+      const reconcile = vi.fn(() => {
+        chat.autonomousGoal = { active: false, revision: chat.autonomousGoal.revision + 1 }
+      })
+      const pending = executeRuntimeRecovery({
+        appRuntimeLifecycle: { start: async () => undefined },
+        resolveWorkspacePrincipalId: async () => 'person',
+        chatRuns: { recover, records: { value: records } },
+        reconcileRecoveredChatRuns: reconcile,
+        saveAppStateStrict: async () => undefined,
+        restoreWorkingContexts: restore,
+        mutations: { getConversation: () => chat },
+        state: { conversations: [chat] },
+        appReady: { value: false },
+        appInitialized: { value: false },
+        appQuitting: { value: false },
+        appUnmounted: false,
+        console: { warn: vi.fn() },
+      })
+      await vi.waitFor(() => expect(recover).toHaveBeenCalledOnce())
+      if (edited) chat.autonomousGoal = { active: false, revision: 2 }
+      waiting.resolve()
+      await pending
+      expect(restore).toHaveBeenCalledOnce()
+      expect(reconcile).toHaveBeenCalledExactlyOnceWith(expect.anything(), [records[0]])
+      expect([...restore.mock.calls[0]![0]]).toEqual(edited ? [] : [['chat', 2]])
+    }
+  )
+
+  it.each(['journal', 'hydration'])(
+    'recovers readiness for the new identity without replaying old goals during %s',
+    async stage => {
+      const gate = new ExecutionGate()
+      const oldWork = deferred()
+      const listeners = new Map<string, () => void>()
+      const chat = { id: 'chat', autonomousGoal: { active: true, revision: 1, iterations: 0 } }
+      let principal = 'old'
+      const restore = vi.fn(async (_goals: ReadonlyMap<string, number>, _ticket: unknown) => undefined)
+      const context = {
+        executionGate: gate,
+        window: {
+          addEventListener: (name: string, callback: () => void) => listeners.set(name, callback),
+          removeEventListener: vi.fn(),
+        },
+        appRuntimeLifecycle: {
+          start: vi.fn(async () => {
+            if (stage === 'hydration') {
+              await oldWork.promise
+              chat.autonomousGoal = { active: true, revision: 1, iterations: 0 }
+            }
+          }),
+        },
+        resolveWorkspacePrincipalId: async () => principal,
+        chatRuns: {
+          recover: vi.fn(async (id: string) => {
+            if (stage === 'journal' && id === 'old') await oldWork.promise
+          }),
+          records: { value: [] },
+        },
+        reconcileRecoveredChatRuns: vi.fn(),
+        saveAppStateStrict: vi.fn(async () => undefined),
+        restoreWorkingContexts: restore,
+        mutations: { getConversation: () => chat },
+        state: { conversations: [chat] },
+        appReady: { value: false },
+        appInitialized: { value: false },
+        appQuitting: { value: false },
+        appUnmounted: false,
+        console: { warn: vi.fn() },
+      }
+      const stale = executeRuntimeRecovery(context)
+      const started = stage === 'journal' ? context.chatRuns.recover : context.appRuntimeLifecycle.start
+      await vi.waitFor(() => expect(started).toHaveBeenCalledOnce())
+      gate.invalidate()
+      listeners.get('luczor:api-identity-changing')!()
+      chat.autonomousGoal = { ...chat.autonomousGoal, active: false, revision: 2 }
+      principal = 'new'
+      listeners.get('luczor:api-identity-changed')!()
+      oldWork.resolve()
+      await stale
+      await vi.waitFor(() => expect(context.appReady.value).toBe(true))
+      expect(context.appInitialized.value).toBe(true)
+      expect(restore).toHaveBeenCalledOnce()
+      expect([...(restore.mock.calls[0]![0] as Map<string, number>)]).toEqual([])
+      expect(chat.autonomousGoal.active).toBe(false)
+      expect(context.appRuntimeLifecycle.start).toHaveBeenCalledOnce()
+      expect(context.console.warn).not.toHaveBeenCalled()
+    }
+  )
+})
 
 describe('captured chat cancellation', () => {
   it('retracts only the captured unfinished answer and resets speech before patching shared main/mini state', () => {
@@ -111,19 +368,16 @@ describe('captured chat cancellation', () => {
   })
 
   it('keeps automatic and manual admission closed until journal recovery and its public-state save finish', async () => {
-    const app = readFileSync('src/App.vue', 'utf8')
-    const start = app.indexOf('appRuntimeLifecycle.start().then(')
-    const source = app.slice(start, app.indexOf('\n})\nonBeforeUnmount', start))
     const recovery = deferred(),
       saved = deferred(),
-      paused = deferred()
+      restored = deferred()
     const context = {
       appRuntimeLifecycle: { start: async () => undefined },
       resolveWorkspacePrincipalId: async () => 'person',
       chatRuns: { recover: () => recovery.promise, records: { value: [] } },
       reconcileRecoveredChatRuns: vi.fn(() => 1),
       saveAppStateStrict: vi.fn(() => saved.promise),
-      autonomousGoal: { pauseAll: vi.fn(() => paused.promise) },
+      restoreWorkingContexts: vi.fn(() => restored.promise),
       state: {},
       appReady: { value: false },
       appInitialized: { value: false },
@@ -131,28 +385,25 @@ describe('captured chat cancellation', () => {
       appUnmounted: false,
       console: { warn: vi.fn() },
     }
-    const result = runInNewContext(source, context) as Promise<void>
+    const result = executeRuntimeRecovery(context)
     await Promise.resolve()
     expect(context.appReady.value).toBe(false)
     expect(context.appInitialized.value).toBe(false)
     recovery.resolve()
+    await vi.waitFor(() => expect(context.restoreWorkingContexts).toHaveBeenCalledOnce())
+    expect(context.appReady.value).toBe(false)
+    expect(context.appInitialized.value).toBe(false)
+    restored.resolve()
     await vi.waitFor(() => expect(context.saveAppStateStrict).toHaveBeenCalledOnce())
     expect(context.appReady.value).toBe(false)
     expect(context.appInitialized.value).toBe(false)
     saved.resolve()
-    await vi.waitFor(() => expect(context.autonomousGoal.pauseAll).toHaveBeenCalledOnce())
-    expect(context.appReady.value).toBe(false)
-    expect(context.appInitialized.value).toBe(false)
-    paused.resolve()
     await result
     expect(context.appReady.value).toBe(true)
     expect(context.appInitialized.value).toBe(true)
   })
 
   it('keeps automatic goals disabled when journal recovery is unavailable', async () => {
-    const app = readFileSync('src/App.vue', 'utf8')
-    const start = app.indexOf('appRuntimeLifecycle.start().then(')
-    const source = app.slice(start, app.indexOf('\n})\nonBeforeUnmount', start))
     const context = {
       appRuntimeLifecycle: { start: async () => undefined },
       resolveWorkspacePrincipalId: async () => 'person',
@@ -171,7 +422,7 @@ describe('captured chat cancellation', () => {
       appUnmounted: false,
       console: { warn: vi.fn() },
     }
-    await runInNewContext(source, context)
+    await executeRuntimeRecovery(context)
     expect(context.appReady.value).toBe(false)
     expect(context.appInitialized.value).toBe(true)
     expect(context.reconcileRecoveredChatRuns).not.toHaveBeenCalled()

@@ -1,10 +1,18 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import AiIcon from './AiIcon.vue'
+import SidebarChatList, { type NavigationChat } from './SidebarChatList.vue'
 import type { SearchItem } from './types'
 const props = withDefaults(
-  defineProps<{ title?: string; items: SearchItem[]; activeId?: string; activeChatId?: string; collapsed?: boolean }>(),
-  { title: 'Luczor', activeId: undefined, activeChatId: undefined }
+  defineProps<{
+    title?: string
+    items: SearchItem[]
+    standaloneChats?: NavigationChat[]
+    activeId?: string
+    activeChatId?: string
+    collapsed?: boolean
+  }>(),
+  { title: 'Luczor', standaloneChats: () => [], activeId: undefined, activeChatId: undefined }
 )
 const emit = defineEmits<{
   select: [id: string]
@@ -15,6 +23,8 @@ const emit = defineEmits<{
   rename: [id: string, name: string]
   newChat: []
   addProject: []
+  createProject: []
+  projectSettings: [projectId: string]
   settings: []
   system: []
   agents: []
@@ -108,8 +118,9 @@ const cloudItems = computed(() => props.items.filter(item => item.cloud))
 const query = ref('')
 const editingId = ref('')
 const editingLabel = ref('')
-const editingChat = ref('')
-const chatTitle = ref('')
+const filteredStandalone = computed(() =>
+  props.standaloneChats.filter(chat => chat.label.toLocaleLowerCase('de').includes(query.value.toLocaleLowerCase('de')))
+)
 const filtered = computed(() =>
   props.items.filter(item =>
     [item.label, ...(item.chats ?? []).map(chat => chat.label)].some(label =>
@@ -132,20 +143,12 @@ function cancelRename() {
   editingId.value = ''
   editingLabel.value = ''
 }
-function finishChatRename(projectId: string, chatId: string) {
-  if (editingChat.value !== chatId) return
-  if (chatTitle.value.trim()) emit('renameChat', projectId, chatId, chatTitle.value.trim())
-  editingChat.value = ''
-}
-function beginChatRename(chat: { id: string; label: string }) {
-  editingChat.value = chat.id
-  chatTitle.value = chat.label
-}
 /* Chats of every project stay reachable: the shown project and projects with
  * running chats open by default; the user can fold or unfold any project. */
 const folded = ref(new Set<string>())
 const unfolded = ref(new Set<string>())
 function chatsOpen(item: SearchItem): boolean {
+  if (query.value.trim()) return true
   if (folded.value.has(item.id)) return false
   return item.id === props.activeId || unfolded.value.has(item.id) || !!item.chats?.some(chat => chat.busy)
 }
@@ -324,14 +327,23 @@ const runLabels: Record<string, string> = {
       </template>
       <template v-else>
         <div class="ai-sidebar__section">
-          <span>Projekte</span><span>{{ items.length }}</span>
+          <span>Chats & Projekte</span>
+          <button
+            type="button"
+            class="sidebar-create"
+            aria-label="Projekt erstellen"
+            title="Projekt erstellen"
+            @click="emit('createProject')"
+          >
+            <AiIcon name="plus" :size="14" />
+          </button>
         </div>
         <label class="ai-search__field"
           ><AiIcon name="search" /><input
             v-model="query"
             type="search"
-            aria-label="Projekte suchen"
-            placeholder="Projekte suchen"
+            aria-label="Chats und Projekte suchen"
+            placeholder="Chats und Projekte suchen"
         /></label>
         <nav v-if="liveChats.length" class="ai-sidebar__live" aria-label="Laufende Chats">
           <div class="ai-sidebar__section">
@@ -355,7 +367,32 @@ const runLabels: Record<string, string> = {
             <small>{{ chat.projectLabel }}</small>
           </button>
         </nav>
-        <nav class="ai-sidebar__items">
+        <nav class="ai-sidebar__items" aria-label="Chats und Projekte">
+          <div class="ai-sidebar__section sidebar-group-heading">
+            <span>Chats</span
+            ><button
+              type="button"
+              class="sidebar-create"
+              aria-label="Neuer Chat ohne Projekt"
+              title="Neuer Chat ohne Projekt"
+              @click="emit('newChat')"
+            >
+              <AiIcon name="plus" :size="13" />
+            </button>
+          </div>
+          <SidebarChatList
+            :chats="filteredStandalone"
+            :active-id="activeChatId"
+            @select="(pid, cid) => emit('selectChat', pid, cid)"
+            @rename="(pid, cid, title) => emit('renameChat', pid, cid, title)"
+            @delete="(pid, cid, title) => emit('deleteChat', pid, cid, title)"
+          />
+          <button v-if="!standaloneChats.length" type="button" class="standalone-empty" @click="emit('newChat')">
+            Ohne Projekt starten
+          </button>
+          <div class="ai-sidebar__section sidebar-group-heading">
+            <span>Projekte</span><span>{{ items.length }}</span>
+          </div>
           <div
             v-for="item in filtered"
             :key="item.id"
@@ -400,6 +437,15 @@ const runLabels: Record<string, string> = {
               :aria-label="`${item.label} umbenennen`"
               @click.stop="beginRename(item)"
             >
+              <AiIcon name="edit" :size="12" />
+            </button>
+            <button
+              type="button"
+              class="ai-sidebar__edit ai-sidebar__project-settings"
+              :aria-label="`Projekteinstellungen für ${item.label}`"
+              title="Projekteinstellungen"
+              @click.stop="emit('projectSettings', item.id)"
+            >
               <AiIcon name="settings" :size="12" />
             </button>
             <button
@@ -412,55 +458,13 @@ const runLabels: Record<string, string> = {
               <AiIcon name="chevron" :size="12" />
             </button>
             <div v-if="chatsOpen(item)" class="ai-sidebar__chats" :aria-label="`Chats in ${item.label}`">
-              <div v-for="chat in item.chats ?? []" :key="chat.id" class="ai-sidebar__chat-row">
-                <input
-                  v-if="editingChat === chat.id"
-                  v-model="chatTitle"
-                  class="ai-sidebar__rename"
-                  aria-label="Chatname bearbeiten"
-                  maxlength="160"
-                  @keydown.enter.prevent="finishChatRename(item.id, chat.id)"
-                  @keydown.esc.prevent="editingChat = ''"
-                  @blur="finishChatRename(item.id, chat.id)"
-                />
-                <button
-                  v-else
-                  type="button"
-                  class="ai-sidebar__chat"
-                  :class="{ 'is-current': chat.id === activeChatId }"
-                  :aria-current="chat.id === activeChatId ? 'page' : undefined"
-                  :title="chat.status ? `${chat.label} · ${runLabels[chat.status] ?? chat.status}` : chat.label"
-                  @click="emit('selectChat', item.id, chat.id)"
-                >
-                  <span
-                    v-if="chat.busy"
-                    class="ai-sidebar__activity"
-                    :aria-label="runLabels[chat.status ?? 'running']"
-                  />
-                  <span v-else aria-hidden="true">·</span><span>{{ chat.label }}</span>
-                  <small v-if="['interrupted', 'failed', 'waiting_approval', 'queued'].includes(chat.status ?? '')">{{
-                    runLabels[chat.status!]
-                  }}</small>
-                </button>
-                <button
-                  v-if="editingChat !== chat.id"
-                  type="button"
-                  class="ai-sidebar__chat-edit"
-                  :aria-label="`Chat ${chat.label} umbenennen`"
-                  @click="beginChatRename(chat)"
-                >
-                  <AiIcon name="settings" :size="11" />
-                </button>
-                <button
-                  v-if="editingChat !== chat.id"
-                  type="button"
-                  class="ai-sidebar__chat-edit ai-sidebar__chat-delete"
-                  :aria-label="`Chat ${chat.label} löschen`"
-                  @click="emit('deleteChat', item.id, chat.id, chat.label)"
-                >
-                  <AiIcon name="trash" :size="11" />
-                </button>
-              </div>
+              <SidebarChatList
+                :chats="(item.chats ?? []).map(chat => ({ ...chat, projectId: item.id }))"
+                :active-id="activeChatId"
+                @select="(pid, cid) => emit('selectChat', pid, cid)"
+                @rename="(pid, cid, title) => emit('renameChat', pid, cid, title)"
+                @delete="(pid, cid, title) => emit('deleteChat', pid, cid, title)"
+              />
               <button type="button" class="ai-sidebar__chat-new" @click="emit('newProjectChat', item.id)">
                 <AiIcon name="plus" :size="12" /> Neuer Chat im Projekt
               </button>
@@ -653,8 +657,12 @@ const runLabels: Record<string, string> = {
   }
 }
 
-.ai-sidebar__live {
+.ai-sidebar .ai-sidebar__live {
   display: grid;
+  flex: 0 0 auto;
+  max-height: 180px;
+  overflow-y: auto;
+  align-content: start;
   gap: 2px;
   padding: 0 4px 6px;
 }
@@ -683,18 +691,12 @@ const runLabels: Record<string, string> = {
 .ai-sidebar__chats {
   flex: 0 0 100%;
   display: grid;
-  gap: 3px;
-  padding: 4px 4px 9px 18px;
+  gap: 1px;
+  padding: 0 2px 4px 10px;
   min-width: 0;
 }
 .ai-sidebar__project:has(.ai-sidebar__chats) {
   flex-wrap: wrap;
-}
-.ai-sidebar__chat-row {
-  display: flex;
-  align-items: center;
-  min-width: 0;
-  gap: 3px;
 }
 .ai-sidebar__chat {
   display: flex;
@@ -724,25 +726,6 @@ const runLabels: Record<string, string> = {
   font-size: 9px;
   margin-left: auto;
 }
-.ai-sidebar__chat-edit {
-  width: auto;
-  min-height: 0;
-  flex: 0 0 auto;
-  padding: 4px;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  opacity: 0;
-}
-.ai-sidebar__chat-row:hover .ai-sidebar__chat-edit,
-.ai-sidebar__chat-edit:focus-visible {
-  opacity: 0.7;
-}
-.ai-sidebar__chat-delete:hover,
-.ai-sidebar__chat-delete:focus-visible {
-  color: var(--ai-red, #e06c75);
-  opacity: 1;
-}
 .ai-sidebar__chat-new {
   display: flex;
   align-items: center;
@@ -753,5 +736,53 @@ const runLabels: Record<string, string> = {
   color: var(--ai-muted, #aaa);
   font-size: 11px;
   cursor: pointer;
+}
+.ai-sidebar .ai-sidebar__items {
+  gap: 2px;
+}
+.ai-sidebar .ai-sidebar__section {
+  align-items: center;
+  padding: 0 6px;
+  min-height: 28px;
+}
+.ai-sidebar .sidebar-group-heading {
+  flex: 0 0 auto;
+  margin-top: 10px;
+}
+.ai-sidebar .sidebar-create {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  min-height: 24px;
+  padding: 3px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--ai-faint);
+  background: transparent;
+  cursor: pointer;
+}
+.ai-sidebar .sidebar-create:hover {
+  color: var(--ai-ink);
+  background: var(--ai-hover);
+}
+.ai-sidebar .ai-sidebar__project-main {
+  min-height: 32px;
+  padding: 5px 6px;
+  gap: 7px;
+  font-size: 11px;
+}
+.ai-sidebar .ai-sidebar__project-settings {
+  opacity: 0.65;
+}
+.ai-sidebar .ai-sidebar__chat-new,
+.ai-sidebar .standalone-empty {
+  min-height: 28px;
+  padding: 4px 6px;
+  font-size: 11px;
+  color: var(--ai-faint);
+}
+.ai-sidebar .ai-sidebar__items .ai-sidebar__project.is-active {
+  background: transparent;
+  box-shadow: none;
 }
 </style>

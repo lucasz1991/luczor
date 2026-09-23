@@ -19,6 +19,24 @@ async function getStore() {
 /** Redact archive copies without changing the arguments shown by live approvals. */
 export function stateForPersistence(state: AppState): AppState {
   const plain = JSON.parse(JSON.stringify(state)) as AppState
+  for (const message of plain.messages ?? []) {
+    // Legacy egress-only flags are not reinterpreted destructively. New explicit
+    // ephemeral classifications retain a visible gap, never the transient payload.
+    if (message.meta?.retentionPolicy !== 'ephemeral') continue
+    message.content = '[Temporärer Inhalt nicht gespeichert; Quelle bei Bedarf erneut lesen.]'
+    message.raw = ''
+    message.parsed = null
+    message.meta = {
+      ...message.meta,
+      summary: undefined,
+      question: undefined,
+      bullets: undefined,
+      commentary: [],
+      serverSpeechAllowed: false,
+      retentionPolicy: 'local_only',
+      retentionOmitted: true,
+    }
+  }
   for (const bucket of Object.values(plain.pending?.toolCallsByProject ?? {})) {
     if (!Array.isArray(bucket)) continue
     for (const call of bucket) {

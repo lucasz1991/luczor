@@ -9,7 +9,7 @@ import { Store } from '@tauri-apps/plugin-store'
 import { setSyncStatus, type ConnState } from '@/state/hud'
 import { luczorMemory } from '@/services/memory/luczorMemory'
 import { LuczorApi } from '@/services/api/luczorApi'
-import { pushAllToServer } from '@/services/api/sync'
+import { synchronizeAll } from '@/services/syncCoordinator'
 import { flushProjectSyncQueue, pendingProjectSyncCount } from '@/services/api/projectSyncQueue'
 import { executionGate } from '@/services/executionGate'
 
@@ -69,7 +69,7 @@ export async function refreshStatus(): Promise<void> {
       if (auto && memoryPending >= threshold) {
         autoSyncing = true
         try {
-          await pushAllToServer()
+          await synchronizeAll()
           const now = await luczorMemory.pendingSyncCount().catch(() => memoryPending)
           setSyncStatus({ pending: now + projectPending, server, cognee })
         } catch {
@@ -86,9 +86,12 @@ export async function refreshStatus(): Promise<void> {
 
 /** Manual sync trigger (e.g. clicking the HUD ⇅). Returns pushed count. */
 export async function syncNow(): Promise<number> {
-  await flushProjectSyncQueue({ force: true, signal: executionGate.capture().signal })
-  const r = await pushAllToServer()
-  const total = Object.values(r.counts).reduce((a, b) => a + b, 0)
-  await refreshStatus()
-  return total
+  try {
+    const result = await synchronizeAll({ force: true })
+    if (result.memory.errors.length)
+      throw new Error('Ein Teil des Gedächtnisabgleichs ist noch offen. Details stehen im Gedächtnisinspektor.')
+    return result.total
+  } finally {
+    await refreshStatus()
+  }
 }

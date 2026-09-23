@@ -42,6 +42,8 @@ export type ToolDef = {
   requiresApproval: boolean
   /** Local/provider result retention policy. Defaults to `syncable`. */
   dataHandling?: ToolDataHandling
+  /** Local encrypted retention, separately from provider/server egress. Legacy ephemeral remains volatile. */
+  retentionPolicy?: import('@/services/runs/dataPolicy').SharedDataPolicy
   /** Enforced by the execution policy as well as displayed in the audit/UI. */
   risk?: ToolRisk
   scope?: ToolScope

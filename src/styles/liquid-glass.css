@@ -115,22 +115,29 @@ html[data-theme] .app-shell.ai-workspace .header {
   box-shadow: inset 0 1px 0 var(--g-edge);
 }
 
-/* Composer: floating glass with the accent diffusion behind it. */
+/* Composer: a quiet edge and theme-aware shadow around the input. */
 html[data-theme] .ai-prompt {
   border-radius: var(--r-lg);
   box-shadow:
     inset 0 1px 1px var(--g-edge),
-    inset 0 -1px 0 rgba(0, 0, 0, 0.22),
-    0 -30px 60px -40px rgba(0, 0, 0, 0.7),
-    var(--glow-sm);
+    0 0 0 1px var(--ai-line),
+    var(--shadow-1);
 }
-html[data-theme] .ai-prompt:focus-within {
-  border-color: var(--border);
+html[data-theme] :is(.ai-prompt, .mini-chat-composer):focus-within {
+  border-color: color-mix(in srgb, var(--ai-accent) 55%, var(--ai-line-strong));
   box-shadow:
     inset 0 1px 1px var(--g-edge),
     inset 0 -1px 0 rgba(0, 0, 0, 0.22),
     var(--focus-ring),
     var(--glow-sm);
+}
+
+/* The composer is the focus surface; its text field stays borderless. */
+html[data-theme] :is(.ai-prompt, .mini-chat-composer) textarea:focus,
+html[data-theme] :is(.ai-prompt, .mini-chat-composer) textarea:focus-visible {
+  border: 0;
+  outline: none;
+  box-shadow: none;
 }
 
 /* Floating panels: large radius, rim light. */

@@ -5,6 +5,28 @@ const owner = { principalId: 'person', projectId: 'project', conversationId: 'ch
 const call = { id: 'call-id', name: 'fs_write', arguments: { path: 'private-path', content: 'private-content' } }
 
 describe('durable tool effect boundary', () => {
+  it('keeps a logical operation identity across fresh run and provider call IDs', async () => {
+    const ids: string[] = []
+    const store = {
+      read: vi.fn(async (_owner: string, id: string) => {
+        ids.push(id)
+        return null
+      }),
+      write: vi.fn(async (record: EffectRecord, revision: number) => ({ ...record, revision: revision + 1 })),
+    }
+    await createChatEffectJournal(owner, store).before({ ...call, operationId: 'logical-operation' })
+    await createChatEffectJournal({ ...owner, runId: 'restarted' }, store).before({
+      ...call,
+      id: 'fresh-call',
+      operationId: 'logical-operation',
+    })
+    await createChatEffectJournal({ ...owner, conversationId: 'other-chat' }, store).before({
+      ...call,
+      operationId: 'logical-operation',
+    })
+    expect(ids[0]).toBe(ids[1])
+    expect(ids[2]).not.toBe(ids[0])
+  })
   it('commits safe metadata before effects and records completion without payloads', async () => {
     const writes: unknown[] = []
     const store = {

@@ -108,6 +108,8 @@ export class LocalModelManager {
   private readonly active = new Map<string, ActiveLocalRequest>()
   private readonly waiters: Array<{
     epoch: number
+    priority: number
+    queuedAt: number
     signal?: AbortSignal
     onAbort?: () => void
     resolve: () => void
@@ -247,7 +249,11 @@ export class LocalModelManager {
     idleOptimization = false
   ): Promise<InferenceResult> {
     const slotGeneration = this.slotGeneration
-    const slot = this.acquireSlot(gatewayEpoch, request.signal)
+    const slot = this.acquireSlot(
+      gatewayEpoch,
+      request.signal,
+      idleOptimization ? 'background' : request.schedulingClass
+    )
     if (slot !== true) await slot
     try {
       return await this.streamExclusive(
@@ -539,14 +545,25 @@ export class LocalModelManager {
     }
   }
 
-  private acquireSlot(epoch: number, signal?: AbortSignal): true | Promise<void> {
+  private acquireSlot(
+    epoch: number,
+    signal?: AbortSignal,
+    schedulingClass: InferenceRequest['schedulingClass'] = 'foreground'
+  ): true | Promise<void> {
     if (signal?.aborted) throw abortError()
     if (!this.slotOccupied) {
       this.slotOccupied = true
       return true
     }
     return new Promise<void>((resolve, reject) => {
-      const waiter = { epoch, signal, resolve, reject } as (typeof this.waiters)[number]
+      const waiter = {
+        epoch,
+        signal,
+        resolve,
+        reject,
+        priority: schedulingClass === 'foreground' ? 0 : schedulingClass === 'goal' ? 1 : 2,
+        queuedAt: this.now().getTime(),
+      } as (typeof this.waiters)[number]
       if (signal) {
         waiter.onAbort = () => {
           const index = this.waiters.indexOf(waiter)
@@ -560,6 +577,9 @@ export class LocalModelManager {
   }
 
   private releaseSlot(): void {
+    // Waiting time orders requests within a work class. Interactive requests
+    // always get the next free slot before an older background request.
+    this.waiters.sort((left, right) => left.priority - right.priority || left.queuedAt - right.queuedAt)
     while (this.waiters.length > 0) {
       const waiter = this.waiters.shift()!
       if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort)

@@ -14,6 +14,7 @@ export function migrateConversations(state: AppState): void {
   state.global.ui.lastConversationByProject ??= {}
   for (const project of state.projects) {
     if (!isSafeRecordKey(project.id)) continue
+    if (project.kind === 'standalone-chat' && project.archivedAt) continue
     const legacyId = legacyConversationId(project.id)
     for (const message of state.messages.filter(item => item.projectId === project.id)) {
       if (!message.conversationId && message.meta?.conversationId) message.conversationId = message.meta.conversationId

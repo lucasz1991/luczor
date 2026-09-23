@@ -1311,6 +1311,17 @@ html[data-reduce-motion='1'] .ai-shimmer {
   gap: 2px;
   flex-shrink: 0;
 }
+.ai-prompt .ai-prompt__controls .ai-dropdown__trigger {
+  padding: 0;
+  border-color: transparent;
+}
+/* Anchor heading menus to the prompt so they stay inside narrow chat columns. */
+.ai-prompt .ai-prompt__controls > .ai-dropdown {
+  position: static;
+}
+.ai-prompt__controls .ai-dropdown__menu {
+  max-width: 100%;
+}
 .ai-route-mode {
   position: relative;
   display: inline-flex;
@@ -1328,7 +1339,7 @@ html[data-reduce-motion='1'] .ai-shimmer {
   font-size: 10px;
   cursor: pointer;
 }
-.ai-route-mode.is-active {
+.ai-prompt__controls .ai-route-mode.is-active {
   color: var(--text-primary);
   border-color: var(--cy, #74c5d9);
   background: var(--surface-glass);
@@ -1367,7 +1378,7 @@ html[data-reduce-motion='1'] .ai-shimmer {
   border-radius: 50%;
   background: var(--text-muted);
 }
-.ai-mode-select.is-act {
+.ai-prompt__controls .ai-mode-select.is-act {
   color: var(--success-soft);
   background: var(--success-wash);
   border-color: rgba(69, 214, 160, 0.28);
@@ -1375,7 +1386,7 @@ html[data-reduce-motion='1'] .ai-shimmer {
 .ai-mode-select.is-act .ai-mode-select__dot {
   background: var(--success-soft);
 }
-.ai-mode-select.is-unrestricted {
+.ai-prompt__controls .ai-mode-select.is-unrestricted {
   color: var(--danger-soft);
   background: var(--danger-wash);
   border-color: rgba(251, 113, 133, 0.32);

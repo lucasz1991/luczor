@@ -1,4 +1,5 @@
 import type { WireMessage } from '@/services/inference/types'
+import type { SharedDataPolicy } from '@/services/runs/dataPolicy'
 
 export type ToolOutcome = { ok: boolean; output?: unknown; error?: string }
 export type PendingTaskCreateVerification = {
@@ -31,6 +32,11 @@ export type AgentCheckpoint = {
   generation: number
   objective: string
   messages: WireMessage[]
+  /** Explicit retention classification; legacy egress taint remains fail-closed. */
+  dataPolicy?: SharedDataPolicy
+  /** Stable logical write identities survive provider call IDs and execution attempts. */
+  operationIds?: [string, string][]
+  progressEvidence?: { receipts: string[]; fingerprint?: string }
   /** Exact, user/model-selected IDs; revalidated against the current authorized pool. */
   selectedTools?: string[]
   /** Request projection hints only. Never replace the original message archive. */
@@ -40,6 +46,7 @@ export type AgentCheckpoint = {
   uncertainMutations?: string[]
   /** Ambiguous task/conversation POSTs must be checked before the same logical create can run again. */
   pendingTaskCreateVerifications?: PendingTaskCreateVerification[]
+  resolvedTaskCreateVerifications?: PendingTaskCreateVerification[]
   ephemeralDataUsed: boolean
   toolAccess?: 'read-only' | 'none'
 }

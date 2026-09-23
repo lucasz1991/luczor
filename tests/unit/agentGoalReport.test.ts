@@ -426,7 +426,11 @@ describe('goal reports in the real agent loop', () => {
     let round = 0
     mocks.stream.mockImplementation(async () =>
       ++round % 2
-        ? toolResponse({ status: 'continue', summary: 'Unchanged progress' }, 'goal_report', `report-${round}`)
+        ? toolResponse(
+            { status: 'continue', summary: `Different model narration ${round}` },
+            'goal_report',
+            `report-${round}`
+          )
         : finalResponse()
     )
     const result = await runAgent(

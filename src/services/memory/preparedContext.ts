@@ -7,6 +7,8 @@ import { inspectRepositoryGraph, readRepositorySnippets, repositoryGraphStatus }
 import { maintenanceHash, type PreparedContextArtifact, type SourceReference } from './maintenance'
 import type { MemoryUsageOrigin } from './usage'
 import { memoryMetadataOf, memoryMetadataSearchText } from './memoryMetadata'
+import { memoryCanPrepareProjectContext } from './memoryPolicy'
+import { resolveWorkspacePrincipalId } from '@/services/projectWorkspace'
 
 /** Optional fast orientation. Missing/stale artifacts never delay a chat for generation. */
 export async function preparedContextFragments(
@@ -15,13 +17,14 @@ export async function preparedContextFragments(
   origin: MemoryUsageOrigin = 'chat'
 ): Promise<PromptFragment[]> {
   const account = await getVerifiedAccountSnapshot()
-  if (!account) return []
-  const snapshot = await luczorMemory.maintenanceSnapshot(account.principalId)
+  const principalId = account?.principalId ?? 'device-local'
+  const repositoryPrincipal = account?.principalId ?? (await resolveWorkspacePrincipalId())
+  const snapshot = await luczorMemory.maintenanceSnapshot(principalId)
   if (!snapshot.journal.artifacts.length) return []
-  const projects = state.projects.filter(project => project.id === projectId)
+  const projects = state.projects.filter(project => project.id === projectId && project.kind !== 'standalone-chat')
   if (!projects.length) return []
   const jobs = await planMaintenance({
-    principalId: account.principalId,
+    principalId,
     projects,
     records: snapshot.records,
     messages: state.messages,
@@ -42,7 +45,9 @@ export async function preparedContextFragments(
     .split(/\W+/u)
     .filter(word => word.length > 2)
   const score = (text: string) => words.filter(word => text.toLocaleLowerCase().includes(word)).length
-  const sourceRecords = new Map(snapshot.records.map(record => [record.id, record]))
+  const sourceRecords = new Map(
+    snapshot.records.filter(memoryCanPrepareProjectContext).map(record => [record.id, record])
+  )
   const metadataSearch = (artifact: PreparedContextArtifact) =>
     artifact.sources
       .filter(source => source.kind === 'memory')
@@ -56,7 +61,11 @@ export async function preparedContextFragments(
       (artifact.projectId && artifact.projectId !== projectId) ||
       artifact.kind !== 'context' ||
       !artifact.sources.length ||
-      artifact.sources.some(source => revisions.get(sourceKey(artifact.projectId, source)) !== source.revision)
+      artifact.sources.some(
+        source =>
+          revisions.get(sourceKey(artifact.projectId, source)) !== source.revision ||
+          (source.kind === 'memory' && !sourceRecords.has(source.id))
+      )
     )
       continue
     if ((await maintenanceHash(artifact.sources)) === artifact.revision) valid.push(artifact)
@@ -80,10 +89,10 @@ export async function preparedContextFragments(
       if (!artifact.repositoryRevision && extraSources.length) continue
       const path = artifact.id.slice(`repository:${projectId}:`.length)
       const [status, page, evidence] = await Promise.all([
-        repositoryGraphStatus(account.principalId, projectId),
-        inspectRepositoryGraph(account.principalId, projectId, path),
+        repositoryGraphStatus(repositoryPrincipal, projectId),
+        inspectRepositoryGraph(repositoryPrincipal, projectId, path),
         readRepositorySnippets(
-          account.principalId,
+          repositoryPrincipal,
           projectId,
           repositorySources.map(source => source.id),
           1000,
@@ -114,7 +123,7 @@ export async function preparedContextFragments(
       score(`${right.content} ${metadataSearch(right)}`) - score(`${left.content} ${metadataSearch(left)}`) ||
       right.createdAt - left.createdAt
   )
-  if ((await getVerifiedAccountSnapshot())?.principalId !== account.principalId) return []
+  if (((await getVerifiedAccountSnapshot())?.principalId ?? 'device-local') !== principalId) return []
   return valid.slice(0, 3).map(artifact => ({
     id: `prepared:${artifact.id}`,
     source: 'memory',

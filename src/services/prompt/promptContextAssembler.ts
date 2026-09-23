@@ -14,6 +14,7 @@ export type PromptFragmentEgress = 'allowed' | 'approval_required' | 'local_only
  */
 export type PromptFragmentProvenance = {
   recordId?: string
+  revision?: string
   type?: string
   staleness?: string
   score?: number

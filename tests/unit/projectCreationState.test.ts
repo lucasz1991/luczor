@@ -10,6 +10,7 @@ describe('transactional local project creation', () => {
 
   it('rolls back every local record created for an uncommitted project', () => {
     mutations.addProject({ id: 'project-new', name: 'Neu' }, false)
+    mutations.getActiveConversationId('project-new')
     state.todos.push({ id: 'todo-new', projectId: 'project-new' })
     state.todoSteps.push({ id: 'step-new', projectId: 'project-new' })
     state.projectMemories.push({ id: 'memory-new', projectId: 'project-new' })
@@ -24,6 +25,8 @@ describe('transactional local project creation', () => {
     expect(state.projectMemories.some(item => item.projectId === 'project-new')).toBe(false)
     expect(state.summaries.some(item => item.projectId === 'project-new')).toBe(false)
     expect(state.pending.toolCallsByProject['project-new']).toBeUndefined()
+    expect(state.conversations?.some(chat => chat.projectId === 'project-new')).toBe(false)
+    expect(state.global.ui?.lastConversationByProject?.['project-new']).toBeUndefined()
   })
 
   it('refuses to roll back the active project', () => {

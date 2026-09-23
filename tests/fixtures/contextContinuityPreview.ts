@@ -50,6 +50,28 @@ const snapshot: ContextSnapshot = {
   conversationId: 'fixture-chat',
   taskType: 'coding',
   prompt: 'Bitte weiterarbeiten.',
+  planning: {
+    local: {
+      found: 3,
+      selected: 3,
+      submitted: 2,
+      submittedIds: ['project-goal', 'repository-src-search-ts'],
+      omitted: 0,
+      windowTokens: 32768,
+      windowKnown: true,
+      contextBudgetTokens: 10922,
+    },
+    external: {
+      found: 3,
+      selected: 1,
+      submitted: null,
+      submittedIds: [],
+      omitted: 2,
+      windowTokens: 8192,
+      windowKnown: false,
+      contextBudgetTokens: 2730,
+    },
+  },
   fragments,
   local: {
     target: 'local_llama_cpp',

@@ -4,6 +4,7 @@ import AiIcon from '@/components/ai/AiIcon.vue'
 import MemoryDreamPanel from './MemoryDreamPanel.vue'
 import MemoryGraphBackdrop from './MemoryGraphBackdrop.vue'
 import MemoryMetadataEditor from './MemoryMetadataEditor.vue'
+import MemorySyncPanel from './MemorySyncPanel.vue'
 import { MEMORY_SYSTEMS } from './graph'
 import { loadMemoryGraphDisplay } from './graphDisplay'
 import { useMemoryGraphData } from './useMemoryGraphData'
@@ -155,6 +156,7 @@ onBeforeUnmount(() => {
             :record="selectedMemory"
             @saved="data.load({ soft: true })"
           />
+          <MemorySyncPanel :project-id="data.project.value" />
           <div class="memory-inspector__head">
             <h2>Einträge dieser Ansicht</h2>
             <span>{{ stats.nodes }} Knoten · {{ stats.edges }} Beziehungen</span>

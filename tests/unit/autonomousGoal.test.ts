@@ -258,6 +258,16 @@ describe('autonomous goal controller', () => {
     expect(context.current()).toMatchObject({ active: false, status: 'blocked', consecutiveErrors: 3 })
   })
 
+  it('does not treat differently worded model summaries as fresh host progress', async () => {
+    const context = fixture()
+    let iteration = 0
+    context.run.mockImplementation(async () => ({ status: 'continue', summary: `Different narration ${++iteration}` }))
+    context.controller.kick('p1')
+    await vi.advanceTimersByTimeAsync(10000)
+    expect(context.run).toHaveBeenCalledTimes(3)
+    expect(context.current()).toMatchObject({ active: false, status: 'blocked', stagnantIterations: 3 })
+  })
+
   it('gives a user message priority and discards a late result even if the adapter ignores abort', async () => {
     const context = fixture()
     let finish!: (result: GoalStepResult) => void

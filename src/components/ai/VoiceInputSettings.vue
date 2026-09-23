@@ -165,7 +165,7 @@ async function save(start = false) {
   align-items: center;
   gap: 5px;
   padding: 5px 7px;
-  border: 1px solid #ffffff20;
+  border: 1px solid transparent;
   border-radius: 6px;
   background: transparent;
   color: inherit;
@@ -181,12 +181,12 @@ async function save(start = false) {
   max-height: min(580px, 70vh);
   overflow: auto;
   z-index: 70;
-  background: #202124;
-  border: 1px solid #ffffff28;
+  background: var(--ai-surface);
+  border: 1px solid var(--ai-line-strong);
   border-radius: 14px;
   padding: 16px;
-  box-shadow: 0 16px 44px #0008;
-  color: #eee;
+  box-shadow: var(--shadow-panel);
+  color: var(--ai-ink);
   text-align: left;
 }
 header,
@@ -208,7 +208,7 @@ strong {
 p {
   font-size: 12px;
   line-height: 1.5;
-  color: #afb3bc;
+  color: var(--ai-muted);
   margin: 10px 0;
 }
 fieldset {
@@ -228,8 +228,8 @@ select,
 input:not([type='checkbox']) {
   width: 100%;
   box-sizing: border-box;
-  background: #141518;
-  border: 1px solid #ffffff30;
+  background: var(--ai-inset);
+  border: 1px solid var(--ai-line-strong);
   border-radius: 7px;
   padding: 8px;
   color: inherit;
@@ -246,7 +246,7 @@ input:not([type='checkbox']) {
 }
 .voice-settings-actions button {
   padding: 8px 10px;
-  border: 1px solid #ffffff30;
+  border: 1px solid var(--ai-line-strong);
   border-radius: 7px;
   background: transparent;
   color: inherit;
@@ -255,13 +255,13 @@ input:not([type='checkbox']) {
   cursor: pointer;
 }
 .voice-settings-actions .voice-settings-start {
-  background: #3c3652;
+  background: var(--ai-hover);
 }
 button:disabled {
   opacity: 0.5;
   cursor: default;
 }
 [role='alert'] {
-  color: #ffc5c5;
+  color: var(--ai-red);
 }
 </style>

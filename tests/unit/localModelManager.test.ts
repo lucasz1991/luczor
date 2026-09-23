@@ -504,6 +504,48 @@ describe('LocalModelManager runtime safety', () => {
     expect(transport.stream).toHaveBeenCalledTimes(2)
   })
 
+  it('prioritizes queued interactive work over goal and idle work without retaining a slot during approval', async () => {
+    const model = await release()
+    let clock = new Date('2026-08-30T12:30:00Z')
+    let releaseFirst!: () => void
+    const first = new Promise<void>(resolve => {
+      releaseFirst = resolve
+    })
+    const order: string[] = []
+    const transport: LocalRuntimeTransport = {
+      stream: vi.fn(async (_model, request) => {
+        order.push(request.taskType!)
+        if (request.taskType === 'active') await first
+        return successfulResult
+      }),
+      cancel: vi.fn(),
+      stop: vi.fn(),
+    }
+    const manager = new LocalModelManager(transport, () => clock)
+    const gateway = manager.gateway(model, readiness(model), catalogBinding, 'b'.repeat(64))
+    const active = gateway.streamChatWithTools({ messages: [], taskType: 'active' })
+    const background = gateway.streamChatWithTools({
+      messages: [],
+      taskType: 'background',
+      schedulingClass: 'background',
+    })
+    clock = new Date(clock.getTime() + 120_000)
+    const goal = gateway.streamChatWithTools({ messages: [], taskType: 'goal', schedulingClass: 'goal' })
+    const foreground = gateway.streamChatWithTools({
+      messages: [],
+      taskType: 'foreground',
+      schedulingClass: 'foreground',
+    })
+    releaseFirst()
+    await Promise.all([active, background, goal, foreground])
+    expect(order).toEqual(['active', 'foreground', 'goal', 'background'])
+    // Tool approval happens after the model reply has settled. Another chat can
+    // infer during that wait; no manager slot belongs to the approval dialog.
+    expect(manager.hasActiveWork()).toBe(false)
+    await gateway.streamChatWithTools({ messages: [], taskType: 'during-approval' })
+    expect(order.at(-1)).toBe('during-approval')
+  })
+
   it('coalesces cancellation and drains the first native IPC before admitting the next stream', async () => {
     const model = await release()
     const events: string[] = []

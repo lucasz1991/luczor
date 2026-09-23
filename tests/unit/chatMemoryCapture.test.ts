@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { runInNewContext } from 'node:vm'
 import ts from 'typescript'
 import { describe, expect, it, vi } from 'vitest'
+import { canPersistData } from '@/services/runs/dataPolicy'
 
 const app = readFileSync('src/App.vue', 'utf8')
 const start = app.indexOf('async function rememberExchange(')
@@ -37,6 +38,7 @@ function capture(autoRemember = true) {
   ]
   const read = vi.fn(() => messages)
   const fn = runInNewContext(compiled, {
+    canPersistData,
     getMemoryPrefs: async () => ({ autoRemember }),
     executionGate: { assert: vi.fn() },
     mutations: { getConversationMessages: read },
@@ -113,5 +115,11 @@ describe('App chat memory provenance integration', () => {
     remember.mockClear()
     await fn('p1', 'chat-1', 'actual-user', 'answer', 'device-local', {}, allowed)
     expect(remember.mock.calls.map(([input]) => input.message.ephemeral)).toEqual([false, !allowed])
+  })
+  it('captures local-only assistant evidence while retaining its transfer restriction', async () => {
+    const { fn, messages, remember } = capture()
+    messages[2]!.meta = { dataHandling: 'ephemeral', retentionPolicy: 'local_only' }
+    await fn('p1', 'chat-1', undefined, 'answer', 'device-local', {}, true)
+    expect(remember.mock.calls[0]?.[0].message).toMatchObject({ ephemeral: false, dataPolicy: 'local_only' })
   })
 })

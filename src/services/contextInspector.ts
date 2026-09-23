@@ -1,6 +1,7 @@
 import type { ContextPackage } from '@/services/inference/contextBroker'
 import type { PromptFragment, PromptFragmentSource } from '@/services/prompt/promptContextAssembler'
 import type { PromptContextDetails } from '@/services/contextController'
+import type { ContextPlanDiagnostics } from '@/services/contextPlanner'
 
 /** One assembled start context: either a live preview of the current draft or what a run received. */
 export type ContextSnapshot = {
@@ -16,6 +17,7 @@ export type ContextSnapshot = {
   local: ContextPackage
   external: ContextPackage
   retrieval?: Pick<PromptContextDetails, 'repositoryDiagnostics' | 'memoryDiagnostics'>
+  planning?: ContextPlanDiagnostics
 }
 
 export const CONTEXT_SOURCE_LABELS: Record<PromptFragmentSource, string> = {

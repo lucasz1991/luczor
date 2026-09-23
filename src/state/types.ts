@@ -47,6 +47,10 @@ export type MessageMeta = {
 
   /** Ephemeral tool results remain device-local and are excluded from sync. */
   dataHandling?: 'syncable' | 'ephemeral'
+  /** Retention is independent of the legacy external-transfer flag above. */
+  retentionPolicy?: import('@/services/runs/dataPolicy').SharedDataPolicy
+  /** The transcript contains a gap marker, not the former ephemeral source. */
+  retentionOmitted?: boolean
   /** False until a generated answer has a final server-egress classification. */
   serverSpeechAllowed?: boolean
 }
@@ -113,6 +117,8 @@ export type ProjectDefaults = {
 export type Project = {
   id: Id
   name: string
+  /** Internal, device-local scope for a chat with no user project or folder binding. */
+  kind?: 'standalone-chat'
   /** Device-local execution state. Only the ordinary goal text may sync to other devices. */
   autonomousGoal?: import('@/services/goals/autonomousGoal').GoalRunState
   /** User-owned server snapshot. Native folder bindings remain device-local. */

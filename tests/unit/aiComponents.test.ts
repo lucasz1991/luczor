@@ -17,6 +17,7 @@ describe('AI component rendering contracts', () => {
           h(SidebarNav, {
             activeId: 'project',
             activeChatId: 'second',
+            standaloneChats: [{ id: 'personal', projectId: 'scope', label: 'My independent chat' }],
             items: [
               {
                 id: 'project',
@@ -32,13 +33,17 @@ describe('AI component rendering contracts', () => {
       })
     )
     expect(html).toContain('Chats in My project')
+    expect(html).toContain('My independent chat')
+    expect(html).toContain('aria-label="Projekt erstellen"')
+    expect(html).toContain('aria-label="Projekteinstellungen für My project"')
+    expect(html).toContain('aria-label="Neuer Chat ohne Projekt"')
     expect(html).toContain('Freigabe nötig')
     expect(html).toContain('Neuer Chat im Projekt')
     expect(html).toContain('aria-label="Projektordner öffnen"')
     expect(html).not.toContain('ai-rail__toggle')
     expect(html).toContain('&lt;script&gt;title&lt;/script&gt;')
     expect(html).not.toContain('<script>title</script>')
-    expect(html).toMatch(/class="[^"]*is-current[^"]*" aria-current="page"/)
+    expect(html).toMatch(/class="[^"]*is-current[^"]*"[^>]*aria-current="page"/)
   })
   it('renders structured code without allowing model HTML to execute', async () => {
     const html = await renderToString(

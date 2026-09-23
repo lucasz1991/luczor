@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="de" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Luczor Mini · Designprüfung</title>
+  </head>
+  <body>
+    <div id="app">Prüfvorschau wird geladen …</div>
+    <script>
+      window.addEventListener('error', event => {
+        document.getElementById('app').textContent = `Prüfvorschau: ${event.message}`
+      })
+      window.addEventListener('unhandledrejection', event => {
+        document.getElementById('app').textContent = `Prüfvorschau: ${String(event.reason)}`
+      })
+    </script>
+    <script type="module" src="/tests/fixtures/miniChatDesignPreview.ts"></script>
+  </body>
+</html>

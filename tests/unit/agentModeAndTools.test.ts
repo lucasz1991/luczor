@@ -112,6 +112,7 @@ describe('agent mode and tool reliability', () => {
         inferenceGateway: { id: 'fixture', target, streamChatWithTools: mocks.streamChatWithTools },
       })
       expect(result.ephemeralDataUsed).toBe(target === 'local_llama_cpp')
+      expect(result.workingContext?.dataPolicy).toBe(target === 'local_llama_cpp' ? 'local_only' : 'syncable')
     }
   )
   it('keeps exact context at side-effect checkpoints and on completed answers, bound to the conversation', async () => {
@@ -869,6 +870,9 @@ describe('agent mode and tool reliability', () => {
       conversationId: 'original-chat',
       runId: 'original-run',
       effectJournal: { before },
+      onCheckpoint: async value => {
+        expect(value.operationIds?.length).toBeGreaterThan(0)
+      },
       mode: 'act',
       baseMessages: [{ role: 'user', content: 'Speichern' }],
     })
@@ -952,11 +956,40 @@ describe('agent mode and tool reliability', () => {
             throw new ChatEffectJournalError()
           },
         },
+        onCheckpoint: async () => undefined,
         baseMessages: [{ role: 'user', content: 'Speichern' }],
       })
     ).rejects.toThrow('Laufjournal')
     expect(mocks.execute).not.toHaveBeenCalled()
     expect(mocks.streamChatWithTools).toHaveBeenCalledOnce()
+  })
+
+  it('does not admit an effect when its durable checkpoint cannot commit', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'project',
+      mutating: true,
+      requiresApproval: false,
+      parameters: { type: 'object' },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(toolCallResult)
+      .mockResolvedValueOnce({ content: 'Speichern fehlgeschlagen.', toolCalls: [], rawToolCalls: [] })
+    const before = vi.fn()
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'act',
+      effectJournal: { before },
+      onCheckpoint: async () => {
+        throw new Error('disk full')
+      },
+      baseMessages: [{ role: 'user', content: 'Speichern' }],
+    })
+    expect(before).not.toHaveBeenCalled()
+    expect(mocks.execute).not.toHaveBeenCalled()
+    expect(result.toolFailures).toBe(1)
+    expect(result.workingContext?.uncertainMutations).toHaveLength(1)
   })
   it.each(['balanced', 'ultra'] as const)(
     'preserves successful tools when %s transport aborts without a stop signal',
@@ -3123,44 +3156,49 @@ describe('agent mode and tool reliability', () => {
     expect(JSON.stringify(result)).not.toContain('PRIVATE')
   })
 
-  it('keeps ephemeral tool content out of durable history and server telemetry', async () => {
-    mocks.getTool.mockReturnValue({
-      name: 'project_get_state',
-      category: 'project',
-      mutating: false,
-      requiresApproval: true,
-      dataHandling: 'ephemeral',
-      parameters: { type: 'object', additionalProperties: true },
-      execute: mocks.execute,
-    })
-    mocks.awaitApproval.mockResolvedValue(true)
-    mocks.execute.mockResolvedValue({ text: 'LOCAL_SECRET' })
-    mocks.streamChatWithTools
-      .mockResolvedValueOnce(toolCallResult)
-      .mockResolvedValueOnce({ content: 'Gelesen.', toolCalls: [], rawToolCalls: [] })
+  it.each([undefined, 'local_only'] as const)(
+    'keeps private tool content out of server telemetry with retention %s',
+    async retentionPolicy => {
+      mocks.getTool.mockReturnValue({
+        name: 'project_get_state',
+        category: 'project',
+        mutating: false,
+        requiresApproval: true,
+        dataHandling: 'ephemeral',
+        retentionPolicy,
+        parameters: { type: 'object', additionalProperties: true },
+        execute: mocks.execute,
+      })
+      mocks.awaitApproval.mockResolvedValue(true)
+      mocks.execute.mockResolvedValue({ text: 'LOCAL_SECRET' })
+      mocks.streamChatWithTools
+        .mockResolvedValueOnce(toolCallResult)
+        .mockResolvedValueOnce({ content: 'Gelesen.', toolCalls: [], rawToolCalls: [] })
 
-    const result = await runAgent({
-      projectId: 'project-2',
-      baseMessages: [{ role: 'user', content: 'lies lokal' }],
-      mode: 'act',
-    })
+      const result = await runAgent({
+        projectId: 'project-2',
+        baseMessages: [{ role: 'user', content: 'lies lokal' }],
+        mode: 'act',
+      })
 
-    expect(mocks.addHiddenToolMessage).toHaveBeenCalledWith(
-      'project-2',
-      {
-        ok: true,
-        output: { redacted: true, output_type: 'object', item_count: undefined },
-      },
-      expect.objectContaining({ dataHandling: 'ephemeral' })
-    )
-    expect(mocks.logAgentEvent).toHaveBeenCalledWith(
-      'tool.executed',
-      expect.objectContaining({ output: null, output_redacted: true, error: null })
-    )
-    expect(JSON.stringify(mocks.addHiddenToolMessage.mock.calls)).not.toContain('LOCAL_SECRET')
-    expect(JSON.stringify(mocks.logAgentEvent.mock.calls)).not.toContain('LOCAL_SECRET')
-    expect(result.ephemeralDataUsed).toBe(true)
-  })
+      expect(mocks.addHiddenToolMessage).toHaveBeenCalledWith(
+        'project-2',
+        {
+          ok: true,
+          output: { redacted: true, output_type: 'object', item_count: undefined },
+        },
+        expect.objectContaining({ dataHandling: 'ephemeral' })
+      )
+      expect(mocks.logAgentEvent).toHaveBeenCalledWith(
+        'tool.executed',
+        expect.objectContaining({ output: null, output_redacted: true, error: null })
+      )
+      expect(JSON.stringify(mocks.addHiddenToolMessage.mock.calls)).not.toContain('LOCAL_SECRET')
+      expect(JSON.stringify(mocks.logAgentEvent.mock.calls)).not.toContain('LOCAL_SECRET')
+      expect(result.ephemeralDataUsed).toBe(true)
+      expect(result.workingContext?.dataPolicy).toBe(retentionPolicy ?? 'ephemeral')
+    }
+  )
 
   it('returns useful partial environment data to the current model without archiving private details', async () => {
     const partial = {

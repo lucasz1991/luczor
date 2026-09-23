@@ -24,6 +24,9 @@ import AgentTeamResults from './components/ai/AgentTeamResults.vue'
 import PlanPanel from './components/PlanPanel.vue'
 import ChatProjectOverlay from './components/ChatProjectOverlay.vue'
 import SidebarNav from './components/ai/SidebarNav.vue'
+import WorkspaceHeaderActions from '@/components/ai/WorkspaceHeaderActions.vue'
+import CreateProjectDialog from '@/components/projects/CreateProjectDialog.vue'
+import { createChatSpace, isStandaloneChat } from '@/services/chatNavigation'
 import CloudProjectsPanel from './components/projects/CloudProjectsPanel.vue'
 import AutonomousGoalControl from './components/projects/AutonomousGoalControl.vue'
 import { useAutonomousGoal } from '@/composables/useAutonomousGoal'
@@ -79,11 +82,11 @@ import ApprovalCard from './components/ai/ApprovalCard.vue'
 import PayloadApproval from './components/ai/PayloadApproval.vue'
 import { requestPayloadApproval } from '@/services/payloadApproval'
 import { requestConfirmation } from '@/services/confirmation'
-import {
-  buildTargetContextPackages,
-  sanitizeInferenceMessagesForTarget,
-  type ContextScopeKey,
-} from '@/services/inference/contextBroker'
+import { sanitizeInferenceMessagesForTarget, type ContextScopeKey } from '@/services/inference/contextBroker'
+import { planContext, recordSubmittedContext } from '@/services/contextPlanner'
+import { runCoordinator } from '@/services/runs/runCoordinator'
+import type { ArchivedRun, RunArchiveScope } from '@/services/runs/runArchive'
+import { canPersistData, strictestDataPolicy } from '@/services/runs/dataPolicy'
 import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import ContextCards from './components/ai/ContextCards.vue'
 import RecommendationCard from './components/ai/RecommendationCard.vue'
@@ -312,13 +315,16 @@ const activeThinkingBudget = computed(() => {
   const messageId = activeTurn.value?.messageId
   return messageId ? (getSafeRecordValue(thinkingBudgets.value, messageId) ?? null) : null
 })
-const continuations = shallowRef<Record<string, AgentCheckpoint>>({})
-// Keep only the latest completed goal context per chat; unfinished work remains in continuations.
-const goalWorkingContexts = new Map<string, { messageId: string; checkpoint: AgentCheckpoint }>()
+type RunReference = Pick<ArchivedRun, 'scope' | 'messageId' | 'state' | 'dataPolicy' | 'gaps' | 'updatedAt'>
+type ChatResume = { checkpoint: AgentCheckpoint; messageId: string; reference?: RunReference }
+const continuations = shallowRef<Record<string, RunReference>>({})
+// Views retain identifiers only; the coordinator owns full working context.
+const goalWorkingContexts = new Map<string, RunReference>()
 const resetChatRouting = () => {
   thinkingBudgets.value = {}
   continuations.value = {}
   goalWorkingContexts.clear()
+  runCoordinator.clear()
 }
 window.addEventListener('luczor:api-identity-changing', resetChatRouting)
 onBeforeUnmount(() => window.removeEventListener('luczor:api-identity-changing', resetChatRouting))
@@ -499,27 +505,107 @@ const appRuntimeLifecycle = createAppRuntimeLifecycle({
   togglePushToTalk,
 })
 
+let stopRunRecoveryListeners: (() => void) | undefined
 onMounted(() => {
   void getLocalSpeechConsent().catch(() => undefined)
   refreshPlanPrincipal()
   window.addEventListener('luczor:voice-stop', stopAllVoice)
   window.addEventListener('luczor:voice-settings-changed', stopVoiceInputForSettings)
-  return appRuntimeLifecycle.start().then(async () => {
+  let startup: ReturnType<typeof appRuntimeLifecycle.start> | undefined
+  let startupSettled = false
+  let identityChangedDuringStartup = false
+  let recoveryGeneration = 0
+  const changing = () => {
+    if (!startupSettled) identityChangedDuringStartup = true
+    recoveryGeneration++
+    appReady.value = false
+    appInitialized.value = false
+  }
+  const recover = async (): Promise<void> => {
     if (appUnmounted || appQuitting.value) return
-    try {
-      const principalId = await resolveWorkspacePrincipalId()
-      await chatRuns.recover(principalId)
-      if (reconcileRecoveredChatRuns(state, chatRuns.records.value)) await saveAppStateStrict(state)
-      await autonomousGoal.pauseAll('App neu gestartet. Projektstand prüfen und Ziel bei Bedarf erneut aktivieren.')
-      if (!appUnmounted && !appQuitting.value) appReady.value = true
-    } catch (error) {
-      console.warn('[runs] Recovery journal unavailable:', error)
-    } finally {
-      if (!appUnmounted && !appQuitting.value) appInitialized.value = true
+    const ticket = executionGate.capture()
+    const generation = ++recoveryGeneration
+    const assertCurrent = () => {
+      executionGate.assert(ticket)
+      if (generation !== recoveryGeneration || appUnmounted || appQuitting.value)
+        throw new Error('Veraltete Wiederherstellung verworfen.')
     }
-  })
+    try {
+      await (startup ??= appRuntimeLifecycle.start())
+      startupSettled = true
+      assertCurrent()
+      const principalId = await resolveWorkspacePrincipalId()
+      assertCurrent()
+      // State hydration can finish after the identity-changing listener paused
+      // the old in-memory goals. Do not revive those persisted startup intents.
+      if (identityChangedDuringStartup) {
+        for (const chat of state.conversations ?? []) {
+          const goal = chat.autonomousGoal
+          if (!goal?.active) continue
+          chat.autonomousGoal = {
+            ...goal,
+            active: false,
+            status: 'waiting',
+            revision: goal.revision + 1,
+            reason: 'Konto während des Starts gewechselt. Ziel erneut aktivieren.',
+            updatedAt: Date.now(),
+          }
+        }
+        identityChangedDuringStartup = false
+      }
+      const activeGoals = new Map(
+        (state.conversations ?? [])
+          .filter(chat => chat.autonomousGoal?.active)
+          .map(chat => [chat.id, chat.autonomousGoal!.revision])
+      )
+      await chatRuns.recover(principalId, assertCurrent)
+      assertCurrent()
+      for (const [id, revision] of activeGoals)
+        if (mutations.getConversation(id)?.autonomousGoal?.revision !== revision) activeGoals.delete(id)
+      reconcileRecoveredChatRuns(
+        state,
+        chatRuns.records.value.filter(record => record.principalId === principalId)
+      )
+      // Reconciliation intentionally pauses dead runs. Bind restoration to the
+      // resulting revision so later user/identity changes cannot be overwritten.
+      for (const id of activeGoals.keys()) {
+        const goal = mutations.getConversation(id)?.autonomousGoal
+        if (goal) activeGoals.set(id, goal.revision)
+        else activeGoals.delete(id)
+      }
+      await restoreWorkingContexts(activeGoals, ticket)
+      assertCurrent()
+      await saveAppStateStrict(state)
+      assertCurrent()
+      appReady.value = true
+    } catch (error) {
+      if (
+        ticket.signal.aborted &&
+        generation === recoveryGeneration &&
+        !appUnmounted &&
+        !appQuitting.value &&
+        !hud.killSwitch
+      )
+        return recover()
+      if (!ticket.signal.aborted && generation === recoveryGeneration)
+        console.warn('[runs] Recovery journal unavailable:', error)
+    } finally {
+      if (!ticket.signal.aborted && generation === recoveryGeneration && !appUnmounted && !appQuitting.value)
+        appInitialized.value = true
+    }
+  }
+  const changed = () => void recover()
+  window.addEventListener('luczor:api-identity-changing', changing)
+  window.addEventListener('luczor:api-identity-changed', changed)
+  stopRunRecoveryListeners = () => {
+    recoveryGeneration++
+    window.removeEventListener('luczor:api-identity-changing', changing)
+    window.removeEventListener('luczor:api-identity-changed', changed)
+  }
+  return recover()
 })
 onBeforeUnmount(() => {
+  stopRunRecoveryListeners?.()
   window.removeEventListener('luczor:voice-stop', stopAllVoice)
   window.removeEventListener('luczor:voice-settings-changed', stopVoiceInputForSettings)
   stopAllVoice()
@@ -734,7 +820,7 @@ function stopAssistantLoading() {
 /* -------------------------------------------------
  * Derived state from store
  * ------------------------------------------------- */
-const projects = computed(() => state.projects.filter(project => canAccessCloudProject(project)))
+const projects = computed(() => state.projects.filter(project => !project.archivedAt && canAccessCloudProject(project)))
 
 const activeProjectId = computed<string>({
   get() {
@@ -750,6 +836,7 @@ const activeProjectId = computed<string>({
 })
 
 const activeProject = computed(() => projects.value.find(p => p.id === activeProjectId.value))
+const standaloneChat = computed(() => isStandaloneChat(activeProject.value))
 const showMemoryExplorer = ref(false)
 function openMemoryExplorer() {
   showMemoryExplorer.value = true
@@ -856,21 +943,118 @@ const projectActivity = computed<Record<string, boolean>>(() => {
   return Object.fromEntries(active)
 })
 const projectItems = computed(() =>
-  projects.value.map(project => ({
-    id: project.id,
-    label: project.name,
-    busy: !!projectActivity.value[project.id],
-    cloud: !!project.cloud,
-    chats: (state.conversations ?? [])
+  projects.value
+    .filter(project => !isStandaloneChat(project))
+    .map(project => ({
+      id: project.id,
+      label: project.name,
+      busy: !!projectActivity.value[project.id],
+      cloud: !!project.cloud,
+      chats: (state.conversations ?? [])
+        .filter(chat => chat.projectId === project.id && !chat.archivedAt)
+        .map(chat => ({
+          id: chat.id,
+          label: chat.title,
+          busy: chatRuns.hasLive(chat.id),
+          status: [...chatRuns.records.value].reverse().find(run => run.conversationId === chat.id)?.state,
+        })),
+    }))
+)
+const standaloneChatItems = computed(() =>
+  projects.value.filter(isStandaloneChat).flatMap(project =>
+    (state.conversations ?? [])
       .filter(chat => chat.projectId === project.id && !chat.archivedAt)
       .map(chat => ({
         id: chat.id,
+        projectId: project.id,
         label: chat.title,
         busy: chatRuns.hasLive(chat.id),
         status: [...chatRuns.records.value].reverse().find(run => run.conversationId === chat.id)?.state,
-      })),
-  }))
+      }))
+  )
 )
+const showCreateProject = ref(false)
+const creatingProject = ref(false)
+const createProjectError = ref('')
+function requestCreateProject() {
+  createProjectError.value = ''
+  showCreateProject.value = true
+}
+async function createNamedProject(name: string) {
+  if (creatingProject.value) return
+  creatingProject.value = true
+  createProjectError.value = ''
+  try {
+    await voiceInputSession.stop()
+    await createChatSpace({ name, settings: inheritedChatSettings() })
+    scheduleSave(state)
+    showCreateProject.value = false
+  } catch (error) {
+    createProjectError.value = error instanceof Error ? error.message : 'Projekt konnte nicht erstellt werden.'
+  } finally {
+    creatingProject.value = false
+  }
+}
+async function newStandaloneChat() {
+  try {
+    await voiceInputSession.stop()
+    await createChatSpace({ standalone: true, settings: inheritedChatSettings() })
+    scheduleSave(state)
+  } catch (error) {
+    pushToast(error instanceof Error ? error.message : 'Chat konnte nicht erstellt werden.', 'error')
+  }
+}
+async function showSidebarProjectSettings(id: string) {
+  openProject(id)
+  await nextTick()
+  openProjectSettings('folder')
+}
+function headerAction(id: string) {
+  switch (id) {
+    case 'browser':
+      browserPanel.expanded = !browserPanel.expanded
+      break
+    case 'tools':
+      showToolCenter.value = true
+      break
+    case 'audit':
+      showAudit.value = !showAudit.value
+      break
+    case 'new-chat':
+      void newStandaloneChat()
+      break
+    case 'project-chat':
+      if (!standaloneChat.value) newChat()
+      break
+    case 'create-project':
+      requestCreateProject()
+      break
+    case 'project-settings':
+      if (!standaloneChat.value) openProjectSettings('folder')
+      break
+    case 'context':
+      toggleContextPanel()
+      break
+    case 'checklist':
+      toggleChecklistPanel()
+      break
+    case 'mini':
+      void miniChat.open()
+      break
+    case 'system':
+      showSystemPanel.value = !showSystemPanel.value
+      break
+    case 'theme':
+      void toggleTheme()
+      break
+    case 'notifications':
+      openSettings('notifications')
+      break
+    case 'settings':
+      openSettings()
+      break
+  }
+}
 const isWelcomeMessage = (message: Message) =>
   message.role === 'assistant' &&
   ['Willkommen. Was ist das Ziel dieses Projekts?', 'Neuer Chat. Was ist das Ziel?'].includes(message.content)
@@ -975,9 +1159,14 @@ function finishProjectTitleEdit() {
 }
 watch(activeProjectId, () => {
   editingProjectTitle.value = false
+  showProjectSettings.value = false
 })
 
 function newChat() {
+  if (standaloneChat.value) {
+    void newStandaloneChat()
+    return
+  }
   void voiceInputSession.stop()
   mutations.createConversation(activeProjectId.value, undefined, inheritedChatSettings())
   scheduleSave(state)
@@ -1602,9 +1791,6 @@ watch(
 )
 const showChecklist = ref(false)
 const activeChecklist = computed(() => getPlan(activeProjectId.value))
-const checklistDone = computed(
-  () => activeChecklist.value.steps.filter(step => step.status === 'done' || step.status === 'skipped').length
-)
 /* The two topbar toggles share the overlay's scroll area, so only one panel is open at a time. */
 function toggleContextPanel() {
   showContext.value = !showContext.value
@@ -1689,10 +1875,16 @@ async function rememberExchange(
             role: item.role,
             content: item.content,
             ts: item.ts,
+            dataPolicy: item.meta.retentionPolicy,
             ephemeral:
               item.role === 'user'
-                ? item.meta.dataHandling === 'ephemeral'
-                : !assistantRetentionAllowed || item.meta.dataHandling === 'ephemeral',
+                ? !canPersistData(
+                    item.meta.retentionPolicy ?? (item.meta.dataHandling === 'ephemeral' ? 'ephemeral' : 'syncable')
+                  )
+                : !assistantRetentionAllowed ||
+                  !canPersistData(
+                    item.meta.retentionPolicy ?? (item.meta.dataHandling === 'ephemeral' ? 'ephemeral' : 'syncable')
+                  ),
           },
           phase: 'completed',
         },
@@ -1711,12 +1903,113 @@ async function rememberExchange(
  * Send
  * ------------------------------------------------- */
 async function resumeWork(messageId: string) {
-  const checkpoint = Object.entries(continuations.value).find(([id]) => id === messageId)?.[1]
-  if (!checkpoint || conversationBusy.value) return
+  const reference = Object.entries(continuations.value).find(([id]) => id === messageId)?.[1]
+  if (!reference || conversationBusy.value) return
   try {
-    await send(false, { checkpoint, messageId })
+    await send(false, await prepareWorkingContext(reference, true))
   } catch (error) {
     pushToast(error instanceof Error ? error.message : 'Arbeitsstand kann nicht fortgesetzt werden.', 'error')
+  }
+}
+async function currentArchivePrincipal(): Promise<string> {
+  const account = await getVerifiedAccountSnapshot()
+  return JSON.stringify([
+    account?.serverInstance ?? 'device-local',
+    account?.principalId ?? (await resolveWorkspacePrincipalId()),
+  ])
+}
+async function prepareWorkingContext(reference: RunReference, review = false): Promise<ChatResume> {
+  const ticket = executionGate.capture()
+  const principalId = await currentArchivePrincipal()
+  executionGate.assert(ticket)
+  if (reference.scope.principalId !== principalId) throw new Error('Der Arbeitsstand gehört zu einem anderen Konto.')
+  const workspace = isTauri() ? await getProjectWorkspace(reference.scope.projectId) : activeWorkspace.value
+  executionGate.assert(ticket)
+  if (workspace && workspace.status !== 'ready') throw new Error('Der Projektordner ist noch nicht verfügbar.')
+  const prepared = await runCoordinator.prepareResume({
+    ...reference.scope,
+    sessionId: ticket.sessionId,
+    generation: ticket.generation,
+    workspaceBindingId: JSON.stringify([workspace?.rootPath ?? '', workspace?.updatedAt ?? '']),
+    review,
+  })
+  executionGate.assert(ticket)
+  if (prepared.status !== 'ready' || !prepared.checkpoint)
+    throw new Error(
+      prepared.status === 'needs_reread'
+        ? 'Temporäre Quellen wurden nicht gespeichert. Den unterbrochenen Auftrag zuerst lesend prüfen.'
+        : 'Der Arbeitsstand benötigt eine Prüfung: Projektzuordnung, Freigabe oder Schreibwirkung ist noch ungeklärt.'
+    )
+  return { checkpoint: prepared.checkpoint, messageId: reference.messageId, reference }
+}
+async function restoreWorkingContexts(
+  activeGoals: ReadonlyMap<string, number>,
+  ticket: ExecutionTicket
+): Promise<void> {
+  executionGate.assert(ticket)
+  const principalId = await currentArchivePrincipal()
+  executionGate.assert(ticket)
+  const archived = await runCoordinator.listRecoverable(principalId)
+  executionGate.assert(ticket)
+  const available = archived
+    .filter(run => {
+      const project = state.projects.find(item => item.id === run.scope.projectId)
+      const chat = mutations.getConversation(run.scope.conversationId)
+      return (
+        run.scope.principalId === principalId &&
+        project &&
+        !project.archivedAt &&
+        canAccessCloudProject(project) &&
+        chat &&
+        !chat.archivedAt &&
+        chat.projectId === project.id &&
+        state.messages.some(message => message.id === run.messageId && message.conversationId === chat.id)
+      )
+    })
+    .sort((left, right) => left.updatedAt - right.updatedAt)
+  const restoredGoals = new Map<string, RunReference>()
+  for (const run of available) restoredGoals.set(run.scope.conversationId, run)
+  const updates: Array<{ chatId: string; revision: number; goal: GoalRunState }> = []
+  for (const chat of state.conversations ?? []) {
+    const goal = chat.autonomousGoal
+    if (!goal || activeGoals.get(chat.id) !== goal.revision) continue
+    const revision = goal.revision
+    const reference = restoredGoals.get(chat.id)
+    let safe = !goal.lastMessageId && goal.iterations === 0
+    if (reference && (reference.messageId === goal.lastMessageId || reference.updatedAt >= goal.updatedAt)) {
+      try {
+        await prepareWorkingContext(reference)
+        executionGate.assert(ticket)
+        safe = reference.state !== 'waiting_approval'
+      } catch {
+        executionGate.assert(ticket)
+        safe = false
+      }
+    }
+    updates.push({
+      chatId: chat.id,
+      revision,
+      goal: {
+        ...goal,
+        active: safe,
+        status: 'waiting',
+        revision: revision + 1,
+        lastMessageId: safe && reference ? reference.messageId : goal.lastMessageId,
+        reason: safe
+          ? 'Arbeitsstand wiederhergestellt. Modell, Ordner und Berechtigungen werden vor der Fortsetzung geprüft.'
+          : 'Arbeitsstand benötigt eine Prüfung; fehlende Quellen, Freigaben oder Schreibwirkungen werden nicht automatisch wiederholt.',
+        updatedAt: Date.now(),
+      },
+    })
+  }
+  // Publish the complete result only after all asynchronous checks succeeded.
+  executionGate.assert(ticket)
+  continuations.value = Object.fromEntries(available.map(run => [run.messageId, run]))
+  goalWorkingContexts.clear()
+  for (const [id, reference] of restoredGoals) goalWorkingContexts.set(id, reference)
+  for (const update of updates) {
+    const chat = mutations.getConversation(update.chatId)
+    if (chat?.autonomousGoal?.revision === update.revision) chat.autonomousGoal = update.goal
   }
 }
 type CapturedChatTurn = {
@@ -1808,7 +2101,9 @@ async function collectContextFragments(opts: {
           .map(message => ({
             role: message.role,
             content: message.content,
-            ephemeral: message.meta.dataHandling === 'ephemeral',
+            ephemeral: !canPersistData(
+              message.meta.retentionPolicy ?? (message.meta.dataHandling === 'ephemeral' ? 'ephemeral' : 'syncable')
+            ),
           })),
       })
       promptContext = await buildLocalPromptContextDetails(pid, text, memoryPrefs.injectCount, taskType, opts.origin, {
@@ -1857,6 +2152,12 @@ const lastRunTools = computed(() => {
 const contextPreview = ref<ContextSnapshot | null>(null)
 const contextPreviewBusy = ref(false)
 const contextPreviewError = ref('')
+function contextModelBudget() {
+  const release = localInferenceCoordinator
+    .status()
+    .manifest?.models.find(model => model.id === modelUsageSettings.value.localModelId)
+  return release ? Math.min(release.contextLimit ?? 32768, release.runtime?.maxContextTokens ?? 32768) : undefined
+}
 let contextPreviewTimer: ReturnType<typeof setTimeout> | undefined
 let contextPreviewGeneration = 0
 /** Assemble the start context for the current draft exactly like send() would, without sending. */
@@ -1893,17 +2194,16 @@ async function refreshContextPreview() {
       sessionId: 'preview',
       taskType,
     }
-    const packages = await buildTargetContextPackages({
+    const previewHistory = mutations.getConversationMessages(pid, conversationId)
+    const packages = await planContext({
       scopeKey,
-      fragments: gathered.fragments.map(fragment => ({
-        ...fragment,
-        scope: scopeKey,
-        lifecycle: 'active',
-        sensitivity: 'normal',
-        audiences: ['local_model', 'external_provider'],
-        contentHash: '',
-      })),
-      budget: { maxChars: 16_000, maxFragments: 24, maxFragmentChars: 4_000 },
+      fragments: gathered.fragments,
+      query: text,
+      local: {
+        windowTokens: contextModelBudget(),
+        history: conversationHistoryForInference(previewHistory, 'local').messages,
+      },
+      external: { history: conversationHistoryForInference(previewHistory, 'external').messages },
     })
     if (generation !== contextPreviewGeneration) return
     contextPreview.value = {
@@ -1917,6 +2217,7 @@ async function refreshContextPreview() {
       local: packages.local,
       external: packages.external,
       retrieval: gathered.promptContext,
+      planning: packages.diagnostics,
     }
   } catch (error) {
     if (generation !== contextPreviewGeneration) return
@@ -1951,7 +2252,7 @@ function goalRunInstruction(goal: Readonly<GoalRunState>): string {
 
 async function send(
   automaticVoice = false,
-  resume?: { checkpoint: AgentCheckpoint; messageId: string },
+  resume?: ChatResume,
   miniInput?: { text: string; projectId: string; conversationId?: string },
   goalInput?: { state: GoalRunState; signal: AbortSignal }
 ): Promise<GoalStepResult | undefined> {
@@ -2069,7 +2370,10 @@ async function send(
               role: 'user',
               content: user.content,
               ts: user.ts,
-              ephemeral: user.meta.dataHandling === 'ephemeral',
+              dataPolicy: user.meta.retentionPolicy,
+              ephemeral: !canPersistData(
+                user.meta.retentionPolicy ?? (user.meta.dataHandling === 'ephemeral' ? 'ephemeral' : 'syncable')
+              ),
             },
             phase: 'submitted',
           },
@@ -2077,6 +2381,8 @@ async function send(
         ).catch(() => undefined)
       // Older controls must not restart a superseded user request.
       const obsolete = new Set(mutations.getConversationMessages(pid, conversationId).map(item => item.id))
+      for (const [id, reference] of Object.entries(continuations.value))
+        if (obsolete.has(id)) await runCoordinator.setState(reference.scope, 'completed')
       continuations.value = Object.fromEntries(Object.entries(continuations.value).filter(([id]) => !obsolete.has(id)))
       goalWorkingContexts.delete(conversationId)
     }
@@ -2141,7 +2447,7 @@ async function send(
 async function executeChatTurn(
   captured: CapturedChatTurn,
   handle: ChatRunHandle,
-  resume?: { checkpoint: AgentCheckpoint; messageId: string },
+  resume?: ChatResume,
   goalInput?: { state: GoalRunState; signal: AbortSignal; foreground?: boolean }
 ): Promise<GoalStepResult | undefined> {
   const { pid, conversationId, text, prj, workspace, inputSource } = captured
@@ -2166,6 +2472,7 @@ async function executeChatTurn(
     conversationId,
     serverSpeechAllowed: false,
     dataHandling: 'ephemeral',
+    retentionPolicy: 'ephemeral',
     activity: createChatActivity(assistant.ts),
     commentary: [],
   }
@@ -2183,6 +2490,7 @@ async function executeChatTurn(
   let checkpointMemoryPrincipal = ''
   let latestPublicCheckpoint = ''
   let latestPublicCheckpointSegment: string | undefined
+  let archiveScope: RunArchiveScope | undefined
 
   const retainMemoryCheckpoint = (content: string, final = false, segmentId?: string) => {
     if (!checkpointMemoryPrincipal || !content.trim()) return
@@ -2267,6 +2575,7 @@ async function executeChatTurn(
       taskType,
     }
     const principalScopeId = JSON.stringify([scopeKey.serverInstance, scopeKey.principalId])
+    archiveScope = { principalId: principalScopeId, projectId: pid, conversationId, runId: handle.runId }
     checkpointMemoryPrincipal = accountScope?.principalId ?? 'device-local'
     let taskCreateRecoveryReady = true
     const pendingTaskCreateVerifications = await loadPendingTaskCreates(principalScopeId, pid).catch(error => {
@@ -2275,17 +2584,12 @@ async function executeChatTurn(
       return []
     })
     executionGate.assert(turnExecution)
-    const packages = await buildTargetContextPackages({
+    const packages = await planContext({
       scopeKey,
-      fragments: contextFragments.map(fragment => ({
-        ...fragment,
-        scope: scopeKey,
-        lifecycle: 'active',
-        sensitivity: 'normal',
-        audiences: ['local_model', 'external_provider'],
-        contentHash: '',
-      })),
-      budget: { maxChars: 16_000, maxFragments: 24, maxFragmentChars: 4_000 },
+      fragments: contextFragments,
+      query: text,
+      local: { windowTokens: contextModelBudget(), history: localHistory.messages },
+      external: { history },
     })
     executionGate.assert(turnExecution)
     lastRunContext.value = {
@@ -2300,6 +2604,7 @@ async function executeChatTurn(
       local: packages.local,
       external: packages.external,
       retrieval: promptContext,
+      planning: packages.diagnostics,
     }
     const observeContextRequest = createContextUsageObserver(contextFragments, packages)
     const baseMessages: WireMessage[] = [
@@ -2360,9 +2665,28 @@ async function executeChatTurn(
       interrupted,
       goalReport,
       goalReviewVerified,
+      progressEvidenceFingerprint,
     } = await runAgent({
       ...turnThinking,
       ephemeralContextUsed: turnRouteMode !== 'external' && localHistory.ephemeralDataUsed,
+      contextDataPolicy:
+        turnRouteMode === 'external'
+          ? 'syncable'
+          : strictestDataPolicy(
+              ...fullHistory
+                .filter(message => message.visibility === 'visible' && !message.meta.isLoading)
+                .map(
+                  message =>
+                    message.meta.retentionPolicy ??
+                    (message.meta.dataHandling === 'ephemeral' ? 'ephemeral' : 'syncable')
+                ),
+              contextFragments.some(
+                fragment =>
+                  fragment.egress !== 'allowed' && packages.local.selected.some(item => item.id === fragment.id)
+              )
+                ? 'local_only'
+                : 'syncable'
+            ),
       localOnlyContextUsed: contextFragments.some(
         fragment =>
           fragment.egress === 'local_only' && packages.local.selected.some(selected => selected.id === fragment.id)
@@ -2376,7 +2700,11 @@ async function executeChatTurn(
       execution: turnExecution,
       conversationId,
       runId: handle.runId,
-      onRunWaiting: state => handle.setWaiting(state),
+      onRunWaiting: async state => {
+        await handle.setWaiting(state)
+        if (archiveScope)
+          await runCoordinator.setState(archiveScope, state === 'approval' ? 'waiting_approval' : 'working')
+      },
       onBudget: progress => {
         if (turnExecution.signal.aborted) return
         const next = { ...thinkingBudgets.value }
@@ -2465,9 +2793,15 @@ async function executeChatTurn(
       signal: turnExecution.signal,
       onCheckpoint: async checkpoint => {
         if (turnExecution.signal.aborted || checkpoint.principalScopeId !== principalScopeId) return
-        const targetMessageId = resume?.messageId ?? assistant.id
-        continuations.value = { ...continuations.value, [targetMessageId]: checkpoint }
-        await replacePendingTaskCreates(principalScopeId, pid, checkpoint.pendingTaskCreateVerifications ?? [])
+        const reference = await runCoordinator.capture({ ...archiveScope!, messageId: assistant.id, checkpoint })
+        continuations.value = { ...continuations.value, [assistant.id]: reference }
+        if (resume?.reference) await runCoordinator.setState(resume.reference.scope, 'completed')
+        await replacePendingTaskCreates(
+          principalScopeId,
+          pid,
+          checkpoint.pendingTaskCreateVerifications ?? [],
+          checkpoint.resolvedTaskCreateVerifications ?? []
+        )
       },
 
       onProgress: event => {
@@ -2517,7 +2851,12 @@ async function executeChatTurn(
         mutations.patchMessage(pid, assistant.id, { meta: { tokenUsage: usage } })
       },
       onContextRequest: request => {
-        if (!turnExecution.signal.aborted) observeContextRequest(request)
+        if (!turnExecution.signal.aborted) {
+          observeContextRequest(request)
+          recordSubmittedContext(packages, request.target, request.messages)
+          if (lastRunContext.value?.messageId === assistant.id)
+            lastRunContext.value = { ...lastRunContext.value, planning: structuredClone(packages.diagnostics) }
+        }
       },
       // Render public answer content as soon as each transport chunk arrives.
       onToken: raw => {
@@ -2546,14 +2885,20 @@ async function executeChatTurn(
     {
       const next = { ...continuations.value }
       if (resume) delete next[resume.messageId]
-      if (continuation) next[assistant.id] = continuation
+      const checkpoint = continuation ?? workingContext
+      const reference = checkpoint
+        ? await runCoordinator.capture({
+            ...archiveScope!,
+            messageId: assistant.id,
+            checkpoint,
+            state: continuation || interrupted ? 'interrupted' : goalInput ? 'working' : 'completed',
+          })
+        : undefined
+      if (reference && resume?.reference) await runCoordinator.setState(resume.reference.scope, 'completed')
+      if (continuation && reference) next[assistant.id] = reference
       else delete next[assistant.id]
       continuations.value = next
-      if (goalInput && (continuation ?? workingContext))
-        goalWorkingContexts.set(conversationId, {
-          messageId: assistant.id,
-          checkpoint: (continuation ?? workingContext)!,
-        })
+      if (goalInput && reference) goalWorkingContexts.set(conversationId, reference)
     }
     if (continuation || interrupted)
       await handle.interrupt('Fortschritt gesichert. Aktuellen Zustand prüfen und weiterarbeiten.')
@@ -2574,6 +2919,8 @@ async function executeChatTurn(
           specialistOutcomes: ephemeralDataUsed ? undefined : specialistOutcomes,
           serverSpeechAllowed: !ephemeralDataUsed,
           dataHandling: ephemeralDataUsed ? 'ephemeral' : 'syncable',
+          retentionPolicy:
+            (continuation ?? workingContext)?.dataPolicy ?? (ephemeralDataUsed ? 'ephemeral' : 'syncable'),
         },
       })
     }
@@ -2611,7 +2958,7 @@ async function executeChatTurn(
         assistant.id,
         checkpointMemoryPrincipal,
         turnExecution,
-        !ephemeralDataUsed
+        canPersistData((continuation ?? workingContext)?.dataPolicy ?? (ephemeralDataUsed ? 'ephemeral' : 'syncable'))
       )
     if (goalInput) {
       if (interrupted)
@@ -2627,6 +2974,7 @@ async function executeChatTurn(
           status: 'continue',
           summary: 'Der nächste Zielabschnitt übernimmt den vollständigen bisherigen Arbeitsstand.',
           messageId: assistant.id,
+          fingerprint: progressEvidenceFingerprint,
         }
       if (!report) throw new Error('Das Modell hat keinen prüfbaren Zielstatus geliefert. Das Ziel bleibt offen.')
       if (report.status === 'completed' && ((!goalReviewVerified && toolFailures > 0) || !report.evidence?.trim()))
@@ -2634,10 +2982,23 @@ async function executeChatTurn(
           status: 'continue',
           summary: 'Die Abschlussprüfung ist noch nicht erfolgreich.',
           messageId: assistant.id,
+          fingerprint: progressEvidenceFingerprint,
         }
-      return { ...report, reviewVerified: goalReviewVerified, messageId: assistant.id }
+      if (
+        report.status === 'completed' &&
+        (goalReviewVerified || goalInput.state.phase === 'review') &&
+        report.evidence?.trim()
+      )
+        await runCoordinator.setState(archiveScope!, 'completed')
+      return {
+        ...report,
+        reviewVerified: goalReviewVerified,
+        messageId: assistant.id,
+        fingerprint: progressEvidenceFingerprint,
+      }
     }
   } catch (e: any) {
+    if (archiveScope) await runCoordinator.setState(archiveScope, 'interrupted').catch(() => undefined)
     progressiveSpeech.cancel()
     const ownsCurrentTurn = isVisible()
     if (ownsCurrentTurn) {
@@ -2914,6 +3275,15 @@ const autonomousGoal = useAutonomousGoal({
     !hud.killSwitch &&
     !chatRuns.hasLive(conversationId) &&
     !admittingConversations.value.has(conversationId) &&
+    (routeModeFor(conversationId) === 'external' ||
+      (localInferenceCoordinator.status().mode === 'active' &&
+        localInferenceCoordinator
+          .modelAdmissions(undefined, 'chat')
+          .some(
+            model =>
+              model.admissible &&
+              (!modelUsageSettings.value.localModelId || model.modelReleaseId === modelUsageSettings.value.localModelId)
+          ))) &&
     (conversationId !== activeConversationId.value || !(showPlanning.value || planningBusy.value)),
   draft: () => input.value,
   run: async (conversationId, goal, signal) => {
@@ -2921,10 +3291,15 @@ const autonomousGoal = useAutonomousGoal({
     if (!projectId) throw new Error('Der Chat dieses Ziels ist nicht mehr verfügbar.')
     const saved = goalWorkingContexts.get(conversationId)
     const previous = goal.lastMessageId
-      ? (continuations.value[goal.lastMessageId] ??
-        (saved?.messageId === goal.lastMessageId ? saved.checkpoint : undefined))
+      ? (continuations.value[goal.lastMessageId] ?? (saved?.messageId === goal.lastMessageId ? saved : undefined))
       : undefined
-    const checkpoint = previous ? { checkpoint: previous, messageId: goal.lastMessageId! } : undefined
+    if ((goal.lastMessageId || goal.iterations > 1) && !previous)
+      return {
+        status: 'blocked',
+        summary:
+          'Der dauerhafte Arbeitsstand fehlt. Den Auftrag zuerst lesend prüfen; eine neue Kontextbasis wird nicht stillschweigend gestartet.',
+      }
+    const checkpoint = previous ? await prepareWorkingContext(previous) : undefined
     const text = goalRunInstruction(goal)
     const result = await send(false, checkpoint, { text, projectId, conversationId }, { state: goal, signal })
     if (!result) throw new Error('Zielrunde konnte noch nicht gestartet werden.')
@@ -3050,16 +3425,43 @@ watch(
   { flush: 'sync' }
 )
 let globalQuitDrain: Promise<boolean> = Promise.resolve(true)
+let quitGoalIntents = new Map<string, string>()
 const gracefulQuit = createGracefulQuit({
   begin: () => {
     appQuitting.value = true
+    quitGoalIntents = new Map(
+      (state.conversations ?? [])
+        .filter(chat => chat.autonomousGoal?.active)
+        .map(chat => [chat.id, chat.autonomousGoal!.text])
+    )
     globalQuitDrain = globalAgentStop.stop()
     appRuntimeLifecycle.stop()
   },
   drain: async () => {
     if (!(await globalQuitDrain)) throw new Error('agent_shutdown_incomplete')
   },
-  save: () => saveAppStateStrict(state),
+  save: async () => {
+    // Normal app exit drains workers, while the user's goal intent survives.
+    // The explicit global stop keeps its separate persistent pause behavior.
+    for (const chat of state.conversations ?? []) {
+      const goal = chat.autonomousGoal
+      if (!goal || quitGoalIntents.get(chat.id) !== goal.text || goal.status === 'completed') continue
+      const latest =
+        Object.values(continuations.value)
+          .filter(reference => reference.scope.conversationId === chat.id)
+          .sort((left, right) => right.updatedAt - left.updatedAt)[0] ?? goalWorkingContexts.get(chat.id)
+      chat.autonomousGoal = {
+        ...goal,
+        active: true,
+        lastMessageId: latest?.messageId ?? goal.lastMessageId,
+        status: 'waiting',
+        revision: goal.revision + 1,
+        reason: 'App beendet; sichere Wiederaufnahme wird beim nächsten Start geprüft.',
+        updatedAt: Date.now(),
+      }
+    }
+    await saveAppStateStrict(state)
+  },
   failed: error => console.warn('[runs] Shutdown could not finish before native fallback:', error),
 })
 const workflowWatchers = useWorkflowWatchers()
@@ -3178,6 +3580,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       v-model:collapsed="sidebarCollapsed"
       :title="appearance.assistantName"
       :items="projectItems"
+      :standalone-chats="standaloneChatItems"
       :active-id="activeProjectId"
       :active-chat-id="activeConversationId"
       @select-chat="selectConversation"
@@ -3191,7 +3594,9 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       "
       @select="openProject"
       @rename="renameProject"
-      @new-chat="newChat"
+      @new-chat="newStandaloneChat"
+      @create-project="requestCreateProject"
+      @project-settings="showSidebarProjectSettings"
       @add-project="addProject"
       @settings="openSettings()"
       @system="showSystemPanel = !showSystemPanel"
@@ -3203,9 +3608,16 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       @memory="openMemoryExplorer"
     />
 
+    <CreateProjectDialog
+      :open="showCreateProject"
+      :busy="creatingProject"
+      :error="createProjectError"
+      @close="showCreateProject = false"
+      @create="createNamedProject"
+    />
     <MemoryExplorerPage
       v-if="showMemoryExplorer"
-      :projects="projects"
+      :projects="projects.filter(project => !isStandaloneChat(project))"
       :project-id="activeProjectId"
       @close="showMemoryExplorer = false"
       @settings="openProjectSettings('display')"
@@ -3224,6 +3636,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             @keydown.enter.prevent="finishProjectTitleEdit"
             @keydown.esc.prevent="editingProjectTitle = false"
           />
+          <span v-else-if="standaloneChat" class="header__eyebrow">Chat ohne Projekt</span>
           <button
             v-else
             type="button"
@@ -3242,200 +3655,21 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           <div class="header__workspace">{{ activeConversation?.title ?? 'Chat' }}</div>
         </div>
 
-        <div class="header__tools">
-          <button
-            type="button"
-            class="icon-btn"
-            :class="{ 'is-on': browserPanel.expanded }"
-            title="Internen Browser öffnen"
-            :aria-label="browserPanel.expanded ? 'Internen Browser einklappen' : 'Internen Browser öffnen'"
-            :aria-expanded="browserPanel.expanded"
-            @click="browserPanel.expanded = !browserPanel.expanded"
-          >
-            <AiIcon name="panel" :size="16" />
-          </button>
-          <button
-            type="button"
-            class="icon-btn"
-            :class="{ 'is-on': showToolCenter }"
-            title="Tool-Center öffnen"
-            aria-label="Tool-Center öffnen"
-            :aria-expanded="showToolCenter"
-            @click="showToolCenter = true"
-          >
-            <AiIcon name="tool" :size="16" />
-          </button>
-          <p v-if="modeConfirmationError" class="repo-graph-message" role="alert">{{ modeConfirmationError }}</p>
-
-          <button
-            type="button"
-            class="icon-btn"
-            :class="{ 'is-on': showProjectSettings }"
-            title="Projekteinstellungen · Ordner, Graph-Erkennung, Darstellung"
-            aria-label="Projekteinstellungen öffnen"
-            @click="openProjectSettings('folder')"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <path d="M3 6h7l2 3h9v11H3Z" />
-              <path d="M12 12v6M9 15h6" />
-            </svg>
-          </button>
-
-          <button
-            type="button"
-            class="icon-btn"
-            :class="{ 'is-on': showContext }"
-            :title="`Projektziele & Zusammenfassungen · ${goalStats.done}/${goalStats.total} erledigt`"
-            :aria-expanded="showContext"
-            @click="toggleContextPanel"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <path d="M9 11l3 3L22 4" />
-              <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
-            </svg>
-          </button>
-
-          <button
-            v-if="!!activePlanningSession || activeChecklist.steps.length > 0"
-            type="button"
-            class="icon-btn"
-            :class="{ 'is-on': showChecklist }"
-            :title="`Checkliste · ${checklistDone}/${activeChecklist.steps.length} erledigt`"
-            :aria-expanded="showChecklist"
-            @click="toggleChecklistPanel"
-          >
-            <AiIcon name="grid" :size="16" />
-          </button>
-
-          <button
-            type="button"
-            class="icon-btn"
-            aria-label="Luczor Mini öffnen"
-            title="Schwebenden Mini-Chat öffnen"
-            @click="miniChat.open()"
-          >
-            <AiIcon name="spark" />
-          </button>
-          <span v-if="miniChat.error.value" class="ai-muted" role="alert">{{ miniChat.error.value }}</span>
-          <button
-            type="button"
-            class="icon-btn"
-            :class="{ 'is-on': showAudit }"
-            title="Tool-Protokoll"
-            :aria-expanded="showAudit"
-            @click="showAudit = !showAudit"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <line x1="8" y1="6" x2="20" y2="6" />
-              <line x1="8" y1="12" x2="20" y2="12" />
-              <line x1="8" y1="18" x2="20" y2="18" />
-              <circle cx="3.5" cy="6" r="1" />
-              <circle cx="3.5" cy="12" r="1" />
-              <circle cx="3.5" cy="18" r="1" />
-            </svg>
-          </button>
-
-          <button
-            type="button"
-            class="icon-btn theme-btn"
-            :title="appearance.theme === 'light' ? 'Dunkles Design' : 'Helles Design'"
-            :aria-label="appearance.theme === 'light' ? 'Dunkles Design einschalten' : 'Helles Design einschalten'"
-            @click="toggleTheme()"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <g class="theme-btn__moon">
-                <path d="M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5z" />
-              </g>
-              <g class="theme-btn__sun">
-                <circle cx="12" cy="12" r="4" />
-                <path
-                  d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
-                />
-              </g>
-            </svg>
-          </button>
-
-          <button
-            type="button"
-            class="icon-btn notification-btn"
-            title="Push-Benachrichtigungen"
-            aria-label="Push-Benachrichtigungen"
-            @click="openSettings('notifications')"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.8"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9" />
-              <path d="M10 21h4" />
-            </svg>
-          </button>
-
-          <button
-            type="button"
-            class="icon-btn icon-btn--danger"
-            title="Neuer Chat / Reset"
-            aria-label="Neuer Chat / Reset"
-            @click="newChat"
-          >
-            <svg
-              viewBox="0 0 24 24"
-              width="16"
-              height="16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <polyline points="3 6 5 6 21 6" />
-              <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-            </svg>
-          </button>
-        </div>
+        <WorkspaceHeaderActions
+          :standalone="standaloneChat"
+          :browser-open="browserPanel.expanded"
+          :tools-open="showToolCenter"
+          :audit-open="showAudit"
+          :context-open="showContext"
+          :system-open="showSystemPanel"
+          :checklist-open="showChecklist"
+          :checklist-available="!!activePlanningSession || activeChecklist.steps.length > 0"
+          :light="appearance.theme === 'light'"
+          @action="headerAction"
+        />
       </div>
+      <p v-if="modeConfirmationError" class="repo-graph-message" role="alert">{{ modeConfirmationError }}</p>
+      <p v-if="miniChat.error.value" class="ai-muted" role="alert">{{ miniChat.error.value }}</p>
 
       <!-- Overlay stays anchored above the independently scrolling conversation. -->
       <ChatComposer scroll-id="messages" :follow="hasConversation">
@@ -3475,6 +3709,8 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
             :project-id="activeProjectId"
             :suspended="
               showSettings ||
+              showCreateProject ||
+              showProjectSettings ||
               showAgentHub ||
               showCloudProjects ||
               showPlanning ||
@@ -3488,7 +3724,10 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           <span class="ai-welcome__mark"><AiIcon :size="32" /></span>
           <span class="ai-eyebrow">DEIN PERSÖNLICHER WORKSPACE</span>
           <h1>Woran arbeiten wir heute?</h1>
-          <p>
+          <p v-if="standaloneChat">
+            Platz für deine Fragen und Ideen.<br />Einfach mit {{ appearance.assistantName }} loslegen.
+          </p>
+          <p v-else>
             Von der ersten Idee bis zum letzten Schritt.<br />Mit deinem Projekt, deinem Kontext und
             {{ appearance.assistantName }}.
           </p>
@@ -3498,6 +3737,15 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
                 >Gemeinsam planen<small>Ziele, Fragen und Schritte im Chat besprechen</small></span
               ><AiIcon name="arrow" /></button
             ><button
+              v-if="standaloneChat"
+              type="button"
+              @click="editSelection('Hilf mir,', 'eine Idee weiterzuentwickeln.')"
+            >
+              <AiIcon name="spark" /><span
+                >Eine Idee entwickeln<small>Gedanken sortieren und Neues entdecken</small></span
+              ><AiIcon name="arrow" /></button
+            ><button
+              v-else
               type="button"
               @click="editSelection('Analysiere', 'den aktuellen Projektzustand und die nächsten sinnvollen Schritte.')"
             >
@@ -3607,7 +3855,11 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
                 >
                   Weiterarbeiten
                 </button>
-                <span>Arbeitskontext erhalten · {{ continuations[m.id]?.messages.length }} Einträge</span>
+                <span>{{
+                  continuations[m.id]?.gaps.length
+                    ? 'Temporäre Quellen müssen erneut gelesen werden'
+                    : 'Arbeitsstand gesichert'
+                }}</span>
               </div>
             </template>
             <p v-else class="ai-message__user-text">{{ m.content }}</p>
@@ -3715,7 +3967,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           :recording="isRecording"
           :listening="listening"
           :voice-busy="voiceInputView.starting || voiceInputView.finishing"
-          :context-label="activeWorkspace?.displayName || activeProject?.name"
+          :context-label="standaloneChat ? undefined : activeWorkspace?.displayName || activeProject?.name"
           :commands="promptCommands"
           @input="setComposerInput(input, 'keyboard')"
           @send="send"

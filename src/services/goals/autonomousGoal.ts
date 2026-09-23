@@ -211,7 +211,9 @@ export function createAutonomousGoalController(dependencies: AutonomousGoalDepen
       if (dependencies.read(id)?.revision !== attempt.revision) return
       const summary = compact(result.summary, 4000)
       const evidence = compact(result.evidence, 8000)
-      const fingerprint = compact(result.fingerprint, 1000) || summary.replace(/\s+/gu, ' ')
+      // Narration is not evidence. Missing host progress cannot reset stagnation
+      // merely because the model paraphrases the same unfinished work.
+      const fingerprint = compact(result.fingerprint, 1000)
       const unchanged = fingerprint === (attempt.lastFingerprint ?? '')
       const stagnant = unchanged ? (attempt.stagnantIterations ?? 0) + 1 : 1
       const common: Partial<GoalRunState> = {

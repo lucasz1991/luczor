@@ -9,7 +9,7 @@ import { startDeviceJobChannel, stopDeviceJobChannel } from '@/services/deviceJo
 import { NATIVE_NOTIFICATION_ACTION_EVENT, startNativeNotificationActionListener } from '@/services/notifications'
 import { loadAppState } from '@/services/persistence'
 import { loadPlans } from '@/services/plan'
-import { luczorMemory } from '@/services/memory/luczorMemory'
+import { refreshMemorySynchronization } from '@/services/memory/memorySyncCoordinator'
 import { preloadSfx } from '@/services/sfx'
 import {
   beginLocalInferenceBootstrap,
@@ -121,7 +121,7 @@ function createDefaultDependencies(): AppRuntimeLifecycleDependencies {
     clearStatusHeartbeat: heartbeat => window.clearInterval(heartbeat),
     startDeviceJobChannel,
     stopDeviceJobChannel,
-    flushMemoryOutbox: () => luczorMemory.flushPendingSync(),
+    flushMemoryOutbox: refreshMemorySynchronization,
     warn: (message, error) => console.warn(message, error),
   }
 }

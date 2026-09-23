@@ -389,9 +389,16 @@ export function mergeMemoryMetadata(records: MetadataRecord[], now = Date.now())
   )
   const merged = captureMemoryMetadata({ content: '', source: 'assistant', now })
   merged.kind = entries.length && entries.every(entry => entry.kind === entries[0]!.kind) ? entries[0]!.kind : 'unknown'
-  merged.interest = entries.some(entry => entry.interest !== null)
-    ? Math.max(...entries.map(entry => entry.interest ?? 0))
-    : null
+  // A preference about one topic is not evidence of interest in every merged topic.
+  const topic = (entry: MemoryMetadata) => JSON.stringify(entry.categories.map(category => category.id).sort())
+  const sameTopic =
+    entries.length > 0 &&
+    entries[0]!.categories.length > 0 &&
+    entries.every(entry => topic(entry) === topic(entries[0]!))
+  merged.interest =
+    sameTopic && entries.every(entry => entry.interest !== null)
+      ? entries.reduce((sum, entry) => sum + entry.interest!, 0) / entries.length
+      : null
   merged.categories = unique(
     entries.flatMap(entry => entry.categories),
     category => category.id
