@@ -128,7 +128,12 @@ function define(
     async execute(args, ctx) {
       validateToolArguments(parameters, args)
       if (typeof args.url === 'string') browserNavigationUrl(args.url)
-      if (action === 'open') revealBrowserPanel(ctx.projectId)
+      const conversationId = ctx.execution?.scope?.conversationId ?? ''
+      const detachedPlaygroundOwnsBrowser =
+        browserPanel.detached &&
+        browserPanel.projectId === ctx.projectId &&
+        browserPanel.conversationId === conversationId
+      if (action === 'open' && !detachedPlaygroundOwnsBrowser) revealBrowserPanel(ctx.projectId, conversationId)
       browserPanel.error = ''
       try {
         // Reserve ownership before entering the operation FIFO; existing owners can still close while others wait.

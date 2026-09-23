@@ -23,6 +23,7 @@ type InternalSession = {
   meta: ToolSession
   ticket: ExecutionTicket
   scope: WorkflowArtifactScope
+  ownerToolSessionId?: string
   invokeTask: <T>(command: string, payload: Record<string, unknown>, mutating?: boolean) => Promise<T>
   browser?: ReturnType<typeof createWorkflowBrowser>
 }
@@ -161,6 +162,15 @@ export async function closeToolSession(id: string): Promise<boolean> {
   const [key, session] = entry
   const operation = (async () => {
     if (session.meta.kind === 'browser') await cleanupWorkflowBrowser(session.scope)
+    if (session.meta.kind === 'terminal') {
+      const ticket = session.ticket.scope
+        ? executionGate.capture(undefined, session.ticket.scope, session.ticket.mode)
+        : executionGate.capture()
+      const execution = await executionPayload(ticket, false)
+      await invoke('wf_execution_cancel', {
+        payload: { execution, executionId: session.scope.runId },
+      })
+    }
     // Keep the handle on cleanup failure; do not lose the ability to release the native window.
     if (sessions.get(key) === session) sessions.delete(key)
     session.meta = { ...session.meta, status: 'stopped', updatedAt: Date.now() }
@@ -173,6 +183,14 @@ export async function closeToolSession(id: string): Promise<boolean> {
   } finally {
     closing.delete(id)
   }
+}
+
+export async function closeToolSessionsForOwner(ownerToolSessionId: string): Promise<void> {
+  if (!ownerToolSessionId) return
+  const ids = [...sessions.values()]
+    .filter(session => session.ownerToolSessionId === ownerToolSessionId)
+    .map(session => session.meta.id)
+  await Promise.all(ids.map(id => closeToolSession(id)))
 }
 
 export async function getToolSession(
@@ -271,7 +289,13 @@ export async function getToolSession(
       conversationId: ticket.scope?.conversationId,
       runId: ticket.scope?.runId,
     })
-    const internal: InternalSession = { meta, ticket, scope, invokeTask }
+    const internal: InternalSession = {
+      meta,
+      ticket,
+      scope,
+      ...(ctx.toolSessionId ? { ownerToolSessionId: ctx.toolSessionId } : {}),
+      invokeTask,
+    }
     if (kind === 'browser') {
       internal.browser = createWorkflowBrowser({
         scope,

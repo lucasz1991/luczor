@@ -1,0 +1,6 @@
+{
+  "identifier": "chat-playground",
+  "description": "Detached, resizable Chat Playground. File, terminal, and browser execution is forwarded to the trusted main runtime.",
+  "windows": ["luczor-chat-playground"],
+  "permissions": ["core:default", "core:event:allow-listen", "core:event:allow-unlisten", "chat-playground-client"]
+}

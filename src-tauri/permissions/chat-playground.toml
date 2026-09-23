@@ -1,0 +1,15 @@
+[[permission]]
+identifier = "chat-playground-host"
+description = "Main webview can open the detached Chat Playground and return bounded tool results."
+commands.allow = ["chat_playground_window_open", "chat_playground_respond"]
+
+[[permission]]
+identifier = "chat-playground-client"
+description = "Detached Playground may request bounded actions through the main host and control its own window."
+commands.allow = [
+    "chat_playground_snapshot",
+    "chat_playground_action",
+    "chat_playground_window_close",
+    "browser_panel_layout",
+    "browser_panel_status",
+]

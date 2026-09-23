@@ -12,12 +12,14 @@ import {
   clearToolSessions,
   acquireBrowserToolSession,
   closeToolSession,
+  closeToolSessionsForOwner,
   getToolSession,
   listToolSessions,
   retainToolSessionRun,
 } from '@/services/tools/toolSessionCoordinator'
 import { executionGate, updateExecutionControls } from '@/services/executionGate'
 import { browserPanel } from '@/services/browserPanel'
+import { chatPlaygroundToolSessionId } from '@/services/chatPlayground'
 const context = { projectId: 'project' }
 const execute = (name: string, args: Record<string, unknown>) =>
   browserTools.find(tool => tool.name === name)!.execute(args, context)
@@ -102,6 +104,67 @@ describe('chat browser native session', () => {
       })
     )
     await expect(getToolSession({ ...ctx, researchScope: undefined }, 'terminal')).rejects.toThrow('scope_changed')
+  })
+  it('shares the docked and detached browser session for one chat and releases that owner only', async () => {
+    const ownerToolSessionId = chatPlaygroundToolSessionId('project', 'chat')
+    const mainContext = {
+      projectId: 'project',
+      toolSessionId: ownerToolSessionId,
+      execution: executionGate.capture(undefined, { projectId: 'project', conversationId: 'chat' }, 'act'),
+    }
+    const detachedContext = {
+      ...mainContext,
+      execution: executionGate.capture(undefined, { projectId: 'project', conversationId: 'chat' }, 'act'),
+    }
+    const docked = await getToolSession(mainContext, 'browser')
+    const detached = await getToolSession(detachedContext, 'browser')
+    const otherChat = await getToolSession(
+      {
+        projectId: 'project',
+        toolSessionId: chatPlaygroundToolSessionId('project', 'other-chat'),
+        execution: executionGate.capture(undefined, { projectId: 'project', conversationId: 'other-chat' }, 'act'),
+      },
+      'terminal'
+    )
+
+    expect(detached.meta.id).toBe(docked.meta.id)
+    await closeToolSessionsForOwner(ownerToolSessionId)
+
+    expect(native.invoke).toHaveBeenCalledWith('wf_browser_cleanup', {
+      payload: expect.objectContaining({ runId: docked.scope.runId }),
+    })
+    expect(listToolSessions().map(session => session.id)).toEqual([otherChat.meta.id])
+  })
+  it('cancels only the bound chat terminal workflow when its playground closes', async () => {
+    const ownerToolSessionId = chatPlaygroundToolSessionId('project', 'chat')
+    const terminal = await getToolSession(
+      {
+        projectId: 'project',
+        toolSessionId: ownerToolSessionId,
+        execution: executionGate.capture(undefined, { projectId: 'project', conversationId: 'chat' }, 'act'),
+      },
+      'terminal'
+    )
+    const other = await getToolSession(
+      {
+        projectId: 'project',
+        toolSessionId: chatPlaygroundToolSessionId('project', 'other-chat'),
+        execution: executionGate.capture(undefined, { projectId: 'project', conversationId: 'other-chat' }, 'act'),
+      },
+      'terminal'
+    )
+
+    await closeToolSessionsForOwner(ownerToolSessionId)
+
+    expect(native.invoke).toHaveBeenCalledWith(
+      'wf_execution_cancel',
+      expect.objectContaining({ payload: expect.objectContaining({ executionId: terminal.scope.runId }) })
+    )
+    expect(native.invoke).not.toHaveBeenCalledWith(
+      'wf_execution_cancel',
+      expect.objectContaining({ payload: expect.objectContaining({ executionId: other.scope.runId }) })
+    )
+    expect(listToolSessions().map(session => session.id)).toEqual([other.meta.id])
   })
   it('rejects executable URLs before reserving a session and ignores legacy host lists', async () => {
     await expect(

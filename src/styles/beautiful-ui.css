@@ -818,7 +818,8 @@
   box-shadow: 0 2px 8px #0002;
 }
 .ai-prompt:focus-within {
-  border-color: var(--ai-faint);
+  border-color: var(--ai-accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ai-accent) 24%, transparent);
 }
 .ai-prompt textarea {
   color: var(--ai-ink);

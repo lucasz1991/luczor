@@ -18,7 +18,7 @@ const groups = computed<Array<{ label: string; icon: string; items: HeaderAction
     label: 'Werkzeuge',
     icon: 'tool',
     items: [
-      { id: 'browser', label: 'Interner Browser', icon: 'panel', active: props.browserOpen },
+      { id: 'browser', label: 'Chat Playground', icon: 'panel', active: props.browserOpen },
       { id: 'tools', label: 'Tool-Center', icon: 'tool', active: props.toolsOpen },
       { id: 'audit', label: 'Tool-Protokoll', icon: 'code', active: props.auditOpen },
     ],

@@ -342,6 +342,19 @@ function archiveNote(
   return { role: 'system', content: content() }
 }
 
+/** A read page is exact working evidence, not an excerpt to shorten again. */
+function isExactHistoryPage(message: WireMessage): boolean {
+  if (message.role !== 'tool' || message.name !== 'context_read_history') return false
+  try {
+    const receipt = JSON.parse(message.content) as { ok?: unknown; output?: { index?: unknown; text?: unknown } }
+    return (
+      receipt.ok === true && Number.isSafeInteger(receipt.output?.index) && typeof receipt.output?.text === 'string'
+    )
+  } catch {
+    return false
+  }
+}
+
 /** One request budget across policy, profile, retrieved knowledge, history and tools.
  * The source archive and tool arguments are immutable. Current user text and policy
  * are hard constraints; overTarget is explicit and native tokenization remains final.
@@ -360,7 +373,9 @@ export function fitRequestContext(
   } = {}
 ): { messages: WireMessage[]; report: ContextBudgetReport } {
   const window = options.contextTokens && options.contextTokens > 0 ? options.contextTokens : 32768
-  const capacity = Math.floor(window * 0.65)
+  // Keep the complete working evidence whenever it fits. The native tokenizer
+  // remains the authority for the signed context limit and answer reserve.
+  const capacity = Math.floor(window * 0.85)
   const target = Math.max(1024, Math.min(options.targetTokens ?? capacity, capacity))
   const messages = structuredClone(source) as WireMessage[]
   const total = () =>
@@ -446,10 +461,19 @@ export function fitRequestContext(
       }
       if (!outstanding.size && block.every(index => !removed.includes(index))) blocks.push(block)
     }
+    // Archive pages must remain visible after the next few ordinary tool calls.
+    // Keep their call IDs together with the two most recent exact pages.
+    const retainedHistoryBlockStarts = new Set(
+      blocks
+        .filter(block => block.some(index => isExactHistoryPage(source.at(index)!)))
+        .slice(-2)
+        .map(block => block[0])
+    )
     // Start from the already privacy/policy-fitted system messages. Original
     // archive indices are retained explicitly, never inferred from this projection.
     const prepared = policyPrepared
     for (const block of blocks.slice(0, -2)) {
+      if (retainedHistoryBlockStarts.has(block[0])) continue
       removed.push(...block)
       const indices = [...new Set(removed)].sort((left, right) => left - right)
       const omitted = new Set(indices)
@@ -468,6 +492,7 @@ export function fitRequestContext(
     if (total() > target) {
       for (const message of messages) {
         if (message.role !== 'tool' || message.content.length < 1800) continue
+        if (isExactHistoryPage(message)) continue
         const index = source.findIndex(
           candidate =>
             candidate.role === 'tool' &&

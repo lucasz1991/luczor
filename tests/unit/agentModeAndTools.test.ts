@@ -2645,6 +2645,38 @@ describe('agent mode and tool reliability', () => {
     expect(request.contextBudget?.shortenedToolResults).toBe(0)
   })
 
+  it('plans the next local round against the context window measured after native growth', async () => {
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce({
+        ...toolCallResult,
+        contextUsage: {
+          inputTokens: 5900,
+          contextTokens: 12288,
+          outputTokens: 500,
+          omittedMessages: 0,
+          shortenedToolResults: 0,
+        },
+      })
+      .mockResolvedValueOnce({ content: 'Geprüft.', toolCalls: [], rawToolCalls: [] })
+
+    const result = await runAgent({
+      projectId: 'p1',
+      mode: 'observe',
+      baseMessages: [{ role: 'user', content: 'Prüfe die Dateien.' }],
+      inferenceGateway: {
+        id: 'local',
+        target: 'local_llama_cpp',
+        contextTokens: 8192,
+        streamChatWithTools: mocks.streamChatWithTools,
+      },
+    })
+
+    expect(result.finalText).toBe('Geprüft.')
+    expect(mocks.execute).toHaveBeenCalledOnce()
+    expect((mocks.streamChatWithTools.mock.calls[0]![0] as InferenceRequest).contextBudget?.targetTokens).toBe(6963)
+    expect((mocks.streamChatWithTools.mock.calls[1]![0] as InferenceRequest).contextBudget?.targetTokens).toBe(10444)
+  })
+
   it('queues approval-required tools as approved in unrestricted mode without opening a pending approval', async () => {
     mocks.getTool.mockReturnValue({
       name: 'project_upsert_goal',

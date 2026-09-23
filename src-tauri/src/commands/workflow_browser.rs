@@ -500,10 +500,11 @@ async fn run(
                 tauri::webview::NewWindowResponse::Deny
             }
         });
-        let main = app
-            .get_window("main")
-            .ok_or("browser_panel_main_unavailable")?;
-        let browser = main
+        let host_label = super::browser_panel::target_window_label(&session.scope.project_id);
+        let host = app
+            .get_window(&host_label)
+            .ok_or("browser_panel_host_unavailable")?;
+        let browser = host
             .add_child(
                 builder,
                 tauri::LogicalPosition::new(0.0, 0.0),

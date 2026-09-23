@@ -889,6 +889,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         )
       : undefined
   let contextTargetTokens = opts.continuation?.recovery?.contextTargetTokens
+  let observedNativeContextTokens: number | undefined
   const uncertainMutations = new Set([
     ...(opts.continuation?.uncertainMutations ?? []),
     ...unresolvedCheckpointCalls(opts.continuation?.messages ?? []).flatMap(call => {
@@ -1367,7 +1368,15 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       return !!definition && permittedDuringPlanningDiscussion(definition) && !tool.function.name.startsWith('agent_')
     })
     const toolStatistics = await toolUsage.snapshot()
-    const availableTools = focused ? focused.select(eligibleTools, toolStatistics) : eligibleTools
+    const planningWindow = observedNativeContextTokens ?? inferenceGateway.contextTokens ?? 32_768
+    // Reduce schemas only while an archive page is working evidence. This
+    // leaves the normal delegation menu intact before retrieval begins.
+    const retainingArchivePage = messages.some(
+      message => message.role === 'tool' && message.name === 'context_read_history'
+    )
+    const availableTools = focused
+      ? focused.select(eligibleTools, toolStatistics, planningWindow <= 12_288 && retainingArchivePage ? 6 : 8)
+      : eligibleTools
     if (!resolvedRoute.externalOneShot) {
       applyRuntimeMode(messages, currentMode())
       applyRuntimeTools(messages, availableTools, currentMode())
@@ -1425,7 +1434,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       const fittedContext = resolvedRoute.externalOneShot
         ? { messages: candidateMessages, report: undefined }
         : fitRequestContext(candidateMessages, availableTools, {
-            contextTokens: inferenceGateway.contextTokens,
+            contextTokens: planningWindow,
             targetTokens: contextTargetTokens,
             compactCurrentTurn: true,
             retrievalAvailable: availableTools.some(tool => tool.function.name === 'context_read_history'),
@@ -1545,7 +1554,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           contextRecoveryAttempted = true
           const target = Math.max(1024, Math.floor((fittedContext.report?.estimatedInputTokens ?? 8192) * 0.65))
           const smaller = fitRequestContext(candidateMessages, availableTools, {
-            contextTokens: inferenceGateway.contextTokens,
+            contextTokens: observedNativeContextTokens ?? inferenceGateway.contextTokens,
             targetTokens: target,
             retrievalAvailable: true,
             compactCurrentTurn: true,
@@ -1579,6 +1588,21 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       } finally {
         acceptingOutput = false
       }
+    }
+    // The native model may grow its resident context during this run. A
+    // successful measured response supersedes an earlier, smaller recovery
+    // target; otherwise the JS planner keeps shrinking evidence forever.
+    const measuredContextTokens = res.contextUsage?.contextTokens
+    if (
+      inferenceGateway.target === 'local_llama_cpp' &&
+      typeof measuredContextTokens === 'number' &&
+      Number.isSafeInteger(measuredContextTokens) &&
+      measuredContextTokens >= (inferenceGateway.contextTokens ?? 0) &&
+      measuredContextTokens <= 262_144
+    ) {
+      const expanded = measuredContextTokens > planningWindow
+      observedNativeContextTokens = measuredContextTokens
+      if (expanded) contextTargetTokens = undefined
     }
     localContextAdjusted ||=
       !!res.contextUsage && (res.contextUsage.omittedMessages > 0 || res.contextUsage.shortenedToolResults > 0)

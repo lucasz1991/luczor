@@ -26,6 +26,7 @@ pub fn run() {
             );
         })
         .manage(commands::mini_chat::MiniChatState::default())
+        .manage(commands::chat_playground::ChatPlaygroundState::default())
         .manage(commands::codex::CodexJobs::default())
         .manage(commands::claude::ClaudeJobs::default())
         .plugin(tauri_plugin_dialog::init())
@@ -92,6 +93,11 @@ pub fn run() {
             commands::mini_chat::mini_chat_drag_by,
             commands::mini_chat::mini_chat_snap,
             commands::mini_chat::mini_chat_window,
+            commands::chat_playground::chat_playground_window_open,
+            commands::chat_playground::chat_playground_snapshot,
+            commands::chat_playground::chat_playground_action,
+            commands::chat_playground::chat_playground_respond,
+            commands::chat_playground::chat_playground_window_close,
             commands::system_status_window::system_status_window_open,
             commands::system_status_window::system_status_window_set_mode,
             commands::system_status_window::system_status_window_close,
@@ -226,6 +232,16 @@ pub fn run() {
             commands::local_model::resource_config::local_model_end_resource_work,
         ])
         .on_window_event(|window, event| {
+            if window.label() == commands::chat_playground::CHAT_PLAYGROUND_LABEL
+                && matches!(event, tauri::WindowEvent::Destroyed)
+            {
+                if let Some(state) = window
+                    .app_handle()
+                    .try_state::<commands::chat_playground::ChatPlaygroundState>()
+                {
+                    commands::chat_playground::on_window_destroyed(&window.app_handle(), &state);
+                }
+            }
             #[cfg(desktop)]
             if window.label() == "main" || window.label() == commands::mini_chat::MINI_LABEL {
                 if let tauri::WindowEvent::CloseRequested { api, .. } = event {

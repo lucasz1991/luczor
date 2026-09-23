@@ -204,7 +204,7 @@ export function focusedTools(
     recordExecution(name: string) {
       if (name !== selector.name && name !== reader.name) discoveryCalls = 0
     },
-    select(available: Definition[], statistics: ToolUsage[] = []): Definition[] {
+    select(available: Definition[], statistics: ToolUsage[] = [], maxRegularTools = archive ? 8 : 9): Definition[] {
       // Built-ins advertised in this request are selectable too. Otherwise the
       // model is told that its visible history reader does not exist.
       const builtins: Definition[] = (archive ? [reader, selector] : [selector]).map(tool => ({
@@ -237,6 +237,10 @@ export function focusedTools(
         preferred.push('os_environment', 'os_system_diagnostics', 'local_model_status')
       if (/erinner|memory/.test(text)) preferred.push('memory_recall', 'memory_remember')
       if (/workflow/.test(text)) preferred.push('workflow_list', 'workflow_get', 'workflow_run_start')
+      const compactSelection = maxRegularTools < 8
+      const taskPreferred = preferred.filter(
+        name => !['project_get_state', 'workspace_get', 'agent_assist'].includes(name)
+      )
       // Preserve explicit IDs even beyond the bounded lexical query, without
       // confusing fs_read with fs_read_extended through substring matching.
       const mentionedIds = new Set(text.match(/[a-z][a-z0-9_]*/g) ?? [])
@@ -246,12 +250,14 @@ export function focusedTools(
         .map(item => item.tool.function.name)
       const order = [
         ...new Set([
-          ...pinned.map(tool => tool.function.name),
+          ...(!compactSelection ? pinned.map(tool => tool.function.name) : []),
           ...requested,
           ...exact,
           ...repositoryFirst,
+          ...(compactSelection ? taskPreferred : []),
           ...matched,
           ...preferred,
+          ...(compactSelection ? pinned.map(tool => tool.function.name) : []),
           ...topToolUsage(pool, usage).map(tool => tool.name),
           ...(pool.length <= (archive ? 8 : 9) ? pool.map(tool => tool.function.name) : []),
         ]),
@@ -259,7 +265,7 @@ export function focusedTools(
       const selected = order
         .map(name => pool.find(tool => tool.function.name === name))
         .filter((tool): tool is Definition => !!tool && !builtinNames.has(tool.function.name))
-        .slice(0, archive ? 8 : 9)
+        .slice(0, maxRegularTools)
       return [...selected, ...builtins]
     },
   }

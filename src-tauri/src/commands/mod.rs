@@ -3,6 +3,7 @@ pub mod agent_effort;
 pub(crate) mod agent_shutdown;
 pub mod browser;
 pub mod browser_panel;
+pub mod chat_playground;
 pub mod claude;
 pub mod codex;
 pub mod desktop_accessibility;
@@ -100,6 +101,16 @@ pub(crate) fn ensure_main_webview(window: &CallerWebview) -> Result<(), String> 
 pub(crate) fn ensure_main_or_system_status_webview(window: &CallerWebview) -> Result<(), String> {
     if window.label() == MAIN_WEBVIEW_LABEL
         || window.label() == system_status_window::SYSTEM_STATUS_LABEL
+    {
+        Ok(())
+    } else {
+        Err("This command is not available to the calling webview.".into())
+    }
+}
+
+pub(crate) fn ensure_main_or_chat_playground_webview(window: &CallerWebview) -> Result<(), String> {
+    if window.label() == MAIN_WEBVIEW_LABEL
+        || window.label() == chat_playground::CHAT_PLAYGROUND_LABEL
     {
         Ok(())
     } else {

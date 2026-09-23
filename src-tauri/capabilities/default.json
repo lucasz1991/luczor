@@ -15,6 +15,7 @@
     "store:allow-delete",
     "main-runtime",
     "mini-chat-host",
-    "system-status-host"
+    "system-status-host",
+    "chat-playground-host"
   ]
 }

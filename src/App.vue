@@ -110,6 +110,8 @@ import ToolCenterPanel from './components/tools/ToolCenterPanel.vue'
 import ProjectSettingsModal from './components/ProjectSettingsModal.vue'
 import BrowserPanel from './components/browser/BrowserPanel.vue'
 import { browserPanel } from '@/services/browserPanel'
+import { useChatPlaygroundHost } from '@/composables/useChatPlaygroundHost'
+import { openPlaygroundNative } from '@/services/chatPlaygroundNative'
 import { useMiniChatHost } from '@/composables/useMiniChatHost'
 import AssistantResponseFooter from '@/components/ai/AssistantResponseFooter.vue'
 import {
@@ -512,6 +514,33 @@ function modeFor(conversationId: string): LuczorMode {
   return chosen === 'unrestricted' && !allowUnrestricted.value ? 'observe' : chosen
 }
 const mode = computed<LuczorMode>(() => modeFor(activeConversationId.value))
+useChatPlaygroundHost({
+  resolveMode: (_projectId, conversationId) => modeFor(conversationId),
+  validateBinding: (projectId, conversationId) => {
+    if (!projects.value.some(project => project.id === projectId)) return false
+    if (!conversationId) return true
+    return (
+      state.conversations?.some(
+        conversation => conversation.id === conversationId && conversation.projectId === projectId
+      ) ?? false
+    )
+  },
+  bindFolder: async projectId => {
+    if (activeProjectId.value !== projectId) openProject(projectId)
+    await nextTick()
+    openProjectSettings('folder')
+  },
+  closed: binding => {
+    if (browserPanel.detachedSessionId !== binding.sessionId) return
+    browserPanel.detached = false
+    browserPanel.detachedSessionId = ''
+    if (activeProjectId.value === binding.projectId && activeConversationId.value === binding.conversationId) {
+      browserPanel.projectId = binding.projectId
+      browserPanel.conversationId = binding.conversationId
+      browserPanel.expanded = true
+    }
+  },
+})
 /** Inherited by a new chat: never "unrestricted" without this chat's own confirmation. */
 const inheritedChatSettings = (): ConversationSettings => ({
   mode: defaultMode.value === 'unrestricted' ? 'act' : defaultMode.value,
@@ -1076,6 +1105,22 @@ async function showSidebarProjectSettings(id: string) {
 function headerAction(id: string) {
   switch (id) {
     case 'browser':
+      if (browserPanel.detached) {
+        void openPlaygroundNative({
+          projectId: activeProjectId.value,
+          conversationId: activeConversationId.value,
+          projectName: activeProject.value?.name || 'Projekt',
+          workspaceName: activeWorkspace.value?.displayName || '',
+          workspaceReady: activeWorkspace.value?.status === 'ready',
+          mode: mode.value,
+          killSwitch: hud.killSwitch,
+        })
+          .then(binding => (browserPanel.detachedSessionId = binding.sessionId))
+          .catch(error => pushToast(error instanceof Error ? error.message : String(error), 'error'))
+        break
+      }
+      if (!browserPanel.expanded) browserPanel.projectId = activeProjectId.value
+      if (!browserPanel.expanded) browserPanel.conversationId = activeConversationId.value
       browserPanel.expanded = !browserPanel.expanded
       break
     case 'tools':
@@ -3790,7 +3835,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
 
         <WorkspaceHeaderActions
           :standalone="standaloneChat"
-          :browser-open="browserPanel.expanded"
+          :browser-open="browserPanel.expanded || browserPanel.detached"
           :tools-open="showToolCenter"
           :audit-open="showAudit"
           :context-open="showContext"
@@ -3805,7 +3850,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
       <p v-if="miniChat.error.value" class="ai-muted" role="alert">{{ miniChat.error.value }}</p>
 
       <!-- Overlay stays anchored above the independently scrolling conversation. -->
-      <ChatComposer scroll-id="messages" :follow="hasConversation">
+      <ChatComposer scroll-id="messages" :follow="hasConversation" :flush-workspace="browserPanel.expanded">
         <template #overlay>
           <ChatProjectOverlay
             v-model:context-expanded="showContext"
@@ -3840,6 +3885,12 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           <BrowserPanel
             v-if="browserPanel.expanded"
             :project-id="activeProjectId"
+            :conversation-id="activeConversationId"
+            :project-name="activeProject?.name || 'Projekt'"
+            :workspace-name="activeWorkspace?.displayName || ''"
+            :workspace-ready="activeWorkspace?.status === 'ready'"
+            :mode="mode"
+            :kill-switch="hud.killSwitch"
             :suspended="
               showSettings ||
               showCreateProject ||
@@ -3851,6 +3902,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
               showToolCenter ||
               showSystemPanel
             "
+            @bind-folder="activeWorkspace ? changeProjectWorkspace() : bindCurrentProjectWorkspace()"
           />
         </template>
         <div v-if="!hasConversation" class="ai-welcome">

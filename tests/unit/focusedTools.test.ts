@@ -210,6 +210,15 @@ describe('focused local tool context', () => {
     ).not.toContain('fs_write')
     expect(focus.select([])).toEqual([])
   })
+  it('prioritizes the requested file tools when a small local window limits schemas', () => {
+    const selected = focusedTools('Bitte Dateien im Projekt lesen', () => [])
+      .select(pool, [], 6)
+      .map(tool => tool.function.name)
+    expect(selected).toEqual(
+      expect.arrayContaining(['fs_list', 'fs_read', 'fs_search', 'context_read_history', 'tools_select'])
+    )
+    expect(selected).toHaveLength(8)
+  })
   it('exposes discovery without silently executing anything', async () => {
     const focus = focusedTools('hi')
     focus.select(pool)

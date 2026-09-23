@@ -2,7 +2,13 @@
 import { onBeforeUnmount, onMounted, ref, useId, watch } from 'vue'
 import AiIcon from './AiIcon.vue'
 const props = withDefaults(
-  defineProps<{ tabs?: { id: string; label: string }[]; title?: string; scrollId?: string; follow?: boolean }>(),
+  defineProps<{
+    tabs?: { id: string; label: string }[]
+    title?: string
+    scrollId?: string
+    follow?: boolean
+    flushWorkspace?: boolean
+  }>(),
   {
     tabs: () => [],
     title: 'Chat',
@@ -64,7 +70,14 @@ defineExpose({ scrollToBottom })
       </button>
     </header>
     <slot name="overlay" />
-    <div v-if="$slots.workspace" class="ai-chat__workspace"><slot name="workspace" /></div>
+    <div
+      v-if="$slots.workspace"
+      class="ai-chat__workspace"
+      :class="{ 'is-flush': flushWorkspace }"
+      :style="flushWorkspace ? { paddingTop: '0px' } : undefined"
+    >
+      <slot name="workspace" />
+    </div>
     <div :id="scrollId || generatedId" ref="scroller" class="ai-chat__messages" @scroll.passive="measure">
       <div ref="thread" class="ai-thread"><slot /></div>
     </div>
@@ -91,6 +104,9 @@ defineExpose({ scrollToBottom })
   min-height: 0;
   flex: 0 0 auto;
   padding-top: 48px;
+}
+.ai-chat__workspace.is-flush {
+  padding-top: 0;
 }
 .ai-chat--with-overlay.ai-chat--with-workspace > .ai-chat__messages {
   padding-block-start: 24px;

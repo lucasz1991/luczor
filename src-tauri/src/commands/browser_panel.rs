@@ -16,6 +16,8 @@ pub struct PanelLayout {
     height: f64,
     #[serde(default = "default_zoom")]
     zoom: f64,
+    #[serde(skip)]
+    window_label: String,
 }
 
 fn default_zoom() -> f64 {
@@ -32,6 +34,7 @@ impl Default for PanelLayout {
             width: 0.0,
             height: 0.0,
             zoom: default_zoom(),
+            window_label: "main".into(),
         }
     }
 }
@@ -52,24 +55,25 @@ impl PanelLayout {
     }
 }
 pub fn apply(app: &AppHandle, browser: &Webview, project_id: &str) -> Result<(), String> {
-    // Older device jobs can still own a detached browser. Never move or hide it.
-    if browser.window().label() != "main" {
-        return Ok(());
-    }
     let state = layout()
         .lock()
         .map_err(|_| "browser_panel_layout_unavailable")?
         .clone();
+    // A browser child belongs to the native window that admitted its layout. Never move it
+    // across windows or let a stale main-window resize hide a detached Playground browser.
+    if browser.window().label() != state.window_label {
+        return Ok(());
+    }
     if !state.visible || state.project_id != project_id {
         return browser.hide().map_err(|e| e.to_string());
     }
-    let main = app
-        .get_window("main")
-        .ok_or("browser_panel_main_unavailable")?;
-    let size = main
+    let host = app
+        .get_window(&state.window_label)
+        .ok_or("browser_panel_host_unavailable")?;
+    let size = host
         .inner_size()
         .map_err(|e| e.to_string())?
-        .to_logical::<f64>(main.scale_factor().map_err(|e| e.to_string())?);
+        .to_logical::<f64>(host.scale_factor().map_err(|e| e.to_string())?);
     if state.left + state.width > size.width + 1.0 || state.top + state.height > size.height + 1.0 {
         return browser.hide().map_err(|e| e.to_string());
     }
@@ -83,16 +87,29 @@ pub fn apply(app: &AppHandle, browser: &Webview, project_id: &str) -> Result<(),
     browser.show().map_err(|e| e.to_string())
 }
 
+/// Target parent for the next project-scoped browser child. The detached window is selected
+/// only after that webview has explicitly published its own layout for the same project.
+pub fn target_window_label(project_id: &str) -> String {
+    layout()
+        .lock()
+        .ok()
+        .filter(|state| state.project_id == project_id)
+        .map(|state| state.window_label.clone())
+        .unwrap_or_else(|| "main".into())
+}
+
 #[tauri::command]
 pub async fn browser_panel_layout(
     window: CallerWebview,
     app: AppHandle,
     payload: PanelLayout,
 ) -> Result<(), String> {
-    super::ensure_main_webview(&window)?;
+    super::ensure_main_or_chat_playground_webview(&window)?;
     if !payload.valid() {
         return Err("browser_panel_bounds_invalid".into());
     }
+    let mut payload = payload;
+    payload.window_label = window.label().to_string();
     *layout()
         .lock()
         .map_err(|_| "browser_panel_layout_unavailable")? = payload;
@@ -105,11 +122,11 @@ pub async fn browser_panel_layout(
 
 #[tauri::command]
 pub async fn browser_panel_status(window: CallerWebview, app: AppHandle) -> Result<Value, String> {
-    super::ensure_main_webview(&window)?;
+    super::ensure_main_or_chat_playground_webview(&window)?;
     let Some(browser) = app.get_webview(BROWSER_WEBVIEW_LABEL) else {
         return Ok(json!({"open":false}));
     };
-    if browser.window().label() != "main" {
+    if browser.window().label() != window.label() {
         return Ok(json!({"open":false}));
     }
     let mut url = browser.url().map_err(|e| e.to_string())?;

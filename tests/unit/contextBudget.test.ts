@@ -192,9 +192,80 @@ describe('shared request budget and evidence retention', () => {
     history.push({ role: 'user', content: 'Apply the previously agreed requirements.' })
     const result = fitRequestContext(history, [], { contextTokens: 131072, retrievalAvailable: true })
     expect(result.report.estimatedInputTokens).toBeGreaterThan(10000)
-    expect(result.report.targetTokens).toBe(Math.floor(131072 * 0.65))
+    expect(result.report.targetTokens).toBe(Math.floor(131072 * 0.85))
     expect(result.report.summarizedMessages).toBe(0)
     expect(result.messages).toEqual(history)
+  })
+
+  it('keeps an exact archive page visible after later tools and a second context fit', () => {
+    const page = JSON.stringify({
+      entries: Array.from({ length: 48 }, (_, index) => ({
+        path: `src/Bericht_Ä_${index}.ts`,
+        file_ref: `exact_ref_${index}`,
+      })),
+    })
+    const history: WireMessage[] = [
+      { role: 'system', content: 'Required rules. '.repeat(240) },
+      { role: 'user', content: 'Use the archived file list.' },
+    ]
+    const append = (id: string, name: string, content: string) => {
+      history.push(
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [{ id, type: 'function', function: { name, arguments: '{}' } }],
+        },
+        { role: 'tool', name, tool_call_id: id, content }
+      )
+    }
+    for (let index = 0; index < 5; index++)
+      append(`old-${index}`, 'fs_list', JSON.stringify({ ok: true, output: { entries: page.repeat(3) } }))
+    const receipt = JSON.stringify({
+      ok: true,
+      output: { index: 12, offset: 0, text: page, nextOffset: null, totalCharacters: page.length, fragmentOnly: false },
+    })
+    append('archive-page', 'context_read_history', receipt)
+    for (let index = 0; index < 2; index++)
+      append(`new-${index}`, 'fs_list', JSON.stringify({ ok: true, output: { entries: page.repeat(2) } }))
+
+    const original = structuredClone(history)
+    const fitted = fitRequestContext(history, [{ schema: 'tool '.repeat(500) }], {
+      contextTokens: 8192,
+      targetTokens: 3200,
+      retrievalAvailable: true,
+      compactCurrentTurn: true,
+    })
+    const preserved = fitted.messages.find(
+      message => message.role === 'tool' && message.tool_call_id === 'archive-page'
+    )
+    expect(preserved?.content).toBe(receipt)
+    expect(preserved?.content).toContain('exact_ref_47')
+    expect(
+      fitted.messages.some(message => message.role === 'assistant' && message.tool_calls?.[0]?.id === 'archive-page')
+    ).toBe(true)
+    expect(history).toEqual(original)
+  })
+
+  it('uses the expanded planning window before archiving a fitting result', () => {
+    const history: WireMessage[] = [
+      { role: 'system', content: 'Required rules. '.repeat(70) },
+      { role: 'user', content: 'Read the returned file.' },
+      {
+        role: 'assistant',
+        content: '',
+        tool_calls: [{ id: 'read', type: 'function', function: { name: 'fs_read', arguments: '{"path":"exact.ts"}' } }],
+      },
+      { role: 'tool', name: 'fs_read', tool_call_id: 'read', content: 'x'.repeat(18000) },
+    ]
+    const fitted = fitRequestContext(history, [], {
+      contextTokens: 10000,
+      retrievalAvailable: true,
+      compactCurrentTurn: true,
+    })
+    expect(fitted.report.targetTokens).toBe(8500)
+    expect(fitted.report.summarizedMessages).toBe(0)
+    expect(fitted.report.shortenedToolResults).toBe(0)
+    expect(fitted.messages).toEqual(history)
   })
 
   it('archives the fewest oldest complete rounds needed instead of dropping all but two', () => {

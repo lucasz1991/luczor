@@ -302,17 +302,8 @@ html.mini-window #app {
 .mini-choices button:hover {
   background: var(--ai-hover);
 }
-.mini-tools {
-  flex-shrink: 0;
-  max-height: 72px;
-  overflow: auto;
-  padding: 2px 12px;
-}
-.mini-decision {
-  flex-shrink: 0;
-  max-height: min(220px, 38%);
-  overflow: auto;
-  padding: 6px 10px;
+.mini-message__approval {
+  margin-block: 12px 6px;
 }
 .mini-surface .ai-approval {
   padding: 10px;
@@ -347,6 +338,7 @@ html.mini-window #app {
 }
 .mini-chat-composer:focus-within {
   border-color: color-mix(in srgb, var(--ai-accent) 55%, var(--ai-line-strong));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--ai-accent) 24%, transparent);
 }
 .mini-chat-composer textarea {
   display: block;
@@ -361,6 +353,7 @@ html.mini-window #app {
   background: transparent;
   border: 0;
   outline: none;
+  box-shadow: none;
   user-select: text;
 }
 .mini-chat-composer textarea::placeholder {
@@ -453,23 +446,6 @@ html.mini-window #app {
   max-height: 65px;
   user-select: text;
   flex-shrink: 0;
-}
-.mini-chat-runs {
-  margin: 0 12px;
-  font-size: 10px;
-  max-height: 85px;
-  overflow: auto;
-  flex-shrink: 0;
-  color: var(--ai-muted);
-}
-.mini-chat-runs > summary {
-  cursor: pointer;
-  padding: 5px 0;
-}
-.mini-chat-runs > summary > svg {
-  display: inline-block;
-  vertical-align: middle;
-  margin-right: 4px;
 }
 
 /* The nudge is ONE box flush to the screen edge — the icon column sits on the edge, the panel
@@ -913,21 +889,6 @@ html.mini-window #app {
   font-size: 10px !important;
   color: var(--ai-accent) !important;
 }
-.mini-peek-source {
-  display: block;
-  margin-bottom: 6px;
-  color: var(--ai-orange);
-  font-size: 9px;
-}
-.mini-peek .ai-approval {
-  padding: 8px;
-}
-.mini-peek .ai-approval__eyebrow {
-  display: none;
-}
-.mini-peek .ai-approval pre {
-  max-height: 45px;
-}
 .mini-disconnected {
   font-size: 9px;
   color: var(--ai-red);
@@ -940,9 +901,6 @@ html.mini-window #app {
   .mini-panel .mini-welcome {
     padding: 0;
   }
-  .mini-panel .mini-decision {
-    max-height: 170px;
-  }
 }
 @media (prefers-reduced-motion: reduce) {
   .mini-surface * {
@@ -950,19 +908,6 @@ html.mini-window #app {
   }
 }
 
-/* Keep decision buttons visible in the collapsed bubble; details open explicitly. */
-.mini-peek .ai-approval .ai-eyebrow {
-  display: none;
-}
-.mini-peek .ai-approval h3 {
-  margin: 0 0 5px;
-}
-.mini-peek .ai-approval p {
-  margin: 4px 0;
-}
-.mini-peek .ai-card-actions {
-  margin-top: 8px;
-}
 .mini-surface .ai-approval__details {
   font-size: 10px;
   margin-top: 5px;
@@ -990,56 +935,6 @@ html.mini-window #app {
   animation: none !important;
   scroll-behavior: auto !important;
 }
-.mini-tool-sessions {
-  display: grid;
-  gap: 5px;
-  margin: 8px 0;
-  padding: 8px 9px;
-  border: 1px solid var(--mini-line, rgba(255, 255, 255, 0.1));
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.025);
-}
-.mini-tool-sessions__heading,
-.mini-tool-session {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--mini-muted, #aab4c8);
-  font-size: 10px;
-}
-.mini-tool-sessions__heading {
-  justify-content: space-between;
-  color: var(--mini-faint, #77839a);
-  font: 9px var(--font-mono, monospace);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-.mini-tool-sessions__heading small,
-.mini-tool-session small {
-  color: var(--mini-faint, #77839a);
-}
-.mini-tool-session__dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #6ee7b7;
-  box-shadow: 0 0 0 3px rgba(110, 231, 183, 0.12);
-}
-.mini-tool-session__dot[data-status='stopped'],
-.mini-tool-session__dot[data-status='expired'] {
-  background: #fca5a5;
-  box-shadow: 0 0 0 3px rgba(252, 165, 165, 0.1);
-}
-.mini-tool-session button {
-  margin-left: auto;
-  border: 1px solid rgba(252, 165, 165, 0.35);
-  border-radius: 5px;
-  padding: 2px 5px;
-  background: transparent;
-  color: #fca5a5;
-  font-size: 9px;
-  cursor: pointer;
-}
 
 /* Expanded chat is one quiet window; the edge controls remain available when collapsed. */
 .mini-surface .mini-orb-dock.is-chat-open,
@@ -1059,14 +954,6 @@ html[data-theme] .mini-surface .mini-orb-dock.is-chat-open {
 }
 .mini-grip-panel.is-chat-open {
   border: 0;
-}
-.mini-panel .mini-tool-session {
-  color: var(--ai-muted);
-  padding: 4px 0;
-}
-.mini-panel .mini-tool-session button {
-  color: var(--ai-red);
-  border-color: var(--ai-line-strong);
 }
 .mini-surface[data-reduce-motion='true'] * {
   transition: none !important;

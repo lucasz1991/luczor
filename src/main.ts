@@ -8,7 +8,7 @@ import './styles/liquid-glass.css'
 // The secondary display must not initialize another model, microphone or store.
 async function mount() {
   const hash = window.location.hash
-  if (hash !== '#mini-chat' && !hash.startsWith('#system-status')) {
+  if (hash !== '#mini-chat' && !hash.startsWith('#system-status') && hash !== '#chat-playground') {
     const { initializeModelUsageSettings } = await import('./services/inference/modelUsageSettings')
     await initializeModelUsageSettings()
   }
@@ -17,7 +17,9 @@ async function mount() {
       ? (await import('./components/mini/MiniChatWindow.vue')).default
       : hash.startsWith('#system-status')
         ? (await import('./components/SystemStatusWindow.vue')).default
-        : (await import('./App.vue')).default
+        : hash === '#chat-playground'
+          ? (await import('./components/browser/ChatPlaygroundWindow.vue')).default
+          : (await import('./App.vue')).default
   const app = createApp(root)
   app.use(createPinia())
   app.mount('#app')

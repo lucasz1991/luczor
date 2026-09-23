@@ -23,13 +23,10 @@ import ThinkingState from '../ai/ThinkingState.vue'
 import ThinkingSelector from '../ai/ThinkingSelector.vue'
 import { createMiniThinkingControl } from '@/services/miniChat/thinkingControl'
 import ApprovalCard from '../ai/ApprovalCard.vue'
-import ToolChips from '../ai/ToolChips.vue'
 import WorkflowChatCards from '../workflows/WorkflowChatCards.vue'
 import { miniStatus } from '@/services/miniChat/presentation'
 import type { MiniAction, MiniSnapshot } from '@/services/miniChat/types'
-import type { ActivityStatus } from '../ai/types'
 import { useClipboard } from '@/composables/useClipboard'
-import { listToolSessions, stopToolSession, toolSessionRevision } from '@/services/tools/toolSessionCoordinator'
 
 const props = withDefaults(defineProps<{ snapshot: MiniSnapshot; native?: boolean; connectionError?: string }>(), {
   connectionError: '',
@@ -37,7 +34,7 @@ const props = withDefaults(defineProps<{ snapshot: MiniSnapshot; native?: boolea
 const emit = defineEmits<{ action: [action: MiniAction]; hide: []; showMain: [] }>()
 // The screen-edge nudge has one window mode: the capsule, with a fly-out per icon. "Chats" is the
 // one pane that can grow into the full chat page — that replaces the old separate Mini "expand" modus.
-type GripPane = 'status' | 'chats' | 'decision' | 'tools' | 'system' | 'link'
+type GripPane = 'status' | 'chats' | 'system' | 'link'
 const gripHover = ref(false)
 const hoverPane = ref<GripPane | null>(null)
 const pinnedPane = ref<GripPane | null>(null)
@@ -49,8 +46,6 @@ const chatsOpen = computed(() => pinnedPane.value === 'chats')
 const paneTitles: Record<GripPane, string> = {
   status: 'Status',
   chats: 'Chats',
-  decision: 'Entscheidung',
-  tools: 'Werkzeuge',
   system: 'Systemstatus',
   link: 'Verbindung',
 }
@@ -153,7 +148,7 @@ let nativeMoveQueued = false
 let dragged = false
 const decision = computed(() => props.snapshot.decision ?? props.snapshot.mainDecision)
 const status = computed(() => miniStatus(props.snapshot, unread.value))
-const peekVisible = computed(() => !chatsOpen.value && (!!decision.value || !!peek.value))
+const peekVisible = computed(() => !chatsOpen.value && !!peek.value)
 const surfaceStyle = computed(() => ({
   ...(props.native
     ? {}
@@ -164,30 +159,6 @@ const surfaceStyle = computed(() => ({
     ? { '--cy-bright': props.snapshot.appearance.accent }
     : {}),
 }))
-const toolStatus: Record<string, ActivityStatus> = {
-  proposed: 'waiting',
-  approved: 'pending',
-  executing: 'running',
-  executed: 'done',
-  failed: 'failed',
-  rejected: 'canceled',
-  canceled: 'canceled',
-}
-const tools = computed(() =>
-  props.snapshot.tools.map(tool => ({ id: tool.id, label: tool.name, status: toolStatus[tool.status] ?? 'pending' }))
-)
-const toolStatusLabel: Record<string, string> = {
-  pending: 'wartet',
-  running: 'läuft',
-  done: 'fertig',
-  failed: 'fehlgeschlagen',
-  canceled: 'abgebrochen',
-}
-const sharedToolSessions = computed(() => {
-  void toolSessionRevision.value
-  const projectId = props.snapshot.project?.id
-  return listToolSessions().filter(session => !projectId || session.projectId === projectId)
-})
 const lastAssistant = computed(() =>
   [...props.snapshot.messages].reverse().find(message => message.role === 'assistant')
 )
@@ -350,10 +321,7 @@ async function togglePin() {
   await windowAction(pinned.value ? 'pin' : 'unpin')
   if (windowError.value) pinned.value = !pinned.value
 }
-function menuAction(
-  action: 'observe' | 'act' | 'pin' | 'system' | 'tools' | 'link' | 'position' | 'hide',
-  close: () => void
-) {
+function menuAction(action: 'observe' | 'act' | 'pin' | 'system' | 'link' | 'position' | 'hide', close: () => void) {
   close()
   if (action === 'observe' || action === 'act') emit('action', { type: 'mode', mode: action })
   else if (action === 'pin') void togglePin()
@@ -592,7 +560,7 @@ onBeforeUnmount(() => {
   <section
     ref="box"
     class="mini-surface"
-    :class="{ 'is-native': native, 'is-expanded': chatsOpen, 'has-peek': peekVisible, 'has-decision': !!decision }"
+    :class="{ 'is-native': native, 'is-expanded': chatsOpen, 'has-peek': peekVisible }"
     :style="surfaceStyle"
     :data-side="side"
     aria-label="Luczor Mini"
@@ -603,29 +571,16 @@ onBeforeUnmount(() => {
     @keydown.esc="!$event.defaultPrevented && collapse()"
   >
     <aside v-if="peekVisible" class="mini-peek" @mouseenter="pausePeek" @mouseleave="armPeek">
-      <template v-if="decision"
-        ><span class="mini-peek-source">{{ snapshot.decision ? 'Mini-Chat' : 'Projektchat' }} · Entscheidung offen</span
-        ><ApprovalCard
-          :key="`${decision.id}:${!!connectionError}`"
-          compact
-          :title="decision.title"
-          :description="decision.description"
-          :detail="decision.detail"
-          :busy="!!connectionError"
-          @approve="decide(true)"
-          @reject="decide(false)"
-      /></template>
-      <template v-else
-        ><header>
-          <strong>Neue Antwort</strong
-          ><button type="button" aria-label="Antwortvorschau schließen" @click="clearPeek">
-            <AiIcon name="close" :size="13" />
-          </button>
-        </header>
-        <p>{{ peek }}</p>
-        <button type="button" class="mini-read" @click="expand">
-          Unterhaltung öffnen <AiIcon name="arrow" :size="13" /></button
-      ></template>
+      <header>
+        <strong>Neue Antwort</strong
+        ><button type="button" aria-label="Antwortvorschau schließen" @click="clearPeek">
+          <AiIcon name="close" :size="13" />
+        </button>
+      </header>
+      <p>{{ peek }}</p>
+      <button type="button" class="mini-read" @click="expand">
+        Unterhaltung öffnen <AiIcon name="arrow" :size="13" />
+      </button>
     </aside>
     <div
       class="mini-orb-dock"
@@ -634,15 +589,11 @@ onBeforeUnmount(() => {
       @pointerenter="enterGrip"
       @pointerleave="leaveGrip"
     >
-      <!-- Edge grip: five icon pills in one glass capsule, like the design board's Nano nudge.
-           Any icon both drags the capsule (pointer moves) and pins its pane (a plain click) —
-           chats pins into the full chat page, the others into their light status pane. This is
-           the only place the nudge can be repositioned from now — the chat window's own header
-           used to double as a drag handle, but that made the header easy to move by accident. -->
+      <!-- Compact grip: chat, system status and connection remain one-click surfaces. -->
       <div
         class="mini-grip"
         role="group"
-        aria-label="Status im Überblick"
+        aria-label="Mini-Chat, Systemstatus und Verbindung"
         :data-phase="status.phase"
         @keydown="moveKey"
         @pointerdown="beginDrag"
@@ -659,41 +610,7 @@ onBeforeUnmount(() => {
           @focus="hoverPane = 'chats'"
           @click="pinPane('chats')"
         >
-          <AiIcon name="chat" :size="14" /><span v-if="decision || unread" class="mini-unread">{{
-            decision ? '!' : '1'
-          }}</span>
-        </button>
-        <button
-          type="button"
-          class="mini-grip__icon"
-          data-kind="decision"
-          :class="{ 'is-pinned': pinnedPane === 'decision', 'is-active': activePane === 'decision' }"
-          :data-state="decision ? 'waiting' : 'idle'"
-          :title="decision ? 'Entscheidung offen' : 'Keine Entscheidung offen'"
-          :aria-label="decision ? 'Entscheidung offen' : 'Keine Entscheidung offen'"
-          @pointerenter="hoverPane = 'decision'"
-          @focus="hoverPane = 'decision'"
-          @click="pinPane('decision')"
-        >
-          <AiIcon name="shield" :size="13" />
-        </button>
-        <button
-          type="button"
-          class="mini-grip__icon"
-          data-kind="tools"
-          :class="{ 'is-pinned': pinnedPane === 'tools', 'is-active': activePane === 'tools' }"
-          :data-state="sharedToolSessions.length ? 'running' : 'idle'"
-          :title="
-            sharedToolSessions.length ? `${sharedToolSessions.length} Tool-Sitzungen laufen` : 'Keine Tool-Sitzung'
-          "
-          :aria-label="
-            sharedToolSessions.length ? `${sharedToolSessions.length} Tool-Sitzungen laufen` : 'Keine Tool-Sitzung'
-          "
-          @pointerenter="hoverPane = 'tools'"
-          @focus="hoverPane = 'tools'"
-          @click="pinPane('tools')"
-        >
-          <AiIcon name="tool" :size="13" />
+          <AiIcon name="chat" :size="14" /><span v-if="unread" class="mini-unread">1</span>
         </button>
         <button
           type="button"
@@ -784,10 +701,6 @@ onBeforeUnmount(() => {
                   <button type="button" @click="menuAction('system', close)">
                     <AiIcon name="gauge" :size="14" /><span>Systemstatus</span>
                   </button>
-                  <button type="button" @click="menuAction('tools', close)">
-                    <AiIcon name="tool" :size="14" /><span>Werkzeuge</span
-                    ><small>{{ sharedToolSessions.filter(session => session.status === 'active').length || '' }}</small>
-                  </button>
                   <button type="button" @click="menuAction('link', close)">
                     <AiIcon name="link" :size="14" /><span>{{
                       connectionError ? 'Verbindung prüfen' : 'Verbindung'
@@ -848,17 +761,13 @@ onBeforeUnmount(() => {
                 <ChatAgentRoster
                   :activity="message.activity"
                   :loading="message.status === 'running'"
-                  :waiting="message.status === 'running' && !!snapshot.decision"
+                  :waiting="message.status === 'running' && !!decision"
                 />
                 <ThinkingState
                   v-if="message.activity"
                   :active="message.status === 'running'"
                   :status="
-                    message.status === 'running'
-                      ? snapshot.decision
-                        ? 'waiting'
-                        : message.activity.status
-                      : message.status
+                    message.status === 'running' ? (decision ? 'waiting' : message.activity.status) : message.status
                   "
                   :steps="message.activity.steps"
                   :started-at="message.createdAt"
@@ -893,6 +802,22 @@ onBeforeUnmount(() => {
                   :question="message.question"
                   :follow-ups="message.status === 'running' ? message.choices : []"
                 />
+                <div
+                  v-if="decision && message.id === lastAssistant?.id"
+                  class="mini-message__approval"
+                  aria-label="Freigabe zur aktuellen Antwort"
+                >
+                  <ApprovalCard
+                    :key="`${decision.id}:${!!connectionError}`"
+                    compact
+                    :title="decision.title"
+                    :description="decision.description"
+                    :detail="decision.detail"
+                    :busy="!!connectionError"
+                    @approve="decide(true)"
+                    @reject="decide(false)"
+                  />
+                </div>
                 <AssistantResponseFooter
                   :message-id="message.id"
                   :active-message-id="lastAssistant?.status === 'running' ? lastAssistant.id : undefined"
@@ -955,35 +880,6 @@ onBeforeUnmount(() => {
               </template>
             </article>
           </ChatComposer>
-          <details v-if="sharedToolSessions.some(session => session.status === 'active')" class="mini-chat-runs">
-            <summary>
-              <AiIcon name="tool" :size="12" />
-              {{ sharedToolSessions.filter(session => session.status === 'active').length }} aktive Tool-Sitzungen
-            </summary>
-            <div
-              v-for="session in sharedToolSessions.filter(session => session.status === 'active')"
-              :key="session.id"
-              class="mini-tool-session"
-            >
-              <span>{{ session.kind }}</span
-              ><button type="button" aria-label="Tool-Sitzung stoppen" @click="stopToolSession(session.id)">
-                Stop
-              </button>
-            </div>
-          </details>
-          <div v-if="tools.length" class="mini-tools"><ToolChips :tools="tools" /></div>
-          <div v-if="decision" class="mini-decision">
-            <ApprovalCard
-              :key="`${decision.id}:${!!connectionError}`"
-              compact
-              :title="decision.title"
-              :description="decision.description"
-              :detail="decision.detail"
-              :busy="!!connectionError"
-              @approve="decide(true)"
-              @reject="decide(false)"
-            />
-          </div>
           <p v-if="error" class="mini-error" role="alert">{{ error }}</p>
           <p v-if="copied || clipboardError" class="mini-copy-status" role="status">
             {{ clipboardError || 'Antwort kopiert' }}
@@ -1099,51 +995,6 @@ onBeforeUnmount(() => {
                 <dt v-if="snapshot.thinkingTier">Denkstufe</dt>
                 <dd v-if="snapshot.thinkingTier">{{ snapshot.thinkingTier }}</dd>
               </dl>
-            </template>
-            <template v-else-if="activePane === 'decision'">
-              <template v-if="decision">
-                <p class="mini-grip-panel__text">
-                  <strong>{{ decision.title }}</strong>
-                  {{ decision.description }}
-                </p>
-                <p v-if="decision.detail" class="mini-grip-panel__detail">{{ decision.detail }}</p>
-                <div class="mini-grip-panel__actions">
-                  <button type="button" class="is-primary" :disabled="!!connectionError" @click="decide(true)">
-                    Freigeben
-                  </button>
-                  <button type="button" :disabled="!!connectionError" @click="decide(false)">Ablehnen</button>
-                </div>
-              </template>
-              <p v-else class="mini-grip-panel__empty">Keine Entscheidung offen.</p>
-            </template>
-            <template v-else-if="activePane === 'tools'">
-              <dl class="mini-grip-panel__kv">
-                <dt>Not-Aus</dt>
-                <dd :class="snapshot.hud.killSwitch ? 'is-error' : 'is-ok'">
-                  {{ snapshot.hud.killSwitch ? 'aktiv · Tools gesperrt' : 'aus' }}
-                </dd>
-                <dt>Sitzungen</dt>
-                <dd>{{ sharedToolSessions.length || 'keine' }}</dd>
-              </dl>
-              <ul v-if="sharedToolSessions.length" class="mini-grip-panel__chats">
-                <li v-for="session in sharedToolSessions" :key="session.id" class="is-busy">
-                  <i aria-hidden="true" /><span>{{ session.kind }}</span
-                  ><small>{{ session.id.slice(0, 8) }}</small>
-                </li>
-              </ul>
-              <p class="mini-grip-panel__caption">Letzte Werkzeuge</p>
-              <ul v-if="tools.length" class="mini-grip-panel__chats">
-                <li
-                  v-for="tool in tools.slice(-6).reverse()"
-                  :key="tool.id"
-                  :class="{ 'is-busy': tool.status === 'running' || tool.status === 'pending' }"
-                  :data-status="tool.status"
-                >
-                  <i aria-hidden="true" /><span>{{ tool.label }}</span
-                  ><small>{{ toolStatusLabel[tool.status] }}</small>
-                </li>
-              </ul>
-              <p v-else class="mini-grip-panel__empty">In diesem Chat wurde noch kein Werkzeug ausgeführt.</p>
             </template>
             <template v-else-if="activePane === 'system'">
               <MiniSystemPane
