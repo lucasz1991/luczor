@@ -46,6 +46,15 @@ fn workflow_source_fingerprint() -> String {
 }
 
 const APP_COMMANDS: &[&str] = &[
+    "research_preview",
+    "research_prepare",
+    "research_read",
+    "research_write",
+    "research_read_artifact",
+    "research_export_artifact",
+    "research_verify",
+    "research_open",
+    "research_release",
     "open_user_link",
     "execution_gate_update",
     "execution_scope_register",

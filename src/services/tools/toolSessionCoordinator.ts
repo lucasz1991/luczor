@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { executionGate, executionPayload, onExecutionInvalidated, type ExecutionTicket } from '@/services/executionGate'
 import { requireProjectWorkspace } from '@/services/projectWorkspace'
 import { captureWorkflowAccess } from '@/services/workflows/access'
-import { cleanupWorkflowBrowser, createWorkflowBrowser } from '@/services/workflows/browser'
+import { cleanupWorkflowBrowser, createWorkflowBrowser, type WorkflowArtifactScope } from '@/services/workflows/browser'
 import type { ToolContext } from './types'
 
 export type ToolSessionStatus = 'active' | 'stopped' | 'expired'
@@ -15,18 +15,14 @@ export type ToolSession = Readonly<{
   createdAt: number
   updatedAt: number
   allowedHosts: readonly string[]
+  conversationId?: string
+  runId?: string
 }>
 
 type InternalSession = {
   meta: ToolSession
   ticket: ExecutionTicket
-  scope: {
-    principalId: string
-    projectId: string
-    expectedRootPath: string
-    expectedWorkspaceUpdatedAt: number
-    runId: string
-  }
+  scope: WorkflowArtifactScope
   invokeTask: <T>(command: string, payload: Record<string, unknown>, mutating?: boolean) => Promise<T>
   browser?: ReturnType<typeof createWorkflowBrowser>
 }
@@ -35,11 +31,70 @@ const sessions = new Map<string, InternalSession>()
 const preparing = new Map<string, Promise<InternalSession>>()
 const closing = new Map<string, Promise<boolean>>()
 const activeRuns = new Map<string, number>()
+const browserAvailabilityListeners = new Set<() => void>()
+let browserAdmission: Promise<unknown> = Promise.resolve()
 let browserPreparation: Promise<InternalSession> | undefined
 export const toolSessionRevision = ref(0)
 
 function notify(): void {
   toolSessionRevision.value++
+  for (const listener of [...browserAvailabilityListeners]) listener()
+}
+
+/** Wait outside the operation queue, allowing the current owner to complete its DOM sequence. */
+export async function acquireBrowserToolSession(ctx: ToolContext): Promise<InternalSession> {
+  const ticket = ctx.execution ?? executionGate.capture(ctx.signal)
+  const signal =
+    ctx.signal && ctx.signal !== ticket.signal ? AbortSignal.any([ctx.signal, ticket.signal]) : ticket.signal
+  executionGate.assert(ticket, true)
+  signal.throwIfAborted()
+  // An existing owner must not wait behind a contender that is waiting for that owner to close.
+  if (findToolSession({ ...ctx, execution: ticket }, 'browser'))
+    return getToolSession({ ...ctx, execution: ticket }, 'browser')
+  const admission = browserAdmission
+    .catch(() => undefined)
+    .then(async () => {
+      executionGate.assert(ticket, true)
+      signal.throwIfAborted()
+      while (
+        [...sessions.values()].some(
+          session =>
+            session.meta.kind === 'browser' && session.meta.status === 'active' && !session.ticket.signal.aborted
+        )
+      ) {
+        await new Promise<void>((resolve, reject) => {
+          const finish = () => {
+            browserAvailabilityListeners.delete(changed)
+            signal.removeEventListener('abort', abort)
+          }
+          const changed = () => {
+            finish()
+            resolve()
+          }
+          const abort = () => {
+            finish()
+            reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+          }
+          browserAvailabilityListeners.add(changed)
+          signal.addEventListener('abort', abort, { once: true })
+          if (signal.aborted) abort()
+        })
+        executionGate.assert(ticket, true)
+        signal.throwIfAborted()
+      }
+      return getToolSession({ ...ctx, execution: ticket }, 'browser')
+    })
+  browserAdmission = admission.then(
+    () => undefined,
+    () => undefined
+  )
+  // A queued caller aborts immediately, even if its predecessor is still waiting.
+  return new Promise<InternalSession>((resolve, reject) => {
+    const abort = () => reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+    signal.addEventListener('abort', abort, { once: true })
+    void admission.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort))
+    if (signal.aborted) abort()
+  })
 }
 
 function sessionKey(projectId: string, kind: InternalSession['meta']['kind'], runId?: string): string {
@@ -140,6 +195,8 @@ export async function getToolSession(
   const existing = sessions.get(key)
   if (existing && existing.ticket.sessionId === ticket.sessionId && existing.ticket.generation === ticket.generation) {
     executionGate.assert(existing.ticket, kind !== 'vision')
+    if ((ctx.researchScope?.researchId ?? '') !== (existing.scope.researchId ?? ''))
+      throw new Error('research_tool_scope_changed')
     if (
       kind !== 'browser' &&
       allowedHosts.length &&
@@ -170,16 +227,30 @@ export async function getToolSession(
         else throw new Error('workflow_browser_owned_by_another_run')
       }
     }
-    const access = await captureWorkflowAccess(ctx, ctx.projectId, kind !== 'vision')
-    const workspace = await requireProjectWorkspace(ctx.projectId, access.principalId)
-    if (!workspace.updatedAt) throw new Error('Die Projektzuordnung besitzt keine gültige Revision.')
-    const scope = Object.freeze({
-      principalId: access.principalId,
-      projectId: access.projectId,
-      expectedRootPath: workspace.rootPath,
-      expectedWorkspaceUpdatedAt: workspace.updatedAt,
-      runId: crypto.randomUUID(),
-    })
+    let scope: WorkflowArtifactScope
+    if (ctx.researchScope) {
+      if (
+        !ctx.researchScope.researchId ||
+        ctx.researchScope.researchId !== ctx.researchScope.runId ||
+        ctx.researchScope.projectId !== ctx.projectId ||
+        !ctx.researchScope.principalId ||
+        !ctx.researchScope.expectedRootPath ||
+        !ctx.researchScope.expectedWorkspaceUpdatedAt
+      )
+        throw new Error('research_tool_scope_invalid')
+      scope = Object.freeze({ ...ctx.researchScope })
+    } else {
+      const access = await captureWorkflowAccess(ctx, ctx.projectId, kind !== 'vision')
+      const workspace = await requireProjectWorkspace(ctx.projectId, access.principalId)
+      if (!workspace.updatedAt) throw new Error('Die Projektzuordnung besitzt keine gültige Revision.')
+      scope = Object.freeze({
+        principalId: access.principalId,
+        projectId: access.projectId,
+        expectedRootPath: workspace.rootPath,
+        expectedWorkspaceUpdatedAt: workspace.updatedAt,
+        runId: crypto.randomUUID(),
+      })
+    }
     const invokeTask = async <T>(command: string, payload: Record<string, unknown>, mutating = true): Promise<T> => {
       executionGate.assert(ticket, mutating)
       const execution = await executionPayload(ticket, mutating)
@@ -190,13 +261,15 @@ export async function getToolSession(
       return result
     }
     const meta: ToolSession = Object.freeze({
-      id: scope.runId,
-      projectId: access.projectId,
+      id: scope.researchId ? crypto.randomUUID() : scope.runId,
+      projectId: scope.projectId,
       kind,
       status: 'active',
       createdAt: Date.now(),
       updatedAt: Date.now(),
       allowedHosts: Object.freeze(kind === 'browser' ? [] : [...allowedHosts]),
+      conversationId: ticket.scope?.conversationId,
+      runId: ticket.scope?.runId,
     })
     const internal: InternalSession = { meta, ticket, scope, invokeTask }
     if (kind === 'browser') {

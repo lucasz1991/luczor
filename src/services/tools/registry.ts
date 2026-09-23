@@ -7,6 +7,7 @@ import { agentTools } from './agents'
 import { agentJobTools } from './agentJobs'
 import { agentTeamTools } from './agentTeams'
 import { filesystemTools } from './filesystem'
+import { repositoryTools } from './repository'
 import { localModelTools } from './localModel'
 import { memoryTools } from './memory'
 import { osTools } from './os'
@@ -35,6 +36,7 @@ const TOOLS: ToolDef[] = [
   ...cloudProjectTools,
   ...deviceTools,
   ...filesystemTools,
+  ...repositoryTools,
   ...osTools,
   ...browserTools,
   ...visionTools,

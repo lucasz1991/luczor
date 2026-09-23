@@ -34,6 +34,7 @@ pub async fn wf_image_action(
     payload: Guarded<WorkflowImageAction>,
 ) -> Result<Value, String> {
     super::ensure_main_webview(&window)?;
+    super::research::check_scope_execution(&app, &payload.scope, &payload.execution)?;
     if payload.execution.workflow_execution_id.is_none() {
         return Err("workflow_execution_identity_required".into());
     }

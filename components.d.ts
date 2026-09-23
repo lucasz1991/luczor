@@ -71,6 +71,7 @@ declare module 'vue' {
     ReadAloudText: typeof import('./src/components/ai/ReadAloudText.vue')['default']
     RecommendationCard: typeof import('./src/components/ai/RecommendationCard.vue')['default']
     RecordsTable: typeof import('./src/components/ai/RecordsTable.vue')['default']
+    ResearchRunCard: typeof import('./src/components/ai/ResearchRunCard.vue')['default']
     ResourceRecoveryDialog: typeof import('./src/components/ai/ResourceRecoveryDialog.vue')['default']
     RichMessage: typeof import('./src/components/RichMessage.vue')['default']
     SearchList: typeof import('./src/components/ai/SearchList.vue')['default']

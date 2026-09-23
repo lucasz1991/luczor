@@ -158,6 +158,7 @@ pub struct WorkflowBrowserAction {
     pub query: Option<String>,
     pub offset: Option<usize>,
     pub limit: Option<usize>,
+    pub max_chars: Option<usize>,
 }
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -172,8 +173,15 @@ pub struct WorkflowBrowserResult {
 fn validate(input: &WorkflowBrowserAction) -> Result<(), String> {
     validate_hosts(input.allowed_hosts.as_deref(), input.automated)?;
     if input.query.as_ref().is_some_and(|q| q.len() > 800)
-        || input.offset.is_some_and(|v| v > 20000)
+        || input.offset.is_some_and(|v| {
+            v > if input.action == BrowserOperation::Read {
+                100_000_000
+            } else {
+                20000
+            }
+        })
         || input.limit.is_some_and(|v| v == 0 || v > 200)
+        || input.max_chars.is_some_and(|v| v == 0 || v > 20000)
     {
         return Err("workflow_browser_scan_options_invalid".into());
     }
@@ -349,6 +357,7 @@ pub async fn wf_browser_action(
     super::ensure_main_webview(&window)?;
     let (_operation, _) = super::owned_processes::Operation::begin()?;
     validate(&payload.request)?;
+    super::research::check_scope_execution(&app, &payload.scope, &payload.execution)?;
     if capabilities()["available"] != true {
         return Err("workflow_browser_requires_windows_webview2".into());
     }
@@ -558,7 +567,7 @@ async fn run(
         return Err("workflow_browser_url_changed".into());
     }
     let timeout = Duration::from_millis(input.timeout_ms.unwrap_or(15000));
-    let data = match input.action {
+    let mut data = match input.action {
         BrowserOperation::Open | BrowserOperation::Navigate => {
             let deadline = Instant::now() + timeout;
             loop {
@@ -653,7 +662,7 @@ async fn run(
                 BrowserOperation::Scan => "scan",
                 _ => return Err("workflow_browser_action_invalid".into()),
             };
-            let mut params = json!({"action":action,"selector":input.selector,"value":input.value,"url":input.url,"expectedUrl":current_url,"timeoutMs":timeout.as_millis(),"maxChars":20000,"query":input.query,"offset":input.offset,"limit":input.limit,"showCursor":super::desktop_control::config()?.show_cursor});
+            let mut params = json!({"action":action,"selector":input.selector,"value":input.value,"url":input.url,"expectedUrl":current_url,"timeoutMs":timeout.as_millis(),"maxChars":input.max_chars.unwrap_or(20000),"query":input.query,"offset":input.offset,"limit":input.limit,"showCursor":super::desktop_control::config()?.show_cursor});
             if matches!(
                 input.action,
                 BrowserOperation::Click | BrowserOperation::Fill | BrowserOperation::Select
@@ -728,6 +737,17 @@ async fn run(
         }
     };
     check(app, session, gate)?;
+    if input.action == BrowserOperation::Read {
+        use sha2::{Digest, Sha256};
+        if let Some(text) = data.get("text").and_then(Value::as_str) {
+            let hash = format!("{:x}", Sha256::digest(text.as_bytes()));
+            data["contentSha256"] = json!(hash);
+        }
+        data["retrievedAt"] = json!(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "research_clock_unavailable")?
+            .as_millis() as u64);
+    }
     let url = browser
         .url()
         .map_err(|_| "workflow_browser_url_unavailable")?
@@ -1033,6 +1053,7 @@ mod tests {
         let session = Arc::new(Session {
             id: "s".into(),
             scope: WorkflowArtifactScope {
+                research_id: None,
                 principal_id: "u".into(),
                 project_id: "p".into(),
                 expected_root_path: "root".into(),

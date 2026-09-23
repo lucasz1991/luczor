@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-export-artifact"
+description = "Enables the research_export_artifact command without any pre-configured scope."
+commands.allow = ["research_export_artifact"]
+
+[[permission]]
+identifier = "deny-research-export-artifact"
+description = "Denies the research_export_artifact command without any pre-configured scope."
+commands.deny = ["research_export_artifact"]

@@ -56,6 +56,7 @@ vi.mock('@/services/api/sync', () => ({ logAgentEvent: mocks.logAgentEvent }))
 
 import { runAgent } from '@/services/agent'
 import { executionGate } from '@/services/executionGate'
+import type { ToolDef } from '@/services/tools/types'
 
 function arrangeApprovalGatedTool() {
   mocks.streamChatWithTools
@@ -89,6 +90,133 @@ describe('runAgent auto execution', () => {
     mocks.toOpenAITools.mockReturnValue([])
     mocks.loadExecutionPolicy.mockResolvedValue({ autoExecuteMutatingTools: true })
   })
+
+  function researchTool(): ToolDef {
+    return {
+      name: 'research_read',
+      category: 'app',
+      description: 'Read captured research source',
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        properties: { observation_id: { type: 'string', minLength: 1 } },
+        required: ['observation_id'],
+      },
+      mutating: true,
+      requiresApproval: true,
+      retentionPolicy: 'local_only',
+      risk: 'sensitive',
+      scope: 'project',
+      execute: mocks.execute,
+    }
+  }
+  function researchCalls(name = 'research_read', args: Record<string, unknown> = { observation_id: 'observed-one' }) {
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce({
+        content: '',
+        requestId: 'research-request',
+        toolCalls: [{ id: 'research-call', name, arguments: args }],
+        rawToolCalls: [],
+      })
+      .mockResolvedValueOnce({ content: 'Quellen gelesen.', toolCalls: [], rawToolCalls: [] })
+    mocks.execute.mockResolvedValue({ ok: true, source_id: 'verified-source' })
+  }
+
+  it('admits only a run-bound research adapter through its narrow grant and retains its scope locally', async () => {
+    researchCalls()
+    const tool = researchTool()
+    const grant = vi.fn(() => true)
+    const researchScope = {
+      principalId: 'owner',
+      projectId: 'project-1',
+      expectedRootPath: 'C:/Research/one',
+      expectedWorkspaceUpdatedAt: 1,
+      runId: 'run-one',
+      researchId: 'run-one',
+    }
+    const result = await runAgent({
+      projectId: 'project-1',
+      conversationId: 'chat-one',
+      runId: 'run-one',
+      baseMessages: [{ role: 'user', content: 'Read current sources.' }],
+      mode: 'act',
+      additionalTools: [tool],
+      initialToolNames: [tool.name],
+      researchScope,
+      toolApprovalGrant: grant,
+      inferenceGateway: { id: 'test-local', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(grant).toHaveBeenCalledWith(tool, { observation_id: 'observed-one' }, expect.anything())
+    expect(mocks.awaitApproval).not.toHaveBeenCalled()
+    expect(mocks.execute).toHaveBeenCalledWith(
+      { observation_id: 'observed-one' },
+      expect.objectContaining({ researchScope })
+    )
+    expect(result.workingContext?.dataPolicy).toBe('local_only')
+    expect(mocks.streamChatWithTools.mock.calls[0]![0].tools).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ function: expect.objectContaining({ name: 'research_read' }) }),
+      ])
+    )
+  })
+
+  it('never applies a research grant to a globally registered tool', async () => {
+    arrangeApprovalGatedTool()
+    const grant = vi.fn(() => true)
+    mocks.awaitApproval.mockResolvedValue(false)
+    await runAgent({ projectId: 'project-1', baseMessages: [], mode: 'act', toolApprovalGrant: grant })
+    expect(grant).not.toHaveBeenCalled()
+    expect(mocks.awaitApproval).toHaveBeenCalledOnce()
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
+  it('rejects adapter name collisions and non-research overrides before a provider request', async () => {
+    const tool = researchTool()
+    await expect(
+      runAgent({
+        projectId: 'project-1',
+        baseMessages: [],
+        mode: 'act',
+        additionalTools: [{ ...tool, name: 'fs_write' }],
+      })
+    ).rejects.toThrow()
+    mocks.getTool.mockReturnValue(tool)
+    await expect(
+      runAgent({ projectId: 'project-1', baseMessages: [], mode: 'act', additionalTools: [tool] })
+    ).rejects.toThrow()
+    expect(mocks.streamChatWithTools).not.toHaveBeenCalled()
+  })
+
+  it.each(['observe', 'kill-switch', 'invalid-arguments', 'disabled'] as const)(
+    'keeps %s ahead of a research grant',
+    async constraint => {
+      researchCalls(
+        'research_read',
+        constraint === 'invalid-arguments'
+          ? { observation_id: 'known', file: 'C:/secret' }
+          : { observation_id: 'known' }
+      )
+      const grant = vi.fn(() => true)
+      const tool = researchTool()
+      if (constraint === 'kill-switch') mocks.hud.killSwitch = true
+      await runAgent({
+        projectId: 'project-1',
+        baseMessages: [],
+        mode: constraint === 'observe' ? 'observe' : 'act',
+        additionalTools: [tool],
+        initialToolNames: [tool.name],
+        toolApprovalGrant: grant,
+        disabledTools: constraint === 'disabled' ? [tool.name] : undefined,
+        inferenceGateway: {
+          id: 'test-local',
+          target: 'local_llama_cpp',
+          streamChatWithTools: mocks.streamChatWithTools,
+        },
+      })
+      expect(mocks.execute).not.toHaveBeenCalled()
+      expect(grant).not.toHaveBeenCalled()
+    }
+  )
 
   it('discards tokens and the final result after a project/account change even if the provider ignores abort', async () => {
     const onToken = vi.fn()

@@ -307,6 +307,9 @@ pub async fn claude_job_start(
     super::ensure_main_webview(&window)?;
     validate_start(&payload.request)?;
     let writing = payload.permission == "workspace-write";
+    if let Some(scope) = &payload.workflow_scope {
+        super::research::check_scope_execution(&app, scope, &payload.execution)?;
+    }
     let execution = admit(&payload.execution, writing)?;
     let input = payload.request;
     let (root, revision) = match &input.workflow_scope {

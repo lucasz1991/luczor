@@ -10,6 +10,8 @@ vi.mock('@/services/projectWorkspace', () => ({
 import { browserTools } from '@/services/tools/browser'
 import {
   clearToolSessions,
+  acquireBrowserToolSession,
+  closeToolSession,
   getToolSession,
   listToolSessions,
   retainToolSessionRun,
@@ -38,6 +40,69 @@ beforeEach(() => {
 })
 
 describe('chat browser native session', () => {
+  it('queues competing owners fairly and skips an aborted waiter without blocking the current owner', async () => {
+    const ownerContext = {
+      projectId: 'project',
+      execution: executionGate.capture(undefined, { projectId: 'project', runId: 'owner' }),
+    }
+    const owner = await acquireBrowserToolSession(ownerContext)
+    const aborted = new AbortController()
+    const cancelled = acquireBrowserToolSession({
+      projectId: 'project',
+      execution: executionGate.capture(aborted.signal, { projectId: 'project', runId: 'cancelled-waiter' }),
+    })
+    const next = acquireBrowserToolSession({
+      projectId: 'project',
+      execution: executionGate.capture(undefined, { projectId: 'project', runId: 'next-waiter' }),
+    })
+    aborted.abort()
+    await expect(cancelled).rejects.toBeDefined()
+    expect((await acquireBrowserToolSession(ownerContext)).meta.id).toBe(owner.meta.id)
+    await closeToolSession(owner.meta.id)
+    const acquired = await next
+    expect(acquired.ticket.scope?.runId).toBe('next-waiter')
+    expect(listToolSessions()).toHaveLength(1)
+  })
+  it('shares a registered research artifact scope across browser, terminal and vision without a project workspace', async () => {
+    const { requireProjectWorkspace } = await import('@/services/projectWorkspace')
+    vi.mocked(requireProjectWorkspace).mockClear()
+    const researchScope = {
+      principalId: 'owner',
+      projectId: 'project',
+      expectedRootPath: 'C:/Research/run',
+      expectedWorkspaceUpdatedAt: 22,
+      runId: 'research-id',
+      researchId: 'research-id',
+    }
+    const ctx = {
+      projectId: 'project',
+      researchScope,
+      execution: executionGate.capture(undefined, {
+        projectId: 'project',
+        conversationId: 'chat',
+        runId: 'research-id',
+      }),
+    }
+    const browser = await getToolSession(ctx, 'browser')
+    const terminal = await getToolSession(ctx, 'terminal')
+    const vision = await getToolSession(ctx, 'vision')
+    expect(browser.scope).toEqual(researchScope)
+    expect(terminal.scope).toEqual(researchScope)
+    expect(vision.scope).toEqual(researchScope)
+    expect(new Set([browser.meta.id, terminal.meta.id, vision.meta.id]).size).toBe(3)
+    expect(requireProjectWorkspace).not.toHaveBeenCalled()
+    await browser.browser!.open('https://example.com')
+    expect(native.invoke).toHaveBeenCalledWith(
+      'wf_browser_action',
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          scope: researchScope,
+          execution: expect.objectContaining({ workflowExecutionId: 'research-id' }),
+        }),
+      })
+    )
+    await expect(getToolSession({ ...ctx, researchScope: undefined }, 'terminal')).rejects.toThrow('scope_changed')
+  })
   it('rejects executable URLs before reserving a session and ignores legacy host lists', async () => {
     await expect(
       execute('browser_open', { url: 'javascript:alert(1)', allowed_hosts: ['wrong.test'] })
@@ -107,10 +172,16 @@ describe('chat browser native session', () => {
     ).resolves.toMatchObject({ closed: false })
     nestedFinish()
     expect(listToolSessions()[0]?.status).toBe('active')
-    await expect(open.execute({ allowed_hosts: ['other.test'] }, secondCtx)).rejects.toThrow('anderer Auftrag')
+    let secondOpened = false
+    const waiting = open.execute({ allowed_hosts: ['other.test'] }, secondCtx).then(result => {
+      secondOpened = true
+      return result
+    })
+    await Promise.resolve()
+    expect(secondOpened).toBe(false)
     finish()
     expect(listToolSessions()[0]?.status).toBe('expired')
-    await open.execute({ allowed_hosts: ['other.test'] }, secondCtx)
+    await waiting
     expect(listToolSessions()).toHaveLength(1)
     expect(listToolSessions()[0]?.allowedHosts).toEqual([])
     const commands = native.invoke.mock.calls.map(([command]) => command)

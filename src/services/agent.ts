@@ -92,9 +92,10 @@ import { executionGate, type ExecutionTicket } from '@/services/executionGate'
 import { ChatEffectJournalError, type ChatEffectJournal } from '@/services/chatEffectJournal'
 import { withRunResources } from '@/services/runs/resourceCoordinator'
 import { freezeAgentWorkflowScope, WORKFLOW_WORKCOPY_TOOLS } from '@/services/agents/workflowScope'
-import { validateToolArguments } from '@/services/tools/validateArguments'
+import { toolArgumentFailure, validateToolArguments } from '@/services/tools/validateArguments'
 import { ToolRecoveryGuard } from '@/services/tools/toolRecovery'
 import { retainToolSessionRun } from '@/services/tools/toolSessionCoordinator'
+import { isResearchProbe } from '@/services/research/probes'
 import { INVALID_TOOL_ARGUMENTS, prepareToolCallHistory } from '@/services/inference/toolCallHistory'
 import { loadToolLimits, validToolRounds } from '@/services/toolLimits'
 import { mutationKey, type AgentCheckpoint, type PendingTaskCreateVerification } from '@/services/agents/chatCheckpoint'
@@ -133,6 +134,12 @@ function pulseForCategory(category: ToolCategory) {
 }
 
 export type RunAgentOptions = {
+  /** Host-owned research tools, scoped to this invocation; never globally registered. */
+  additionalTools?: readonly ToolDef[]
+  initialToolNames?: readonly string[]
+  researchScope?: import('@/services/workflows/browser').WorkflowArtifactScope
+  /** A revocable grant may approve only the additional research tools, never general tools. */
+  toolApprovalGrant?: (tool: ToolDef, args: Record<string, unknown>, execution: ExecutionTicket) => boolean
   /** Inherited only by internal children of the same locally orchestrated turn. */
   internalProfileMode?: import('./assistantProfileTypes').InternalModelProfileMode
   /** Optional remote-authority guard; normal device-local chats perform no extra requests. */
@@ -641,7 +648,9 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       ? Object.freeze({ ...inheritedExecution, signal: AbortSignal.any([inheritedExecution.signal, opts.signal]) })
       : inheritedExecution
   executionGate.assert(execution)
-  cleanup.push(retainToolSessionRun({ projectId, execution, toolSessionId: opts.runId }))
+  cleanup.push(
+    retainToolSessionRun({ projectId, execution, toolSessionId: opts.runId, researchScope: opts.researchScope })
+  )
   const signal = AbortSignal.any([
     execution.signal,
     ...(opts.signal ? [opts.signal] : []),
@@ -712,14 +721,27 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   const planningDiscussion = isPlanningDiscussion(latestUserMessage)
   const requestedToolChoice = planningDiscussion && opts.toolChoice === 'required' ? 'auto' : opts.toolChoice
   const disabledTools = new Set(opts.disabledTools ?? [])
-  const allTools = toOpenAITools().filter(
+  const additionalTools = new Map<string, ToolDef>()
+  for (const tool of opts.additionalTools ?? []) {
+    if (!/^research_[a-z_]+$/u.test(tool.name) || getTool(tool.name) || additionalTools.has(tool.name))
+      throw new Error('Ungültiges oder mehrfach registriertes Recherchewerkzeug.')
+    additionalTools.set(tool.name, tool)
+  }
+  const resolveTool = (name: string) => additionalTools.get(name) ?? getTool(name)
+  const allTools = [
+    ...toOpenAITools(),
+    ...[...additionalTools.values()].map(tool => ({
+      type: 'function' as const,
+      function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+    })),
+  ].filter(
     description =>
       !disabledTools.has(description.function.name) &&
       (!opts.workflowScope || WORKFLOW_WORKCOPY_TOOLS.has(description.function.name)) &&
-      (!getTool(description.function.name)?.workspaceOnly || !!opts.workspaceScope) &&
+      (!resolveTool(description.function.name)?.workspaceOnly || !!opts.workspaceScope) &&
       opts.toolAccess !== 'none' &&
-      (opts.toolAccess !== 'read-only' || getTool(description.function.name)?.mutating === false) &&
-      (!planningDiscussion || permittedDuringPlanningDiscussion(getTool(description.function.name)))
+      (opts.toolAccess !== 'read-only' || resolveTool(description.function.name)?.mutating === false) &&
+      (!planningDiscussion || permittedDuringPlanningDiscussion(resolveTool(description.function.name)))
   )
   const routeInput = (externalPackage?: ExternalTurnPackage) => ({
     projectId,
@@ -863,7 +885,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       ? focusedTools(
           latestUserMessage,
           opts.toolAccess === 'none' ? undefined : () => messages,
-          opts.continuation?.selectedTools
+          opts.continuation?.selectedTools ?? opts.initialToolNames
         )
       : undefined
   let contextTargetTokens = opts.continuation?.recovery?.contextTargetTokens
@@ -978,7 +1000,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   const localAssistantTools = allTools
     .map(tool => tool.function.name)
     .filter(name => {
-      const tool = getTool(name)
+      const tool = resolveTool(name)
       return (
         tool?.mutating === false &&
         !tool.requiresApproval &&
@@ -1077,6 +1099,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               onUsage: undefined,
               onContextRequest: undefined,
               onCheckpoint: undefined,
+              toolApprovalGrant: undefined,
               pendingTaskCreateVerifications: undefined,
             })
             return {
@@ -1337,7 +1360,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       if (!toolRecovery.canOffer(tool.function.name)) return false
       if (!reviewingGoal()) return true
       if ([GOAL_REPORT_NAME, GOAL_READ_RESULT_NAME].includes(tool.function.name)) return true
-      const definition = getTool(tool.function.name)
+      const definition = resolveTool(tool.function.name)
       return !!definition && permittedDuringPlanningDiscussion(definition) && !tool.function.name.startsWith('agent_')
     })
     const toolStatistics = await toolUsage.snapshot()
@@ -1876,7 +1899,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
             ? goalReportTool
             : call.name === GOAL_READ_RESULT_NAME
               ? goalReadResultTool
-              : (assistance?.tools.find(tool => tool.name === call.name) ?? getTool(call.name))
+              : (assistance?.tools.find(tool => tool.name === call.name) ?? resolveTool(call.name))
       const tool =
         ((call.name === 'agent_assist' && call.arguments.target === 'local') ||
           (call.name === 'agent_assist_status' && assistance?.isLocalJob(call.arguments.job_id))) &&
@@ -1948,7 +1971,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         validateToolArguments(tool.parameters, call.arguments)
       } catch (error) {
         toolFailures++
-        const outcome: Outcome = { ok: false, error: error instanceof Error ? error.message : String(error) }
+        const outcome: Outcome = toolRecovery.record(call.name, call.arguments, toolArgumentFailure(error))
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'failed', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
@@ -2263,9 +2286,15 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         continue
       }
 
+      // Research discovery/read adapters verify their own snapshots and native output receipts.
+      // Their observation handles are session-local, so neither old results nor operation IDs may be replayed.
+      const repeatableResearchProbe = !!opts.researchScope?.researchId &&
+        opts.researchScope.researchId === opts.runId && opts.researchScope.projectId === projectId &&
+        additionalTools.get(call.name) === tool && isResearchProbe(call.name)
       if (
         tool.mutating &&
         uncertainMutations.has(completedMutationKey(call.name, call.arguments, projectId)) &&
+        !repeatableResearchProbe &&
         !['task_create', 'chat_create'].includes(call.name)
       ) {
         const outcome: Outcome = {
@@ -2283,7 +2312,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       // Human-in-the-loop approval.
       // Input and process actions may legitimately repeat at a later desktop state.
       const reusableMutation =
-        tool.mutating && !(tool.effects ?? []).some(effect => effect === 'input' || effect === 'execute')
+        tool.mutating && !repeatableResearchProbe && !(tool.effects ?? []).some(effect => effect === 'input' || effect === 'execute')
       const completionKey = completedMutationKey(call.name, call.arguments, projectId)
       const previousMutation = reusableMutation
         ? (completedMutations.get(completionKey) ?? completedMutations.get(mutationKey(call.name, call.arguments)))
@@ -2311,7 +2340,9 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         scope: tool.scope,
         effects: tool.effects,
       })
-      if (requiresApproval && approvalMode !== 'unrestricted' && !autoExecute) {
+      const researchGranted =
+        additionalTools.get(call.name) === tool && opts.toolApprovalGrant?.(tool, call.arguments, execution) === true
+      if (requiresApproval && approvalMode !== 'unrestricted' && !autoExecute && !researchGranted) {
         updateToolStatus(call.id, 'proposed')
         await opts.onRunWaiting?.('approval')
         const approved = await (opts.toolSession
@@ -2443,7 +2474,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           executionGate.assert(execution)
           signal.throwIfAborted()
           if (tool.mutating) {
-            if (!operationIds.has(completionKey)) operationIds.set(completionKey, crypto.randomUUID())
+            if (repeatableResearchProbe || !operationIds.has(completionKey)) operationIds.set(completionKey, crypto.randomUUID())
             uncertainMutations.add(completionKey)
             await emitCheckpoint(safeProgressCheckpoint(), !!opts.effectJournal)
             executionGate.assert(execution)
@@ -2469,6 +2500,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               inferenceTarget: 'local',
               workspaceScope: opts.workspaceScope,
               workflowScope: opts.workflowScope,
+              researchScope: opts.researchScope,
               toolSessionId: opts.runId,
             })
             await toolUsage.record(call.id, call.name, normalizeToolOutcome(result).ok, performance.now() - invokedAt)
@@ -2482,7 +2514,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           }
         })
         executionGate.assert(execution)
-        const outcome = toolRecovery.record(call.name, executionArguments, normalizeToolOutcome(output))
+        const outcome = toolRecovery.record(call.name, executionArguments, normalizeToolOutcome(output), tool.mutating)
         if (outcome.ok) {
           uncertainMutations.delete(completionKey)
           // Repeated identical reads or cached writes cannot renew a goal section.

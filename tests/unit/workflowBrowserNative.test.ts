@@ -184,11 +184,34 @@ describe('fixed native browser DOM protocol', () => {
     })
     expect(await fixture.execute({ ...base, action: 'select', value: 'one' })).toEqual({ ok: true, applied: true })
     select.innerText = 'first full line\n' + 'x'.repeat(30)
-    expect(await fixture.execute({ ...base, action: 'read' })).toEqual({
+    expect(await fixture.execute({ ...base, action: 'read' })).toMatchObject({
       ok: true,
-      text: 'first full line',
+      text: 'first full line\n',
       truncated: true,
+      offset: 0,
+      nextOffset: 16,
+      title: 'Fixture',
     })
+  })
+  it('reads long unbroken text without gaps and changes its full-document snapshot when text changes', async () => {
+    const fixture = page()
+    fixture.element.innerText = 'x'.repeat(55)
+    const first = await fixture.execute({ ...base, action: 'read' })
+    const second = await fixture.execute({ ...base, action: 'read', offset: Number(first.nextOffset) })
+    const third = await fixture.execute({ ...base, action: 'read', offset: Number(second.nextOffset) })
+    expect(String(first.text) + String(second.text) + String(third.text)).toBe(fixture.element.innerText)
+    expect(first.snapshotId).toBe(second.snapshotId)
+    expect(third).toMatchObject({ nextOffset: null, truncated: false, totalChars: 55 })
+    fixture.element.innerText = 'y' + 'x'.repeat(54)
+    expect((await fixture.execute({ ...base, action: 'read' })).snapshotId).not.toBe(first.snapshotId)
+  })
+  it('never splits an astral character between JSON source chunks', async () => {
+    const fixture = page()
+    fixture.element.innerText = 'x'.repeat(19) + '😀y'
+    const first = await fixture.execute({ ...base, action: 'read' })
+    expect(first).toMatchObject({ text: 'x'.repeat(19), nextOffset: 19 })
+    const second = await fixture.execute({ ...base, action: 'read', offset: 19, maxChars: 1 })
+    expect(second).toMatchObject({ text: '😀', nextOffset: 21 })
   })
   it('keeps download execution out of page JavaScript', async () => {
     const fixture = page()

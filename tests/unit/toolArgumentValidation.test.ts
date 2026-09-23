@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { validateToolArguments } from '@/services/tools/validateArguments'
+import { toolArgumentFailure, validateToolArguments } from '@/services/tools/validateArguments'
 import { deviceTools } from '@/services/tools/devices'
 
 const schema = {
@@ -9,6 +9,25 @@ const schema = {
   properties: { path: { type: 'string', minLength: 1 }, count: { type: 'integer', minimum: 1, maximum: 3 } },
 }
 describe('tool argument admission', () => {
+  it('returns a field-specific correction without echoing the invalid private argument', () => {
+    try {
+      validateToolArguments(schema, { path: 'file.ts', count: 'PRIVATE_VALUE' })
+      expect.fail('must reject')
+    } catch (error) {
+      const result = toolArgumentFailure(error)
+      expect(result).toMatchObject({ ok: false, output: { executed: false, code: 'tool_arguments_invalid',
+        validation: { field: 'Argumente.count', rule: 'type', expected: { type: 'integer' } } } })
+      expect(JSON.stringify(result)).not.toContain('PRIVATE_VALUE')
+    }
+    try {
+      validateToolArguments(schema, { selector: '#wrong-contract' })
+      expect.fail('must reject')
+    } catch (error) {
+      expect(toolArgumentFailure(error)).toMatchObject({ output: {
+        validation: { field: 'Argumente.path', rule: 'required', expected: { required: true, type: 'string' } },
+      } })
+    }
+  })
   it('rejects wrong types, extra keys, missing required values and invalid bounds', () => {
     for (const value of [
       [],

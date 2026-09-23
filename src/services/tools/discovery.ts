@@ -67,6 +67,7 @@ export const TOOL_BRANCHES: Branch[] = [
     'memory memories erinnerung erinnerungen erinnern recall remember merken notiz notizen erfahrung wissen'
   ),
   branch('knowledge/history', 'Context archive', 'history verlauf archiv nachlesen original context'),
+  branch('knowledge/repository', 'Repository graph and LSP', 'repository repo code source graph lsp symbol symbols references imports definition callers usages quellcode codegraph sprachserver referenzen aufrufer verwendungen abhängigkeiten'),
   branch('agents', 'Agents', 'agent agents agenten assistenz assistance delegation mitarbeiter helfer parallel'),
   branch('agents/jobs', 'Individual agents', 'job auftrag teilauftrag delegieren worker spezialist codex claude'),
   branch(
@@ -144,6 +145,7 @@ const operations = [
 ]
 function branchFor(name: string): string {
   if (name === 'tools_select') return 'tools/catalog'
+  if (name.startsWith('repository_')) return 'knowledge/repository'
   if (name.startsWith('context_')) return 'knowledge/history'
   if (name.startsWith('project_cloud_')) return 'files/cloud'
   if (name.startsWith('fs_') || name === 'workspace_get') return 'files/local'

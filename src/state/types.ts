@@ -12,6 +12,8 @@ export type MessageVisibility = 'visible' | 'hidden'
 
 export type MessageMeta = {
   runId?: Id
+  /** Local reference to a durable research archive; evidence is not stored in the transcript. */
+  researchRunId?: Id
   conversationId?: Id
   thinkingTier?: import('@/services/inference/thinking').ThinkingTier
   kind?: 'question' | 'statement'

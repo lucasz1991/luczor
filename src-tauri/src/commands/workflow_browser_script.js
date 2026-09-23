@@ -299,9 +299,55 @@ async function luczorWorkflowBrowser(p) {
     }
     if (p.action === 'read') {
       const text = String(el.innerText || el.textContent || ''),
-        max = p.maxChars || 20000
-      const end = text.length <= max ? text.length : Math.max(0, text.lastIndexOf('\n', max))
-      return { ok: true, text: text.slice(0, end), truncated: text.length > end }
+        max = p.maxChars || 20000,
+        offset = Math.min(p.offset || 0, text.length)
+      let end = Math.min(text.length, offset + max)
+      // Prefer whole lines while still advancing across a long unbroken paragraph.
+      if (end < text.length) {
+        const boundary = text.lastIndexOf('\n', end)
+        if (boundary > offset) end = boundary + 1
+        // A JSON string must not end halfway through an astral Unicode character.
+        if (end > offset && /[\uD800-\uDBFF]/u.test(text[end - 1]) && /[\uDC00-\uDFFF]/u.test(text[end])) {
+          end = end - 1 > offset ? end - 1 : Math.min(text.length, end + 1)
+        }
+      }
+      let first = 2166136261,
+        second = 5381
+      for (let index = 0; index < text.length; index++) {
+        const unit = text.charCodeAt(index)
+        first = Math.imul(first ^ unit, 16777619)
+        second = Math.imul(second, 33) ^ unit
+      }
+      const links = []
+      const seen = new Set()
+      for (const anchor of document.querySelectorAll('a[href]')) {
+        try {
+          const url = new URL(anchor.getAttribute('href'), document.baseURI)
+          if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || seen.has(url.href))
+            continue
+          seen.add(url.href)
+          links.push({ url: url.href, title: normalize(anchor.innerText || anchor.textContent).slice(0, 300) })
+          if (links.length >= 200) break
+        } catch {
+          /* Malformed page links are data, not failed research. */
+        }
+      }
+      const meta = name =>
+        document.querySelector(`meta[property="${name}"],meta[name="${name}"]`)?.content?.slice(0, 160) || null
+      return {
+        ok: true,
+        url: location.href,
+        title: document.title,
+        text: text.slice(offset, end),
+        truncated: end < text.length,
+        offset,
+        totalChars: text.length,
+        nextOffset: end < text.length ? end : null,
+        snapshotId: `${text.length}:${first >>> 0}:${second >>> 0}`,
+        links,
+        publishedAt: meta('article:published_time') || meta('datePublished') || meta('date'),
+        updatedAt: meta('article:modified_time') || meta('dateModified'),
+      }
     }
     const operation = p.operation || p.action
     if (

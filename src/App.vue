@@ -77,6 +77,19 @@ import ChatComposer from './components/ai/ChatComposer.vue'
 import PromptBar from './components/ai/PromptBar.vue'
 import StreamingText from './components/ai/StreamingText.vue'
 import ChatTurnTimeline from './components/ai/ChatTurnTimeline.vue'
+import ResearchRunCard from './components/ai/ResearchRunCard.vue'
+import { parseResearchEntry } from '@/services/research/researchEntry'
+import {
+  researchRuns,
+  startResearch,
+  pauseResearch,
+  resumeResearch,
+  stopResearch,
+  openResearch,
+  recoverResearch,
+  clearResearch,
+} from '@/services/research/service'
+import { setResearchRoot } from '@/services/research/settings'
 import ChatWorkingIndicator from './components/ai/ChatWorkingIndicator.vue'
 import ApprovalCard from './components/ai/ApprovalCard.vue'
 import PayloadApproval from './components/ai/PayloadApproval.vue'
@@ -344,12 +357,42 @@ const activeTurn = computed(() => {
     : null
 })
 const promptCommands = [
+  {
+    id: 'research',
+    label: 'Recherche · /research deep',
+    description: 'Quellen prüfen und einen Bericht im eigenen Ordner erstellen',
+    icon: 'spark',
+  },
+  {
+    id: 'research-folder',
+    label: 'Rechercheordner wählen',
+    description: 'Zentralen Ablageort für Recherchen ohne Projektordner ändern',
+    icon: 'folder',
+  },
   { id: 'summarize', label: '/zusammenfassen', description: 'Den bisherigen Chat zusammenfassen', icon: 'spark' },
   { id: 'plan', label: '/plan', description: 'Ziele, Fragen und Schritte gemeinsam im Chat besprechen', icon: 'check' },
   { id: 'context', label: '@projekt', description: 'Projektkontext ansehen', icon: 'folder' },
   { id: 'settings', label: '/modell', description: 'Modelleinstellungen öffnen', icon: 'settings' },
 ]
 function handlePromptCommand(id: string) {
+  if (id === 'research') {
+    const topic = parseResearchEntry(input.value)?.topic ?? input.value.trim()
+    setComposerInput(`/research deep ${topic}`, 'keyboard')
+    void nextTick(() => promptBar.value?.focus())
+    return
+  }
+  if (id === 'research-folder') {
+    void researchAction(async () => {
+      const principalId = await resolveWorkspacePrincipalId()
+      const path = await selectProjectWorkspaceDirectory('Zentralen Rechercheordner auswählen')
+      if (!path) return
+      if ((await resolveWorkspacePrincipalId()) !== principalId)
+        throw new Error('Konto während der Ordnerwahl geändert.')
+      await setResearchRoot(principalId, path)
+      pushToast('Rechercheordner für neue Läufe ohne Projektordner gespeichert.', 'success')
+    })
+    return
+  }
   if (id === 'plan') {
     startPlanningChat()
     return
@@ -482,7 +525,10 @@ function openSettings(tab: SettingsStartTab = 'server') {
   showSettings.value = true
 }
 
-const stopAccountRuns = () => void chatRuns.stopAll(executionAbortReason('execution_session_changed'))
+const stopAccountRuns = () => {
+  clearResearch()
+  void chatRuns.stopAll(executionAbortReason('execution_session_changed'))
+}
 window.addEventListener('luczor:api-identity-changing', stopAccountRuns)
 onBeforeUnmount(() => {
   window.removeEventListener('luczor:api-identity-changing', stopAccountRuns)
@@ -560,6 +606,16 @@ onMounted(() => {
       )
       await chatRuns.recover(principalId, assertCurrent)
       assertCurrent()
+      await recoverResearch(principalId)
+      assertCurrent()
+      for (const run of researchRuns.value) {
+        if (mutations.getConversation(run.conversationId)?.projectId !== run.projectId ||
+          state.messages.some(message => message.meta.researchRunId === run.id)) continue
+        const message = mutations.makeMsg('assistant', 'Deep-Recherche', run.projectId, run.conversationId)
+        message.id = `research:${run.id}`
+        message.meta = { ...message.meta, researchRunId: run.id, retentionPolicy: 'local_only', serverSpeechAllowed: false }
+        mutations.addMessage(message)
+      }
       for (const [id, revision] of activeGoals)
         if (mutations.getConversation(id)?.autonomousGoal?.revision !== revision) activeGoals.delete(id)
       reconcileRecoveredChatRuns(
@@ -2250,6 +2306,70 @@ function goalRunInstruction(goal: Readonly<GoalRunState>): string {
     .join('\n\n')
 }
 
+function messageResearch(message: Message) {
+  return researchRuns.value.filter(
+    run =>
+      run.id === message.meta.researchRunId &&
+      run.projectId === message.projectId &&
+      run.conversationId === message.conversationId
+  )
+}
+async function researchAction(action: () => Promise<unknown>) {
+  try {
+    await action()
+  } catch (error) {
+    pushToast(error instanceof Error ? error.message : 'Rechercheaktion fehlgeschlagen.', 'error')
+  }
+}
+async function submitResearch(topic: string, pid: string, conversationId: string, submittedText: string) {
+  if (!topic) {
+    pushToast('Bitte ein Thema ergänzen: /research deep <Thema>', 'error')
+    void nextTick(() => promptBar.value?.focus())
+    return
+  }
+  if (chatRuns.hasLive(conversationId) || admittingConversations.value.has(conversationId)) {
+    pushToast('Bitte den laufenden Auftrag in diesem Chat zuerst pausieren oder stoppen.', 'error')
+    return
+  }
+  const project = projects.value.find(item => item.id === pid)
+  admittingConversations.value = new Set([...admittingConversations.value, conversationId])
+  try {
+    await startResearch({
+      projectId: pid,
+      conversationId,
+      topic,
+      mode: modeFor(conversationId),
+      thinkingTier: thinkingTierFor(conversationId),
+      standalone: isStandaloneChat(project),
+      folderShared: project?.cloud?.folderShared,
+      onRegistered: async run => {
+        const user = mutations.makeMsg('user', submittedText, pid, conversationId)
+        user.meta = { ...user.meta, retentionPolicy: 'local_only', serverSpeechAllowed: false }
+        const assistant = mutations.makeMsg('assistant', 'Deep-Recherche', pid, conversationId)
+        assistant.id = `research:${run.id}`
+        assistant.meta = {
+          ...assistant.meta,
+          researchRunId: run.id,
+          retentionPolicy: 'local_only',
+          serverSpeechAllowed: false,
+        }
+        mutations.addMessage(user)
+        mutations.addMessage(assistant)
+        const chat = mutations.getConversation(conversationId)
+        if (chat) {
+          chat.updatedAt = Date.now()
+          if (chat.title === 'Neuer Chat') chat.title = topic.slice(0, 80)
+          if (chat.draft === submittedText) chat.draft = ''
+        }
+        if (activeConversationId.value === conversationId && input.value === submittedText) input.value = ''
+        await saveAppStateStrict(state)
+        void nextTick(autoGrow)
+      },
+    })
+  } finally {
+    admittingConversations.value = new Set([...admittingConversations.value].filter(id => id !== conversationId))
+  }
+}
 async function send(
   automaticVoice = false,
   resume?: ChatResume,
@@ -2263,6 +2383,11 @@ async function send(
   const conversationId = miniInput?.conversationId ?? mutations.getActiveConversationId(pid)
   if (mutations.getConversation(conversationId)?.projectId !== pid) return
   const submittedText = miniInput?.text ?? input.value
+  const research = !resume && !goalInput ? parseResearchEntry(submittedText) : null
+  if (research) {
+    await researchAction(() => submitResearch(research.topic, pid, conversationId, submittedText))
+    return
+  }
   const submission = captureChatSubmission({
     projectId: pid,
     conversationId,
@@ -3783,6 +3908,16 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
               >
             </header>
             <template v-if="m.role === 'assistant'">
+              <ResearchRunCard
+                v-for="research in messageResearch(m)"
+                :key="research.id"
+                :run="research"
+                @pause="researchAction(() => pauseResearch(research.id))"
+                @resume="researchAction(() => resumeResearch(research.id, mode, thinkingTier))"
+                @stop="researchAction(() => stopResearch(research.id))"
+                @open-report="researchAction(() => openResearch(research.id, mode, true))"
+                @open-folder="researchAction(() => openResearch(research.id, mode))"
+              />
               <ChatTurnTimeline
                 :activity="chatActivities[m.id]"
                 :commentary="m.meta.commentary ?? []"
@@ -3981,6 +4116,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           @update:mode="selectMode"
         >
           <template #heading-start>
+            <span v-if="parseResearchEntry(input)" class="ai-badge">Deep-Recherche · mit Quellen und Bericht</span>
             <AutonomousGoalControl
               :key="activeConversationId"
               :model="autonomousGoal.model.value"

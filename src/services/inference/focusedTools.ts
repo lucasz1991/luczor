@@ -223,6 +223,8 @@ export function focusedTools(
       )
       const text = objective.toLowerCase()
       const preferred = ['project_get_state', 'workspace_get', 'agent_assist']
+      const repositoryFirst = /\b(repo(?:sitory)?|code|quellcode|codegraph|lsp|symbol|funktion|function|import|referen[cz])\b/u.test(text)
+        ? ['repository_search'] : []
       if (/datei|repo|code|file|ordner|software/.test(text))
         preferred.push('fs_list', 'fs_read', 'fs_search', 'project_terminal_run')
       if (/browser|web|url|internet|seite/.test(text))
@@ -243,6 +245,7 @@ export function focusedTools(
           ...pinned.map(tool => tool.function.name),
           ...requested,
           ...exact,
+          ...repositoryFirst,
           ...matched,
           ...preferred,
           ...topToolUsage(pool, usage).map(tool => tool.name),

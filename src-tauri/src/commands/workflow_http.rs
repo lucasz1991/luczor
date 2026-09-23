@@ -211,7 +211,9 @@ fn validate_headers(raw: HashMap<String, String>) -> Result<HeaderMap, String> {
 
 /// Resolve once, reject every non-public result, then pin one validated address
 /// into reqwest. This closes the usual check/use DNS-rebinding gap.
-fn resolve_and_validate_target(url: &Url) -> Result<Option<(String, SocketAddr)>, String> {
+pub(super) fn resolve_and_validate_target(
+    url: &Url,
+) -> Result<Option<(String, SocketAddr)>, String> {
     let host = url.host_str().ok_or("Workflow HTTP URL has no host.")?;
     let port = url
         .port_or_known_default()

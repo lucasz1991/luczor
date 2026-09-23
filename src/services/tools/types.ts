@@ -16,6 +16,8 @@ export type ToolSessionKind = 'browser' | 'vision' | 'terminal' | 'model'
 export type WorkspaceScope = { principalId: string; projectIds: readonly string[] }
 
 export type ToolContext = {
+  /** A native-registered run output root; never a synthetic project binding. */
+  researchScope?: import('@/services/workflows/browser').WorkflowArtifactScope
   workflowScope?: import('@/services/workflows/browser').WorkflowArtifactScope
   projectId: string
   signal?: AbortSignal

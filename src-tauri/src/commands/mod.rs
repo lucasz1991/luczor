@@ -20,7 +20,6 @@ mod desktop_window_input;
 pub mod device_jobs;
 pub mod device_key;
 pub mod device_run_journal;
-pub mod run_archive;
 pub mod execution;
 pub mod lan_peer;
 pub mod local_model;
@@ -30,6 +29,8 @@ pub mod notifications;
 pub mod project_mirror;
 pub mod project_workspace;
 pub mod repository_graph;
+pub mod research;
+pub mod run_archive;
 mod script_environment;
 pub mod system;
 mod system_diagnostics;
@@ -198,6 +199,15 @@ mod tests {
 
         let main_runtime = include_str!("../../permissions/main-runtime.toml");
         for command in [
+            "research_preview",
+            "research_prepare",
+            "research_read",
+            "research_write",
+            "research_read_artifact",
+            "research_export_artifact",
+            "research_verify",
+            "research_open",
+            "research_release",
             "system_diagnostics",
             "codex_runtime_status",
             "codex_desktop_open",

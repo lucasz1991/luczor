@@ -6,6 +6,8 @@ export type WorkflowArtifactScope = Readonly<{
   expectedRootPath: string
   expectedWorkspaceUpdatedAt: number
   runId: string
+  /** Native research registry resolves this scope without a project-folder binding. */
+  researchId?: string
 }>
 export type WorkflowNativeInvoke = <T>(
   command: string,
@@ -30,6 +32,15 @@ export type WorkflowBrowserResult = Readonly<{
 }>
 export type BrowserOptions = { sessionId?: string; expectedTabId?: string; expectedUrl?: string; timeoutMs?: number }
 export type BrowserScanOptions = BrowserOptions & { selector?: string; query?: string; offset?: number; limit?: number }
+export type BrowserReadOptions = BrowserOptions & { offset?: number; maxChars?: number }
+export type BrowserReadResult = Record<string, unknown> & {
+  ok: boolean
+  sessionId: string
+  tabId: string
+  url: string
+  text: string
+  truncated: boolean
+}
 
 /** The original run can release its own window even after its execution ticket was revoked. */
 export function cleanupWorkflowBrowser(scope: WorkflowArtifactScope): Promise<boolean> {
@@ -74,7 +85,7 @@ export function createWorkflowBrowser(context: {
       execute('select', { ...options, selector, value }),
     wait: (selector?: string, options: BrowserOptions = {}) => execute('wait', { ...options, selector }, false),
     scan: (options: BrowserScanOptions = {}) => execute('scan', options, false),
-    read: async (selector?: string, options: BrowserOptions = {}) => {
+    read: async (selector?: string, options: BrowserReadOptions = {}): Promise<BrowserReadResult> => {
       const result = await execute('read', { ...options, selector }, false)
       if (typeof result.data.text !== 'string' || typeof result.data.truncated !== 'boolean')
         throw new Error('workflow_browser_read_invalid')

@@ -1,5 +1,6 @@
 import type { ToolDef, ToolContext } from './types'
-import { closeToolSession, findToolSession, getToolSession } from './toolSessionCoordinator'
+import { acquireBrowserToolSession, closeToolSession, findToolSession, getToolSession } from './toolSessionCoordinator'
+import { researchBrowserQueue } from '@/services/research/browserQueue'
 import { validateToolArguments } from './validateArguments'
 import { browserPanel, browserFailure, revealBrowserPanel } from '@/services/browserPanel'
 import { loadDesktopControl } from '@/services/desktopControl'
@@ -126,10 +127,13 @@ function define(
     approvalMode: requiresApproval ? 'session' : 'call',
     async execute(args, ctx) {
       validateToolArguments(parameters, args)
+      if (typeof args.url === 'string') browserNavigationUrl(args.url)
       if (action === 'open') revealBrowserPanel(ctx.projectId)
       browserPanel.error = ''
       try {
-        return await browser(ctx, action, args)
+        // Reserve ownership before entering the operation FIFO; existing owners can still close while others wait.
+        if (action === 'open') await acquireBrowserToolSession(ctx)
+        return await researchBrowserQueue.run(() => browser(ctx, action, args), ctx.signal ?? ctx.execution?.signal)
       } catch (error) {
         const message = browserFailure(error)
         browserPanel.error = message

@@ -2,6 +2,15 @@
 identifier = "main-runtime"
 description = "Allows the trusted main Luczor webview to use the explicitly registered application runtime commands."
 commands.allow = [
+    "research_preview",
+    "research_prepare",
+    "research_read",
+    "research_write",
+    "research_read_artifact",
+    "research_export_artifact",
+    "research_verify",
+    "research_open",
+    "research_release",
     "open_user_link",
     "execution_gate_update",
     "execution_scope_register",

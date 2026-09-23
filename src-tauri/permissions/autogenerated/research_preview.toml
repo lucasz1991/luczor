@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-preview"
+description = "Enables the research_preview command without any pre-configured scope."
+commands.allow = ["research_preview"]
+
+[[permission]]
+identifier = "deny-research-preview"
+description = "Denies the research_preview command without any pre-configured scope."
+commands.deny = ["research_preview"]

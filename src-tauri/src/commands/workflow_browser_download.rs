@@ -19,6 +19,10 @@ pub(super) async fn download(
     let session = session.clone();
     let gate = gate.clone();
     let name = input.name.clone().unwrap_or_else(|| "download".into());
+    if session.scope.research_id.is_some() && !matches!(target.scheme(), "http" | "https") {
+        return Err("research_download_requires_public_http_url".into());
+    }
+    let requested_url = target.to_string();
     tauri::async_runtime::spawn_blocking(move || {
         check(&app, &session, &gate)?;
         let deadline = Instant::now() + timeout;
@@ -36,16 +40,26 @@ pub(super) async fn download(
             }
             (Box::new(file), "application/octet-stream".into())
         } else {
-            let client = reqwest::blocking::Client::builder()
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|_| "workflow_browser_download_failed")?;
             let mut redirects = 0;
             let response = loop {
                 check(&app, &session, &gate)?;
                 if !matches!(target.scheme(), "http" | "https") || Instant::now() >= deadline {
                     return Err("workflow_browser_download_invalid".into());
                 }
+                let mut builder = reqwest::blocking::Client::builder()
+                    .redirect(reqwest::redirect::Policy::none());
+                if session.scope.research_id.is_some() {
+                    // Automatic research downloads never redirect into local services.
+                    builder = builder.no_proxy();
+                    if let Some((host, address)) =
+                        super::super::workflow_http::resolve_and_validate_target(&target)?
+                    {
+                        builder = builder.resolve(&host, address);
+                    }
+                }
+                let client = builder
+                    .build()
+                    .map_err(|_| "workflow_browser_download_failed")?;
                 // Resolve cookies separately for EVERY redirect; never forward a previous host's cookies.
                 let cookies = browser
                     .cookies_for_url(target.clone())
@@ -122,7 +136,7 @@ pub(super) async fn download(
             }
             bytes.extend_from_slice(&chunk[..n]);
         }
-        serde_json::to_value(workflow_artifacts::store(
+        let mut result = serde_json::to_value(workflow_artifacts::store(
             &app,
             &session.scope,
             &bytes,
@@ -130,7 +144,14 @@ pub(super) async fn download(
             &name,
             &|| check(&app, &session, &gate),
         )?)
-        .map_err(|_| "workflow_artifact_invalid".into())
+        .map_err(|_| "workflow_artifact_invalid".to_string())?;
+        result["requestedUrl"] = serde_json::json!(requested_url);
+        result["sourceUrl"] = serde_json::json!(target.as_str());
+        result["retrievedAt"] = serde_json::json!(std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| "research_clock_unavailable")?
+            .as_millis() as u64);
+        Ok(result)
     })
     .await
     .map_err(|_| "workflow_browser_task_failed".to_string())?

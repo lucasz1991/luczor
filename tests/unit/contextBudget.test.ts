@@ -4,6 +4,50 @@ import { focusedTools } from '@/services/inference/focusedTools'
 import type { WireMessage } from '@/services/inference/types'
 
 describe('shared request budget and evidence retention', () => {
+  it('retains the latest usable tool batches when mandatory context alone exceeds the soft budget', () => {
+    const history: WireMessage[] = [
+      { role: 'system', content: 'Mandatory instructions. '.repeat(800) },
+      { role: 'user', content: 'Inspect the project and continue.' },
+    ]
+    for (let index = 0; index < 12; index++) {
+      history.push(
+        { role: 'assistant', content: '', tool_calls: [{ id: `list-${index}`, type: 'function',
+          function: { name: 'fs_list', arguments: '{"path":"."}' } }] },
+        { role: 'tool', name: 'fs_list', tool_call_id: `list-${index}`, content: JSON.stringify({ ok: true, output: {
+          path: '', truncated: false, entries: Array.from({ length: 40 }, (_, file) => ({
+            path: `src/Bericht_Ä_${file}.ts`, name: `Bericht_Ä_${file}.ts`, file_ref: `file_exact_${file}`,
+            kind: 'file', size_bytes: 100,
+          })),
+        } }) }
+      )
+    }
+    const original = structuredClone(history)
+    const result = fitRequestContext(history, [{ schema: 'required '.repeat(800) }], {
+      contextTokens: 8192, retrievalAvailable: true, compactCurrentTurn: true,
+    })
+    expect(result.report.overTarget).toBe(true)
+    const receipts = result.messages.filter(message => message.role === 'tool')
+    expect(receipts.map(message => message.tool_call_id)).toEqual(['list-10', 'list-11'])
+    for (const receipt of receipts) {
+      expect(receipt.content).toContain('file_exact_0')
+      expect(receipt.content).toContain('src/Bericht_Ä_0.ts')
+      expect(result.messages.some(message => message.role === 'assistant' &&
+        message.tool_calls?.some(call => call.id === receipt.tool_call_id))).toBe(true)
+    }
+    expect(history).toEqual(original)
+  })
+
+  it('preserves atomic file identities in nested, compacted model receipts', () => {
+    const entries = Array.from({ length: 30 }, (_, index) => ({ path: `src/e\u0301-${index}.ts`,
+      name: `e\u0301-${index}.ts`, file_ref: `file_${index}`, kind: 'file', extra: 'metadata'.repeat(80) }))
+    const result = compactToolOutput({ ok: true, output: { path: '', entries, truncated: false } }, 1000) as
+      { output: { entries: typeof entries; omittedEntries: number } }
+    expect(result.output.entries.length).toBeGreaterThan(0)
+    expect(result.output.entries[0]).toMatchObject({ path: 'src/e\u0301-0.ts', file_ref: 'file_0' })
+    expect(result.output.omittedEntries).toBe(30 - result.output.entries.length)
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(1000)
+  })
+
   it('archives even a huge completed tool-call pair atomically without clipping arguments', async () => {
     const call = {
       id: 'large-write',

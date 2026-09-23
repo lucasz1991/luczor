@@ -1,3 +1,5 @@
+import { compactToolOutput } from '@/services/inference/contextBudget'
+
 type Outcome = { ok: boolean; error?: string; output?: unknown }
 type Recovery = { code: string; guidance: string; next_tool?: string; next_arguments?: Record<string, unknown> }
 
@@ -10,6 +12,18 @@ function details(output: unknown): Record<string, unknown> | undefined {
 function recovery(name: string, outcome: Outcome): Recovery | undefined {
   const output = details(outcome.output)
   const error = `${outcome.error ?? ''} ${typeof output?.code === 'string' ? output.code : ''}`
+  if (output?.code === 'tool_arguments_invalid')
+    return {
+      code: 'tool_arguments_invalid',
+      guidance: 'No action ran. Use validation.field and validation.expected to correct the arguments. Do not retry unchanged input.',
+    }
+  if (name.startsWith('fs_') && /path must be relative|path must not contain|path is invalid/u.test(error))
+    return {
+      code: 'project_relative_path_required',
+      guidance: 'No action ran. The path must be relative to the bound project, never an absolute path, parent traversal, CSS selector or @project alias. List the project root and copy the returned identity. Do not guess or silently rewrite a write target.',
+      next_tool: 'fs_list',
+      next_arguments: { path: '.', max_depth: 1 },
+    }
   if (
     name === 'fs_read' &&
     /Project path does not exist|Project read path must be a regular file|file_reference_|path is empty/u.test(error)
@@ -57,6 +71,15 @@ function recovery(name: string, outcome: Outcome): Recovery | undefined {
   return undefined
 }
 
+const repeatedReads = new Set(['fs_list', 'fs_search', 'project_get_state', 'workspace_get', 'context_read_history', 'repository_search'])
+function stableData(value: unknown): string {
+  return JSON.stringify(value, (_key, item) =>
+    item && typeof item === 'object' && !Array.isArray(item)
+      ? Object.fromEntries(Object.entries(item).sort(([left], [right]) => left.localeCompare(right)))
+      : item
+  ) ?? 'null'
+}
+
 /** Per-run recovery budget. Argument guessing does not reset a failing browser path. */
 export class ToolRecoveryGuard {
   private browserFailures = 0
@@ -64,6 +87,24 @@ export class ToolRecoveryGuard {
   private localVisionUnavailable = false
   private fileSelectionFailures = 0
   private observedFiles = new Map<string, { path: string; file_ref?: string }>()
+  // Only bounded, exact observations. Polling jobs/browser state is deliberately excluded.
+  private reads = new Map<string, { signature: string; count: number; output: unknown }>()
+
+  private repeatedRead(name: string, args: Record<string, unknown>): Outcome | undefined {
+    const previous = this.reads.get(stableData([name, args]))
+    if (!previous || previous.count < 3) return undefined
+    const file = [...this.observedFiles.values()].at(-1)
+    return {
+      ok: false,
+      error: 'Repeated identical read without new evidence. Reuse the previous result and take the next concrete step.',
+      output: {
+        code: 'tool_read_loop', executed: false, repetitions: previous.count,
+        previous_observation: previous.output,
+        guidance: 'This is an earlier observation, not a fresh check. Read a selected file or graph result, read an archive index instead of searching again, or report the actual blocker. Unchanged reads do not advance the task.',
+        ...(name === 'fs_list' && file ? { next_tool: 'fs_read', next_arguments: file.file_ref ? { file_ref: file.file_ref } : { path: file.path } } : {}),
+      },
+    }
+  }
 
   canOffer(name: string): boolean {
     if (name === 'browser_status' || name === 'browser_dom_scan') return true
@@ -72,6 +113,8 @@ export class ToolRecoveryGuard {
   }
 
   blocked(name: string, args: Record<string, unknown>): Outcome | undefined {
+    const repeated = this.repeatedRead(name, args)
+    if (repeated) return repeated
     if (name === 'fs_read' && this.fileSelectionFailures >= 2) {
       const observed = [...this.observedFiles.values()].some(file =>
         args.file_ref !== undefined
@@ -113,8 +156,27 @@ export class ToolRecoveryGuard {
     }
   }
 
-  record(name: string, args: Record<string, unknown>, outcome: Outcome): Outcome {
+  record(name: string, args: Record<string, unknown>, outcome: Outcome, mutating = false): Outcome {
     if (outcome.ok) {
+      if (mutating || name === 'fs_read') this.reads.clear()
+      if (repeatedReads.has(name)) {
+        const key = stableData([name, args])
+        const signature = stableData(outcome.output)
+        // Large responses remain governed by context budgeting; never retain an
+        // unbounded duplicate or compare only a prefix and call it identical.
+        if (signature.length <= 100_000 && key.length <= 4000) {
+          const previous = this.reads.get(key)
+          const count = previous?.signature === signature ? previous.count + 1 : 1
+          this.reads.delete(key)
+          this.reads.set(key, { signature, count, output: compactToolOutput(outcome.output, 1600) })
+          while (this.reads.size > 24) this.reads.delete(this.reads.keys().next().value!)
+          if (count >= 3)
+            outcome = { ...outcome, output: { ...details(outcome.output), recovery: {
+              code: 'tool_read_repeated',
+              guidance: 'This read succeeded three times with identical data. Use the returned evidence to continue; do not repeat the same call. Job-status polling remains available.',
+            } } }
+        }
+      }
       if (['fs_list', 'fs_search', 'fs_stat', 'fs_read'].includes(name)) {
         const result = details(outcome.output)
         const entries = name === 'fs_list' ? result?.entries : name === 'fs_search' ? result?.matches : [result]

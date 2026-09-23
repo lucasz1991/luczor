@@ -399,6 +399,9 @@ pub async fn project_fs_list(
     payload: Guarded<FsListPayload>,
 ) -> Result<FsListResult, String> {
     ensure_main_webview(&window)?;
+    if let Some(scope) = &payload.workflow_scope {
+        super::research::check_scope_execution(&app, scope, &payload.execution)?;
+    }
     let gate = admit(&payload.execution, false)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
@@ -437,6 +440,9 @@ pub async fn project_fs_stat(
     payload: Guarded<FsStatPayload>,
 ) -> Result<FsStatResult, String> {
     ensure_main_webview(&window)?;
+    if let Some(scope) = &payload.workflow_scope {
+        super::research::check_scope_execution(&app, scope, &payload.execution)?;
+    }
     let gate = admit(&payload.execution, false)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
@@ -464,6 +470,9 @@ pub async fn project_fs_read(
     payload: Guarded<FsReadPayload>,
 ) -> Result<FsReadResult, String> {
     ensure_main_webview(&window)?;
+    if let Some(scope) = &payload.workflow_scope {
+        super::research::check_scope_execution(&app, scope, &payload.execution)?;
+    }
     let gate = admit(&payload.execution, false)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
@@ -497,6 +506,9 @@ pub async fn project_fs_search(
     payload: Guarded<FsSearchPayload>,
 ) -> Result<FsSearchResult, String> {
     ensure_main_webview(&window)?;
+    if let Some(scope) = &payload.workflow_scope {
+        super::research::check_scope_execution(&app, scope, &payload.execution)?;
+    }
     let gate = admit(&payload.execution, false)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
@@ -538,6 +550,9 @@ pub async fn project_fs_write(
     payload: Guarded<FsWritePayload>,
 ) -> Result<FsWriteResult, String> {
     ensure_main_webview(&window)?;
+    if let Some(scope) = &payload.workflow_scope {
+        super::research::check_scope_execution(&app, scope, &payload.execution)?;
+    }
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
@@ -580,6 +595,9 @@ pub async fn project_fs_create_dir(
     payload: Guarded<FsCreateDirPayload>,
 ) -> Result<FsCreateDirResult, String> {
     ensure_main_webview(&window)?;
+    if let Some(scope) = &payload.workflow_scope {
+        super::research::check_scope_execution(&app, scope, &payload.execution)?;
+    }
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
@@ -612,6 +630,9 @@ pub async fn project_fs_move(
     payload: Guarded<FsMovePayload>,
 ) -> Result<FsMoveResult, String> {
     ensure_main_webview(&window)?;
+    if let Some(scope) = &payload.workflow_scope {
+        super::research::check_scope_execution(&app, scope, &payload.execution)?;
+    }
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
@@ -645,6 +666,9 @@ pub async fn project_fs_delete(
     payload: Guarded<FsDeletePayload>,
 ) -> Result<FsDeleteResult, String> {
     ensure_main_webview(&window)?;
+    if let Some(scope) = &payload.workflow_scope {
+        super::research::check_scope_execution(&app, scope, &payload.execution)?;
+    }
     let gate = admit(&payload.execution, true)?;
     let payload = payload.request;
     tauri::async_runtime::spawn_blocking(move || {
@@ -1030,7 +1054,7 @@ fn find_git_root(path: &Path) -> Option<PathBuf> {
         .map(|_| path.to_path_buf())
 }
 
-fn validate_relative_path(raw: &str, allow_root: bool) -> Result<PathBuf, String> {
+pub(super) fn validate_relative_path(raw: &str, allow_root: bool) -> Result<PathBuf, String> {
     if raw.contains('\0') || raw.chars().any(char::is_control) {
         return Err("Path contains forbidden control characters.".into());
     }
@@ -1206,7 +1230,7 @@ fn resolve_new_target(root: &Path, raw: &str) -> Result<(PathBuf, PathBuf), Stri
     Ok((relative, path))
 }
 
-fn inspect_components(
+pub(super) fn inspect_components(
     root: &Path,
     relative: &Path,
     allow_missing_tail: bool,
@@ -1958,7 +1982,7 @@ fn mutation_guard() -> Result<MutexGuard<'static, ()>, String> {
         .map_err(|_| "Project filesystem mutation lock is unavailable.".to_string())
 }
 
-fn atomic_write(
+pub(super) fn atomic_write(
     target: &Path,
     bytes: &[u8],
     expected_sha256: Option<&str>,
@@ -2124,7 +2148,7 @@ fn atomic_replace(source: &Path, target: &Path) -> std::io::Result<()> {
     fs::rename(source, target)
 }
 
-fn is_link_like(metadata: &fs::Metadata) -> bool {
+pub(super) fn is_link_like(metadata: &fs::Metadata) -> bool {
     if metadata.file_type().is_symlink() {
         return true;
     }

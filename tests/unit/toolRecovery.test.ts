@@ -2,6 +2,45 @@ import { describe, expect, it } from 'vitest'
 import { ToolRecoveryGuard } from '@/services/tools/toolRecovery'
 
 describe('tool failure recovery', () => {
+  it('bounds identical successful discovery loops and keeps the exact previous file target usable', () => {
+    const guard = new ToolRecoveryGuard()
+    const outcome = { ok: true, output: { entries: [{ path: 'exact.ts', kind: 'file', file_ref: 'file_exact' }] } }
+    for (let i = 0; i < 3; i++) {
+      guard.record('fs_list', { path: '.', limit: 100 }, outcome)
+      guard.record('project_get_state', {}, { ok: true, output: { summary: 'unchanged' } })
+    }
+    expect(guard.blocked('fs_list', { limit: 100, path: '.' })).toMatchObject({
+      ok: false, output: { code: 'tool_read_loop', executed: false,
+        next_tool: 'fs_read', next_arguments: { file_ref: 'file_exact' } },
+    })
+    expect(guard.blocked('fs_list', { path: 'src' })).toBeUndefined()
+    expect(guard.blocked('fs_read', { file_ref: 'file_exact' })).toBeUndefined()
+    guard.record('fs_read', { file_ref: 'file_exact' }, { ok: true, output: { path: 'exact.ts', content: 'new evidence' } })
+    expect(guard.blocked('fs_list', { path: '.', limit: 100 })).toBeUndefined()
+  })
+
+  it('allows changed observations, later verification after a write and legitimate asynchronous polling', () => {
+    const guard = new ToolRecoveryGuard()
+    for (let i = 0; i < 5; i++) {
+      guard.record('agent_assist_status', { id: 'job' }, { ok: true, output: { status: 'running' } })
+      guard.record('project_get_state', {}, { ok: true, output: { revision: i } })
+    }
+    expect(guard.blocked('agent_assist_status', { id: 'job' })).toBeUndefined()
+    expect(guard.blocked('project_get_state', {})).toBeUndefined()
+    for (let i = 0; i < 3; i++) guard.record('project_get_state', {}, { ok: true, output: { revision: 5 } })
+    expect(guard.blocked('project_get_state', {})).toBeDefined()
+    guard.record('project_set_summary', {}, { ok: true }, true)
+    expect(guard.blocked('project_get_state', {})).toBeUndefined()
+  })
+
+  it('explains project path failures and browser target failures with different recovery tools', () => {
+    const guard = new ToolRecoveryGuard()
+    expect(guard.record('fs_read', {}, { ok: false, error: 'path must be relative to the active project' }).output)
+      .toMatchObject({ recovery: { code: 'project_relative_path_required', next_tool: 'fs_list' } })
+    expect(guard.record('browser_click', {}, { ok: false, error: 'browser_selector_invalid' }).output)
+      .toMatchObject({ recovery: { next_tool: 'browser_dom_scan' } })
+  })
+
   it('stops filename guessing while allowing an exactly observed path or file reference', () => {
     const guard = new ToolRecoveryGuard()
     const path = 'luczor_tooltest/ABSCHLUSSBERICHT_2026-09-13.md'

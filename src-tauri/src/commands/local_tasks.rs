@@ -152,6 +152,7 @@ pub async fn wf_scoped_file_read(
     payload: Guarded<ScopedFile>,
 ) -> Result<FileReadResult, String> {
     ensure_main_webview(&window)?;
+    super::research::check_scope_execution(&app, &payload.scope, &payload.execution)?;
     let gate = admit(&payload.execution, false)?;
     let (operation, _) = super::owned_processes::Operation::begin()?;
     tauri::async_runtime::spawn_blocking(move || {
@@ -191,6 +192,7 @@ pub async fn wf_scoped_file_write(
     payload: Guarded<ScopedFile>,
 ) -> Result<Value, String> {
     ensure_main_webview(&window)?;
+    super::research::check_scope_execution(&app, &payload.scope, &payload.execution)?;
     let gate = admit(&payload.execution, true)?;
     let (operation, _) = super::owned_processes::Operation::begin()?;
     tauri::async_runtime::spawn_blocking(move||{let _operation=operation;gate.check()?;use std::io::Write;let request=payload.request;let content=request.content.ok_or("workflow_file_content_missing")?;if content.len()>MAX_FILE_BYTES{return Err("workflow_file_size_exceeded".into());}request.scope.check(&app)?;let root=PathBuf::from(&request.scope.expected_root_path);let _workspace=super::codex::acquire_workspace_lease(&root,true)?;let path=safe_path(&root,&request.path,true)?;
@@ -479,6 +481,9 @@ pub async fn wf_run_script(
 ) -> Result<RunScriptResult, String> {
     ensure_main_webview(&window)?;
     validate_script(&payload.request)?;
+    if let Some(scope) = &payload.scope {
+        super::research::check_scope_execution(&app, scope, &payload.execution)?;
+    }
     if payload.scope.is_some() && payload.execution.workflow_execution_id.is_none() {
         return Err("workflow_execution_identity_required".into());
     }
@@ -721,6 +726,7 @@ mod tests {
             timeout_seconds: Some(10),
             full_access_acknowledged: true,
             scope: Some(super::super::workflow_artifacts::WorkflowArtifactScope {
+                research_id: None,
                 principal_id: "user".into(),
                 project_id: "project".into(),
                 expected_root_path: "E:\\project".into(),

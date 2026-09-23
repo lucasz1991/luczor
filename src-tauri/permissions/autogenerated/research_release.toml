@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-research-release"
+description = "Enables the research_release command without any pre-configured scope."
+commands.allow = ["research_release"]
+
+[[permission]]
+identifier = "deny-research-release"
+description = "Denies the research_release command without any pre-configured scope."
+commands.deny = ["research_release"]

@@ -73,7 +73,7 @@ export const visionTools: ToolDef[] = [
         scope: session.scope,
         invokeTask: session.invokeTask,
         ticket: session.ticket,
-        workflowExecutionId: session.meta.id,
+        workflowExecutionId: session.scope.runId,
       })
     },
   },

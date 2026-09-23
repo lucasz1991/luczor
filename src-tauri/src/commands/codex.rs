@@ -352,6 +352,9 @@ pub async fn codex_job_start(
 ) -> Result<CodexJobSnapshot, String> {
     ensure_main_webview(&window)?;
     let writing = matches!(payload.permission, CodexPermission::WorkspaceWrite);
+    if let Some(scope) = &payload.workflow_scope {
+        super::research::check_scope_execution(&app, scope, &payload.execution)?;
+    }
     let execution = admit(&payload.execution, writing)?;
     let payload = payload.request;
     validate_start(&payload)?;

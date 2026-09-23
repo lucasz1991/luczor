@@ -18,6 +18,8 @@ pub struct WorkflowArtifactScope {
     pub expected_root_path: String,
     pub expected_workspace_updated_at: i64,
     pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub research_id: Option<String>,
 }
 impl WorkflowArtifactScope {
     pub(super) fn agent_root(
@@ -37,6 +39,9 @@ impl WorkflowArtifactScope {
     }
     pub fn check(&self, app: &AppHandle) -> Result<(), String> {
         validate_scope(self)?;
+        if self.research_id.is_some() {
+            return super::research::check_scope(app, self);
+        }
         let (root, revision) = if let Some(workcopy) = super::project_mirror::run_workspace(
             app,
             &self.principal_id,
@@ -66,6 +71,10 @@ fn validate_scope(scope: &WorkflowArtifactScope) -> Result<(), String> {
         || scope.project_id.len() > 160
         || scope.expected_workspace_updated_at <= 0
         || uuid::Uuid::parse_str(&scope.run_id).is_err()
+        || scope
+            .research_id
+            .as_ref()
+            .is_some_and(|id| id != &scope.run_id)
     {
         return Err("workflow_artifact_identity_invalid".into());
     }
@@ -320,6 +329,7 @@ mod tests {
     #[test]
     fn scope_requires_a_real_run_id() {
         let mut scope = WorkflowArtifactScope {
+            research_id: None,
             principal_id: "user".into(),
             project_id: "project".into(),
             expected_root_path: "root".into(),
