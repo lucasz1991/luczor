@@ -69,7 +69,86 @@ function fixture(): SavedResearch {
   }
 }
 const key = async () => 'ab'.repeat(32)
+function pendingTerminal(value: SavedResearch): void {
+  value.checkpoint!.messages.push({
+    role: 'assistant',
+    content: '',
+    tool_calls: [
+      {
+        id: 'pending-terminal',
+        type: 'function',
+        function: { name: 'project_terminal_run', arguments: '{"command":"PRIVATE_ARGS"}' },
+      },
+    ],
+  })
+}
+function resolveTerminal(value: SavedResearch): void {
+  value.checkpoint!.messages.push({
+    role: 'tool',
+    name: 'project_terminal_run',
+    tool_call_id: 'pending-terminal',
+    content: '{"ok":true}',
+  })
+}
 describe('research archive persistence', () => {
+  it('clears a temporary redaction marker after the original in-memory checkpoint records the terminal receipt', async () => {
+    const storage = createMemoryRunArchiveStore()
+    const store = createResearchStore(createRunArchive({ store: storage, key }))
+    const value = fixture()
+    value.checkpoint!.dataPolicy = 'ephemeral'
+    pendingTerminal(value)
+    await store.save(value)
+    expect((await store.list('account'))[0]?.recoveryNeedsReview).toBe(true)
+    resolveTerminal(value)
+    await store.save(value)
+    const restored = (await createResearchStore(createRunArchive({ store: storage, key })).list('account'))[0]!
+    expect(restored.recoveryNeedsReview).toBeUndefined()
+    expect(restored.checkpoint).toBeUndefined()
+  })
+
+  it.each(['ephemeral', 'local_only'] as const)(
+    'preserves uncertainty when a %s raw checkpoint is explicitly discarded',
+    async policy => {
+      const storage = createMemoryRunArchiveStore()
+      const store = createResearchStore(createRunArchive({ store: storage, key }))
+      const value = fixture()
+      value.checkpoint!.dataPolicy = policy
+      pendingTerminal(value)
+      await store.save(value)
+      await store.save({ ...value, checkpoint: undefined })
+      const restored = (await createResearchStore(createRunArchive({ store: storage, key })).list('account'))[0]!
+      expect(restored.recoveryNeedsReview).toBe(true)
+      expect(restored.checkpoint).toBeUndefined()
+    }
+  )
+
+  it('retains local-only in-flight context without freezing a marker and accepts its subsequent receipt', async () => {
+    const storage = createMemoryRunArchiveStore()
+    const store = createResearchStore(createRunArchive({ store: storage, key }))
+    const value = fixture()
+    pendingTerminal(value)
+    await store.save(value)
+    const pending = (await store.list('account'))[0]!
+    expect(pending.recoveryNeedsReview).toBeUndefined()
+    expect(pending.checkpoint).toEqual(value.checkpoint)
+    resolveTerminal(value)
+    await store.save(value)
+    expect((await store.list('account'))[0]?.recoveryNeedsReview).toBeUndefined()
+  })
+
+  it('does not clear an explicit marker recovered after its raw checkpoint was discarded', async () => {
+    const storage = createMemoryRunArchiveStore()
+    const first = createResearchStore(createRunArchive({ store: storage, key }))
+    const value = fixture()
+    value.checkpoint!.dataPolicy = 'ephemeral'
+    pendingTerminal(value)
+    await first.save(value)
+    const second = createResearchStore(createRunArchive({ store: storage, key }))
+    const restored = (await second.list('account'))[0]!
+    await second.save({ ...restored, checkpoint: fixture().checkpoint })
+    expect((await second.list('account'))[0]?.recoveryNeedsReview).toBe(true)
+  })
+
   it('roundtrips exact local-only state and working context after a new service instance', async () => {
     const storage = createMemoryRunArchiveStore()
     const write = vi.spyOn(storage, 'write')
@@ -172,6 +251,32 @@ describe('research archive persistence', () => {
         },
       ],
     })
+    await store.save(value)
+    expect((await store.list('account'))[0]?.recoveryNeedsReview).toBe(true)
+  })
+
+  it('can discard uncertainty of the four verified research adapters without discarding mixed generic effects', async () => {
+    const storage = createMemoryRunArchiveStore()
+    const store = createResearchStore(createRunArchive({ store: storage, key }))
+    const value = fixture()
+    value.checkpoint!.dataPolicy = 'ephemeral'
+    value.checkpoint!.uncertainMutations = [JSON.stringify(['research_read', { observation_id: 'safe-ref' }])]
+    value.checkpoint!.messages.push({
+      role: 'assistant',
+      content: '',
+      tool_calls: [
+        {
+          id: 'pending',
+          type: 'function',
+          function: { name: 'research_read', arguments: '{"observation_id":"safe-ref"}' },
+        },
+      ],
+    })
+    await store.save(value)
+    expect((await store.list('account'))[0]?.recoveryNeedsReview).toBeUndefined()
+    value.checkpoint!.uncertainMutations.push(
+      JSON.stringify(['project_terminal_run', { command: 'UNKNOWN_SIDE_EFFECT' }])
+    )
     await store.save(value)
     expect((await store.list('account'))[0]?.recoveryNeedsReview).toBe(true)
   })

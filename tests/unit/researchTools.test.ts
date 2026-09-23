@@ -172,6 +172,59 @@ describe('bounded research tools', () => {
       'scope_mismatch'
     )
   })
+  it('reads later page sections with a pinned snapshot and global citation locations', async () => {
+    const { execute, browser, captureSource } = harness()
+    const page = 'A'.repeat(48000) + 'Later evidence. '.repeat(300)
+    let snapshot = 'snapshot-one'
+    browser.read.mockImplementation(async (_, options) => {
+      const end = Math.min(page.length, options.offset + options.maxChars)
+      return {
+        url: options.expectedUrl,
+        title: 'Long report',
+        text: page.slice(options.offset, end),
+        offset: options.offset,
+        snapshotId: snapshot,
+        truncated: end < page.length,
+        totalChars: page.length,
+        nextOffset: end < page.length ? end : null,
+      }
+    })
+    const discovery = (await execute('research_search', { query: 'sources' })) as {
+      results: { observation_id: string }[]
+    }
+    const args = { observation_id: discovery.results[0]!.observation_id }
+    type ReadResult = { source: ResearchSource; next_offset: number | null; snapshot_id: string; truncated: boolean }
+    const first = (await execute('research_read', args)) as ReadResult
+    expect(first).toMatchObject({ next_offset: 48000, snapshot_id: snapshot, truncated: true })
+    expect(first.source.coverage).toBe('partial')
+    expect(first.source.segments[0]?.id).toBe('text-1')
+    const laterArgs = { ...args, offset: first.next_offset, snapshot_id: first.snapshot_id, max_chars: 4000 }
+    const later = (await execute('research_read', laterArgs)) as ReadResult
+    expect(later).toMatchObject({ next_offset: 52000, snapshot_id: snapshot, truncated: true })
+    expect(later.source.coverage).toBe('partial')
+    expect(later.source.segments).toEqual([
+      { id: 'text-13', locator: 'Zeichen 48001–52000', text: page.slice(48000, 52000) },
+    ])
+    expect(later.source.contentHash).toBe(await sha256Bytes(new TextEncoder().encode(page.slice(48000, 52000))))
+    const repeated = (await execute('research_read', laterArgs)) as ReadResult
+    expect(repeated.source.id).toBe(later.source.id)
+    expect(repeated.source.segments).toEqual(later.source.segments)
+    const tail = (await execute('research_read', { ...laterArgs, offset: later.next_offset })) as ReadResult
+    expect(tail).toMatchObject({ next_offset: null, truncated: false, source: { coverage: 'partial' } })
+    expect(tail.source.segments[0]).toEqual({
+      id: 'text-14',
+      locator: `Zeichen 52001–${page.length}`,
+      text: page.slice(52000),
+    })
+    const opensBeforeRejection = browser.open.mock.calls.length
+    expect(isResearchGrantedTool('research_read', { ...args, offset: 48000 }, binding.workflowScope)).toBe(false)
+    await expect(execute('research_read', { ...args, offset: 48000 })).rejects.toThrow('snapshot_required')
+    expect(browser.open).toHaveBeenCalledTimes(opensBeforeRejection)
+    const capturesBeforeChange = captureSource.mock.calls.length
+    snapshot = 'snapshot-changed'
+    await expect(execute('research_read', laterArgs)).rejects.toThrow('changed_or_unverifiable')
+    expect(captureSource).toHaveBeenCalledTimes(capturesBeforeChange)
+  })
   it('rejects unread/unowned document artifacts and preserves local-only evidence policy', async () => {
     const { execute, tools } = harness()
     await expect(execute('research_read_document', { artifact_id: 'not-this-run' })).rejects.toThrow('not_in_run')

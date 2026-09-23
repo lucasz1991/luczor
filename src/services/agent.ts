@@ -1002,6 +1002,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     .filter(name => {
       const tool = resolveTool(name)
       return (
+        !additionalTools.has(name) &&
         tool?.mutating === false &&
         !tool.requiresApproval &&
         tool.dataHandling !== 'ephemeral' &&
@@ -1099,6 +1100,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
               onUsage: undefined,
               onContextRequest: undefined,
               onCheckpoint: undefined,
+              additionalTools: undefined,
+              initialToolNames: undefined,
               toolApprovalGrant: undefined,
               pendingTaskCreateVerifications: undefined,
             })
@@ -2288,9 +2291,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
 
       // Research discovery/read adapters verify their own snapshots and native output receipts.
       // Their observation handles are session-local, so neither old results nor operation IDs may be replayed.
-      const repeatableResearchProbe = !!opts.researchScope?.researchId &&
-        opts.researchScope.researchId === opts.runId && opts.researchScope.projectId === projectId &&
-        additionalTools.get(call.name) === tool && isResearchProbe(call.name)
+      const repeatableResearchProbe =
+        !!opts.researchScope?.researchId &&
+        opts.researchScope.researchId === opts.runId &&
+        opts.researchScope.projectId === projectId &&
+        additionalTools.get(call.name) === tool &&
+        isResearchProbe(call.name)
       if (
         tool.mutating &&
         uncertainMutations.has(completedMutationKey(call.name, call.arguments, projectId)) &&
@@ -2312,7 +2318,9 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       // Human-in-the-loop approval.
       // Input and process actions may legitimately repeat at a later desktop state.
       const reusableMutation =
-        tool.mutating && !repeatableResearchProbe && !(tool.effects ?? []).some(effect => effect === 'input' || effect === 'execute')
+        tool.mutating &&
+        !repeatableResearchProbe &&
+        !(tool.effects ?? []).some(effect => effect === 'input' || effect === 'execute')
       const completionKey = completedMutationKey(call.name, call.arguments, projectId)
       const previousMutation = reusableMutation
         ? (completedMutations.get(completionKey) ?? completedMutations.get(mutationKey(call.name, call.arguments)))
@@ -2474,7 +2482,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           executionGate.assert(execution)
           signal.throwIfAborted()
           if (tool.mutating) {
-            if (repeatableResearchProbe || !operationIds.has(completionKey)) operationIds.set(completionKey, crypto.randomUUID())
+            if (repeatableResearchProbe || !operationIds.has(completionKey))
+              operationIds.set(completionKey, crypto.randomUUID())
             uncertainMutations.add(completionKey)
             await emitCheckpoint(safeProgressCheckpoint(), !!opts.effectJournal)
             executionGate.assert(execution)

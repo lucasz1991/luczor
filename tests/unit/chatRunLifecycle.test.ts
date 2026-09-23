@@ -15,6 +15,8 @@ function executeRuntimeRecovery(context: Record<string, unknown>) {
   runInNewContext(ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText, {
     getLocalSpeechConsent: async () => undefined,
     refreshPlanPrincipal: vi.fn(),
+    recoverResearch: vi.fn(async () => {}),
+    researchRuns: { value: [] },
     stopAllVoice: vi.fn(),
     stopVoiceInputForSettings: vi.fn(),
     window: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
@@ -83,6 +85,60 @@ function fixture(controller: AbortController | null = new AbortController()) {
 }
 
 describe('working-context recovery identity boundaries', () => {
+  it('restores a missing local research card only for an existing conversation after archive recovery', async () => {
+    const waiting = deferred()
+    const chat = { id: 'chat', projectId: 'p' }
+    const state = { conversations: [chat], messages: [] as Array<{ id: string; meta: Record<string, unknown> }> }
+    const recovered = { value: [] as Array<{ id: string; projectId: string; conversationId: string }> }
+    const ready = { value: false }
+    const restore = vi.fn(async () => {})
+    const save = vi.fn(async () => {})
+    const recoverResearch = vi.fn(async () => {
+      await waiting.promise
+      recovered.value = [
+        { id: 'saved-research', projectId: 'p', conversationId: 'chat' },
+        { id: 'deleted-chat-research', projectId: 'p', conversationId: 'deleted' },
+      ]
+    })
+    const pending = executeRuntimeRecovery({
+      appRuntimeLifecycle: { start: async () => undefined },
+      resolveWorkspacePrincipalId: async () => 'person',
+      chatRuns: { recover: async () => {}, records: { value: [] } },
+      researchRuns: recovered,
+      recoverResearch,
+      reconcileRecoveredChatRuns: vi.fn(),
+      saveAppStateStrict: save,
+      restoreWorkingContexts: restore,
+      state,
+      appReady: ready,
+      appInitialized: { value: false },
+      appQuitting: { value: false },
+      appUnmounted: false,
+      mutations: {
+        getConversation: (id: string) => (id === chat.id ? chat : undefined),
+        makeMsg: () => ({ id: 'new', meta: {} }),
+        addMessage: (message: { id: string; meta: Record<string, unknown> }) => state.messages.push(message),
+      },
+      console: { warn: vi.fn() },
+    })
+    await vi.waitFor(() => expect(recoverResearch).toHaveBeenCalledOnce())
+    expect(ready.value).toBe(false)
+    expect(restore).not.toHaveBeenCalled()
+    waiting.resolve()
+    await pending
+    expect(ready.value).toBe(true)
+    expect(state.messages).toEqual([
+      {
+        id: 'research:saved-research',
+        meta: {
+          researchRunId: 'saved-research',
+          retentionPolicy: 'local_only',
+          serverSpeechAllowed: false,
+        },
+      },
+    ])
+    expect(save).toHaveBeenCalledOnce()
+  })
   it.each(['principal', 'workspace', 'archive'])('rejects an identity change during %s preparation', async stage => {
     const gate = new ExecutionGate()
     const waiting = deferred()

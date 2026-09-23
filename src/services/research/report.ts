@@ -66,6 +66,12 @@ export function renderResearchReport(run: ResearchRun, options: { intermediate?:
       `<li>${escapeResearchHtml(question.text)}${question.requiresFreshness ? ' (aktueller Stand erforderlich)' : ''}</li>`
     )
   }
+  if (run.clarifications?.length) {
+    md.push('', 'Ergänzungen zum Auftrag:', '', ...run.clarifications.map(note => `- ${markdownText(note)}`))
+    body.push(
+      `</ol><p>Ergänzungen zum Auftrag:</p><ol>${run.clarifications.map(note => `<li>${escapeResearchHtml(note)}</li>`).join('')}`
+    )
+  }
   body.push('</ol><h2>Ergebnisse und Belege</h2>')
   md.push('', '## Ergebnisse und Belege', '')
   if (!run.claims.length) {
@@ -161,6 +167,7 @@ export function renderResearchReport(run: ResearchRun, options: { intermediate?:
       {
         version: 1,
         topic: run.topic,
+        clarifications: run.clarifications ?? [],
         depth: run.depth,
         asOf: run.asOf,
         createdAt: run.createdAt,

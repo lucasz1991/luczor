@@ -1,11 +1,33 @@
 <script setup lang="ts">
-import { computed, useId } from 'vue'
+import { computed, ref, useId, watch } from 'vue'
 import type { ResearchRun, ResearchStage, ResearchStatus } from '@/services/research/types'
 import { researchEvidenceFingerprint } from '@/services/research/evidence'
 
 const props = defineProps<{ run: ResearchRun }>()
-const emit = defineEmits<{ pause: []; resume: []; stop: []; 'open-report': []; 'open-folder': [] }>()
+const emit = defineEmits<{
+  pause: []
+  resume: [clarification: string]
+  stop: []
+  'open-report': []
+  'open-folder': []
+}>()
 const id = useId()
+const clarification = ref('')
+watch(
+  () => props.run.id,
+  () => {
+    clarification.value = ''
+  }
+)
+watch(
+  () => props.run.clarifications,
+  value => {
+    if (clarification.value.trim() && value?.at(-1) === clarification.value.trim()) clarification.value = ''
+  }
+)
+function updateClarification(event: Event): void {
+  clarification.value = (event.target as HTMLTextAreaElement).value
+}
 const stages: Record<ResearchStage, string> = {
   planning: 'Fragen und Suchplan',
   collecting: 'Quellen lesen und sichern',
@@ -73,9 +95,22 @@ const verifiedClaims = computed(() =>
       </ul>
       <p v-if="!run.sources.length">Noch keine gelesenen Quellen.</p>
     </details>
+    <div v-if="resumable" class="research-card__clarification">
+      <label :for="`${id}-clarification`"
+        >Ergänzung zur Recherche <span class="research-card__muted">(optional)</span></label
+      >
+      <textarea
+        :id="`${id}-clarification`"
+        :value="clarification"
+        rows="2"
+        maxlength="20000"
+        placeholder="Fehlende Angaben ergänzen oder die Fragestellung präzisieren …"
+        @input="updateClarification"
+      />
+    </div>
     <div class="research-card__actions">
       <button v-if="active" type="button" @click="emit('pause')">Pausieren</button>
-      <button v-if="resumable" type="button" @click="emit('resume')">Fortsetzen</button>
+      <button v-if="resumable" type="button" @click="emit('resume', clarification.trim())">Fortsetzen</button>
       <button v-if="stoppable" type="button" @click="emit('stop')">Stoppen</button>
       <button v-if="run.report?.htmlPath" type="button" @click="emit('open-report')">
         {{ run.status === 'completed' ? 'Bericht öffnen' : 'Zwischenbericht öffnen' }}
@@ -123,11 +158,8 @@ const verifiedClaims = computed(() =>
   line-height: 1.45;
 }
 .research-card__status {
-  color: var(--ai-accent);
+  color: var(--text-secondary);
   font-size: 12px;
-}
-.research-card[data-status='completed'] .research-card__status {
-  color: var(--ai-accent);
 }
 .research-card__phase {
   margin: 12px 0 6px;
@@ -184,8 +216,30 @@ const verifiedClaims = computed(() =>
   background: var(--ai-page);
 }
 .research-card button:focus-visible,
-.research-card summary:focus-visible {
+.research-card summary:focus-visible,
+.research-card textarea:focus-visible {
   outline: 2px solid var(--ai-accent);
   outline-offset: 3px;
+}
+.research-card__clarification {
+  margin-top: 12px;
+}
+.research-card__clarification label {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.research-card textarea {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  resize: vertical;
+  padding: 8px 10px;
+  font: inherit;
+  color: inherit;
+  background: var(--ai-page);
+  border: 1px solid var(--ai-line-strong);
+  border-radius: 6px;
 }
 </style>

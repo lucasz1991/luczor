@@ -131,6 +131,22 @@ describe('research progress and user controls', () => {
     await nextTick()
     click('Fortsetzen')
     expect(resume).toHaveBeenCalledOnce()
+    expect(resume).toHaveBeenLastCalledWith('')
+    const input = descendants(root)
+      .find(node => node.tag === 'textarea')
+      ?.props.get('onInput')
+    if (typeof input !== 'function') throw new Error('Missing clarification input')
+    input({ target: { value: '  Deutschland, September 2026  ' } })
+    await nextTick()
+    click('Fortsetzen')
+    expect(resume).toHaveBeenLastCalledWith('Deutschland, September 2026')
+    props.run = { ...props.run, clarifications: ['Deutschland, September 2026'] }
+    await nextTick()
+    expect(
+      descendants(root)
+        .find(node => node.tag === 'textarea')
+        ?.props.get('value')
+    ).toBe('')
     expect(descendants(root).some(node => node.tag === 'button' && text(node) === 'Pausieren')).toBe(false)
     props.run = {
       ...props.run,
@@ -177,6 +193,8 @@ describe('research progress and user controls', () => {
     expect(html).toContain('Zwischenbericht öffnen')
     expect(html).toContain('<details')
     expect(html).toContain('role="status"')
+    expect(html).toContain('Ergänzung zur Recherche')
+    expect(html).toContain('maxlength="20000"')
     expect(html).not.toContain('<script>')
     expect(html).not.toContain('<img')
     expect(html).toContain('&lt;img')

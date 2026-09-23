@@ -35,6 +35,8 @@ const readSchema = {
   additionalProperties: false,
   properties: {
     observation_id: { type: 'string', minLength: 1, maxLength: 200 },
+    offset: { type: 'integer', minimum: 0, maximum: 100000000 },
+    snapshot_id: { type: 'string', minLength: 1, maxLength: 200 },
     max_chars: { type: 'integer', minimum: 4000, maximum: 120000 },
   },
   required: ['observation_id'],
@@ -75,6 +77,7 @@ export function isResearchGrantedTool(
   if (!schema) return false
   try {
     validateToolArguments(schema, args)
+    if (name === 'research_read' && Number(args.offset ?? 0) > 0 && !args.snapshot_id) return false
     return true
   } catch {
     return false
@@ -108,14 +111,16 @@ export function publicResearchUrl(value: string, base?: string): string | null {
   }
 }
 
-function splitSegments(text: string, prefix: string, locator?: string): ResearchSegment[] {
+function splitSegments(text: string, prefix: string, locator?: string, startOffset = 0): ResearchSegment[] {
   const segments: ResearchSegment[] = []
-  for (let offset = 0; offset < text.length; offset += 4000)
+  for (let offset = 0; offset < text.length; offset += 4000) {
+    const globalOffset = startOffset + offset
     segments.push({
-      id: `${prefix}-${segments.length + 1}`,
+      id: globalOffset % 4000 === 0 ? `${prefix}-${globalOffset / 4000 + 1}` : `${prefix}-offset-${globalOffset}`,
       text: text.slice(offset, offset + 4000),
-      locator: locator ?? `Zeichen ${offset + 1}–${Math.min(text.length, offset + 4000)}`,
+      locator: locator ?? `Zeichen ${globalOffset + 1}–${startOffset + Math.min(text.length, offset + 4000)}`,
     })
+  }
   return segments
 }
 function safeName(value: string): string {
@@ -213,7 +218,11 @@ export function createResearchTools(options: ResearchToolsOptions): ToolDef[] {
   }
   async function capture(source: ResearchSource) {
     const existing = [...sources.values(), ...(options.sources?.() ?? [])].find(
-      item => item.url === source.url && item.contentHash === source.contentHash && item.kind === source.kind
+      item =>
+        item.url === source.url &&
+        item.contentHash === source.contentHash &&
+        item.kind === source.kind &&
+        (source.kind !== 'web' || item.segments[0]?.id === source.segments[0]?.id)
     )
     const candidate: ResearchSource = existing
       ? {
@@ -287,27 +296,30 @@ export function createResearchTools(options: ResearchToolsOptions): ToolDef[] {
     ),
     define(
       'research_read',
-      'Read an observed public web URL, verify pagination belongs to one document snapshot, and retain source text with source_id/segment ids for citations. Explicit partial coverage remains partial.',
+      'Read an observed public web URL and retain source text with source_id/segment ids for citations. Continue with returned next_offset as offset and snapshot_id (required when offset > 0). max_chars limits text from the requested offset. Pagination verifies one document snapshot; partial coverage remains partial.',
       async (args, ctx) => {
         const target = observed(args.observation_id)
+        const startOffset = Number(args.offset ?? 0)
+        if (startOffset > 0 && !args.snapshot_id) throw new Error('research_source_snapshot_required')
         return browserTransaction(ctx, async session => {
           const opened = await session.browser!.open(target.url)
           const actualUrl = publicResearchUrl(opened.url)
           if (!actualUrl) throw new Error('research_redirect_not_public')
           const maxChars = Number(args.max_chars ?? 48000)
-          let offset = 0
-          let snapshot = ''
+          const endOffset = startOffset + maxChars
+          let offset = startOffset
+          let snapshot = String(args.snapshot_id ?? '')
           let title = target.title
           let publishedAt: string | undefined
           let updatedAt: string | undefined
           let publisher: string | undefined
-          let complete = false
+          let reachedEnd = false
           const chunks: string[] = []
-          while (offset < maxChars) {
+          while (offset < endOffset) {
             const result = await session.browser!.read(undefined, {
               expectedUrl: opened.url,
               offset,
-              maxChars: Math.min(16000, maxChars - offset),
+              maxChars: Math.min(16000, endOffset - offset),
             })
             const currentSnapshot = String(result.snapshotId ?? '')
             if (
@@ -325,10 +337,15 @@ export function createResearchTools(options: ResearchToolsOptions): ToolDef[] {
             chunks.push(result.text)
             const nextOffset = result.nextOffset
             if (nextOffset === null && result.truncated === false) {
-              complete = true
+              reachedEnd = true
               break
             }
-            if (typeof nextOffset !== 'number' || nextOffset <= offset)
+            if (
+              typeof nextOffset !== 'number' ||
+              !Number.isInteger(nextOffset) ||
+              nextOffset <= offset ||
+              nextOffset !== offset + result.text.length
+            )
               throw new Error('research_source_pagination_invalid')
             offset = nextOffset
           }
@@ -349,10 +366,17 @@ export function createResearchTools(options: ResearchToolsOptions): ToolDef[] {
             contentHash: await sha256Bytes(new TextEncoder().encode(text)),
             readReceiptId: crypto.randomUUID(),
             kind: 'web',
-            coverage: complete ? 'complete' : 'partial',
-            segments: splitSegments(text, 'text'),
+            coverage: startOffset === 0 && reachedEnd ? 'complete' : 'partial',
+            segments: splitSegments(text, 'text', undefined, startOffset),
           })
-          return { ok: true, source, discovered_links: links, truncated: !complete }
+          return {
+            ok: true,
+            source,
+            discovered_links: links,
+            truncated: !reachedEnd,
+            next_offset: reachedEnd ? null : offset,
+            snapshot_id: snapshot,
+          }
         })
       }
     ),

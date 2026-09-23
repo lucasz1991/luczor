@@ -8,25 +8,36 @@ const schema = {
   required: ['path'],
   properties: { path: { type: 'string', minLength: 1 }, count: { type: 'integer', minimum: 1, maximum: 3 } },
 }
+function failure(value: unknown) {
+  try {
+    validateToolArguments(schema, value)
+  } catch (error) {
+    return toolArgumentFailure(error)
+  }
+  throw new Error('Expected argument rejection')
+}
 describe('tool argument admission', () => {
+  it('does not echo a JSON parser excerpt containing rejected private data', () => {
+    expect(JSON.stringify(toolArgumentFailure(new SyntaxError('Unexpected token PRIVATE_VALUE')))).not.toContain(
+      'PRIVATE_VALUE'
+    )
+  })
   it('returns a field-specific correction without echoing the invalid private argument', () => {
-    try {
-      validateToolArguments(schema, { path: 'file.ts', count: 'PRIVATE_VALUE' })
-      expect.fail('must reject')
-    } catch (error) {
-      const result = toolArgumentFailure(error)
-      expect(result).toMatchObject({ ok: false, output: { executed: false, code: 'tool_arguments_invalid',
-        validation: { field: 'Argumente.count', rule: 'type', expected: { type: 'integer' } } } })
-      expect(JSON.stringify(result)).not.toContain('PRIVATE_VALUE')
-    }
-    try {
-      validateToolArguments(schema, { selector: '#wrong-contract' })
-      expect.fail('must reject')
-    } catch (error) {
-      expect(toolArgumentFailure(error)).toMatchObject({ output: {
+    const result = failure({ path: 'file.ts', count: 'PRIVATE_VALUE' })
+    expect(result).toMatchObject({
+      ok: false,
+      output: {
+        executed: false,
+        code: 'tool_arguments_invalid',
+        validation: { field: 'Argumente.count', rule: 'type', expected: { type: 'integer' } },
+      },
+    })
+    expect(JSON.stringify(result)).not.toContain('PRIVATE_VALUE')
+    expect(failure({ selector: '#wrong-contract' })).toMatchObject({
+      output: {
         validation: { field: 'Argumente.path', rule: 'required', expected: { required: true, type: 'string' } },
-      } })
-    }
+      },
+    })
   })
   it('rejects wrong types, extra keys, missing required values and invalid bounds', () => {
     for (const value of [

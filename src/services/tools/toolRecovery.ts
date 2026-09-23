@@ -15,12 +15,14 @@ function recovery(name: string, outcome: Outcome): Recovery | undefined {
   if (output?.code === 'tool_arguments_invalid')
     return {
       code: 'tool_arguments_invalid',
-      guidance: 'No action ran. Use validation.field and validation.expected to correct the arguments. Do not retry unchanged input.',
+      guidance:
+        'No action ran. Use validation.field and validation.expected to correct the arguments. Do not retry unchanged input.',
     }
   if (name.startsWith('fs_') && /path must be relative|path must not contain|path is invalid/u.test(error))
     return {
       code: 'project_relative_path_required',
-      guidance: 'No action ran. The path must be relative to the bound project, never an absolute path, parent traversal, CSS selector or @project alias. List the project root and copy the returned identity. Do not guess or silently rewrite a write target.',
+      guidance:
+        'No action ran. The path must be relative to the bound project, never an absolute path, parent traversal, CSS selector or @project alias. List the project root and copy the returned identity. Do not guess or silently rewrite a write target.',
       next_tool: 'fs_list',
       next_arguments: { path: '.', max_depth: 1 },
     }
@@ -71,13 +73,22 @@ function recovery(name: string, outcome: Outcome): Recovery | undefined {
   return undefined
 }
 
-const repeatedReads = new Set(['fs_list', 'fs_search', 'project_get_state', 'workspace_get', 'context_read_history', 'repository_search'])
+const repeatedReads = new Set([
+  'fs_list',
+  'fs_search',
+  'project_get_state',
+  'workspace_get',
+  'context_read_history',
+  'repository_search',
+])
 function stableData(value: unknown): string {
-  return JSON.stringify(value, (_key, item) =>
-    item && typeof item === 'object' && !Array.isArray(item)
-      ? Object.fromEntries(Object.entries(item).sort(([left], [right]) => left.localeCompare(right)))
-      : item
-  ) ?? 'null'
+  return (
+    JSON.stringify(value, (_key, item) =>
+      item && typeof item === 'object' && !Array.isArray(item)
+        ? Object.fromEntries(Object.entries(item).sort(([left], [right]) => left.localeCompare(right)))
+        : item
+    ) ?? 'null'
+  )
 }
 
 /** Per-run recovery budget. Argument guessing does not reset a failing browser path. */
@@ -98,10 +109,15 @@ export class ToolRecoveryGuard {
       ok: false,
       error: 'Repeated identical read without new evidence. Reuse the previous result and take the next concrete step.',
       output: {
-        code: 'tool_read_loop', executed: false, repetitions: previous.count,
+        code: 'tool_read_loop',
+        executed: false,
+        repetitions: previous.count,
         previous_observation: previous.output,
-        guidance: 'This is an earlier observation, not a fresh check. Read a selected file or graph result, read an archive index instead of searching again, or report the actual blocker. Unchanged reads do not advance the task.',
-        ...(name === 'fs_list' && file ? { next_tool: 'fs_read', next_arguments: file.file_ref ? { file_ref: file.file_ref } : { path: file.path } } : {}),
+        guidance:
+          'This is an earlier observation, not a fresh check. Read a selected file or graph result, read an archive index instead of searching again, or report the actual blocker. Unchanged reads do not advance the task.',
+        ...(name === 'fs_list' && file
+          ? { next_tool: 'fs_read', next_arguments: file.file_ref ? { file_ref: file.file_ref } : { path: file.path } }
+          : {}),
       },
     }
   }
@@ -171,10 +187,17 @@ export class ToolRecoveryGuard {
           this.reads.set(key, { signature, count, output: compactToolOutput(outcome.output, 1600) })
           while (this.reads.size > 24) this.reads.delete(this.reads.keys().next().value!)
           if (count >= 3)
-            outcome = { ...outcome, output: { ...details(outcome.output), recovery: {
-              code: 'tool_read_repeated',
-              guidance: 'This read succeeded three times with identical data. Use the returned evidence to continue; do not repeat the same call. Job-status polling remains available.',
-            } } }
+            outcome = {
+              ...outcome,
+              output: {
+                ...details(outcome.output),
+                recovery: {
+                  code: 'tool_read_repeated',
+                  guidance:
+                    'This read succeeded three times with identical data. Use the returned evidence to continue; do not repeat the same call. Job-status polling remains available.',
+                },
+              },
+            }
         }
       }
       if (['fs_list', 'fs_search', 'fs_stat', 'fs_read'].includes(name)) {

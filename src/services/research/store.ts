@@ -3,6 +3,7 @@ import { unresolvedCheckpointCalls } from '@/services/agents/continuationHistory
 import { createRunArchive, type RunArchive } from '@/services/runs/runArchive'
 import type { ResearchRun } from './types'
 import type { ResearchBinding, ResearchPrepareInput } from './native'
+import { researchOnlyUncertainty } from './probes'
 
 export type SavedResearch = {
   run: ResearchRun
@@ -17,6 +18,19 @@ type ResearchCheckpoint = AgentCheckpoint & { researchState: Omit<SavedResearch,
 export type ResearchStore = {
   save(value: SavedResearch): Promise<void>
   list(principalId: string): Promise<SavedResearch[]>
+}
+
+/** Preserve unknown generic effects independently of payload retention or replanning. */
+export function researchRecoveryNeedsReview(value: SavedResearch): boolean {
+  const previous = value.checkpoint
+  return (
+    value.recoveryNeedsReview === true ||
+    (!!previous &&
+      !researchOnlyUncertainty(previous) &&
+      (!!previous.uncertainMutations?.length ||
+        unresolvedCheckpointCalls(previous.messages).length > 0 ||
+        !!previous.pendingTaskCreateVerifications?.some(item => item.state !== 'verified_present')))
+  )
 }
 
 function validScope(value: SavedResearch): boolean {
@@ -46,6 +60,8 @@ function validScope(value: SavedResearch): boolean {
 
 /** The encrypted run archive is authoritative. Public report files never contain tool transcripts. */
 export function createResearchStore(archive: RunArchive = createRunArchive()): ResearchStore {
+  // Current raw checkpoints can reconcile a temporary redaction marker. Loaded explicit markers cannot.
+  const previousRisk = new Map<string, boolean>()
   return {
     async save(value) {
       if (!validScope(value)) throw new Error('research_store_scope_mismatch')
@@ -55,13 +71,31 @@ export function createResearchStore(archive: RunArchive = createRunArchive()): R
         previous &&
         previous.dataPolicy !== 'ephemeral' &&
         !(previous.ephemeralDataUsed && previous.dataPolicy === undefined)
+      const scope = {
+        principalId: run.principalId,
+        projectId: run.projectId,
+        conversationId: run.conversationId,
+        runId: run.id,
+      }
+      const key = JSON.stringify(scope)
+      if (!previous && !previousRisk.has(key)) {
+        const loaded = (await archive.load(scope))?.checkpoint as ResearchCheckpoint | undefined
+        previousRisk.set(
+          key,
+          loaded
+            ? researchRecoveryNeedsReview({
+                ...value,
+                checkpoint: loaded,
+                recoveryNeedsReview: loaded.researchState?.recoveryNeedsReview,
+              })
+            : false
+        )
+      }
+      const currentUnknown = researchRecoveryNeedsReview({ ...value, recoveryNeedsReview: undefined })
       const recoveryNeedsReview =
         value.recoveryNeedsReview === true ||
-        (!retainWorkingContext &&
-          !!previous &&
-          (!!previous.uncertainMutations?.length ||
-            unresolvedCheckpointCalls(previous.messages).length > 0 ||
-            !!previous.pendingTaskCreateVerifications?.some(item => item.state !== 'verified_present')))
+        (!retainWorkingContext && currentUnknown) ||
+        (!previous && previousRisk.get(key) === true)
       const checkpoint: ResearchCheckpoint = {
         ...(retainWorkingContext
           ? previous
@@ -96,6 +130,7 @@ export function createResearchStore(archive: RunArchive = createRunArchive()): R
         dataPolicy: 'local_only',
         state: run.status === 'completed' ? 'completed' : run.status === 'cancelled' ? 'cancelled' : 'interrupted',
       })
+      previousRisk.set(key, recoveryNeedsReview || currentUnknown)
     },
     async list(principalId) {
       const result: SavedResearch[] = []
@@ -116,6 +151,7 @@ export function createResearchStore(archive: RunArchive = createRunArchive()): R
         )
           continue
         const { researchState: _researchState, ...working } = checkpoint!
+        previousRisk.set(JSON.stringify(item.scope), researchRecoveryNeedsReview({ ...saved, checkpoint: working }))
         result.push({ ...saved, checkpoint: working.messages.length ? working : undefined })
       }
       return result

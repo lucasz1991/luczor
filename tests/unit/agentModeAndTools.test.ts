@@ -99,6 +99,74 @@ const durableTaskCreate = {
 } as const
 
 describe('agent mode and tool reliability', () => {
+  it('passes actionable validation back to the model without executing the invalid tool', async () => {
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'project',
+      mutating: false,
+      requiresApproval: false,
+      parameters: {
+        type: 'object',
+        additionalProperties: false,
+        required: ['path'],
+        properties: { path: { type: 'string' } },
+      },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce({
+        content: '',
+        toolCalls: [{ id: 'invalid-path', name: 'project_get_state', arguments: { path: 42 } }],
+        rawToolCalls: [
+          { id: 'invalid-path', type: 'function', function: { name: 'project_get_state', arguments: '{"path":42}' } },
+        ],
+      })
+      .mockResolvedValueOnce({ content: 'I will select a valid path.', toolCalls: [], rawToolCalls: [] })
+    await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      maxRounds: 2,
+      baseMessages: [{ role: 'user', content: 'Read the file.' }],
+    })
+    expect(mocks.execute).not.toHaveBeenCalled()
+    const request = mocks.streamChatWithTools.mock.calls[1]![0] as InferenceRequest
+    const receipt = request.messages.find(message => message.role === 'tool')!
+    expect(JSON.parse(receipt.content)).toMatchObject({
+      ok: false,
+      output: { executed: false, validation: { field: 'Argumente.path', expected: { type: 'string' } } },
+    })
+  })
+
+  it('ends an identical read cycle without aborting the run or reexecuting the fourth read', async () => {
+    for (let index = 0; index < 4; index++) {
+      const id = `repeated-read-${index}`
+      mocks.streamChatWithTools.mockResolvedValueOnce({
+        content: '',
+        toolCalls: [{ id, name: 'project_get_state', arguments: {} }],
+        rawToolCalls: [{ id, type: 'function', function: { name: 'project_get_state', arguments: '{}' } }],
+      })
+    }
+    mocks.streamChatWithTools.mockResolvedValueOnce({
+      content: 'The recorded project state is sufficient.',
+      toolCalls: [],
+      rawToolCalls: [],
+    })
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'observe',
+      maxRounds: 5,
+      baseMessages: [{ role: 'user', content: 'Check the project.' }],
+    })
+    expect(mocks.execute).toHaveBeenCalledTimes(3)
+    expect(result.interrupted).toBeUndefined()
+    expect(result.finalText).toBe('The recorded project state is sufficient.')
+    const request = mocks.streamChatWithTools.mock.calls[4]![0] as InferenceRequest
+    const receipt = request.messages.find(
+      message => message.role === 'tool' && message.tool_call_id === 'repeated-read-3'
+    )!
+    expect(JSON.parse(receipt.content)).toMatchObject({ output: { code: 'tool_read_loop', executed: false } })
+  })
+
   it.each(['local_llama_cpp', 'laravel_proxy'] as const)(
     'marks private retrieval only when its local packet is used: %s',
     async target => {

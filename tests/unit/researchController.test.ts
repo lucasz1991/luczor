@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createResearchController, type ResearchStepContext } from '@/services/research/controller'
 import type { ResearchStore, SavedResearch } from '@/services/research/store'
+import { researchEvidenceFingerprint } from '@/services/research/evidence'
 
 function saved(): SavedResearch {
   return {
@@ -78,6 +79,234 @@ function fixture(step = vi.fn<(_saved: SavedResearch, context: ResearchStepConte
 }
 
 describe('durable research controller', () => {
+  it('replans an amended paused run in its original folder and preserves uncertain-effect protection', async () => {
+    const value = saved()
+    value.run.status = 'blocked'
+    value.run.questions = [{ id: 'q', text: 'Old question', requiresFreshness: false }]
+    value.run.claims = [{ id: 'c', text: 'Old claim', questionIds: ['q'], evidence: [] }]
+    value.run.sources = [
+      {
+        id: 's',
+        url: 'https://example.com',
+        title: 'Saved source',
+        capturedAt: 2,
+        contentHash: 'hash',
+        readReceiptId: 'read',
+        kind: 'web',
+        coverage: 'complete',
+        segments: [{ id: 'part', text: 'Saved evidence' }],
+      },
+    ]
+    value.run.artifacts = [{ id: 'a', path: 'downloads/source.pdf', kind: 'download', contentHash: 'hash' }]
+    value.run.review = {
+      inputFingerprint: 'old',
+      completedAt: 2,
+      readReceiptIds: [],
+      summary: 'Old review',
+      issues: [],
+    }
+    value.run.reviewProgress = { inputFingerprint: 'old', readReceiptIds: ['review:s:part'] }
+    value.run.report = { htmlPath: 'bericht.html', markdownPath: 'bericht.md' }
+    value.checkpoint = {
+      projectId: 'project',
+      principalScopeId: 'account',
+      conversationId: 'chat',
+      sessionId: 's',
+      generation: 1,
+      objective: 'old',
+      completedMutations: [],
+      ephemeralDataUsed: true,
+      dataPolicy: 'ephemeral',
+      messages: [
+        {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: 'unknown',
+              type: 'function',
+              function: { name: 'project_terminal_run', arguments: '{"command":"private"}' },
+            },
+          ],
+        },
+      ],
+    }
+    const current = fixture()
+    await current.controller.register(value)
+    await current.controller.amend('r', '  Deutschland, Stand September 2026.  ')
+    const amended = current.controller.get('r')
+    expect(amended.run).toMatchObject({
+      id: 'r',
+      status: 'blocked',
+      stage: 'planning',
+      clarifications: ['Deutschland, Stand September 2026.'],
+      outputDir: value.run.outputDir,
+      questions: [],
+      claims: [],
+      blockers: [],
+      sources: value.run.sources,
+      artifacts: value.run.artifacts,
+    })
+    expect(amended.binding).toEqual(value.binding)
+    expect(amended.prepare).toEqual(value.prepare)
+    expect(amended.run.review).toBeUndefined()
+    expect(amended.run.reviewProgress).toBeUndefined()
+    expect(amended.run.report).toBeUndefined()
+    expect(amended.queries).toEqual([])
+    expect(amended.checkpoint).toBeUndefined()
+    expect(amended.recoveryNeedsReview).toBe(true)
+    expect(current.records.get('r')?.recoveryNeedsReview).toBe(true)
+  })
+
+  it.each(['queued', 'running', 'completed', 'cancelled'] as const)('refuses amendment of a %s run', async status => {
+    const current = fixture()
+    const value = saved()
+    value.run.status = status
+    await current.controller.register(value)
+    await expect(current.controller.amend('r', 'New scope')).rejects.toThrow('pausierten oder blockierten')
+    expect(current.controller.get('r').run).toEqual(value.run)
+  })
+
+  it('rejects empty or oversized notes and preserves an existing recovery flag for valid notes', async () => {
+    const current = fixture()
+    const value = saved()
+    value.run.status = 'paused'
+    value.run.clarifications = ['Earlier scope']
+    value.recoveryNeedsReview = true
+    await current.controller.register(value)
+    for (const note of ['  ', 'x'.repeat(20001)])
+      await expect(current.controller.amend('r', note)).rejects.toThrow('20.000')
+    await current.controller.amend('r', 'Further scope')
+    expect(current.controller.get('r').run.clarifications).toEqual(['Earlier scope', 'Further scope'])
+    expect(current.controller.get('r').recoveryNeedsReview).toBe(true)
+  })
+
+  it('does not freeze uncertainty from an ordinary in-flight checkpoint after a receipt arrives', async () => {
+    const checkpoint = {
+      projectId: 'project',
+      principalScopeId: 'account',
+      conversationId: 'chat',
+      sessionId: 's',
+      generation: 1,
+      objective: 'task',
+      completedMutations: [],
+      ephemeralDataUsed: false,
+      messages: [
+        {
+          role: 'assistant' as const,
+          content: '',
+          tool_calls: [
+            { id: 'pending', type: 'function' as const, function: { name: 'project_terminal_run', arguments: '{}' } },
+          ],
+        },
+      ],
+    }
+    const current = fixture(
+      vi.fn(async (_value, context) => {
+        await context.checkpoint(checkpoint)
+        expect(context.read().recoveryNeedsReview).toBeUndefined()
+        await context.checkpoint({
+          ...checkpoint,
+          messages: [
+            ...checkpoint.messages,
+            { role: 'tool', name: 'project_terminal_run', tool_call_id: 'pending', content: '{"ok":true}' },
+          ],
+        })
+        await context.update({ status: 'completed' })
+      })
+    )
+    await current.controller.register(saved())
+    await current.controller.run('r')
+    expect(current.controller.get('r').recoveryNeedsReview).toBeUndefined()
+    expect(current.controller.get('r').run.status).toBe('completed')
+  })
+
+  it('continues a large review while each bounded section verifies a new stored source segment', async () => {
+    const value = saved()
+    value.run.stage = 'reviewing'
+    value.run.sources = [
+      {
+        id: 's',
+        url: 'https://example.com',
+        title: 'Long source',
+        capturedAt: 2,
+        contentHash: 'hash',
+        readReceiptId: 'read',
+        kind: 'web',
+        coverage: 'complete',
+        segments: Array.from({ length: 12 }, (_, index) => ({ id: `part-${index}`, text: `Evidence ${index}` })),
+      },
+    ]
+    value.run.claims = [
+      {
+        id: 'c',
+        text: 'Summary',
+        questionIds: [],
+        evidence: value.run.sources[0]!.segments.map(segment => ({ sourceId: 's', segmentId: segment.id })),
+      },
+    ]
+    let calls = 0
+    const current = fixture(
+      vi.fn(async (_value, context) => {
+        const run = context.read().run
+        await context.update({
+          reviewProgress: {
+            inputFingerprint: researchEvidenceFingerprint(run),
+            readReceiptIds: [...(run.reviewProgress?.readReceiptIds ?? []), `review:s:part-${calls++}`],
+          },
+          ...(calls === 12 ? { status: 'completed' as const } : {}),
+        })
+      })
+    )
+    await current.controller.register(value)
+    await current.controller.run('r')
+    expect(calls).toBe(12)
+    expect(current.controller.get('r').run.status).toBe('completed')
+  })
+
+  it('ignores stale reviewer receipts after the review input changes', async () => {
+    const value = saved()
+    value.run.stage = 'reviewing'
+    value.run.sources = [
+      {
+        id: 's',
+        url: 'https://example.com',
+        title: 'Source',
+        capturedAt: 2,
+        contentHash: 'hash',
+        readReceiptId: 'read',
+        kind: 'web',
+        coverage: 'complete',
+        segments: Array.from({ length: 8 }, (_, index) => ({ id: `part-${index}`, text: `Evidence ${index}` })),
+      },
+    ]
+    value.run.claims = [
+      {
+        id: 'c',
+        text: 'Summary',
+        questionIds: [],
+        evidence: value.run.sources[0]!.segments.map(segment => ({ sourceId: 's', segmentId: segment.id })),
+      },
+    ]
+    const staleFingerprint = researchEvidenceFingerprint(value.run)
+    value.run.clarifications = ['Changed scope']
+    let calls = 0
+    const current = fixture(
+      vi.fn(async (_value, context) => {
+        await context.update({
+          reviewProgress: {
+            inputFingerprint: staleFingerprint,
+            readReceiptIds: [...(context.read().run.reviewProgress?.readReceiptIds ?? []), `review:s:part-${calls++}`],
+          },
+        })
+      })
+    )
+    await current.controller.register(value)
+    await current.controller.run('r')
+    expect(calls).toBe(3)
+    expect(current.controller.get('r').run.status).toBe('blocked')
+  })
+
   it('pauses promptly, drains the active section and rejects its late completion before explicit resume', async () => {
     const entered = deferred(),
       release = deferred()

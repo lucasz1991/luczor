@@ -61,6 +61,7 @@ export type ResearchRun = {
   conversationId: string
   workspaceBindingId?: string
   topic: string
+  clarifications?: string[]
   depth: 'deep'
   stage: ResearchStage
   status: ResearchStatus
@@ -76,6 +77,8 @@ export type ResearchRun = {
   blockers: string[]
   limitations?: string[]
   review?: ResearchReview
+  /** Internal checkpoint of verified source reads within a bounded independent review. */
+  reviewProgress?: { inputFingerprint: string; readReceiptIds: string[]; deliveredReceiptIds?: string[] }
   report?: ResearchReport
 }
 export type ResearchPlanProposal = { questions: ResearchQuestion[]; queries: string[] }

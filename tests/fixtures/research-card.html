@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="de" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Luczor · ResearchRunCard · UI-Testdaten</title>
+    <style>
+      html,
+      body {
+        overflow: auto !important;
+        min-height: 100%;
+      }
+      body {
+        margin: 0;
+        background: var(--ai-page);
+      }
+      .research-fixture {
+        max-width: 828px;
+        min-width: 0;
+        margin: 0 auto;
+        padding: 24px;
+        color: var(--ai-ink);
+        font-family: var(--ai-font);
+      }
+      .research-fixture__header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        flex-wrap: wrap;
+        gap: 16px;
+        margin-bottom: 20px;
+      }
+      .research-fixture h1 {
+        margin: 0 0 8px;
+        font-size: 22px;
+      }
+      .research-fixture__notice {
+        max-width: 580px;
+        margin: 0;
+        color: var(--ai-muted);
+        font-size: 13px;
+        line-height: 1.6;
+      }
+      .research-fixture__themes {
+        display: flex;
+        gap: 8px;
+      }
+      .research-fixture__themes button {
+        min-height: 36px;
+        padding: 6px 12px;
+        border: 1px solid var(--ai-line-strong);
+        border-radius: 6px;
+        background: var(--ai-surface);
+        color: var(--ai-ink);
+        cursor: pointer;
+      }
+      .research-fixture__themes button[aria-pressed='true'] {
+        border-color: var(--ai-accent);
+      }
+      .research-fixture__themes button:focus-visible {
+        outline: 2px solid var(--ai-accent);
+        outline-offset: 3px;
+      }
+      .research-fixture__label {
+        margin: 24px 0 4px;
+        font-size: 12px;
+        color: var(--ai-muted);
+      }
+      .research-fixture__event {
+        min-height: 24px;
+        padding: 12px 0;
+        color: var(--ai-muted);
+        font-size: 12px;
+      }
+      @media (max-width: 420px) {
+        .research-fixture {
+          padding: 16px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./researchCardPreview.ts"></script>
+  </body>
+</html>

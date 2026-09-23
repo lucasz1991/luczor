@@ -228,6 +228,19 @@ describe('host-bound research proposals and evidence', () => {
 })
 
 describe('safe report artifacts', () => {
+  it('invalidates a prior review when the user clarifies the assignment and escapes that note in both reports', () => {
+    const run = complete()
+    run.clarifications = ['<script>scope</script> **new requirement**']
+    const result = renderResearchReport(run)
+    expect(result.intermediate).toBe(true)
+    expect(result.html).toContain('Ergänzungen zum Auftrag:')
+    expect(result.html).toContain('&lt;script&gt;scope&lt;/script&gt;')
+    expect(result.html).not.toContain('<script>')
+    expect(result.markdown).toContain('\\*\\*new requirement\\*\\*')
+    expect(JSON.parse(result.manifestJson).clarifications).toEqual(run.clarifications)
+    expect(result.manifestJson).not.toContain('reviewProgress')
+  })
+
   it('exports deterministic Markdown, HTML and metadata with exact observed source dates', () => {
     const run = complete()
     const result = renderResearchReport(run)

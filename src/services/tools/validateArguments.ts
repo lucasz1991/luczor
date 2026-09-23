@@ -35,7 +35,12 @@ export class ToolArgumentError extends Error {
 export function toolArgumentFailure(error: unknown) {
   return {
     ok: false as const,
-    error: error instanceof Error ? error.message : String(error),
+    error:
+      error instanceof SyntaxError
+        ? 'Tool-Argumente sind kein gültiges JSON. Ein Objekt gemäß Werkzeugschema senden.'
+        : error instanceof Error
+          ? error.message
+          : String(error),
     output: {
       code: 'tool_arguments_invalid',
       executed: false,
@@ -51,7 +56,7 @@ export function toolArgumentFailure(error: unknown) {
 export function validateToolArguments(schema: Record<string, unknown>, value: unknown): void {
   let visited = 0
   function check(rule: Record<string, unknown>, input: unknown, path: string, depth: number): void {
-    const invalid = (message: string, constraint: string, expected: Record<string, unknown>, field = path): never => {
+    function invalid(message: string, constraint: string, expected: Record<string, unknown>, field = path): never {
       throw new ToolArgumentError(message, field, constraint, expected)
     }
     if (depth > 12 || ++visited > 2000) throw new Error('Tool-Argumente sind zu tief oder zu umfangreich.')
@@ -61,12 +66,18 @@ export function validateToolArguments(schema: Record<string, unknown>, value: un
     if (Object.prototype.hasOwnProperty.call(rule, 'format') && (rule.format !== 'uuid' || type !== 'string'))
       throw new Error('Nicht unterstütztes Tool-Schema: format')
     if (type === 'object') {
-      if (!input || typeof input !== 'object' || Array.isArray(input)) invalid(`${path}: Objekt erwartet.`, 'type', { type })
+      if (!input || typeof input !== 'object' || Array.isArray(input))
+        invalid(`${path}: Objekt erwartet.`, 'type', { type })
       const record = input as Record<string, unknown>
       const properties = (rule.properties ?? {}) as Record<string, Record<string, unknown>>
       for (const key of (rule.required ?? []) as string[])
         if (!Object.prototype.hasOwnProperty.call(record, key))
-          invalid(`${path}.${key}: Pflichtfeld fehlt.`, 'required', { required: true, type: properties[key]?.type }, `${path}.${key}`)
+          invalid(
+            `${path}.${key}: Pflichtfeld fehlt.`,
+            'required',
+            { required: true, type: Object.getOwnPropertyDescriptor(properties, key)?.value?.type },
+            `${path}.${key}`
+          )
       for (const [key, item] of Object.entries(record)) {
         if (['__proto__', 'prototype', 'constructor'].includes(key)) throw new Error(`${path}: Unerlaubter Feldname.`)
         if (Object.prototype.hasOwnProperty.call(properties, key))
@@ -77,19 +88,28 @@ export function validateToolArguments(schema: Record<string, unknown>, value: un
             depth + 1
           )
         else if (rule.additionalProperties !== true)
-          invalid(`${path}.${key}: Unbekanntes Feld.`, 'additionalProperties', { allowedFields: Object.keys(properties) }, `${path}.${key}`)
+          invalid(
+            `${path}.${key}: Unbekanntes Feld.`,
+            'additionalProperties',
+            { allowedFields: Object.keys(properties) },
+            `${path}.${key}`
+          )
       }
     } else if (type === 'array') {
       if (!Array.isArray(input)) invalid(`${path}: Liste erwartet.`, 'type', { type })
-      if (!Array.isArray(input)) return
       if (input.length > Number(rule.maxItems ?? 1000) || input.length < Number(rule.minItems ?? 0))
-        invalid(`${path}: Ungültige Listenlänge.`, 'items', { minItems: rule.minItems ?? 0, maxItems: rule.maxItems ?? 1000 })
+        invalid(`${path}: Ungültige Listenlänge.`, 'items', {
+          minItems: rule.minItems ?? 0,
+          maxItems: rule.maxItems ?? 1000,
+        })
       for (const item of input) check((rule.items ?? {}) as Record<string, unknown>, item, `${path}[]`, depth + 1)
     } else if (type === 'string') {
       if (typeof input !== 'string') invalid(`${path}: Text erwartet.`, 'type', { type })
-      if (typeof input !== 'string') return
       if (input.length > Number(rule.maxLength ?? 200_000) || input.length < Number(rule.minLength ?? 0))
-        invalid(`${path}: Ungültige Textlänge.`, 'length', { minLength: rule.minLength ?? 0, maxLength: rule.maxLength ?? 200_000 })
+        invalid(`${path}: Ungültige Textlänge.`, 'length', {
+          minLength: rule.minLength ?? 0,
+          maxLength: rule.maxLength ?? 200_000,
+        })
       // Match the UUID string representation, also enforced by the server's
       // uuid rule. No coercion, URN prefixes, braces, or trailing line breaks.
       if (
@@ -100,9 +120,11 @@ export function validateToolArguments(schema: Record<string, unknown>, value: un
     } else if (type === 'number' || type === 'integer') {
       if (typeof input !== 'number' || !Number.isFinite(input) || (type === 'integer' && !Number.isInteger(input)))
         invalid(`${path}: ${type} erwartet.`, 'type', { type })
-      if (typeof input !== 'number') return
       if (input < Number(rule.minimum ?? -Infinity) || input > Number(rule.maximum ?? Infinity))
-        invalid(`${path}: Wert außerhalb des erlaubten Bereichs.`, 'range', { minimum: rule.minimum, maximum: rule.maximum })
+        invalid(`${path}: Wert außerhalb des erlaubten Bereichs.`, 'range', {
+          minimum: rule.minimum,
+          maximum: rule.maximum,
+        })
     } else if (type === 'boolean' && typeof input !== 'boolean') invalid(`${path}: Boolean erwartet.`, 'type', { type })
     else if (type === 'null' && input !== null) invalid(`${path}: null erwartet.`, 'type', { type })
     else if (type !== undefined && !['boolean', 'null'].includes(String(type)))

@@ -8,9 +8,10 @@ import { requestConfirmation } from '@/services/confirmation'
 import { chatRuns, type ChatRunHandle } from '@/services/chatRunManager'
 import { listTools } from '@/services/tools/registry'
 import type { ToolDef } from '@/services/tools/types'
-import type { LuczorMode } from '@/services/inference/types'
+import type { LuczorMode, WireMessage } from '@/services/inference/types'
 import type { ThinkingTier } from '@/services/inference/thinking'
 import { createChatEffectJournal } from '@/services/chatEffectJournal'
+import { unresolvedCheckpointCalls } from '@/services/agents/continuationHistory'
 import { runCoordinator } from '@/services/runs/runCoordinator'
 import { createResearchController, type ResearchStepContext } from './controller'
 import { createResearchStore, type SavedResearch } from './store'
@@ -31,9 +32,12 @@ import {
   parseResearchClaims,
   parseResearchReview,
   applyResearchReview,
+  researchEvidenceFingerprint,
+  requiredResearchReviewReceipts,
   validateResearchCompletion,
 } from './evidence'
 import { renderResearchReport } from './report'
+import { researchOnlyUncertainty } from './probes'
 import type { ResearchRun, ResearchSource, ResearchArtifact } from './types'
 
 export const researchRuns = shallowRef<ResearchRun[]>([])
@@ -147,6 +151,7 @@ function contextSummary(saved: SavedResearch) {
   const { run } = saved
   return JSON.stringify({
     topic: run.topic,
+    clarifications: run.clarifications ?? [],
     asOf: run.asOf,
     stage: run.stage,
     questions: run.questions,
@@ -159,6 +164,10 @@ function contextSummary(saved: SavedResearch) {
     claims: run.claims,
     limitations: run.limitations,
     blockers: run.blockers,
+    reviewedEvidence:
+      run.reviewProgress?.inputFingerprint === researchEvidenceFingerprint(run)
+        ? (run.reviewProgress.deliveredReceiptIds ?? [])
+        : [],
   })
 }
 async function verifyFiles(saved: SavedResearch, ticket: ExecutionTicket) {
@@ -236,7 +245,36 @@ async function readEvidence(saved: SavedResearch, sourceId: string, segmentId: s
     text: segment.text,
   }
 }
-function evidenceTool(context: ResearchStepContext, receipts?: Set<string>): ToolDef {
+type ReviewEvidenceProgress = { inputFingerprint: string; receipts: Set<string>; delivered: Set<string> }
+function reviewProgressPatch(review: ReviewEvidenceProgress): Pick<ResearchRun, 'reviewProgress'> {
+  return {
+    reviewProgress: {
+      inputFingerprint: review.inputFingerprint,
+      readReceiptIds: [...review.receipts],
+      deliveredReceiptIds: [...review.delivered],
+    },
+  }
+}
+/** A read and a review emitted in one tool batch cannot prove the model received the evidence. */
+function observeReviewEvidence(run: ResearchRun, review: ReviewEvidenceProgress, messages: readonly WireMessage[]) {
+  if (run.stage !== 'reviewing' || researchEvidenceFingerprint(run) !== review.inputFingerprint) return
+  for (const message of messages) {
+    if (message.role !== 'tool' || message.name !== 'research_read_evidence') continue
+    try {
+      const outcome = JSON.parse(message.content)
+      const output = outcome?.output
+      if (outcome?.ok !== true || output?.ok !== true) continue
+      const receipt = `review:${output.sourceId}:${output.segmentId}`
+      if (!review.receipts.has(receipt)) continue
+      const source = run.sources.find(item => item.id === output.sourceId)
+      const segment = source?.segments.find(item => item.id === output.segmentId)
+      if (source && segment && output.url === source.url && output.text === segment.text) review.delivered.add(receipt)
+    } catch {
+      // Compacted, partial or invalid tool content never counts as delivered evidence.
+    }
+  }
+}
+function evidenceTool(context: ResearchStepContext, review?: ReviewEvidenceProgress): ToolDef {
   return {
     name: 'research_read_evidence',
     category: 'app',
@@ -254,7 +292,16 @@ function evidenceTool(context: ResearchStepContext, receipts?: Set<string>): Too
         segmentId = String(args.segment_id)
       const result = await readEvidence(context.read(), sourceId, segmentId, executionFor(context.read().run.id).ticket)
       context.signal.throwIfAborted()
-      receipts?.add(`review:${sourceId}:${segmentId}`)
+      if (review) {
+        const current = context.read().run
+        if (current.stage !== 'reviewing' || researchEvidenceFingerprint(current) !== review.inputFingerprint)
+          throw new Error('Die Prüfgrundlage wurde geändert. Die Belege müssen erneut geprüft werden.')
+        const receipt = `review:${sourceId}:${segmentId}`
+        if (requiredResearchReviewReceipts(current).includes(receipt)) {
+          review.receipts.add(receipt)
+          await context.update(reviewProgressPatch(review))
+        }
+      }
       return result
     },
   }
@@ -265,7 +312,8 @@ async function modelRound(
   context: ResearchStepContext,
   instruction: string,
   tools: ToolDef[],
-  generalTools: string[] = []
+  generalTools: string[] = [],
+  review?: ReviewEvidenceProgress
 ) {
   const owned = executionFor(saved.run.id)
   const allowed = new Set(generalTools)
@@ -313,13 +361,19 @@ async function modelRound(
       runId: saved.run.id,
     }),
     onRunWaiting: waiting => owned.handle?.setWaiting(waiting) ?? Promise.resolve(),
-    onCheckpoint: checkpoint => context.checkpoint(checkpoint),
+    onContextRequest: review
+      ? request => observeReviewEvidence(context.read().run, review, request.messages)
+      : undefined,
+    onCheckpoint: checkpoint =>
+      review ? context.update(reviewProgressPatch(review), { checkpoint }) : context.checkpoint(checkpoint),
   }
   if (
     saved.checkpoint?.messages.length &&
     saved.checkpoint.dataPolicy === 'local_only' &&
     !saved.checkpoint.uncertainMutations?.length &&
-    saved.run.stage === 'collecting'
+    (saved.run.stage === 'collecting' ||
+      (saved.run.stage === 'reviewing' &&
+        saved.run.reviewProgress?.inputFingerprint === researchEvidenceFingerprint(saved.run)))
   ) {
     options.continuation = {
       ...saved.checkpoint,
@@ -329,6 +383,7 @@ async function modelRound(
   }
   const result = await runAgent(options)
   context.signal.throwIfAborted()
+  if (review) await context.update(reviewProgressPatch(review))
   if (result.interrupted && result.interrupted.code !== 'round_limit') throw new Error(result.interrupted.message)
   return result
 }
@@ -347,8 +402,19 @@ const controller = createResearchController({
   },
   async step(saved, context) {
     const { run } = saved
+    // Even an unavailable model leaves a readable, explicitly incomplete dossier.
+    if (!run.report) await publish(context, true)
     if (run.stage === 'planning') {
       let proposal: ReturnType<typeof parseResearchPlan> | undefined
+      let question: string | undefined
+      const clarificationTool = submissionTool(
+        'research_request_clarification',
+        'Nur bei einer wesentlichen fehlenden Nutzerangabe: eine gezielte Rückfrage stellen. Der Lauf wartet dann auf eine Ergänzung in seiner Chatkarte.',
+        objectSchema({ question: { type: 'string', minLength: 1, maxLength: 2000 } }),
+        args => {
+          question = String(args.question).trim()
+        }
+      )
       const tool = submissionTool(
         'research_submit_plan',
         'Erfasst die vollständigen Kernfragen und Suchanfragen. Keine Rechercheergebnisse erfinden.',
@@ -360,9 +426,14 @@ const controller = createResearchController({
       const result = await modelRound(
         saved,
         context,
-        'Erstelle einen Rechercheplan, der den gesamten Nutzerauftrag abdeckt. Markiere zeitabhängige Fragen mit requiresFreshness=true. Rufe research_submit_plan auf.',
-        [tool]
+        'Erstelle einen Rechercheplan, der den gesamten Nutzerauftrag und seine Ergänzungen abdeckt. Markiere zeitabhängige Fragen mit requiresFreshness=true. Rufe research_submit_plan auf. Nur wenn eine wesentliche Nutzerangabe fehlt, nutze research_request_clarification.',
+        [tool, clarificationTool]
       )
+      if (question) {
+        await context.update({ status: 'blocked', blockers: [question] }, { checkpoint: undefined })
+        await publish(context, true)
+        return
+      }
       proposal ??= parseResearchPlan(result.finalText)
       await context.update(
         { questions: proposal.questions, stage: 'collecting' },
@@ -455,28 +526,55 @@ const controller = createResearchController({
     }
     if (run.stage === 'reviewing') {
       let proposal: ReturnType<typeof parseResearchReview> | undefined
-      const receipts = new Set<string>()
+      const inputFingerprint = researchEvidenceFingerprint(run)
+      const requiredReceipts = new Set(requiredResearchReviewReceipts(run))
+      const receipts = new Set(
+        run.reviewProgress?.inputFingerprint === inputFingerprint
+          ? run.reviewProgress.readReceiptIds.filter(id => requiredReceipts.has(id))
+          : []
+      )
+      const delivered = new Set(
+        run.reviewProgress?.inputFingerprint === inputFingerprint
+          ? (run.reviewProgress.deliveredReceiptIds ?? []).filter(id => receipts.has(id))
+          : []
+      )
+      const reviewProgress = { inputFingerprint, receipts, delivered }
+      if (run.reviewProgress?.inputFingerprint !== inputFingerprint)
+        await context.update(reviewProgressPatch(reviewProgress), { checkpoint: undefined })
       const tool = submissionTool(
         'research_submit_review',
         'Übermittelt die unabhängige Prüfung jeder Aussage. Zuvor jeden zitierten Abschnitt mit research_read_evidence lesen. Offene Kernfragen, Widersprüche und Aktualitätslücken in issues nennen.',
         reviewSchema,
         args => {
+          if ([...requiredReceipts].some(id => !delivered.has(id)))
+            throw new Error(
+              'Die Prüfung benötigt alle vollständigen Belege im Modellkontext. Lies die fehlenden Abschnitte mit research_read_evidence und bewerte sie erst im nächsten Modellschritt; Lesen und Prüfabschluss im selben Werkzeugblock reichen nicht aus.'
+            )
           proposal = parseResearchReview(args, run)
         }
       )
       const result = await modelRound(
-        saved,
+        context.read(),
         context,
         'Du prüfst unabhängig von der Recherche. Lies jeden zitierten Beleg mit research_read_evidence. Stimmen die Aussagen mit den Fundstellen überein? Decken die Fragen den ursprünglichen Auftrag vollständig ab? Ist jede zeitabhängige Aussage zum angegebenen Stand belegt? Abrufdatum ist kein Veröffentlichungsdatum. Behauptete Aktualität ohne belastbaren Beleg ist unknown. Offene wesentliche Widersprüche verhindern Abschluss. Rufe research_submit_review auf.',
-        [evidenceTool(context, receipts), tool]
+        [evidenceTool(context, reviewProgress), tool],
+        [],
+        reviewProgress
       )
+      if (!proposal && result.continuation) {
+        await context.checkpoint(result.continuation)
+        return
+      }
       proposal ??= parseResearchReview(result.finalText, run)
-      const reviewed = { ...run, ...applyResearchReview(run, proposal, [...receipts], Date.now()), blockers: [] }
+      if (researchEvidenceFingerprint(context.read().run) !== inputFingerprint)
+        throw new Error('Die Prüfgrundlage wurde geändert. Die Belege müssen erneut geprüft werden.')
+      const reviewed = { ...run, ...applyResearchReview(run, proposal, [...delivered], Date.now()), blockers: [] }
       const check = validateResearchCompletion(reviewed, { requireReport: false })
       await context.update(
         {
           claims: reviewed.claims,
           review: reviewed.review,
+          reviewProgress: undefined,
           stage: check.ok ? 'publishing' : 'collecting',
           blockers: check.issues,
         },
@@ -550,7 +648,9 @@ async function launch(id: string) {
           await controller.run(id, AbortSignal.any([handle.signal, owned.ticket.signal]))
           if (controller.get(id).run.status !== 'completed')
             await handle.interrupt('Recherche gespeichert; Abschlussprüfung noch offen.')
-        } finally { handle.signal.removeEventListener('abort', revoke) }
+        } finally {
+          handle.signal.removeEventListener('abort', revoke)
+        }
       },
       owned.ticket.signal
     )
@@ -629,7 +729,9 @@ export async function startResearch(input: StartResearch): Promise<string> {
     }
     await controller.register({ run, binding, prepare, queries: [] })
     registered = true
+    executionGate.assert(ticket, true)
     await input.onRegistered?.(run)
+    executionGate.assert(ticket, true)
     void launch(id).catch(error => console.warn('[research] Lauf konnte nicht gestartet werden:', asError(error)))
     return id
   } catch (error) {
@@ -643,15 +745,23 @@ export async function startResearch(input: StartResearch): Promise<string> {
     preparing.delete(input.conversationId)
   }
 }
-export async function resumeResearch(id: string, mode: LuczorMode, thinkingTier: ThinkingTier) {
+export async function resumeResearch(id: string, mode: LuczorMode, thinkingTier: ThinkingTier, clarification = '') {
+  if (clarification.length > 20000) throw new Error('Bitte die Ergänzung auf 20.000 Zeichen begrenzen.')
   const saved = controller.get(id)
   if (saved.run.status === 'completed' || saved.run.status === 'cancelled')
     throw new Error('Dieser Recherchelauf ist beendet.')
   if (controller.isRunning(saved.run.conversationId) || preparing.has(saved.run.conversationId))
     throw new Error('Die Recherche läuft bereits.')
   if (mode === 'observe') throw new Error('Bitte für die Recherche im Chat „Handeln“ wählen.')
-  if (saved.recoveryNeedsReview)
-    throw new Error('Eine unterbrochene allgemeine Werkzeugaktion hat kein bestätigtes Ergebnis. Vor einer Fortsetzung muss ihr tatsächlicher Zustand geprüft werden; sie wird nicht automatisch wiederholt.')
+  const checkpointUncertain =
+    saved.checkpoint &&
+    (!!saved.checkpoint.uncertainMutations?.length ||
+      unresolvedCheckpointCalls(saved.checkpoint.messages).length > 0 ||
+      saved.checkpoint.pendingTaskCreateVerifications?.some(item => item.state !== 'verified_present'))
+  if (saved.recoveryNeedsReview || (checkpointUncertain && !researchOnlyUncertainty(saved.checkpoint)))
+    throw new Error(
+      'Eine unterbrochene allgemeine Werkzeugaktion hat kein bestätigtes Ergebnis. Vor einer Fortsetzung muss ihr tatsächlicher Zustand geprüft werden; sie wird nicht automatisch wiederholt.'
+    )
   preparing.add(saved.run.conversationId)
   let preparedTicket: ExecutionTicket | undefined
   try {
@@ -659,7 +769,14 @@ export async function resumeResearch(id: string, mode: LuczorMode, thinkingTier:
       throw new Error('Recherche gehört zu einem anderen Konto.')
     invalidateExecutionScope({ runId: id })
     const ticket = makeTicket(id, { ...saved.run, mode }, saved.run.workspaceBindingId)
-    await approve(saved.prepare, saved.run.outputDir, ticket)
+    await approve(
+      {
+        ...saved.prepare,
+        title: saved.run.topic + (clarification.trim() ? `\nErgänzung: ${clarification.trim()}` : ''),
+      },
+      saved.run.outputDir,
+      ticket
+    )
     await researchPrepare({ ...saved.prepare, expectedRootPath: saved.run.outputDir, resume: true }, ticket)
     preparedTicket = ticket
     const recovery = await runCoordinator.prepareResume({
@@ -671,8 +788,19 @@ export async function resumeResearch(id: string, mode: LuczorMode, thinkingTier:
       generation: ticket.generation,
       workspaceBindingId: saved.run.workspaceBindingId,
     })
-    if (recovery.status === 'needs_review')
+    const retryOnlyResearch =
+      recovery.status === 'needs_review' &&
+      recovery.reasons.every(reason => ['effect_outcome_unknown', 'tool_receipt_missing'].includes(reason)) &&
+      !!saved.checkpoint &&
+      researchOnlyUncertainty(saved.checkpoint)
+    if (recovery.status === 'needs_review' && !retryOnlyResearch)
       throw new Error(`Fortsetzung benötigt Prüfung: ${recovery.reasons.join(', ')}`)
+    // Repeatable native reads/downloads reconcile owned files before getting fresh observations.
+    if (retryOnlyResearch) await verifyFiles(saved, ticket)
+    if (clarification.trim()) {
+      await verifyFiles(saved, ticket)
+      await controller.amend(id, clarification.trim())
+    }
     executions.set(id, { ticket, mode, thinkingTier })
     void launch(id).catch(error => console.warn('[research] Fortsetzung fehlgeschlagen:', asError(error)))
   } catch (error) {

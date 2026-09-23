@@ -1,6 +1,7 @@
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import type { ResearchRun, ResearchStatus } from './types'
-import type { ResearchStore, SavedResearch } from './store'
+import { researchRecoveryNeedsReview, type ResearchStore, type SavedResearch } from './store'
+import { researchEvidenceFingerprint } from './evidence'
 
 export type ResearchStepContext = {
   signal: AbortSignal
@@ -38,6 +39,16 @@ const progressFacts = (run: ResearchRun): Set<string> => {
     facts.add(JSON.stringify(['coverage', coverage]))
     if (claim.review?.supported && ['current', 'not_required'].includes(claim.review.freshness))
       facts.add(JSON.stringify(['supported', coverage, claim.text]))
+  }
+  if (run.reviewProgress?.inputFingerprint === researchEvidenceFingerprint(run)) {
+    const receipts = new Set(run.reviewProgress.readReceiptIds)
+    for (const claim of run.claims)
+      for (const ref of claim.evidence) {
+        if (!receipts.has(`review:${ref.sourceId}:${ref.segmentId}`)) continue
+        const source = run.sources.find(item => item.id === ref.sourceId)
+        const segment = source?.segments.find(item => item.id === ref.segmentId)
+        if (source && segment) facts.add(JSON.stringify(['review-read', source.url, source.contentHash, segment.text]))
+      }
   }
   return facts
 }
@@ -86,6 +97,12 @@ export function createResearchController(dependencies: ResearchControllerDepende
             updatedAt: now(),
           },
         }
+        if (
+          Object.hasOwn(extra, 'checkpoint') &&
+          extra.checkpoint === undefined &&
+          researchRecoveryNeedsReview(current)
+        )
+          next.recoveryNeedsReview = true
         await dependencies.store.save(next)
         // A stop may arrive during disk I/O. It schedules its own state write behind this one.
         if (expectedEpoch === epoch) {
@@ -220,6 +237,29 @@ export function createResearchController(dependencies: ResearchControllerDepende
       }
     },
     run: drive,
+    async amend(id: string, text: string) {
+      const value = text.trim()
+      if (!value || value.length > 20000) throw new Error('Die Ergänzung benötigt 1 bis 20.000 Zeichen.')
+      const current = get(id)
+      if (drivers.has(id) || !['paused', 'blocked'].includes(current.run.status))
+        throw new Error('Ergänzungen sind nur bei einer pausierten oder blockierten Recherche möglich.')
+      await update(
+        id,
+        {
+          clarifications: [...(current.run.clarifications ?? []), value],
+          stage: 'planning',
+          questions: [],
+          claims: [],
+          review: undefined,
+          reviewProgress: undefined,
+          report: undefined,
+          blockers: [],
+        },
+        { queries: [], checkpoint: undefined },
+        undefined,
+        latest => !drivers.has(id) && ['paused', 'blocked'].includes(latest.run.status)
+      )
+    },
     async pause(id: string) {
       if (terminal(get(id).run.status)) return
       const driver = drivers.get(id)

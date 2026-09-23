@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   pulse: vi.fn(),
   setLastTool: vi.fn(),
   logAgentEvent: vi.fn(),
+  createAdaptiveAssistance: vi.fn(),
   hud: { killSwitch: false },
 }))
 
@@ -53,10 +54,13 @@ vi.mock('@/state/hud', () => ({
   setLastTool: mocks.setLastTool,
 }))
 vi.mock('@/services/api/sync', () => ({ logAgentEvent: mocks.logAgentEvent }))
+vi.mock('@/services/agents/adaptiveAssistance', () => ({ createAdaptiveAssistance: mocks.createAdaptiveAssistance }))
 
 import { runAgent } from '@/services/agent'
 import { executionGate } from '@/services/executionGate'
 import type { ToolDef } from '@/services/tools/types'
+import { mutationKey } from '@/services/agents/chatCheckpoint'
+import type { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
 
 function arrangeApprovalGatedTool() {
   mocks.streamChatWithTools
@@ -122,6 +126,61 @@ describe('runAgent auto execution', () => {
     mocks.execute.mockResolvedValue({ ok: true, source_id: 'verified-source' })
   }
 
+  it('keeps run-bound submission closures out of delegated local analysis', async () => {
+    type AssistanceInput = Parameters<typeof createAdaptiveAssistance>[0]
+    let assistance!: AssistanceInput
+    mocks.createAdaptiveAssistance.mockImplementation((input: AssistanceInput) => {
+      assistance = input
+    })
+    const submit: ToolDef = {
+      ...researchTool(),
+      name: 'research_submit_review',
+      mutating: false,
+      requiresApproval: false,
+      effects: ['read'],
+    }
+    const read: ToolDef = {
+      ...researchTool(),
+      name: 'context_read',
+      mutating: false,
+      requiresApproval: false,
+      effects: ['read'],
+    }
+    mocks.getTool.mockImplementation((name: string) => (name === 'context_read' ? read : undefined))
+    mocks.toOpenAITools.mockReturnValue([
+      { type: 'function', function: { name: read.name, description: read.description, parameters: read.parameters } },
+    ])
+    mocks.streamChatWithTools
+      .mockImplementationOnce(async () => {
+        await assistance.execute(
+          { target: 'local', role: 'review', task: 'Analyze the supplied evidence.', tools: ['context_read', submit.name] },
+          new AbortController().signal
+        )
+        return { content: 'Analyse übernommen.', toolCalls: [], rawToolCalls: [] }
+      })
+      .mockResolvedValueOnce({
+        content: '',
+        toolCalls: [{ id: 'child-submit', name: submit.name, arguments: {} }],
+        rawToolCalls: [],
+      })
+      .mockResolvedValueOnce({ content: 'Begrenzte Analyse geliefert.', toolCalls: [], rawToolCalls: [] })
+    await runAgent({
+      projectId: 'project-1',
+      baseMessages: [{ role: 'user', content: 'Review sources.' }],
+      mode: 'act',
+      agentMode: true,
+      additionalTools: [submit],
+      initialToolNames: [submit.name],
+      inferenceGateway: { id: 'local-test', target: 'local_llama_cpp', streamChatWithTools: mocks.streamChatWithTools },
+    })
+    expect(assistance.localTools).toContain('context_read')
+    expect(assistance.localTools).not.toContain(submit.name)
+    expect(mocks.streamChatWithTools.mock.calls[1]?.[0].tools).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ function: expect.objectContaining({ name: submit.name }) })])
+    )
+    expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
   it('admits only a run-bound research adapter through its narrow grant and retains its scope locally', async () => {
     researchCalls()
     const tool = researchTool()
@@ -168,6 +227,71 @@ describe('runAgent auto execution', () => {
     expect(grant).not.toHaveBeenCalled()
     expect(mocks.awaitApproval).toHaveBeenCalledOnce()
     expect(mocks.execute).not.toHaveBeenCalled()
+  })
+
+  it('reexecutes verified research probes with fresh journal identities, including legacy cached/uncertain continuation', async () => {
+    const tool = researchTool()
+    const researchScope = {
+      principalId: 'owner',
+      projectId: 'project-1',
+      expectedRootPath: 'C:/Research/probe',
+      expectedWorkspaceUpdatedAt: 1,
+      runId: 'repeat-run',
+      researchId: 'repeat-run',
+    }
+    const seen = new Set<string>()
+    const before = vi.fn(async (call: { operationId?: string }) => {
+      if (!call.operationId || seen.has(call.operationId)) throw new Error('journal identity reused')
+      seen.add(call.operationId)
+      return { finish: vi.fn(async () => undefined) }
+    })
+    mocks.execute.mockResolvedValue({ ok: true, observation_id: 'fresh-observation' })
+    const call = {
+      content: '',
+      toolCalls: [{ id: 'same-provider-id', name: tool.name, arguments: { observation_id: 'known' } }],
+      rawToolCalls: [],
+    }
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(call)
+      .mockResolvedValueOnce(call)
+      .mockResolvedValueOnce({ content: 'Read twice.', toolCalls: [], rawToolCalls: [] })
+    const options = {
+      projectId: 'project-1',
+      conversationId: 'chat',
+      runId: 'repeat-run',
+      baseMessages: [],
+      mode: 'act' as const,
+      researchScope,
+      additionalTools: [tool],
+      initialToolNames: [tool.name],
+      toolApprovalGrant: () => true,
+      effectJournal: { before },
+      onCheckpoint: async () => undefined,
+      inferenceGateway: {
+        id: 'test-local',
+        target: 'local_llama_cpp' as const,
+        streamChatWithTools: mocks.streamChatWithTools,
+      },
+    }
+    const first = await runAgent(options)
+    expect(mocks.execute).toHaveBeenCalledTimes(2)
+    expect(seen.size).toBe(2)
+    const key = mutationKey(tool.name, { observation_id: 'known' })
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(call)
+      .mockResolvedValueOnce({ content: 'Reread after resume.', toolCalls: [], rawToolCalls: [] })
+    await runAgent({
+      ...options,
+      continuation: {
+        ...first.workingContext!,
+        completedMutations: [[key, { ok: true, output: { observation_id: 'expired' } }]],
+        uncertainMutations: [key],
+        operationIds: [[key, 'previous-operation']],
+      },
+    })
+    expect(mocks.execute).toHaveBeenCalledTimes(3)
+    expect(seen.size).toBe(3)
+    expect(seen.has('previous-operation')).toBe(false)
   })
 
   it('rejects adapter name collisions and non-research overrides before a provider request', async () => {

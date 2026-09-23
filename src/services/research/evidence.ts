@@ -131,6 +131,7 @@ export function researchEvidenceFingerprint(run: ResearchRun): string {
     conversationId: run.conversationId,
     workspaceBindingId: run.workspaceBindingId ?? null,
     topic: run.topic,
+    clarifications: run.clarifications ?? [],
     asOf: run.asOf,
     questions: run.questions.map(question => [question.id, question.text, question.requiresFreshness]),
     sources: run.sources.map(source => [

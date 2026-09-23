@@ -10,12 +10,21 @@ describe('tool failure recovery', () => {
       guard.record('project_get_state', {}, { ok: true, output: { summary: 'unchanged' } })
     }
     expect(guard.blocked('fs_list', { limit: 100, path: '.' })).toMatchObject({
-      ok: false, output: { code: 'tool_read_loop', executed: false,
-        next_tool: 'fs_read', next_arguments: { file_ref: 'file_exact' } },
+      ok: false,
+      output: {
+        code: 'tool_read_loop',
+        executed: false,
+        next_tool: 'fs_read',
+        next_arguments: { file_ref: 'file_exact' },
+      },
     })
     expect(guard.blocked('fs_list', { path: 'src' })).toBeUndefined()
     expect(guard.blocked('fs_read', { file_ref: 'file_exact' })).toBeUndefined()
-    guard.record('fs_read', { file_ref: 'file_exact' }, { ok: true, output: { path: 'exact.ts', content: 'new evidence' } })
+    guard.record(
+      'fs_read',
+      { file_ref: 'file_exact' },
+      { ok: true, output: { path: 'exact.ts', content: 'new evidence' } }
+    )
     expect(guard.blocked('fs_list', { path: '.', limit: 100 })).toBeUndefined()
   })
 
@@ -35,10 +44,12 @@ describe('tool failure recovery', () => {
 
   it('explains project path failures and browser target failures with different recovery tools', () => {
     const guard = new ToolRecoveryGuard()
-    expect(guard.record('fs_read', {}, { ok: false, error: 'path must be relative to the active project' }).output)
-      .toMatchObject({ recovery: { code: 'project_relative_path_required', next_tool: 'fs_list' } })
-    expect(guard.record('browser_click', {}, { ok: false, error: 'browser_selector_invalid' }).output)
-      .toMatchObject({ recovery: { next_tool: 'browser_dom_scan' } })
+    expect(
+      guard.record('fs_read', {}, { ok: false, error: 'path must be relative to the active project' }).output
+    ).toMatchObject({ recovery: { code: 'project_relative_path_required', next_tool: 'fs_list' } })
+    expect(guard.record('browser_click', {}, { ok: false, error: 'browser_selector_invalid' }).output).toMatchObject({
+      recovery: { next_tool: 'browser_dom_scan' },
+    })
   })
 
   it('stops filename guessing while allowing an exactly observed path or file reference', () => {

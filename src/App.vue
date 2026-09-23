@@ -609,11 +609,19 @@ onMounted(() => {
       await recoverResearch(principalId)
       assertCurrent()
       for (const run of researchRuns.value) {
-        if (mutations.getConversation(run.conversationId)?.projectId !== run.projectId ||
-          state.messages.some(message => message.meta.researchRunId === run.id)) continue
+        if (
+          mutations.getConversation(run.conversationId)?.projectId !== run.projectId ||
+          state.messages.some(message => message.meta.researchRunId === run.id)
+        )
+          continue
         const message = mutations.makeMsg('assistant', 'Deep-Recherche', run.projectId, run.conversationId)
         message.id = `research:${run.id}`
-        message.meta = { ...message.meta, researchRunId: run.id, retentionPolicy: 'local_only', serverSpeechAllowed: false }
+        message.meta = {
+          ...message.meta,
+          researchRunId: run.id,
+          retentionPolicy: 'local_only',
+          serverSpeechAllowed: false,
+        }
         mutations.addMessage(message)
       }
       for (const [id, revision] of activeGoals)
@@ -3913,7 +3921,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
                 :key="research.id"
                 :run="research"
                 @pause="researchAction(() => pauseResearch(research.id))"
-                @resume="researchAction(() => resumeResearch(research.id, mode, thinkingTier))"
+                @resume="note => researchAction(() => resumeResearch(research.id, mode, thinkingTier, note))"
                 @stop="researchAction(() => stopResearch(research.id))"
                 @open-report="researchAction(() => openResearch(research.id, mode, true))"
                 @open-folder="researchAction(() => openResearch(research.id, mode))"
