@@ -159,8 +159,16 @@
 }
 .ai-welcome__mark {
   display: inline-flex;
-  color: var(--ai-accent);
-  margin-bottom: 28px;
+  width: 56px;
+  height: 56px;
+  margin-bottom: 24px;
+  overflow: hidden;
+  border-radius: 14px;
+}
+.ai-welcome__mark :is(picture, img) {
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 .ai-welcome .ai-eyebrow {
   font: 10px var(--ai-font);

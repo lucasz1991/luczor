@@ -306,6 +306,60 @@ describe('debug privacy boundary', () => {
     expect(await trace.readTrace()).toBeUndefined()
   })
 
+  it('removes alternate credential headers before persistence and preserves public fields', async () => {
+    const debug = await import('@/services/debug')
+    const trace = await import('@/services/debugTrace')
+    await debug.setDebugCollectionEnabled(true)
+    await trace.setTraceEnabled(true)
+    const source = {
+      headers: { Set_Cookie: 'hidden-cookie', 'Proxy-Authorization': 'hidden-proxy' },
+      rows: [
+        { name: 'Cookie', value: 'hidden-row' },
+        { key: 'X-Api-Key', value: 'hidden-api' },
+        { name: 'Content-Type', value: 'application/json' },
+      ],
+      arguments: JSON.stringify({ sessionId: 'hidden-session', path: 'docs/example.md' }),
+      raw: 'Cookie: first=hidden-first; second=hidden-second\r\nProxy-Authorization: Basic hidden-auth\r\n\thidden-folded\r\nContent-Type: text/plain',
+      request_id: 'public-request',
+    }
+    await trace.recordTrace('privacy.fixture', source)
+    const archive = harness.debug.values.get('chat_trace') as { events: { data: unknown }[] }
+    const safe = archive.events[0]?.data
+    expect(JSON.stringify(archive)).not.toContain('hidden-')
+    expect(safe).toMatchObject({ request_id: 'public-request' })
+    expect(JSON.stringify(safe)).toContain('application/json')
+    expect(JSON.stringify(safe)).toContain('docs/example.md')
+    expect(JSON.stringify(safe)).toContain('Content-Type: text/plain')
+    expect(trace.redactTrace(safe)).toEqual(safe)
+    expect(source.headers.Set_Cookie).toBe('hidden-cookie')
+  })
+
+  it('sanitizes historical trace data again before upload without changing the archive', async () => {
+    const debug = await import('@/services/debug')
+    const trace = await import('@/services/debugTrace')
+    await debug.setDebugCollectionEnabled(true)
+    await trace.setTraceEnabled(true)
+    const archive = {
+      scope: await trace.debugScope(),
+      dropped: 0,
+      events: [
+        {
+          id: 'old-event',
+          at: '2026-09-01T00:00:00Z',
+          kind: 'privacy.fixture',
+          data: { Set_Cookie: 'hidden-old-cookie' },
+        },
+      ],
+    }
+    harness.debug.values.set('chat_trace', archive)
+    harness.pollDebugRequest.mockResolvedValue({ data: { id: 'privacy-request' } })
+    await expect(debug.collectRequestedDebugReport()).resolves.toBe('uploaded')
+    const report = harness.completeDebugRequest.mock.calls[0]?.[1]
+    expect(report.chat_trace.events[0]).toEqual({ ...archive.events[0], data: { Set_Cookie: '[REDACTED]' } })
+    expect(JSON.stringify(report)).not.toContain('hidden-old-cookie')
+    expect(archive.events[0]?.data.Set_Cookie).toBe('hidden-old-cookie')
+  })
+
   it('preserves numeric request evidence even when a large diagnostic payload is truncated', async () => {
     const debug = await import('@/services/debug')
     const trace = await import('@/services/debugTrace')

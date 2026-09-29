@@ -86,7 +86,28 @@ export async function debugScope(): Promise<string> {
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
 }
 
-/** Public content only. Credentials, binary payloads and private reasoning never enter storage. */
+function sensitiveTraceKey(key: string): boolean {
+  return /^(?:.*password|.*secret|.*apikey|authorization|proxyauthorization|cookie|setcookie|token|devicekey|accesstoken|refreshtoken|idtoken|sessiontoken|sessionid|reasoning(?:content)?|analysis|imagebase64|base64)$/i.test(
+    key.replace(/[^a-z0-9]/gi, '')
+  )
+}
+
+function redactCredentialHeaders(text: string): string {
+  let sensitiveHeader = false
+  return text
+    .split(/(\r?\n)/)
+    .map(line => {
+      if (line === '\n' || line === '\r\n') return line
+      // Folded header values belong to the preceding header, not a new field.
+      if (sensitiveHeader && /^[\t ]/.test(line)) return `${line.match(/^[\t ]*/)?.[0] ?? ''}[REDACTED]`
+      const header = line.match(/^([\t ]*(?:proxy[-_]authorization|authorization|set[-_]cookie|cookie)[\t ]*:[\t ]*)/i)
+      sensitiveHeader = Boolean(header)
+      return header ? `${header[1]}[REDACTED]` : line
+    })
+    .join('')
+}
+
+/** Remove recognized credentials, binary payloads and private reasoning before storage/export. */
 export function redactTrace(value: unknown, depth = 0): unknown {
   if (depth > 32) return '[DEPTH_LIMIT]'
   if (typeof value === 'string') {
@@ -97,7 +118,7 @@ export function redactTrace(value: unknown, depth = 0): unknown {
         /* Plain text. */
       }
     }
-    return value
+    return redactCredentialHeaders(value)
       .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/g, '[REDACTED]')
       .replace(/<(?:think|analysis)>[\s\S]*?(?:<\/(?:think|analysis)>|$)/gi, '[PRIVATE_REASONING_OMITTED]')
       .replace(/Bearer\s+[^\s"',;]+/gi, 'Bearer [REDACTED]')
@@ -112,14 +133,13 @@ export function redactTrace(value: unknown, depth = 0): unknown {
   if (Array.isArray(value)) return value.map(item => redactTrace(item, depth + 1))
   if (value && typeof value === 'object') {
     if (value instanceof Error) return redactTrace({ ...value, name: value.name, message: value.message }, depth + 1)
+    const entry = value as Record<string, unknown>
+    const entryName = entry.name ?? entry.key
+    const sensitiveEntry = typeof entryName === 'string' && sensitiveTraceKey(entryName)
     return Object.fromEntries(
       Object.entries(value).map(([key, item]) => [
         key,
-        /^(?:authorization|cookie|set-cookie|token|.*password|.*secret|.*api.?key|device.?key|access.?token|refresh.?token|reasoning(?:_content)?|analysis|image_base64|base64)$/i.test(
-          key
-        )
-          ? '[REDACTED]'
-          : redactTrace(item, depth + 1),
+        sensitiveTraceKey(key) || (sensitiveEntry && key === 'value') ? '[REDACTED]' : redactTrace(item, depth + 1),
       ])
     )
   }
@@ -178,7 +198,8 @@ export async function readTrace() {
     limit_bytes: LIMIT,
     dropped_events: archive?.scope === scope ? archive.dropped : 0,
     coalesced_progress_events: archive?.scope === scope ? (archive.coalescedProgress ?? 0) : 0,
-    events: archive?.scope === scope ? archive.events : [],
+    // Older archives may predate current redaction rules. Do not export them verbatim.
+    events: archive?.scope === scope ? archive.events.map(event => ({ ...event, data: redactTrace(event.data) })) : [],
     exclusions: ['credentials', 'private_reasoning', 'binary_data'],
     scope,
   }

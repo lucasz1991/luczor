@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="title">
+  <title id="title">Luczor App-Icon</title>
+
+  <defs>
+    <linearGradient id="lz-blue" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#359ffa"/>
+      <stop offset="1" stop-color="#586cf6"/>
+    </linearGradient>
+    <linearGradient id="lz-top" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#5475f8"/>
+      <stop offset="1" stop-color="#9859ef"/>
+    </linearGradient>
+    <linearGradient id="lz-right" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#825cf0"/>
+      <stop offset="1" stop-color="#9858ec"/>
+    </linearGradient>
+    <linearGradient id="lz-bottom" x1="0" y1="0" x2="1" y2="0">
+      <stop stop-color="#3b9ff9"/>
+      <stop offset="1" stop-color="#7665f2"/>
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="504" height="504" rx="108" fill="#0b0d18" stroke="#22243a" stroke-width="3"/>
+  <g transform="translate(60 47) scale(.86)">
+    <path id="lz-left" d="M150 0V251l66 67H57l-21-22V98Z" fill="url(#lz-blue)" opacity="1.000"/>
+<path id="lz-top" d="M171 68h190l94 100H239l-68 64Z" fill="url(#lz-top)" opacity="1.000"/>
+<path id="lz-top-facet" d="M171 68l68 100-68 64Z" fill="#496ff6" opacity="1.000"/>
+<path id="lz-right" d="M250 188h111l67 69v135l-109 93V258Z" fill="url(#lz-right)" opacity="1.000"/>
+<path id="lz-bottom" d="M0 331h231l67-60v162H92Z" fill="url(#lz-bottom)" opacity="1.000"/>
+  </g>
+</svg>

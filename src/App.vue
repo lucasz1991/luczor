@@ -3906,7 +3906,12 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           />
         </template>
         <div v-if="!hasConversation" class="ai-welcome">
-          <span class="ai-welcome__mark"><AiIcon :size="32" /></span>
+          <span class="ai-welcome__mark" aria-hidden="true">
+            <picture>
+              <source media="(prefers-reduced-motion: reduce)" srcset="/brand/luczor-icon.svg" type="image/svg+xml" />
+              <img src="/brand/luczor-animated.gif" width="56" height="56" alt="" />
+            </picture>
+          </span>
           <span class="ai-eyebrow">DEIN PERSÖNLICHER WORKSPACE</span>
           <h1>Woran arbeiten wir heute?</h1>
           <p v-if="standaloneChat">

@@ -682,6 +682,11 @@
   display: inline-flex;
   color: var(--ai-accent);
 }
+.ai-brand-mark img {
+  display: block;
+  width: 24px;
+  height: 24px;
+}
 .ai-sidebar__new,
 .ai-sidebar__action,
 .ai-sidebar nav button,

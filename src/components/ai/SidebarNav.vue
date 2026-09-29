@@ -196,7 +196,10 @@ const runLabels: Record<string, string> = {
     <!-- Icon rail: always visible, labels as tooltips -->
     <nav class="ai-rail" aria-label="Bereiche">
       <div class="ai-sidebar__brand">
-        <span class="ai-brand-mark"><AiIcon :size="21" /></span><strong>{{ title }}</strong>
+        <span class="ai-brand-mark" aria-hidden="true">
+          <img src="/brand/luczor-mark.svg" width="24" height="24" alt="" />
+        </span>
+        <strong>{{ title }}</strong>
       </div>
       <button
         class="ai-sidebar__new"
