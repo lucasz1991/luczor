@@ -65,16 +65,58 @@ function recovery(name: string, outcome: Outcome): Recovery | undefined {
         next_arguments: {},
       }
     }
+    if (code === 'workflow_browser_session_unavailable')
+      return {
+        code,
+        guidance:
+          'This run has no browser session. Use browser_open with the URL or local file from the task, then browser_dom_scan. Status and close cannot create a missing session. Do not invent a destination.',
+        next_tool: 'browser_open',
+      }
     const targetError = /browser_(ref_stale|target_|selector_|page_not_ready)/u.test(code)
+    if (targetError || /workflow_browser_(navigation_failed|navigation_timeout|url_changed)$/u.test(code))
+      return {
+        code,
+        guidance:
+          'Read the current page with browser_dom_scan and use exact observed refs. Verify what happened before deciding whether another action is needed; do not guess selectors or retry uncertain writes. Use screenshot and image_analyze only for an explicit visual exception.',
+        next_tool: 'browser_dom_scan',
+        next_arguments: {},
+      }
+    if (code === 'workflow_browser_cleanup_failed')
+      return {
+        code,
+        guidance:
+          "Cleanup of this run's session failed. Use browser_close {} to retry cleanup within the recovery budget. Closing does not verify earlier uncertain actions.",
+        next_tool: 'browser_close',
+        next_arguments: {},
+      }
+    if (code === 'workflow_browser_owned_by_another_run')
+      return {
+        code,
+        guidance:
+          'Another run owns the internal browser. Continue independent work or wait for that owner to finish; this run cannot close or take over its session.',
+      }
+    if (code === 'workflow_browser_cleanup_pending' || code === 'workflow_browser_session_busy')
+      return {
+        code,
+        guidance:
+          'Wait for the current browser operation to finish. Do not start another action or repeatedly open and close the session.',
+      }
+    if (code === 'workflow_browser_url_invalid')
+      return {
+        code,
+        guidance:
+          "Use the task's HTTP(S) URL, file URL or absolute local file path without embedded credentials. Correct the invalid URL before another attempt; status and cleanup cannot repair it.",
+      }
+    if (/host_|hosts_|monitor_|requires_windows_webview2/u.test(code))
+      return {
+        code,
+        guidance:
+          'Report the native browser runtime or compatibility failure with its code. Current internal DOM browsing supports HTTP(S) domains and local files without host lists or a selected screen. Do not change domains, screen settings or external browser windows to work around this failure.',
+      }
     return {
       code,
-      guidance: targetError
-        ? 'No action was confirmed. Scan the DOM again and use the exact observed ref. Do not guess selectors or retry uncertain writes. Use screenshot and image_analyze only for an explicit visual exception.'
-        : code === 'workflow_browser_owned_by_another_run'
-          ? 'Ein anderer Auftrag hält den Browser. Andere Arbeit fortsetzen; keine Hosts raten und die fremde Sitzung nicht übernehmen.'
-          : 'Die eigene Bindung mit browser_status {} prüfen. Bei einer falschen Bindung browser_close {} und erst danach gezielt browser_open verwenden. Keine Hostvarianten durchprobieren.',
-      next_tool: targetError ? 'browser_dom_scan' : 'browser_status',
-      next_arguments: {},
+      guidance:
+        "Use the reported browser error to identify the blocker. browser_status reads only this run's session metadata, not native readiness. Do not loop through status, close and open or replay an unconfirmed action.",
     }
   }
   if (name === 'image_analyze' && error.includes('workflow_vision_multimodal_runtime_unavailable')) {
@@ -119,6 +161,7 @@ function stableData(value: unknown): string {
 /** Per-run recovery budget. Argument guessing does not reset a failing browser path. */
 export class ToolRecoveryGuard {
   private browserFailures = 0
+  private browserRecovery?: Recovery
   // Closing or observing a session does not establish whether an earlier input took effect.
   private uncertainBrowserOutcome = false
   private closeFailures = 0
@@ -152,6 +195,12 @@ export class ToolRecoveryGuard {
   canOffer(name: string): boolean {
     if (name === 'browser_status' || name === 'browser_dom_scan') return true
     if (name === 'browser_close') return this.closeFailures < 3
+    if (
+      name === 'browser_open' &&
+      this.browserRecovery?.code === 'workflow_browser_session_unavailable' &&
+      !this.uncertainBrowserOutcome
+    )
+      return true
     return !name.startsWith('browser_') || this.browserFailures < 3
   }
 
@@ -198,18 +247,29 @@ export class ToolRecoveryGuard {
         },
       }
     }
+    const browserNext = this.browserRecovery?.next_tool
+    const usableBrowserNext = browserNext && this.canOffer(browserNext) ? browserNext : undefined
     return {
       ok: false,
       error: vision
         ? 'Lokale Bildanalyse ist für diese Runtime bereits als nicht verfügbar bestätigt. capabilities oder OCR verwenden; andere Arbeit kann weiterlaufen.'
-        : 'Dieser Browserweg ist nach drei fehlgeschlagenen Versuchen für den Auftrag pausiert. Keine weiteren Hostvarianten versuchen. Andere Werkzeuge bleiben nutzbar.',
+        : 'Dieser Browserweg ist nach drei fehlgeschlagenen Versuchen für den Auftrag pausiert. Die gemeldete Ursache beheben oder den Blocker berichten. Andere Werkzeuge bleiben nutzbar.',
       output: {
         code: 'tool_recovery_required',
         blocked_tool: name,
-        next_tool: vision ? 'image_analyze' : 'browser_status',
-        next_arguments: vision ? { action: 'capabilities' } : {},
-        guidance:
-          'Zuerst die Ursache anhand des Status beheben. Eine erfolgreich geschlossene eigene Sitzung gibt den Browserweg wieder frei.',
+        ...(vision
+          ? { next_tool: 'image_analyze', next_arguments: { action: 'capabilities' } }
+          : usableBrowserNext
+            ? {
+                next_tool: usableBrowserNext,
+                ...(this.browserRecovery?.next_arguments
+                  ? { next_arguments: this.browserRecovery.next_arguments }
+                  : {}),
+              }
+            : {}),
+        guidance: vision
+          ? 'Die lokalen Bildanalysefähigkeiten prüfen; keine automatische externe Übertragung.'
+          : `${this.browserRecovery?.guidance ?? 'Report the browser blocker before trying another action.'} The failed action path is paused; unchanged status reads do not resolve it.`,
       },
     }
   }
@@ -269,6 +329,7 @@ export class ToolRecoveryGuard {
     }
     const next = recovery(name, outcome)
     if (!next) return outcome
+    if (name.startsWith('browser_') && name !== 'browser_status') this.browserRecovery = next
     if (
       name.startsWith('browser_') &&
       (getBrowserFailure(details(outcome.output)?.browserFailure)?.outcome === 'unknown' ||

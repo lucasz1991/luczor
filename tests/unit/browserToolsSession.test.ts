@@ -42,6 +42,41 @@ beforeEach(() => {
 })
 
 describe('chat browser native session', () => {
+  it.each([
+    ['browser_status', []],
+    ['browser_close', ['allowed_hosts']],
+    ['browser_open', ['url', 'timeout_ms', 'allowed_hosts']],
+    ['browser_navigate', ['url', 'timeout_ms', 'allowed_hosts']],
+    ['browser_dom_scan', ['selector', 'query', 'offset', 'limit', 'timeout_ms', 'allowed_hosts']],
+    ['browser_dom_read', ['selector', 'allowed_hosts']],
+    ['browser_screenshot', ['name', 'allowed_hosts']],
+    ['browser_click', ['selector', 'timeout_ms', 'allowed_hosts']],
+    ['browser_fill', ['selector', 'value', 'timeout_ms', 'allowed_hosts']],
+    ['browser_select', ['selector', 'value', 'timeout_ms', 'allowed_hosts']],
+    ['browser_download', ['url', 'name', 'timeout_ms', 'allowed_hosts']],
+  ])('offers only the arguments used by %s plus legacy compatibility', (name, fields) => {
+    const parameters = browserTools.find(tool => tool.name === name)!.parameters
+    expect(Object.keys(parameters.properties as object).sort()).toEqual([...fields].sort())
+  })
+  it('describes status as own-session metadata without probing native browser readiness', async () => {
+    const result = await execute('browser_status', {})
+    expect(result).toMatchObject({
+      session: null,
+      native_readiness: 'not_checked',
+      next_tool: 'browser_open',
+      guidance: expect.stringContaining('browser_open'),
+    })
+    expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_action')).toBe(false)
+    expect(browserTools.find(tool => tool.name === 'browser_status')!.description).toContain('metadata')
+  })
+  it('rejects unrelated action arguments before creating a browser session', async () => {
+    await expect(execute('browser_open', { selector: 'ref:invented' })).rejects.toThrow('Unbekanntes Feld')
+    await expect(execute('browser_click', { selector: 'ref:observed', url: 'https://example.test' })).rejects.toThrow(
+      'Unbekanntes Feld'
+    )
+    expect(listToolSessions()).toEqual([])
+    expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_action')).toBe(false)
+  })
   it('queues competing owners fairly and skips an aborted waiter without blocking the current owner', async () => {
     const ownerContext = {
       projectId: 'project',

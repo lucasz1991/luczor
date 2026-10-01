@@ -158,6 +158,16 @@ async fn run_inner(
     manual_seconds: u64,
     evidence: &mut Evidence,
 ) -> Result<(), String> {
+    let started = Instant::now();
+    let desktop_isolation = match crate::commands::desktop_control::capture_monitor(None) {
+        Err(code) if code == "desktop_control_monitor_unavailable" => Ok(json!({
+            "desktopCapture": "blocked",
+            "code": code,
+        })),
+        _ => Err("probe_desktop_monitor_isolation_failed".into()),
+    };
+    evidence.record("unavailable_desktop_monitor", started, &desktop_isolation)?;
+    desktop_isolation?;
     let identity = uuid::Uuid::new_v4().to_string();
     execution::execution_gate_update(
         caller(app),

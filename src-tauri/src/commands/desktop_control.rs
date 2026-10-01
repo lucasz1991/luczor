@@ -128,77 +128,6 @@ pub fn capture_monitor(requested: Option<u32>) -> Result<u32, String> {
     Ok(selected.id)
 }
 
-pub fn check_browser_display(app: &AppHandle) -> Result<Option<MonitorInfo>, String> {
-    if config()?.monitor.is_none() {
-        return Ok(None);
-    }
-    let monitor = selected_monitor()?;
-    let main = app
-        .get_window("main")
-        .ok_or("browser_panel_main_unavailable")?;
-    let origin = main
-        .inner_position()
-        .map_err(|_| "browser_monitor_position_unavailable")?;
-    let (x, y, width, height) = if let Some(browser) = app.get_webview(super::BROWSER_WEBVIEW_LABEL)
-    {
-        let bounds = browser
-            .bounds()
-            .map_err(|_| "browser_monitor_position_unavailable")?;
-        let scale = main
-            .scale_factor()
-            .map_err(|_| "browser_monitor_position_unavailable")?;
-        let position = bounds.position.to_physical::<i32>(scale);
-        let size = bounds.size.to_physical::<u32>(scale);
-        (
-            origin.x.saturating_add(position.x),
-            origin.y.saturating_add(position.y),
-            size.width,
-            size.height,
-        )
-    } else {
-        let size = main
-            .inner_size()
-            .map_err(|_| "browser_monitor_position_unavailable")?;
-        (origin.x, origin.y, size.width, size.height)
-    };
-    if !contains_rect(&monitor, x, y, width, height) {
-        return Err("browser_outside_selected_monitor_move_luczor_window".into());
-    }
-    Ok(Some(monitor))
-}
-
-pub async fn browser_feedback(
-    app: &AppHandle,
-    permit: &super::execution::ExecutionPermit,
-) -> Result<(), String> {
-    if let Some(monitor) = check_browser_display(app)? {
-        let app = app.clone();
-        let permit = permit.clone();
-        let feedback = tauri::async_runtime::spawn_blocking(move || {
-            super::desktop_control_overlay::show(&app, &monitor, 0, None, Some(permit))
-        })
-        .await
-        .map_err(|_| "browser_control_feedback_unavailable")?;
-        internal_browser_overlay_feedback(feedback)?;
-    }
-    check_browser_display(app)?;
-    Ok(())
-}
-
-fn internal_browser_overlay_feedback(result: Result<(), String>) -> Result<(), String> {
-    match result {
-        // The internal browser has its own DOM cursor and does not use OS input.
-        // Wayland's missing monitor overlay must not block that independent route.
-        // Display bounds and the execution permit are still checked by the caller.
-        Err(error)
-            if error == "desktop_control_wayland_overlay_unavailable_use_internal_browser" =>
-        {
-            Ok(())
-        }
-        other => other,
-    }
-}
-
 pub fn activity(
     target: &WindowTarget,
     point: Option<(i32, i32)>,
@@ -329,26 +258,5 @@ mod tests {
         assert_eq!(config.input_mode, InputMode::Isolated);
         assert!(config.monitor.is_none());
         assert!(config.prefer_internal_browser && config.show_cursor);
-    }
-
-    #[test]
-    fn internal_browser_accepts_only_the_unsupported_wayland_overlay() {
-        assert!(internal_browser_overlay_feedback(Ok(())).is_ok());
-        assert!(internal_browser_overlay_feedback(Err(
-            "desktop_control_wayland_overlay_unavailable_use_internal_browser".into()
-        ))
-        .is_ok());
-        for error in [
-            "desktop_control_execution_stopped",
-            "desktop_control_overlay_superseded",
-            "desktop_control_monitor_unavailable",
-            "browser_outside_selected_monitor_move_luczor_window",
-            "desktop_control_overlay_unavailable",
-        ] {
-            assert_eq!(
-                internal_browser_overlay_feedback(Err(error.into())),
-                Err(error.into())
-            );
-        }
     }
 }

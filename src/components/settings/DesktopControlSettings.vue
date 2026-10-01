@@ -136,7 +136,10 @@ onMounted(load)
           ></label
         >
         <div class="browser-routes">
-          <p><strong>Interner Browser</strong><br />Eigene Sitzung, DOM, Formulare und Browser-Screenshots.</p>
+          <p>
+            <strong>Interner Browser</strong><br />Eigene Sitzung, DOM, Formulare und Browser-Screenshots. Funktioniert
+            unabhängig vom ausgewählten Bildschirm, auch im abgetrennten Browserfenster.
+          </p>
           <p>
             <strong>Externe Browserfenster</strong><br />Native Fensterwerkzeuge mit Bildschirm- und Eingabeprüfung.
             Kein automatischer Wechsel zwischen beiden Wegen.

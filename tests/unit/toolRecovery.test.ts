@@ -3,6 +3,44 @@ import { ToolRecoveryGuard } from '@/services/tools/toolRecovery'
 import { browserFailureOutcome } from '@/services/browserFailure'
 
 describe('tool failure recovery', () => {
+  it('recovers a missing own session by opening one even after repeated premature reads', () => {
+    const guard = new ToolRecoveryGuard()
+    for (let index = 0; index < 3; index++) {
+      const result = guard.record('browser_dom_read', {}, browserFailureOutcome('workflow_browser_session_unavailable'))
+      expect(result.output).toMatchObject({ recovery: { next_tool: 'browser_open' } })
+    }
+    expect(guard.canOffer('browser_open')).toBe(true)
+    expect(guard.blocked('browser_open', { url: 'https://example.test' })).toBeUndefined()
+    guard.record('browser_open', { url: 'https://example.test' }, { ok: true })
+    expect(guard.canOffer('browser_click')).toBe(true)
+  })
+  it.each([
+    ['workflow_browser_cleanup_failed', 'browser_close'],
+    ['workflow_browser_navigation_timeout', 'browser_dom_scan'],
+    ['workflow_browser_url_changed', 'browser_dom_scan'],
+    ['workflow_browser_selector_required', 'browser_dom_scan'],
+  ])('routes %s to the relevant next observation or cleanup', (code, nextTool) => {
+    const guard = new ToolRecoveryGuard()
+    expect(guard.record('browser_click', {}, browserFailureOutcome(code)).output).toMatchObject({
+      recovery: { code, next_tool: nextTool },
+    })
+  })
+  it.each([
+    'workflow_browser_owned_by_another_run',
+    'workflow_browser_cleanup_pending',
+    'workflow_browser_session_busy',
+    'workflow_browser_url_invalid',
+    'workflow_browser_host_boundary_required',
+    'workflow_browser_host_not_allowed',
+    'workflow_browser_requires_windows_webview2',
+    'browser_monitor_position_unavailable',
+  ])('does not turn %s into a status and close loop or invent a host requirement', code => {
+    const guard = new ToolRecoveryGuard()
+    const result = guard.record('browser_open', {}, browserFailureOutcome(code))
+    const recovery = (result.output as { recovery: { guidance: string; next_tool?: string } }).recovery
+    expect(recovery.next_tool).toBeUndefined()
+    expect(recovery.guidance).not.toContain('allowed_hosts')
+  })
   it('keeps unknown outcomes observation-first after the third failure and never clears them through cleanup', () => {
     const guard = new ToolRecoveryGuard()
     const code = 'workflow_browser_action_failed_outcome_unknown'

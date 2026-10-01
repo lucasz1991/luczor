@@ -8,7 +8,7 @@ export type EffectRecord = {
   conversationId: string
   runId: string
   payloadHash: string
-  state: 'started' | 'completed' | 'outcome_unknown'
+  state: 'started' | 'completed' | 'failed' | 'outcome_unknown'
   checkpoint: { messageId: string; summary: string }
   revision?: number
 }
@@ -98,10 +98,13 @@ export function createChatEffectJournal(
         throw new ChatEffectJournalError()
       }
       return {
-        async finish(success: boolean) {
+        async finish(success: boolean | 'not_started') {
           try {
             record = await store.write(
-              { ...record, state: success ? 'completed' : 'outcome_unknown' },
+              {
+                ...record,
+                state: success === 'not_started' ? 'failed' : success ? 'completed' : 'outcome_unknown',
+              },
               record.revision!
             )
           } catch {

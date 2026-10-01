@@ -681,7 +681,8 @@ async fn run(
         });
     }
     let mut navigation_generation = None;
-    super::desktop_control::browser_feedback(app, gate.permit()).await?;
+    // This run owns a child webview and uses its DOM cursor, never desktop input.
+    // A missing/changed desktop monitor or overlay cannot block internal browsing.
     gate.check()?;
     if input.action == BrowserOperation::Open && app.get_webview(BROWSER_WEBVIEW_LABEL).is_none() {
         diagnostic.phase = "navigation_start";

@@ -82,4 +82,37 @@ describe('durable tool effect boundary', () => {
     }
     await expect(createChatEffectJournal(owner, store).before(call)).rejects.toThrow('Laufjournal')
   })
+
+  it('records a confirmed pre-action refusal as failed while retaining the immutable attempt', async () => {
+    let saved: EffectRecord | null = null
+    const store = {
+      read: vi.fn(async () => saved),
+      write: vi.fn(async (record: EffectRecord, revision: number) => {
+        saved = { ...record, revision: revision + 1 }
+        return saved
+      }),
+    }
+    const journal = createChatEffectJournal(owner, store)
+    const receipt = await journal.before(call)
+    await receipt.finish('not_started')
+    expect(store.write.mock.calls.at(-1)?.[0].state).toBe('failed')
+    await expect(journal.before(call)).rejects.toThrow('Laufjournal')
+  })
+
+  it('does not clear the durable attempt when saving a pre-action refusal fails', async () => {
+    let saved: EffectRecord | null = null
+    const store = {
+      read: vi.fn(async () => saved),
+      write: vi.fn(async (record: EffectRecord, revision: number) => {
+        if (revision !== 0) throw new Error('disk full')
+        saved = { ...record, revision: 1 }
+        return saved
+      }),
+    }
+    const journal = createChatEffectJournal(owner, store)
+    const receipt = await journal.before(call)
+    await expect(receipt.finish('not_started')).rejects.toThrow('Laufjournal')
+    await expect(journal.before(call)).rejects.toThrow('Laufjournal')
+    expect(store.write).toHaveBeenCalledTimes(2)
+  })
 })

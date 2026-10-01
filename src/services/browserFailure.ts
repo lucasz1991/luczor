@@ -96,16 +96,17 @@ export function getBrowserFailure(error: unknown): BrowserFailureDiagnostic | un
 
 const messages: Record<string, string> = {
   browser_outside_selected_monitor_move_luczor_window:
-    'Bitte das Luczor-Fenster vollständig auf den unter Einstellungen → Bildschirmsteuerung gewählten Bildschirm verschieben.',
+    'Die Browser-Runtime meldet eine veraltete Bildschirmbindung. DOM-Steuerung benötigt keine Bildschirmzuordnung; Kompatibilität der installierten Runtime prüfen.',
   browser_monitor_position_unavailable:
-    'Die Position des Luczor-Browsers kann auf diesem System nicht sicher einem Bildschirm zugeordnet werden.',
+    'Die Browser-Runtime meldet eine veraltete Bildschirmprüfung. DOM-Steuerung benötigt keine Bildschirmzuordnung; Kompatibilität der installierten Runtime prüfen.',
   workflow_execution_identity_required:
     'Die Browser-Ausführung besitzt keine gültige Sitzungs-ID. Bitte Luczor aktualisieren.',
-  workflow_browser_host_boundary_required: 'Bitte beim Öffnen die erlaubten Zielhosts in allowed_hosts angeben.',
+  workflow_browser_host_boundary_required:
+    'Die Runtime erwartet eine frühere Hostbegrenzung. Der interne Browser benötigt keine Hostliste; Kompatibilität der installierten Runtime prüfen.',
   workflow_browser_allowed_hosts_invalid:
-    'Die Zielhosts müssen ohne Protokoll oder Pfad angegeben werden, z. B. example.com.',
+    'Die Runtime meldet ein früheres Hostlistenformat. Der interne Browser benötigt keine Hostliste; Kompatibilität der installierten Runtime prüfen.',
   workflow_browser_host_not_allowed:
-    'Diese Adresse liegt außerhalb der bestätigten Hosts. browser_status mit {} zeigt die Bindung. Zum Wechseln browser_close mit {} und anschließend browser_open mit den bestätigten Zielhosts verwenden. Keine Hosts raten.',
+    'Die Runtime meldet eine frühere Hostbegrenzung. HTTP(S)-Domains und lokale Dateien sind zulässig; Kompatibilität der installierten Runtime prüfen.',
   workflow_browser_url_invalid:
     'Eine HTTP(S)-Adresse, file://-URL oder einen absoluten Dateipfad ohne eingebettete Zugangsdaten verwenden.',
   workflow_browser_host_boundary_unavailable: 'Die sichere Browser-Steuerung ist auf diesem System nicht verfügbar.',
@@ -125,7 +126,7 @@ const messages: Record<string, string> = {
     'Das Ziel unterstützt diese Eingabe nicht. Mit browser_dom_scan das passende Eingabefeld oder Auswahlfeld bestimmen.',
   workflow_browser_selector_required: 'Das Elementziel fehlt. Mit browser_dom_scan eine gültige Referenz ermitteln.',
   workflow_browser_owned_by_another_run:
-    'Ein anderer Auftrag verwendet den Browser. Dessen Abschluss abwarten; eigene Hostlisten oder browser_close können seine Sitzung nicht übernehmen.',
+    'Ein anderer Auftrag verwendet den Browser. Dessen Abschluss abwarten; browser_close kann seine Sitzung nicht übernehmen.',
   workflow_browser_cleanup_pending:
     'Die eigene Browser-Sitzung wird noch geschlossen. Den Abschluss abwarten; noch keine neue Sitzung öffnen.',
   workflow_browser_cleanup_failed:
@@ -137,7 +138,7 @@ const messages: Record<string, string> = {
   workflow_browser_navigation_superseded:
     'Der Seitenwechsel wurde durch einen neueren Vorgang ersetzt. Bitte den aktuellen Seitenstand mit browser_dom_scan erneut lesen.',
   workflow_browser_navigation_failed:
-    'Der native Browser hat den Seitenwechsel als fehlgeschlagen gemeldet. Browserstatus und aktuellen Seitenstand prüfen.',
+    'Der native Browser hat den Seitenwechsel als fehlgeschlagen gemeldet. Mit browser_dom_scan den aktuellen Seitenstand prüfen; browser_status zeigt nur Sitzungsmetadaten.',
   workflow_browser_navigation_timeout:
     'Die Seite wurde nicht rechtzeitig geladen. Den aktuellen Seitenstand prüfen, bevor erneut navigiert wird.',
   workflow_browser_action_failed_outcome_unknown: 'Die Browseraktion wurde nicht bestätigt.',

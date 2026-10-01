@@ -67,6 +67,7 @@ import { runAgent } from '@/services/agent'
 import { executionGate } from '@/services/executionGate'
 import type { ToolDef } from '@/services/tools/types'
 import { mutationKey } from '@/services/agents/chatCheckpoint'
+import { createChatEffectJournal, type EffectRecord } from '@/services/chatEffectJournal'
 import type { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
 
 function arrangeApprovalGatedTool() {
@@ -102,6 +103,77 @@ describe('runAgent auto execution', () => {
     mocks.loadExecutionPolicy.mockResolvedValue({ autoExecuteMutatingTools: true })
     mocks.traceEnabled.mockResolvedValue(false)
   })
+
+  it.each(['not_started', 'unknown', 'mismatched_operation', 'post_effect_phase', 'legacy'] as const)(
+    'keeps native browser effect evidence consistent with the durable journal: %s',
+    async evidence => {
+      const tool: ToolDef = {
+        name: 'browser_open',
+        category: 'app',
+        description: 'Synthetic browser fixture',
+        parameters: { type: 'object', additionalProperties: true },
+        mutating: true,
+        requiresApproval: false,
+        execute: mocks.execute,
+      }
+      mocks.getTool.mockReturnValue(tool)
+      const call = {
+        content: '',
+        toolCalls: [{ id: 'first', name: tool.name, arguments: { url: 'http://127.0.0.1/fixture' } }],
+        rawToolCalls: [],
+      }
+      const diagnostic = {
+        version: 1,
+        code: 'workflow_browser_session_busy',
+        phase: evidence === 'post_effect_phase' ? 'dom_effect' : 'admission',
+        operation: evidence === 'mismatched_operation' ? 'click' : 'open',
+        operationId: 'native-operation',
+        backend: 'webview2',
+        elapsedMs: 1,
+        outcome: evidence === 'unknown' ? 'unknown' : 'not_started',
+      }
+      mocks.execute
+        .mockRejectedValueOnce(evidence === 'legacy' ? new Error('desktop_control_monitor_unavailable') : diagnostic)
+        .mockResolvedValueOnce({ ok: true })
+      const records = new Map<string, EffectRecord>()
+      const writes: EffectRecord[] = []
+      const journal = createChatEffectJournal(
+        { principalId: 'synthetic', projectId: 'project-1', conversationId: 'chat', runId: 'run' },
+        {
+          read: async (_principalId, id) => records.get(id) ?? null,
+          write: async (record, revision) => {
+            expect(records.get(record.runId)?.revision ?? 0).toBe(revision)
+            const saved = { ...record, revision: revision + 1 }
+            records.set(record.runId, saved)
+            writes.push(saved)
+            return saved
+          },
+        }
+      )
+      mocks.streamChatWithTools.mockResolvedValueOnce(call)
+      const options = {
+        projectId: 'project-1',
+        conversationId: 'chat',
+        mode: 'act' as const,
+        baseMessages: [{ role: 'user' as const, content: 'Test the synthetic browser.' }],
+        effectJournal: journal,
+        onCheckpoint: async () => undefined,
+        maxRounds: 1,
+      }
+      const first = await runAgent(options)
+      const confirmedNotStarted = evidence === 'not_started'
+      expect(first.continuation?.uncertainMutations ?? []).toHaveLength(confirmedNotStarted ? 0 : 1)
+      expect(writes.at(-1)?.state).toBe(confirmedNotStarted ? 'failed' : 'outcome_unknown')
+      mocks.streamChatWithTools
+        .mockResolvedValueOnce({ ...call, toolCalls: call.toolCalls.map(value => ({ ...value, id: 'second' })) })
+        .mockResolvedValueOnce({ content: 'Finished fixture.', toolCalls: [], rawToolCalls: [] })
+      const next = await runAgent({ ...options, baseMessages: [], continuation: first.continuation, maxRounds: 2 })
+      expect(mocks.execute).toHaveBeenCalledTimes(confirmedNotStarted ? 2 : 1)
+      expect(next.workingContext?.uncertainMutations ?? []).toHaveLength(confirmedNotStarted ? 0 : 1)
+      expect(records.size).toBe(confirmedNotStarted ? 2 : 1)
+      expect(writes.at(-1)?.state).toBe(confirmedNotStarted ? 'completed' : 'outcome_unknown')
+    }
+  )
 
   function researchTool(): ToolDef {
     return {

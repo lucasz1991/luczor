@@ -94,7 +94,7 @@ import { withRunResources } from '@/services/runs/resourceCoordinator'
 import { freezeAgentWorkflowScope, WORKFLOW_WORKCOPY_TOOLS } from '@/services/agents/workflowScope'
 import { toolArgumentFailure, validateToolArguments } from '@/services/tools/validateArguments'
 import { ToolRecoveryGuard } from '@/services/tools/toolRecovery'
-import { browserFailureOutcome } from '@/services/browserFailure'
+import { browserFailureOutcome, getBrowserFailure } from '@/services/browserFailure'
 import { retainToolSessionRun } from '@/services/tools/toolSessionCoordinator'
 import { isResearchProbe } from '@/services/research/probes'
 import { INVALID_TOOL_ARGUMENTS, prepareToolCallHistory } from '@/services/inference/toolCallHistory'
@@ -2543,7 +2543,20 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           } catch (error) {
             if (invokedAt !== undefined)
               await toolUsage.record(call.id, call.name, false, performance.now() - invokedAt)
-            if (!(error instanceof ChatEffectJournalError)) await receipt?.finish(false)
+            if (!(error instanceof ChatEffectJournalError)) {
+              const browserFailure = call.name.startsWith('browser_') ? getBrowserFailure(error) : undefined
+              const notStarted =
+                browserFailure?.outcome === 'not_started' &&
+                browserFailure.operation === call.name.slice('browser_'.length) &&
+                ['validation', 'admission', 'dom_prepare'].includes(browserFailure.phase)
+              // Only native pre-effect evidence can resolve uncertainty. Preserve the failed
+              // attempt durably before allowing a new, independently admitted operation ID.
+              await receipt?.finish(notStarted ? 'not_started' : false)
+              if (notStarted) {
+                uncertainMutations.delete(completionKey)
+                operationIds.delete(completionKey)
+              }
+            }
             throw error
           }
         })

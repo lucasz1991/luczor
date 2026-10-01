@@ -124,6 +124,23 @@ fn native_probe(research_only: bool, live_public: bool, isolated_acceptance: boo
         .plugin(crate::commands::desktop_control::feedback_plugin())
         .any_thread()
         .setup(move |app| {
+            if isolated_acceptance {
+                // Model an unplugged desktop monitor in this unique test profile.
+                // Internal DOM browsing must work while desktop capture stays denied.
+                let config_root = app.path().app_config_dir()?;
+                std::fs::create_dir_all(&config_root)?;
+                let config = crate::commands::desktop_control::DesktopControlConfig {
+                    monitor: Some(crate::commands::desktop_control::MonitorSelection {
+                        id: u32::MAX,
+                        name: format!("synthetic-unavailable-monitor-{id}"),
+                    }),
+                    ..Default::default()
+                };
+                std::fs::write(
+                    config_root.join("desktop-control.json"),
+                    serde_json::to_vec(&config)?,
+                )?;
+            }
             crate::commands::desktop_control::initialize(app.handle());
             tauri::WebviewWindowBuilder::new(
                 app,

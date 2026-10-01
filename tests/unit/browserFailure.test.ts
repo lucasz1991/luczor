@@ -25,6 +25,20 @@ const failure = {
 } as const
 
 describe('safe browser failure diagnostics', () => {
+  it.each([
+    'workflow_browser_host_boundary_required',
+    'workflow_browser_allowed_hosts_invalid',
+    'workflow_browser_host_not_allowed',
+  ])('explains legacy %s without requesting host lists', code => {
+    const message = browserFailure(code)
+    expect(message).toContain('Kompatibilität')
+    expect(message).not.toContain('allowed_hosts angeben')
+    expect(message).not.toContain('browser_close')
+  })
+  it('does not require moving a window for DOM browser recovery', () => {
+    expect(browserFailure('browser_outside_selected_monitor_move_luczor_window')).toContain('DOM')
+    expect(browserFailure('browser_monitor_position_unavailable')).toContain('DOM')
+  })
   it('preserves only bounded diagnostic fields and keeps the unknown action outcome visible', () => {
     const raw = { ...failure, url: 'https://PRIVATE.test', cookie: 'PRIVATE', value: 'PRIVATE', reasoning: 'PRIVATE' }
     const error = browserFailureError(raw)
