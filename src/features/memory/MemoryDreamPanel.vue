@@ -3,9 +3,11 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { IDLE_WAIT_LABELS } from '@/services/inference/idleRecovery'
 import type { DreamView } from './MemoryGraphView.vue'
 import {
-  DREAM_OPERATION_LABELS,
+  dreamDecisionCommitted,
+  dreamDecisionLabel,
   DREAM_SKIP_LABELS,
   DREAM_STAGE_LABELS,
+  currentDreamSkip,
   dreamTargetLabel,
   type DreamRun,
   type DreamStep,
@@ -69,7 +71,7 @@ const phaseLabel = computed(() => {
   return PHASES[status.value?.phase ?? ''] ?? 'Nicht verfügbar'
 })
 const reasonLabel = computed(() => {
-  const reason = status.value?.reason ?? props.trace.lastSkip?.reason
+  const reason = status.value?.reason ?? currentDreamSkip(props.trace)?.reason
   // `reason` comes from the optimizer's fixed reason codes, not from user input.
   // eslint-disable-next-line security/detect-object-injection
   return reason ? (REASONS[reason] ?? reason) : ''
@@ -216,8 +218,19 @@ function stepSubtitle(step: DreamStep): string {
 /** Counts affected entries, not decision rows: one merge over two memories reads as two. */
 function decisionCount(item: DreamRun, op: string) {
   return item.decisions
-    .filter(decision => decision.op === op)
+    .filter(decision => decision.op === op && dreamDecisionCommitted(decision))
     .reduce((sum, decision) => sum + Math.max(1, decision.targets.length), 0)
+}
+function proposedCount(item: DreamRun) {
+  return item.decisions.filter(decision => !dreamDecisionCommitted(decision)).length
+}
+function failureDetailLabel(item: DreamRun) {
+  const detail = item.failureDetail
+  if (!detail) return ''
+  const phases = { proposal: 'Entwurf', verification: 'Gegenprüfung', commit: 'Speichern', runtime: 'Modellaufruf' }
+  return [phases[detail.phase], detail.field, detail.attempt ? `Versuch ${detail.attempt}` : '']
+    .filter(Boolean)
+    .join(' · ')
 }
 
 const BLOCKERS: Record<string, string> = {
@@ -229,9 +242,27 @@ const BLOCKERS: Record<string, string> = {
 /** Track the whole requested lifecycle, not just the first running transition. */
 const requestedAt = ref(0)
 const requestStarted = ref(false)
+let observedRunId: string | undefined
 watch(
-  () => [status.value?.phase, status.value?.reason, props.trace.current?.id, run.value?.outcome] as const,
+  () =>
+    [status.value?.phase, status.value?.reason, props.trace.current?.id, run.value?.id, run.value?.outcome] as const,
   ([phase, reason]) => {
+    // A scheduled pass can follow a declined manual request. Its lifecycle must
+    // replace that old message even after the manual request has already settled.
+    const latest = run.value
+    if (!latest && observedRunId) {
+      observedRunId = undefined
+      requestedAt.value = 0
+      requestStarted.value = false
+      message.value = ''
+      messageTone.value = 'info'
+      return
+    }
+    if (latest && latest.id !== observedRunId && latest.startedAt >= requestedAt.value) {
+      observedRunId = latest.id
+      requestedAt.value = latest.startedAt
+      requestStarted.value = true
+    }
     if (!requestedAt.value) return
     if (phase === 'running' || phase === 'committing') {
       requestStarted.value = true
@@ -252,7 +283,7 @@ watch(
       const ok = reason === 'candidate_ready'
       const failed = run.value?.outcome === 'failed' && run.value.startedAt >= requestedAt.value
       message.value = failed
-        ? `Traum fehlgeschlagen: ${failureLabel(run.value?.error)}`
+        ? `${run.value?.committedAt !== undefined ? 'Ergebnis gespeichert; Nachbereitung fehlgeschlagen' : 'Traum fehlgeschlagen'}: ${failureLabel(run.value?.error)}`
         : ok
           ? 'Traum abgeschlossen und übernommen.'
           : `Traum ${requestStarted.value ? 'pausiert' : 'nicht gestartet'}: ${why || 'Voraussetzung fehlt'}.`
@@ -264,7 +295,8 @@ watch(
       messageTone.value = 'info'
       requestedAt.value = 0
     }
-  }
+  },
+  { immediate: true }
 )
 /** The orb in the 3D map asks for a dream or its end; consent and eligibility stay here. */
 function onDreamRequest(event: Event) {
@@ -414,7 +446,16 @@ async function stopDreaming() {
         <span
           >{{ run.scope === 'project' ? 'Projekt' : 'Konto' }} · {{ time(run.startedAt) }} · {{ duration(run) }}
           <template v-if="run.outcome">
-            · {{ run.outcome === 'success' ? 'übernommen' : run.outcome === 'failed' ? 'verworfen' : 'unterbrochen' }}
+            ·
+            {{
+              run.outcome === 'success'
+                ? 'übernommen'
+                : run.committedAt !== undefined
+                  ? 'gespeichert; Nachbereitung unterbrochen'
+                  : run.outcome === 'failed'
+                    ? 'verworfen'
+                    : 'unterbrochen'
+            }}
           </template></span
         >
       </div>
@@ -437,12 +478,13 @@ async function stopDreaming() {
           <small
             >{{ decisionCount(run, 'read') }} gelesen · {{ decisionCount(run, 'keep') }} behalten ·
             {{ decisionCount(run, 'merge') + decisionCount(run, 'rewrite') }} verdichtet ·
-            {{ decisionCount(run, 'remove') }} ersetzt · {{ decisionCount(run, 'create') }} neu</small
+            {{ decisionCount(run, 'remove') }} ersetzt · {{ decisionCount(run, 'create') }} neu
+            <template v-if="proposedCount(run)"> · {{ proposedCount(run) }} vorgeschlagene Schritte</template></small
           >
         </h4>
         <ul>
           <li v-for="(decision, index) in run.decisions" :key="index" :data-op="decision.op">
-            <span class="dream-panel__op">{{ DREAM_OPERATION_LABELS[decision.op] }}</span>
+            <span class="dream-panel__op">{{ dreamDecisionLabel(decision) }}</span>
             <span class="dream-panel__targets">
               <button
                 v-for="target in decision.targets"
@@ -459,7 +501,9 @@ async function stopDreaming() {
         </ul>
       </div>
       <p v-if="run.outcome === 'failed'" class="dream-panel__error">
-        Fehlgeschlagen: {{ failureLabel(run.error) }}<small v-if="run.error"> · {{ run.error }}</small>
+        {{ run.committedAt !== undefined ? 'Nachbereitung fehlgeschlagen' : 'Fehlgeschlagen' }}:
+        {{ failureLabel(run.error) }}<small v-if="run.error"> · {{ run.error }}</small>
+        <small v-if="failureDetailLabel(run)"> · {{ failureDetailLabel(run) }}</small>
       </p>
     </div>
     <p v-else class="dream-panel__empty">

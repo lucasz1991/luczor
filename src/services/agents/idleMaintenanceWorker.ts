@@ -17,7 +17,11 @@ import {
   assertPreservedReferences,
   maintenanceBatchChars,
   maintenanceHash,
+  memoryRevision,
+  maintenanceFailureDetail,
+  isCorrectableMaintenanceFormat,
   MAINTENANCE_POLICY,
+  type MaintenanceFailureDetail,
   type MaintenanceSource,
   type MemoryChangeSet,
   type MaintenanceJournal,
@@ -53,7 +57,9 @@ import {
 import { discoverRepositoryPage, hydrateRepositoryJob } from '@/services/memory/repositoryMaintenance'
 import {
   beginDreamRun,
+  commitDreamDecisions,
   endDreamRun,
+  recordDreamFailure,
   recordDreamDecision,
   recordDreamModel,
   recordDreamOffload,
@@ -125,8 +131,8 @@ type Work = {
   changes?: MemoryChangeSet
   output?: string
   evaluation?: { passed: boolean; baseline: boolean }
-  reviewFailed?: boolean
   evidence?: MaintenanceSource[]
+  traceRunId: string
 }
 
 /** Foreground admission, source gathering, generation and review share the optimizer's abort/drain lifetime. */
@@ -146,12 +152,16 @@ export function createMaintenanceWorker(
   /** Permission to continue below the normal RAM reserve; not a measurement of actual OS paging. */
   let offloading = false
   let lastFailure = ''
+  let lastFailureDetail: MaintenanceFailureDetail | undefined
   let recoveryEpoch = 0
   const failureCode = (error: unknown) => {
-    const detailed = localFailureTraceCode(error)
-    if (detailed) return detailed
-    if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string') return error.code
-    return error instanceof Error ? error.message : String(error)
+    return localFailureTraceCode(error) ?? maintenanceFailureDetail(error, 'runtime').code
+  }
+  const rememberFailure = (error: unknown, phase: MaintenanceFailureDetail['phase'], attempt: number) => {
+    lastFailureDetail = maintenanceFailureDetail(error, phase, attempt)
+    const nativeDetail = localFailureTraceCode(error)
+    if (nativeDetail) lastFailureDetail.code = nativeDetail
+    lastFailure = lastFailureDetail.code
   }
   const repositoryLabel = (status: RepositoryGraphStatus) =>
     status.status === 'ready'
@@ -494,7 +504,7 @@ export function createMaintenanceWorker(
         }
         const hydrated = snapshot.work.find(item => item.id === job.id)!
         recordMemoryUsageEvent('idle', 'retrieved', hydrated.material.length)
-        beginDreamRun({
+        const traceRunId = beginDreamRun({
           jobKey: job.id,
           task: traceTask(job.id, job.kind),
           scope: job.projectId ? 'project' : 'user',
@@ -503,7 +513,7 @@ export function createMaintenanceWorker(
           reason: `${hydrated.material.length} Quellen · ${job.attempts ? `Versuch ${job.attempts + 1}` : 'erster Versuch'}`,
         })
         selected.clear()
-        selected.set(job.id, { hydrated, modelId: '' })
+        selected.set(job.id, { hydrated, modelId: '', traceRunId })
         return {
           key: job.id,
           fingerprint: job.revision,
@@ -519,11 +529,15 @@ export function createMaintenanceWorker(
       async runLocal(job, signal) {
         const work = selected.get(job.key)
         if (!work) throw new Error('missing_job')
+        const epoch = recoveryEpoch
         lastFailure = ''
+        lastFailureDetail = undefined
+        let phase: MaintenanceFailureDetail['phase'] = 'runtime'
+        let attempt = 1
         try {
           await assertCurrent(job, signal)
         } catch (error) {
-          if (!signal.aborted) lastFailure = failureCode(error)
+          if (!signal.aborted && epoch === recoveryEpoch) rememberFailure(error, phase, attempt)
           throw error
         }
         return deps.resources
@@ -562,6 +576,7 @@ export function createMaintenanceWorker(
             recordDreamModel(modelId)
             recordDreamStep('generating', 'Entwurf erzeugen', modelId)
             maintenanceProgress.value = { ...maintenanceProgress.value, modelId, stage: 'generating' }
+            phase = 'proposal'
             const generate = async (prompt: string, includedSources = 0, maxOutputTokens = 768) => {
               signal.throwIfAborted()
               if (
@@ -660,10 +675,56 @@ export function createMaintenanceWorker(
             }
             work.evidence = reviewedSources
             if (job.task === 'memory' || job.task === 'metadata') {
-              work.changes =
+              const parseProposal = (text: string) =>
                 job.task === 'metadata'
-                  ? parseMemoryAnnotation(output, reviewedSources)
-                  : parseMemoryChangeSet(output, reviewedSources)
+                  ? parseMemoryAnnotation(text, reviewedSources)
+                  : parseMemoryChangeSet(text, reviewedSources)
+              try {
+                work.changes = parseProposal(output)
+              } catch (error) {
+                // Only local, complete proposals with structural parser failures get one correction.
+                // No replay of a failed response and no additional evidence, tools or permissions.
+                if (!isCorrectableMaintenanceFormat(error) || reviewedSources.some(source => source.kind !== 'memory'))
+                  throw error
+                await assertCurrent(job, signal)
+                const fresh = await luczorMemory.maintenanceSnapshot(job.principalId)
+                signal.throwIfAborted()
+                if (
+                  job.task === 'memory' &&
+                  (!fresh.journal.consent?.automaticRewrite ||
+                    !fresh.journal.quality?.passed ||
+                    fresh.journal.quality.modelId !== modelId ||
+                    fresh.journal.quality.policy !== MAINTENANCE_POLICY ||
+                    fresh.journal.quality.catalogHash !== deps.policy().manifest?.payloadSha256)
+                )
+                  throw new Error('quality_gate_required')
+                if (
+                  reviewedSources.some(
+                    source =>
+                      !fresh.records.some(
+                        record =>
+                          record.principalId === job.principalId &&
+                          record.id === source.id &&
+                          memoryRevision(record) === source.revision
+                      )
+                  )
+                )
+                  throw new Error('stale_source')
+                // Snapshot reads yield: check the foreground/account boundary once more before generation.
+                await assertCurrent(job, signal)
+                const detail = maintenanceFailureDetail(error, 'proposal')
+                recordDreamStep('generating', 'Format einmal korrigieren', detail.code)
+                attempt = 2
+                const correction =
+                  'Einmalige Formatkorrektur. Der vorherige Entwurf wurde nicht übernommen. ' +
+                  `Vertragsfehler: ${detail.code}; Feld: ${detail.field ?? '$'}; Erwartet: ${detail.expected ?? 'contract'}. ` +
+                  (detail.operationIndex !== undefined ? `Operationsindex: ${detail.operationIndex}. ` : '') +
+                  'Erstelle aus exakt denselben DATEN einen vollständigen neuen Entwurf. Keine weiteren Leseanfragen, Quellen oder Werkzeuge. ' +
+                  'Die sachliche Gegenprüfung bleibt unverändert.\n' +
+                  maintenancePrompt(work.hydrated.kind, reviewedSources)
+                output = await generate(correction, reviewedSources.length)
+                work.changes = parseProposal(output)
+              }
               if (
                 work.changes.operations.some(operation =>
                   job.task === 'metadata'
@@ -732,6 +793,7 @@ export function createMaintenanceWorker(
             }
             recordDreamStep('verifying', 'Gegenprüfung', `${reviewedSources.length} Quellen`)
             maintenanceProgress.value = { ...maintenanceProgress.value, stage: 'verifying' }
+            phase = 'verification'
             try {
               parseMaintenanceVerification(
                 await generate(
@@ -749,7 +811,6 @@ export function createMaintenanceWorker(
               recordDreamStep('verifying', 'Prüfung bestanden')
             } catch (error) {
               signal.throwIfAborted()
-              work.reviewFailed = true
               recordDreamStep('verifying', 'Prüfung abgelehnt', failureCode(error))
               throw error
             }
@@ -789,37 +850,41 @@ export function createMaintenanceWorker(
             return output
           }, signal)
           .catch((error: unknown) => {
-            if (!signal.aborted) lastFailure = failureCode(error)
+            if (!signal.aborted && epoch === recoveryEpoch) rememberFailure(error, phase, attempt)
             throw error
           })
       },
       async commitCandidate(job, content, signal) {
         const work = selected.get(job.key)
         if (!work || work.output !== content) throw new Error('unverified_candidate')
+        const epoch = recoveryEpoch
         recordDreamStep('committing', 'Übernehmen')
         try {
           await commit(job, content, signal)
         } catch (error) {
-          if (!signal.aborted) lastFailure = failureCode(error)
+          if (!signal.aborted && epoch === recoveryEpoch) rememberFailure(error, 'commit', 1)
           throw error
         }
       },
       async settled(job, success, interrupted) {
         const epoch = recoveryEpoch
-        const reviewFailed = selected.get(job.key)?.reviewFailed
+        const work = selected.get(job.key)
+        const detail = lastFailureDetail
         const deferred = !success && !!idleWaitReason(lastFailure)
         const metadataOptOut =
           !success &&
           job.task === 'metadata' &&
           ['metadata_disabled', 'metadata_annotations_disabled'].includes(lastFailure)
         interrupted ||= deferred || metadataOptOut
+        if (!success && detail && work) recordDreamFailure(detail, work.traceRunId)
         endDreamRun(success ? 'success' : interrupted ? 'interrupted' : 'failed', success ? undefined : lastFailure)
         lastFailure = ''
+        lastFailureDetail = undefined
         if (!success)
           await luczorMemory.updateMaintenance(job.principalId, journal => {
             if (epoch !== recoveryEpoch) throw new DOMException('Recovered owner', 'AbortError')
             failMaintenanceJob(journal, job.key, job.fingerprint, interrupted, Date.now())
-            if (!interrupted && job.task !== 'metadata' && (job.task === 'memory' || reviewFailed) && journal.quality)
+            if (!interrupted && job.task !== 'metadata' && detail?.category === 'semantic' && journal.quality)
               journal.quality = { ...journal.quality, passed: false, reason: 'review_failure' }
           })
         if (epoch !== recoveryEpoch) return
@@ -830,6 +895,7 @@ export function createMaintenanceWorker(
         recoveryEpoch++
         selected.clear()
         lastFailure = ''
+        lastFailureDetail = undefined
         endDreamRun('interrupted', 'global_stop')
         maintenanceProgress.value = { ...maintenanceProgress.value, stage: 'paused' }
       },
@@ -838,6 +904,12 @@ export function createMaintenanceWorker(
   )
   async function commit(job: IdleOptimizationJob, content: string, signal: AbortSignal) {
     const work = selected.get(job.key)!
+    const epoch = recoveryEpoch
+    const committed = () => {
+      if (epoch !== recoveryEpoch) return false
+      commitDreamDecisions(work.traceRunId)
+      return true
+    }
     maintenanceProgress.value = { ...maintenanceProgress.value, stage: 'committing' }
     if (job.key.startsWith('sql:')) {
       await assertCurrent(job, signal)
@@ -845,6 +917,7 @@ export function createMaintenanceWorker(
       if (!adapter || !writableMaintenanceAdapter(adapter) || !work.changes)
         throw new Error('adapter_write_unsupported')
       const result = await adapter.apply!(job.principalId, work.hydrated, work.changes, work.modelId, signal)
+      if (!committed()) return
       await luczorMemory.acknowledgeSharedMaintenance(job.principalId, result.retired ?? [])
       await luczorMemory.updateMaintenance(job.principalId, journal => {
         const saved = journal.jobs.find(item => item.id === job.key && item.revision === job.fingerprint)
@@ -902,6 +975,7 @@ export function createMaintenanceWorker(
         }
         if (complete) journal.evaluationRequested = undefined
       })
+      committed()
       return
     }
     const evidence = work.evidence ?? work.hydrated.material
@@ -961,6 +1035,7 @@ export function createMaintenanceWorker(
               localOnly: true,
             },
     })
+    if (!committed()) return
     window.dispatchEvent(new CustomEvent('luczor:memory-changed', { detail: { origin: 'idle' } }))
     if (job.task !== 'repository' && job.task !== 'metadata') {
       try {
@@ -969,6 +1044,7 @@ export function createMaintenanceWorker(
           expectedPrincipalId: job.principalId,
           signal,
         })
+        if (epoch !== recoveryEpoch) return
         maintenanceProgress.value = {
           ...maintenanceProgress.value,
           provider:

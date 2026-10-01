@@ -19,22 +19,39 @@ fn caller(app: &AppHandle) -> CallerWebview {
 #[test]
 #[ignore = "Creates an isolated hidden native WebView2 session; run explicitly with --test-threads=1"]
 fn native_browser_panel_smoke() {
-    native_probe(false, false);
+    native_probe(false, false, false);
+}
+
+#[test]
+#[ignore = "Creates a unique loopback-only native test profile; visibility is opt-in"]
+fn native_browser_isolated_acceptance() {
+    native_probe(false, false, true);
 }
 
 #[test]
 #[ignore = "Creates an isolated hidden native research/WebView2 session; run explicitly with --test-threads=1"]
 fn native_research_smoke() {
-    native_probe(true, false);
+    native_probe(true, false, false);
 }
 
 #[test]
 #[ignore = "Reads/downloads the public Python robots.txt with native TLS; run explicitly"]
 fn native_research_live_smoke() {
-    native_probe(true, true);
+    native_probe(true, true, false);
 }
 
-fn native_probe(research_only: bool, live_public: bool) {
+fn native_probe(research_only: bool, live_public: bool, isolated_acceptance: bool) {
+    let visible =
+        isolated_acceptance && std::env::var("LUCZOR_BROWSER_PROBE_VISIBLE").as_deref() == Ok("1");
+    let manual_seconds = if visible {
+        std::env::var("LUCZOR_BROWSER_PROBE_MANUAL_SECONDS")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+            .min(300)
+    } else {
+        0
+    };
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let host = listener.local_addr().unwrap().to_string();
@@ -48,8 +65,24 @@ fn native_probe(research_only: bool, live_public: bool) {
                 let mut request = [0u8; 4096];
                 let _ = socket.read(&mut request);
                 let request = String::from_utf8_lossy(&request);
+                if isolated_acceptance && request.starts_with("GET /navigation-failure ") {
+                    // Synthetic, loopback-only failed navigation: close without HTTP
+                    // response so the native engine supplies its own failure code.
+                    let _ = socket.shutdown(std::net::Shutdown::Both);
+                    continue;
+                }
                 let alternate = server_host.replace("127.0.0.1", "localhost");
-                let (mime, page) = if request.starts_with("GET /asset.js ") {
+                let (mime, page) = if isolated_acceptance {
+                    if request.starts_with("GET /probe-download.txt ") {
+                        ("text/plain", "Luczor synthetic download\n".to_string())
+                    } else {
+                        (
+                            "text/html",
+                            include_str!("../../../tests/native/browser-isolated-fixture.html")
+                                .to_string(),
+                        )
+                    }
+                } else if request.starts_with("GET /asset.js ") {
                     (
                         "application/javascript",
                         "document.getElementById('cross').textContent='Cross-domain asset loaded';"
@@ -70,9 +103,19 @@ fn native_probe(research_only: bool, live_public: bool) {
             }
         }
     });
-    let id = uuid::Uuid::new_v4().to_string();
+    let id = if isolated_acceptance {
+        std::env::var("LUCZOR_BROWSER_PROBE_RUN_ID")
+            .ok()
+            .map(|id| uuid::Uuid::parse_str(&id).expect("probe run ID must be a UUID"))
+            .unwrap_or_else(uuid::Uuid::new_v4)
+            .to_string()
+    } else {
+        uuid::Uuid::new_v4().to_string()
+    };
     let root = std::env::temp_dir().join(format!("luczor-browser-probe-{id}"));
-    std::fs::create_dir_all(&root).unwrap();
+    // Reusing a supplied run ID must never silently reuse a previous browser profile.
+    std::fs::create_dir(&root).expect("probe run must use a new temporary workspace");
+    println!("NATIVE_BROWSER_PROBE_RUN: id={id} root={}", root.display());
     let mut context = tauri::generate_context!();
     context.config_mut().identifier = format!("de.luczor.browserprobe.{}", id.replace('-', ""));
     context.config_mut().app.windows.clear();
@@ -87,20 +130,26 @@ fn native_probe(research_only: bool, live_public: bool) {
                 "main",
                 tauri::WebviewUrl::External("about:blank".parse().unwrap()),
             )
-            .visible(false)
+            .title(format!("Luczor — ISOLIERTER BROWSERTEST — {id}"))
+            .visible(visible)
             .inner_size(1100.0, 760.0)
             .build()?;
             let app = app.handle().clone();
             let watchdog = app.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs(45));
+                std::thread::sleep(Duration::from_secs(45 + manual_seconds));
                 watchdog.exit(2);
             });
             tauri::async_runtime::spawn(async move {
-                let result = probe(&app, &root, &host, research_only, live_public).await;
+                let result = if isolated_acceptance {
+                    acceptance::run(&app, &root, &host, &id, visible, manual_seconds).await
+                } else {
+                    probe(&app, &root, &host, research_only, live_public).await
+                };
                 let exit_code = if result.is_ok() { 0 } else { 1 };
                 match &result {
                     Ok(()) if research_only => println!("NATIVE_RESEARCH_SESSION_OK: isolated native research acceptance completed"),
+                    Ok(()) if isolated_acceptance => println!("NATIVE_BROWSER_PROBE_OK: isolated native browser acceptance; see acceptance.json for individual stages and manual status"),
                     Ok(()) => println!("NATIVE_BROWSER_PROBE_OK: child view, semantic scan/refs, isolated world, open shadow root, frames, cross-domain resources/download, local file, stale-ref refusal, form fill/click/read, navigation, collapse/restore, caller isolation, cleanup"),
                     Err(error) => eprintln!("NATIVE_BROWSER_PROBE_FAILED: {error}"),
                 }
@@ -119,6 +168,9 @@ fn native_probe(research_only: bool, live_public: bool) {
         .expect("native probe deadline")
         .expect("native browser contract");
 }
+
+#[path = "browser_panel_acceptance.rs"]
+mod acceptance;
 
 async fn probe(
     app: &AppHandle,
@@ -182,6 +234,7 @@ async fn probe(
         width: 520.0,
         height: 570.0,
         zoom: 0.5,
+        ..Default::default()
     };
     browser_panel_layout(caller(app), app.clone(), placement(true)).await?;
     assert_eq!(
@@ -301,7 +354,7 @@ async fn probe(
         action("click", json!({"selector":apply_ref})),
     )
     .await;
-    assert!(matches!(stale,Err(ref code) if code == "browser_ref_stale"));
+    assert!(matches!(stale,Err(ref error) if error.code() == "browser_ref_stale"));
     let downloaded = workflow_browser::wf_browser_action(app.clone(),caller(app),action("download",json!({"url":format!("http://{}/asset.js",host.replace("127.0.0.1","localhost")),"name":"cross-domain.js"}))).await?;
     assert!(downloaded.data["bytes"].as_u64().unwrap() > 0);
     let local = root.join("Local ä #1.html");

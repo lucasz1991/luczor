@@ -10,7 +10,7 @@ import * as FailureApi from '@/services/inference/localFailure'
 import * as IdleRecoveryApi from '@/services/inference/idleRecovery'
 import type { DreamView } from '@/features/memory/MemoryGraphView.vue'
 
-const status = shallowRef({ phase: 'waiting', reason: 'activity' })
+const status = shallowRef<{ phase: string; reason: string | null }>({ phase: 'waiting', reason: 'activity' })
 const idleApi = {
   idleOptimizationEnabled: shallowRef(true),
   idleOptimizationStatus: status,
@@ -122,7 +122,10 @@ async function mount() {
     props.dream = { ...props.dream, active: !outcome, run: current }
     await nextTick()
   }
-  const message = () => text(nodes(root).find(node => node.props.get('class') === 'dream-panel__message')!)
+  const message = () => {
+    const node = nodes(root).find(node => node.props.get('class') === 'dream-panel__message')
+    return node ? text(node) : ''
+  }
   const offload = () => {
     const node = nodes(root).find(node => node.props.get('class') === 'dream-panel__offload')
     return node ? text(node) : ''
@@ -134,7 +137,7 @@ async function mount() {
     }
     await nextTick()
   }
-  return { root, message, updateRun, offload, updateOffload }
+  return { root, props, message, updateRun, offload, updateOffload }
 }
 beforeEach(() => {
   status.value = { phase: 'waiting', reason: 'activity' }
@@ -146,6 +149,98 @@ afterEach(() => {
 })
 
 describe('dream panel lifecycle', () => {
+  it('labels proposed changes without counting them as already saved', async () => {
+    const panel = await mount()
+    await panel.updateRun('failed', 'invalid_targets')
+    const run: DreamApi.DreamRun = {
+      ...panel.props.dream.run!,
+      decisions: [
+        { at: Date.now(), op: 'remove', targets: [{ kind: 'memory', id: 'synthetic-a' }], effectState: 'proposed' },
+        { at: Date.now(), op: 'create', targets: [{ kind: 'memory', id: 'synthetic-b' }], effectState: 'proposed' },
+      ],
+      failureDetail: {
+        phase: 'proposal',
+        category: 'format',
+        code: 'invalid_targets',
+        field: 'targets',
+        expected: 'exactly_one_target',
+        attempt: 2,
+      },
+    }
+    panel.props.dream = { ...panel.props.dream, run }
+    await nextTick()
+    expect(text(panel.root)).toContain('Entfernen vorgeschlagen')
+    expect(text(panel.root)).toContain('Erstellen vorgeschlagen')
+    expect(text(panel.root)).toContain('0 ersetzt')
+    expect(text(panel.root)).toContain('0 neu')
+    expect(text(panel.root)).toContain('2 vorgeschlagene Schritte')
+    expect(text(panel.root)).toContain('Entwurf · targets · Versuch 2')
+    run.decisions = run.decisions.map(decision => ({ ...decision, effectState: 'committed' }))
+    panel.props.dream = { ...panel.props.dream, run: { ...run, outcome: 'success' } }
+    await nextTick()
+    expect(text(panel.root)).toContain('1 ersetzt')
+    expect(text(panel.root)).toContain('1 neu')
+    expect(text(panel.root)).not.toContain('Entfernen vorgeschlagen')
+    panel.props.dream = { ...panel.props.dream, run: { ...run, outcome: 'failed', committedAt: Date.now() } }
+    await nextTick()
+    expect(text(panel.root)).toContain('gespeichert; Nachbereitung unterbrochen')
+    expect(text(panel.root)).not.toContain('· verworfen')
+  })
+
+  it('clears a previous run message when the account trace is reset', async () => {
+    const panel = await mount()
+    await panel.updateRun('failed', 'runtime_stream_failed')
+    status.value = { phase: 'cooldown', reason: 'failed' }
+    await nextTick()
+    expect(panel.message()).toContain('Lokale Modellausgabe wurde unterbrochen')
+    panel.props.trace = { current: null, history: [], scan: null, lastSkip: null, offload: null }
+    panel.props.dream = { ...panel.props.dream, active: false, run: null }
+    await nextTick()
+    expect(panel.message()).toBe('')
+  })
+
+  it('replaces an old declined manual request with the outcome of a later scheduled run', async () => {
+    const panel = await mount()
+    status.value = { phase: 'paused', reason: 'memory_changed' }
+    await nextTick()
+    expect(panel.message()).toContain('Traum nicht gestartet: Gedächtnis hat sich geändert')
+    const later: DreamApi.DreamRun = {
+      id: 'later-scheduled-run',
+      startedAt: Date.now() + 1000,
+      jobKey: 'synthetic:later',
+      task: 'memory',
+      scope: 'user',
+      steps: [],
+      decisions: [],
+    }
+    panel.props.trace = { ...panel.props.trace, current: later }
+    panel.props.dream = { ...panel.props.dream, run: later, active: true }
+    status.value = { phase: 'running', reason: 'generating' }
+    await nextTick()
+    expect(panel.message()).toContain('Der Traum läuft')
+    const failed = {
+      ...later,
+      outcome: 'failed' as const,
+      error: 'runtime_stream_failed',
+      endedAt: later.startedAt + 1,
+    }
+    panel.props.trace = { ...panel.props.trace, current: null, history: [failed] }
+    panel.props.dream = { ...panel.props.dream, run: failed, active: false }
+    status.value = { phase: 'cooldown', reason: 'failed' }
+    await nextTick()
+    expect(panel.message()).toContain('Lokale Modellausgabe wurde unterbrochen')
+    expect(panel.message()).not.toContain('nicht gestartet')
+  })
+
+  it('does not reuse a skip reason from before the latest run in the current state heading', async () => {
+    const panel = await mount()
+    panel.props.trace = { ...panel.props.trace, lastSkip: { at: Date.now() - 1000, reason: 'memory_changed' } }
+    await panel.updateRun('failed', 'runtime_stream_failed')
+    status.value = { phase: 'paused', reason: null }
+    await nextTick()
+    expect(text(panel.root)).not.toContain('Gedächtnis hat sich geändert')
+  })
+
   it('shows a recoverable model wait instead of reporting broken memory', async () => {
     const panel = await mount()
     await panel.updateRun('interrupted', 'idle_model_cooldown')

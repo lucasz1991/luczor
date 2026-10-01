@@ -1,7 +1,72 @@
 import { describe, expect, it } from 'vitest'
 import { ToolRecoveryGuard } from '@/services/tools/toolRecovery'
+import { browserFailureOutcome } from '@/services/browserFailure'
 
 describe('tool failure recovery', () => {
+  it('keeps unknown outcomes observation-first after the third failure and never clears them through cleanup', () => {
+    const guard = new ToolRecoveryGuard()
+    const code = 'workflow_browser_action_failed_outcome_unknown'
+    let lastOutput: unknown
+    for (let index = 0; index < 3; index++) {
+      const result = guard.record(
+        'browser_click',
+        { selector: `ref:${index}` },
+        browserFailureOutcome({
+          version: 1,
+          code,
+          phase: 'dom_effect',
+          operation: 'click',
+          backend: 'webview2',
+          elapsedMs: 8,
+          outcome: 'unknown',
+        })
+      )
+      expect(result.output).toMatchObject({
+        code,
+        browserFailure: { outcome: 'unknown' },
+        recovery: { code, next_tool: 'browser_dom_scan' },
+      })
+      lastOutput = result.output
+    }
+    expect(lastOutput).toMatchObject({
+      next_tool: 'browser_dom_scan',
+      guidance: expect.stringContaining('Do not repeat'),
+    })
+    const paused = () => {
+      expect(guard.blocked('browser_click', { selector: 'ref:0' })).toMatchObject({
+        ok: false,
+        output: { next_tool: 'browser_dom_scan', guidance: expect.stringContaining('Do not repeat') },
+      })
+      expect(guard.canOffer('browser_dom_scan')).toBe(true)
+      expect(guard.canOffer('browser_status')).toBe(true)
+      expect(guard.canOffer('fs_read')).toBe(true)
+    }
+    paused()
+    guard.record('browser_close', {}, { ok: true, output: { closed: true } })
+    paused()
+    guard.record('browser_dom_scan', {}, { ok: true, output: { elements: [] } })
+    paused()
+  })
+  it.each(['workflow_browser_navigation_superseded', 'workflow_browser_navigation_failed'])(
+    'observes %s instead of repeating or closing an uncertain operation',
+    code => {
+      const guard = new ToolRecoveryGuard()
+      const failure = browserFailureOutcome({
+        version: 1,
+        code,
+        phase: 'navigation',
+        operation: 'navigate',
+        backend: 'webview2',
+        elapsedMs: 8,
+        outcome: 'unknown',
+      })
+      const result = guard.record('browser_navigate', { url: 'https://example.test' }, failure)
+      expect(result.output).toMatchObject({
+        browserFailure: { code, outcome: 'unknown' },
+        recovery: { code, next_tool: 'browser_dom_scan', guidance: expect.stringContaining('Do not repeat') },
+      })
+    }
+  )
   it('bounds identical successful discovery loops and keeps the exact previous file target usable', () => {
     const guard = new ToolRecoveryGuard()
     const outcome = { ok: true, output: { entries: [{ path: 'exact.ts', kind: 'file', file_ref: 'file_exact' }] } }

@@ -16,6 +16,8 @@ const mocks = vi.hoisted(() => ({
   setLastTool: vi.fn(),
   logAgentEvent: vi.fn(),
   createAdaptiveAssistance: vi.fn(),
+  recordTrace: vi.fn(),
+  traceEnabled: vi.fn(),
   hud: { killSwitch: false },
 }))
 
@@ -55,6 +57,11 @@ vi.mock('@/state/hud', () => ({
 }))
 vi.mock('@/services/api/sync', () => ({ logAgentEvent: mocks.logAgentEvent }))
 vi.mock('@/services/agents/adaptiveAssistance', () => ({ createAdaptiveAssistance: mocks.createAdaptiveAssistance }))
+vi.mock('@/services/debugTrace', () => ({
+  recordTrace: mocks.recordTrace,
+  traceEnabled: mocks.traceEnabled,
+  debugScope: vi.fn(async () => 'test-browser-diagnostics'),
+}))
 
 import { runAgent } from '@/services/agent'
 import { executionGate } from '@/services/executionGate'
@@ -93,6 +100,7 @@ describe('runAgent auto execution', () => {
     mocks.hud.killSwitch = false
     mocks.toOpenAITools.mockReturnValue([])
     mocks.loadExecutionPolicy.mockResolvedValue({ autoExecuteMutatingTools: true })
+    mocks.traceEnabled.mockResolvedValue(false)
   })
 
   function researchTool(): ToolDef {
@@ -153,7 +161,12 @@ describe('runAgent auto execution', () => {
     mocks.streamChatWithTools
       .mockImplementationOnce(async () => {
         await assistance.execute(
-          { target: 'local', role: 'review', task: 'Analyze the supplied evidence.', tools: ['context_read', submit.name] },
+          {
+            target: 'local',
+            role: 'review',
+            task: 'Analyze the supplied evidence.',
+            tools: ['context_read', submit.name],
+          },
           new AbortController().signal
         )
         return { content: 'Analyse übernommen.', toolCalls: [], rawToolCalls: [] }
@@ -505,5 +518,55 @@ describe('runAgent auto execution', () => {
       (message: { role: string }) => message.role === 'tool'
     )
     expect(JSON.parse(feedback.content)).toMatchObject({ ok: false, error: expect.stringContaining(expectedError) })
+  })
+
+  it('carries safe native browser diagnostics into tool feedback and the existing debug event without replay', async () => {
+    const failure = {
+      version: 1,
+      code: 'workflow_browser_action_failed_outcome_unknown',
+      phase: 'dom_effect',
+      operationId: 'e965c1c9-b415-41a7-b705-6e615a7351e5',
+      operation: 'click',
+      backend: 'webview2',
+      elapsedMs: 17,
+      outcome: 'unknown',
+    }
+    mocks.traceEnabled.mockResolvedValue(true)
+    mocks.canAutoExecuteTool.mockReturnValue(true)
+    mocks.getTool.mockReturnValue({
+      name: 'browser_click',
+      category: 'app',
+      mutating: true,
+      requiresApproval: true,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    const call = {
+      content: '',
+      toolCalls: [{ id: 'browser-call', name: 'browser_click', arguments: { selector: 'ref:observed' } }],
+      rawToolCalls: [],
+    }
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(call)
+      .mockResolvedValueOnce({ ...call, toolCalls: [{ ...call.toolCalls[0], id: 'browser-repeat' }] })
+      .mockResolvedValueOnce({
+        content: 'Unbekannte Wirkung; erneute Beobachtung nötig.',
+        toolCalls: [],
+        rawToolCalls: [],
+      })
+    mocks.execute.mockRejectedValue({ ...failure, url: 'https://PRIVATE.test', value: 'PRIVATE', reasoning: 'PRIVATE' })
+    await runAgent({ projectId: 'p1', baseMessages: [], mode: 'act' })
+    const feedback = mocks.streamChatWithTools.mock.calls[1]![0].messages.find(
+      (message: { role: string }) => message.role === 'tool'
+    )
+    expect(JSON.parse(feedback.content)).toMatchObject({
+      ok: false,
+      output: { browserFailure: failure, recovery: { next_tool: 'browser_dom_scan' } },
+    })
+    expect(feedback.content).not.toContain('PRIVATE')
+    const event = mocks.recordTrace.mock.calls.find(([kind]) => kind === 'tool.response')
+    expect(event?.[1]).toMatchObject({ status: 'failed', outcome: { output: { browserFailure: failure } } })
+    expect(JSON.stringify(event)).not.toContain('PRIVATE')
+    expect(mocks.execute).toHaveBeenCalledTimes(1)
   })
 })

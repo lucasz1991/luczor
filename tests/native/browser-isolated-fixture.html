@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" />
+  <title>Luczor isolated browser test</title>
+  <style>
+    body {
+      max-width: 760px;
+      margin: 32px auto;
+      padding: 24px;
+      font: 18px system-ui;
+      background: #f4f6fa;
+      color: #182332;
+    }
+    h1 {
+      font-size: 28px;
+    }
+    label {
+      display: block;
+      margin: 20px 0;
+    }
+    input,
+    select,
+    button {
+      font: inherit;
+      padding: 8px;
+      margin: 4px;
+    }
+    #notice {
+      padding: 14px;
+      border: 2px solid #326fc8;
+    }
+    output,
+    #manual-status {
+      display: block;
+      margin: 12px 0;
+    }
+  </style>
+  <h1>Luczor — isolated browser test</h1>
+  <p id="notice">Synthetic local page. No accounts, existing projects or memories.</p>
+  <p id="location"></p>
+  <label>Name <input id="name" autocomplete="off" /></label>
+  <button id="apply" type="button">Apply</button>
+  <output id="result">Pending</output>
+  <label
+    >Platform
+    <select id="platform">
+      <option value="windows">Windows</option>
+      <option value="linux">Linux</option>
+    </select></label
+  >
+  <output id="selection">windows</output>
+  <button id="reveal" type="button">Reveal dynamic action</button>
+  <div id="dynamic"></div>
+  <output id="dynamic-result">Pending</output>
+  <p>
+    <a id="next" href="/second">Next local page</a> ·
+    <a id="download" href="/probe-download.txt" download>Download synthetic text</a>
+  </p>
+  <section id="manual" hidden>
+    <h2>Direct manual check</h2>
+    <p>
+      Enter <strong>Manual Luczor</strong>, click Apply, select Linux, reveal and click the dynamic action, then
+      confirm.
+    </p>
+    <button id="manual-confirm" type="button">Confirm manual check</button>
+    <output id="manual-status">Not confirmed</output>
+  </section>
+  <script>
+    document.getElementById('location').textContent = location.pathname
+    document.getElementById('apply').onclick = () => {
+      document.getElementById('result').textContent = document.getElementById('name').value
+    }
+    document.getElementById('platform').onchange = event => {
+      document.getElementById('selection').textContent = event.target.value
+    }
+    document.getElementById('reveal').onclick = () => {
+      setTimeout(() => {
+        const button = document.createElement('button')
+        button.id = 'dynamic-action'
+        button.textContent = 'Dynamic action'
+        button.onclick = () => {
+          document.getElementById('dynamic-result').textContent = 'Done'
+        }
+        document.getElementById('dynamic').replaceChildren(button)
+      }, 180)
+    }
+    if (location.pathname === '/manual') document.getElementById('manual').hidden = false
+    document.getElementById('manual-confirm').onclick = () => {
+      const passed =
+        document.getElementById('result').textContent === 'Manual Luczor' &&
+        document.getElementById('selection').textContent === 'linux' &&
+        document.getElementById('dynamic-result').textContent === 'Done'
+      document.getElementById('manual-status').textContent = passed
+        ? 'Confirmed'
+        : 'Incomplete; follow all manual steps'
+    }
+  </script>
+</html>

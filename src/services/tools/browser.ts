@@ -2,7 +2,8 @@ import type { ToolDef, ToolContext } from './types'
 import { acquireBrowserToolSession, closeToolSession, findToolSession, getToolSession } from './toolSessionCoordinator'
 import { researchBrowserQueue } from '@/services/research/browserQueue'
 import { validateToolArguments } from './validateArguments'
-import { browserPanel, browserFailure, revealBrowserPanel } from '@/services/browserPanel'
+import { browserPanel, revealBrowserPanel } from '@/services/browserPanel'
+import { browserFailureError } from '@/services/browserFailure'
 import { loadDesktopControl } from '@/services/desktopControl'
 import { browserNavigationUrl } from '@/services/browserNavigation'
 
@@ -73,7 +74,11 @@ async function browser(ctx: ToolContext, action: string, args: Record<string, un
       try {
         return await browser.open(target, options)
       } catch (error) {
-        await closeToolSession(session.meta.id)
+        try {
+          await closeToolSession(session.meta.id)
+        } catch (cleanupError) {
+          throw browserFailureError(error, cleanupError)
+        }
         throw error
       }
     case 'navigate':
@@ -140,9 +145,9 @@ function define(
         if (action === 'open') await acquireBrowserToolSession(ctx)
         return await researchBrowserQueue.run(() => browser(ctx, action, args), ctx.signal ?? ctx.execution?.signal)
       } catch (error) {
-        const message = browserFailure(error)
-        browserPanel.error = message
-        throw new Error(message)
+        const failure = browserFailureError(error)
+        browserPanel.error = failure.message
+        throw failure
       }
     },
   }

@@ -94,6 +94,7 @@ import { withRunResources } from '@/services/runs/resourceCoordinator'
 import { freezeAgentWorkflowScope, WORKFLOW_WORKCOPY_TOOLS } from '@/services/agents/workflowScope'
 import { toolArgumentFailure, validateToolArguments } from '@/services/tools/validateArguments'
 import { ToolRecoveryGuard } from '@/services/tools/toolRecovery'
+import { browserFailureOutcome } from '@/services/browserFailure'
 import { retainToolSessionRun } from '@/services/tools/toolSessionCoordinator'
 import { isResearchProbe } from '@/services/research/probes'
 import { INVALID_TOOL_ARGUMENTS, prepareToolCallHistory } from '@/services/inference/toolCallHistory'
@@ -2743,10 +2744,10 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       } catch (e: any) {
         if (e instanceof ChatEffectJournalError || e instanceof ToolExecutionAuthorityError) throw e
         if (execution.signal.aborted) throw new DOMException('Aborted', 'AbortError')
-        const outcome = toolRecovery.record(call.name, executionArguments, {
-          ok: false,
-          error: e?.message ?? String(e),
-        })
+        const failure = call.name.startsWith('browser_')
+          ? browserFailureOutcome(e)
+          : { ok: false, error: e?.message ?? String(e) }
+        const outcome = toolRecovery.record(call.name, executionArguments, failure)
         toolFailures++
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(

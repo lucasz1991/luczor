@@ -1,5 +1,6 @@
 //! WebKitGTK uses its own isolated world; no Luczor domain/content filters.
 use super::*;
+use glib::translate::ToGlibPtr;
 use javascriptcore::ValueExt;
 use webkit2gtk::{LoadEvent, SnapshotOptions, SnapshotRegion, WebViewExt};
 
@@ -27,10 +28,19 @@ pub(super) async fn install_navigation_tracking(
                         }
                     }
                 });
-                view.connect_load_failed(move |_, _, _, _| {
+                view.connect_load_failed(move |_, _, _, error| {
                     if let Ok(mut tracker) = session.navigation.lock() {
                         let id = tracker.generation;
-                        tracker.finished(id, false);
+                        // GLib 0.18 exposes GError's numeric code through the borrowed
+                        // C struct. The callback owns this error for the entire read.
+                        let native_error: *const glib::ffi::GError = error.to_glib_none().0;
+                        let code = unsafe { (*native_error).code };
+                        tracker.finished_with_detail(
+                            id,
+                            false,
+                            Some(code),
+                            Some(error.domain().as_str()),
+                        );
                     }
                     false
                 });

@@ -5,6 +5,7 @@ import { emptyMaintenanceJournal, type MaintenanceJournal } from '@/services/mem
 import type { idleOptimizationDependencies } from '@/services/agents/idleOptimization'
 import { memoryUsageEvents, resetMemoryUsage } from '@/services/memory/usage'
 import { applyMemoryAnnotation, captureMemoryMetadata } from '@/services/memory/memoryMetadata'
+import { IDLE_WAIT_LABELS } from '@/services/inference/idleRecovery'
 const fixture = vi.hoisted(() => ({
   journal: null as MaintenanceJournal | null,
   writes: [] as string[],
@@ -93,6 +94,7 @@ function setup() {
   return { project, deps, stream, create }
 }
 beforeEach(() => {
+  vi.stubGlobal('window', new EventTarget())
   resetMemoryUsage()
   vi.useFakeTimers()
   fixture.journal = emptyMaintenanceJournal()
@@ -106,6 +108,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.clearAllTimers()
   vi.useRealTimers()
+  vi.unstubAllGlobals()
 })
 async function run(optimizer: ReturnType<typeof createMaintenanceWorker>) {
   optimizer.start()
@@ -114,6 +117,321 @@ async function run(optimizer: ReturnType<typeof createMaintenanceWorker>) {
   await vi.waitFor(() => expect(['cooldown', 'paused']).toContain(optimizer.snapshot().phase))
 }
 describe('mounted persistent maintenance worker', () => {
+  function memoryCase() {
+    const test = setup()
+    fixture.records = [
+      {
+        ...candidate(),
+        id: 'm1',
+        source: 'user',
+        writeIntent: 'explicit',
+        status: 'active',
+        content: 'Elbe nutzt docs/start.md. Nur nach Prüfung ändern.',
+        contentHash: 'source-v1',
+      },
+    ]
+    fixture.journal!.consent = { automaticRewrite: true, installedModelStart: false, metadataAnnotations: false }
+    fixture.journal!.quality = {
+      policy: 'luczor-maintenance-v1',
+      modelId: 'installed',
+      passed: true,
+      at: Date.now(),
+      catalogHash: 'signed',
+      reason: 'passed',
+    }
+    const content = JSON.stringify({
+      operations: [
+        {
+          operation: 'rewrite',
+          targets: ['m1'],
+          sources: ['m1'],
+          content: 'Elbe nutzt docs/start.md. Nur nach Prüfung ändern.',
+          reason: 'Synthetischer Test.',
+        },
+      ],
+    })
+    const valid = async (request: { messages: Array<{ content: string }> }) => ({
+      content: request.messages[1]!.content.startsWith('Unabhängige Prüfung')
+        ? JSON.stringify({
+            approved: true,
+            checkedSources: ['m1'],
+            unsupportedFacts: false,
+            lostFacts: false,
+            lostConstraints: false,
+            temporalConflict: false,
+          })
+        : content,
+      toolCalls: [],
+      rawToolCalls: [],
+      finishReason: 'stop',
+    })
+    test.stream.mockImplementation(valid)
+    fixture.apply.mockImplementation(async input => {
+      await input.validate()
+      fixture.writes.push(JSON.stringify(input.changes))
+      fixture.journal!.jobs.find(job => job.id === input.jobId)!.status = 'completed'
+    })
+    return { ...test, valid, malformed: content.replace('"targets":["m1"]', '"targets":[]') }
+  }
+
+  it('corrects one structural proposal error using the same evidence, then independently verifies once', async () => {
+    const test = memoryCase()
+    test.stream.mockImplementationOnce(async request => ({ ...(await test.valid(request)), content: test.malformed }))
+    const worker = test.create()
+    try {
+      await run(worker)
+      expect(test.stream).toHaveBeenCalledTimes(3)
+      expect(test.stream.mock.calls[1]![0].messages[1]!.content).toContain('invalid_targets')
+      const evidence = (prompt: string) => prompt.slice(prompt.indexOf('\nDATEN:\n'))
+      expect(evidence(test.stream.mock.calls[1]![0].messages[1]!.content)).toBe(
+        evidence(test.stream.mock.calls[0]![0].messages[1]!.content)
+      )
+      expect(test.stream.mock.calls[2]![0].messages[1]!.content).toMatch(/^Unabhängige Prüfung/)
+      expect(test.stream.mock.calls[0]![0]).toMatchObject({ tools: [], toolChoice: 'none', maxOutputTokens: 768 })
+      expect(test.stream.mock.calls[1]![0]).toMatchObject({ tools: [], toolChoice: 'none', maxOutputTokens: 768 })
+      expect(test.stream.mock.calls[2]![0]).toMatchObject({ tools: [], toolChoice: 'none', maxOutputTokens: 384 })
+      expect(fixture.writes).toHaveLength(1)
+      expect(fixture.journal!.quality?.passed).toBe(true)
+    } finally {
+      await worker.stop()
+    }
+  })
+
+  it('bounds structural correction to one retry and leaves the quality gate unchanged', async () => {
+    const test = memoryCase()
+    test.stream.mockImplementation(async request => ({ ...(await test.valid(request)), content: test.malformed }))
+    const worker = test.create()
+    try {
+      await run(worker)
+      expect(test.stream).toHaveBeenCalledTimes(2)
+      expect(fixture.writes).toHaveLength(0)
+      expect(fixture.journal!.quality?.passed).toBe(true)
+      expect(fixture.journal!.jobs.find(job => job.kind === 'memory')).toMatchObject({ status: 'retry', attempts: 1 })
+      const { dreamTrace } = await import('@/services/memory/dreamTrace')
+      expect(dreamTrace.value.history[0]?.failureDetail).toMatchObject({
+        phase: 'proposal',
+        category: 'format',
+        code: 'invalid_targets',
+        attempt: 2,
+        operationIndex: 0,
+        field: 'targets',
+        expected: 'exactly_one_source_id',
+      })
+    } finally {
+      await worker.stop()
+    }
+  })
+
+  it.each(['runtime_stream_failed', 'runtime_total_timeout'] as const)(
+    'does not retry %s or invalidate the rewrite gate',
+    async code => {
+      const test = memoryCase()
+      test.stream.mockRejectedValue(new Error(code))
+      const worker = test.create()
+      try {
+        await run(worker)
+        expect(test.stream).toHaveBeenCalledOnce()
+        expect(fixture.writes).toHaveLength(0)
+        expect(fixture.journal!.quality?.passed).toBe(true)
+      } finally {
+        await worker.stop()
+      }
+    }
+  )
+
+  it.each(['installed_model_unavailable', 'idle_model_not_ready', 'runtime_not_configured', 'model_files_unavailable'])(
+    'retains preparation failure %s in the completed trace without starting inference',
+    async code => {
+      const test = memoryCase()
+      test.deps.prepare = vi.fn(async () => {
+        throw Object.assign(new Error('PRIVATE native detail'), { code })
+      })
+      const worker = test.create()
+      try {
+        await run(worker)
+        const { dreamTrace } = await import('@/services/memory/dreamTrace')
+        expect(test.stream).not.toHaveBeenCalled()
+        expect(fixture.writes).toHaveLength(0)
+        expect(fixture.journal!.quality?.passed).toBe(true)
+        expect(dreamTrace.value.history[0]).toMatchObject({
+          error: code,
+          failureDetail: { code, phase: 'runtime', category: 'runtime' },
+        })
+        expect(JSON.stringify(dreamTrace.value.history[0])).not.toContain('PRIVATE native detail')
+      } finally {
+        await worker.stop()
+      }
+    }
+  )
+
+  it('rechecks source revision before correcting format and rejects stale evidence', async () => {
+    const test = memoryCase()
+    test.stream.mockImplementationOnce(async request => {
+      fixture.records[0]!.contentHash = 'source-v2'
+      return { ...(await test.valid(request)), content: test.malformed }
+    })
+    const worker = test.create()
+    try {
+      await run(worker)
+      expect(test.stream).toHaveBeenCalledOnce()
+      expect(fixture.writes).toHaveLength(0)
+      expect(fixture.journal!.quality?.passed).toBe(true)
+    } finally {
+      await worker.stop()
+    }
+  })
+
+  it.each(['unknown_source', 'lost_reference', 'missing_evidence'] as const)(
+    'does not correct semantic failure %s and closes the rewrite gate',
+    async cause => {
+      const test = memoryCase()
+      test.stream.mockImplementationOnce(async request => {
+        const result = await test.valid(request)
+        const changes = JSON.parse(result.content)
+        if (cause === 'unknown_source') changes.operations[0].sources.push('invented')
+        if (cause === 'lost_reference') changes.operations[0].content = 'Nur nach Prüfung ändern.'
+        if (cause === 'missing_evidence') changes.operations[0].sources = []
+        return { ...result, content: JSON.stringify(changes) }
+      })
+      const worker = test.create()
+      try {
+        await run(worker)
+        expect(test.stream).toHaveBeenCalledOnce()
+        expect(fixture.writes).toHaveLength(0)
+        expect(fixture.journal!.quality).toMatchObject({ passed: false, reason: 'review_failure' })
+      } finally {
+        await worker.stop()
+      }
+    }
+  )
+
+  it('never retries malformed verification and keeps existing quality approval', async () => {
+    const test = memoryCase()
+    test.stream.mockImplementation(async request => ({
+      ...(await test.valid(request)),
+      ...(request.messages[1]!.content.startsWith('Unabhängige Prüfung') ? { content: '{broken SECRET}' } : {}),
+    }))
+    const worker = test.create()
+    try {
+      await run(worker)
+      expect(test.stream).toHaveBeenCalledTimes(2)
+      expect(fixture.writes).toHaveLength(0)
+      expect(fixture.journal!.quality?.passed).toBe(true)
+      const { dreamTrace } = await import('@/services/memory/dreamTrace')
+      expect(dreamTrace.value.history[0]?.failureDetail).toMatchObject({
+        phase: 'verification',
+        code: 'invalid_maintenance_json',
+        category: 'format',
+      })
+      expect(JSON.stringify(dreamTrace.value.history[0])).not.toContain('SECRET')
+      expect(
+        dreamTrace.value.history[0]?.decisions
+          .filter(item => item.op !== 'read')
+          .every(item => item.effectState === 'proposed')
+      ).toBe(true)
+    } finally {
+      await worker.stop()
+    }
+  })
+
+  it('does not generate a correction after the foreground starts or rewrite consent is withdrawn', async () => {
+    for (const reason of ['foreground', 'consent'] as const) {
+      fixture.journal = emptyMaintenanceJournal()
+      fixture.writes = []
+      const test = memoryCase()
+      let busy = false
+      test.stream.mockImplementationOnce(async request => {
+        if (reason === 'foreground') busy = true
+        else fixture.journal!.consent!.automaticRewrite = false
+        return { ...(await test.valid(request)), content: test.malformed }
+      })
+      const worker = createMaintenanceWorker({ project: () => test.project, busy: () => busy }, test.deps, () => true)
+      try {
+        await run(worker)
+        expect(test.stream).toHaveBeenCalledOnce()
+        expect(fixture.writes).toHaveLength(0)
+        expect(fixture.journal!.quality?.passed).toBe(true)
+      } finally {
+        await worker.stop()
+      }
+    }
+  })
+
+  it('does not reopen a previously closed rewrite gate after unrelated successful context work', async () => {
+    const test = setup()
+    fixture.journal!.quality = {
+      policy: 'luczor-maintenance-v1',
+      modelId: 'installed',
+      catalogHash: 'signed',
+      passed: false,
+      at: 1,
+      reason: 'review_failure',
+    }
+    const worker = test.create()
+    try {
+      await run(worker)
+      expect(fixture.writes).toHaveLength(1)
+      expect(fixture.journal!.quality).toMatchObject({ passed: false, reason: 'review_failure' })
+    } finally {
+      await worker.stop()
+    }
+  })
+
+  it('keeps persisted decisions committed when a foreground stop interrupts post-processing', async () => {
+    const { dreamTrace, resetDreamTraceForTests } = await import('@/services/memory/dreamTrace')
+    resetDreamTraceForTests()
+    const test = memoryCase()
+    const worker = test.create()
+    let stopping: Promise<void> | undefined
+    test.deps.improve = async (_scope, options) => {
+      stopping = worker.stop()
+      options?.signal?.throwIfAborted()
+      return 'not_scheduled'
+    }
+    worker.start()
+    worker.requestNow()
+    await vi.advanceTimersByTimeAsync(2)
+    await vi.waitFor(() => expect(stopping).toBeDefined())
+    await stopping
+    expect(fixture.writes).toHaveLength(1)
+    expect(fixture.journal!.jobs.find(job => job.kind === 'memory')?.status).toBe('completed')
+    const run = dreamTrace.value.history[0]!
+    expect(run.committedAt).toBeDefined()
+    expect(run.decisions.filter(item => item.op !== 'read').every(item => item.effectState === 'committed')).toBe(true)
+    resetDreamTraceForTests()
+  })
+
+  it('does not mark a newer dream committed when an older durable write returns after recovery', async () => {
+    const { beginDreamRun, dreamTrace, resetDreamTraceForTests } = await import('@/services/memory/dreamTrace')
+    resetDreamTraceForTests()
+    const test = memoryCase()
+    const apply = fixture.apply.getMockImplementation()!
+    let release!: () => void
+    const pending = new Promise<void>(resolve => {
+      release = resolve
+    })
+    fixture.apply.mockImplementation(async input => {
+      await apply(input)
+      await pending
+    })
+    const improve = vi.fn(async () => 'not_scheduled' as const)
+    test.deps.improve = improve
+    const worker = test.create()
+    worker.start()
+    worker.requestNow()
+    await vi.advanceTimersByTimeAsync(2)
+    await vi.waitFor(() => expect(fixture.writes).toHaveLength(1))
+    const stopping = worker.stop()
+    worker.recoverAfterStop()
+    beginDreamRun({ jobKey: 'new-owner', task: 'context', scope: 'user', sources: [] })
+    const current = dreamTrace.value.current
+    release()
+    await stopping
+    expect(dreamTrace.value.current).toBe(current)
+    expect(improve).not.toHaveBeenCalled()
+    resetDreamTraceForTests()
+  })
+
   it('drains guest capture locally only with an active runtime policy', async () => {
     const testCase = setup()
     testCase.deps.account = async () => null
@@ -386,7 +704,7 @@ describe('mounted persistent maintenance worker', () => {
       optimizer.stop()
     }
   })
-  it.each(['idle_model_busy', 'idle_model_cooldown', 'model_cooldown', 'resource_background_unavailable'])(
+  it.each(Object.keys(IDLE_WAIT_LABELS))(
     'defers %s without burning source retries or closing the quality gate',
     async reason => {
       const testCase = setup()

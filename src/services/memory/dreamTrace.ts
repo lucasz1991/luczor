@@ -1,4 +1,5 @@
 import { shallowRef } from 'vue'
+import type { MaintenanceFailureDetail } from './maintenance'
 
 /**
  * Session-local, bounded trace of idle memory maintenance ("dreaming").
@@ -19,6 +20,8 @@ export type DreamDecision = {
   op: DreamOperation
   targets: DreamTarget[]
   reason?: string
+  /** Missing on older traces: never infer a committed write from a proposal. */
+  effectState?: 'proposed' | 'committed'
 }
 
 export type DreamStep = { at: number; stage: DreamStage; title: string; detail?: string }
@@ -27,6 +30,7 @@ export type DreamRun = {
   id: string
   startedAt: number
   endedAt?: number
+  committedAt?: number
   jobKey: string
   task: 'context' | 'memory' | 'metadata' | 'repository' | 'evaluation' | 'shared'
   scope: 'user' | 'project'
@@ -36,6 +40,7 @@ export type DreamRun = {
   decisions: DreamDecision[]
   outcome?: 'success' | 'failed' | 'interrupted'
   error?: string
+  failureDetail?: MaintenanceFailureDetail
 }
 
 export type DreamTrace = {
@@ -75,6 +80,14 @@ export function dreamTargetLabel(target: DreamTarget): string {
   return target.label ?? target.id
 }
 
+/** An eligibility refusal from before a newer run is historical, not its current status. */
+export function currentDreamSkip(trace: DreamTrace): DreamTrace['lastSkip'] {
+  const skip = trace.lastSkip
+  const latest = trace.current ?? trace.history[0]
+  if (!skip || trace.current || (latest && skip.at <= (latest.endedAt ?? latest.startedAt))) return null
+  return skip
+}
+
 /** Eligibility declined; only reason changes are recorded so polling stays quiet. */
 export function recordDreamSkip(reason: string): void {
   const last = dreamTrace.value.lastSkip
@@ -104,7 +117,7 @@ export function beginDreamRun(input: {
   projectId?: string
   sources: DreamTarget[]
   reason?: string
-}): void {
+}): string {
   const now = Date.now()
   const stale = dreamTrace.value.current
   const history = stale
@@ -145,6 +158,7 @@ export function beginDreamRun(input: {
           {
             at: now,
             op: 'read',
+            effectState: 'committed',
             targets: input.sources.map(target => ({ ...target, label: label(target.label) })),
             reason: 'Quellen werden gelesen',
           },
@@ -152,6 +166,7 @@ export function beginDreamRun(input: {
       : [],
   }
   patch({ current: run, history: history.slice(0, MAX_HISTORY), lastSkip: null })
+  return run.id
 }
 
 export function recordDreamStep(stage: DreamStage, title: string, detail?: string): void {
@@ -182,12 +197,50 @@ export function recordDreamDecision(op: DreamOperation, targets: DreamTarget[], 
         {
           at: Date.now(),
           op,
+          effectState: op === 'read' ? ('committed' as const) : ('proposed' as const),
           targets: targets.map(target => ({ ...target, label: label(target.label) })),
           reason: label(reason),
         },
       ].slice(-MAX_DECISIONS),
     },
   })
+}
+
+/** Called only after the worker's verified atomic commit has completed. */
+export function commitDreamDecisions(expectedRunId?: string): void {
+  const run = dreamTrace.value.current
+  if (!run || (expectedRunId !== undefined && run.id !== expectedRunId)) return
+  patch({
+    current: {
+      ...run,
+      committedAt: run.committedAt ?? Date.now(),
+      decisions: run.decisions.map(decision => ({ ...decision, effectState: 'committed' })),
+    },
+  })
+}
+
+export function recordDreamFailure(detail: MaintenanceFailureDetail, expectedRunId?: string): void {
+  const run = dreamTrace.value.current
+  if (!run || (expectedRunId !== undefined && run.id !== expectedRunId)) return
+  // Only the typed diagnostic contract, never response text or extra error properties.
+  patch({
+    current: {
+      ...run,
+      failureDetail: {
+        phase: detail.phase,
+        category: detail.category,
+        code: detail.code,
+        ...(detail.operationIndex !== undefined ? { operationIndex: detail.operationIndex } : {}),
+        ...(detail.field ? { field: detail.field } : {}),
+        ...(detail.expected ? { expected: detail.expected } : {}),
+        ...(detail.attempt !== undefined ? { attempt: detail.attempt } : {}),
+      },
+    },
+  })
+}
+
+export function dreamDecisionCommitted(decision: DreamDecision): boolean {
+  return decision.op === 'read' || decision.effectState === 'committed'
 }
 
 export function endDreamRun(outcome: NonNullable<DreamRun['outcome']>, error?: string): void {
@@ -198,7 +251,14 @@ export function endDreamRun(outcome: NonNullable<DreamRun['outcome']>, error?: s
   const finalStep: DreamStep = {
     at: now,
     stage,
-    title: outcome === 'success' ? 'Abgeschlossen' : outcome === 'failed' ? 'Verworfen' : 'Unterbrochen',
+    title:
+      outcome === 'success'
+        ? 'Abgeschlossen'
+        : run.committedAt !== undefined
+          ? 'Nach Speichern unterbrochen'
+          : outcome === 'failed'
+            ? 'Verworfen'
+            : 'Unterbrochen',
     detail: label(error),
   }
   const finished: DreamRun = {
@@ -232,6 +292,7 @@ export function dreamEffects(trace: DreamTrace): {
   if (run) {
     const recent = !run.endedAt || Date.now() - run.endedAt < 15_000
     for (const decision of run.decisions) {
+      if (!dreamDecisionCommitted(decision)) continue
       for (const target of decision.targets) {
         const id = dreamNodeId(target)
         if (!recent) continue
@@ -275,6 +336,23 @@ export const DREAM_OPERATION_LABELS: Record<DreamOperation, string> = {
   create: 'erzeugt',
   artifact: 'Kontextpaket',
   annotate: 'Metadaten ergänzt',
+}
+
+const PROPOSED_OPERATION_LABELS: Record<DreamOperation, string> = {
+  read: 'gelesen',
+  keep: 'Beibehalten vorgeschlagen',
+  rewrite: 'Umschreiben vorgeschlagen',
+  merge: 'Zusammenführen vorgeschlagen',
+  conflict: 'Konfliktmarkierung vorgeschlagen',
+  remove: 'Entfernen vorgeschlagen',
+  create: 'Erstellen vorgeschlagen',
+  artifact: 'Kontextpaket vorgeschlagen',
+  annotate: 'Metadaten vorgeschlagen',
+}
+
+export function dreamDecisionLabel(decision: DreamDecision): string {
+  // Operation names belong to the typed local trace contract.
+  return (dreamDecisionCommitted(decision) ? DREAM_OPERATION_LABELS : PROPOSED_OPERATION_LABELS)[decision.op]
 }
 
 export const DREAM_SKIP_LABELS: Record<string, string> = {

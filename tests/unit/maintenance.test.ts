@@ -12,6 +12,8 @@ import {
   maintenanceBatchChars,
   partitionMaintenanceSources,
   maintenancePrompt,
+  maintenanceFailureDetail,
+  isCorrectableMaintenanceFormat,
   verificationPrompt,
   type MaintenanceJob,
 } from '@/services/memory/maintenance'
@@ -42,6 +44,147 @@ const sources = [
   },
 ]
 describe('durable maintenance policy', () => {
+  it('documents the target contract used by every memory parser operation', () => {
+    const prompt = maintenancePrompt('memory', sources)
+    expect(prompt).toContain('rewrite: targets enthält genau eine')
+    expect(prompt).toContain('merge: targets enthält mindestens zwei')
+    expect(prompt).toContain('add, conflict und noop: targets ist immer []')
+    expect(prompt).toContain('Alle targets müssen auch in sources stehen')
+    const pair = [...sources, { ...sources[0]!, id: 'b' }]
+    for (const [operation, targets] of [
+      ['rewrite', ['a']],
+      ['merge', ['a', 'b']],
+      ['add', []],
+      ['conflict', []],
+      ['noop', []],
+    ] as const) {
+      expect(
+        parseMemoryChangeSet(
+          JSON.stringify({
+            operations: [{ operation, targets, sources: ['a', 'b'], content: 'Beleg', reason: 'Prüfung' }],
+          }),
+          pair
+        ).operations[0]?.targets
+      ).toEqual([...targets])
+    }
+  })
+
+  it('reports safe structured syntax and target errors without quoting the response', () => {
+    const failure = (operation: () => unknown) => {
+      try {
+        operation()
+      } catch (error) {
+        return error
+      }
+    }
+    const syntax = failure(() => parseMemoryChangeSet('{"private":"SECRET-MUST-NOT-LEAK" BROKEN}', sources))
+    expect(syntax).toMatchObject({
+      message: 'invalid_maintenance_json',
+      detail: { phase: 'proposal', category: 'format', code: 'invalid_maintenance_json', field: '$' },
+    })
+    expect(String(syntax)).not.toContain('SECRET-MUST-NOT-LEAK')
+    const target = failure(() =>
+      parseMemoryChangeSet(
+        JSON.stringify({
+          operations: [{ operation: 'rewrite', targets: [], sources: ['a'], content: 'Beleg', reason: '' }],
+        }),
+        sources
+      )
+    )
+    expect(target).toMatchObject({
+      detail: {
+        phase: 'proposal',
+        category: 'format',
+        code: 'invalid_targets',
+        operationIndex: 0,
+        field: 'targets',
+        expected: 'exactly_one_source_id',
+      },
+    })
+    const review = failure(() => parseMaintenanceVerification('{"private":"SECRET-MUST-NOT-LEAK" BROKEN}', sources))
+    expect(review).toMatchObject({
+      detail: { phase: 'verification', category: 'format', code: 'invalid_maintenance_json' },
+    })
+    expect(String(review)).not.toContain('SECRET-MUST-NOT-LEAK')
+  })
+
+  it('only authorizes correction for a typed proposal format failure, never runtime text or unknown IDs', () => {
+    const capture = (operation: () => unknown) => {
+      try {
+        operation()
+      } catch (error) {
+        return error
+      }
+    }
+    expect(isCorrectableMaintenanceFormat(capture(() => parseMemoryChangeSet('not-json', sources)))).toBe(true)
+    expect(isCorrectableMaintenanceFormat(capture(() => parseMaintenanceVerification('not-json', sources)))).toBe(false)
+    expect(isCorrectableMaintenanceFormat(new Error('invalid_targets'))).toBe(false)
+    const unknown = capture(() =>
+      parseMemoryChangeSet(
+        JSON.stringify({
+          operations: [
+            { operation: 'rewrite', targets: ['invented'], sources: ['invented'], content: 'Text', reason: '' },
+          ],
+        }),
+        sources
+      )
+    )
+    expect(isCorrectableMaintenanceFormat(unknown)).toBe(false)
+    expect(maintenanceFailureDetail(unknown, 'proposal')).toMatchObject({
+      code: 'fabricated_source',
+      category: 'semantic',
+    })
+    expect(maintenanceFailureDetail(new Error('SECRET raw model response'), 'runtime')).toEqual({
+      phase: 'runtime',
+      category: 'runtime',
+      code: 'maintenance_failed',
+      attempt: 1,
+    })
+    expect(maintenanceFailureDetail(new SyntaxError('SECRET JSON snippet'), 'proposal')).toMatchObject({
+      code: 'maintenance_failed',
+    })
+  })
+
+  it.each([
+    'installed_model_unavailable',
+    'idle_model_not_ready',
+    'idle_preparation_unavailable',
+    'idle_preparation_unsupported',
+    'idle_catalog_unavailable',
+    'runtime_not_configured',
+    'model_files_unavailable',
+    'model_directory_not_configured',
+    'runtime_unavailable',
+    'local_paths_invalid',
+    'artifact_mismatch',
+    'runtime_mismatch',
+    'benchmark_failed',
+    'readiness_mismatch',
+    'runtime_startup_ram_pressure',
+    'local_preparation_failed',
+    'runtime_platform_mismatch',
+    'runtime_download_unavailable',
+    'runtime_download_failed',
+    'runtime_installation_failed',
+    'runtime_installed_checksum_mismatch',
+    'available_ram_below_minimum',
+    'storage_unavailable',
+    'resource_revision_mismatch',
+  ])('preserves the fixed preparation diagnostic %s without accepting appended private details', code => {
+    expect(maintenanceFailureDetail(new Error(code), 'runtime')).toMatchObject({
+      code,
+      phase: 'runtime',
+      category: 'runtime',
+    })
+    expect(maintenanceFailureDetail({ code, message: 'PRIVATE native detail' }, 'runtime')).toMatchObject({
+      code,
+      phase: 'runtime',
+      category: 'runtime',
+    })
+    expect(isCorrectableMaintenanceFormat(new Error(code))).toBe(false)
+    expect(maintenanceFailureDetail(new Error(`${code}: PRIVATE path`), 'runtime').code).toBe('maintenance_failed')
+  })
+
   const memory = (id: string, patch: Partial<MemoryRecord> = {}): MemoryRecord => ({
     id,
     principalId: 'owner',

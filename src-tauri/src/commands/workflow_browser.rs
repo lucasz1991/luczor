@@ -29,7 +29,21 @@ struct NavigationTracker {
 struct RequestedNavigation {
     target: String,
     id: Option<u64>,
-    complete: Option<bool>,
+    state: NavigationState,
+    failure: NavigationFailureDetail,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum NavigationState {
+    #[default]
+    Pending,
+    Completed,
+    Failed,
+    Superseded,
+}
+#[derive(Clone, Default)]
+struct NavigationFailureDetail {
+    backend_code: Option<i32>,
+    backend_domain: Option<String>,
 }
 impl NavigationTracker {
     fn begin(&mut self, target: &str) -> u64 {
@@ -37,7 +51,8 @@ impl NavigationTracker {
         self.requested = Some(RequestedNavigation {
             target: target.into(),
             id: None,
-            complete: None,
+            state: NavigationState::Pending,
+            failure: NavigationFailureDetail::default(),
         });
         self.generation
     }
@@ -53,24 +68,197 @@ impl NavigationTracker {
             if request.id.is_none() && uri == request.target {
                 request.id = Some(id);
             } else if request.id.is_some_and(|expected| expected != id) {
-                request.complete = Some(false);
+                request.state = NavigationState::Superseded;
             }
         }
     }
+    #[cfg(any(test, target_os = "linux"))]
     fn finished(&mut self, id: u64, success: bool) {
+        self.finished_with_detail(id, success, None, None);
+    }
+    fn finished_with_detail(
+        &mut self,
+        id: u64,
+        success: bool,
+        backend_code: Option<i32>,
+        backend_domain: Option<&str>,
+    ) {
         #[cfg(all(test, feature = "native-browser-smoke"))]
         eprintln!("BROWSER_NAV_FINISH id={id} success={success}");
         if let Some(request) = &mut self.requested {
-            if request.id == Some(id) && request.complete.is_none() {
-                request.complete = Some(success);
+            if request.id == Some(id) && request.state == NavigationState::Pending {
+                request.state = if success {
+                    NavigationState::Completed
+                } else {
+                    NavigationState::Failed
+                };
+                if !success {
+                    request.failure = NavigationFailureDetail {
+                        backend_code,
+                        backend_domain: backend_domain
+                            .filter(|domain| {
+                                domain.len() <= 64
+                                    && domain.bytes().all(|byte| {
+                                        byte.is_ascii_alphanumeric() || b"._-".contains(&byte)
+                                    })
+                            })
+                            .map(str::to_owned),
+                    };
+                }
             }
         }
     }
+    #[cfg(test)]
     fn status(&self, generation: u64) -> Result<Option<bool>, String> {
+        self.state(generation).map(|state| match state {
+            NavigationState::Pending => None,
+            NavigationState::Completed => Some(true),
+            NavigationState::Failed | NavigationState::Superseded => Some(false),
+        })
+    }
+    fn state(&self, generation: u64) -> Result<NavigationState, String> {
         if generation != self.generation {
             return Err("workflow_browser_navigation_changed".into());
         }
-        Ok(self.requested.as_ref().and_then(|request| request.complete))
+        Ok(self
+            .requested
+            .as_ref()
+            .map(|request| request.state)
+            .unwrap_or_default())
+    }
+    fn failure_detail(&self, generation: u64) -> Option<NavigationFailureDetail> {
+        (generation == self.generation)
+            .then(|| {
+                self.requested
+                    .as_ref()
+                    .map(|request| request.failure.clone())
+            })
+            .flatten()
+    }
+}
+
+/// Native-generated metadata only. Never include target URLs, page text or OS error messages.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserFailure {
+    version: u8,
+    code: String,
+    phase: &'static str,
+    operation_id: String,
+    operation: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    navigation_generation: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    navigation_id: Option<u64>,
+    backend: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend_code: Option<i32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backend_domain: Option<String>,
+    elapsed_ms: u64,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_readiness_code: Option<String>,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(untagged)]
+pub enum BrowserCommandError {
+    Legacy(String),
+    Detailed(BrowserFailure),
+}
+impl BrowserCommandError {
+    pub fn code(&self) -> &str {
+        match self {
+            Self::Legacy(code) => code,
+            Self::Detailed(failure) => &failure.code,
+        }
+    }
+}
+impl From<BrowserCommandError> for String {
+    fn from(error: BrowserCommandError) -> Self {
+        error.code().to_owned()
+    }
+}
+fn browser_code(code: &str) -> bool {
+    code.len() <= 100
+        && (code.starts_with("workflow_browser_") || code.starts_with("browser_"))
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+}
+struct BrowserOperationDiagnostic {
+    operation_id: String,
+    operation: BrowserOperation,
+    started: Instant,
+    phase: &'static str,
+    outcome: &'static str,
+    session_id: Option<String>,
+    navigation_generation: Option<u64>,
+    navigation_id: Option<u64>,
+    backend_code: Option<i32>,
+    backend_domain: Option<String>,
+    last_readiness_code: Option<String>,
+}
+impl BrowserOperationDiagnostic {
+    fn new(operation: BrowserOperation) -> Self {
+        Self {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            operation,
+            started: Instant::now(),
+            phase: "validation",
+            outcome: "not_started",
+            session_id: None,
+            navigation_generation: None,
+            navigation_id: None,
+            backend_code: None,
+            backend_domain: None,
+            last_readiness_code: None,
+        }
+    }
+    fn apply_navigation(&mut self, tracker: &NavigationTracker, generation: u64) {
+        if generation != tracker.generation {
+            return;
+        }
+        self.navigation_generation = Some(generation);
+        self.navigation_id = tracker.requested.as_ref().and_then(|request| request.id);
+        if let Some(detail) = tracker.failure_detail(generation) {
+            self.backend_code = detail.backend_code;
+            self.backend_domain = detail.backend_domain;
+        }
+    }
+    fn readiness_error(&mut self, code: &str) {
+        if browser_code(code) {
+            self.last_readiness_code = Some(code.to_owned());
+        }
+    }
+    fn failure(&self, code: String) -> BrowserCommandError {
+        if !browser_code(&code) {
+            return BrowserCommandError::Legacy(code);
+        }
+        BrowserCommandError::Detailed(BrowserFailure {
+            version: 1,
+            code,
+            phase: self.phase,
+            operation_id: self.operation_id.clone(),
+            operation: self.operation.name(),
+            session_id: self.session_id.clone(),
+            navigation_generation: self.navigation_generation,
+            navigation_id: self.navigation_id,
+            backend: if cfg!(windows) {
+                "webview2"
+            } else if cfg!(target_os = "linux") {
+                "webkitgtk"
+            } else {
+                "unavailable"
+            },
+            backend_code: self.backend_code,
+            backend_domain: self.backend_domain.clone(),
+            elapsed_ms: self.started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+            outcome: self.outcome,
+            last_readiness_code: self.last_readiness_code.clone(),
+        })
     }
 }
 pub(crate) fn panel_project_id() -> Option<String> {
@@ -138,6 +326,23 @@ pub enum BrowserOperation {
     Screenshot,
     Download,
     Close,
+}
+impl BrowserOperation {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Navigate => "navigate",
+            Self::Click => "click",
+            Self::Fill => "fill",
+            Self::Select => "select",
+            Self::Wait => "wait",
+            Self::Read => "read",
+            Self::Scan => "scan",
+            Self::Screenshot => "screenshot",
+            Self::Download => "download",
+            Self::Close => "close",
+        }
+    }
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -353,10 +558,23 @@ pub async fn wf_browser_action(
     app: AppHandle,
     window: crate::commands::CallerWebview,
     payload: Guarded<WorkflowBrowserAction>,
+) -> Result<WorkflowBrowserResult, BrowserCommandError> {
+    let mut diagnostic = BrowserOperationDiagnostic::new(payload.action);
+    browser_action_inner(app, window, payload, &mut diagnostic)
+        .await
+        .map_err(|code| diagnostic.failure(code))
+}
+
+async fn browser_action_inner(
+    app: AppHandle,
+    window: crate::commands::CallerWebview,
+    payload: Guarded<WorkflowBrowserAction>,
+    diagnostic: &mut BrowserOperationDiagnostic,
 ) -> Result<WorkflowBrowserResult, String> {
     super::ensure_main_webview(&window)?;
     let (_operation, _) = super::owned_processes::Operation::begin()?;
     validate(&payload.request)?;
+    diagnostic.phase = "admission";
     super::research::check_scope_execution(&app, &payload.scope, &payload.execution)?;
     if capabilities()["available"] != true {
         return Err("workflow_browser_requires_windows_webview2".into());
@@ -417,11 +635,12 @@ pub async fn wf_browser_action(
         }
     };
     let _busy = lock_session(&session)?;
+    diagnostic.session_id = Some(session.id.clone());
     *session
         .gate
         .lock()
         .map_err(|_| "workflow_browser_gate_unavailable")? = Some(gate.clone());
-    let result = run(&app, &session, &gate, &input).await;
+    let result = run(&app, &session, &gate, &input, diagnostic).await;
     if result.is_err()
         && (check(&app, &session, &gate).is_err() || input.action == BrowserOperation::Open)
     {
@@ -435,6 +654,7 @@ async fn run(
     session: &Arc<Session>,
     gate: &ExecutionLease,
     input: &WorkflowBrowserAction,
+    diagnostic: &mut BrowserOperationDiagnostic,
 ) -> Result<WorkflowBrowserResult, String> {
     check(app, session, gate)?;
     // expectedUrl is the source-page precondition. Check it before navigation or any other mutation.
@@ -449,6 +669,8 @@ async fn run(
         }
     }
     if input.action == BrowserOperation::Close {
+        diagnostic.phase = "operation";
+        diagnostic.outcome = "unknown";
         retire(app, session);
         return Ok(WorkflowBrowserResult {
             ok: true,
@@ -462,6 +684,7 @@ async fn run(
     super::desktop_control::browser_feedback(app, gate.permit()).await?;
     gate.check()?;
     if input.action == BrowserOperation::Open && app.get_webview(BROWSER_WEBVIEW_LABEL).is_none() {
+        diagnostic.phase = "navigation_start";
         let target = input.url.as_deref().map(url).transpose()?.unwrap_or(
             tauri::Url::parse("about:blank").map_err(|_| "workflow_browser_url_invalid")?,
         );
@@ -522,6 +745,8 @@ async fn run(
                 .map_err(|_| "workflow_browser_navigation_unavailable")?
                 .begin(target.as_str()),
         );
+        diagnostic.navigation_generation = navigation_generation;
+        diagnostic.outcome = "unknown";
         browser
             .navigate(target)
             .map_err(|_| "workflow_browser_navigation_failed")?;
@@ -530,6 +755,7 @@ async fn run(
         BrowserOperation::Open | BrowserOperation::Navigate
     ) {
         if let Some(target) = input.url.as_deref() {
+            diagnostic.phase = "navigation_start";
             check(app, session, gate)?;
             let target = url(target)?;
             if !host_allowed(&target, session.allowed_hosts.as_deref()) {
@@ -542,6 +768,8 @@ async fn run(
                     .map_err(|_| "workflow_browser_navigation_unavailable")?
                     .begin(target.as_str()),
             );
+            diagnostic.navigation_generation = navigation_generation;
+            diagnostic.outcome = "unknown";
             app.get_webview(BROWSER_WEBVIEW_LABEL)
                 .ok_or("workflow_browser_window_unavailable")?
                 .navigate(target)
@@ -574,20 +802,30 @@ async fn run(
             loop {
                 check(app, session, gate)?;
                 let completed = if let Some(generation) = navigation_generation {
-                    match session
+                    let tracker = session
                         .navigation
                         .lock()
-                        .map_err(|_| "workflow_browser_navigation_unavailable")?
-                        .status(generation)?
-                    {
-                        Some(false) => return Err("workflow_browser_navigation_failed".into()),
-                        Some(true) => true,
-                        None => false,
+                        .map_err(|_| "workflow_browser_navigation_unavailable")?;
+                    diagnostic.phase = "navigation";
+                    diagnostic.apply_navigation(&tracker, generation);
+                    match tracker.state(generation)? {
+                        NavigationState::Failed => {
+                            return Err("workflow_browser_navigation_failed".into())
+                        }
+                        NavigationState::Superseded => {
+                            return Err("workflow_browser_navigation_superseded".into())
+                        }
+                        NavigationState::Completed => true,
+                        NavigationState::Pending => false,
                     }
                 } else {
                     true
                 };
+                diagnostic.phase = "readiness";
                 let state = evaluate(&browser, json!({"expression":"({url:location.href,ready:document.readyState})","returnByValue":true}), app.clone(), session.clone(), gate.clone(), Duration::from_secs(2)).await;
+                if let Err(code) = &state {
+                    diagnostic.readiness_error(code);
+                }
                 if let Ok(state) = state {
                     let value = &state["result"]["value"];
                     let actual = browser
@@ -613,9 +851,12 @@ async fn run(
             json!({"opened":true,"readiness":"ready"})
         }
         BrowserOperation::Download => {
+            diagnostic.phase = "operation";
+            diagnostic.outcome = "unknown";
             download::download(app, &browser, session, gate, input, timeout).await?
         }
         BrowserOperation::Screenshot => {
+            diagnostic.phase = "operation";
             let raw = devtools(
                 &browser,
                 "Page.captureScreenshot",
@@ -668,6 +909,7 @@ async fn run(
                 input.action,
                 BrowserOperation::Click | BrowserOperation::Fill | BrowserOperation::Select
             ) {
+                diagnostic.phase = "dom_prepare";
                 let deadline = Instant::now() + timeout;
                 loop {
                     check(app, session, gate)?;
@@ -709,6 +951,13 @@ async fn run(
             }
             // Admission is rechecked after waiting. The effect phase is never retried.
             check(app, session, gate)?;
+            diagnostic.phase = "dom_effect";
+            if matches!(
+                input.action,
+                BrowserOperation::Click | BrowserOperation::Fill | BrowserOperation::Select
+            ) {
+                diagnostic.outcome = "unknown";
+            }
             let expression = format!(
                 "{}\nluczorWorkflowBrowser({});",
                 include_str!("workflow_browser_script.js"),
@@ -879,10 +1128,12 @@ async fn install_navigation_tracking(
                             if let Some(args) = args {
                                 let mut id = 0;
                                 let mut success = windows_webview::core::BOOL::default();
+                                let mut native_status = webview2_com::Microsoft::Web::WebView2::Win32::COREWEBVIEW2_WEB_ERROR_STATUS(0);
                                 args.NavigationId(&mut id)?;
                                 args.IsSuccess(&mut success)?;
+                                let status = args.WebErrorStatus(&mut native_status).ok().map(|_| native_status.0);
                                 if let Ok(mut tracker) = completed_session.navigation.lock() {
-                                    tracker.finished(id, success.as_bool());
+                                    tracker.finished_with_detail(id, success.as_bool(), status, Some("webview2"));
                                 }
                             }
                             Ok(())
@@ -1129,5 +1380,70 @@ mod tests {
         tracker.finished(51, true);
         tracker.finished(50, true);
         assert_eq!(tracker.status(generation).unwrap(), Some(false));
+    }
+
+    #[test]
+    fn navigation_diagnostics_preserve_backend_failure_without_url_content() {
+        let mut tracker = NavigationTracker::default();
+        let generation = tracker.begin("https://example.test/private?token=secret");
+        tracker.started(60, "https://example.test/private?token=secret");
+        tracker.finished_with_detail(60, false, Some(12), Some("webview2"));
+        tracker.finished_with_detail(59, true, None, None);
+        assert_eq!(tracker.state(generation).unwrap(), NavigationState::Failed);
+        let detail = tracker.failure_detail(generation).unwrap();
+        assert_eq!(detail.backend_code, Some(12));
+        assert_eq!(detail.backend_domain.as_deref(), Some("webview2"));
+        let mut operation = BrowserOperationDiagnostic::new(BrowserOperation::Navigate);
+        operation.phase = "navigation";
+        operation.outcome = "unknown";
+        operation.navigation_generation = Some(generation);
+        operation.apply_navigation(&tracker, generation);
+        let error = operation.failure("workflow_browser_navigation_failed".into());
+        let serialized = serde_json::to_value(error).unwrap();
+        assert_eq!(serialized["version"], 1);
+        assert_eq!(serialized["backendCode"], 12);
+        assert_eq!(serialized["navigationId"], 60);
+        assert!(!serialized.to_string().contains("token"));
+        assert!(!serialized.to_string().contains("example.test"));
+    }
+
+    #[test]
+    fn superseded_and_old_navigation_cannot_be_reported_as_completed() {
+        let mut tracker = NavigationTracker::default();
+        let generation = tracker.begin("http://example.test/a");
+        tracker.started(70, "http://example.test/a");
+        tracker.started(71, "http://example.test/b");
+        tracker.finished_with_detail(70, true, None, None);
+        assert_eq!(
+            tracker.state(generation).unwrap(),
+            NavigationState::Superseded
+        );
+        let next = tracker.begin("http://example.test/c");
+        tracker.finished_with_detail(70, false, Some(12), Some("webview2"));
+        assert_eq!(tracker.state(next).unwrap(), NavigationState::Pending);
+        assert!(tracker.failure_detail(generation).is_none());
+    }
+
+    #[test]
+    fn browser_failure_preserves_legacy_authority_errors_and_bounds_readiness_detail() {
+        let mut operation = BrowserOperationDiagnostic::new(BrowserOperation::Open);
+        operation.phase = "readiness";
+        operation.outcome = "unknown";
+        operation.readiness_error("workflow_browser_protocol_unavailable");
+        operation.readiness_error("https://secret.test/?token=hidden");
+        let failure =
+            serde_json::to_value(operation.failure("workflow_browser_navigation_timeout".into()))
+                .unwrap();
+        assert_eq!(
+            failure["lastReadinessCode"],
+            "workflow_browser_protocol_unavailable"
+        );
+        assert_eq!(failure["phase"], "readiness");
+        assert_eq!(failure["outcome"], "unknown");
+        let authority = operation.failure("Execution revoked".into());
+        assert_eq!(
+            serde_json::to_value(authority).unwrap(),
+            "Execution revoked"
+        );
     }
 }

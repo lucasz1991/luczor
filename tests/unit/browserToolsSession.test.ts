@@ -323,6 +323,43 @@ describe('chat browser native session', () => {
     )
     expect(browserPanel.error).toContain('workflow_browser_host_boundary_unavailable')
   })
+  it('keeps structured native failures through presentation without replaying uncertain input', async () => {
+    await execute('browser_open', { url: 'https://example.test' })
+    const diagnostic = {
+      version: 1,
+      code: 'workflow_browser_action_failed_outcome_unknown',
+      phase: 'dom_effect',
+      operationId: 'e965c1c9-b415-41a7-b705-6e615a7351e5',
+      operation: 'click',
+      sessionId: 'native-session',
+      navigationGeneration: 3,
+      navigationId: 7,
+      backend: 'webview2',
+      backendCode: -2147467259,
+      elapsedMs: 123,
+      outcome: 'unknown',
+    }
+    native.invoke.mockRejectedValueOnce({ ...diagnostic, url: 'https://private.test', value: 'PRIVATE' })
+    await expect(execute('browser_click', { selector: 'ref:observed' })).rejects.toMatchObject({
+      browserFailure: diagnostic,
+      message: expect.stringContaining('nicht wiederholen'),
+    })
+    expect(browserPanel.error).not.toContain('[object Object]')
+    expect(browserPanel.error).not.toContain('PRIVATE')
+    expect(native.invoke.mock.calls.filter(([, input]) => input?.payload?.action === 'click')).toHaveLength(1)
+  })
+  it('retains the original open failure even if cleanup also fails', async () => {
+    native.invoke.mockImplementation(async command => {
+      if (command === 'wf_browser_action') throw 'workflow_browser_navigation_failed'
+      if (command === 'wf_browser_cleanup') throw 'workflow_browser_cleanup_failed'
+      return true
+    })
+    await expect(execute('browser_open', { url: 'https://example.test' })).rejects.toMatchObject({
+      message: expect.stringContaining('workflow_browser_navigation_failed'),
+      cleanupFailure: { code: 'workflow_browser_cleanup_failed' },
+    })
+    expect(browserPanel.error).toContain('workflow_browser_navigation_failed')
+  })
   it('does not execute after Not-Aus', async () => {
     await execute('browser_open', { allowed_hosts: ['example.test'] })
     updateExecutionControls({ mode: 'act', killSwitch: true, scope: 'project' })

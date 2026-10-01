@@ -3,6 +3,203 @@ import type { RepositoryMaintenanceCursor } from './repositoryMaintenance'
 import { memoryMetadataOf, parseMemoryClassification, type MemoryClassification } from './memoryMetadata'
 
 export const MAINTENANCE_POLICY = 'luczor-maintenance-v1'
+/** Safe diagnostics contain contract identifiers only, never response fragments or parser messages. */
+export type MaintenanceFailureDetail = {
+  phase: 'proposal' | 'verification' | 'commit' | 'runtime'
+  code: string
+  category: 'format' | 'semantic' | 'runtime' | 'scope'
+  operationIndex?: number
+  field?: string
+  expected?: string
+  attempt?: number
+}
+class MaintenanceContractError extends Error {
+  constructor(readonly detail: MaintenanceFailureDetail) {
+    super(detail.code)
+    this.name = 'MaintenanceContractError'
+  }
+}
+const semanticFailures = new Set([
+  'fabricated_source',
+  'overlapping_targets',
+  'missing_evidence',
+  'context_target_forbidden',
+  'fabricated_reference',
+  'lost_reference',
+  'verification_rejected',
+  'sensitive_candidate',
+  'scope_merge_forbidden',
+  'invalid_operation_for_job',
+])
+const scopeFailures = new Set([
+  'scope_changed',
+  'scope_unavailable',
+  'stale_source',
+  'stale_job',
+  'stale_preparation',
+  'project_unavailable',
+  'memory_disabled',
+  'memory_capture_disabled',
+  'metadata_disabled',
+  'metadata_annotations_disabled',
+  'quality_gate_required',
+  'invalid_source',
+])
+const runtimeFailures = new Set([
+  'idle_model_busy',
+  'idle_model_cooldown',
+  'model_cooldown',
+  'resource_background_unavailable',
+  'resource_system_check_busy',
+  'idle_catalog_refresh_wait',
+  // Fixed preparation/readiness contract from the coordinator; never match raw native messages or prefixes.
+  'idle_catalog_unavailable',
+  'idle_model_not_ready',
+  'idle_preparation_unavailable',
+  'idle_preparation_unsupported',
+  'installed_model_unavailable',
+  'local_preparation_failed',
+  'runtime_not_configured',
+  'model_directory_not_configured',
+  'runtime_unavailable',
+  'model_files_unavailable',
+  'local_paths_invalid',
+  'artifact_mismatch',
+  'runtime_mismatch',
+  'benchmark_failed',
+  'readiness_mismatch',
+  'readiness_pending',
+  'runtime_platform_mismatch',
+  'runtime_download_unavailable',
+  'runtime_download_failed',
+  'runtime_installation_failed',
+  'runtime_installed_checksum_mismatch',
+  'runtime_platform_protection_unavailable',
+  'model_disabled',
+  'release_not_executable',
+  'capability_unavailable',
+  'capacity_unknown',
+  'total_ram_below_minimum',
+  'available_ram_below_minimum',
+  'accelerator_unavailable',
+  'accelerator_runtime_unavailable',
+  'cpu_mode_disallowed_by_manifest',
+  'vram_below_minimum',
+  'storage_unavailable',
+  'runtime_startup_ram_pressure',
+  'fixed_nvme_storage_required',
+  'resource_pressure',
+  'runtime_gpu_required_no_offload',
+  'thermal_limit',
+  'health_cooldown',
+  'health_error',
+  'resource_config_pending',
+  'resource_config_busy',
+  'resource_revision_mismatch',
+  'resource_revision_required',
+  'resource_gpu_selection_changed',
+  'resource_gpu_selection_ambiguous',
+  'resource_gpu_selection_unavailable',
+  'resource_thread_controls_unavailable',
+  'ram_budget_insufficient',
+  'runtime_gpu_measurement_unavailable',
+  'runtime_gpu_capacity_unavailable',
+  'gpu_full_offload_not_verified',
+  'forced_split_unavailable',
+  'forced_split_metadata_unavailable',
+  'forced_split_not_verified',
+  'installed_model_required',
+  'local_only_required',
+  'missing_job',
+  'unverified_candidate',
+  'incomplete_evaluation',
+  'adapter_write_unsupported',
+  'incomplete_candidate',
+  'output_truncated',
+  'invalid_candidate',
+  'invalid_context_request',
+  'context_request_limit',
+  'runtime_context_exceeded',
+  'runtime_chat_history_rejected',
+  'runtime_chat_template_failed',
+  'runtime_tool_contract_rejected',
+  'runtime_capacity_exhausted',
+  'runtime_auth_failed',
+  'runtime_model_unavailable',
+  'runtime_request_rejected',
+  'runtime_server_failed',
+  'runtime_http_failed',
+  'runtime_reasoning_control_unavailable',
+  'runtime_output_repeated',
+  'runtime_stream_failed',
+  'runtime_first_progress_timeout',
+  'runtime_progress_timeout',
+  'runtime_total_timeout',
+  'runtime_start_failed',
+])
+export function maintenanceFailureDetail(
+  error: unknown,
+  phase: MaintenanceFailureDetail['phase'],
+  attempt = 1
+): MaintenanceFailureDetail {
+  if (error instanceof MaintenanceContractError) return { ...error.detail, attempt }
+  const candidate =
+    error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+      ? error.code
+      : error instanceof Error
+        ? error.message
+        : ''
+  const category = semanticFailures.has(candidate) ? 'semantic' : scopeFailures.has(candidate) ? 'scope' : 'runtime'
+  const code =
+    semanticFailures.has(candidate) || scopeFailures.has(candidate) || runtimeFailures.has(candidate)
+      ? candidate
+      : error instanceof Error && error.name === 'TimeoutError'
+        ? 'runtime_total_timeout'
+        : error instanceof Error && error.name === 'AbortError'
+          ? 'interrupted'
+          : 'maintenance_failed'
+  return { phase, category, code, attempt }
+}
+function contractError(
+  code: string,
+  detail: Omit<MaintenanceFailureDetail, 'code' | 'category'>,
+  category: MaintenanceFailureDetail['category'] = 'format'
+): never {
+  throw new MaintenanceContractError({ ...detail, code, category })
+}
+/** Only our proposal parser may authorize one format correction; runtime errors never do. */
+export function isCorrectableMaintenanceFormat(error: unknown): boolean {
+  return (
+    error instanceof MaintenanceContractError && error.detail.phase === 'proposal' && error.detail.category === 'format'
+  )
+}
+const targetRules = {
+  rewrite: {
+    min: 1,
+    max: 1,
+    expected: 'exactly_one_source_id',
+    instruction: 'rewrite: targets enthält genau eine bestehende Quell-ID.',
+  },
+  merge: {
+    min: 2,
+    max: Infinity,
+    expected: 'at_least_two_distinct_source_ids',
+    instruction: 'merge: targets enthält mindestens zwei verschiedene bestehende Quell-IDs.',
+  },
+  add: { min: 0, max: 0, expected: 'empty_array' },
+  conflict: { min: 0, max: 0, expected: 'empty_array' },
+  noop: { min: 0, max: 0, expected: 'empty_array' },
+} as const
+export const MEMORY_OPERATION_CONTRACT = [
+  'Jede Operation enthält operation, targets, sources, content und reason. operation ist genau ein Wert aus add, rewrite, merge, conflict, noop.',
+  'targets und sources sind immer Arrays.',
+  targetRules.rewrite.instruction,
+  targetRules.merge.instruction,
+  'add, conflict und noop: targets ist immer [], das Feld wird nicht weggelassen.',
+  'sources enthält ausschließlich IDs der verwendeten Belege aus DATEN. Alle targets müssen auch in sources stehen.',
+  'Eine Ziel-ID darf nicht in mehreren Operationen stehen. Außer bei noop sind sources und content nicht leer.',
+  'content und reason sind Texte, keine Objekte. Wähle Operationen ausschließlich nach den Belegen.',
+].join(' ')
 export type SourceReference = {
   id: string
   revision: string
@@ -207,13 +404,27 @@ export function failMaintenanceJob(
   job.status = job.attempts >= 3 ? 'blocked' : 'retry'
   job.nextAttemptAt = now + (aborted ? 0 : Math.min(3_600_000, 60_000 * 4 ** job.attempts))
 }
-function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid_maintenance_json')
+type ContractLocation = Omit<MaintenanceFailureDetail, 'code' | 'category' | 'attempt'>
+function json(text: string, phase: MaintenanceFailureDetail['phase']): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return contractError('invalid_maintenance_json', { phase, field: '$', expected: 'json_object' })
+  }
+}
+function object(
+  value: unknown,
+  location: ContractLocation = { phase: 'proposal', field: '$' }
+): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    contractError('invalid_maintenance_json', { ...location, expected: 'json_object' })
   return value as Record<string, unknown>
 }
-function ids(value: unknown, allowed: Set<string>): string[] {
-  if (!Array.isArray(value) || value.some(id => typeof id !== 'string' || !allowed.has(id)))
-    throw new Error('fabricated_source')
+function ids(value: unknown, allowed: Set<string>, location: ContractLocation): string[] {
+  if (!Array.isArray(value) || value.some(id => typeof id !== 'string'))
+    contractError('invalid_source_ids', { ...location, expected: 'source_id_array' })
+  if (value.some(id => !allowed.has(id)))
+    contractError('fabricated_source', { ...location, expected: 'known_source_ids' }, 'semantic')
   return [...new Set(value)] as string[]
 }
 /** The model classifies one source; only the host chooses the mutation and its exact target. */
@@ -221,7 +432,7 @@ export function parseMemoryAnnotation(text: string, sources: MaintenanceSource[]
   const source = sources[0]
   if (sources.length !== 1 || !source || !['memory', 'shared'].includes(source.kind))
     throw new Error('invalid_annotation_source')
-  const metadata = parseMemoryClassification(JSON.parse(text))
+  const metadata = parseMemoryClassification(json(text, 'proposal'))
   return {
     operations: [
       {
@@ -236,28 +447,29 @@ export function parseMemoryAnnotation(text: string, sources: MaintenanceSource[]
   }
 }
 export function parseMemoryChangeSet(text: string, sources: MaintenanceSource[]): MemoryChangeSet {
-  const data = object(JSON.parse(text))
+  const data = object(json(text, 'proposal'))
   if (!Array.isArray(data.operations) || !data.operations.length || data.operations.length > 8)
-    throw new Error('invalid_operations')
+    contractError('invalid_operations', { phase: 'proposal', field: 'operations', expected: 'one_to_eight_operations' })
   const allowed = new Set(sources.map(source => source.id))
   const targetsSeen = new Set<string>()
   return {
-    operations: data.operations.map(raw => {
-      const item = object(raw)
+    operations: data.operations.map((raw, operationIndex) => {
+      const location = { phase: 'proposal' as const, operationIndex }
+      const item = object(raw, { ...location, field: 'operations' })
       if (!['add', 'rewrite', 'merge', 'conflict', 'noop', 'annotate'].includes(String(item.operation)))
-        throw new Error('invalid_operation')
+        contractError('invalid_operation', { ...location, field: 'operation', expected: 'known_operation' })
       const operation = item.operation as MemoryChangeSet['operations'][number]['operation']
-      const targets = ids(item.targets, allowed)
-      const references = ids(item.sources, allowed)
+      const targets = ids(item.targets, allowed, { ...location, field: 'targets' })
+      const references = ids(item.sources, allowed, { ...location, field: 'sources' })
       if (operation === 'annotate') {
         if (targets.length !== 1 || references.length !== 1 || targets[0] !== references[0])
-          throw new Error('invalid_targets')
+          contractError('invalid_targets', { ...location, field: 'targets', expected: 'one_target_matching_source' })
         if (
           (item.content !== undefined && item.content !== '') ||
           typeof item.reason !== 'string' ||
           item.reason.length > 400
         )
-          throw new Error('invalid_content')
+          contractError('invalid_content', { ...location, field: 'content', expected: 'empty_content_bounded_reason' })
         if (targetsSeen.has(targets[0]!)) throw new Error('overlapping_targets')
         targetsSeen.add(targets[0]!)
         return {
@@ -269,23 +481,24 @@ export function parseMemoryChangeSet(text: string, sources: MaintenanceSource[])
           metadata: parseMemoryClassification(item.metadata),
         }
       }
-      if (item.metadata !== undefined) throw new Error('invalid_operation_metadata')
+      if (item.metadata !== undefined)
+        contractError('invalid_operation_metadata', { ...location, field: 'metadata', expected: 'absent' })
       if (
         typeof item.content !== 'string' ||
         item.content.length > 6000 ||
         typeof item.reason !== 'string' ||
         item.reason.length > 400
       )
-        throw new Error('invalid_content')
+        contractError('invalid_content', {
+          ...location,
+          field: 'content',
+          expected: 'bounded_content_and_reason_strings',
+        })
       if (operation !== 'noop' && (!item.content.trim() || !references.length)) throw new Error('missing_evidence')
-      if (
-        operation === 'rewrite'
-          ? targets.length !== 1
-          : operation === 'merge'
-            ? targets.length < 2
-            : targets.length !== 0
-      )
-        throw new Error('invalid_targets')
+      const rule =
+        operation === 'rewrite' ? targetRules.rewrite : operation === 'merge' ? targetRules.merge : targetRules.add
+      if (targets.length < rule.min || targets.length > rule.max)
+        contractError('invalid_targets', { ...location, field: 'targets', expected: rule.expected })
       for (const target of targets) {
         if (targetsSeen.has(target) || !references.includes(target)) throw new Error('overlapping_targets')
         targetsSeen.add(target)
@@ -299,11 +512,17 @@ export function parseMaintenanceVerification(
   sources: MaintenanceSource[],
   options: { summary?: boolean } = {}
 ): MaintenanceVerification {
-  const data = object(JSON.parse(text))
+  const location = { phase: 'verification' as const }
+  const data = object(json(text, 'verification'), { ...location, field: '$' })
   const fields = ['approved', 'unsupportedFacts', 'lostFacts', 'lostConstraints', 'temporalConflict'] as const
-  if (fields.some(field => typeof Reflect.get(data, field) !== 'boolean')) throw new Error('invalid_verification')
-  const checkedSources = ids(data.checkedSources, new Set(sources.map(source => source.id)))
-  if (checkedSources.length !== sources.length) throw new Error('incomplete_verification')
+  if (fields.some(field => typeof Reflect.get(data, field) !== 'boolean'))
+    contractError('invalid_verification', { ...location, field: 'flags', expected: 'boolean_flags' })
+  const checkedSources = ids(data.checkedSources, new Set(sources.map(source => source.id)), {
+    ...location,
+    field: 'checkedSources',
+  })
+  if (checkedSources.length !== sources.length)
+    contractError('incomplete_verification', { ...location, field: 'checkedSources', expected: 'all_source_ids' })
   const result = { ...data, checkedSources } as MaintenanceVerification
   // A context package is a deliberate condensation: omissions are expected, inventions are not.
   if (
@@ -377,7 +596,9 @@ export function maintenancePrompt(kind: MaintenanceJob['kind'], sources: Mainten
         MAINTENANCE_OUTPUT_CHARS +
         ' Zeichen.'
       : kind === 'memory'
-        ? 'Antworte ausschließlich JSON {"operations":[{"operation":"add|rewrite|merge|conflict|noop","targets":[],"sources":["Quell-ID"],"content":"Text","reason":"sachliche Begründung"}]}. Nutzerbeobachtungen sind keine bestätigten Fakten. Bei unklaren Widersprüchen conflict ohne targets; bei fehlendem Nutzen noop. Keine globale Persönlichkeit ändern. Fasse dich kurz: insgesamt höchstens ' +
+        ? 'Antworte ausschließlich JSON {"operations":[{"operation":"noop","targets":[],"sources":[],"content":"","reason":"sachliche Begründung"}]}. ' +
+          MEMORY_OPERATION_CONTRACT +
+          ' Nutzerbeobachtungen sind keine bestätigten Fakten. Bei unklaren Widersprüchen conflict mit targets: []; bei fehlendem Nutzen noop. Keine globale Persönlichkeit ändern. Fasse dich kurz: insgesamt höchstens ' +
           MAINTENANCE_OUTPUT_CHARS +
           ' Zeichen.'
         : 'Erstelle ein kompaktes vorbereitetes Kontextpaket auf Deutsch: Überblick, belegte Entscheidungen, offene Aufgaben, Präferenzen, Einstiegspunkte. Gib Quell-IDs an. LSP-Beziehungen sind Belege, eigene Architekturinterpretationen als Ableitung kennzeichnen. Nicht belegbare Rubriken auslassen. Nenne Pfade, URLs und Bezeichner nur, wenn sie wörtlich in DATEN stehen. Antworte nur mit dem Kontextpaket, höchstens ' +

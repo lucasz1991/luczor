@@ -1,4 +1,5 @@
 import { compactToolOutput } from '@/services/inference/contextBudget'
+import { getBrowserFailure } from '@/services/browserFailure'
 
 type Outcome = { ok: boolean; error?: string; output?: unknown }
 type Recovery = { code: string; guidance: string; next_tool?: string; next_arguments?: Record<string, unknown> }
@@ -39,7 +40,31 @@ function recovery(name: string, outcome: Outcome): Recovery | undefined {
     }
   }
   if (name.startsWith('browser_')) {
-    const code = error.match(/\b(?:workflow_browser_[a-z_]+|browser_[a-z_]+)\b/u)?.[0] ?? 'browser_action_failed'
+    const diagnostic = getBrowserFailure(output?.browserFailure)
+    // Friendly text may itself name browser_dom_scan. Prefer the native machine code.
+    const declaredCode =
+      typeof output?.code === 'string' && /^(?:workflow_browser_|browser_)[a-z0-9_]+$/u.test(output.code)
+        ? output.code
+        : undefined
+    const code =
+      diagnostic?.code ??
+      declaredCode ??
+      error.match(/\b(?:workflow_browser_[a-z_]+|browser_[a-z_]+)\b/u)?.[0] ??
+      'browser_action_failed'
+    if (
+      diagnostic?.outcome === 'unknown' ||
+      code.endsWith('_outcome_unknown') ||
+      code === 'workflow_browser_navigation_superseded' ||
+      code === 'workflow_browser_navigation_changed'
+    ) {
+      return {
+        code,
+        guidance:
+          'The previous operation was not confirmed. Do not repeat the action or close the session to retry it. Read the current page with browser_dom_scan and verify its state before deciding what remains necessary.',
+        next_tool: 'browser_dom_scan',
+        next_arguments: {},
+      }
+    }
     const targetError = /browser_(ref_stale|target_|selector_|page_not_ready)/u.test(code)
     return {
       code,
@@ -94,6 +119,8 @@ function stableData(value: unknown): string {
 /** Per-run recovery budget. Argument guessing does not reset a failing browser path. */
 export class ToolRecoveryGuard {
   private browserFailures = 0
+  // Closing or observing a session does not establish whether an earlier input took effect.
+  private uncertainBrowserOutcome = false
   private closeFailures = 0
   private localVisionUnavailable = false
   private fileSelectionFailures = 0
@@ -156,6 +183,21 @@ export class ToolRecoveryGuard {
       args.inference !== 'external' &&
       this.localVisionUnavailable
     if (!vision && this.canOffer(name)) return undefined
+    if (!vision && name.startsWith('browser_') && this.uncertainBrowserOutcome) {
+      return {
+        ok: false,
+        error:
+          'Browser actions are paused for this run after unconfirmed operations. Observe the current page; do not replay input.',
+        output: {
+          code: 'tool_recovery_required',
+          blocked_tool: name,
+          next_tool: 'browser_dom_scan',
+          next_arguments: {},
+          guidance:
+            'Do not repeat the uncertain actions. Use a fresh DOM observation to verify the current state. Closing the session or reading its status does not resolve unknown effects or reopen the paused action path in this run.',
+        },
+      }
+    }
     return {
       ok: false,
       error: vision
@@ -218,15 +260,21 @@ export class ToolRecoveryGuard {
         if (name === 'fs_read') this.fileSelectionFailures = 0
       }
       if (name === 'browser_close' && details(outcome.output)?.closed === true) {
-        this.browserFailures = 0
+        if (!this.uncertainBrowserOutcome) this.browserFailures = 0
         this.closeFailures = 0
       } else if (name.startsWith('browser_') && !['browser_status', 'browser_close'].includes(name)) {
-        this.browserFailures = 0
+        if (!this.uncertainBrowserOutcome) this.browserFailures = 0
       }
       return outcome
     }
     const next = recovery(name, outcome)
     if (!next) return outcome
+    if (
+      name.startsWith('browser_') &&
+      (getBrowserFailure(details(outcome.output)?.browserFailure)?.outcome === 'unknown' ||
+        next.code.endsWith('_outcome_unknown'))
+    )
+      this.uncertainBrowserOutcome = true
     if (next.code === 'file_selection_required') {
       this.fileSelectionFailures++
       for (const [path, file] of this.observedFiles)
@@ -237,15 +285,18 @@ export class ToolRecoveryGuard {
     else if (name.startsWith('browser_') && name !== 'browser_status') this.browserFailures++
     if (next.code === 'workflow_vision_multimodal_runtime_unavailable' && args.inference !== 'external')
       this.localVisionUnavailable = true
+    const blockedOutput = this.blocked(name, args)?.output as object | undefined
+    const preserveBrowserFailure = name.startsWith('browser_') && this.uncertainBrowserOutcome
     return {
       ...outcome,
       output: {
+        ...(preserveBrowserFailure ? blockedOutput : undefined),
         ...(details(outcome.output) ?? {}),
         recovery: next,
         ...(next.code === 'file_selection_required'
           ? { observed_files: [...this.observedFiles.values()].slice(-8) }
           : {}),
-        ...(this.blocked(name, args)?.output as object | undefined),
+        ...(!preserveBrowserFailure ? blockedOutput : undefined),
       },
     }
   }
