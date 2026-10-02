@@ -21,6 +21,103 @@ const pool = [
   'browser_dom_scan',
 ].map(name => ({ type: 'function' as const, function: { name, description: name, parameters: { type: 'object' } } }))
 describe('focused local tool context', () => {
+  it.each([6, 8])('keeps opening and scanning available for an internal browser task at budget %s', async budget => {
+    const { toOpenAITools } = await import('@/services/tools/registry')
+    const delegation = ['agent_assist', 'agent_assist_status', 'agent_assist_stop'].map(name => ({
+      type: 'function' as const,
+      function: { name, description: 'Delegate browser tasks', parameters: { type: 'object' } },
+    }))
+    const selected = focusedTools('Internen Browser und dessen Tools testen bitte', () => [])
+      .select([...toOpenAITools(), ...delegation], [], budget)
+      .map(tool => tool.function.name)
+    expect(selected).toContain('browser_open')
+    expect(selected).toContain('browser_dom_scan')
+    expect(selected).toHaveLength(budget + 2)
+    expect(selected.some(name => name.startsWith('os_'))).toBe(false)
+  })
+  it.each([6, 8])('prioritizes an eligible recovery tool over stale selected reads at budget %s', budget => {
+    const requested = ['browser_status', 'browser_dom_scan', 'browser_dom_read', 'os_environment', 'fs_list', 'fs_read']
+    const focus = focusedTools('Internen Browser und dessen Tools testen bitte', () => [], requested)
+    const selected = focus.select(pool, [], budget, ['browser_open']).map(tool => tool.function.name)
+    expect(selected[0]).toBe('browser_open')
+    expect(selected).toHaveLength(budget + 2)
+    expect(focus.selected()).toEqual(requested)
+  })
+  it('reserves browser prerequisites when five pinned tools and highly ranked reads compete for eight slots', () => {
+    const objective = 'Internen Browser und dessen Tools testen bitte'
+    const pinned = ['agent_assist', 'agent_assist_status', 'agent_assist_stop', 'goal_report', 'goal_read_result']
+    const definitions = [
+      ...pool.map(tool => ({
+        ...tool,
+        function: {
+          ...tool.function,
+          description: ['browser_status', 'browser_dom_read'].includes(tool.function.name)
+            ? objective
+            : tool.function.description,
+        },
+      })),
+      ...pinned
+        .filter(name => !pool.some(tool => tool.function.name === name))
+        .map(name => ({
+          type: 'function' as const,
+          function: { name, description: name, parameters: { type: 'object' } },
+        })),
+      {
+        type: 'function' as const,
+        function: { name: 'browser_screenshot', description: objective, parameters: { type: 'object' } },
+      },
+    ]
+    const selected = focusedTools(objective, () => [])
+      .select(definitions)
+      .map(tool => tool.function.name)
+    expect(selected).toEqual(expect.arrayContaining([...pinned, 'browser_open', 'browser_dom_scan']))
+    expect(selected).toHaveLength(10)
+  })
+  it('bounds recovery priority to two distinct eligible browser tools without persisting it as a user selection', () => {
+    const focus = focusedTools('Read files', () => [], ['fs_read'])
+    const selected = focus
+      .select(pool, [], 3, [
+        'fs_write',
+        'browser_missing',
+        'browser_open',
+        'browser_open',
+        'browser_dom_scan',
+        'browser_status',
+      ])
+      .map(tool => tool.function.name)
+    expect(selected).toEqual(['browser_open', 'browser_dom_scan', 'fs_read', 'context_read_history', 'tools_select'])
+    expect(focus.selected()).toEqual(['fs_read'])
+    expect(focus.select(pool, [], 3).map(tool => tool.function.name)[0]).toBe('fs_read')
+  })
+  it('never restores a browser prerequisite or recovery action removed from the eligible pool', () => {
+    const eligible = pool.filter(tool => tool.function.name !== 'browser_open')
+    const focus = focusedTools('Internen Browser und dessen Tools testen bitte', () => [])
+    const selected = focus.select(eligible, [], 6, ['browser_open']).map(tool => tool.function.name)
+    expect(selected).not.toContain('browser_open')
+    expect(selected).toContain('browser_dom_scan')
+    expect(focus.select([], [], 6, ['browser_open'])).toEqual([])
+  })
+  it('does not offer an external OS browser just because its description mentions the internal browser', () => {
+    const definitions = [
+      ...pool,
+      {
+        type: 'function' as const,
+        function: {
+          name: 'os_open_url',
+          description: 'Internen Browser und dessen Tools testen bitte',
+          parameters: {},
+        },
+      },
+    ]
+    const implicit = focusedTools('Internen Browser und dessen Tools testen bitte', () => [])
+      .select(definitions)
+      .map(tool => tool.function.name)
+    expect(implicit).not.toContain('os_open_url')
+    const explicit = focusedTools('Internen Browser und dessen Tools testen bitte', () => [], ['os_open_url'])
+      .select(definitions)
+      .map(tool => tool.function.name)
+    expect(explicit).toContain('os_open_url')
+  })
   it('offers DOM scanning for web tasks before visual fallback', () => {
     const selected = focusedTools('browser web website', () => [])
       .select(pool)

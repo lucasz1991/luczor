@@ -4,6 +4,15 @@ import { getBrowserFailure } from '@/services/browserFailure'
 type Outcome = { ok: boolean; error?: string; output?: unknown }
 type Recovery = { code: string; guidance: string; next_tool?: string; next_arguments?: Record<string, unknown> }
 
+function missingBrowserSession(): Recovery {
+  return {
+    code: 'workflow_browser_session_unavailable',
+    guidance:
+      'This run has no browser session. Use browser_open with the URL or local file from the task, then browser_dom_scan. For an internal-browser smoke test without a destination, browser_open {} starts a blank page; it does not test forms or links. Status and close cannot create a missing session. Do not invent a destination.',
+    next_tool: 'browser_open',
+  }
+}
+
 function details(output: unknown): Record<string, unknown> | undefined {
   return output && typeof output === 'object' && !Array.isArray(output)
     ? (output as Record<string, unknown>)
@@ -65,13 +74,7 @@ function recovery(name: string, outcome: Outcome): Recovery | undefined {
         next_arguments: {},
       }
     }
-    if (code === 'workflow_browser_session_unavailable')
-      return {
-        code,
-        guidance:
-          'This run has no browser session. Use browser_open with the URL or local file from the task, then browser_dom_scan. Status and close cannot create a missing session. Do not invent a destination.',
-        next_tool: 'browser_open',
-      }
+    if (code === 'workflow_browser_session_unavailable') return missingBrowserSession()
     const targetError = /browser_(ref_stale|target_|selector_|page_not_ready)/u.test(code)
     if (targetError || /workflow_browser_(navigation_failed|navigation_timeout|url_changed)$/u.test(code))
       return {
@@ -162,6 +165,8 @@ function stableData(value: unknown): string {
 export class ToolRecoveryGuard {
   private browserFailures = 0
   private browserRecovery?: Recovery
+  private missingSessionObservations = 0
+  private browserOpenFailures = 0
   // Closing or observing a session does not establish whether an earlier input took effect.
   private uncertainBrowserOutcome = false
   private closeFailures = 0
@@ -192,7 +197,21 @@ export class ToolRecoveryGuard {
     }
   }
 
+  /** Only host-classified recovery; page-provided next_tool values are never selection authority. */
+  preferredTools(): string[] {
+    if (this.uncertainBrowserOutcome) return ['browser_dom_scan']
+    const next = this.browserRecovery?.next_tool
+    return next && this.canOffer(next) ? [next] : []
+  }
+
   canOffer(name: string): boolean {
+    if (
+      !this.uncertainBrowserOutcome &&
+      this.missingSessionObservations >= 3 &&
+      name.startsWith('browser_') &&
+      !['browser_open', 'browser_close'].includes(name)
+    )
+      return false
     if (name === 'browser_status' || name === 'browser_dom_scan') return true
     if (name === 'browser_close') return this.closeFailures < 3
     if (
@@ -200,7 +219,7 @@ export class ToolRecoveryGuard {
       this.browserRecovery?.code === 'workflow_browser_session_unavailable' &&
       !this.uncertainBrowserOutcome
     )
-      return true
+      return this.browserOpenFailures < 3
     return !name.startsWith('browser_') || this.browserFailures < 3
   }
 
@@ -253,7 +272,7 @@ export class ToolRecoveryGuard {
       ok: false,
       error: vision
         ? 'Lokale Bildanalyse ist für diese Runtime bereits als nicht verfügbar bestätigt. capabilities oder OCR verwenden; andere Arbeit kann weiterlaufen.'
-        : 'Dieser Browserweg ist nach drei fehlgeschlagenen Versuchen für den Auftrag pausiert. Die gemeldete Ursache beheben oder den Blocker berichten. Andere Werkzeuge bleiben nutzbar.',
+        : 'Dieser Browserweg ist nach wiederholten Versuchen ohne Fortschritt für den Auftrag pausiert. Die gemeldete Ursache beheben oder den Blocker berichten. Andere Werkzeuge bleiben nutzbar.',
       output: {
         code: 'tool_recovery_required',
         blocked_tool: name,
@@ -276,6 +295,16 @@ export class ToolRecoveryGuard {
 
   record(name: string, args: Record<string, unknown>, outcome: Outcome, mutating = false): Outcome {
     if (outcome.ok) {
+      // A status call is successful even when it proves there is no native session.
+      // Count that exact prerequisite loop, never unchanged DOM or asynchronous job data.
+      const status = name === 'browser_status' ? details(outcome.output) : undefined
+      if (status?.surface === 'luczor_internal_browser' && status.session === null) {
+        this.missingSessionObservations++
+        if (!this.uncertainBrowserOutcome) this.browserRecovery = missingBrowserSession()
+      } else if (status?.surface === 'luczor_internal_browser' && typeof details(status.session)?.id === 'string') {
+        this.missingSessionObservations = 0
+        if (this.browserRecovery?.code === 'workflow_browser_session_unavailable') this.browserRecovery = undefined
+      }
       if (mutating || name === 'fs_read') this.reads.clear()
       if (repeatedReads.has(name)) {
         const key = stableData([name, args])
@@ -322,14 +351,23 @@ export class ToolRecoveryGuard {
       if (name === 'browser_close' && details(outcome.output)?.closed === true) {
         if (!this.uncertainBrowserOutcome) this.browserFailures = 0
         this.closeFailures = 0
+        this.missingSessionObservations = 0
+        this.browserOpenFailures = 0
+        this.browserRecovery = undefined
       } else if (name.startsWith('browser_') && !['browser_status', 'browser_close'].includes(name)) {
         if (!this.uncertainBrowserOutcome) this.browserFailures = 0
+        this.missingSessionObservations = 0
+        this.browserRecovery = undefined
+        if (name === 'browser_open') this.browserOpenFailures = 0
       }
       return outcome
     }
     const next = recovery(name, outcome)
     if (!next) return outcome
     if (name.startsWith('browser_') && name !== 'browser_status') this.browserRecovery = next
+    if (name.startsWith('browser_') && next.code === 'workflow_browser_session_unavailable')
+      this.missingSessionObservations++
+    if (name === 'browser_open') this.browserOpenFailures++
     if (
       name.startsWith('browser_') &&
       (getBrowserFailure(details(outcome.output)?.browserFailure)?.outcome === 'unknown' ||

@@ -59,7 +59,7 @@ async function browser(ctx: ToolContext, action: string, args: Record<string, un
         ? { id: existing.meta.id, status: existing.meta.status, allowed_hosts: existing.meta.allowedHosts }
         : null,
       next_tool: existing ? 'browser_dom_scan' : 'browser_open',
-      guidance: `${existing ? 'This run owns session metadata; it does not prove the native page is ready. Use browser_dom_scan to observe it.' : 'This run has no browser session. Use browser_open with the task URL, then browser_dom_scan.'} Use observed refs for actions, then verify with a fresh scan/read. Screenshot/vision is optional for canvas, inaccessible frames or visual checks; never required for ordinary actions.`,
+      guidance: `${existing ? 'This run owns session metadata; it does not prove the native page is ready. Use browser_dom_scan {} to observe the existing page. browser_open {} preserves this owned page.' : 'This run has no browser session. Use browser_open with the URL or local file supplied by the task. For a requested basic test without a target, use browser_open {} then browser_dom_scan {}. A new blank page has no interactive elements; this checks opening and observation, not form interaction. Do not invent a website.'} Use observed refs for actions, then verify with a fresh scan/read. Screenshot/vision is optional for canvas, inaccessible frames or visual checks; never required for ordinary actions.`,
     }
   }
   if (action === 'close') {
@@ -159,7 +159,7 @@ function define(
 export const browserTools: ToolDef[] = [
   define(
     'browser_status',
-    'Read this run’s internal browser session metadata and configured capabilities. Use {}. Does not open a session or probe native browser readiness. Start browser work with browser_open, then browser_dom_scan.',
+    'Read this run’s internal browser session metadata. Use {}. Does not open a session or probe native browser readiness. A missing session needs browser_open first. For a requested basic test without a target: browser_open {}, then browser_dom_scan {}. Use the task URL when supplied.',
     'status',
     { type: 'object', additionalProperties: false, properties: {} },
     false,
@@ -175,7 +175,7 @@ export const browserTools: ToolDef[] = [
   ),
   define(
     'browser_open',
-    'Open the internal browser at any HTTP(S) URL, localhost/intranet address or local file URL/absolute path. Domain lists are not required. Follow with browser_dom_scan.',
+    'Open this run’s internal browser. For a basic test without a URL, use {} then browser_dom_scan {}. Uses a blank page for a new session; keeps an existing owned page. When the task names a URL or local file, pass that target. Follow with browser_dom_scan for fresh refs. HTTP(S), localhost/intranet and absolute file paths are supported; domain lists are not required. A blank page has no interactive elements: opening and observation are not a form-interaction test. Do not invent a website.',
     'open',
     sessionSchema(['url', 'timeout_ms']),
     true,
@@ -191,7 +191,7 @@ export const browserTools: ToolDef[] = [
   ),
   define(
     'browser_dom_scan',
-    'Preferred observation: paginated DOM/semantic map with observed element refs, role, name, state and frame limitations. Includes open shadow roots and same-origin frames. Filter with query or selector; continue with nextOffset. Pass a returned ref unchanged as selector to click/fill/select. No screenshot or vision inference.',
+    'Observe this run’s existing browser session; if absent, use browser_open first. Returns a paginated DOM/semantic map with observed refs, role, name, state and frame limitations. A new blank page correctly has no interactive elements. Includes open shadow roots and same-origin frames. Filter with query or selector; continue with nextOffset. Pass a returned ref unchanged as selector to click/fill/select. No screenshot or vision inference.',
     'scan',
     sessionSchema(['selector', 'query', 'offset', 'limit', 'timeout_ms']),
     false,

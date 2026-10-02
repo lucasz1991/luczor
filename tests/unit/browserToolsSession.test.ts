@@ -69,6 +69,38 @@ describe('chat browser native session', () => {
     expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_action')).toBe(false)
     expect(browserTools.find(tool => tool.name === 'browser_status')!.description).toContain('metadata')
   })
+  it('explains a no-URL basic test without inventing a website or claiming form coverage', async () => {
+    const status = await execute('browser_status', {})
+    expect(status).toMatchObject({
+      session: null,
+      next_tool: 'browser_open',
+      guidance: expect.stringContaining('browser_open {}'),
+    })
+    expect(status).toMatchObject({ guidance: expect.stringContaining('no interactive elements') })
+    const open = browserTools.find(tool => tool.name === 'browser_open')!
+    expect(open.description.slice(0, 160)).toContain('use {}')
+    expect(open.description).toContain('existing owned page')
+    expect(open.description).toContain('task names a URL or local file')
+    expect(open.description).toContain('not a form-interaction test')
+    expect(browserTools.find(tool => tool.name === 'browser_dom_scan')!.description).toContain('browser_open first')
+    expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_action')).toBe(false)
+  })
+  it('leaves omitted URL selection to the native session and preserves an existing owned page', async () => {
+    await execute('browser_open', {})
+    const created = listToolSessions()[0]!.id
+    const nativeCalls = () => native.invoke.mock.calls.filter(([command]) => command === 'wf_browser_action')
+    expect(nativeCalls()[0]![1].payload).toMatchObject({ action: 'open', url: undefined, sessionId: undefined })
+    await execute('browser_open', { url: 'https://example.test/task' })
+    await execute('browser_open', {})
+    expect(listToolSessions()[0]!.id).toBe(created)
+    expect(nativeCalls()[1]![1].payload).toMatchObject({ action: 'open', url: 'https://example.test/task' })
+    expect(nativeCalls()[2]![1].payload).toMatchObject({ action: 'open', url: undefined, sessionId: 'native-session' })
+    expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_cleanup')).toBe(false)
+    await expect(execute('browser_status', {})).resolves.toMatchObject({
+      session: { id: created },
+      next_tool: 'browser_dom_scan',
+    })
+  })
   it('rejects unrelated action arguments before creating a browser session', async () => {
     await expect(execute('browser_open', { selector: 'ref:invented' })).rejects.toThrow('Unbekanntes Feld')
     await expect(execute('browser_click', { selector: 'ref:observed', url: 'https://example.test' })).rejects.toThrow(

@@ -204,7 +204,12 @@ export function focusedTools(
     recordExecution(name: string) {
       if (name !== selector.name && name !== reader.name) discoveryCalls = 0
     },
-    select(available: Definition[], statistics: ToolUsage[] = [], maxRegularTools = archive ? 8 : 9): Definition[] {
+    select(
+      available: Definition[],
+      statistics: ToolUsage[] = [],
+      maxRegularTools = archive ? 8 : 9,
+      recoveryToolNames: readonly string[] = []
+    ): Definition[] {
       // Built-ins advertised in this request are selectable too. Otherwise the
       // model is told that its visible history reader does not exist.
       const builtins: Definition[] = (archive ? [reader, selector] : [selector]).map(tool => ({
@@ -222,6 +227,11 @@ export function focusedTools(
         )
       )
       const text = objective.toLowerCase()
+      const browserObjective = /browser|web|url|internet|seite/.test(text)
+      const desktopObjective =
+        /desktop|bildschirm|screen|fenster|window|maus|mouse|tastatur|keyboard|extern|chrome|firefox|edge|hardware|diagnos|system/.test(
+          text
+        )
       const preferred = ['project_get_state', 'workspace_get', 'agent_assist']
       const repositoryFirst =
         /\b(repo(?:sitory)?|code|quellcode|codegraph|graph|lsp|symbole?s?|funktion(?:en)?|functions?|imports?|references?|referenzen|aufrufer|callers?|abhängigkeiten)\b/u.test(
@@ -231,7 +241,7 @@ export function focusedTools(
           : []
       if (/datei|repo|code|file|ordner|software/.test(text))
         preferred.push('fs_list', 'fs_read', 'fs_search', 'project_terminal_run')
-      if (/browser|web|url|internet|seite/.test(text))
+      if (browserObjective)
         preferred.push('browser_status', 'browser_open', 'browser_dom_scan', 'browser_click', 'browser_fill')
       if (/gerät|system|linux|windows|leistung|hardware/.test(text))
         preferred.push('os_environment', 'os_system_diagnostics', 'local_model_status')
@@ -248,11 +258,20 @@ export function focusedTools(
       const matched = searchToolCatalog(pool, objective)
         .filter(item => item.score > 0)
         .map(item => item.tool.function.name)
+      // Host recovery state can request a schema, never widen the eligible pool
+      // or perform an action. Keep hints temporary, bounded and browser-specific.
+      const recoveryPriority = [...new Set(recoveryToolNames)]
+        .filter(name => name.startsWith('browser_') && pool.some(tool => tool.function.name === name))
+        .slice(0, 2)
       const order = [
         ...new Set([
+          ...recoveryPriority,
           ...(!compactSelection ? pinned.map(tool => tool.function.name) : []),
           ...requested,
           ...exact,
+          // Opening is a prerequisite for every page read. A high lexical rank
+          // for status/read/screenshot must not hide open or the first DOM scan.
+          ...(browserObjective ? ['browser_open', 'browser_dom_scan'] : []),
           ...repositoryFirst,
           ...(compactSelection ? taskPreferred : []),
           ...matched,
@@ -263,6 +282,14 @@ export function focusedTools(
         ]),
       ]
       const selected = order
+        .filter(
+          name =>
+            !browserObjective ||
+            desktopObjective ||
+            !name.startsWith('os_') ||
+            requested.includes(name) ||
+            mentionedIds.has(name)
+        )
         .map(name => pool.find(tool => tool.function.name === name))
         .filter((tool): tool is Definition => !!tool && !builtinNames.has(tool.function.name))
         .slice(0, maxRegularTools)

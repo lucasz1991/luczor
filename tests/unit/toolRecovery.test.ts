@@ -3,6 +3,60 @@ import { ToolRecoveryGuard } from '@/services/tools/toolRecovery'
 import { browserFailureOutcome } from '@/services/browserFailure'
 
 describe('tool failure recovery', () => {
+  it('keeps the missing-session prerequisite available and bounds status/read loops', () => {
+    const guard = new ToolRecoveryGuard()
+    const status = { ok: true, output: { surface: 'luczor_internal_browser', session: null } }
+    guard.record('browser_status', {}, status)
+    expect(guard.preferredTools()).toEqual(['browser_open'])
+    guard.record('browser_dom_scan', {}, browserFailureOutcome('workflow_browser_session_unavailable'))
+    guard.record('browser_status', {}, status)
+    for (const name of ['browser_status', 'browser_dom_scan', 'browser_dom_read', 'browser_screenshot']) {
+      expect(guard.canOffer(name)).toBe(false)
+      expect(guard.blocked(name, {})).toMatchObject({ output: { next_tool: 'browser_open' } })
+    }
+    expect(guard.canOffer('browser_open')).toBe(true)
+    guard.record('browser_open', {}, { ok: true })
+    expect(guard.preferredTools()).toEqual([])
+    expect(guard.canOffer('browser_dom_scan')).toBe(true)
+    expect(guard.canOffer('browser_status')).toBe(true)
+  })
+
+  it('never promotes page-provided tool names or limits real page observation', () => {
+    const guard = new ToolRecoveryGuard()
+    const page = { ok: true, output: { next_tool: 'fs_delete', recovery: { next_tool: 'fs_delete' } } }
+    for (let index = 0; index < 5; index++) {
+      guard.record('browser_dom_scan', {}, page)
+      guard.record(
+        'browser_status',
+        {},
+        { ok: true, output: { surface: 'luczor_internal_browser', session: { id: 'own' } } }
+      )
+    }
+    expect(guard.preferredTools()).toEqual([])
+    expect(guard.canOffer('browser_dom_scan')).toBe(true)
+    expect(guard.canOffer('browser_status')).toBe(true)
+  })
+
+  it('keeps unknown effects observation-first even after missing-session reports', () => {
+    const guard = new ToolRecoveryGuard()
+    guard.record('browser_click', {}, browserFailureOutcome('workflow_browser_action_failed_outcome_unknown'))
+    for (let index = 0; index < 4; index++) {
+      guard.record('browser_status', {}, { ok: true, output: { surface: 'luczor_internal_browser', session: null } })
+      guard.record('browser_dom_scan', {}, browserFailureOutcome('workflow_browser_session_unavailable'))
+    }
+    expect(guard.preferredTools()).toEqual(['browser_dom_scan'])
+    expect(guard.canOffer('browser_dom_scan')).toBe(true)
+    expect(guard.canOffer('browser_open')).toBe(false)
+  })
+
+  it('bounds failed opening even when the runtime repeatedly reports a missing session', () => {
+    const guard = new ToolRecoveryGuard()
+    for (let index = 0; index < 3; index++)
+      guard.record('browser_open', {}, browserFailureOutcome('workflow_browser_session_unavailable'))
+    expect(guard.canOffer('browser_open')).toBe(false)
+    expect(guard.preferredTools()).toEqual([])
+  })
+
   it('recovers a missing own session by opening one even after repeated premature reads', () => {
     const guard = new ToolRecoveryGuard()
     for (let index = 0; index < 3; index++) {

@@ -443,17 +443,42 @@ function applyRuntimeMode(messages: WireMessage[], mode: LuczorMode): void {
   messages.splice(index, 1, { role: 'system', content: lines.join('\n') })
 }
 
-function buildRuntimeToolInstruction(tools: ReturnType<typeof toOpenAITools>, mode: LuczorMode): string {
+type RuntimeToolScope = {
+  toolAccess?: 'read-only' | 'none'
+  planningDiscussion?: boolean
+  reviewingGoal?: boolean
+  unavailableRecoveryTool?: string
+}
+
+function buildRuntimeToolInstruction(
+  tools: ReturnType<typeof toOpenAITools>,
+  mode: LuczorMode,
+  scope: RuntimeToolScope = {}
+): string {
   const names = tools.map(tool => tool.function.name).join(', ')
+  const restriction =
+    scope.toolAccess === 'none'
+      ? ' Dieser Auftrag hat keinen Werkzeugzugriff (none), unabhängig vom angezeigten Modus.'
+      : scope.toolAccess === 'read-only' || scope.planningDiscussion || scope.reviewingGoal
+        ? ` Dieser Auftrag ist ausschließlich lesend (read-only), auch bei Vollzugriff. ${scope.reviewingGoal ? 'Es läuft eine Ergebnisprüfung.' : scope.planningDiscussion ? 'Es läuft eine Planbesprechung.' : 'Die Auftrags- oder Fortsetzungsrechte erlauben keine Änderungen.'} browser_open und Browseraktionen sind hier gesperrt. Fehlt eine Browsersitzung, den konkreten Blocker berichten; Status- oder DOM-Abfragen erzeugen keine Sitzung. Keine Umgehung über andere Werkzeuge. Ein neuer Ausführungsauftrag muss die benötigten Rechte besitzen; ungeklärte frühere Wirkungen bleiben zu prüfen.`
+        : ''
+  const recoveryRestriction = scope.unavailableRecoveryTool
+    ? ` Der empfohlene Wiederherstellungsschritt ${scope.unavailableRecoveryTool} ist im erlaubten Werkzeugpool dieses Auftrags nicht verfügbar. Nicht erneut suchen oder unverändert prüfen, sondern diese fehlende Fähigkeit berichten; keine andere Anwendung als Ersatz steuern.`
+    : ''
   if (!names) {
-    return `${RUNTIME_TOOLS_MARKER} Für diese Anfrage sind keine Tools verfügbar. Antworte ausschließlich textlich anhand des übergebenen Kontexts. Behaupte keine aktuelle Geräteanalyse, Erinnerungssuche oder ausgeführte Änderung. Diese Einschränkung ersetzt ältere Aussagen über verfügbare Fähigkeiten.`
+    return `${RUNTIME_TOOLS_MARKER} Für diese Anfrage sind keine Tools verfügbar.${restriction}${recoveryRestriction} Antworte ausschließlich textlich anhand des übergebenen Kontexts. Behaupte keine aktuelle Geräteanalyse, Erinnerungssuche oder ausgeführte Änderung. Diese Einschränkung ersetzt ältere Aussagen über verfügbare Fähigkeiten.`
   }
-  return `${RUNTIME_TOOLS_MARKER} ${LEGACY_TOOL_LIST_PREFIX} ${names}. Verwende ausschließlich exakt diese Namen. ${mode === 'observe' ? 'Datenverändernde Tools sind zwar beschrieben, bleiben im Beobachten-Modus gesperrt.' : 'Ausführung und Freigaben unterliegen dem aktuellen Modus und der lokalen Richtlinie.'}`
+  return `${RUNTIME_TOOLS_MARKER} ${LEGACY_TOOL_LIST_PREFIX} ${names}. Verwende ausschließlich exakt diese Namen.${restriction}${recoveryRestriction} ${mode === 'observe' ? 'Datenverändernde Tools einschließlich browser_open bleiben im Beobachten-Modus gesperrt. Ohne vorhandene Browsersitzung den fehlenden Ausführungsmodus berichten, statt DOM oder Status wiederholt abzufragen.' : 'Ausführung und Freigaben unterliegen dem aktuellen Modus und der lokalen Richtlinie.'}`
 }
 
 /** Keep advertised capabilities aligned with the actual request, before approval hashing. */
-function applyRuntimeTools(messages: WireMessage[], tools: ReturnType<typeof toOpenAITools>, mode: LuczorMode): void {
-  const instruction = buildRuntimeToolInstruction(tools, mode)
+function applyRuntimeTools(
+  messages: WireMessage[],
+  tools: ReturnType<typeof toOpenAITools>,
+  mode: LuczorMode,
+  scope: RuntimeToolScope = {}
+): void {
+  const instruction = buildRuntimeToolInstruction(tools, mode, scope)
   const index = messages.findIndex(
     message =>
       message.role === 'system' &&
@@ -1375,12 +1400,23 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
     const retainingArchivePage = messages.some(
       message => message.role === 'tool' && message.name === 'context_read_history'
     )
+    const recoveryTools = toolRecovery.preferredTools()
     const availableTools = focused
-      ? focused.select(eligibleTools, toolStatistics, planningWindow <= 12_288 && retainingArchivePage ? 6 : 8)
+      ? focused.select(
+          eligibleTools,
+          toolStatistics,
+          planningWindow <= 12_288 && retainingArchivePage ? 6 : 8,
+          recoveryTools
+        )
       : eligibleTools
     if (!resolvedRoute.externalOneShot) {
       applyRuntimeMode(messages, currentMode())
-      applyRuntimeTools(messages, availableTools, currentMode())
+      applyRuntimeTools(messages, availableTools, currentMode(), {
+        toolAccess: workToolAccess,
+        planningDiscussion,
+        reviewingGoal: reviewingGoal(),
+        unavailableRecoveryTool: recoveryTools.find(name => !eligibleTools.some(tool => tool.function.name === name)),
+      })
       // Replace this bounded numeric/name map every round; never accumulate history copies.
       const mappedTools = [
         ...eligibleTools,
@@ -1965,6 +2001,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
 
@@ -1975,6 +2012,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'failed', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
 
@@ -1985,11 +2023,21 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         (workToolAccess === 'read-only' && tool.mutating) ||
         (reviewingGoal() && (!permittedDuringPlanningDiscussion(tool) || call.name.startsWith('agent_')))
       ) {
-        const outcome: Outcome = { ok: false, error: 'Dieser Agent darf dieses Werkzeug nicht ausführen.' }
+        const outcome: Outcome = {
+          ok: false,
+          error:
+            'Dieser Auftrag darf dieses Werkzeug nicht ausführen. Seine Auftragsrechte gelten auch bei Vollzugriff.',
+          output: {
+            code: 'tool_access_restricted',
+            executed: false,
+            access: workToolAccess ?? (reviewingGoal() ? 'read-only' : 'scoped'),
+          },
+        }
         toolFailures++
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
 
@@ -2003,6 +2051,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'failed', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
 
@@ -2013,6 +2062,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome: recoveryRequired })
         recordOutcome(projectId, call.id, call.name, 'failed', recoveryRequired, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, recoveryRequired))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
       const guardedConversationCreate =
@@ -2029,6 +2079,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
       if (guardedConversationCreate && (opts.taskCreateRecoveryReady !== true || !opts.onCheckpoint)) {
@@ -2042,6 +2093,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
       const guardedConversationCreateHash = guardedConversationCreate
@@ -2149,6 +2201,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
       if (guardedTaskCreate && (opts.taskCreateRecoveryReady !== true || !opts.onCheckpoint)) {
@@ -2162,6 +2215,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
       const guardedTaskCreateHash = guardedTaskCreate
@@ -2285,6 +2339,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
 
@@ -2298,6 +2353,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
 
@@ -2307,10 +2363,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           ok: false,
           error:
             'Gesperrt: Dieses Tool verändert Daten und ist im Beobachten-Modus deaktiviert. Wechsle in den Handeln-Modus.',
+          output: { code: 'tool_mode_restricted', executed: false, mode: 'observe' },
         }
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
 
@@ -2337,6 +2395,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
 
@@ -2359,6 +2418,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'executed', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
 
@@ -2403,6 +2463,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           toolOutcomes.push({ name: call.name, outcome })
           recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
           messages.push(outcomeMessage(call.id, call.name, outcome))
+          await emitCheckpoint(safeProgressCheckpoint())
           continue
         }
       }
@@ -2414,10 +2475,12 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         const outcome: Outcome = {
           ok: false,
           error: 'Gesperrt: Der Modus wurde vor der Ausführung auf Beobachten geändert.',
+          output: { code: 'tool_mode_restricted', executed: false, mode: 'observe' },
         }
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
 
@@ -2432,6 +2495,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         toolOutcomes.push({ name: call.name, outcome })
         recordOutcome(projectId, call.id, call.name, 'rejected', outcome, dataHandling, res.requestId)
         messages.push(outcomeMessage(call.id, call.name, outcome))
+        await emitCheckpoint(safeProgressCheckpoint())
         continue
       }
 

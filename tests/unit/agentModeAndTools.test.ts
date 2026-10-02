@@ -74,6 +74,7 @@ import { executionGate } from '@/services/executionGate'
 import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 import type { InferenceRequest } from '@/services/inference/types'
 import { resetAssistantProfile } from '@/services/assistantProfile'
+import { mutationKey, type AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import {
   buildLaravelProxyBody,
   hashLaravelProxyBody,
@@ -98,7 +99,185 @@ const durableTaskCreate = {
   onCheckpoint: async () => undefined,
 } as const
 
+const browserReadSelection = [
+  'browser_status',
+  'browser_dom_scan',
+  'browser_dom_read',
+  'browser_screenshot',
+  'project_get_state',
+  'workspace_get',
+]
+function browserAgentCall(id: string, name: string, args: Record<string, unknown> = {}) {
+  return {
+    content: '',
+    toolCalls: [{ id, name, arguments: args }],
+    rawToolCalls: [{ id, type: 'function' as const, function: { name, arguments: JSON.stringify(args) } }],
+  }
+}
+function offeredToolNames(request: InferenceRequest): string[] {
+  return (request.tools ?? []).map(tool => {
+    expect(tool).toMatchObject({ type: 'function', function: { name: expect.any(String) } })
+    return (tool as { function: { name: string } }).function.name
+  })
+}
+function mockBrowserAgentTools() {
+  const status = vi.fn(async () => ({
+    ok: true,
+    surface: 'luczor_internal_browser',
+    session: null,
+    next_tool: 'browser_open',
+  }))
+  const open = vi.fn(async () => ({ ok: true, sessionId: 'test-browser-session' }))
+  const navigate = vi.fn(async () => ({ ok: true }))
+  const scan = vi.fn(async () => ({ ok: true, elements: [] }))
+  const definitions = [...browserReadSelection, 'browser_open', 'browser_navigate'].map(name => ({
+    name,
+    category: 'app',
+    description: name,
+    mutating: ['browser_open', 'browser_navigate'].includes(name),
+    requiresApproval: ['browser_open', 'browser_navigate'].includes(name),
+    parameters: {
+      type: 'object',
+      additionalProperties: false,
+      properties: { url: { type: 'string' } },
+    },
+    execute:
+      new Map<string, () => Promise<unknown>>([
+        ['browser_status', status],
+        ['browser_open', open],
+        ['browser_navigate', navigate],
+        ['browser_dom_scan', scan],
+      ]).get(name) ?? mocks.execute,
+  }))
+  mocks.toOpenAITools.mockReturnValue(
+    definitions.map(tool => ({
+      type: 'function',
+      function: { name: tool.name, description: tool.description, parameters: tool.parameters },
+    }))
+  )
+  mocks.getTool.mockImplementation(name => definitions.find(tool => tool.name === name))
+  return { status, open, navigate, scan }
+}
+
 describe('agent mode and tool reliability', () => {
+  it('offers and executes the browser prerequisite after a null session despite six stale read selections', async () => {
+    const browser = mockBrowserAgentTools()
+    mocks.streamChatWithTools
+      .mockImplementationOnce(async (request: InferenceRequest) => {
+        expect(offeredToolNames(request)).not.toContain('browser_open')
+        return browserAgentCall('missing-session', 'browser_status')
+      })
+      .mockImplementationOnce(async (request: InferenceRequest) => {
+        expect(offeredToolNames(request)[0]).toBe('browser_open')
+        expect(JSON.stringify(request.messages)).toContain('browser_open')
+        return browserAgentCall('open-session', 'browser_open')
+      })
+      .mockImplementationOnce(async (request: InferenceRequest) => {
+        expect(offeredToolNames(request)).toContain('browser_dom_scan')
+        return browserAgentCall('verify-page', 'browser_dom_scan')
+      })
+      .mockResolvedValueOnce({
+        content: 'Die leere Browserseite wurde geöffnet und per DOM geprüft.',
+        toolCalls: [],
+        rawToolCalls: [],
+      })
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'unrestricted',
+      agentMode: true,
+      initialToolNames: browserReadSelection,
+      maxRounds: 4,
+      baseMessages: [{ role: 'user', content: 'Internen Browser und dessen Tools testen bitte' }],
+      inferenceGateway: {
+        id: 'local-browser-test',
+        target: 'local_llama_cpp',
+        streamChatWithTools: mocks.streamChatWithTools,
+      },
+    })
+    expect(browser.status).toHaveBeenCalledOnce()
+    expect(browser.open).toHaveBeenCalledOnce()
+    expect(browser.scan).toHaveBeenCalledOnce()
+    expect(browser.navigate).not.toHaveBeenCalled()
+    expect(mocks.awaitApproval).not.toHaveBeenCalled()
+    expect(result.toolFailures).toBe(0)
+    expect(result.finalText).toBe('Die leere Browserseite wurde geöffnet und per DOM geprüft.')
+  })
+
+  it('explains a read-only browser continuation, bounds null status reads and never replays an unknown navigation', async () => {
+    const browser = mockBrowserAgentTools()
+    const execution = executionGate.capture()
+    const objective = 'Internen Browser und dessen Tools testen bitte'
+    const unknownTarget = { url: 'https://example.test/previous' }
+    const previous = browserAgentCall('previous-navigation', 'browser_navigate', unknownTarget)
+    const checkpoint: AgentCheckpoint = {
+      projectId: 'project-2',
+      sessionId: execution.sessionId,
+      generation: execution.generation,
+      objective,
+      messages: [
+        { role: 'user', content: objective },
+        { role: 'assistant', content: '', tool_calls: previous.rawToolCalls },
+      ],
+      completedMutations: [],
+      uncertainMutations: [mutationKey('browser_navigate', unknownTarget)],
+      selectedTools: browserReadSelection,
+      ephemeralDataUsed: false,
+      toolAccess: 'read-only',
+    }
+    for (let index = 0; index < 4; index++)
+      mocks.streamChatWithTools.mockResolvedValueOnce(browserAgentCall(`null-status-${index}`, 'browser_status'))
+    mocks.streamChatWithTools
+      .mockResolvedValueOnce(browserAgentCall('retry-unknown-navigation', 'browser_navigate', unknownTarget))
+      .mockResolvedValueOnce({
+        content: 'Die Fortsetzung ist lesend gesperrt; die frühere Navigation bleibt ungeklärt.',
+        toolCalls: [],
+        rawToolCalls: [],
+      })
+    const result = await runAgent({
+      projectId: 'project-2',
+      mode: 'unrestricted',
+      execution,
+      continuation: checkpoint,
+      maxRounds: 6,
+      baseMessages: [],
+      inferenceGateway: {
+        id: 'local-browser-test',
+        target: 'local_llama_cpp',
+        streamChatWithTools: mocks.streamChatWithTools,
+      },
+    })
+    const requests = mocks.streamChatWithTools.mock.calls.map(([request]) => request as InferenceRequest)
+    for (const request of requests) {
+      const names = offeredToolNames(request)
+      expect(names).not.toContain('browser_open')
+      expect(names).not.toContain('browser_navigate')
+      const instruction = request.messages
+        .filter(message => message.role === 'system')
+        .map(message => message.content)
+        .join('\n')
+      expect(instruction).toContain('VOLLZUGRIFF')
+      expect(instruction).toContain('read-only')
+      expect(instruction).toMatch(/browser_open[^.\n]*(?:gesperrt|nicht verfügbar)/u)
+    }
+    expect(offeredToolNames(requests[3]!)).not.toContain('browser_status')
+    const blockedStatus = requests[4]!.messages.find(
+      message => message.role === 'tool' && message.tool_call_id === 'null-status-3'
+    )!
+    expect(JSON.parse(blockedStatus.content)).toMatchObject({ ok: false, output: { code: 'tool_recovery_required' } })
+    expect(
+      requests[0]!.messages.some(
+        message => message.role === 'tool' && message.content.includes('checkpoint_outcome_unknown')
+      )
+    ).toBe(true)
+    expect(browser.status).toHaveBeenCalledTimes(3)
+    expect(browser.open).not.toHaveBeenCalled()
+    expect(browser.navigate).not.toHaveBeenCalled()
+    expect(mocks.awaitApproval).not.toHaveBeenCalled()
+    expect(result.workingContext?.toolAccess).toBe('read-only')
+    expect(result.workingContext?.uncertainMutations).toContain(mutationKey('browser_navigate', unknownTarget))
+    expect(result.finalText).toContain('frühere Navigation bleibt ungeklärt')
+  })
+
   it('passes actionable validation back to the model without executing the invalid tool', async () => {
     mocks.getTool.mockReturnValue({
       name: 'project_get_state',

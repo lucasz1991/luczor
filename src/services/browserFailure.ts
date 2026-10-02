@@ -111,7 +111,8 @@ const messages: Record<string, string> = {
     'Eine HTTP(S)-Adresse, file://-URL oder einen absoluten Dateipfad ohne eingebettete Zugangsdaten verwenden.',
   workflow_browser_host_boundary_unavailable: 'Die sichere Browser-Steuerung ist auf diesem System nicht verfügbar.',
   workflow_browser_requires_windows_webview2: 'Diese Browser-Funktion benötigt Windows/WebView2.',
-  workflow_browser_session_unavailable: 'Bitte zuerst browser_open mit der gewünschten Adresse oder Datei ausführen.',
+  workflow_browser_session_unavailable:
+    'Dieser Auftrag besitzt keine Browsersitzung. Zuerst browser_open mit der Adresse oder Datei aus dem Auftrag ausführen. Für einen angeforderten Grundtest ohne Ziel: browser_open {}, danach browser_dom_scan {}. Eine neue leere Seite enthält keine interaktiven Elemente; damit sind nur Öffnen und Lesen, keine Formularaktionen geprüft. Keine Website erfinden.',
   browser_ref_stale:
     'Das beobachtete Element hat sich geändert. Mit browser_dom_scan neu erfassen und die neue Referenz verwenden.',
   browser_target_ambiguous: 'Mehrere Elemente passen. Mit browser_dom_scan das genaue Ziel auswählen.',

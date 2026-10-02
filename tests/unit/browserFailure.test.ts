@@ -25,6 +25,14 @@ const failure = {
 } as const
 
 describe('safe browser failure diagnostics', () => {
+  it('offers a blank-page basic test only when the task provides no destination', () => {
+    const message = browserFailure('workflow_browser_session_unavailable')
+    expect(message).toContain('Adresse oder Datei aus dem Auftrag')
+    expect(message).toContain('browser_open {}')
+    expect(message).toContain('browser_dom_scan {}')
+    expect(message).toContain('keine interaktiven Elemente')
+    expect(message).not.toContain('browser_close')
+  })
   it.each([
     'workflow_browser_host_boundary_required',
     'workflow_browser_allowed_hosts_invalid',
