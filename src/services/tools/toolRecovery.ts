@@ -2,7 +2,14 @@ import { compactToolOutput } from '@/services/inference/contextBudget'
 import { getBrowserFailure } from '@/services/browserFailure'
 
 type Outcome = { ok: boolean; error?: string; output?: unknown }
-type Recovery = { code: string; guidance: string; next_tool?: string; next_arguments?: Record<string, unknown> }
+type Recovery = {
+  code: string
+  guidance: string
+  next_tool?: string
+  next_arguments?: Record<string, unknown>
+  cause_code?: string
+  repetitions?: number
+}
 
 function missingBrowserSession(): Recovery {
   return {
@@ -17,6 +24,34 @@ function details(output: unknown): Record<string, unknown> | undefined {
   return output && typeof output === 'object' && !Array.isArray(output)
     ? (output as Record<string, unknown>)
     : undefined
+}
+
+/** Only the host's confirmed action envelope can carry an automatic observation. */
+function actionObservation(name: string, output: unknown): { status: 'ok' | 'unavailable'; code?: string } | undefined {
+  if (!['browser_open', 'browser_navigate', 'browser_click', 'browser_fill', 'browser_select'].includes(name))
+    return undefined
+  const action = details(output)
+  const observation = details(action?.observation)
+  if (action?.ok !== true || typeof action.sessionId !== 'string' || !action.sessionId || !observation) return undefined
+  if (
+    observation.status === 'ok' &&
+    observation.ok === true &&
+    observation.sessionId === action.sessionId &&
+    typeof action.tabId === 'string' &&
+    observation.tabId === action.tabId &&
+    typeof observation.url === 'string' &&
+    details(observation.data)
+  )
+    return { status: 'ok' }
+  if (observation.status !== 'unavailable') return undefined
+  const code = getBrowserFailure(observation.browserFailure)?.code ?? observation.code
+  return {
+    status: 'unavailable',
+    code:
+      typeof code === 'string' && /^(?:workflow_browser_|browser_)[a-z0-9_]{1,80}$/u.test(code)
+        ? code
+        : 'browser_observation_unavailable',
+  }
 }
 
 function recovery(name: string, outcome: Outcome): Recovery | undefined {
@@ -68,15 +103,20 @@ function recovery(name: string, outcome: Outcome): Recovery | undefined {
     ) {
       return {
         code,
-        guidance:
-          'The previous operation was not confirmed. Do not repeat the action or close the session to retry it. Read the current page with browser_dom_scan and verify its state before deciding what remains necessary.',
+        guidance: browserEffects.has(name)
+          ? 'The previous operation was not confirmed. Do not repeat the action or close the session to retry it. Read the current page with browser_dom_scan and verify its state before deciding what remains necessary.'
+          : 'The browser observation did not return confirmed page evidence. This does not make an earlier confirmed action uncertain. Do not replay earlier input. Use browser_dom_scan to inspect the current page; report the observation blocker if reading remains unavailable.',
         next_tool: 'browser_dom_scan',
         next_arguments: {},
       }
     }
     if (code === 'workflow_browser_session_unavailable') return missingBrowserSession()
     const targetError = /browser_(ref_stale|target_|selector_|page_not_ready)/u.test(code)
-    if (targetError || /workflow_browser_(navigation_failed|navigation_timeout|url_changed)$/u.test(code))
+    if (
+      targetError ||
+      code === 'browser_url_changed' ||
+      /workflow_browser_(navigation_failed|navigation_timeout|url_changed)$/u.test(code)
+    )
       return {
         code,
         guidance:
@@ -151,6 +191,15 @@ const repeatedReads = new Set([
   'context_read_history',
   'repository_search',
 ])
+const browserEffects = new Set([
+  'browser_open',
+  'browser_navigate',
+  'browser_click',
+  'browser_fill',
+  'browser_select',
+  'browser_download',
+  'browser_close',
+])
 function stableData(value: unknown): string {
   return (
     JSON.stringify(value, (_key, item) =>
@@ -173,8 +222,32 @@ export class ToolRecoveryGuard {
   private localVisionUnavailable = false
   private fileSelectionFailures = 0
   private observedFiles = new Map<string, { path: string; file_ref?: string }>()
+  private failedBrowserObservations = new Map<string, number>()
   // Only bounded, exact observations. Polling jobs/browser state is deliberately excluded.
   private reads = new Map<string, { signature: string; count: number; output: unknown }>()
+
+  private repeatedBrowserObservation(name: string, args: Record<string, unknown>, code: string): Recovery | undefined {
+    if (
+      !['browser_dom_scan', 'browser_dom_read'].includes(name) ||
+      !['browser_url_changed', 'workflow_browser_url_changed'].includes(code)
+    )
+      return undefined
+    const key = stableData([name, args])
+    if (key.length > 4000) return undefined
+    const count = (this.failedBrowserObservations.get(key) ?? 0) + 1
+    this.failedBrowserObservations.delete(key)
+    this.failedBrowserObservations.set(key, count)
+    while (this.failedBrowserObservations.size > 24)
+      this.failedBrowserObservations.delete(this.failedBrowserObservations.keys().next().value!)
+    if (count < 3) return undefined
+    return {
+      code: 'browser_observation_repeated',
+      cause_code: code,
+      repetitions: count,
+      guidance:
+        'The same DOM observation repeatedly failed with a URL mismatch and produced no page evidence. Stop unchanged scan/read retries and report this browser blocker. Status is metadata only. Do not replay a confirmed action or treat this failure as resolution of an earlier unknown effect. A later fresh observation remains allowed when there is a concrete reason to expect changed page state.',
+    }
+  }
 
   private repeatedRead(name: string, args: Record<string, unknown>): Outcome | undefined {
     const previous = this.reads.get(stableData([name, args]))
@@ -199,6 +272,8 @@ export class ToolRecoveryGuard {
 
   /** Only host-classified recovery; page-provided next_tool values are never selection authority. */
   preferredTools(): string[] {
+    // Keep observation available, but do not keep promoting a known failing read loop.
+    if (this.browserRecovery?.code === 'browser_observation_repeated') return []
     if (this.uncertainBrowserOutcome) return ['browser_dom_scan']
     const next = this.browserRecovery?.next_tool
     return next && this.canOffer(next) ? [next] : []
@@ -295,6 +370,9 @@ export class ToolRecoveryGuard {
 
   record(name: string, args: Record<string, unknown>, outcome: Outcome, mutating = false): Outcome {
     if (outcome.ok) {
+      const observation = actionObservation(name, outcome.output)
+      if (['browser_dom_scan', 'browser_dom_read'].includes(name) || observation?.status === 'ok')
+        this.failedBrowserObservations.clear()
       // A status call is successful even when it proves there is no native session.
       // Count that exact prerequisite loop, never unchanged DOM or asynchronous job data.
       const status = name === 'browser_status' ? details(outcome.output) : undefined
@@ -360,16 +438,34 @@ export class ToolRecoveryGuard {
         this.browserRecovery = undefined
         if (name === 'browser_open') this.browserOpenFailures = 0
       }
+      if (observation?.status === 'unavailable') {
+        // A failed read cannot revoke confirmation of its parent action or make that action uncertain.
+        const code = observation.code!
+        const next = this.repeatedBrowserObservation('browser_dom_scan', {}, code) ?? {
+          code: 'browser_observation_unavailable',
+          cause_code: code,
+          guidance:
+            'The browser action succeeded; only its follow-up DOM observation failed. Do not replay the confirmed action. Use browser_dom_scan once to inspect the current page, then report the observation blocker if no fresh page evidence is available.',
+          next_tool: 'browser_dom_scan',
+          next_arguments: {},
+        }
+        this.browserRecovery = next
+        return {
+          ...outcome,
+          output: { ...details(outcome.output), recovery: next },
+        }
+      }
       return outcome
     }
-    const next = recovery(name, outcome)
-    if (!next) return outcome
+    const classified = recovery(name, outcome)
+    if (!classified) return outcome
+    const next = this.repeatedBrowserObservation(name, args, classified.code) ?? classified
     if (name.startsWith('browser_') && name !== 'browser_status') this.browserRecovery = next
     if (name.startsWith('browser_') && next.code === 'workflow_browser_session_unavailable')
       this.missingSessionObservations++
     if (name === 'browser_open') this.browserOpenFailures++
     if (
-      name.startsWith('browser_') &&
+      browserEffects.has(name) &&
       (getBrowserFailure(details(outcome.output)?.browserFailure)?.outcome === 'unknown' ||
         next.code.endsWith('_outcome_unknown'))
     )

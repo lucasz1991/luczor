@@ -1,11 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const native = vi.hoisted(() => ({ invoke: vi.fn() }))
+const workspace = vi.hoisted(() => ({ rootPath: 'E:/workspace' }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }))
 vi.mock('@/services/workflows/access', () => ({
-  captureWorkflowAccess: vi.fn(async (_ctx, projectId) => ({ principalId: 'owner', projectId })),
+  captureWorkflowAccess: vi.fn(async (_ctx, projectId) => ({
+    principalId: 'owner',
+    projectId,
+  })),
 }))
 vi.mock('@/services/projectWorkspace', () => ({
-  requireProjectWorkspace: vi.fn(async () => ({ rootPath: 'E:/workspace', updatedAt: 10 })),
+  requireProjectWorkspace: vi.fn(async () => ({
+    rootPath: workspace.rootPath,
+    updatedAt: 10,
+  })),
 }))
 import { browserTools } from '@/services/tools/browser'
 import {
@@ -23,9 +30,20 @@ import { chatPlaygroundToolSessionId } from '@/services/chatPlayground'
 const context = { projectId: 'project' }
 const execute = (name: string, args: Record<string, unknown>) =>
   browserTools.find(tool => tool.name === name)!.execute(args, context)
+const openTimeout = {
+  version: 1,
+  code: 'workflow_browser_navigation_timeout',
+  phase: 'readiness',
+  operation: 'open',
+  sessionId: 'untrusted-error-session',
+  backend: 'webview2',
+  elapsedMs: 15000,
+  outcome: 'unknown',
+} as const
 
 beforeEach(() => {
   clearToolSessions()
+  workspace.rootPath = 'E:/workspace'
   native.invoke.mockReset().mockImplementation(async (command, input) => {
     if (command === 'wf_browser_action')
       return {
@@ -33,7 +51,15 @@ beforeEach(() => {
         sessionId: 'native-session',
         tabId: 'luczor-browser',
         url: input.payload.url ?? 'https://example.test',
-        data: { text: 'page', truncated: false },
+        data:
+          input.payload.action === 'scan'
+            ? {
+                version: 1,
+                elements: [{ ref: 'ref:current', role: 'button', name: 'Next' }],
+                offset: 0,
+                nextOffset: null,
+              }
+            : { text: 'page', truncated: false },
       }
     return true
   })
@@ -45,8 +71,8 @@ describe('chat browser native session', () => {
   it.each([
     ['browser_status', []],
     ['browser_close', ['allowed_hosts']],
-    ['browser_open', ['url', 'timeout_ms', 'allowed_hosts']],
-    ['browser_navigate', ['url', 'timeout_ms', 'allowed_hosts']],
+    ['browser_open', ['url', 'project_path', 'timeout_ms', 'allowed_hosts']],
+    ['browser_navigate', ['url', 'project_path', 'timeout_ms', 'allowed_hosts']],
     ['browser_dom_scan', ['selector', 'query', 'offset', 'limit', 'timeout_ms', 'allowed_hosts']],
     ['browser_dom_read', ['selector', 'allowed_hosts']],
     ['browser_screenshot', ['name', 'allowed_hosts']],
@@ -76,7 +102,9 @@ describe('chat browser native session', () => {
       next_tool: 'browser_open',
       guidance: expect.stringContaining('browser_open {}'),
     })
-    expect(status).toMatchObject({ guidance: expect.stringContaining('no interactive elements') })
+    expect(status).toMatchObject({
+      guidance: expect.stringContaining('no interactive elements'),
+    })
     const open = browserTools.find(tool => tool.name === 'browser_open')!
     expect(open.description.slice(0, 160)).toContain('use {}')
     expect(open.description).toContain('existing owned page')
@@ -88,41 +116,200 @@ describe('chat browser native session', () => {
   it('leaves omitted URL selection to the native session and preserves an existing owned page', async () => {
     await execute('browser_open', {})
     const created = listToolSessions()[0]!.id
-    const nativeCalls = () => native.invoke.mock.calls.filter(([command]) => command === 'wf_browser_action')
-    expect(nativeCalls()[0]![1].payload).toMatchObject({ action: 'open', url: undefined, sessionId: undefined })
+    const nativeCalls = () => native.invoke.mock.calls.filter(([, input]) => input?.payload?.action === 'open')
+    expect(nativeCalls()[0]![1].payload).toMatchObject({
+      action: 'open',
+      url: undefined,
+      sessionId: undefined,
+    })
     await execute('browser_open', { url: 'https://example.test/task' })
     await execute('browser_open', {})
     expect(listToolSessions()[0]!.id).toBe(created)
-    expect(nativeCalls()[1]![1].payload).toMatchObject({ action: 'open', url: 'https://example.test/task' })
-    expect(nativeCalls()[2]![1].payload).toMatchObject({ action: 'open', url: undefined, sessionId: 'native-session' })
+    expect(nativeCalls()[1]![1].payload).toMatchObject({
+      action: 'open',
+      url: 'https://example.test/task',
+    })
+    expect(nativeCalls()[2]![1].payload).toMatchObject({
+      action: 'open',
+      url: undefined,
+      sessionId: 'native-session',
+    })
     expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_cleanup')).toBe(false)
     await expect(execute('browser_status', {})).resolves.toMatchObject({
       session: { id: created },
       next_tool: 'browser_dom_scan',
+      guidance: expect.stringContaining('Do not reopen or navigate to about:blank before scanning'),
     })
+  })
+  it.each(['browser_open', 'browser_navigate'])('grounds %s local paths in the exact filesystem result', name => {
+    const tool = browserTools.find(candidate => candidate.name === name)!
+    expect(tool.description).toContain('workspace root')
+    expect(tool.description).toContain('exact relative path returned by fs_write or fs_list once')
+    expect(tool.description).toContain('Do not guess the root or duplicate path segments')
+    expect(tool.parameters.properties).toMatchObject({
+      project_path: {
+        description: expect.stringContaining('Exact project-relative file path returned by fs_write or fs_list'),
+      },
+    })
+  })
+  it('does not offer project_path through the shared download URL description', () => {
+    const tool = browserTools.find(candidate => candidate.name === 'browser_download')!
+    expect(tool.parameters.properties).toMatchObject({
+      url: { description: expect.not.stringContaining('project_path') },
+    })
+    expect(tool.parameters.properties).not.toHaveProperty('project_path')
+  })
+  it.each([
+    [
+      'E:/projekte/luczor_tests',
+      'luczor_tooltest/browser_test.html',
+      'file:///E:/projekte/luczor_tests/luczor_tooltest/browser_test.html',
+    ],
+    [
+      'E:\\projekte\\Test Raum\\',
+      '.\\Formulare\\Größe #1%.html',
+      'file:///E:/projekte/Test%20Raum/Formulare/Gr%C3%B6%C3%9Fe%20%231%25.html',
+    ],
+    ['\\\\server\\share\\', 'forms/test.html', 'file://server/share/forms/test.html'],
+    ['/tmp/project/', 'forms/test.html', 'file:///tmp/project/forms/test.html'],
+  ])('resolves a project file exactly once against its frozen workspace: %s', async (root, path, target) => {
+    workspace.rootPath = root
+    await expect(execute('browser_open', { project_path: path })).resolves.toMatchObject({ ok: true, url: target })
+    workspace.rootPath = 'E:/different-current-binding'
+    await execute('browser_navigate', { project_path: path })
+    const actions = native.invoke.mock.calls.filter(([, input]) =>
+      ['open', 'navigate'].includes(input?.payload?.action)
+    )
+    expect(actions.map(([, input]) => input.payload.url)).toEqual([target, target])
+    expect(actions.map(([, input]) => input.payload.scope.expectedRootPath)).toEqual([root, root])
+  })
+  it.each([
+    ['browser_open', { project_path: '../private.html' }],
+    ['browser_open', { project_path: 'E:\\outside.html' }],
+    ['browser_open', { project_path: '/outside.html' }],
+    ['browser_open', { project_path: 'https://example.test' }],
+    ['browser_open', { project_path: '.' }],
+    ['browser_open', { project_path: 'page.html', url: 'https://example.test' }],
+    ['browser_navigate', {}],
+  ] as const)('rejects invalid or conflicting project navigation before admission: %s %j', async (name, args) => {
+    await expect(execute(name, args)).rejects.toMatchObject({
+      code: 'tool_arguments_invalid',
+    })
+    expect(listToolSessions()).toEqual([])
+    expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_action')).toBe(false)
+  })
+  it('returns a confirmed open with its observation without requiring another tool call', async () => {
+    await expect(execute('browser_open', { url: 'https://example.test' })).resolves.toMatchObject({
+      ok: true,
+      observation: {
+        status: 'ok',
+        data: { elements: [{ ref: 'ref:current' }] },
+      },
+    })
+    expect(
+      native.invoke.mock.calls
+        .filter(([command]) => command === 'wf_browser_action')
+        .map(([, input]) => input.payload.action)
+    ).toEqual(['open', 'scan'])
+    expect(browserPanel.error).toBe('')
+  })
+  it('requires full refs with their suffix or an observed unique semantic selector', () => {
+    const tool = browserTools.find(candidate => candidate.name === 'browser_click')!
+    expect(tool.description).toContain('returned unique semantic selector')
+    expect(tool.description).toContain('entire ref including its suffix unchanged')
+    expect(tool.parameters.properties).toMatchObject({
+      selector: {
+        description: expect.stringContaining('Never truncate the nonce or suffix'),
+      },
+    })
+  })
+  it('keeps a successful first open and its session when the attached read fails', async () => {
+    const original = native.invoke.getMockImplementation()!
+    native.invoke.mockImplementation(async (command, input) => {
+      if (input?.payload?.action === 'scan') throw { ...openTimeout, operation: 'scan' }
+      return original(command, input)
+    })
+    await expect(execute('browser_open', {})).resolves.toMatchObject({
+      ok: true,
+      observation: { status: 'unavailable', next_tool: 'browser_dom_scan' },
+    })
+    expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_cleanup')).toBe(false)
+    expect(listToolSessions()).toHaveLength(1)
+    expect(browserPanel.error).toBe('')
+  })
+  it('holds the browser FIFO until the attached observation has completed', async () => {
+    const original = native.invoke.getMockImplementation()!
+    let finishScan!: (value: unknown) => void
+    let markStarted!: () => void
+    const started = new Promise<void>(resolve => {
+      markStarted = resolve
+    })
+    const pendingScan = new Promise(resolve => {
+      finishScan = resolve
+    })
+    let firstScan = true
+    native.invoke.mockImplementation(async (command, input) => {
+      if (input?.payload?.action === 'scan' && firstScan) {
+        firstScan = false
+        markStarted()
+        return pendingScan
+      }
+      return original(command, input)
+    })
+    const opening = execute('browser_open', {})
+    await Promise.race([
+      started,
+      opening.then(() => {
+        throw new Error('Open returned before its DOM observation')
+      }),
+    ])
+    const navigating = execute('browser_navigate', {
+      url: 'https://example.test/next',
+    })
+    await Promise.resolve()
+    const actions = () =>
+      native.invoke.mock.calls
+        .filter(([command]) => command === 'wf_browser_action')
+        .map(([, input]) => input.payload.action)
+    expect(actions()).toEqual(['open', 'scan'])
+    finishScan(await original('wf_browser_action', { payload: { action: 'scan' } }))
+    await Promise.all([opening, navigating])
+    expect(actions()).toEqual(['open', 'scan', 'navigate', 'scan'])
   })
   it('rejects unrelated action arguments before creating a browser session', async () => {
     await expect(execute('browser_open', { selector: 'ref:invented' })).rejects.toThrow('Unbekanntes Feld')
-    await expect(execute('browser_click', { selector: 'ref:observed', url: 'https://example.test' })).rejects.toThrow(
-      'Unbekanntes Feld'
-    )
+    await expect(
+      execute('browser_click', {
+        selector: 'ref:observed',
+        url: 'https://example.test',
+      })
+    ).rejects.toThrow('Unbekanntes Feld')
     expect(listToolSessions()).toEqual([])
     expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_action')).toBe(false)
   })
   it('queues competing owners fairly and skips an aborted waiter without blocking the current owner', async () => {
     const ownerContext = {
       projectId: 'project',
-      execution: executionGate.capture(undefined, { projectId: 'project', runId: 'owner' }),
+      execution: executionGate.capture(undefined, {
+        projectId: 'project',
+        runId: 'owner',
+      }),
     }
     const owner = await acquireBrowserToolSession(ownerContext)
     const aborted = new AbortController()
     const cancelled = acquireBrowserToolSession({
       projectId: 'project',
-      execution: executionGate.capture(aborted.signal, { projectId: 'project', runId: 'cancelled-waiter' }),
+      execution: executionGate.capture(aborted.signal, {
+        projectId: 'project',
+        runId: 'cancelled-waiter',
+      }),
     })
     const next = acquireBrowserToolSession({
       projectId: 'project',
-      execution: executionGate.capture(undefined, { projectId: 'project', runId: 'next-waiter' }),
+      execution: executionGate.capture(undefined, {
+        projectId: 'project',
+        runId: 'next-waiter',
+      }),
     })
     aborted.abort()
     await expect(cancelled).rejects.toBeDefined()
@@ -166,7 +353,9 @@ describe('chat browser native session', () => {
       expect.objectContaining({
         payload: expect.objectContaining({
           scope: researchScope,
-          execution: expect.objectContaining({ workflowExecutionId: 'research-id' }),
+          execution: expect.objectContaining({
+            workflowExecutionId: 'research-id',
+          }),
         }),
       })
     )
@@ -225,20 +414,30 @@ describe('chat browser native session', () => {
 
     expect(native.invoke).toHaveBeenCalledWith(
       'wf_execution_cancel',
-      expect.objectContaining({ payload: expect.objectContaining({ executionId: terminal.scope.runId }) })
+      expect.objectContaining({
+        payload: expect.objectContaining({ executionId: terminal.scope.runId }),
+      })
     )
     expect(native.invoke).not.toHaveBeenCalledWith(
       'wf_execution_cancel',
-      expect.objectContaining({ payload: expect.objectContaining({ executionId: other.scope.runId }) })
+      expect.objectContaining({
+        payload: expect.objectContaining({ executionId: other.scope.runId }),
+      })
     )
     expect(listToolSessions().map(session => session.id)).toEqual([other.meta.id])
   })
   it('rejects executable URLs before reserving a session and ignores legacy host lists', async () => {
     await expect(
-      execute('browser_open', { url: 'javascript:alert(1)', allowed_hosts: ['wrong.test'] })
+      execute('browser_open', {
+        url: 'javascript:alert(1)',
+        allowed_hosts: ['wrong.test'],
+      })
     ).rejects.toThrow('workflow_browser_url_invalid')
     expect(listToolSessions()).toEqual([])
-    await execute('browser_open', { url: 'https://example.test', allowed_hosts: ['Example.TEST', 'example.test'] })
+    await execute('browser_open', {
+      url: 'https://example.test',
+      allowed_hosts: ['Example.TEST', 'example.test'],
+    })
     expect(listToolSessions()[0]?.allowedHosts).toEqual([])
   })
   it('reports the owned boundary and closes without guessed hosts through native owner cleanup', async () => {
@@ -267,8 +466,13 @@ describe('chat browser native session', () => {
   })
   it('does not create sessions for reads, status or idempotent close', async () => {
     await expect(execute('browser_dom_read', {})).rejects.toThrow('browser_open')
-    await expect(execute('browser_status', {})).resolves.toMatchObject({ session: null })
-    await expect(execute('browser_close', {})).resolves.toMatchObject({ closed: false, already_closed: true })
+    await expect(execute('browser_status', {})).resolves.toMatchObject({
+      session: null,
+    })
+    await expect(execute('browser_close', {})).resolves.toMatchObject({
+      closed: false,
+      already_closed: true,
+    })
     expect(listToolSessions()).toEqual([])
     expect(native.invoke.mock.calls.filter(([command]) => command.startsWith('wf_browser'))).toEqual([])
   })
@@ -278,17 +482,25 @@ describe('chat browser native session', () => {
     native.invoke.mockRejectedValueOnce('workflow_browser_cleanup_pending')
     await expect(execute('browser_close', {})).rejects.toThrow('noch geschlossen')
     expect(listToolSessions()[0]?.id).toBe(id)
-    await expect(execute('browser_close', {})).resolves.toMatchObject({ closed: true })
+    await expect(execute('browser_close', {})).resolves.toMatchObject({
+      closed: true,
+    })
     expect(listToolSessions()).toEqual([])
   })
   it('does not expose or close another active run and frees completed run ownership for the next chat', async () => {
     const firstCtx = {
       ...context,
-      execution: executionGate.capture(undefined, { projectId: 'project', runId: 'browser-first' }),
+      execution: executionGate.capture(undefined, {
+        projectId: 'project',
+        runId: 'browser-first',
+      }),
     }
     const secondCtx = {
       ...context,
-      execution: executionGate.capture(undefined, { projectId: 'project', runId: 'browser-second' }),
+      execution: executionGate.capture(undefined, {
+        projectId: 'project',
+        runId: 'browser-second',
+      }),
     }
     const finish = retainToolSessionRun(firstCtx)
     const nestedFinish = retainToolSessionRun(firstCtx)
@@ -332,8 +544,14 @@ describe('chat browser native session', () => {
   })
   it('never reuses another run’s execution permit inside the same project', async () => {
     const firstController = new AbortController()
-    const firstTicket = executionGate.capture(firstController.signal, { projectId: 'project', runId: 'first-run' })
-    const secondTicket = executionGate.capture(undefined, { projectId: 'project', runId: 'second-run' })
+    const firstTicket = executionGate.capture(firstController.signal, {
+      projectId: 'project',
+      runId: 'first-run',
+    })
+    const secondTicket = executionGate.capture(undefined, {
+      projectId: 'project',
+      runId: 'second-run',
+    })
     const first = await getToolSession({ ...context, execution: firstTicket }, 'terminal')
     const second = await getToolSession({ ...context, execution: secondTicket }, 'terminal')
     expect(first.meta.id).not.toBe(second.meta.id)
@@ -344,9 +562,12 @@ describe('chat browser native session', () => {
     expect(secondTicket.signal.aborted).toBe(false)
   })
   it('sends a stable execution identity matching its artifact run for open and navigation', async () => {
-    await execute('browser_open', { url: 'https://example.test/first', allowed_hosts: ['example.test'] })
+    await execute('browser_open', {
+      url: 'https://example.test/first',
+      allowed_hosts: ['example.test'],
+    })
     await execute('browser_navigate', { url: 'https://example.test/second' })
-    const calls = native.invoke.mock.calls.filter(([command]) => command === 'wf_browser_action')
+    const calls = native.invoke.mock.calls.filter(([, input]) => ['open', 'navigate'].includes(input?.payload?.action))
     expect(calls).toHaveLength(2)
     const first = calls[0]![1].payload
     const second = calls[1]![1].payload
@@ -375,7 +596,12 @@ describe('chat browser native session', () => {
     expect(native.invoke).toHaveBeenLastCalledWith(
       'wf_browser_action',
       expect.objectContaining({
-        payload: expect.objectContaining({ action: 'scan', query: 'Save', offset: 80, limit: 20 }),
+        payload: expect.objectContaining({
+          action: 'scan',
+          query: 'Save',
+          offset: 80,
+          limit: 20,
+        }),
       })
     )
     expect(native.invoke.mock.calls.some(([, input]) => input?.payload?.action === 'screenshot')).toBe(false)
@@ -406,7 +632,11 @@ describe('chat browser native session', () => {
       elapsedMs: 123,
       outcome: 'unknown',
     }
-    native.invoke.mockRejectedValueOnce({ ...diagnostic, url: 'https://private.test', value: 'PRIVATE' })
+    native.invoke.mockRejectedValueOnce({
+      ...diagnostic,
+      url: 'https://private.test',
+      value: 'PRIVATE',
+    })
     await expect(execute('browser_click', { selector: 'ref:observed' })).rejects.toMatchObject({
       browserFailure: diagnostic,
       message: expect.stringContaining('nicht wiederholen'),
@@ -415,21 +645,152 @@ describe('chat browser native session', () => {
     expect(browserPanel.error).not.toContain('PRIVATE')
     expect(native.invoke.mock.calls.filter(([, input]) => input?.payload?.action === 'click')).toHaveLength(1)
   })
-  it('retains the original open failure even if cleanup also fails', async () => {
+  it.each([
+    openTimeout,
+    { ...openTimeout, phase: 'validation', outcome: 'not_started' },
+    { ...openTimeout, phase: 'admission', outcome: 'not_started' },
+  ])('keeps a confirmed session observable after a later open failure: $phase/$outcome', async diagnostic => {
+    await execute('browser_open', {})
+    const id = listToolSessions()[0]!.id
+    native.invoke.mockRejectedValueOnce(diagnostic)
+    await expect(execute('browser_open', { url: 'about:blank' })).rejects.toMatchObject({
+      browserFailure: diagnostic,
+    })
+    expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_cleanup')).toBe(false)
+    expect(listToolSessions()[0]?.id).toBe(id)
+    await expect(execute('browser_status', {})).resolves.toMatchObject({
+      session: { id },
+      next_tool: 'browser_dom_scan',
+    })
+    await execute('browser_dom_scan', {})
+    expect(native.invoke).toHaveBeenLastCalledWith(
+      'wf_browser_action',
+      expect.objectContaining({
+        payload: expect.objectContaining({
+          action: 'scan',
+          sessionId: 'native-session',
+        }),
+      })
+    )
+    expect(native.invoke.mock.calls.filter(([, input]) => input?.payload?.action === 'open')).toHaveLength(2)
+  })
+  it.each([
+    openTimeout,
+    { ...openTimeout, phase: 'navigation_start', outcome: 'not_started' },
+    {
+      ...openTimeout,
+      phase: 'admission',
+      operation: 'navigate',
+      outcome: 'not_started',
+    },
+    'workflow_browser_navigation_failed',
+  ])(
+    'preserves first-open uncertainty for an own-scope observation without adopting error identity: %j',
+    async diagnostic => {
+      native.invoke.mockRejectedValueOnce(diagnostic)
+      await expect(execute('browser_open', { url: 'about:blank' })).rejects.toThrow()
+      expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_cleanup')).toBe(false)
+      expect(listToolSessions()).toHaveLength(1)
+      await execute('browser_dom_scan', {})
+      const calls = native.invoke.mock.calls.filter(([command]) => command === 'wf_browser_action')
+      expect(calls.map(([, input]) => input.payload.action)).toEqual(['open', 'scan'])
+      expect(calls[1]![1].payload.scope).toEqual(calls[0]![1].payload.scope)
+      expect(calls[1]![1].payload.sessionId).toBeUndefined()
+      await execute('browser_dom_read', {})
+      expect(native.invoke).toHaveBeenLastCalledWith(
+        'wf_browser_action',
+        expect.objectContaining({
+          payload: expect.objectContaining({
+            action: 'read',
+            sessionId: 'native-session',
+          }),
+        })
+      )
+    }
+  )
+  it.each(['validation', 'admission'])('cleans up a first open confirmed not started during %s', async phase => {
+    const diagnostic = { ...openTimeout, phase, outcome: 'not_started' }
+    native.invoke.mockRejectedValueOnce(diagnostic)
+    await expect(execute('browser_open', {})).rejects.toMatchObject({
+      browserFailure: diagnostic,
+    })
+    expect(native.invoke.mock.calls.filter(([command]) => command === 'wf_browser_cleanup')).toHaveLength(1)
+    expect(listToolSessions()).toEqual([])
+  })
+  it('does not discard an earlier uncertain open when a later explicit attempt is rejected before starting', async () => {
+    native.invoke.mockRejectedValueOnce(openTimeout)
+    await expect(execute('browser_open', {})).rejects.toMatchObject({
+      browserFailure: openTimeout,
+    })
+    native.invoke.mockRejectedValueOnce({
+      ...openTimeout,
+      phase: 'validation',
+      outcome: 'not_started',
+    })
+    await expect(execute('browser_open', {})).rejects.toThrow()
+    expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_cleanup')).toBe(false)
+    await execute('browser_dom_scan', {})
+    const calls = native.invoke.mock.calls.filter(([command]) => command === 'wf_browser_action')
+    expect(calls.map(([, input]) => input.payload.action)).toEqual(['open', 'open', 'scan'])
+    expect(calls[2]![1].payload.sessionId).toBeUndefined()
+    expect(calls[2]![1].payload.scope).toEqual(calls[0]![1].payload.scope)
+    expect(listToolSessions()).toHaveLength(1)
+  })
+  it.each(['cancel', 'revoke'] as const)('keeps an uncertain open inaccessible after %s', async change => {
+    const controller = new AbortController()
+    const ctx = {
+      ...context,
+      execution: executionGate.capture(controller.signal, {
+        projectId: 'project',
+        runId: 'cancelled-open',
+      }),
+    }
     native.invoke.mockImplementation(async command => {
-      if (command === 'wf_browser_action') throw 'workflow_browser_navigation_failed'
+      if (command === 'wf_browser_action') {
+        if (change === 'cancel') controller.abort()
+        else
+          updateExecutionControls({
+            mode: 'act',
+            killSwitch: true,
+            scope: 'project',
+          })
+        throw openTimeout
+      }
+      return true
+    })
+    await expect(browserTools.find(tool => tool.name === 'browser_open')!.execute({}, ctx)).rejects.toMatchObject({
+      browserFailure: openTimeout,
+    })
+    await expect(browserTools.find(tool => tool.name === 'browser_dom_scan')!.execute({}, ctx)).rejects.toThrow()
+    expect(native.invoke.mock.calls.filter(([command]) => command === 'wf_browser_action')).toHaveLength(1)
+    expect(native.invoke.mock.calls.some(([command]) => command === 'wf_browser_cleanup')).toBe(change === 'revoke')
+    expect(listToolSessions()).toHaveLength(change === 'revoke' ? 0 : 1)
+  })
+  it('retains the original unstarted open failure even if cleanup also fails', async () => {
+    const diagnostic = {
+      ...openTimeout,
+      code: 'workflow_browser_host_boundary_unavailable',
+      phase: 'admission',
+      outcome: 'not_started',
+    }
+    native.invoke.mockImplementation(async command => {
+      if (command === 'wf_browser_action') throw diagnostic
       if (command === 'wf_browser_cleanup') throw 'workflow_browser_cleanup_failed'
       return true
     })
     await expect(execute('browser_open', { url: 'https://example.test' })).rejects.toMatchObject({
-      message: expect.stringContaining('workflow_browser_navigation_failed'),
+      browserFailure: diagnostic,
       cleanupFailure: { code: 'workflow_browser_cleanup_failed' },
     })
-    expect(browserPanel.error).toContain('workflow_browser_navigation_failed')
+    expect(browserPanel.error).toContain('workflow_browser_host_boundary_unavailable')
   })
   it('does not execute after Not-Aus', async () => {
     await execute('browser_open', { allowed_hosts: ['example.test'] })
-    updateExecutionControls({ mode: 'act', killSwitch: true, scope: 'project' })
+    updateExecutionControls({
+      mode: 'act',
+      killSwitch: true,
+      scope: 'project',
+    })
     const before = native.invoke.mock.calls.filter(([command]) => command === 'wf_browser_action').length
     await expect(execute('browser_navigate', { url: 'https://example.test' })).rejects.toThrow('Not-Aus')
     expect(native.invoke.mock.calls.filter(([command]) => command === 'wf_browser_action')).toHaveLength(before)

@@ -75,6 +75,8 @@ export function compactToolOutput(value: unknown, maxChars = 6000): unknown {
   }
   const files = compactFileEntries(value, maxChars)
   if (files !== undefined) return files
+  const observedAction = compactObservedBrowserAction(value, maxChars)
+  if (observedAction !== undefined) return observedAction
   const browser = compactBrowserSnapshot(value, maxChars)
   if (browser !== undefined) return browser
   const catalog = compactToolCatalog(value, maxChars)
@@ -171,6 +173,39 @@ function compactFileEntries(value: unknown, maxChars: number): unknown | undefin
   return JSON.stringify(result).length <= maxChars ? result : undefined
 }
 
+/** Attached DOM evidence is independent of the already-confirmed action receipt. */
+function compactObservedBrowserAction(value: unknown, maxChars: number): unknown | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const action = value as Record<string, unknown>
+  const observation = action.observation as Record<string, unknown> | undefined
+  if (action.ok !== true || !observation || typeof observation !== 'object') return undefined
+  if (!['ok', 'unavailable', 'omitted'].includes(String(observation.status))) return undefined
+  if (JSON.stringify(value).length <= maxChars) return value
+
+  const overhead = JSON.stringify({ ...action, observation: null }).length - 4
+  const remaining = maxChars - overhead
+  if (observation.status === 'ok' && remaining >= 256) {
+    const snapshot = compactBrowserSnapshot(observation, remaining) as Record<string, unknown> | undefined
+    if (snapshot && snapshot.omitted !== true) {
+      const result = { ...action, observation: snapshot }
+      if (JSON.stringify(result).length <= maxChars) return result
+    }
+  }
+  // Do not leave partial refs, a generic array projection or a stale pagination
+  // cursor that would invite replaying the confirmed action to recover evidence.
+  const omitted = {
+    status: 'omitted',
+    contextCompacted: true,
+    reason: 'DOM evidence omitted from this excerpt. Retrieve the original receipt; do not replay the action.',
+  }
+  const preserved = { ...action, observation: omitted }
+  if (JSON.stringify(preserved).length <= maxChars) return preserved
+  const receipt = { ok: true, actionReceiptOmitted: true, contextCompacted: true, observation: omitted }
+  return JSON.stringify(receipt).length <= maxChars
+    ? receipt
+    : { ok: true, actionReceiptOmitted: true, contextCompacted: true }
+}
+
 /** Keep scan refs atomic and pagination accurate when a model has a smaller tool budget. */
 function compactBrowserSnapshot(value: unknown, maxChars: number): unknown | undefined {
   if (!value || typeof value !== 'object') return undefined
@@ -201,6 +236,7 @@ function compactBrowserSnapshot(value: unknown, maxChars: number): unknown | und
       if (!elements.length && element && typeof element === 'object' && typeof element.ref === 'string') {
         const target: Record<string, unknown> = {
           ref: element.ref,
+          ...(typeof element.selector === 'string' ? { selector: element.selector } : {}),
           role: element.role,
           name: element.name,
           detailsOmitted: true,
@@ -210,6 +246,9 @@ function compactBrowserSnapshot(value: unknown, maxChars: number): unknown | und
         if (JSON.stringify(result).length > maxChars) {
           delete target.name
           target.nameOmitted = true
+        }
+        if (JSON.stringify(result).length > maxChars) {
+          delete target.selector
         }
         if (JSON.stringify(result).length > maxChars) {
           elements.pop()

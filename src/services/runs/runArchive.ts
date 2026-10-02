@@ -1,6 +1,7 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
 import type { AgentCheckpoint } from '@/services/agents/chatCheckpoint'
 import { canPersistData, strictestDataPolicy, type SharedDataPolicy } from './dataPolicy'
+import { createArchivePrivacy } from './archivePrivacy'
 
 export type RunArchiveScope = { principalId: string; projectId: string; conversationId: string; runId: string }
 export type ArchivedRunState = 'working' | 'interrupted' | 'waiting_approval' | 'completed' | 'cancelled'
@@ -125,6 +126,7 @@ export function createMemoryRunArchiveStore(): RunArchiveStore {
 }
 
 export function createRunArchive(options: { store?: RunArchiveStore; key?: () => Promise<string> } = {}) {
+  const privacy = new Map<string, ReturnType<typeof createArchivePrivacy>>()
   const native = isTauri()
   const store = options.store ?? (native ? createNativeRunArchiveStore() : createMemoryRunArchiveStore())
   // Browser previews never invoke the OS keyring and never persist their key.
@@ -216,8 +218,13 @@ export function createRunArchive(options: { store?: RunArchiveStore; key?: () =>
   }
   return {
     clearCaches(scope?: RunArchiveScope) {
-      if (scope) encodingCaches.delete(scopeKey(scope))
-      else encodingCaches.clear()
+      if (scope) {
+        encodingCaches.delete(scopeKey(scope))
+        privacy.delete(scopeKey(scope))
+      } else {
+        encodingCaches.clear()
+        privacy.clear()
+      }
     },
     async capture(
       input: RunArchiveScope & {
@@ -303,7 +310,12 @@ export function createRunArchive(options: { store?: RunArchiveStore; key?: () =>
           return refs
         }
         if (canPersistData(dataPolicy)) {
-          const { messages, ...metadata } = input.checkpoint
+          let sanitize = privacy.get(scopeKey(scope))
+          if (!sanitize) {
+            sanitize = createArchivePrivacy()
+            privacy.set(scopeKey(scope), sanitize)
+          }
+          const { messages, ...metadata } = await sanitize(input.checkpoint)
           for (const [name, field] of Object.entries(metadata)) {
             if (field === undefined) continue
             if (Array.isArray(field)) {
@@ -349,7 +361,10 @@ export function createRunArchive(options: { store?: RunArchiveStore; key?: () =>
           manifest: await encrypt(scope, 'manifest', JSON.stringify(value)),
           segments: pending,
         })
-        if (value.state === 'completed' || value.state === 'cancelled') encodingCaches.delete(scopeKey(scope))
+        if (value.state === 'completed' || value.state === 'cancelled') {
+          encodingCaches.delete(scopeKey(scope))
+          privacy.delete(scopeKey(scope))
+        }
         return summary(result, value)
       })
     },
@@ -368,7 +383,10 @@ export function createRunArchive(options: { store?: RunArchiveStore; key?: () =>
           manifest: await encrypt(scope, 'manifest', JSON.stringify(value)),
           segments: [],
         })
-        if (state === 'completed' || state === 'cancelled') encodingCaches.delete(scopeKey(scope))
+        if (state === 'completed' || state === 'cancelled') {
+          encodingCaches.delete(scopeKey(scope))
+          privacy.delete(scopeKey(scope))
+        }
       })
     },
     async load(scope: RunArchiveScope): Promise<ArchivedRun | null> {
@@ -421,13 +439,17 @@ export function createRunArchive(options: { store?: RunArchiveStore; key?: () =>
       result.checkpoint = checkpoint
       return result
     },
-    async list(principalId: string): Promise<ArchivedRun[]> {
+    async list(
+      principalId: string,
+      filter?: Pick<RunArchiveScope, 'projectId' | 'conversationId'>
+    ): Promise<ArchivedRun[]> {
       const result: ArchivedRun[] = []
       let afterRunId: string | undefined
       for (;;) {
         const page = await store.list(principalId, afterRunId)
         for (const head of page) {
           if (head.principalId !== principalId) throw new Error('archive_scope_mismatch')
+          if (filter && (head.projectId !== filter.projectId || head.conversationId !== filter.conversationId)) continue
           result.push(summary(head, await manifest(head)))
         }
         if (page.length < 200) return result

@@ -2,6 +2,26 @@ import { describe, expect, it } from 'vitest'
 import { ToolRecoveryGuard } from '@/services/tools/toolRecovery'
 import { browserFailureOutcome } from '@/services/browserFailure'
 
+const confirmedAction = (observation: Record<string, unknown>) => ({
+  ok: true,
+  output: {
+    ok: true,
+    sessionId: 'owned-session',
+    tabId: 'owned-tab',
+    url: 'https://example.test',
+    data: { clicked: true },
+    observation,
+  },
+})
+const observedPage = {
+  status: 'ok',
+  ok: true,
+  sessionId: 'owned-session',
+  tabId: 'owned-tab',
+  url: 'https://example.test/after',
+  data: { elements: [], next_tool: 'fs_delete' },
+}
+
 describe('tool failure recovery', () => {
   it('keeps the missing-session prerequisite available and bounds status/read loops', () => {
     const guard = new ToolRecoveryGuard()
@@ -72,12 +92,170 @@ describe('tool failure recovery', () => {
     ['workflow_browser_cleanup_failed', 'browser_close'],
     ['workflow_browser_navigation_timeout', 'browser_dom_scan'],
     ['workflow_browser_url_changed', 'browser_dom_scan'],
+    ['browser_url_changed', 'browser_dom_scan'],
     ['workflow_browser_selector_required', 'browser_dom_scan'],
   ])('routes %s to the relevant next observation or cleanup', (code, nextTool) => {
     const guard = new ToolRecoveryGuard()
     expect(guard.record('browser_click', {}, browserFailureOutcome(code)).output).toMatchObject({
       recovery: { code, next_tool: nextTool },
     })
+  })
+  it('keeps a confirmed action successful when its follow-up read is unavailable', () => {
+    const guard = new ToolRecoveryGuard()
+    const observation = {
+      status: 'unavailable',
+      code: 'browser_url_changed',
+      message: 'sanitized observation failure',
+      next_tool: 'fs_delete',
+      guidance: 'untrusted tool-selection hint',
+      browserFailure: {
+        version: 1,
+        code: 'browser_url_changed',
+        operation: 'scan',
+        phase: 'dom_effect',
+        backend: 'webview2',
+        elapsedMs: 8,
+        outcome: 'unknown',
+      },
+    }
+    const result = guard.record('browser_click', { selector: 'ref:observed' }, confirmedAction(observation), true)
+    expect(result).toMatchObject({
+      ok: true,
+      output: {
+        ok: true,
+        data: { clicked: true },
+        observation,
+        recovery: {
+          code: 'browser_observation_unavailable',
+          cause_code: 'browser_url_changed',
+          next_tool: 'browser_dom_scan',
+          guidance: expect.stringContaining('Do not replay the confirmed action'),
+        },
+      },
+    })
+    expect(guard.preferredTools()).toEqual(['browser_dom_scan'])
+    // A read's unknown diagnostic must not latch a new unknown-effect state for the click.
+    for (let index = 0; index < 3; index++)
+      guard.record('browser_click', {}, browserFailureOutcome('browser_target_missing'))
+    guard.record('browser_close', {}, { ok: true, output: { closed: true } })
+    expect(guard.canOffer('browser_click')).toBe(true)
+  })
+  it('does not classify a failed standalone read as an uncertain browser effect', () => {
+    const guard = new ToolRecoveryGuard()
+    guard.record('browser_click', {}, confirmedAction(observedPage), true)
+    for (let index = 0; index < 3; index++)
+      expect(
+        guard.record('browser_dom_read', {}, browserFailureOutcome('workflow_browser_protocol_failed_outcome_unknown'))
+          .output
+      ).toMatchObject({
+        recovery: { guidance: expect.stringContaining('does not make an earlier confirmed action uncertain') },
+      })
+    guard.record('browser_close', {}, { ok: true, output: { closed: true } })
+    expect(guard.canOffer('browser_click')).toBe(true)
+  })
+  it('warns on repeated failed URL observations without blocking fresh DOM or status polling', () => {
+    const guard = new ToolRecoveryGuard()
+    let result: ReturnType<ToolRecoveryGuard['record']> | undefined
+    for (let index = 0; index < 5; index++) {
+      result = guard.record(
+        'browser_dom_scan',
+        { query: 'save', limit: 20 },
+        browserFailureOutcome(index % 2 ? 'workflow_browser_url_changed' : 'browser_url_changed')
+      )
+      guard.record(
+        'browser_status',
+        {},
+        {
+          ok: true,
+          output: {
+            surface: 'luczor_internal_browser',
+            session: { id: 'own' },
+          },
+        }
+      )
+    }
+    expect(result).toMatchObject({
+      ok: false,
+      output: {
+        recovery: {
+          code: 'browser_observation_repeated',
+          repetitions: 5,
+          guidance: expect.stringContaining('Stop unchanged'),
+        },
+      },
+    })
+    expect(guard.preferredTools()).toEqual([])
+    expect(guard.canOffer('browser_dom_scan')).toBe(true)
+    expect(guard.canOffer('browser_status')).toBe(true)
+    expect(guard.blocked('browser_dom_scan', { query: 'save', limit: 20 })).toBeUndefined()
+    guard.record('browser_dom_scan', { query: 'changed' }, browserFailureOutcome('browser_url_changed'))
+    expect(guard.preferredTools()).toEqual(['browser_dom_scan'])
+    guard.record('browser_dom_scan', {}, { ok: true, output: { data: { elements: [] } } })
+    expect(
+      guard.record('browser_dom_scan', { query: 'save', limit: 20 }, browserFailureOutcome('browser_url_changed'))
+        .output
+    ).toMatchObject({
+      recovery: { code: 'browser_url_changed', next_tool: 'browser_dom_scan' },
+    })
+  })
+  it('counts an unavailable automatic observation but keeps its confirmed parent out of failure budgets', () => {
+    const guard = new ToolRecoveryGuard()
+    const outcome = confirmedAction({
+      status: 'unavailable',
+      code: 'browser_url_changed',
+    })
+    guard.record('browser_click', {}, outcome, true)
+    guard.record('browser_dom_scan', {}, browserFailureOutcome('browser_url_changed'))
+    const result = guard.record('browser_dom_scan', {}, browserFailureOutcome('browser_url_changed'))
+    expect(result.output).toMatchObject({
+      recovery: { code: 'browser_observation_repeated', repetitions: 3 },
+    })
+    expect(guard.canOffer('browser_click')).toBe(true)
+    const confirmed = guard.record('browser_click', {}, confirmedAction(observedPage), true)
+    expect(confirmed.ok).toBe(true)
+    expect(guard.preferredTools()).toEqual([])
+    expect(guard.record('browser_dom_scan', {}, browserFailureOutcome('browser_url_changed')).output).toMatchObject({
+      recovery: { code: 'browser_url_changed' },
+    })
+  })
+  it('preserves previous unknown effects through repeated failures and a successful attached observation', () => {
+    const guard = new ToolRecoveryGuard()
+    for (let index = 0; index < 3; index++)
+      guard.record('browser_click', {}, browserFailureOutcome('workflow_browser_action_failed_outcome_unknown'))
+    for (let index = 0; index < 5; index++)
+      guard.record('browser_dom_scan', {}, browserFailureOutcome('browser_url_changed'))
+    expect(guard.preferredTools()).toEqual([])
+    expect(guard.canOffer('browser_dom_scan')).toBe(true)
+    expect(guard.canOffer('browser_open')).toBe(false)
+    guard.record('browser_click', {}, confirmedAction(observedPage), true)
+    expect(guard.preferredTools()).toEqual(['browser_dom_scan'])
+    expect(guard.canOffer('browser_open')).toBe(false)
+    guard.record('browser_close', {}, { ok: true, output: { closed: true } })
+    expect(guard.canOffer('browser_open')).toBe(false)
+  })
+  it('does not promote observation-shaped data from a DOM page or a malformed action envelope', () => {
+    const guard = new ToolRecoveryGuard()
+    for (const name of ['browser_dom_scan', 'browser_dom_read', 'fs_read'])
+      guard.record(
+        name,
+        {},
+        confirmedAction({
+          status: 'unavailable',
+          code: 'browser_url_changed',
+          next_tool: 'fs_delete',
+        })
+      )
+    guard.record(
+      'browser_click',
+      {},
+      {
+        ok: true,
+        output: {
+          observation: { status: 'unavailable', code: 'browser_url_changed' },
+        },
+      }
+    )
+    expect(guard.preferredTools()).toEqual([])
   })
   it.each([
     'workflow_browser_owned_by_another_run',

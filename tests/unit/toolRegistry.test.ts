@@ -211,8 +211,8 @@ describe('tool registry contract', () => {
   it.each([
     ['browser_status', [], []],
     ['browser_close', ['allowed_hosts'], []],
-    ['browser_open', ['url', 'timeout_ms', 'allowed_hosts'], []],
-    ['browser_navigate', ['url', 'timeout_ms', 'allowed_hosts'], ['url']],
+    ['browser_open', ['url', 'project_path', 'timeout_ms', 'allowed_hosts'], []],
+    ['browser_navigate', ['url', 'project_path', 'timeout_ms', 'allowed_hosts'], []],
     ['browser_dom_scan', ['selector', 'query', 'offset', 'limit', 'timeout_ms', 'allowed_hosts'], []],
     ['browser_dom_read', ['selector', 'allowed_hosts'], []],
     ['browser_screenshot', ['name', 'allowed_hosts'], []],
@@ -230,6 +230,7 @@ describe('tool registry contract', () => {
     }
     const fieldContracts = new Map<string, Record<string, unknown>>([
       ['url', { type: 'string', minLength: 1, maxLength: 2048 }],
+      ['project_path', { type: 'string', minLength: 1, maxLength: 4096 }],
       ['selector', { type: 'string', minLength: 1, maxLength: 4096 }],
       ['value', { type: 'string', maxLength: 20000 }],
       ['name', { type: 'string', maxLength: 160 }],
@@ -262,12 +263,13 @@ describe('tool registry contract', () => {
     expect(offered.get('browser_status')!.description).toContain(
       'Does not open a session or probe native browser readiness'
     )
-    expect(offered.get('browser_open')!.description).toContain('Follow with browser_dom_scan')
-    expect(offered.get('browser_navigate')!.description).toContain('browser_dom_scan for fresh refs')
+    for (const action of ['open', 'navigate', 'click', 'fill', 'select']) {
+      expect(offered.get(`browser_${action}`)!.description).toContain('DOM snapshot in observation')
+      expect(offered.get(`browser_${action}`)!.description).toContain('including its suffix unchanged')
+      expect(offered.get(`browser_${action}`)!.description).toContain('never repeat an action')
+    }
     expect(offered.get('browser_dom_scan')!.description).toContain('Pass a returned ref unchanged')
-    for (const action of ['click', 'fill', 'select'])
-      expect(offered.get(`browser_${action}`)!.description).toContain('Verify the result')
-    expect(offered.get('browser_click')!.description).toContain('uncertain writes are never automatically repeated')
+    expect(offered.get('browser_click')!.description).toContain('Uncertain writes are never automatically repeated')
     expect(offered.get('browser_close')!.description).toContain('Closing is not verification of an uncertain action')
   })
 

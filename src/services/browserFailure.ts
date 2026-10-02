@@ -6,6 +6,7 @@ const phases = [
   'readiness',
   'dom_prepare',
   'dom_effect',
+  'dom_observation',
   'operation',
 ] as const
 const operations = [
@@ -112,9 +113,9 @@ const messages: Record<string, string> = {
   workflow_browser_host_boundary_unavailable: 'Die sichere Browser-Steuerung ist auf diesem System nicht verfügbar.',
   workflow_browser_requires_windows_webview2: 'Diese Browser-Funktion benötigt Windows/WebView2.',
   workflow_browser_session_unavailable:
-    'Dieser Auftrag besitzt keine Browsersitzung. Zuerst browser_open mit der Adresse oder Datei aus dem Auftrag ausführen. Für einen angeforderten Grundtest ohne Ziel: browser_open {}, danach browser_dom_scan {}. Eine neue leere Seite enthält keine interaktiven Elemente; damit sind nur Öffnen und Lesen, keine Formularaktionen geprüft. Keine Website erfinden.',
+    'Dieser Auftrag besitzt keine Browsersitzung. Zuerst browser_open mit der Adresse oder Datei aus dem Auftrag ausführen. Für einen angeforderten Grundtest ohne Ziel: browser_open {}. Der Aufruf liefert den DOM unter observation mit. Eine neue leere Seite enthält keine interaktiven Elemente; damit sind nur Öffnen und Lesen, keine Formularaktionen geprüft. Keine Website erfinden.',
   browser_ref_stale:
-    'Das beobachtete Element hat sich geändert. Mit browser_dom_scan neu erfassen und die neue Referenz verwenden.',
+    'Die Elementreferenz ist ungültig oder veraltet. Einen eindeutigen beobachteten Selektor oder die vollständige Referenz einschließlich Suffix unverändert übernehmen. Bei verändertem Seitenstand mit browser_dom_scan neu erfassen.',
   browser_target_ambiguous: 'Mehrere Elemente passen. Mit browser_dom_scan das genaue Ziel auswählen.',
   browser_target_not_actionable:
     'Das Ziel ist verdeckt, deaktiviert oder bewegt sich noch. DOM erneut prüfen; keine unklare Eingabe wiederholen.',
@@ -134,6 +135,8 @@ const messages: Record<string, string> = {
     'Die eigene Browser-Sitzung konnte nicht geschlossen werden. browser_close mit {} kann die Bereinigung erneut versuchen.',
   workflow_browser_url_changed:
     'Die Seite hat sich seit dem letzten Aufruf geändert. Bitte den aktuellen Seitenstand erneut lesen.',
+  browser_url_changed:
+    'Die Dokumentadresse stimmt nicht mit dem erwarteten Seitenstand überein. Mit browser_dom_scan den aktuellen Inhalt prüfen; die vorherige Aktion nicht unverändert wiederholen.',
   workflow_browser_navigation_changed:
     'Ein anderer Seitenwechsel hat diesen Vorgang überholt. Bitte den aktuellen Seitenstand mit browser_dom_scan erneut lesen.',
   workflow_browser_navigation_superseded:
@@ -141,7 +144,7 @@ const messages: Record<string, string> = {
   workflow_browser_navigation_failed:
     'Der native Browser hat den Seitenwechsel als fehlgeschlagen gemeldet. Mit browser_dom_scan den aktuellen Seitenstand prüfen; browser_status zeigt nur Sitzungsmetadaten.',
   workflow_browser_navigation_timeout:
-    'Die Seite wurde nicht rechtzeitig geladen. Den aktuellen Seitenstand prüfen, bevor erneut navigiert wird.',
+    'Das Laden der Seite wurde nicht rechtzeitig bestätigt. Mit browser_dom_scan den aktuellen Seitenstand der eigenen Sitzung prüfen; browser_status zeigt nur Sitzungsmetadaten.',
   workflow_browser_action_failed_outcome_unknown: 'Die Browseraktion wurde nicht bestätigt.',
   workflow_browser_protocol_failed_outcome_unknown: 'Die native Rückmeldung zur Browseraktion ist ausgeblieben.',
   workflow_browser_session_busy: 'Der Browser führt gerade eine andere Aktion aus. Deren Abschluss abwarten.',

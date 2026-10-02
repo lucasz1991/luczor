@@ -98,6 +98,7 @@ import { requestConfirmation } from '@/services/confirmation'
 import { sanitizeInferenceMessagesForTarget, type ContextScopeKey } from '@/services/inference/contextBroker'
 import { planContext, recordSubmittedContext } from '@/services/contextPlanner'
 import { runCoordinator } from '@/services/runs/runCoordinator'
+import { checkpointMessageRetention } from '@/services/runs/checkpointMessageRetention'
 import type { ArchivedRun, RunArchiveScope } from '@/services/runs/runArchive'
 import { canPersistData, strictestDataPolicy } from '@/services/runs/dataPolicy'
 import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
@@ -2754,6 +2755,18 @@ async function executeChatTurn(
     }
     const principalScopeId = JSON.stringify([scopeKey.serverInstance, scopeKey.principalId])
     archiveScope = { principalId: principalScopeId, projectId: pid, conversationId, runId: handle.runId }
+    const assertArchiveAccess = async () => {
+      executionGate.assert(turnExecution)
+      const principal = await currentArchivePrincipal()
+      executionGate.assert(turnExecution)
+      if (
+        principal !== principalScopeId ||
+        !state.projects.some(project => project.id === pid) ||
+        mutations.getConversation(conversationId)?.projectId !== pid
+      )
+        throw new Error('Das lokale Archiv gehört nicht mehr zum Konto oder Chat dieses Auftrags.')
+    }
+    const archivedHistory = runCoordinator.historySource(archiveScope, assertArchiveAccess)
     checkpointMemoryPrincipal = accountScope?.principalId ?? 'device-local'
     let taskCreateRecoveryReady = true
     const pendingTaskCreateVerifications = await loadPendingTaskCreates(principalScopeId, pid).catch(error => {
@@ -2927,6 +2940,7 @@ async function executeChatTurn(
           turnExecution.signal
         ),
       continuation: resume?.checkpoint,
+      archivedHistory,
       continuationContext: resume ? packages.local.text : undefined,
       pendingTaskCreateVerifications,
       principalScopeId,
@@ -2972,6 +2986,8 @@ async function executeChatTurn(
       onCheckpoint: async checkpoint => {
         if (turnExecution.signal.aborted || checkpoint.principalScopeId !== principalScopeId) return
         const reference = await runCoordinator.capture({ ...archiveScope!, messageId: assistant.id, checkpoint })
+        await assertArchiveAccess()
+        mutations.patchMessage(pid, assistant.id, { meta: checkpointMessageRetention(reference) })
         continuations.value = { ...continuations.value, [assistant.id]: reference }
         if (resume?.reference) await runCoordinator.setState(resume.reference.scope, 'completed')
         await replacePendingTaskCreates(

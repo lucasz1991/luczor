@@ -592,7 +592,7 @@ async fn browser_action_inner(
     let gate = admit(&payload.execution, writing)?;
     let input = payload.request;
     input.scope.check(&app)?;
-    let session = {
+    let (session, new_session) = {
         let mut current = sessions()
             .lock()
             .map_err(|_| "workflow_browser_registry_unavailable")?;
@@ -612,7 +612,7 @@ async fn browser_action_inner(
             {
                 return Err("workflow_browser_owned_by_another_run".into());
             }
-            session.clone()
+            (session.clone(), false)
         } else {
             if input.action != BrowserOperation::Open || input.session_id.is_some() {
                 return Err("workflow_browser_session_unavailable".into());
@@ -631,7 +631,7 @@ async fn browser_action_inner(
                 navigation: Mutex::new(NavigationTracker::default()),
             });
             *current = Some(session.clone());
-            session
+            (session, true)
         }
     };
     let _busy = lock_session(&session)?;
@@ -642,7 +642,12 @@ async fn browser_action_inner(
         .map_err(|_| "workflow_browser_gate_unavailable")? = Some(gate.clone());
     let result = run(&app, &session, &gate, &input, diagnostic).await;
     if result.is_err()
-        && (check(&app, &session, &gate).is_err() || input.action == BrowserOperation::Open)
+        && retire_after_failed_action(
+            input.action,
+            diagnostic.outcome,
+            check(&app, &session, &gate).is_ok(),
+            new_session,
+        )
     {
         retire(&app, &session);
     }
@@ -832,11 +837,12 @@ async fn run(
                     let actual = browser
                         .url()
                         .map_err(|_| "workflow_browser_url_unavailable")?;
-                    if completed
-                        && value["ready"] == "complete"
-                        && value["url"].as_str() == Some(actual.as_str())
-                        && (input.url.is_none() || actual.as_str() != "about:blank")
-                    {
+                    if navigation_document_ready(
+                        completed,
+                        input.url.as_deref(),
+                        actual.as_str(),
+                        value,
+                    ) {
                         break;
                     }
                 }
@@ -906,6 +912,14 @@ async fn run(
                 _ => return Err("workflow_browser_action_invalid".into()),
             };
             let mut params = json!({"action":action,"selector":input.selector,"value":input.value,"url":input.url,"expectedUrl":current_url,"timeoutMs":timeout.as_millis(),"maxChars":input.max_chars.unwrap_or(20000),"query":input.query,"offset":input.offset,"limit":input.limit,"showCursor":super::desktop_control::config()?.show_cursor});
+            // Unbound reads inspect the owned current document, including native
+            // error pages. Explicit source preconditions and all effects stay strict.
+            params["observeCurrentDocument"] = json!(
+                matches!(
+                    input.action,
+                    BrowserOperation::Scan | BrowserOperation::Read
+                ) && input.expected_url.is_none()
+            );
             if matches!(
                 input.action,
                 BrowserOperation::Click | BrowserOperation::Fill | BrowserOperation::Select
@@ -952,7 +966,14 @@ async fn run(
             }
             // Admission is rechecked after waiting. The effect phase is never retried.
             check(app, session, gate)?;
-            diagnostic.phase = "dom_effect";
+            diagnostic.phase = if matches!(
+                input.action,
+                BrowserOperation::Scan | BrowserOperation::Read
+            ) {
+                "dom_observation"
+            } else {
+                "dom_effect"
+            };
             if matches!(
                 input.action,
                 BrowserOperation::Click | BrowserOperation::Fill | BrowserOperation::Select
@@ -988,6 +1009,17 @@ async fn run(
         }
     };
     check(app, session, gate)?;
+    if matches!(
+        input.action,
+        BrowserOperation::Scan | BrowserOperation::Read
+    ) && browser
+        .url()
+        .map_err(|_| "workflow_browser_url_unavailable")?
+        .as_str()
+        != current_url
+    {
+        return Err("workflow_browser_url_changed".into());
+    }
     if input.action == BrowserOperation::Read {
         use sha2::{Digest, Sha256};
         if let Some(text) = data.get("text").and_then(Value::as_str) {
@@ -1291,6 +1323,35 @@ async fn devtools(
     Err("workflow_browser_requires_windows_webview2".into())
 }
 
+fn retire_after_failed_action(
+    action: BrowserOperation,
+    outcome: &str,
+    authority_valid: bool,
+    new_session: bool,
+) -> bool {
+    // A valid owner must be able to observe an existing page after a refused
+    // open, or a newly created page after an unconfirmed open.
+    // Revoked execution, scope changes and policy violations still close it.
+    !authority_valid || (new_session && action == BrowserOperation::Open && outcome != "unknown")
+}
+
+fn navigation_document_ready(
+    completed: bool,
+    requested_url: Option<&str>,
+    actual_url: &str,
+    document: &Value,
+) -> bool {
+    completed
+        && document["ready"] == "complete"
+        && document["url"].as_str() == Some(actual_url)
+        // A completed initial blank document cannot confirm an HTTP/file request.
+        // Explicit blank navigation uses the same URL normalization as dispatch.
+        && (actual_url != "about:blank"
+            || requested_url.is_none_or(|target| {
+                url(target).is_ok_and(|target| target.as_str() == "about:blank")
+            }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1348,6 +1409,130 @@ mod tests {
         ] {
             assert!(url(target).is_err());
         }
+    }
+
+    #[test]
+    fn failed_open_preserves_an_uncertain_owned_session_only_while_authority_remains_valid() {
+        assert!(!retire_after_failed_action(
+            BrowserOperation::Open,
+            "unknown",
+            true,
+            true
+        ));
+        assert!(retire_after_failed_action(
+            BrowserOperation::Open,
+            "not_started",
+            true,
+            true
+        ));
+        for action in [
+            BrowserOperation::Open,
+            BrowserOperation::Navigate,
+            BrowserOperation::Scan,
+        ] {
+            for outcome in ["not_started", "unknown"] {
+                for new_session in [false, true] {
+                    assert!(retire_after_failed_action(
+                        action,
+                        outcome,
+                        false,
+                        new_session
+                    ));
+                }
+            }
+        }
+        assert!(!retire_after_failed_action(
+            BrowserOperation::Navigate,
+            "unknown",
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn an_existing_owned_session_survives_a_later_open_precondition_failure() {
+        assert!(!retire_after_failed_action(
+            BrowserOperation::Open,
+            "not_started",
+            true,
+            false,
+        ));
+    }
+
+    #[test]
+    fn explicitly_requested_blank_document_can_be_ready_after_its_navigation_completes() {
+        let mut tracker = NavigationTracker::default();
+        let generation = tracker.begin("about:blank");
+        tracker.started(80, "about:blank");
+        tracker.finished(80, true);
+        for requested in ["about:blank", "  about:blank  ", "ABOUT:blank"] {
+            assert!(
+                navigation_document_ready(
+                    tracker.state(generation).unwrap() == NavigationState::Completed,
+                    Some(requested),
+                    "about:blank",
+                    &json!({"url":"about:blank","ready":"complete"}),
+                ),
+                "requested blank target: {requested}"
+            );
+        }
+    }
+
+    #[test]
+    fn readiness_keeps_implicit_blank_and_completed_web_or_file_documents() {
+        assert!(navigation_document_ready(
+            true,
+            None,
+            "about:blank",
+            &json!({"url":"about:blank","ready":"complete"})
+        ));
+        for (requested, actual) in [
+            (
+                "https://example.test/start",
+                "https://example.test/redirected",
+            ),
+            ("file:///C:/probe/index.html", "file:///C:/probe/index.html"),
+        ] {
+            assert!(navigation_document_ready(
+                true,
+                Some(requested),
+                actual,
+                &json!({"url":actual,"ready":"complete"})
+            ));
+        }
+    }
+
+    #[test]
+    fn blank_readiness_never_confirms_pending_navigation_or_another_document() {
+        let mut tracker = NavigationTracker::default();
+        let generation = tracker.begin("about:blank");
+        tracker.finished(79, true);
+        assert!(!navigation_document_ready(
+            tracker.state(generation).unwrap() == NavigationState::Completed,
+            Some("about:blank"),
+            "about:blank",
+            &json!({"url":"about:blank","ready":"complete"})
+        ));
+        for requested in ["https://example.test/new", "file:///C:/probe/index.html"] {
+            assert!(!navigation_document_ready(
+                true,
+                Some(requested),
+                "about:blank",
+                &json!({"url":"about:blank","ready":"complete"})
+            ));
+        }
+        assert!(!navigation_document_ready(
+            true,
+            Some("about:blank"),
+            "about:blank",
+            &json!({"url":"about:blank","ready":"loading"})
+        ));
+        assert!(!navigation_document_ready(
+            true,
+            Some("about:blank"),
+            "about:blank",
+            &json!({"url":"https://example.test/old","ready":"complete"})
+        ));
     }
 
     #[test]

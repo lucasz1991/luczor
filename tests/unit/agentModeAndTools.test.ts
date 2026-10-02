@@ -75,6 +75,7 @@ import { modelUsageSettings } from '@/services/inference/modelUsageSettings'
 import type { InferenceRequest } from '@/services/inference/types'
 import { resetAssistantProfile } from '@/services/assistantProfile'
 import { mutationKey, type AgentCheckpoint } from '@/services/agents/chatCheckpoint'
+import { createMemoryRunArchiveStore, createRunArchive } from '@/services/runs/runArchive'
 import {
   buildLaravelProxyBody,
   hashLaravelProxyBody,
@@ -433,6 +434,58 @@ describe('agent mode and tool reliability', () => {
     expect(next.toolFailures).toBe(1)
     expect(next.workingContext?.uncertainMutations).toHaveLength(1)
   })
+
+  it.each([true, false])(
+    'does not replay a redacted original effect after archive restart (confirmed=%s)',
+    async confirmed => {
+      mocks.getTool.mockReturnValue({
+        name: 'project_get_state',
+        category: 'project',
+        mutating: true,
+        requiresApproval: false,
+        dataHandling: 'ephemeral',
+        parameters: { type: 'object', additionalProperties: true },
+        execute: mocks.execute,
+      })
+      if (!confirmed) mocks.execute.mockRejectedValueOnce(new Error('Connection lost after write'))
+      const args = { password: 'credential-must-not-be-archived' }
+      const call = browserAgentCall('original', 'project_get_state', args)
+      mocks.streamChatWithTools.mockResolvedValueOnce(call)
+      const first = await runAgent({
+        projectId: 'project-2',
+        conversationId: 'chat',
+        mode: 'act',
+        baseMessages: [{ role: 'user', content: 'Update project' }],
+        maxRounds: 1,
+      })
+      const checkpoint = first.continuation!
+      const scope = {
+        principalId: checkpoint.principalScopeId!,
+        projectId: 'project-2',
+        conversationId: 'chat',
+        runId: 'run',
+      }
+      const store = createMemoryRunArchiveStore(),
+        key = async () => 'ab'.repeat(32)
+      await createRunArchive({ store, key }).capture({ ...scope, messageId: 'answer', checkpoint })
+      const loaded = (await createRunArchive({ store, key }).load(scope))!.checkpoint!
+      expect(JSON.stringify(loaded)).not.toContain(args.password)
+      mocks.streamChatWithTools
+        .mockResolvedValueOnce(browserAgentCall('new-provider-call-id', 'project_get_state', args))
+        .mockResolvedValueOnce({ content: 'State retained.', toolCalls: [], rawToolCalls: [] })
+      const next = await runAgent({
+        projectId: 'project-2',
+        conversationId: 'chat',
+        mode: 'act',
+        baseMessages: [],
+        continuation: loaded,
+        maxRounds: 2,
+      })
+      expect(mocks.execute).toHaveBeenCalledOnce()
+      expect(next.toolFailures).toBe(confirmed ? 0 : 1)
+      expect(next.workingContext?.uncertainMutations ?? []).toHaveLength(confirmed ? 0 : 1)
+    }
+  )
 
   it('recovers a native context limit with a smaller retrievable projection and no tool replay', async () => {
     const evidence = 'Original source evidence\n'.repeat(3000)
@@ -3435,7 +3488,7 @@ describe('agent mode and tool reliability', () => {
     expect(JSON.stringify(result)).not.toContain('PRIVATE')
   })
 
-  it.each([undefined, 'local_only'] as const)(
+  it.each([undefined, 'local_only', 'ephemeral'] as const)(
     'keeps private tool content out of server telemetry with retention %s',
     async retentionPolicy => {
       mocks.getTool.mockReturnValue({
@@ -3475,7 +3528,7 @@ describe('agent mode and tool reliability', () => {
       expect(JSON.stringify(mocks.addHiddenToolMessage.mock.calls)).not.toContain('LOCAL_SECRET')
       expect(JSON.stringify(mocks.logAgentEvent.mock.calls)).not.toContain('LOCAL_SECRET')
       expect(result.ephemeralDataUsed).toBe(true)
-      expect(result.workingContext?.dataPolicy).toBe(retentionPolicy ?? 'ephemeral')
+      expect(result.workingContext?.dataPolicy).toBe(retentionPolicy ?? 'local_only')
     }
   )
 

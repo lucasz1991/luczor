@@ -7,6 +7,7 @@ vi.mock('@tauri-apps/plugin-store', () => ({ Store: { load: vi.fn(async () => st
 import { DEFAULT_STATE } from '@/state/defaults'
 import { loadAppState, saveAppState, saveAppStateStrict, stateForPersistence } from '@/services/persistence'
 import { getTool } from '@/services/tools/registry'
+import { toolRetentionPolicy } from '@/services/runs/toolRetention'
 
 function pending(name: string, status: PendingToolCall['status'] = 'proposed'): PendingToolCall {
   return {
@@ -31,6 +32,38 @@ describe('ephemeral tool argument persistence', () => {
   beforeEach(() => {
     vi.resetAllMocks()
     storage.save.mockResolvedValue(undefined)
+  })
+  it('keeps answers derived from retained tool evidence after reload instead of the temporary-content placeholder', async () => {
+    const state = appState()
+    state.messages = [
+      {
+        id: 'answer',
+        projectId: 'default',
+        role: 'assistant',
+        content: 'Browser und Terminal erfolgreich geprüft.',
+        raw: 'Browser und Terminal erfolgreich geprüft.',
+        parsed: null,
+        visibility: 'visible',
+        ts: 1,
+        createdAt: 1,
+        meta: {
+          dataHandling: 'ephemeral',
+          retentionPolicy: toolRetentionPolicy(getTool('project_terminal_run')!, true),
+          serverSpeechAllowed: false,
+        },
+      },
+    ]
+    storage.get.mockResolvedValue(stateForPersistence(state))
+    const restored = await loadAppState()
+    expect(restored.messages[0]!.content).toBe(state.messages[0]!.content)
+    expect(JSON.stringify(restored.messages)).not.toContain(
+      '[Temporärer Inhalt nicht gespeichert; Quelle bei Bedarf erneut lesen.]'
+    )
+    expect(restored.messages[0]!.meta).toMatchObject({
+      dataHandling: 'ephemeral',
+      retentionPolicy: 'local_only',
+      serverSpeechAllowed: false,
+    })
   })
   it('retains local-only answers but persists an explicit gap for truly ephemeral content', () => {
     const state = appState()

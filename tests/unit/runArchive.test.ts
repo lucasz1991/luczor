@@ -27,6 +27,75 @@ function checkpoint(): AgentCheckpoint {
 const resume = { ...scope, sessionId: 'fresh', generation: 2, workspaceBindingId: 'workspace' }
 
 describe('encrypted segmented run archive and coordinator', () => {
+  it('filters unrelated archive heads before decrypting their manifests', async () => {
+    const store = createMemoryRunArchiveStore()
+    const archive = createRunArchive({ store, key })
+    await archive.capture({ ...scope, messageId: 'answer', checkpoint: checkpoint(), state: 'completed' })
+    await store.write({
+      scope: { ...scope, conversationId: 'unrelated', runId: 'other-run' },
+      expectedRevision: 0,
+      manifest: 'unreadable unrelated data',
+      segments: [],
+    })
+    const listed = await archive.list(scope.principalId, scope)
+    expect(listed).toHaveLength(1)
+    expect(listed[0]!.scope).toEqual(scope)
+  })
+  it('retains local evidence but excludes credentials and private reasoning from decrypted archives', async () => {
+    const store = createMemoryRunArchiveStore()
+    const value = checkpoint()
+    const args = { path: 'config.json', content: 'password=PRIVATE_CREDENTIAL' }
+    const identity = mutationKey('fs_write', args)
+    value.completedMutations = [[identity, { ok: true, output: { password: 'PRIVATE_CREDENTIAL', path: args.path } }]]
+    value.operationIds = [[identity, 'operation-1']]
+    value.uncertainMutations = [identity]
+    value.messages.push(
+      {
+        role: 'assistant',
+        content: '<think>PRIVATE_THOUGHT</think>Public result',
+        tool_calls: [
+          { id: 'write', type: 'function', function: { name: 'fs_write', arguments: JSON.stringify(args) } },
+          {
+            id: 'fill',
+            type: 'function',
+            function: { name: 'browser_fill', arguments: '{"selector":"ref:login","value":"UNLABELLED_PASSWORD"}' },
+          },
+        ],
+      },
+      {
+        role: 'tool',
+        tool_call_id: 'write',
+        content: JSON.stringify({
+          ok: true,
+          output: {
+            text: 'Browser page and terminal evidence 😀',
+            cookie: 'SESSION_CREDENTIAL',
+            analysis: 'ordinary report',
+            sessionId: 'browser-session-1',
+            tabId: 'tab-1',
+          },
+        }),
+      }
+    )
+    await createRunArchive({ store, key }).capture({ ...scope, messageId: 'assistant', checkpoint: value })
+    const restored = (await createRunArchive({ store, key }).load(scope))!.checkpoint!
+    expect(JSON.stringify(restored)).not.toMatch(
+      /PRIVATE_CREDENTIAL|PRIVATE_THOUGHT|SESSION_CREDENTIAL|UNLABELLED_PASSWORD/
+    )
+    expect(JSON.stringify(restored)).toContain('Browser page and terminal evidence 😀')
+    expect(JSON.stringify(restored)).toContain('browser-session-1')
+    const digest = Array.from(
+      new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(identity))),
+      byte => byte.toString(16).padStart(2, '0')
+    ).join('')
+    expect(restored.completedMutations[0]![0]).toBe(`sha256:${digest}`)
+    expect(restored.operationIds).toEqual([[`sha256:${digest}`, 'operation-1']])
+    expect(restored.uncertainMutations).toEqual([`sha256:${digest}`])
+    expect((await createRunCoordinator(createRunArchive({ store, key })).prepareResume(resume)).status).toBe(
+      'needs_review'
+    )
+    expect(JSON.stringify(value)).toContain('PRIVATE_CREDENTIAL')
+  })
   it('restores exact local-only context after a new service instance, preserving Unicode and tool identities', async () => {
     const store = createMemoryRunArchiveStore()
     const write = vi.spyOn(store, 'write')

@@ -1,9 +1,9 @@
 export type ToolCategory = 'os' | 'project' | 'app' | 'custom'
 
 /**
- * Controls what survives the current provider round. `ephemeral` results may
- * be shown to the model after an explicit approval, but are never persisted in
- * chat history or mirrored to the Laravel audit/archive.
+ * Controls provider/server egress. `ephemeral` results stay local and are not
+ * mirrored to the Laravel audit/archive. Registered built-in tools retain their
+ * evidence in the encrypted account/run archive unless explicitly volatile.
  */
 export type ToolDataHandling = 'syncable' | 'ephemeral'
 
@@ -42,9 +42,9 @@ export type ToolDef = {
   mutating: boolean
   /** When true, the user must approve the call before it executes. */
   requiresApproval: boolean
-  /** Local/provider result retention policy. Defaults to `syncable`. */
+  /** Provider/server egress classification. Defaults to `syncable`. */
   dataHandling?: ToolDataHandling
-  /** Local encrypted retention, separately from provider/server egress. Legacy ephemeral remains volatile. */
+  /** Local encrypted retention. Explicit ephemeral is volatile; custom legacy ephemeral stays fail-closed. */
   retentionPolicy?: import('@/services/runs/dataPolicy').SharedDataPolicy
   /** Enforced by the execution policy as well as displayed in the audit/UI. */
   risk?: ToolRisk

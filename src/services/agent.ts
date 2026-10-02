@@ -5,6 +5,8 @@ import {
   createCheckpointValueSnapshot,
 } from './agents/checkpointMessages'
 import { strictestDataPolicy, type SharedDataPolicy } from '@/services/runs/dataPolicy'
+import { toolRetentionPolicy } from '@/services/runs/toolRetention'
+import { restoredMutationIdentity } from '@/services/runs/archivePrivacy'
 import { createAdaptiveAssistance } from '@/services/agents/adaptiveAssistance'
 import {
   assistanceWorkerSummary,
@@ -30,7 +32,7 @@ import {
   resumeCheckpointMessages,
   unresolvedCheckpointCalls,
 } from '@/services/agents/continuationHistory'
-import { focusedTools, cleanLocalHistory } from '@/services/inference/focusedTools'
+import { focusedTools, cleanLocalHistory, type ArchivedHistorySource } from '@/services/inference/focusedTools'
 import { fitRequestContext } from '@/services/inference/contextBudget'
 import { recordTrace, debugScope, traceEnabled } from '@/services/debugTrace'
 import { openToolUsage, toolUsageContext, TOOL_MAP_MARKER } from '@/services/tools/usage'
@@ -135,6 +137,8 @@ function pulseForCategory(category: ToolCategory) {
 }
 
 export type RunAgentOptions = {
+  /** Account/chat-bound historical evidence, supplied only to the local history reader. */
+  archivedHistory?: ArchivedHistorySource
   /** Host-owned research tools, scoped to this invocation; never globally registered. */
   additionalTools?: readonly ToolDef[]
   initialToolNames?: readonly string[]
@@ -911,7 +915,8 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       ? focusedTools(
           latestUserMessage,
           opts.toolAccess === 'none' ? undefined : () => messages,
-          opts.continuation?.selectedTools ?? opts.initialToolNames
+          opts.continuation?.selectedTools ?? opts.initialToolNames,
+          opts.toolAccess === 'none' ? undefined : opts.archivedHistory
         )
       : undefined
   let contextTargetTokens = opts.continuation?.recovery?.contextTargetTokens
@@ -2380,9 +2385,14 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         opts.researchScope.projectId === projectId &&
         additionalTools.get(call.name) === tool &&
         isResearchProbe(call.name)
+      const completionKey = await restoredMutationIdentity(completedMutationKey(call.name, call.arguments, projectId), [
+        uncertainMutations,
+        completedMutations,
+        operationIds,
+      ])
       if (
         tool.mutating &&
-        uncertainMutations.has(completedMutationKey(call.name, call.arguments, projectId)) &&
+        uncertainMutations.has(completionKey) &&
         !repeatableResearchProbe &&
         !['task_create', 'chat_create'].includes(call.name)
       ) {
@@ -2405,9 +2415,11 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         tool.mutating &&
         !repeatableResearchProbe &&
         !(tool.effects ?? []).some(effect => effect === 'input' || effect === 'execute')
-      const completionKey = completedMutationKey(call.name, call.arguments, projectId)
       const previousMutation = reusableMutation
-        ? (completedMutations.get(completionKey) ?? completedMutations.get(mutationKey(call.name, call.arguments)))
+        ? (completedMutations.get(completionKey) ??
+          completedMutations.get(
+            await restoredMutationIdentity(mutationKey(call.name, call.arguments), [completedMutations])
+          ))
         : undefined
       if (previousMutation?.ok) {
         const outcome: Outcome = {
@@ -2517,7 +2529,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       if (dataHandling === 'ephemeral') {
         ephemeralDataUsed = true
       }
-      dataPolicy = strictestDataPolicy(dataPolicy, tool.retentionPolicy ?? dataHandling)
+      dataPolicy = strictestDataPolicy(dataPolicy, toolRetentionPolicy(tool, selectedTool === getTool(call.name)))
       if (guardedConversationCreate && conversationCreateOperation) {
         deletePendingCreate(conversationCreateOperation.externalId, 'conversation')
         if (pendingConversationKeyToReplace && pendingConversationKeyToReplace !== guardedConversationCreate.key)

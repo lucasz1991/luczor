@@ -4,6 +4,103 @@ import { focusedTools } from '@/services/inference/focusedTools'
 import type { WireMessage } from '@/services/inference/types'
 
 describe('shared request budget and evidence retention', () => {
+  const observedAction = () => ({
+    ok: true,
+    sessionId: 'session-exact',
+    tabId: 'tab-exact',
+    url: 'https://example.test/before',
+    data: { clicked: true },
+    observation: {
+      status: 'ok',
+      ok: true,
+      sessionId: 'session-exact',
+      tabId: 'tab-exact',
+      url: 'https://example.test/after',
+      data: {
+        version: 1,
+        url: 'https://example.test/after',
+        documentUrl: 'https://example.test/after',
+        offset: 0,
+        nextOffset: 40,
+        total: 60,
+        truncated: true,
+        elements: Array.from({ length: 40 }, (_, index) => ({
+          ref: `ref:complete-${index}`,
+          selector: `role=link[name="Exact link ${index}"]`,
+          role: 'link',
+          name: `Exact link ${index}`,
+          href: `https://example.test/${'long-path/'.repeat(200)}${index}`,
+        })),
+      },
+    },
+  })
+
+  it('preserves confirmed action receipts and whole DOM refs in attached observations', () => {
+    const action = observedAction()
+    const original = structuredClone(action)
+    const wrapped = { ok: true, output: action }
+    const compacted = compactToolOutput(wrapped, 1400) as typeof wrapped
+    expect(compacted.output).toMatchObject({
+      ok: true,
+      sessionId: 'session-exact',
+      tabId: 'tab-exact',
+      url: 'https://example.test/before',
+      data: { clicked: true },
+      observation: {
+        status: 'ok',
+        url: 'https://example.test/after',
+        data: { offset: 0, nextOffset: 1, contextCompacted: true },
+      },
+    })
+    expect(compacted.output.observation.data.elements).toEqual([
+      {
+        ref: 'ref:complete-0',
+        selector: 'role=link[name="Exact link 0"]',
+        role: 'link',
+        name: 'Exact link 0',
+        detailsOmitted: true,
+      },
+    ])
+    expect(JSON.stringify(compacted).length).toBeLessThanOrEqual(1400)
+    expect(action).toEqual(original)
+    expect(compactToolOutput(compacted, 1400)).toEqual(compacted)
+  })
+
+  it('never clips an observation URL or associates partial refs with a confirmed action', () => {
+    const action = observedAction()
+    action.observation.url = 'https://example.test/' + 'exact/'.repeat(500)
+    const result = compactToolOutput(action, 700) as Record<string, unknown>
+    expect(result).toMatchObject({ ok: true, data: { clicked: true }, observation: { status: 'omitted' } })
+    expect(JSON.stringify(result)).not.toContain('https://example.test/exact/')
+    expect(JSON.stringify(result)).not.toContain('ref:complete-')
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(700)
+  })
+
+  it('keeps an error document observation separate from the confirmed navigation address', () => {
+    const action = observedAction()
+    action.observation.data.documentUrl = 'chrome-error://chromewebdata/'
+    const result = compactToolOutput(action, 1400) as typeof action
+    expect(result.observation.data.documentUrl).toBe('chrome-error://chromewebdata/')
+    expect(result.url).toBe('https://example.test/before')
+    expect(result.observation.url).toBe('https://example.test/after')
+  })
+
+  it('does not turn an oversized confirmed action receipt into an action failure', () => {
+    const action = { ...observedAction(), data: { value: 'confirmed'.repeat(4000) } }
+    const result = compactToolOutput(action, 500)
+    expect(result).toMatchObject({ ok: true, actionReceiptOmitted: true, observation: { status: 'omitted' } })
+    expect(JSON.stringify(result).length).toBeLessThanOrEqual(500)
+  })
+
+  it('retains observation failures unchanged when the action and diagnostic fit', () => {
+    const action = {
+      ok: true,
+      data: { clicked: true },
+      observation: { status: 'unavailable', code: 'browser_url_changed', next_tool: 'browser_dom_scan' },
+    }
+    expect(compactToolOutput(action, 1400)).toEqual(action)
+  })
+
   it('retains the latest usable tool batches when mandatory context alone exceeds the soft budget', () => {
     const history: WireMessage[] = [
       { role: 'system', content: 'Mandatory instructions. '.repeat(800) },

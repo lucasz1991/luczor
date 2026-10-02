@@ -25,13 +25,30 @@ const failure = {
 } as const
 
 describe('safe browser failure diagnostics', () => {
+  it('points a navigation timeout at observation rather than restarting the browser', () => {
+    const error = browserFailureError({
+      ...failure,
+      code: 'workflow_browser_navigation_timeout',
+      operation: 'open',
+      phase: 'readiness',
+    })
+    expect(browserFailure(error)).toContain('browser_dom_scan')
+    expect(browserFailure(error)).toContain('nicht wiederholen')
+    expect(getBrowserFailure(error)?.outcome).toBe('unknown')
+  })
   it('offers a blank-page basic test only when the task provides no destination', () => {
     const message = browserFailure('workflow_browser_session_unavailable')
     expect(message).toContain('Adresse oder Datei aus dem Auftrag')
     expect(message).toContain('browser_open {}')
-    expect(message).toContain('browser_dom_scan {}')
+    expect(message).toContain('observation')
     expect(message).toContain('keine interaktiven Elemente')
     expect(message).not.toContain('browser_close')
+  })
+  it('distinguishes invalid references and address mismatches from a failed browser engine', () => {
+    expect(browserFailure('browser_ref_stale')).toContain('ungültig oder veraltet')
+    expect(browserFailure('browser_ref_stale')).toContain('Suffix')
+    expect(browserFailure('browser_url_changed')).toContain('Dokumentadresse')
+    expect(browserFailure('browser_url_changed')).toContain('browser_dom_scan')
   })
   it.each([
     'workflow_browser_host_boundary_required',
@@ -116,5 +133,21 @@ describe('safe browser failure diagnostics', () => {
       output: { browserFailure: { operationId: failure.operationId, sessionId: '[REDACTED]' } },
     })
     expect(browserFailureError(error)).toBe(error)
+  })
+})
+
+describe('native DOM observation diagnostics', () => {
+  it('preserves content-free observation failures without classifying them as effects', () => {
+    const diagnostic = {
+      version: 1 as const,
+      code: 'workflow_browser_url_changed',
+      phase: 'dom_observation',
+      operation: 'scan',
+      backend: 'webview2',
+      elapsedMs: 12,
+      outcome: 'not_started',
+    }
+    expect(getBrowserFailure(diagnostic)).toEqual(diagnostic)
+    expect(getBrowserFailure({ ...diagnostic, phase: 'arbitrary_page_phase' })).toBeUndefined()
   })
 })

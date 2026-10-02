@@ -5,7 +5,11 @@ const SECRET_KEY =
  * syntax. Secret members are replaced as whole values, including containers.
  * Undefined means plain text; callers choose their plain-text policy.
  */
-export function sanitizeJsonText(text: string, sanitizeString: (value: string) => string): string | undefined {
+export function sanitizeJsonText(
+  text: string,
+  sanitizeString: (value: string) => string,
+  isSecretKey: (key: string) => boolean = key => SECRET_KEY.test(key)
+): string | undefined {
   try {
     JSON.parse(text)
   } catch {
@@ -24,7 +28,7 @@ export function sanitizeJsonText(text: string, sanitizeString: (value: string) =
     const decoded = JSON.parse(token[0]) as string
     const sanitized = sanitizeString(decoded)
     if (decoded !== sanitized) replace(token.index!, token.index! + token[0].length, JSON.stringify(sanitized))
-    if (tokens.at(index + 1)?.[0] !== ':' || !SECRET_KEY.test(decoded)) continue
+    if (tokens.at(index + 1)?.[0] !== ':' || !isSecretKey(decoded)) continue
     const start = index + 2
     let end = start
     let depth = 0

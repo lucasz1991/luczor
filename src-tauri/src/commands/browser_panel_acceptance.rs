@@ -190,6 +190,63 @@ async fn run_inner(
     let scope = json!({"principalId":"isolated-browser-probe","projectId":"probe","expectedRootPath":workspace["rootPath"],"expectedWorkspaceUpdatedAt":workspace["updatedAt"],"runId":run_id});
     let base = json!({"scope":scope,"execution":{"sessionId":identity,"generation":1,"workflowExecutionId":run_id},"automated":true,"timeoutMs":3000});
     let started = Instant::now();
+    let blank = perform(app, &base, "open", json!({})).await;
+    evidence.record("implicit_blank_open", started, &blank)?;
+    let blank = blank?;
+    if blank["url"] != "about:blank" || blank["data"]["readiness"] != "ready" {
+        return Err("probe_implicit_blank_not_ready".into());
+    }
+    evidence.value["sessionId"] = blank["sessionId"].clone();
+    let view = app
+        .get_webview(BROWSER_WEBVIEW_LABEL)
+        .ok_or("probe_browser_missing")?;
+    capture_navigation(&view, evidence.navigation.clone()).await?;
+    for (stage, operation) in [
+        ("explicit_blank_open", "open"),
+        ("explicit_blank_navigate", "navigate"),
+    ] {
+        let started = Instant::now();
+        let ready = perform(app, &base, operation, json!({"url":"about:blank"})).await;
+        evidence.record(stage, started, &ready)?;
+        let ready = ready?;
+        if ready["url"] != "about:blank"
+            || ready["data"]["readiness"] != "ready"
+            || ready["sessionId"] != blank["sessionId"]
+        {
+            return Err("probe_explicit_blank_not_ready".into());
+        }
+    }
+    let started = Instant::now();
+    let empty = perform(app, &base, "scan", json!({})).await;
+    evidence.record("blank_dom_scan", started, &empty)?;
+    if !empty?["data"]["elements"]
+        .as_array()
+        .is_some_and(Vec::is_empty)
+    {
+        return Err("probe_blank_document_not_empty".into());
+    }
+    let local = root.join("blank navigation % fixture # ä.html");
+    std::fs::write(&local, "<!doctype html><html><body><p id=local-proof>Local blank navigation fixture</p></body></html>")
+        .map_err(|_| "probe_local_fixture_write_failed")?;
+    let started = Instant::now();
+    let loaded = perform(app, &base, "navigate", json!({"url":local})).await;
+    evidence.record("local_file_after_blank", started, &loaded)?;
+    let loaded = loaded?;
+    if !loaded["url"]
+        .as_str()
+        .is_some_and(|url| url.starts_with("file:"))
+        || loaded["data"]["readiness"] != "ready"
+        || loaded["sessionId"] != blank["sessionId"]
+    {
+        return Err("probe_local_file_not_ready".into());
+    }
+    let started = Instant::now();
+    let content = perform(app, &base, "read", json!({"selector":"#local-proof"})).await;
+    evidence.record("local_file_read", started, &content)?;
+    if content?["data"]["text"] != "Local blank navigation fixture" {
+        return Err("probe_local_file_content_mismatch".into());
+    }
+    let started = Instant::now();
     let opened = perform(
         app,
         &base,
@@ -199,11 +256,9 @@ async fn run_inner(
     .await;
     evidence.record("navigation_open", started, &opened)?;
     let opened = opened?;
-    evidence.value["sessionId"] = opened["sessionId"].clone();
-    let view = app
-        .get_webview(BROWSER_WEBVIEW_LABEL)
-        .ok_or("probe_browser_missing")?;
-    capture_navigation(&view, evidence.navigation.clone()).await?;
+    if opened["sessionId"] != blank["sessionId"] {
+        return Err("probe_http_changed_session".into());
+    }
     if view.window().label() != "main" {
         return Err("probe_browser_wrong_parent".into());
     }
@@ -263,17 +318,23 @@ async fn run_inner(
     let scan = perform(app, &base, "scan", json!({})).await;
     evidence.record("dom_scan", started, &scan)?;
     let scan = scan?;
-    if !scan["data"]["elements"]
-        .as_array()
-        .is_some_and(|entries| entries.iter().any(|entry| entry["name"] == "Name"))
-    {
+    if !scan["data"]["elements"].as_array().is_some_and(|entries| {
+        entries.iter().any(|entry| {
+            entry["name"] == "Name" && entry["selector"] == "role=textbox[name=\"Name\"]"
+        })
+    }) {
         return Err("probe_name_not_scanned".into());
     }
+    let name_selector = scan["data"]["elements"]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|entry| entry["name"] == "Name"))
+        .and_then(|entry| entry["selector"].as_str())
+        .ok_or("probe_name_selector_missing")?;
     for (stage, operation, fields) in [
         (
             "form_fill",
             "fill",
-            json!({"selector":"label=Name","value":"Luczor synthetic probe"}),
+            json!({"selector":name_selector,"value":"Luczor synthetic probe"}),
         ),
         ("form_click", "click", json!({"selector":"#apply"})),
         (
@@ -371,6 +432,97 @@ async fn run_inner(
         let read = perform(app, &base, "read", json!({"selector":"#result"})).await?;
         evidence.value["suppliedActionsFinalResult"] = read["data"]["text"].clone();
     }
+    // Keep a synthetic local document loading long enough to time out after
+    // dispatch, then finish it so the retained session can be observed safely.
+    let pending_resource = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|_| "probe_delayed_resource_bind_failed")?;
+    pending_resource
+        .set_nonblocking(true)
+        .map_err(|_| "probe_delayed_resource_setup_failed")?;
+    let pending_host = pending_resource
+        .local_addr()
+        .map_err(|_| "probe_delayed_resource_address_failed")?;
+    let delayed_document = root.join("delayed-readiness-fixture.html");
+    std::fs::write(&delayed_document, format!("<!doctype html><html><body><label>Retained page<input></label><img src=\"http://{pending_host}/slow\"></body></html>"))
+        .map_err(|_| "probe_delayed_fixture_write_failed")?;
+    let resource = std::thread::spawn(move || -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if let Ok((mut socket, _)) = pending_resource.accept() {
+                let _ = socket.set_read_timeout(Some(Duration::from_secs(1)));
+                let mut request = [0_u8; 1024];
+                let _ = socket.read(&mut request);
+                std::thread::sleep(Duration::from_millis(1500));
+                let _ = socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        Err("probe_delayed_resource_not_requested".into())
+    });
+    let started = Instant::now();
+    let failed_open = expected_failure(
+        app,
+        &base,
+        "open",
+        json!({"url":delayed_document,"timeoutMs":300}),
+        "workflow_browser_navigation_timeout",
+    )
+    .await;
+    evidence.record("uncertain_open_failure", started, &failed_open)?;
+    tauri::async_runtime::spawn_blocking(move || resource.join())
+        .await
+        .map_err(|_| "probe_delayed_resource_task_failed")?
+        .map_err(|_| "probe_delayed_resource_thread_failed")??;
+    let failed_open = failed_open?;
+    if failed_open["outcome"] != "unknown"
+        || failed_open["phase"] != "readiness"
+        || failed_open["sessionId"] != blank["sessionId"]
+    {
+        return Err("probe_failed_open_diagnostics_missing".into());
+    }
+    // Resolve only by the same native owner scope, without trusting an error's session ID.
+    let started = Instant::now();
+    let observed = perform(app, &base, "scan", json!({})).await;
+    evidence.record("dom_scan_after_failed_open", started, &observed)?;
+    let observed = observed?;
+    if observed["sessionId"] != blank["sessionId"]
+        || !observed["data"]["elements"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| entry["name"] == "Retained page"))
+    {
+        return Err("probe_failed_open_session_lost".into());
+    }
+    let started = Instant::now();
+    let refused_open = expected_failure(
+        app,
+        &base,
+        "open",
+        json!({"url":"about:blank","expectedUrl":"https://example.test/wrong-source"}),
+        "workflow_browser_url_changed",
+    )
+    .await;
+    evidence.record(
+        "existing_session_open_precondition_refusal",
+        started,
+        &refused_open,
+    )?;
+    let refused_open = refused_open?;
+    if refused_open["outcome"] != "not_started" || refused_open["sessionId"] != blank["sessionId"] {
+        return Err("probe_open_refusal_diagnostics_missing".into());
+    }
+    let started = Instant::now();
+    let retained = perform(app, &base, "scan", json!({})).await;
+    evidence.record("dom_scan_after_refused_existing_open", started, &retained)?;
+    let retained = retained?;
+    if retained["sessionId"] != blank["sessionId"]
+        || retained["url"] != observed["url"]
+        || !retained["data"]["elements"]
+            .as_array()
+            .is_some_and(|entries| entries.iter().any(|entry| entry["name"] == "Retained page"))
+    {
+        return Err("probe_refused_open_existing_session_lost".into());
+    }
     let failed_navigation = expected_failure(
         app,
         &base,
@@ -399,6 +551,43 @@ async fn run_inner(
     });
     evidence.persist()?;
     failed_navigation?;
+    for (stage, operation) in [
+        ("failed_navigation_scan", "scan"),
+        ("failed_navigation_read", "read"),
+    ] {
+        let started = Instant::now();
+        let observed = perform(app, &base, operation, json!({})).await;
+        evidence.record(stage, started, &observed)?;
+        let observed = observed?;
+        if observed["sessionId"] != blank["sessionId"]
+            || observed["data"]["documentUrl"] == observed["url"]
+            || observed["data"]["browserUrl"] != observed["url"]
+            || observed["data"]["documentUrlMatchesBrowser"] != false
+            || observed["data"]["observationOnly"] != true
+            || observed["data"]["elements"]
+                .as_array()
+                .is_some_and(|elements| elements.iter().any(|element| element.get("ref").is_some()))
+        {
+            return Err("probe_error_document_observation_mismatch".into());
+        }
+    }
+    for (stage, operation, fields) in [
+        (
+            "error_document_explicit_source_refusal",
+            "scan",
+            json!({"expectedUrl":format!("http://{host}/navigation-failure")}),
+        ),
+        (
+            "error_document_mutation_refusal",
+            "click",
+            json!({"selector":"#never-execute"}),
+        ),
+    ] {
+        let started = Instant::now();
+        let refusal = expected_failure(app, &base, operation, fields, "browser_url_changed").await;
+        evidence.record(stage, started, &refusal)?;
+        refusal?;
+    }
     let foreign = CallerWebview {
         window: view.window(),
         webview: view,
@@ -414,6 +603,38 @@ async fn run_inner(
     .await?;
     if app.get_webview(BROWSER_WEBVIEW_LABEL).is_some() {
         return Err("probe_cleanup_failed".into());
+    }
+    // A new explicit blank open must bind its requested navigation rather than
+    // accidentally accepting the webview's initial bootstrap document.
+    let started = Instant::now();
+    let fresh = perform(app, &base, "open", json!({"url":"about:blank"})).await;
+    evidence.record("fresh_explicit_blank_open", started, &fresh)?;
+    let fresh = fresh?;
+    if fresh["url"] != "about:blank"
+        || fresh["data"]["readiness"] != "ready"
+        || fresh["sessionId"] == blank["sessionId"]
+    {
+        return Err("probe_fresh_blank_not_ready".into());
+    }
+    let started = Instant::now();
+    let fresh_scan = perform(app, &base, "scan", json!({})).await;
+    evidence.record("fresh_blank_dom_scan", started, &fresh_scan)?;
+    let fresh_scan = fresh_scan?;
+    if fresh_scan["sessionId"] != fresh["sessionId"]
+        || !fresh_scan["data"]["elements"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+    {
+        return Err("probe_fresh_blank_scan_mismatch".into());
+    }
+    workflow_browser::wf_browser_cleanup(
+        app.clone(),
+        caller(app),
+        serde_json::from_value(base["scope"].clone()).unwrap(),
+    )
+    .await?;
+    if app.get_webview(BROWSER_WEBVIEW_LABEL).is_some() {
+        return Err("probe_fresh_cleanup_failed".into());
     }
     evidence.value["isolationAndCleanup"] = json!("passed");
     Ok(())

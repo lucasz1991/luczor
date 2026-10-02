@@ -1,7 +1,10 @@
 // Fixed native-owned code in an isolated WebView2/WebKitGTK world. Arguments are data.
 async function luczorWorkflowBrowser(p) {
   const fail = code => ({ ok: false, code })
-  if (location.href !== p.expectedUrl) return fail('browser_url_changed')
+  const documentUrl = location.href
+  const documentUrlMatchesBrowser = documentUrl === p.expectedUrl
+  const observeCurrentDocument = p.observeCurrentDocument === true && ['scan', 'read'].includes(p.action)
+  if (!documentUrlMatchesBrowser && !observeCurrentDocument) return fail('browser_url_changed')
   const normalize = text =>
     String(text || '')
       .replace(/\s+/gu, ' ')
@@ -220,6 +223,17 @@ async function luczorWorkflowBrowser(p) {
         query = normalize(p.query).toLocaleLowerCase(),
         offset = p.offset || 0,
         limit = p.limit || 80
+      const semanticCounts = new Map()
+      if (documentUrlMatchesBrowser && el === document.body && !found.traversalLimited) {
+        for (const node of found.nodes) {
+          if (!visible(node)) continue
+          const candidateRole = role(node),
+            candidateName = name(node)
+          if (!/^[a-z]+$/u.test(candidateRole) || !candidateName) continue
+          const key = JSON.stringify([candidateRole, candidateName])
+          semanticCounts.set(key, (semanticCounts.get(key) || 0) + 1)
+        }
+      }
       const matches = found.nodes.filter(node => {
         if (!visible(node)) return false
         const r = role(node)
@@ -232,7 +246,8 @@ async function luczorWorkflowBrowser(p) {
       let responseBytes = 0
       const candidates = matches.slice(offset, offset + limit).map(node => {
         const result = {
-          ref: observe(node),
+          // Error documents remain inspectable but cannot offer action references.
+          ...(documentUrlMatchesBrowser ? { ref: observe(node) } : {}),
           role: role(node) || 'element',
           name: name(node),
           tag: tag(node),
@@ -245,6 +260,10 @@ async function luczorWorkflowBrowser(p) {
         if (result.name.length > 1000) {
           result.name = ''
           result.nameOmitted = true
+        }
+        if (result.name && semanticCounts.get(JSON.stringify([result.role, result.name])) === 1) {
+          const selector = `role=${result.role}[name=${JSON.stringify(result.name)}]`
+          if (selector.length <= 300) result.selector = selector
         }
         if (node.checked !== undefined) result.checked = !!node.checked
         if (attr(node, 'aria-expanded')) result.expanded = attr(node, 'aria-expanded') === 'true'
@@ -273,7 +292,11 @@ async function luczorWorkflowBrowser(p) {
       return {
         ok: true,
         version: 1,
-        url: location.href,
+        url: documentUrl,
+        documentUrl,
+        browserUrl: p.expectedUrl,
+        documentUrlMatchesBrowser,
+        observationOnly: !documentUrlMatchesBrowser,
         title: document.title,
         elements,
         total: matches.length,
@@ -336,7 +359,11 @@ async function luczorWorkflowBrowser(p) {
         document.querySelector(`meta[property="${name}"],meta[name="${name}"]`)?.content?.slice(0, 160) || null
       return {
         ok: true,
-        url: location.href,
+        url: documentUrl,
+        documentUrl,
+        browserUrl: p.expectedUrl,
+        documentUrlMatchesBrowser,
+        observationOnly: !documentUrlMatchesBrowser,
         title: document.title,
         text: text.slice(offset, end),
         truncated: end < text.length,
