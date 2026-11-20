@@ -61,6 +61,12 @@ pub(super) struct AccelerationPlan {
     device_budgets: HashMap<String, u64>,
     pub(super) require_full_offload: bool,
     pub(super) arguments: Vec<String>,
+    /// Per chosen device: the share of its `--fit-target` that only bridges the
+    /// runtime's free-memory view to the measured one.
+    fit_gap_mib: Vec<u64>,
+    /// A previous start of this plan failed for GPU capacity, so some weights
+    /// will stay on the host even where the byte budget alone says otherwise.
+    pub(super) capacity_refuted: bool,
     pub(super) status: RuntimeAcceleration,
     pub(super) runtime_options: RuntimeOptions,
 }
@@ -71,6 +77,8 @@ impl AccelerationPlan {
             gpu_budget_bytes: 0,
             device_budgets: HashMap::new(),
             require_full_offload: false,
+            fit_gap_mib: Vec::new(),
+            capacity_refuted: false,
             runtime_options: RuntimeOptions::default(),
             arguments: vec![
                 "--n-gpu-layers".into(),
@@ -109,6 +117,36 @@ impl AccelerationPlan {
 
     pub(super) fn uses_gpu(&self) -> bool {
         self.status.backend != "cpu"
+    }
+
+    /// Arguments as they identify the KV layout for the slot cache. The measured
+    /// share of the fitter margin follows the momentary VRAM use of other
+    /// applications; hashing it would rotate the identity on nearly every cold
+    /// start and no saved slot could be restored.
+    pub(super) fn identity_arguments(&self) -> Vec<String> {
+        let mut arguments = self.arguments.clone();
+        let Some(index) = arguments
+            .iter()
+            .position(|arg| arg == "--fit-target")
+            .filter(|index| index + 1 < arguments.len())
+        else {
+            return arguments;
+        };
+        let targets = arguments[index + 1]
+            .split(',')
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>();
+        if let Ok(targets) = targets {
+            if targets.len() == self.fit_gap_mib.len() {
+                arguments[index + 1] = targets
+                    .iter()
+                    .zip(&self.fit_gap_mib)
+                    .map(|(target, gap)| target.saturating_sub(*gap).to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+            }
+        }
+        arguments
     }
 }
 
@@ -253,7 +291,11 @@ struct RuntimeDevice {
     backend: String,
     name: String,
     total_mib: Option<u64>,
+    /// Conservative free budget: the runtime's value capped by NVML.
     available_mib: Option<u64>,
+    /// Free memory exactly as the runtime reports it, which is the base its own
+    /// `--fit` allocator measures `--fit-target` against.
+    fitter_available_mib: Option<u64>,
 }
 
 fn binding_matches_runtime(bound: &DeviceBinding, device: &RuntimeDevice) -> bool {
@@ -378,24 +420,18 @@ pub(super) fn choose_acceleration(
     };
     let mut devices = devices;
     // CUDA's Windows allocator and NVML can report different budgets. Never
-    // promise the larger number; the native --fit allocator remains decisive.
+    // promise the larger number; the native --fit allocator remains decisive
+    // and receives the difference as additional margin (see `fit_target`).
     // Only the global NVML free-memory measurement is relevant here; the
     // separate DXGI inventory cannot prove a CUDA budget or backend support.
     let hardware = nvml_gpu_snapshot();
-    for device in &mut devices {
-        if device.backend != "cuda" {
-            continue;
-        }
-        let matches = hardware
+    cap_by_measured_free(
+        &mut devices,
+        &hardware
             .iter()
-            .filter(|gpu| gpu.name == device.name)
-            .collect::<Vec<_>>();
-        // Never equate CUDA indices from two different enumerators. For duplicate
-        // names, the smallest observed free budget is conservative for every card.
-        if let Some(free) = matches.iter().filter_map(|gpu| gpu.available_bytes).min() {
-            device.available_mib = Some(device.available_mib.unwrap_or(free / MIB).min(free / MIB));
-        }
-    }
+            .map(|gpu| (gpu.name.as_str(), gpu.available_bytes))
+            .collect::<Vec<_>>(),
+    );
     let inventory = super::gpu_snapshot();
     if config.gpu_device_ids.is_some() {
         if bindings.len() != config.gpu_device_ids.as_ref().map_or(0, Vec::len)
@@ -430,6 +466,26 @@ pub(super) fn choose_acceleration(
     plan.status.resource_revision = revision;
     plan.status.requested_mode = config.mode.clone();
     Ok(plan)
+}
+
+/// Caps each CUDA device's free budget by the globally measured (name, bytes).
+fn cap_by_measured_free(devices: &mut [RuntimeDevice], measured: &[(&str, Option<u64>)]) {
+    for device in devices.iter_mut().filter(|device| device.backend == "cuda") {
+        let matches = measured
+            .iter()
+            .filter(|(name, _)| *name == device.name)
+            .collect::<Vec<_>>();
+        // Never equate CUDA indices from two different enumerators. For duplicate
+        // names, the smallest observed free budget is conservative for every card.
+        if let Some(free) = matches.iter().filter_map(|(_, free)| *free).min() {
+            device.available_mib = Some(device.available_mib.unwrap_or(free / MIB).min(free / MIB));
+            if matches.len() != 1 {
+                // The shared minimum is planning pessimism, not a measured gap of
+                // this card: keep the plain reserve as its fitter margin.
+                device.fitter_available_mib = device.available_mib;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -508,6 +564,19 @@ fn select_configured_plan(
             .map_or(100, |limits| limits.gpu_percent());
         base + maximum - super::resource_config::percentage_budget(maximum, percent)
     };
+    // llama.cpp fits against its own free-memory view. Windows CUDA reports the
+    // per-process WDDM budget there, which exceeded the globally free dedicated
+    // VRAM by 3.2 GiB on a desktop RTX 3090 with other applications open. Widen
+    // the fitter margin by that difference so the reserve holds against the
+    // measured free memory that the device budgets are computed from.
+    let fit_gap = |device: &RuntimeDevice| {
+        let measured = device.available_mib.unwrap_or(0);
+        device
+            .fitter_available_mib
+            .unwrap_or(measured)
+            .saturating_sub(measured)
+    };
+    let fit_target = |device: &RuntimeDevice| device_reserve(device) + fit_gap(device);
     let mut eligible = matching
         .into_iter()
         .filter(|device| {
@@ -633,15 +702,11 @@ fn select_configured_plan(
         "--fit".into(),
         if full { "off" } else { "on" }.into(),
         "--fit-target".into(),
-        if chosen.len() == 1 {
-            device_reserve(device).to_string()
-        } else {
-            chosen
-                .iter()
-                .map(|device| device_reserve(device).to_string())
-                .collect::<Vec<_>>()
-                .join(",")
-        },
+        chosen
+            .iter()
+            .map(|device| fit_target(device).to_string())
+            .collect::<Vec<_>>()
+            .join(","),
     ];
     if chosen.len() > 1 {
         arguments.extend(["--split-mode".into(), "layer".into()]);
@@ -680,6 +745,8 @@ fn select_configured_plan(
             })
             .collect(),
         require_full_offload: full,
+        fit_gap_mib: chosen.iter().map(|device| fit_gap(device)).collect(),
+        capacity_refuted: false,
         runtime_options: RuntimeOptions::from_help(help),
         arguments,
         status: RuntimeAcceleration {
@@ -775,6 +842,7 @@ fn parse_devices(output: &str) -> Vec<RuntimeDevice> {
                 name: name.into(),
                 total_mib,
                 available_mib,
+                fitter_available_mib: available_mib,
             })
         })
         .take(32)
@@ -994,6 +1062,7 @@ pub(super) fn hybrid_retry(plan: &AccelerationPlan) -> Option<AccelerationPlan> 
 pub(super) fn auto_fallback(plan: &AccelerationPlan, cause: &str) -> AccelerationPlan {
     let mut fallback = plan.clone();
     fallback.require_full_offload = false;
+    fallback.capacity_refuted = true;
     for pair in fallback.arguments.chunks_mut(2) {
         if pair.len() == 2 && pair[0] == "--n-gpu-layers" {
             pair[1] = "auto".into();
@@ -1206,6 +1275,7 @@ mod tests {
             backend: "vulkan".into(),
             total_mib: Some(4096),
             available_mib: Some(3500),
+            fitter_available_mib: Some(3500),
         };
         assert_eq!(
             binding_matches_runtime(&bound, &device),
@@ -1738,6 +1808,148 @@ mod tests {
                 .as_deref(),
             Some("runtime_gpu_fit_unavailable")
         );
+    }
+    #[test]
+    fn fit_target_keeps_the_reserve_against_measured_free_vram() {
+        // Measured on Windows: llama.cpp saw 23336 MiB free (WDDM process budget)
+        // while NVML counted 20131 MiB, because other applications held 4.3 GiB.
+        let mut devices =
+            parse_devices("CUDA0: NVIDIA GeForce RTX 3090 (24575 MiB, 23336 MiB free)");
+        devices[0].available_mib = Some(20131);
+        let plan = select_plan(&devices, HELP, None, 0);
+        assert_eq!(plan.gpu_budget_bytes, (20131 - 1024) * MIB);
+        // The fitter may use 23336 - 4229 = 19107 MiB: exactly the measured budget.
+        assert!(plan
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--fit-target", "4229"]));
+        let retry = hybrid_retry(&plan).unwrap();
+        assert_eq!(retry.gpu_budget_bytes, (19107 - 4777) * MIB);
+        assert!(retry
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--fit-target", "9006"]));
+        // A percentage budget scales the measured free memory and keeps the gap.
+        let config = LocalResourceConfig {
+            percentage_limits: Some(super::super::resource_config::ResourcePercentageLimits {
+                response_cpu: 100,
+                context_cpu: 100,
+                ram: 100,
+                gpu: 50,
+                cpu_enabled: None,
+                ram_enabled: None,
+                gpu_enabled: None,
+            }),
+            ..Default::default()
+        };
+        let half =
+            select_configured_plan(&devices, HELP, None, 0, "single_device", 0, &config).unwrap();
+        assert_eq!(half.gpu_budget_bytes, 9553 * MIB);
+        assert!(half
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--fit-target", &(23336 - 9553).to_string()]));
+        // Identical views, or an NVML value above the runtime's, add no margin.
+        devices[0].available_mib = Some(23336);
+        assert!(select_plan(&devices, HELP, None, 0)
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--fit-target", "1024"]));
+        devices[0].fitter_available_mib = None;
+        assert!(select_plan(&devices, HELP, None, 0)
+            .arguments
+            .windows(2)
+            .any(|pair| pair == ["--fit-target", "1024"]));
+    }
+    #[test]
+    fn measured_vram_gap_never_rotates_the_slot_cache_identity() {
+        let plan_at = |measured_free: u64| {
+            let mut devices =
+                parse_devices("CUDA0: NVIDIA GeForce RTX 3090 (24575 MiB, 23336 MiB free)");
+            cap_by_measured_free(
+                &mut devices,
+                &[("NVIDIA GeForce RTX 3090", Some(measured_free * MIB))],
+            );
+            select_plan(&devices, HELP, None, 0)
+        };
+        // Another application took 33 MiB of VRAM between two cold starts.
+        let (first, second) = (plan_at(20131), plan_at(20098));
+        assert_ne!(first.arguments, second.arguments);
+        assert_eq!(first.identity_arguments(), second.identity_arguments());
+        assert!(first
+            .identity_arguments()
+            .windows(2)
+            .any(|pair| pair == ["--fit-target", "1024"]));
+        // The retry margin stays part of the identity, the measured gap does not.
+        let retry = hybrid_retry(&first).unwrap();
+        assert!(retry.capacity_refuted);
+        assert!(retry
+            .identity_arguments()
+            .windows(2)
+            .any(|pair| pair == ["--fit-target", &(1024 + 4777).to_string()]));
+        assert!(!first.capacity_refuted);
+        assert!(auto_fallback(&first, "runtime_gpu_capacity_unavailable").capacity_refuted);
+        // A configured reserve still separates identities.
+        let mut devices =
+            parse_devices("CUDA0: NVIDIA GeForce RTX 3090 (24575 MiB, 23336 MiB free)");
+        cap_by_measured_free(
+            &mut devices,
+            &[("NVIDIA GeForce RTX 3090", Some(20131 * MIB))],
+        );
+        let reserved = select_configured_plan(
+            &devices,
+            HELP,
+            None,
+            0,
+            "single_device",
+            0,
+            &LocalResourceConfig {
+                vram_reserve_bytes: Some(2048 * MIB),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_ne!(reserved.identity_arguments(), first.identity_arguments());
+        let cpu = AccelerationPlan::cpu("test");
+        assert_eq!(cpu.identity_arguments(), cpu.arguments);
+    }
+    #[test]
+    fn measured_free_vram_caps_budgets_but_widens_only_unambiguous_cards() {
+        let listed = "CUDA0: NVIDIA GeForce RTX 3090 (24575 MiB, 23336 MiB free)\nCUDA1: NVIDIA GeForce RTX 3090 (24575 MiB, 23336 MiB free)\nVulkan2: AMD Radeon (8192 MiB, 7000 MiB free)";
+        // Two cards share one name: the enumerators cannot be matched, so both get
+        // the smaller budget but neither a per-card fitter gap.
+        let mut devices = parse_devices(listed);
+        cap_by_measured_free(
+            &mut devices,
+            &[
+                ("NVIDIA GeForce RTX 3090", Some(20131 * MIB)),
+                ("NVIDIA GeForce RTX 3090", Some(24200 * MIB)),
+                ("AMD Radeon", Some(1000 * MIB)),
+            ],
+        );
+        for device in &devices[..2] {
+            assert_eq!(device.available_mib, Some(20131));
+            assert_eq!(device.fitter_available_mib, Some(20131));
+        }
+        // Non-CUDA devices keep the runtime's own measurement.
+        assert_eq!(devices[2].available_mib, Some(7000));
+        // A unique card keeps the runtime view for the fitter margin.
+        let mut single =
+            parse_devices("CUDA0: NVIDIA GeForce RTX 3090 (24575 MiB, 23336 MiB free)");
+        cap_by_measured_free(
+            &mut single,
+            &[("NVIDIA GeForce RTX 3090", Some(20131 * MIB))],
+        );
+        assert_eq!(single[0].available_mib, Some(20131));
+        assert_eq!(single[0].fitter_available_mib, Some(23336));
+        // A measurement above the runtime's view, or none at all, changes nothing.
+        for measured in [Some(24000 * MIB), None] {
+            let mut device =
+                parse_devices("CUDA0: NVIDIA GeForce RTX 3090 (24575 MiB, 23336 MiB free)");
+            cap_by_measured_free(&mut device, &[("NVIDIA GeForce RTX 3090", measured)]);
+            assert_eq!(device[0].available_mib, Some(23336));
+            assert_eq!(device[0].fitter_available_mib, Some(23336));
+        }
     }
     #[test]
     fn insufficient_or_unknown_gpu_memory_selects_explained_cpu_fallback() {

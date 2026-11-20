@@ -6,8 +6,17 @@ use std::time::{Duration, Instant};
 use sysinfo::System;
 
 const GIB: u64 = 1024 * 1024 * 1024;
+const MIB: u64 = 1024 * 1024;
 pub(super) const STARTUP_RAM_PRESSURE: &str =
     "Local runtime startup stopped to protect available RAM (runtime_startup_ram_pressure).";
+/// Host memory a starting runtime may transiently occupy beyond its planned
+/// host weights: runtime libraries, pinned upload staging and the operating
+/// system's file cache while the GGUF is streamed. A fully offloaded 17 GB
+/// model on Windows/CUDA lowered available RAM by about 1.9 GiB for a few
+/// seconds and kept about 1.2 GiB resident.
+const STARTUP_STAGING_BYTES: u64 = 3 * GIB;
+/// llama.cpp's own default for its in-RAM prompt cache (`--cache-ram`).
+const RUNTIME_PROMPT_CACHE_DEFAULT_MIB: u64 = 8192;
 
 pub(super) struct StartupMemoryGuard {
     floor_bytes: u64,
@@ -16,13 +25,27 @@ pub(super) struct StartupMemoryGuard {
 }
 
 impl StartupMemoryGuard {
-    pub(super) fn with_floor(total_ram: u64, protected_headroom: u64) -> Self {
+    /// The plan headroom is a safety margin for other applications, not a quota
+    /// on memory they already hold. Measuring it against system-wide available
+    /// RAM therefore only makes sense as far as the machine had room for it
+    /// before this start: the pre-start sample minus the planned host footprint
+    /// and the transient staging allowance. Below that the emergency floor
+    /// applies, so a load that consumes far more than planned is still stopped
+    /// before the desktop becomes unresponsive.
+    pub(super) fn for_plan(
+        total_ram: u64,
+        available_at_start: u64,
+        protected_headroom: u64,
+        planned_host_bytes: u64,
+    ) -> Self {
+        let critical = (total_ram / 50).clamp(GIB / 2, GIB);
+        let reachable = available_at_start
+            .saturating_sub(planned_host_bytes.saturating_add(STARTUP_STAGING_BYTES));
         Self {
-            // Preserve the plan headroom plus a bounded staging margin for
-            // Windows/the desktop compositor during model startup.
-            floor_bytes: protected_headroom
-                .saturating_add(256 * 1024 * 1024)
-                .clamp(GIB / 2, total_ram.saturating_sub(GIB / 2).max(GIB / 2)),
+            floor_bytes: reachable
+                .min(protected_headroom)
+                .max(critical)
+                .min(total_ram.saturating_sub(GIB / 2).max(GIB / 2)),
             below_since: None,
             low_samples: 0,
         }
@@ -119,6 +142,7 @@ pub(super) struct RuntimeOptions {
     http_threads: bool,
     flash_attn: bool,
     kv_cache_quant: bool,
+    cache_ram: bool,
     pub(super) slot_save_path: bool,
 }
 
@@ -151,6 +175,7 @@ impl RuntimeOptions {
             // llama.cpp, so both are gated on --flash-attn advertising support.
             flash_attn: supported("--flash-attn"),
             kv_cache_quant: supported("--cache-type-k") && supported("--cache-type-v"),
+            cache_ram: supported("--cache-ram"),
             slot_save_path: supported("--slot-save-path"),
         }
     }
@@ -190,11 +215,22 @@ pub(super) struct ResourcePlan {
     reason_codes: Vec<String>,
     #[serde(skip)]
     arguments: Vec<String>,
+    /// Host-only cache sizing. Kept out of `arguments` because it follows the
+    /// momentary RAM budget and must not change the KV slot-cache identity.
+    #[serde(skip)]
+    host_cache_arguments: Vec<String>,
+    /// Host memory this plan expects the starting runtime to occupy.
+    #[serde(skip)]
+    startup_host_bytes: u64,
 }
 
 impl ResourcePlan {
     pub(super) fn arguments(&self) -> &[String] {
         &self.arguments
+    }
+
+    pub(super) fn host_cache_arguments(&self) -> &[String] {
+        &self.host_cache_arguments
     }
 
     pub(super) fn confirm_started(&mut self) {
@@ -205,11 +241,20 @@ impl ResourcePlan {
         self.total_ram_bytes
     }
 
+    pub(super) fn available_ram_bytes(&self) -> u64 {
+        self.available_ram_bytes
+    }
+
     pub(super) fn ram_headroom_bytes(&self) -> u64 {
         self.ram_headroom_bytes
     }
+
+    pub(super) fn startup_host_bytes(&self) -> u64 {
+        self.startup_host_bytes
+    }
 }
 
+#[cfg(test)]
 pub(super) fn plan_resources(
     hardware: &ResourceSnapshot,
     context_tokens: u32,
@@ -274,11 +319,43 @@ pub(super) fn plan_resources_configured(
     adjusted.available_ram_bytes = adjusted
         .available_ram_bytes
         .saturating_sub(headroom.saturating_sub(default_headroom));
-    let mut plan = plan_resources(&adjusted, context_tokens, model_bytes, backend, options);
+    let mut plan = plan_resources_with_host_weights(
+        &adjusted,
+        context_tokens,
+        model_bytes,
+        backend,
+        options,
+        cfg!(windows),
+        Some(host_model),
+    );
     plan.resource_revision = revision;
     plan.requested_mode = config.mode.clone();
     plan.available_ram_bytes = hardware.available_ram_bytes;
     plan.ram_headroom_bytes = headroom;
+    if options.cache_ram {
+        // llama.cpp otherwise keeps up to 8 GiB of prompt states in system RAM
+        // regardless of this budget. Grant half of the host budget that remains
+        // after the admitted host weights; the rest stays free for working memory
+        // and context checkpoints. Roomy machines keep the runtime default.
+        // The limit is hard in b10809: a state larger than it is not parked, so
+        // an interleaved prompt then costs the displaced conversation a prefill.
+        let spare = hardware
+            .available_ram_bytes
+            .saturating_sub(headroom)
+            .saturating_sub(host_model);
+        let limit_mib = (spare / 2 / MIB / 256 * 256).min(RUNTIME_PROMPT_CACHE_DEFAULT_MIB);
+        if limit_mib < RUNTIME_PROMPT_CACHE_DEFAULT_MIB {
+            plan.host_cache_arguments = vec!["--cache-ram".into(), limit_mib.to_string()];
+            plan.reason_codes.push(
+                if limit_mib == 0 {
+                    "prompt_cache_ram_disabled"
+                } else {
+                    "prompt_cache_ram_budgeted"
+                }
+                .into(),
+            );
+        }
+    }
     if let Some(threads) = config.threads {
         plan.threads = threads;
     }
@@ -310,6 +387,7 @@ pub(super) fn plan_resources_configured(
     Ok(plan)
 }
 
+#[cfg(test)]
 fn plan_resources_for_platform(
     hardware: &ResourceSnapshot,
     context_tokens: u32,
@@ -318,7 +396,33 @@ fn plan_resources_for_platform(
     options: &RuntimeOptions,
     windows: bool,
 ) -> ResourcePlan {
+    plan_resources_with_host_weights(
+        hardware,
+        context_tokens,
+        model_bytes,
+        backend,
+        options,
+        windows,
+        None,
+    )
+}
+
+/// `host_weight_bytes` is the admission estimate of weights that stay in system
+/// RAM for a GPU backend; `None` when the caller has no GPU budget to compare.
+fn plan_resources_with_host_weights(
+    hardware: &ResourceSnapshot,
+    context_tokens: u32,
+    model_bytes: u64,
+    backend: &str,
+    options: &RuntimeOptions,
+    windows: bool,
+    host_weight_bytes: Option<u64>,
+) -> ResourcePlan {
     let gpu_selected = backend != "cpu";
+    // Batch and compute buffers of a fully offloaded model live in VRAM: across
+    // 128/32, 512/128 and 1024/256 the host compute buffer stayed below 17 MiB
+    // while prompt throughput doubled. Host RAM pressure must not shrink them.
+    let gpu_resident = gpu_selected && host_weight_bytes == Some(0);
     let available = hardware
         .available_logical_cores
         .max(1)
@@ -344,9 +448,10 @@ fn plan_resources_for_platform(
         || hardware.available_ram_bytes < hardware.total_ram_bytes / 10
         || working_budget < 4 * GIB;
     let cpu_pressure = hardware.cpu_load.is_some_and(|usage| usage >= 85.0);
-    let (profile, batch, micro_batch) = if memory_pressure {
+    let batch_pressure = memory_pressure && !gpu_resident;
+    let (profile, batch, micro_batch) = if batch_pressure {
         ("memory_saving", 128, 32)
-    } else if gpu_selected && working_budget >= 12 * GIB && !cpu_pressure {
+    } else if gpu_selected && (gpu_resident || working_budget >= 12 * GIB) && !cpu_pressure {
         ("throughput", 1024, 256)
     } else {
         ("balanced", 512, 128)
@@ -357,7 +462,7 @@ fn plan_resources_for_platform(
     if cpu_pressure {
         threads = threads.div_ceil(2);
     }
-    let threads_batch = if memory_pressure || cpu_pressure {
+    let threads_batch = if batch_pressure || cpu_pressure {
         threads
     } else {
         usable.min(if gpu_selected { 16 } else { 32 }).max(threads)
@@ -369,8 +474,10 @@ fn plan_resources_for_platform(
     if reserved > 0 {
         reasons.push("cpu_ui_headroom".into());
     }
-    if memory_pressure {
+    if batch_pressure {
         reasons.push("memory_pressure_reduced_batch".into());
+    } else if memory_pressure {
+        reasons.push("gpu_resident_batch_unreduced".into());
     }
     if cpu_pressure {
         reasons.push("cpu_pressure_reduced_threads".into());
@@ -404,6 +511,22 @@ fn plan_resources_for_platform(
     if prefer_buffered && !buffered_supported {
         reasons.push("runtime_buffered_loading_unavailable".into());
     }
+    // A mapped model may stay resident after upload. Plan for it only where the
+    // mapping demonstrably fits the host budget, on every backend. A mapping that
+    // does not fit, or is forced by a missing buffered loader, stays unplanned so
+    // the startup guard keeps its full protection against that retained view.
+    let mapping_fits =
+        !memory_pressure && model_bytes < host_budget.saturating_sub(host_budget / 4);
+    let startup_host_bytes = if !gpu_selected {
+        model_bytes
+    } else {
+        let mapped = if load_mode == LoadMode::Mmap && mapping_fits {
+            model_bytes
+        } else {
+            0
+        };
+        mapped.max(host_weight_bytes.unwrap_or(0))
+    };
     let mut arguments = Vec::new();
     if options.resource_controls {
         arguments.extend([
@@ -486,6 +609,8 @@ fn plan_resources_for_platform(
         applied: false,
         reason_codes: reasons,
         arguments,
+        host_cache_arguments: Vec::new(),
+        startup_host_bytes,
     }
 }
 
@@ -886,16 +1011,15 @@ mod tests {
     #[test]
     fn startup_ram_guard_stops_immediately_below_128_mib_without_rejecting_unknown_measurements() {
         let start = Instant::now();
+        let headroom = (32 * GIB / 12).clamp(GIB, 4 * GIB);
         for available in [0, 6 * 1024 * 1024, GIB / 8 - 1] {
-            let mut guard =
-                StartupMemoryGuard::with_floor(32 * GIB, (32 * GIB / 12).clamp(GIB, 4 * GIB));
+            let mut guard = StartupMemoryGuard::for_plan(32 * GIB, 16 * GIB, headroom, 0);
             assert_eq!(
                 guard.observe(32 * GIB, available, start).unwrap_err(),
                 STARTUP_RAM_PRESSURE
             );
         }
-        let mut guard =
-            StartupMemoryGuard::with_floor(32 * GIB, (32 * GIB / 12).clamp(GIB, 4 * GIB));
+        let mut guard = StartupMemoryGuard::for_plan(32 * GIB, 16 * GIB, headroom, 0);
         assert!(guard.observe(32 * GIB, GIB / 8, start).is_ok());
         assert!(guard.observe(0, 0, start).is_ok());
     }
@@ -903,7 +1027,7 @@ mod tests {
     #[test]
     fn startup_ram_guard_allows_transient_staging_but_rejects_sustained_critical_pressure() {
         let start = Instant::now();
-        let mut guard = StartupMemoryGuard::with_floor(32 * GIB, 256 * 1024 * 1024);
+        let mut guard = StartupMemoryGuard::for_plan(32 * GIB, 16 * GIB, 256 * 1024 * 1024, 0);
         assert!(guard.observe(32 * GIB, 2 * GIB, start).is_ok());
         assert!(guard
             .observe(32 * GIB, GIB / 4, start + Duration::from_millis(200))
@@ -927,27 +1051,288 @@ mod tests {
             .is_ok());
     }
 
+    /// Three samples spanning more than a second, as `await_health` produces them.
+    fn sustained(guard: &mut StartupMemoryGuard, available: u64) -> Result<(), String> {
+        let start = Instant::now();
+        guard.observe(32 * GIB, available, start)?;
+        guard.observe(32 * GIB, available, start + Duration::from_millis(500))?;
+        guard.observe(32 * GIB, available, start + Duration::from_millis(1600))
+    }
+
     #[test]
     fn startup_ram_guard_preserves_plan_headroom_during_model_load() {
+        // Enough free RAM before the start: the full headroom stays protected.
+        let mut guard = StartupMemoryGuard::for_plan(32 * GIB, 16 * GIB, 3 * GIB, 0);
+        assert_eq!(guard.floor_bytes, 3 * GIB);
+        assert!(sustained(&mut guard, 3 * GIB).is_ok());
+        let mut guard = StartupMemoryGuard::for_plan(32 * GIB, 16 * GIB, 3 * GIB, 0);
         let start = Instant::now();
-        let mut guard = StartupMemoryGuard::with_floor(32 * GIB, 3 * GIB);
-        let below_floor = 3 * GIB + 256 * 1024 * 1024 - 1;
-        assert!(guard.observe(32 * GIB, below_floor, start).is_ok());
+        assert!(guard.observe(32 * GIB, 3 * GIB - 1, start).is_ok());
         assert!(guard
-            .observe(32 * GIB, below_floor, start + Duration::from_millis(500))
+            .observe(32 * GIB, 3 * GIB - 1, start + Duration::from_millis(500))
             .is_ok());
-        assert!(guard
-            .observe(32 * GIB, below_floor, start + Duration::from_millis(1600))
-            .is_err());
+        assert_eq!(
+            guard
+                .observe(32 * GIB, 3 * GIB - 1, start + Duration::from_millis(1600))
+                .unwrap_err(),
+            STARTUP_RAM_PRESSURE
+        );
+    }
+
+    #[test]
+    fn startup_ram_guard_does_not_charge_the_load_for_ram_other_applications_already_hold() {
+        // Measured on a 32 GiB Windows/CUDA desktop: 4.2 GiB available before
+        // the start, a fully offloaded 17 GB model, 2.4 GiB at the lowest point
+        // and about 3.2 GiB once healthy. The headroom was never reachable.
+        let total = 34_223_976_448;
+        let headroom = (total / 12).clamp(GIB, 4 * GIB);
+        let before = 4_311 * MIB;
+        let mut guard = StartupMemoryGuard::for_plan(total, before, headroom, 0);
+        assert_eq!(guard.floor_bytes, before - STARTUP_STAGING_BYTES);
+        assert!(guard.floor_bytes < headroom);
+        assert!(sustained(&mut guard, 2_457 * MIB).is_ok());
+        // A load that takes far more than its staging allowance is still stopped.
+        let mut guard = StartupMemoryGuard::for_plan(total, before, headroom, 0);
+        assert_eq!(
+            sustained(&mut guard, GIB).unwrap_err(),
+            STARTUP_RAM_PRESSURE
+        );
+        // The emergency floor holds even when nothing was reachable.
+        let mut guard = StartupMemoryGuard::for_plan(total, 2 * GIB, headroom, 0);
+        assert_eq!(guard.floor_bytes, total / 50);
+        assert!(sustained(&mut guard, total / 50).is_ok());
+        let mut guard = StartupMemoryGuard::for_plan(total, 2 * GIB, headroom, 0);
+        assert!(sustained(&mut guard, total / 50 - 1).is_err());
+    }
+
+    #[test]
+    fn recorded_busy_desktop_startup_passes_where_the_headroom_floor_stopped_it() {
+        // (elapsed ms, available MiB) sampled while llama.cpp b10809 loaded the
+        // 17 GB model to health on the 32 GiB desktop described above.
+        const TIMELINE: [(u64, u64); 22] = [
+            (56, 4311),
+            (1282, 3967),
+            (2214, 3384),
+            (3230, 3320),
+            (4161, 3313),
+            (5160, 3218),
+            (6152, 3106),
+            (7146, 3018),
+            (7472, 2962),
+            (7783, 2906),
+            (8101, 2842),
+            (8408, 2744),
+            (8724, 2631),
+            (9087, 2542),
+            (9390, 2479),
+            (9769, 2457),
+            (10082, 2814),
+            (10387, 2789),
+            (10698, 2759),
+            (11007, 2727),
+            (11363, 2561),
+            (11670, 2517),
+        ];
+        let total = 34_223_976_448;
+        let headroom = (total / 12).clamp(GIB, 4 * GIB);
+        let start = Instant::now();
+        let replay = |guard: &mut StartupMemoryGuard| {
+            TIMELINE.iter().try_for_each(|(elapsed, available)| {
+                guard.observe(
+                    total,
+                    available * MIB,
+                    start + Duration::from_millis(*elapsed),
+                )
+            })
+        };
+        let mut guard = StartupMemoryGuard::for_plan(total, TIMELINE[0].1 * MIB, headroom, 0);
+        assert!(replay(&mut guard).is_ok());
+        // The previous floor (headroom + 256 MiB of system-wide available RAM)
+        // ended this start although the model was resident in VRAM.
+        let mut previous = StartupMemoryGuard {
+            floor_bytes: headroom + 256 * MIB,
+            below_since: None,
+            low_samples: 0,
+        };
+        assert_eq!(replay(&mut previous).unwrap_err(), STARTUP_RAM_PRESSURE);
+    }
+
+    #[test]
+    fn startup_ram_guard_allows_planned_host_weights_but_never_exceeds_the_headroom() {
+        // A hybrid plan admitted 8 GiB of host weights below an 11 GiB reserve.
+        let mut guard = StartupMemoryGuard::for_plan(32 * GIB, 20 * GIB, 11 * GIB, 8 * GIB);
+        assert_eq!(guard.floor_bytes, 9 * GIB);
+        assert!(sustained(&mut guard, 10 * GIB).is_ok());
+        // Without host weights the same reserve is protected in full.
+        let guard = StartupMemoryGuard::for_plan(32 * GIB, 20 * GIB, 11 * GIB, 0);
+        assert_eq!(guard.floor_bytes, 11 * GIB);
+        // A larger pre-start sample never raises the floor above the headroom.
+        let guard = StartupMemoryGuard::for_plan(64 * GIB, 60 * GIB, 4 * GIB, 0);
+        assert_eq!(guard.floor_bytes, 4 * GIB);
     }
 
     #[test]
     fn startup_guard_handles_unknown_or_tiny_total_without_panicking() {
         for total in [0, 1, GIB / 2, GIB] {
-            let mut guard = StartupMemoryGuard::with_floor(total, 3 * GIB);
-            assert!(guard.observe(0, 0, Instant::now()).is_ok());
+            for available in [0, total, 64 * GIB] {
+                let mut guard = StartupMemoryGuard::for_plan(total, available, 3 * GIB, u64::MAX);
+                assert!(guard.observe(0, 0, Instant::now()).is_ok());
+                assert!(guard.floor_bytes >= GIB / 2);
+            }
         }
     }
+
+    #[test]
+    fn fully_offloaded_gpu_models_keep_throughput_batches_under_host_ram_pressure() {
+        // 4.2 GiB available on a 32 GiB desktop: host pressure, but every weight
+        // of the 17 GB model fits the 19 GiB GPU budget.
+        let mut hardware = hardware();
+        hardware.total_ram_bytes = 32 * GIB;
+        hardware.available_ram_bytes = 4 * GIB + 200 * MIB;
+        let config = super::super::resource_config::LocalResourceConfig::default();
+        let resident = plan_resources_configured(
+            &hardware,
+            12288,
+            17 * GIB,
+            "cuda",
+            &options(),
+            &config,
+            19 * GIB,
+            3,
+        )
+        .unwrap();
+        assert_eq!(resident.profile, "throughput");
+        assert_eq!(
+            (resident.batch_size, resident.micro_batch_size),
+            (1024, 256)
+        );
+        assert!(resident
+            .reason_codes
+            .iter()
+            .any(|code| code == "gpu_resident_batch_unreduced"));
+        assert!(!resident
+            .reason_codes
+            .iter()
+            .any(|code| code == "memory_pressure_reduced_batch"));
+        // Weights that stay on the host still shrink the batches under pressure.
+        let hybrid = plan_resources_configured(
+            &hardware,
+            12288,
+            17 * GIB,
+            "cuda",
+            &options(),
+            &config,
+            16 * GIB,
+            3,
+        )
+        .unwrap();
+        assert_eq!(hybrid.profile, "memory_saving");
+        assert_eq!((hybrid.batch_size, hybrid.micro_batch_size), (128, 32));
+        // Without a GPU budget the unconfigured planner keeps its host-based rule.
+        let unknown = plan_resources(&hardware, 12288, 17 * GIB, "cuda", &options());
+        assert_eq!(unknown.profile, "memory_saving");
+    }
+
+    #[test]
+    fn prompt_cache_ram_follows_the_host_budget_without_touching_the_slot_identity() {
+        let cli = format!("{CONTROLS} --load-mode MODE\n- none: buffered\n--cache-ram N");
+        let options = RuntimeOptions::from_help(&cli);
+        let config = super::super::resource_config::LocalResourceConfig::default();
+        let mut hardware = hardware();
+        hardware.total_ram_bytes = 32 * GIB;
+        hardware.available_ram_bytes = 4 * GIB + 200 * MIB;
+        let plan_at = |hardware: &ResourceSnapshot, options: &RuntimeOptions| {
+            plan_resources_configured(
+                hardware,
+                12288,
+                17 * GIB,
+                "cuda",
+                options,
+                &config,
+                19 * GIB,
+                1,
+            )
+            .unwrap()
+        };
+        // (4.2 GiB - 2.67 GiB headroom) / 2 = 0.77 GiB, rounded down to 768 MiB.
+        let busy = plan_at(&hardware, &options);
+        assert_eq!(busy.host_cache_arguments(), ["--cache-ram", "768"]);
+        assert!(busy
+            .reason_codes
+            .iter()
+            .any(|code| code == "prompt_cache_ram_budgeted"));
+        assert!(!busy.arguments().iter().any(|arg| arg == "--cache-ram"));
+        // The momentary RAM budget must not rotate the KV slot-cache identity.
+        hardware.available_ram_bytes = 5 * GIB;
+        let later = plan_at(&hardware, &options);
+        assert_eq!(later.host_cache_arguments(), ["--cache-ram", "1024"]);
+        assert_eq!(later.arguments(), busy.arguments());
+        // No budget left: the cache is disabled rather than left at 8 GiB.
+        hardware.available_ram_bytes = 2 * GIB + 600 * MIB;
+        let exhausted = plan_at(&hardware, &options);
+        assert_eq!(exhausted.host_cache_arguments(), ["--cache-ram", "0"]);
+        assert!(exhausted
+            .reason_codes
+            .iter()
+            .any(|code| code == "prompt_cache_ram_disabled"));
+        // Roomy machines and runtimes without the flag keep the runtime default.
+        hardware.available_ram_bytes = 24 * GIB;
+        assert!(plan_at(&hardware, &options)
+            .host_cache_arguments()
+            .is_empty());
+        hardware.available_ram_bytes = 4 * GIB + 200 * MIB;
+        assert!(plan_at(&hardware, &self::options())
+            .host_cache_arguments()
+            .is_empty());
+    }
+
+    #[test]
+    fn startup_host_bytes_cover_cpu_weights_and_only_self_chosen_mappings() {
+        let roomy = hardware();
+        // CPU: all weights are host memory.
+        let cpu = plan_resources_for_platform(&roomy, 32768, 4 * GIB, "cpu", &options(), true);
+        assert_eq!(cpu.startup_host_bytes(), 4 * GIB);
+        // Windows/CUDA small model with ample RAM: the plan chooses the mapping.
+        let mapped = plan_resources_for_platform(&roomy, 32768, 4 * GIB, "cuda", &options(), true);
+        assert_eq!(mapped.load_mode, LoadMode::Mmap);
+        assert_eq!(mapped.startup_host_bytes(), 4 * GIB);
+        // Buffered loading keeps a fully offloaded model off the host.
+        let mut busy = hardware();
+        busy.total_ram_bytes = 32 * GIB;
+        busy.available_ram_bytes = 5 * GIB;
+        let buffered =
+            plan_resources_for_platform(&busy, 32768, 17 * GIB, "cuda", &options(), true);
+        assert_eq!(buffered.load_mode, LoadMode::Buffered);
+        assert_eq!(buffered.startup_host_bytes(), 0);
+        // Admitted host weights of a hybrid plan are part of the footprint.
+        let hybrid = plan_resources_with_host_weights(
+            &busy,
+            32768,
+            17 * GIB,
+            "cuda",
+            &options(),
+            true,
+            Some(GIB),
+        );
+        assert_eq!(hybrid.startup_host_bytes(), GIB);
+        // A mapping forced by a missing buffered loader is not a planned footprint.
+        let legacy = RuntimeOptions::from_help(&format!("{CONTROLS} --mmap"));
+        let forced = plan_resources_for_platform(&busy, 32768, 17 * GIB, "cuda", &legacy, true);
+        assert_eq!(forced.load_mode, LoadMode::Mmap);
+        assert_eq!(forced.startup_host_bytes(), 0);
+        // Backends without a buffered path follow the same rule on every platform:
+        // only a mapping that fits the host budget is planned.
+        for windows in [true, false] {
+            let oversized =
+                plan_resources_for_platform(&busy, 32768, 17 * GIB, "vulkan", &options(), windows);
+            assert_eq!(oversized.load_mode, LoadMode::Mmap);
+            assert_eq!(oversized.startup_host_bytes(), 0);
+            let fitting =
+                plan_resources_for_platform(&roomy, 32768, 4 * GIB, "vulkan", &options(), windows);
+            assert_eq!(fitting.startup_host_bytes(), 4 * GIB);
+        }
+    }
+    const CONTROLS: &str = "--threads N --threads-batch N --batch-size N --ubatch-size N";
 
     #[test]
     #[ignore = "read-only resource-plan sample of the current hardware; run explicitly"]

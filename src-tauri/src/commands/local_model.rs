@@ -3647,17 +3647,26 @@ fn start_runtime_attempt(
         .map_err(|_| "Local model manager is unavailable.")?
         .resource_settings
         .clone();
+    let model_bytes = model
+        .artifact
+        .as_ref()
+        .map_or(0, |artifact| artifact.size_bytes);
+    // A start that already failed for GPU capacity proves that not every weight
+    // fits, whatever the byte budget says. The host share is unknown, so plan at
+    // least a remainder there instead of treating the model as GPU-resident.
+    let gpu_weight_budget = if plan.capacity_refuted {
+        plan.gpu_budget_bytes.min(model_bytes.saturating_sub(1))
+    } else {
+        plan.gpu_budget_bytes
+    };
     let resource_plan = resource_runtime::plan_resources_configured(
         &hardware,
         context,
-        model
-            .artifact
-            .as_ref()
-            .map_or(0, |artifact| artifact.size_bytes),
+        model_bytes,
         &plan.status.backend,
         &plan.runtime_options,
         &settings.state.applied,
-        plan.gpu_budget_bytes,
+        gpu_weight_budget,
         settings.state.applied_revision,
     )?;
     let port = reserve_loopback_port()?;
@@ -3668,7 +3677,7 @@ fn start_runtime_attempt(
             "runtime": model.runtime.as_ref().map(|runtime| &runtime.sha256),
             "template": model.chat_template_hash,
             "context": context,
-            "acceleration": plan.arguments,
+            "acceleration": plan.identity_arguments(),
             "resources": resource_plan.arguments(),
         }))
         .map_err(|_| "Slot cache identity could not be encoded.")?
@@ -3727,6 +3736,7 @@ fn start_runtime_attempt(
     command
         .args(&plan.arguments)
         .args(resource_plan.arguments())
+        .args(resource_plan.host_cache_arguments())
         .env_clear()
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -3823,9 +3833,11 @@ fn await_health(
 ) -> Result<(), String> {
     let client = local_http_client(Duration::from_secs(2), Duration::from_secs(2))?;
     let started = Instant::now();
-    let mut ram_guard = resource_runtime::StartupMemoryGuard::with_floor(
+    let mut ram_guard = resource_runtime::StartupMemoryGuard::for_plan(
         runtime.resource_plan.total_ram_bytes(),
+        runtime.resource_plan.available_ram_bytes(),
         runtime.resource_plan.ram_headroom_bytes(),
+        runtime.resource_plan.startup_host_bytes(),
     );
     let mut ram_snapshot = System::new();
     while started.elapsed() < timeout {
