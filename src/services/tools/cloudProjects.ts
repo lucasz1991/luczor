@@ -90,14 +90,24 @@ export const cloudProjectTools: ToolDef[] = [
     name: 'project_cloud_write_file',
     category: 'project',
     description:
-      'Create or replace one explicitly named text file in the active global project. Use expected_revision=0 only for a new file; otherwise read its current revision first. A conflict never overwrites the other device.',
+      'Create or replace ONE named text file in the active GLOBAL (cloud) project. Precondition: the project must be globally deployed; on "noch nicht global bereitgestellt" it is a local-only project — use fs_write instead, or tell the user to deploy it, do not retry here. content is the COMPLETE file, not a diff. New file: expected_revision=0. Replacing: first project_cloud_read_file and pass its returned revision as expected_revision. A revision conflict never overwrites the other device.',
     parameters: {
       type: 'object',
       additionalProperties: false,
       properties: {
         path,
-        content: { type: 'string', maxLength: 1048576 },
-        expected_revision: { type: 'integer', minimum: 0, maximum: 9007199254740990 },
+        content: {
+          type: 'string',
+          maxLength: 1048576,
+          description: 'Complete UTF-8 content of the whole file, not a diff or snippet.',
+        },
+        expected_revision: {
+          type: 'integer',
+          minimum: 0,
+          maximum: 9007199254740990,
+          description:
+            '0 for a new file; otherwise the revision returned by a prior project_cloud_read_file of this path.',
+        },
       },
       required: ['path', 'content', 'expected_revision'],
     },

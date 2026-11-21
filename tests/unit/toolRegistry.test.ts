@@ -203,8 +203,8 @@ const TOOL_CONTRACT = [
 // memory_recall now documents host-bound local/private versus external/shared retrieval.
 // These aggregate baselines also predate repository tools and fs_read's file_ref contract.
 // Keep that drift visible; browser-only changes are verified independently below.
-const TOOL_SCHEMA_SHA256 = '2424ecf9ae8add1b9bf2342bd5ad64f1da7864ac27898786158233a9b786c211'
-const CORE_TOOL_SCHEMA_SHA256 = '355c270130f92fc028aada9d7d6f93c2f82da43203724095246d30e13301f2eb'
+const TOOL_SCHEMA_SHA256 = 'ce26128b50cf686a2b7e0a3766b4669931224e0bd007c42e2af68e0b5c06a059'
+const CORE_TOOL_SCHEMA_SHA256 = 'd21feb277dbf7115b9fc1e9efd537820cae0d84b46426691c8bfd0b8b769388b'
 const PROJECT_CONTEXT = { projectId: 'project-1' }
 
 describe('tool registry contract', () => {

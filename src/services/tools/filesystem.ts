@@ -160,7 +160,7 @@ export const filesystemTools: EphemeralToolDef[] = [
     name: 'fs_list',
     category: 'app',
     description:
-      "List files and directories below the active project's bound workspace. Use '.' for its root. File entries include file_ref: pass it unchanged to fs_read instead of retyping a filename. Directories are not readable files.",
+      "List files and directories below the active project's bound workspace. Precondition: the project must have a local folder; if any fs_* call returns \"keine lokale Projektzuordnung\" / \"noch kein lokaler Ordner\", no folder is bound — tell the user to assign one in the project, do not retry. Paths are relative, use forward slashes, no leading '/', no drive letter, no '..'; use '.' for the root. File entries include file_ref: pass it unchanged to fs_read instead of retyping a filename. Directories are not readable files.",
     mutating: false,
     requiresApproval: true,
     dataHandling: 'ephemeral',
@@ -309,7 +309,7 @@ export const filesystemTools: EphemeralToolDef[] = [
     name: 'fs_write',
     category: 'app',
     description:
-      "Atomically create or replace one text file inside the active project's bound workspace. Use only relative paths.",
+      "Atomically create or replace ONE text file inside the active project's bound workspace. content must be the COMPLETE new file, not a diff or a fragment. path is relative with forward slashes, no leading '/', no drive letter, no '..'. Precondition: the project must have a bound local folder; on \"keine lokale Projektzuordnung\" / \"noch kein lokaler Ordner\" the project has no folder — tell the user, do not retry. Creating a new file: omit expected_sha256. Replacing an existing file: first fs_read it, then pass its sha256 as expected_sha256. A blocked write is never retried automatically; read the current state and clarify before trying again.",
     mutating: true,
     requiresApproval: true,
     dataHandling: 'ephemeral',
@@ -321,11 +321,19 @@ export const filesystemTools: EphemeralToolDef[] = [
       type: 'object',
       additionalProperties: false,
       properties: {
-        path: { type: 'string', description: 'Relative target file path.' },
-        content: { type: 'string', maxLength: MAX_WRITE_CHARS, description: 'Complete UTF-8 file content.' },
+        path: {
+          type: 'string',
+          description: "Relative target file path, e.g. 'src/index.php'. No leading '/', drive letter or '..'.",
+        },
+        content: {
+          type: 'string',
+          maxLength: MAX_WRITE_CHARS,
+          description: 'Complete UTF-8 content of the whole file. Not a diff, patch or snippet.',
+        },
         expected_sha256: {
           type: 'string',
-          description: 'SHA-256 from fs_read/fs_stat; mandatory when replacing an existing file.',
+          description:
+            'Omit when creating a new file. When replacing an existing file, the 64-char hex SHA-256 returned by a prior fs_read/fs_stat of that file.',
         },
       },
       required: ['path', 'content'],
