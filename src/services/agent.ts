@@ -996,6 +996,11 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
   const toolRecovery = new ToolRecoveryGuard()
   let reasoningRetryUsed = false
   let textToolRetryRound = -1
+  let toolContractRetryRound = -1
+  let toolContractRetries = 0
+  // Set once the local model answered a forced call with prose. A keyword guess
+  // must not keep forcing a call the model demonstrably does not produce.
+  let requiredCallUnsupported = false
   let statusEchoRetries = 0
   const guardTextTools = resolvedRoute.gateway.target === 'local_llama_cpp' && !allowsTextToolExample(latestUserMessage)
   const guardStatusEcho =
@@ -1610,6 +1615,46 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
             continue
           }
         }
+        // The model itself produced an invalid completion (prose instead of a forced
+        // call, or a malformed call). Nothing was executed, so one corrected attempt
+        // per round is safe. A request the runtime rejected (HTTP status present)
+        // would fail identically and is not retried.
+        if (
+          !resolvedRoute.externalOneShot &&
+          inferenceGateway.target === 'local_llama_cpp' &&
+          error instanceof LocalInferenceError &&
+          error.code === 'runtime_tool_contract_rejected' &&
+          error.diagnostic?.stage === 'generation' &&
+          error.diagnostic.httpStatus === undefined &&
+          (toolContractRetryRound !== round || toolContractRetries < 2)
+        ) {
+          toolContractRetries = toolContractRetryRound === round ? toolContractRetries + 1 : 1
+          toolContractRetryRound = round
+          if (nextToolChoice === 'required') requiredCallUnsupported = true
+          // First repair: let the model choose between a real call and an answer.
+          // Second repair: no call at all, so this round always ends in a plain,
+          // honest status instead of a failed run. Nothing is executed from text.
+          const withoutTools = toolContractRetries > 1
+          nextToolChoice = withoutTools ? 'none' : 'auto'
+          const correction: WireMessage = {
+            role: 'system',
+            content: withoutTools
+              ? 'Auch der zweite Versuch enthielt keinen gültigen strukturierten Werkzeugaufruf; es wurde kein Werkzeug ausgeführt. ' +
+                'In dieser Antwort stehen keine Werkzeuge zur Verfügung. Antworte kurz auf Deutsch: was anhand der vorhandenen Ergebnisse bereits feststeht und welcher Schritt noch offen ist. ' +
+                'Behaupte keine ausgeführten Aktionen und erfinde keine Ergebnisse.'
+              : 'Die vorige Ausgabe enthielt keinen gültigen strukturierten Werkzeugaufruf und wurde verworfen; es wurde kein Werkzeug ausgeführt. ' +
+                'Erfordert der Auftrag eine Aktion, rufe sofort ein bereitgestelltes Werkzeug im Werkzeugformat der aktiven Chatvorlage mit vollständigen JSON-Argumenten auf, ohne vorangestellten Fließtext. ' +
+                'Ist keine Aktion nötig, beantworte die Nutzerfrage direkt. Erfinde keine Ergebnisse. Bereits erfolgreiche Aktionen nicht wiederholen.',
+          }
+          if (!messages.some(message => message.role === 'system' && message.content === correction.content)) {
+            messages.push(correction)
+          }
+          opts.onResponseReset?.({ round: round + 1 })
+          publish('')
+          opts.onBudget?.(null)
+          opts.onProgress?.({ phase: 'regenerating', round: round + 1, attempt: toolContractRetries })
+          continue
+        }
         const interruption = unexpectedInferenceInterruption(error)
         if (interruption)
           error = new LocalInferenceError(interruption.message, interruption.code, true, visibleContent.length > 0)
@@ -1706,7 +1751,11 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
           textToolRetryRound = round
           // An ambiguous follow-up is not new execution authority; never force a tool for it.
           nextToolChoice =
-            synthesisOnly || requestedToolChoice === 'none' ? 'none' : repairTextTools ? 'required' : 'auto'
+            synthesisOnly || requestedToolChoice === 'none'
+              ? 'none'
+              : repairTextTools && !requiredCallUnsupported
+                ? 'required'
+                : 'auto'
           const correction: WireMessage = {
             role: 'system',
             content:
@@ -1745,7 +1794,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       }
       if (reasoningLeak && !reasoningRetryUsed) {
         reasoningRetryUsed = true
-        nextToolChoice = requestedToolChoice === 'required' ? 'required' : 'auto'
+        nextToolChoice = requestedToolChoice === 'required' && !requiredCallUnsupported ? 'required' : 'auto'
         messages.push({
           role: 'system',
           content:

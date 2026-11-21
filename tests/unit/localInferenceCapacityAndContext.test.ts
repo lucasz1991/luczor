@@ -91,12 +91,34 @@ describe('local inference capacity and scoped context', () => {
       })
       input.snapshot.memory.totalBytes = 15 * GIB
       input.snapshot.memory.availableBytes = 7 * GIB
+      // A model larger than a single GPU is not GPU-resident, so both RAM floors apply.
+      input.artifactSizeBytes = 32 * GIB
       expect(assessModelCapacity(input)).toMatchObject({
         status: 'ineligible',
         reasons: ['total_ram_below_minimum', 'available_ram_below_minimum'],
       })
     }
   )
+
+  it('relaxes the free-RAM floor for a model that fits entirely in one accelerator', () => {
+    // Full-GPU-resident weights need almost no host RAM; the signed free-RAM floor
+    // (sized for host weights) must not block such a model when free RAM is low.
+    const input = gpuCapacityInput([{ id: 'cuda-0', backend: 'cuda', name: 'GPU', totalBytes: 24 * GIB }], {
+      minVramBytes: 0,
+      minAvailableRamBytes: 2 * GIB,
+    })
+    input.artifactSizeBytes = 17 * GIB
+    input.snapshot.memory.availableBytes = GIB // below the 2 GiB signed floor
+    expect(assessModelCapacity(input)).toMatchObject({ status: 'eligible', reasons: [] })
+
+    // A GPU too small to hold the model keeps the strict free-RAM gate.
+    input.snapshot.accelerators = [{ id: 'cuda-0', backend: 'cuda', name: 'GPU', totalBytes: 8 * GIB }]
+    expect(assessModelCapacity(input).reasons).toContain('available_ram_below_minimum')
+
+    // An explicit CPU execution mode also keeps the strict gate.
+    input.snapshot.accelerators = [{ id: 'cuda-0', backend: 'cuda', name: 'GPU', totalBytes: 24 * GIB }]
+    expect(assessModelCapacity({ ...input, executionMode: 'cpu' }).reasons).toContain('available_ram_below_minimum')
+  })
 
   it.each<{ label: string; accelerators: HardwareSnapshot['accelerators'] }>([
     {
@@ -327,7 +349,9 @@ describe('local inference capacity and scoped context', () => {
       snapshot,
       modelReleaseId: 'local',
       manifestPayloadSha256: 'catalog-a',
-      artifactSizeBytes: GIB,
+      // Larger than the snapshot's 24 GiB GPU, so residency (not GPU residency) is
+      // what decides the host-RAM admission here.
+      artifactSizeBytes: 32 * GIB,
       policy: {
         minTotalRamBytes: 16 * GIB,
         minAvailableRamBytes: 8 * GIB,

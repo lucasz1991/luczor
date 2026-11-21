@@ -177,12 +177,30 @@ export function assessModelCapacity(input: {
     !!input.manifestPayloadSha256 &&
     snapshot.memory.residentModel?.modelReleaseId === input.modelReleaseId &&
     snapshot.memory.residentModel.manifestPayloadSha256 === input.manifestPayloadSha256
-  if (!resident && finiteNonNegative(snapshot.memory.availableBytes) < finiteNonNegative(policy.minAvailableRamBytes)) {
-    reasons.push('available_ram_below_minimum')
-  }
 
   const accepted = new Set(policy.acceptedAccelerators ?? ['cuda', 'vulkan', 'metal'])
   const accelerators = snapshot.accelerators.filter(item => accepted.has(item.backend))
+  // A model the runtime can hold entirely in one accelerator keeps almost no weights
+  // in host RAM, so the momentary free-RAM floor (sized for host weights) does not
+  // apply to it. Physical VRAM capacity is the pre-filter only; signed native
+  // preparation still measures the real free VRAM and host budget, and the native
+  // RAM-budget guard rejects a plan that would actually spill weights to the host.
+  // Unknown VRAM (0) or an explicit CPU mode keeps the strict host-RAM gate.
+  const GPU_RESIDENT_HOST_RESERVE_BYTES = 1024 * 1024 * 1024
+  const gpuCanHoldModel =
+    input.executionMode !== 'cpu' &&
+    accelerators.some(
+      item =>
+        finiteNonNegative(item.totalBytes) >=
+        finiteNonNegative(input.artifactSizeBytes) + GPU_RESIDENT_HOST_RESERVE_BYTES
+    )
+  if (
+    !resident &&
+    !gpuCanHoldModel &&
+    finiteNonNegative(snapshot.memory.availableBytes) < finiteNonNegative(policy.minAvailableRamBytes)
+  ) {
+    reasons.push('available_ram_below_minimum')
+  }
   // DXGI discovers physical adapters, not an executable Vulkan/CUDA backend.
   // Under automatic backend selection, defer that proof to signed native
   // preparation. An explicit backend restriction must not be relaxed here.

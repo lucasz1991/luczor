@@ -2450,6 +2450,98 @@ describe('agent mode and tool reliability', () => {
     )
   })
 
+  it('retries a forced call the local model answered with prose instead of failing the run', async () => {
+    const proseInsteadOfCall = () =>
+      new LocalInferenceError(
+        'Antwortgenerierung: kein gültiger Werkzeugaufruf.',
+        'runtime_tool_contract_rejected',
+        false,
+        true,
+        {
+          schemaVersion: 1,
+          stage: 'generation',
+          code: 'runtime_tool_contract_rejected',
+          reason: 'unclassified',
+          inputTokens: 21263,
+          contextTokens: 32768,
+          outputTokens: 11441,
+        }
+      )
+    mocks.getTool.mockReturnValue({
+      name: 'project_get_state',
+      category: 'project',
+      mutating: false,
+      requiresApproval: false,
+      parameters: { type: 'object', additionalProperties: true },
+      execute: mocks.execute,
+    })
+    mocks.streamChatWithTools
+      .mockRejectedValueOnce(proseInsteadOfCall())
+      .mockResolvedValueOnce({ content: 'Der Projektstand ist geprüft.', toolCalls: [], rawToolCalls: [] })
+    const onResponseReset = vi.fn()
+    const gateway = { id: 'local', target: 'local_llama_cpp' as const, streamChatWithTools: mocks.streamChatWithTools }
+
+    const recovered = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Prüfe bitte den Projektstand' }],
+      mode: 'act',
+      toolChoice: 'required',
+      maxRounds: 2,
+      onResponseReset,
+      inferenceGateway: gateway,
+    })
+
+    expect(recovered.interrupted).toBeUndefined()
+    expect(recovered.finalText).toBe('Der Projektstand ist geprüft.')
+    expect(onResponseReset).toHaveBeenCalledExactlyOnceWith({ round: 1 })
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(2)
+    const first = mocks.streamChatWithTools.mock.calls[0]![0] as InferenceRequest
+    const second = mocks.streamChatWithTools.mock.calls[1]![0] as InferenceRequest
+    expect(first.toolChoice).toBe('required')
+    expect(second.toolChoice).toBe('auto')
+    expect(second.messages.at(-1)).toMatchObject({ role: 'system' })
+    expect(second.messages.at(-1)?.content).toContain('keinen gültigen strukturierten Werkzeugaufruf')
+    expect(mocks.execute).not.toHaveBeenCalled()
+
+    // A second invalid completion falls back to a plain answer without tools.
+    mocks.streamChatWithTools.mockReset()
+    mocks.streamChatWithTools
+      .mockRejectedValueOnce(proseInsteadOfCall())
+      .mockRejectedValueOnce(proseInsteadOfCall())
+      .mockResolvedValueOnce({ content: 'Offen ist noch die Prüfung.', toolCalls: [], rawToolCalls: [] })
+    const plain = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Prüfe bitte den Projektstand' }],
+      mode: 'act',
+      toolChoice: 'required',
+      maxRounds: 2,
+      inferenceGateway: gateway,
+    })
+    expect(plain.interrupted).toBeUndefined()
+    expect(plain.finalText).toBe('Offen ist noch die Prüfung.')
+    expect(
+      mocks.streamChatWithTools.mock.calls.map(call => (call[0] as InferenceRequest).toolChoice)
+    ).toEqual(['required', 'auto', 'none'])
+    expect(mocks.execute).not.toHaveBeenCalled()
+
+    // Only a third invalid completion in the same round ends in the resumable checkpoint.
+    mocks.streamChatWithTools.mockReset()
+    mocks.streamChatWithTools
+      .mockRejectedValueOnce(proseInsteadOfCall())
+      .mockRejectedValueOnce(proseInsteadOfCall())
+      .mockRejectedValueOnce(proseInsteadOfCall())
+    const interrupted = await runAgent({
+      projectId: 'project-2',
+      baseMessages: [{ role: 'user', content: 'Prüfe bitte den Projektstand' }],
+      mode: 'act',
+      toolChoice: 'required',
+      maxRounds: 2,
+      inferenceGateway: gateway,
+    })
+    expect(interrupted.interrupted).toMatchObject({ code: 'runtime_tool_contract_rejected', round: 1 })
+    expect(mocks.streamChatWithTools).toHaveBeenCalledTimes(3)
+  })
+
   it('keeps a mutation-safe checkpoint when a later local model round fails', async () => {
     mocks.getTool.mockReturnValue({
       name: 'project_get_state',

@@ -2394,7 +2394,10 @@ fn prepare_release_inner(
     // its artifact handles remain locked throughout the resident lifetime.
     if !refresh_resident_runtime(&model, operation_id, catalog_binding, &cancel)? {
         require_cold_start_allowed(resident_only)?;
-        validate_capacity(&model)?;
+        // Lenient early gate: residency is unknown before the GPU plan, so block
+        // only when free RAM is below the critical host floor. start_runtime makes
+        // the authoritative decision once the acceleration plan is known.
+        validate_capacity(&model, true)?;
         ensure_runtime_policy(
             app,
             &model,
@@ -2600,7 +2603,7 @@ fn verify_configured_artifacts(
     })
 }
 
-fn validate_capacity(model: &ModelRelease) -> Result<(), String> {
+fn validate_capacity(model: &ModelRelease, host_resident_fully: bool) -> Result<(), String> {
     // Capacity admission only needs current RAM here; disk and GPU checks use
     // the actual verified model/runtime paths later in the startup boundary.
     let mut system = System::new();
@@ -2612,15 +2615,35 @@ fn validate_capacity(model: &ModelRelease) -> Result<(), String> {
     let min_ram = policy
         .min_available_ram_bytes
         .ok_or("Capacity policy has no RAM threshold.")?;
-    if system.total_memory() < min_total_ram {
+    let total = system.total_memory();
+    if total < min_total_ram {
         return Err("Total RAM is below the signed model threshold.".into());
     }
-    if system.available_memory() < min_ram {
+    if system.available_memory() < admission_available_floor(total, min_ram, host_resident_fully) {
         return Err("Available RAM is below the signed model threshold.".into());
     }
     // GPU thresholds are checked against the selected, verified runtime device
     // at startup. NVML alone cannot prove or disprove Vulkan/Metal availability.
     Ok(())
+}
+
+/// The free-RAM admission floor. The signed available-RAM floor sizes host weights;
+/// a plan that holds the whole model on the GPU keeps almost no weights in host RAM,
+/// so it is admitted against the critical host floor instead. The actual host budget
+/// and the startup dip remain enforced by plan_resources (`ram_budget_insufficient`)
+/// and the StartupMemoryGuard. CPU/hybrid plans keep the full signed floor, and the
+/// relaxed floor never rises above the signed value.
+fn admission_available_floor(
+    total_ram: u64,
+    min_available_ram: u64,
+    host_resident_fully: bool,
+) -> u64 {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    if host_resident_fully {
+        (total_ram / 50).clamp(GIB / 2, GIB).min(min_available_ram)
+    } else {
+        min_available_ram
+    }
 }
 
 fn run_signed_benchmark(
@@ -3428,7 +3451,9 @@ fn start_runtime(
     cancel: &AtomicBool,
     installed_only: bool,
 ) -> Result<ManagedRuntime, String> {
-    validate_capacity(model)?;
+    // Lenient early gate before the expensive artifact verification; the
+    // authoritative RAM admission runs below, once the acceleration plan is known.
+    validate_capacity(model, true)?;
     // Every process replacement retains the signed hashes and immutable read guards.
     let artifacts =
         verify_configured_artifacts(app, model, catalog_binding, cancel, installed_only)?;
@@ -3497,6 +3522,20 @@ fn start_runtime(
     if gpu_required && !plan.uses_gpu() {
         return Err("No compatible GPU runtime satisfies the signed model capacity policy.".into());
     }
+    // Authoritative RAM admission now that the acceleration plan is known. A plan
+    // that holds the whole model on the GPU (budget covers the weights and no prior
+    // capacity failure forced a host spill) keeps almost no weights in host RAM, so
+    // it is admitted against the critical host floor instead of the full signed
+    // available-RAM threshold. Partial/CPU plans keep the signed floor.
+    let model_bytes = model
+        .artifact
+        .as_ref()
+        .map_or(0, |artifact| artifact.size_bytes);
+    let fully_gpu_resident = plan.uses_gpu()
+        && !plan.capacity_refuted
+        && model_bytes > 0
+        && plan.gpu_budget_bytes >= model_bytes;
+    validate_capacity(model, fully_gpu_resident)?;
     let timeout = Duration::from_secs(
         model
             .capacity_policy
@@ -3575,9 +3614,10 @@ fn start_runtime(
                 && started.elapsed() < timeout =>
         {
             // One owned-process retry only, before any user inference. A CPU fallback
-            // must still meet the original signed RAM and benchmark requirements.
+            // must still meet the original signed RAM and benchmark requirements: it
+            // keeps the full weights in host RAM, so the signed available-RAM floor applies.
             require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)?;
-            validate_capacity(model)?;
+            validate_capacity(model, false)?;
             let mut cpu = gpu_runtime::AccelerationPlan::cpu("runtime_gpu_start_failed")
                 .with_options(plan.runtime_options.clone());
             cpu.status.resource_revision = settings.state.applied_revision;
@@ -5462,6 +5502,27 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn admission_floor_relaxes_only_for_fully_gpu_resident_plans() {
+        use super::admission_available_floor;
+        const GIB: u64 = 1024 * 1024 * 1024;
+        let total = 32 * GIB;
+        let signed = 2 * GIB;
+        // CPU/hybrid plans keep the full signed floor.
+        assert_eq!(admission_available_floor(total, signed, false), signed);
+        // A fully GPU-resident plan is admitted against the critical host floor
+        // (total/50 clamped to 0.5..1 GiB), here 0.64 GiB, well below the user's
+        // ~1.1 GiB free RAM that the signed 2 GiB floor had rejected.
+        let relaxed = admission_available_floor(total, signed, true);
+        assert_eq!(relaxed, (total / 50).clamp(GIB / 2, GIB));
+        assert!(relaxed < signed);
+        // The relaxed floor never rises above the signed value, even when the
+        // critical floor would be larger than a very small signed threshold.
+        assert_eq!(admission_available_floor(total, GIB / 4, true), GIB / 4);
+        // The critical floor is clamped to at least 0.5 GiB on tiny machines.
+        assert_eq!(admission_available_floor(4 * GIB, GIB, true), GIB / 2);
+    }
+
     fn generation_fixture(
         frames: Vec<serde_json::Value>,
         tool_choice: &str,
