@@ -1,10 +1,8 @@
 import { runAgent, type RunAgentOptions, type RunAgentResult } from '@/services/agent'
 import { createClaudeMainGateway, ProviderRefusalError } from '@/services/inference/claudeGateway'
 import type { ClaudeEffort } from '@/services/inference/claudeMain'
-import { claudeDisabledToolNames } from '@/services/inference/claudeToolPolicy'
 import type { ClaudeRouteMode } from '@/services/inference/modelUsageSettings'
 import type { ApprovedProxyConfig, InferenceGateway, WireMessage } from '@/services/inference/types'
-import { listTools } from '@/services/tools/registry'
 import { createTokenUsageCounter } from '@/services/tokenUsage'
 
 /** A Claude-led turn may run this long across all of its model/tool rounds. */
@@ -54,18 +52,21 @@ function unansweredResult(): RunAgentResult {
   }
 }
 
-/** Options of the Claude-led run: provider-safe transcript, shareable tools only, no local evidence. */
+/**
+ * Options of the Claude-led run. Claude drives the same registered tools as the local model, under
+ * the same permission mode and approvals; tool results therefore travel to the provider as part of
+ * the next request. Only the starting transcript is the provider-safe projection.
+ */
 export function claudeRunOptions(input: ClaudeTurnInput, gateway: InferenceGateway): RunAgentOptions {
   const { local } = input
   return {
     ...local,
     inferenceGateway: gateway,
     baseMessages: input.externalBaseMessages,
-    // The delegation tools start local children on the active gateway; a Claude-led turn has none.
+    // The delegation tools start children on the active gateway and external specialist packets;
+    // a Claude-led turn works on its own.
     agentMode: false,
-    disabledTools: [...new Set([...(local.disabledTools ?? []), ...claudeDisabledToolNames(listTools())])],
-    // Archived runs, device-local history and private context never join a provider packet.
-    archivedHistory: undefined,
+    // The initial context is the provider-safe one; what tools add later is classified per result.
     ephemeralContextUsed: false,
     localOnlyContextUsed: false,
     contextDataPolicy: 'syncable',

@@ -2874,7 +2874,19 @@ async function executeChatTurn(
       initialUserContext: goalInput?.state.text ?? mutations.getConversation(conversationId)?.goal,
     }
     const localHistory = conversationHistoryForInference(fullHistory, 'local', historyOptions)
-    const externalHistory = conversationHistoryForInference(fullHistory, 'external', historyOptions)
+    // A Claude-led chat keeps its own earlier turns, including those built on tool results.
+    // Turns the local specialist took over stay out of every provider request.
+    const externalHistory = conversationHistoryForInference(
+      fullHistory,
+      'external',
+      captured.claude
+        ? {
+            ...historyOptions,
+            keepEphemeral: message =>
+              message.role === 'assistant' && message.meta.inferenceTarget === 'laravel_proxy' && !message.meta.handoff,
+          }
+        : historyOptions
+    )
     const settingsStore = await Store.load('luczor.settings.json')
     const historyBudget = clampNumber(
       (await settingsStore.get<number>('client_history_token_budget')) ?? DEFAULT_EXTERNAL_HISTORY_TOKENS,

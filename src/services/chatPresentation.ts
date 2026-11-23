@@ -12,7 +12,11 @@ export const MAX_EXTERNAL_HISTORY_TOKENS = 20_000
 export function conversationHistoryForInference(
   messages: readonly Pick<Message, 'role' | 'content' | 'visibility' | 'meta'>[],
   target: 'local' | 'external',
-  options: { initialUserContext?: string } = {}
+  options: {
+    initialUserContext?: string
+    /** Device-local messages that still belong in this external projection (a Claude chat's own turns). */
+    keepEphemeral?: (message: Pick<Message, 'role' | 'meta'>) => boolean
+  } = {}
 ): { messages: WireMessage[]; ephemeralDataUsed: boolean } {
   const history: WireMessage[] = []
   let ephemeralDataUsed = false
@@ -20,11 +24,12 @@ export function conversationHistoryForInference(
     if (message.visibility !== 'visible' || message.meta?.isLoading) continue
     if (message.role !== 'user' && message.role !== 'assistant') continue
     const ephemeral = message.meta?.dataHandling === 'ephemeral'
-    if (target === 'external' && ephemeral) continue
+    const kept = ephemeral && target === 'external' && options.keepEphemeral?.(message) === true
+    if (target === 'external' && ephemeral && !kept) continue
     const parts: string[] = []
     if (message.role === 'assistant') {
       for (const entry of message.meta?.commentary ?? []) {
-        if (!entry.content.trim() || (target === 'external' && !entry.serverSpeechAllowed)) continue
+        if (!entry.content.trim() || (target === 'external' && !entry.serverSpeechAllowed && !kept)) continue
         if (!parts.includes(entry.content)) parts.push(entry.content)
         if (!entry.serverSpeechAllowed) ephemeralDataUsed = true
       }

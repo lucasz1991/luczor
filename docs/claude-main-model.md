@@ -35,9 +35,13 @@ Die Übergabe reagiert ausschließlich auf das Signal der API. Für sprachlich f
 
 ## Werkzeuge
 
-Claude erhält nur Werkzeuge, deren eigene Einstufung eine Weitergabe an Provider erlaubt (`services/inference/claudeToolPolicy.ts`). Das sind derzeit Projektstand, Aufgaben, Chats, Pläne und Workflow-Definitionen. Dateien, Repository, Memory, Browser, Terminal, Bildschirm und Agentenstarter sind als gerätelokal eingestuft und bleiben dem lokalen Modell vorbehalten. Die exakte Liste ist in `tests/unit/claudeMain.test.ts` festgeschrieben; eine Änderung ist eine bewusste Entscheidung über Datenabfluss. Der Berechtigungsmodus des Chats (Beobachten, Handeln, Vollzugriff) gilt unverändert.
+Claude verwendet dieselben registrierten Werkzeuge wie das lokale Modell (Dateien, Repository, Memory, Browser, Terminal, Bildschirm, Aufgaben, Workflows …) – auf ausdrückliche Vorgabe des Betreibers vom 2026-11-23. Der Berechtigungsmodus des Chats (Beobachten, Handeln, Vollzugriff) und alle Freigabedialoge gelten unverändert.
 
-Delegation (`agent_assist`), Archivzugriff und Zielverfolgung sind in Claude-geführten Aufträgen abgeschaltet. Zielrunden, Fortsetzungen, Mini-Chat und Workspace-Modus laufen weiterhin lokal.
+Folge: Werkzeugergebnisse sind Teil der nächsten Anfrage und gehen damit über den Luczor-Server an Anthropic – auch Dateiinhalte, Bildschirmaufnahmen, Zwischenablage, Memory-Treffer und Seiteninhalte. Die Projekteinstellung für die externe Repository-Weitergabe (`repository_external_policy`) wird in Claude-geführten Aufträgen nicht angewendet, weil die Werkzeuge wie beim lokalen Modell laufen. Wer etwas auf dem Gerät halten will, wählt für diesen Chat den Modus „Lokal“.
+
+Frühere Claude-Antworten eines Chats bleiben im Verlauf für Claude erhalten, auch wenn sie auf Werkzeugergebnissen beruhen. Vom lokalen Spezial-Agenten übernommene Runden gehen nie an einen Provider.
+
+Die Delegation an Unter-Agenten (`agent_assist`) und die Zielverfolgung sind in Claude-geführten Aufträgen abgeschaltet. Zielrunden, Fortsetzungen, Mini-Chat und Workspace-Modus laufen weiterhin lokal.
 
 ## Grenzen
 

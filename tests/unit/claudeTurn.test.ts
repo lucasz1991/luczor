@@ -142,9 +142,10 @@ function turn(patch: Partial<ClaudeTurnInput>): ClaudeTurnInput {
 }
 
 describe('Claude-led turn', () => {
-  it('runs Claude on the provider-safe transcript without local evidence or delegation', () => {
+  it('runs Claude on the provider-safe transcript with the same tools as the local model', () => {
+    const history = { read: async () => [] } as never
     const options = claudeRunOptions(
-      turn({}),
+      turn({ local: { ...local, archivedHistory: history } }),
       gateway(async () => answer())
     )
     expect(options.baseMessages).toEqual([{ role: 'user', content: 'providersicher' }])
@@ -156,9 +157,10 @@ describe('Claude-led turn', () => {
       contextDataPolicy: 'syncable',
       contextEgress: 'external_allowed',
     })
-    expect(options.archivedHistory).toBeUndefined()
-    expect(options.disabledTools).toEqual(expect.arrayContaining(['custom_tool', 'fs_read', 'os_screen_capture']))
-    expect(options.disabledTools).not.toContain('task_list')
+    // No tool is withheld: only what the caller already disabled stays disabled.
+    expect(options.disabledTools).toEqual(['custom_tool'])
+    expect(options.archivedHistory).toBe(history)
+    expect(options.mode).toBe('act')
     expect(options.inferenceGateway?.target).toBe('laravel_proxy')
   })
 

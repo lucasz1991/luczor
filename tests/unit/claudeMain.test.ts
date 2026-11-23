@@ -5,12 +5,9 @@ import {
   resolveClaudeModel,
   supportedThinkingTier,
 } from '@/services/inference/claudeMain'
-import { claudeDisabledToolNames, claudeMayUseTool, toolsForClaudeMain } from '@/services/inference/claudeToolPolicy'
 import { buildLaravelProxyBody, hashLaravelProxyBody } from '@/services/inference/laravelProxyBody'
 import { parseModelUsage } from '@/services/inference/modelUsageSettings'
-import { messageRouteLabel } from '@/services/chatPresentation'
-import { listTools } from '@/services/tools/registry'
-import type { ToolDef } from '@/services/tools/types'
+import { conversationHistoryForInference, messageRouteLabel } from '@/services/chatPresentation'
 
 const block = {
   claude_modes_allowed: true,
@@ -96,83 +93,6 @@ describe('Claude route modes in the device settings', () => {
   })
 })
 
-describe('Claude tool policy', () => {
-  const tool = (patch: Partial<ToolDef>): ToolDef => ({
-    name: 'sample',
-    category: 'app',
-    description: '',
-    parameters: {},
-    mutating: false,
-    requiresApproval: false,
-    execute: async () => null,
-    ...patch,
-  })
-
-  it('offers only tools whose own classification allows provider egress', () => {
-    expect(claudeMayUseTool(tool({}))).toBe(true)
-    expect(claudeMayUseTool(tool({ dataHandling: 'syncable', scope: 'project', effects: ['read', 'write'] }))).toBe(
-      true
-    )
-    expect(claudeMayUseTool(tool({ dataHandling: 'ephemeral' }))).toBe(false)
-    expect(claudeMayUseTool(tool({ retentionPolicy: 'local_only' as never }))).toBe(false)
-    expect(claudeMayUseTool(tool({ risk: 'critical' }))).toBe(false)
-    expect(claudeMayUseTool(tool({ scope: 'desktop' }))).toBe(false)
-    expect(claudeMayUseTool(tool({ scope: 'network' }))).toBe(false)
-    expect(claudeMayUseTool(tool({ effects: ['read', 'execute'] }))).toBe(false)
-    expect(claudeMayUseTool(tool({ effects: ['input'] }))).toBe(false)
-    expect(claudeMayUseTool(tool({ sessionKind: 'browser' }))).toBe(false)
-    expect(claudeMayUseTool(tool({ workspaceOnly: true }))).toBe(false)
-  })
-
-  it('pins the exact registry subset Claude may drive', () => {
-    // A change here is a deliberate egress decision. Do not update this list to make a test pass.
-    expect(toolsForClaudeMain(listTools()).map(item => item.name)).toEqual([
-      'project_get_state',
-      'project_set_summary',
-      'project_upsert_goal',
-      'project_create',
-      'chat_create',
-      'chat_list',
-      'task_create',
-      'task_list',
-      'task_update',
-      'task_complete',
-      'plan_update',
-      'plan_get',
-      'workflow_catalog',
-      'workflow_list',
-      'workflow_get',
-      'workflow_validate',
-      'workflow_create',
-      'workflow_update',
-      'workflow_run_get',
-      'workflow_trigger_list',
-    ])
-  })
-
-  it('keeps every device-local tool family away from Claude', () => {
-    const disabled = new Set(claudeDisabledToolNames(listTools()))
-    for (const name of [
-      'fs_read',
-      'fs_write',
-      'repository_read',
-      'memory_recall',
-      'os_screen_capture',
-      'os_read_clipboard',
-      'os_type_text',
-      'browser_dom_read',
-      'project_terminal_run',
-      'image_analyze',
-      'agent_dispatch',
-      'device_dispatch',
-      'workspace_chat_read',
-      'project_cloud_read_file',
-    ])
-      expect(disabled.has(name)).toBe(true)
-    expect(disabled.size + toolsForClaudeMain(listTools()).length).toBe(listTools().length)
-  })
-})
-
 describe('proxy body for Claude-led turns', () => {
   const request = { messages: [{ role: 'user' as const, content: 'Hallo' }], projectId: 'p1' }
 
@@ -207,5 +127,47 @@ describe('message route label', () => {
       'Lokal · Spezial-Agent · Orca'
     )
     expect(messageRouteLabel({ inferenceTarget: 'laravel_proxy', handoff: { state: 'offered' } })).toBe('Router')
+  })
+})
+
+describe('history of a Claude-led chat', () => {
+  const message = (role: 'user' | 'assistant', content: string, meta: Record<string, unknown> = {}) => ({
+    role,
+    content,
+    visibility: 'visible' as const,
+    meta,
+  })
+  const transcript = [
+    message('user', 'Frage 1'),
+    message('assistant', 'Claude mit Werkzeugergebnis', {
+      dataHandling: 'ephemeral',
+      inferenceTarget: 'laravel_proxy',
+    }),
+    message('user', 'Frage 2', { dataHandling: 'ephemeral' }),
+    message('assistant', 'Lokal übernommen', {
+      dataHandling: 'ephemeral',
+      inferenceTarget: 'local_llama_cpp',
+      handoff: { state: 'taken' },
+    }),
+    message('assistant', 'Angebot', {
+      dataHandling: 'ephemeral',
+      inferenceTarget: 'laravel_proxy',
+      handoff: { state: 'offered' },
+    }),
+  ]
+  const keepEphemeral = (item: { role: string; meta: Record<string, unknown> }) =>
+    item.role === 'assistant' && item.meta.inferenceTarget === 'laravel_proxy' && !item.meta.handoff
+
+  it('keeps Claude turns built on tool results and drops every handed-over turn', () => {
+    const history = conversationHistoryForInference(transcript as never, 'external', {
+      keepEphemeral: keepEphemeral as never,
+    })
+    expect(history.messages.map(item => item.content)).toEqual(['Frage 1', 'Claude mit Werkzeugergebnis'])
+  })
+
+  it('leaves the existing external projection unchanged without the option', () => {
+    expect(conversationHistoryForInference(transcript as never, 'external').messages.map(item => item.content)).toEqual(
+      ['Frage 1']
+    )
   })
 })
