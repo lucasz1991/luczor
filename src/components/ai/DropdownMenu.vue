@@ -14,6 +14,8 @@ export type DropdownOption<V extends string = string> = {
   description?: string
   tone?: 'neutral' | 'accent' | 'success' | 'warning' | 'danger'
   disabled?: boolean
+  /** Options sharing a group follow one heading; a new value on consecutive options starts a new one. */
+  group?: string
 }
 
 const props = withDefaults(
@@ -44,6 +46,13 @@ const trigger = ref<HTMLButtonElement | null>(null)
 const highlighted = ref(null) as Ref<T | null>
 const current = computed(() => props.options.find(option => option.value === props.modelValue) ?? null)
 const enabled = computed(() => props.options.filter(option => !option.disabled))
+/** Each option with the heading it opens, if any. Without groups no extra heading is rendered. */
+const rows = computed(() =>
+  props.options.map((option, index) => {
+    const previous = index > 0 ? props.options.at(index - 1)?.group : undefined
+    return { option, groupHeading: option.group && option.group !== previous ? option.group : '' }
+  })
+)
 useDismissible(open, root, {
   onClose: () => {
     highlighted.value = null
@@ -169,29 +178,30 @@ watch(
         @keydown="onMenuKey"
       >
         <div v-if="heading" class="ai-dropdown__head">{{ heading }}</div>
-        <button
-          v-for="option in options"
-          :id="optionId(option.value)"
-          :key="option.value"
-          type="button"
-          role="option"
-          class="ai-dropdown__option"
-          :class="{ 'is-on': option.value === modelValue, 'is-highlighted': option.value === highlighted }"
-          :data-tone="option.tone ?? 'neutral'"
-          :aria-selected="option.value === modelValue"
-          :aria-disabled="option.disabled || undefined"
-          :disabled="option.disabled"
-          tabindex="-1"
-          @click="choose(option)"
-          @pointerenter="highlighted = option.value"
-        >
-          <span class="ai-dropdown__dot" aria-hidden="true" />
-          <span class="ai-dropdown__text">
-            <span>{{ option.label }}</span>
-            <small v-if="option.description">{{ option.description }}</small>
-          </span>
-          <AiIcon v-if="option.value === modelValue" name="check" :size="12" class="ai-dropdown__check" />
-        </button>
+        <template v-for="{ option, groupHeading } in rows" :key="option.value">
+          <div v-if="groupHeading" class="ai-dropdown__head" role="presentation">{{ groupHeading }}</div>
+          <button
+            :id="optionId(option.value)"
+            type="button"
+            role="option"
+            class="ai-dropdown__option"
+            :class="{ 'is-on': option.value === modelValue, 'is-highlighted': option.value === highlighted }"
+            :data-tone="option.tone ?? 'neutral'"
+            :aria-selected="option.value === modelValue"
+            :aria-disabled="option.disabled || undefined"
+            :disabled="option.disabled"
+            tabindex="-1"
+            @click="choose(option)"
+            @pointerenter="highlighted = option.value"
+          >
+            <span class="ai-dropdown__dot" aria-hidden="true" />
+            <span class="ai-dropdown__text">
+              <span>{{ option.label }}</span>
+              <small v-if="option.description">{{ option.description }}</small>
+            </span>
+            <AiIcon v-if="option.value === modelValue" name="check" :size="12" class="ai-dropdown__check" />
+          </button>
+        </template>
       </div>
     </Transition>
   </div>

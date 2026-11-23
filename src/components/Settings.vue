@@ -7,6 +7,7 @@ import PrivacyDiagnosticsSettings from '@/components/PrivacyDiagnosticsSettings.
 import AppearanceSettingsSection from '@/components/settings/AppearanceSettingsSection.vue'
 import AccountConnection from '@/components/settings/AccountConnection.vue'
 import ChatSettingsSection from '@/components/settings/ChatSettingsSection.vue'
+import ClaudeApiSection from '@/components/settings/ClaudeApiSection.vue'
 import { modelUsageSettings, saveModelUsageSettings } from '@/services/inference/modelUsageSettings'
 import { DEFAULT_TOOL_LIMITS, loadToolLimits, validToolRounds } from '@/services/toolLimits'
 import ExecutionSettingsSection from '@/components/settings/ExecutionSettingsSection.vue'
@@ -45,7 +46,8 @@ import {
   type VoiceMode,
 } from '@/services/voice/localVoice'
 
-type SettingsTab = 'server' | 'notifications' | 'execution' | 'computer' | 'voice' | 'chat' | 'appearance' | 'privacy'
+type SettingsTab =
+  'server' | 'notifications' | 'execution' | 'computer' | 'voice' | 'chat' | 'claude' | 'appearance' | 'privacy'
 
 const props = withDefaults(
   defineProps<{
@@ -201,6 +203,13 @@ const notificationUi = reactive({
 
 const settings = reactive<AppSettings>({ ...DEFAULTS })
 const modelUsageDraft = ref({ ...modelUsageSettings.value })
+// The Claude area writes the access flag directly; keep the open draft from saving a stale copy over it.
+watch(
+  () => modelUsageSettings.value.claude,
+  claude => {
+    modelUsageDraft.value = { ...modelUsageDraft.value, claude: { ...claude } }
+  }
+)
 const saving = ref(false)
 const registeredTools = listTools()
 
@@ -650,6 +659,7 @@ const tabs: Array<{
   { id: 'computer', title: 'Bildschirmsteuerung', desc: 'Bildschirm, Eingaben & Browser', icon: 'computer' },
   { id: 'voice', title: 'Voice', desc: 'Lokale STT · Server-TTS', icon: 'mic' },
   { id: 'chat', title: 'Chat & Agenten', desc: 'Modelle, Ressourcen & Sprache', icon: 'chat' },
+  { id: 'claude', title: 'Claude API', desc: 'Zugang & Schlüssel', icon: 'key' },
   { id: 'appearance', title: 'Appearance', desc: 'UI (später)', icon: 'palette' },
   { id: 'privacy', title: 'Datenschutz', desc: 'Diagnose & Freigabe', icon: 'shield' },
 ]
@@ -1062,7 +1072,9 @@ function iconPath(kind: string) {
                 v-model:allow-local-speech="settings.voice_tts_allow_local_content"
                 v-model:history-token-budget="settings.client_history_token_budget"
                 @reset="resetChatSettings"
+                @open-claude-api="selectTab('claude')"
               />
+              <ClaudeApiSection v-else-if="ui.tab === 'claude'" />
 
               <!-- APPEARANCE / PERSONALIZATION -->
               <AppearanceSettingsSection

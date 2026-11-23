@@ -44,6 +44,7 @@ import {
   type NativeLocalModelStatus,
 } from '@/services/inference/tauriLocalRuntime'
 import type { ApprovedProxyConfig, InferenceGateway, InferenceRequest, WireMessage } from '@/services/inference/types'
+import { applyClaudeMainPolicy } from './claudeMain'
 import { modelUsageSettings } from './modelUsageSettings'
 import { openResourceRecovery } from './resourceRecovery'
 
@@ -909,6 +910,8 @@ export class LocalInferenceCoordinator {
     this.mode = 'loading'
     this.reason = 'bootstrap_pending'
     this.bootstrap = bootstrap
+    // Server-published Claude policy; an older server has no block and keeps the Claude modes locked.
+    applyClaudeMainPolicy(bootstrap)
 
     let failureReason = 'manifest_session_unavailable'
     try {

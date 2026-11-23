@@ -137,11 +137,27 @@ export function formatChatTime(timestamp: number, seconds = false): string {
  */
 export function messageRouteLabel(meta: {
   model?: string
+  provider?: string
+  useCase?: string
   inferenceTarget?: 'local_llama_cpp' | 'laravel_proxy'
+  handoff?: { state: string }
 }): string {
-  const route =
-    meta.inferenceTarget === 'laravel_proxy' ? 'Router' : meta.inferenceTarget === 'local_llama_cpp' ? 'Lokal' : ''
-  return [route, safeTrim(meta.model)].filter(Boolean).join(' · ')
+  const model = safeTrim(meta.model)
+  // A turn the local model took over from Claude names its role, not only its route.
+  if (meta.inferenceTarget === 'local_llama_cpp' && meta.handoff?.state === 'taken')
+    return ['Lokal', 'Spezial-Agent', model].filter(Boolean).join(' · ')
+  // Claude as the main model is named as such instead of the generic external route.
+  const claude =
+    meta.inferenceTarget === 'laravel_proxy' &&
+    (meta.useCase === 'main-claude' || safeTrim(meta.provider).toLocaleLowerCase('en-US') === 'anthropic')
+  const route = claude
+    ? 'Claude'
+    : meta.inferenceTarget === 'laravel_proxy'
+      ? 'Router'
+      : meta.inferenceTarget === 'local_llama_cpp'
+        ? 'Lokal'
+        : ''
+  return [route, model].filter(Boolean).join(' · ')
 }
 
 export function goalStatusLabel(status: string): string {

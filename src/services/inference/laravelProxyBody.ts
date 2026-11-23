@@ -47,6 +47,9 @@ export function buildLaravelProxyBody(request: InferenceRequest, clientId: strin
   body.branch = request.branch
   body.commit_sha = request.commitSha
   body.input_source = request.inputSource ?? 'keyboard'
+  // Only present on Claude-led turns, so every existing external packet keeps its exact bytes and hash.
+  if (request.mainModelProfile) body.main_model_profile = request.mainModelProfile
+  if (request.effort) body.effort = request.effort
   return Object.freeze(body)
 }
 

@@ -54,6 +54,8 @@ export type InferenceResult = {
   routeDecisionId?: string
   target?: InferenceTarget
   usage?: InferenceTokenUsage
+  /** The provider declined the round (policy stop). Any streamed text is not an answer. */
+  refusal?: { category?: string; phase: 'before_output' | 'mid_stream' }
   contextUsage?: {
     inputTokens: number
     contextTokens: number
@@ -89,6 +91,10 @@ export type InferenceRequest = {
   branch?: string
   commitSha?: string
   inputSource?: 'keyboard' | 'push_to_talk' | 'hands_free'
+  /** Claude-led turns only: the server model profile chosen in the composer. Part of the hashed body. */
+  mainModelProfile?: string
+  /** Claude-led turns only: provider effort derived from the chat's thinking tier. Part of the hashed body. */
+  effort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max'
   signal?: AbortSignal
   onToken?: (content: string) => void
   /**

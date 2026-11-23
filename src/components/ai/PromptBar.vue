@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
 import AiIcon from './AiIcon.vue'
-import ThinkingSelector from './ThinkingSelector.vue'
+import ModelSelector from './ModelSelector.vue'
 import DropdownMenu, { type DropdownOption } from './DropdownMenu.vue'
 import type { ThinkingTier } from '@/services/inference/thinking'
-import type { ChatRouteMode } from '@/services/inference/modelUsageSettings'
+import { isClaudeRouteMode, type ChatRouteMode } from '@/services/inference/modelUsageSettings'
+import type { ClaudeModelOption } from '@/services/inference/claudeMain'
 import type { LuczorMode } from '@/services/openrouter.service'
 import VoiceInputSettings from './VoiceInputSettings.vue'
 import SearchList from './SearchList.vue'
@@ -15,6 +16,14 @@ const props = withDefaults(
     thinkingTier?: ThinkingTier
     routeMode?: ChatRouteMode
     externalAllowed?: boolean
+    /** A verified Claude access exists and the server allows the Claude modes. */
+    claudeAvailable?: boolean
+    claudeModel?: string
+    claudeModels?: readonly ClaudeModelOption[]
+    /** Name of the local model answering in local modes and after a hand-over. */
+    modelInfo?: string
+    /** A Claude chat that the local model continues after a declined turn. */
+    localContinuation?: boolean
     mode?: LuczorMode
     modeTitle?: string
     modeBusy?: boolean
@@ -32,6 +41,11 @@ const props = withDefaults(
     commands: () => [],
     contextLabel: '',
     externalAllowed: true,
+    claudeAvailable: false,
+    claudeModel: undefined,
+    claudeModels: () => [],
+    modelInfo: '',
+    localContinuation: false,
     routeMode: 'local',
     thinkingTier: 'balanced',
     mode: 'observe',
@@ -43,6 +57,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   'update:thinkingTier': [value: ThinkingTier]
   'update:routeMode': [value: ChatRouteMode]
+  'update:claudeModel': [value: string]
+  'resume-claude': []
   'update:mode': [value: LuczorMode]
   'update:modelValue': [value: string]
   input: []
@@ -61,7 +77,8 @@ function onMode(value: LuczorMode): void {
   if (value === 'observe' || value === 'act' || value === 'unrestricted') emit('update:mode', value)
 }
 function onRouteMode(value: ChatRouteMode): void {
-  if (value === 'local' || value === 'auto' || value === 'external') emit('update:routeMode', value)
+  if (value === 'local' || value === 'auto' || value === 'external' || isClaudeRouteMode(value))
+    emit('update:routeMode', value)
 }
 const modeOptions = computed<DropdownOption<LuczorMode>[]>(() => [
   { value: 'observe', label: 'Beobachten', description: 'Nur lesen und antworten – keine Werkzeuge.' },
@@ -82,30 +99,76 @@ const routeOptions = computed<DropdownOption<ChatRouteMode>[]>(() => [
     value: 'local',
     label: 'Lokal',
     description: 'Nur das lokale Modell; Inhalte bleiben auf dem Gerät.',
-    tone: 'accent',
+    tone: 'success',
+    group: 'Lokales Modell führt',
   },
   {
     value: 'auto',
     label: 'Lokal + extern',
     description: 'Lokal zuerst, externe Unterstützung bei Bedarf.',
     disabled: !props.externalAllowed,
+    group: 'Lokales Modell führt',
+  },
+  {
+    value: 'claude_local',
+    label: 'Claude + lokal',
+    description: 'Claude führt; das lokale Modell übernimmt bei Ablehnung.',
+    tone: 'accent',
+    disabled: !props.claudeAvailable,
+    group: 'Claude führt',
+  },
+  {
+    value: 'claude',
+    label: 'Nur Claude',
+    description: 'Claude führt ohne lokales Modell.',
+    tone: 'accent',
+    disabled: !props.claudeAvailable,
+    group: 'Claude führt',
   },
   {
     value: 'external',
     label: 'Nur extern',
     description: 'Externe Modelle bearbeiten die Anfrage.',
     disabled: !props.externalAllowed,
+    group: 'Externe Modelle führen',
   },
 ])
+/** A stored mode whose access is switched off must never look or act as if it were active. */
+const effectiveRouteMode = computed<ChatRouteMode>(() => {
+  if (isClaudeRouteMode(props.routeMode)) return props.claudeAvailable ? props.routeMode : 'local'
+  if (props.routeMode === 'auto' || props.routeMode === 'external')
+    return props.externalAllowed ? props.routeMode : 'local'
+  return 'local'
+})
 /** The mode permits model routes; delegation is chosen for the actual request. */
 const routeModeHint = computed(() => {
+  if (isClaudeRouteMode(props.routeMode) && !props.claudeAvailable)
+    return 'Claude-Zugang zuerst unter Einstellungen → Claude API einrichten.'
+  switch (effectiveRouteMode.value) {
+    case 'claude_local':
+      return 'Claude führt den Chat. Lehnt Claude eine Anfrage ab, übernimmt das lokale Modell auf diesem Gerät.'
+    case 'claude':
+      return 'Claude führt den Chat ohne lokales Modell. Bei einer Ablehnung entscheidest du, wie es weitergeht.'
+    case 'external':
+      return 'Externe Modelle bearbeiten die Anfrage und holen bei Bedarf Unterstützung hinzu.'
+    case 'auto':
+      return 'Das Chatmodell antwortet direkt oder zieht bei Bedarf lokale und externe Unterstützung hinzu.'
+    default:
+      break
+  }
   if (!props.externalAllowed) return 'Externe Modelle zuerst unter Einstellungen → Chat & Agenten zulassen.'
-  if (props.routeMode === 'external')
-    return 'Externe Modelle bearbeiten die Anfrage und holen bei Bedarf Unterstützung hinzu.'
-  if (props.routeMode === 'auto')
-    return 'Das Chatmodell antwortet direkt oder zieht bei Bedarf lokale und externe Unterstützung hinzu.'
   return 'Das lokale Modell antwortet direkt oder übernimmt mehrere Arbeitsschritte. Inhalte bleiben lokal.'
 })
+/** Claude leads only while the chat has not been handed over to the local model. */
+const claudeLeads = computed(() => isClaudeRouteMode(effectiveRouteMode.value) && !props.localContinuation)
+const modelProvider = computed<'claude' | 'local' | 'external'>(() => {
+  if (props.localContinuation) return 'local'
+  if (claudeLeads.value) return 'claude'
+  return effectiveRouteMode.value === 'external' ? 'external' : 'local'
+})
+const modelLabel = computed(() =>
+  modelProvider.value === 'external' ? 'Extern · Serverauswahl' : props.modelInfo.trim() || 'Lokales Modell'
+)
 const field = ref<HTMLTextAreaElement | null>(null)
 const menu = ref(false)
 const commandsDismissed = ref(false)
@@ -169,6 +232,12 @@ defineExpose({ focus: () => field.value?.focus() })
         Schließen
       </button>
     </div>
+    <div v-if="localContinuation" class="ai-prompt__continuation" role="status">
+      <span>Dieser Chat wird lokal fortgeführt, damit Folgefragen den vollständigen Verlauf sehen.</span>
+      <button type="button" class="ai-prompt__continuation-action" :disabled="busy" @click="emit('resume-claude')">
+        Wieder Claude verwenden
+      </button>
+    </div>
     <div class="ai-prompt" :class="{ 'is-busy': busy }">
       <div class="ai-prompt__heading">
         <button
@@ -206,15 +275,15 @@ defineExpose({ focus: () => field.value?.focus() })
             @stop="emit('voice-stop')"
           />
           <DropdownMenu
-            :model-value="externalAllowed ? routeMode : 'local'"
+            :model-value="effectiveRouteMode"
             :options="routeOptions"
             label="Erlaubte Modelle für diesen Chat"
             heading="Modelle"
             align="end"
             :title="routeModeHint"
             :disabled="busy"
-            :trigger-class="`ai-route-mode${routeMode !== 'local' && externalAllowed ? ' is-active' : ''}`"
-            :menu-width="260"
+            :trigger-class="`ai-route-mode${effectiveRouteMode !== 'local' ? ' is-active' : ''}`"
+            :menu-width="300"
             @update:model-value="onRouteMode"
           >
             <template #trigger>
@@ -244,10 +313,17 @@ defineExpose({ focus: () => field.value?.focus() })
           >
             <AiIcon name="plus" :size="19" />
           </button>
-          <ThinkingSelector
-            :model-value="thinkingTier"
+          <ModelSelector
+            :thinking-tier="thinkingTier"
             :next-prompt="busy"
-            @update:model-value="emit('update:thinkingTier', $event)"
+            :claude-mode="claudeLeads"
+            :models="claudeModels"
+            :model="claudeModel"
+            :info="modelLabel"
+            :provider="modelProvider"
+            :specialist="localContinuation"
+            @update:thinking-tier="emit('update:thinkingTier', $event)"
+            @update:model="emit('update:claudeModel', $event)"
           />
         </div>
         <div>
@@ -294,3 +370,64 @@ defineExpose({ focus: () => field.value?.focus() })
     </div>
   </div>
 </template>
+<style scoped>
+/* Slim notice above the composer while a Claude chat is continued by the local model. */
+.ai-prompt__continuation {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  padding: 8px 8px 8px 14px;
+  border: 1px solid color-mix(in srgb, var(--success, #6cb98a) 32%, transparent);
+  border-radius: 12px;
+  background: var(--success-wash, rgba(108, 185, 138, 0.12));
+  color: var(--text-secondary, var(--ai-text-muted, #a3a5af));
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.ai-prompt__continuation > span {
+  min-width: 0;
+}
+/* Lets the model label shrink with an ellipsis instead of pushing the send controls out. */
+.ai-prompt__toolbar > div:first-child {
+  min-width: 0;
+}
+.ai-prompt__continuation-action {
+  flex: none;
+  padding: 7px 13px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-primary, var(--ai-text, #e9eaf0));
+  font: 600 12px var(--ai-font, inherit);
+  cursor: pointer;
+  transition:
+    background 180ms var(--ease, ease),
+    border-color 180ms var(--ease, ease);
+}
+.ai-prompt__continuation-action:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.16);
+}
+.ai-prompt__continuation-action:focus-visible {
+  outline: 2px solid var(--ai-accent, #ac95ea);
+  outline-offset: 2px;
+}
+.ai-prompt__continuation-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+@media (max-width: 560px) {
+  .ai-prompt__continuation {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 9px 10px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-prompt__continuation-action {
+    transition: none;
+  }
+}
+</style>

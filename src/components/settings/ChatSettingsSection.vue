@@ -22,6 +22,7 @@ const emit = defineEmits<{
   (event: 'update:allowLocalSpeech', value: boolean): void
   (event: 'update:historyTokenBudget', value: number): void
   (event: 'reset'): void
+  (event: 'openClaudeApi'): void
 }>()
 
 const autoSpeechModeModel = computed({
@@ -36,7 +37,11 @@ const historyTokenBudgetModel = computed({
 
 <template>
   <div class="lz-section">
-    <ModelUsageSettings v-model="modelUsage" :managed="modelUsage !== undefined" />
+    <ModelUsageSettings
+      v-model="modelUsage"
+      :managed="modelUsage !== undefined"
+      @open-claude-api="emit('openClaudeApi')"
+    />
     <div class="lz-section__head">
       <h3>Chat</h3>
       <p>Zwischenkommentare und Antworten automatisch nacheinander vorlesen.</p>

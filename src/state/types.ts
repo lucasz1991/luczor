@@ -55,6 +55,20 @@ export type MessageMeta = {
   retentionOmitted?: boolean
   /** False until a generated answer has a final server-egress classification. */
   serverSpeechAllowed?: boolean
+  /** Claude declined this turn; the local model answered it or the user is asked. */
+  handoff?: MessageHandoff
+}
+
+export type MessageHandoff = {
+  from: 'claude'
+  reason: 'refusal' | 'manual'
+  /** Provider policy category for diagnostics only; never shown as chat text. */
+  category?: string
+  at: number
+  /** `offered`: waiting for the user; `taken`: answered locally; `declined`: left unanswered. */
+  state: 'offered' | 'taken' | 'declined'
+  /** The user request an offered hand-over would repeat locally. */
+  userMessageId?: Id
 }
 
 export type ChatCommentary = {
@@ -168,6 +182,10 @@ export type ConversationSettings = {
   mode?: import('@/services/inference/types').LuczorMode
   routeMode?: import('@/services/inference/modelUsageSettings').ChatRouteMode
   thinkingTier?: import('@/services/inference/thinking').ThinkingTier
+  /** Claude model chosen in this chat's composer (server model-profile id). */
+  claudeModel?: string
+  /** After a hand-over the chat stays on the local model until the user switches back. */
+  localContinuation?: boolean
 }
 
 export type Conversation = {

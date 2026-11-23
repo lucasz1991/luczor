@@ -26,6 +26,7 @@ it('persists model and route choices together before publishing them', async () 
     externalEnabled: true,
     chatRouteMode: 'auto' as const,
     externalToolsEnabled: true,
+    claude: { enabled: false, lastModel: null },
   }
   await saveModelUsageSettings(choice)
   expect(modelUsageSettings.value).toEqual(choice)

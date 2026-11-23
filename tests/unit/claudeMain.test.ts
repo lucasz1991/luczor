@@ -1,0 +1,211 @@
+import { describe, expect, it } from 'vitest'
+import {
+  claudeEffortForTier,
+  parseClaudeMainPolicy,
+  resolveClaudeModel,
+  supportedThinkingTier,
+} from '@/services/inference/claudeMain'
+import { claudeDisabledToolNames, claudeMayUseTool, toolsForClaudeMain } from '@/services/inference/claudeToolPolicy'
+import { buildLaravelProxyBody, hashLaravelProxyBody } from '@/services/inference/laravelProxyBody'
+import { parseModelUsage } from '@/services/inference/modelUsageSettings'
+import { messageRouteLabel } from '@/services/chatPresentation'
+import { listTools } from '@/services/tools/registry'
+import type { ToolDef } from '@/services/tools/types'
+
+const block = {
+  claude_modes_allowed: true,
+  key_sources: ['user', 'organization', 'bogus'],
+  default_model: 'claude-sonnet-5-5',
+  models: [
+    { id: 'claude-opus-5-5', label: 'Claude Opus 5.5', description: 'Stark', efforts: ['fast', 'balanced', 'ultra'] },
+    { id: 'claude-sonnet-5-5', label: 'Claude Sonnet 5.5', description: 'Schnell', efforts: ['nope'] },
+    { id: 'claude-opus-5-5', label: 'Duplikat' },
+    { id: 'not valid!', label: 'x' },
+    null,
+  ],
+}
+
+describe('Claude main-model policy', () => {
+  it('stays locked without a server block or without models', () => {
+    expect(parseClaudeMainPolicy(undefined).allowed).toBe(false)
+    expect(parseClaudeMainPolicy('yes').allowed).toBe(false)
+    expect(parseClaudeMainPolicy({ claude_modes_allowed: true, models: [] }).allowed).toBe(false)
+    expect(parseClaudeMainPolicy({ claude_modes_allowed: 'true', models: block.models }).allowed).toBe(false)
+  })
+
+  it('drops malformed and duplicate models and unknown key sources', () => {
+    const policy = parseClaudeMainPolicy(block)
+    expect(policy.allowed).toBe(true)
+    expect(policy.models.map(model => model.id)).toEqual(['claude-opus-5-5', 'claude-sonnet-5-5'])
+    expect(policy.keySources).toEqual(['user', 'organization'])
+    expect(policy.defaultModel).toBe('claude-sonnet-5-5')
+    // An entry without a usable tier list accepts every tier; the server still enforces its own limits.
+    expect(policy.models[1]!.efforts).toEqual(['fast', 'balanced', 'thorough', 'max', 'ultra'])
+  })
+
+  it('falls back to the first model when the default is not offered', () => {
+    expect(parseClaudeMainPolicy({ ...block, default_model: 'claude-fable-5-2' }).defaultModel).toBe('claude-opus-5-5')
+  })
+
+  it('resolves chat choice, then last choice, then the default, never an unknown id', () => {
+    const policy = parseClaudeMainPolicy(block)
+    expect(resolveClaudeModel('claude-opus-5-5', 'claude-sonnet-5-5', policy)?.id).toBe('claude-opus-5-5')
+    expect(resolveClaudeModel(undefined, 'claude-opus-5-5', policy)?.id).toBe('claude-opus-5-5')
+    expect(resolveClaudeModel('removed-model', 'also-removed', policy)?.id).toBe('claude-sonnet-5-5')
+    expect(resolveClaudeModel('x', 'y', parseClaudeMainPolicy(undefined))).toBeNull()
+  })
+
+  it('maps thinking tiers to provider effort and lowers an unsupported tier', () => {
+    expect(['fast', 'balanced', 'thorough', 'max', 'ultra'].map(tier => claudeEffortForTier(tier as never))).toEqual([
+      'low',
+      'medium',
+      'high',
+      'xhigh',
+      'max',
+    ])
+    const opus = parseClaudeMainPolicy(block).models[0]!
+    expect(supportedThinkingTier(opus, 'ultra')).toBe('ultra')
+    expect(supportedThinkingTier(opus, 'max')).toBe('balanced')
+    expect(supportedThinkingTier(opus, 'thorough')).toBe('balanced')
+  })
+})
+
+describe('Claude route modes in the device settings', () => {
+  it('keeps old stored settings valid and adds the Claude block', () => {
+    expect(parseModelUsage({ localModelId: 'orca', externalEnabled: true, chatRouteMode: 'auto' })).toEqual({
+      localModelId: 'orca',
+      externalEnabled: true,
+      externalToolsEnabled: false,
+      chatRouteMode: 'auto',
+      claude: { enabled: false, lastModel: null },
+    })
+  })
+
+  it('never keeps a Claude mode without a verified access', () => {
+    expect(parseModelUsage({ chatRouteMode: 'claude_local' }).chatRouteMode).toBe('local')
+    expect(parseModelUsage({ chatRouteMode: 'claude', externalEnabled: true }).chatRouteMode).toBe('local')
+    expect(parseModelUsage({ chatRouteMode: 'claude', claude: { enabled: true } }).chatRouteMode).toBe('claude')
+    expect(
+      parseModelUsage({ chatRouteMode: 'claude_local', claude: { enabled: true, lastModel: 'bad id!' } })
+    ).toMatchObject({ chatRouteMode: 'claude_local', claude: { enabled: true, lastModel: null } })
+  })
+
+  it('keeps the existing rule for external modes', () => {
+    expect(parseModelUsage({ chatRouteMode: 'external', claude: { enabled: true } }).chatRouteMode).toBe('local')
+    expect(parseModelUsage({ chatRouteMode: 'external', externalEnabled: true }).chatRouteMode).toBe('external')
+  })
+})
+
+describe('Claude tool policy', () => {
+  const tool = (patch: Partial<ToolDef>): ToolDef => ({
+    name: 'sample',
+    category: 'app',
+    description: '',
+    parameters: {},
+    mutating: false,
+    requiresApproval: false,
+    execute: async () => null,
+    ...patch,
+  })
+
+  it('offers only tools whose own classification allows provider egress', () => {
+    expect(claudeMayUseTool(tool({}))).toBe(true)
+    expect(claudeMayUseTool(tool({ dataHandling: 'syncable', scope: 'project', effects: ['read', 'write'] }))).toBe(
+      true
+    )
+    expect(claudeMayUseTool(tool({ dataHandling: 'ephemeral' }))).toBe(false)
+    expect(claudeMayUseTool(tool({ retentionPolicy: 'local_only' as never }))).toBe(false)
+    expect(claudeMayUseTool(tool({ risk: 'critical' }))).toBe(false)
+    expect(claudeMayUseTool(tool({ scope: 'desktop' }))).toBe(false)
+    expect(claudeMayUseTool(tool({ scope: 'network' }))).toBe(false)
+    expect(claudeMayUseTool(tool({ effects: ['read', 'execute'] }))).toBe(false)
+    expect(claudeMayUseTool(tool({ effects: ['input'] }))).toBe(false)
+    expect(claudeMayUseTool(tool({ sessionKind: 'browser' }))).toBe(false)
+    expect(claudeMayUseTool(tool({ workspaceOnly: true }))).toBe(false)
+  })
+
+  it('pins the exact registry subset Claude may drive', () => {
+    // A change here is a deliberate egress decision. Do not update this list to make a test pass.
+    expect(toolsForClaudeMain(listTools()).map(item => item.name)).toEqual([
+      'project_get_state',
+      'project_set_summary',
+      'project_upsert_goal',
+      'project_create',
+      'chat_create',
+      'chat_list',
+      'task_create',
+      'task_list',
+      'task_update',
+      'task_complete',
+      'plan_update',
+      'plan_get',
+      'workflow_catalog',
+      'workflow_list',
+      'workflow_get',
+      'workflow_validate',
+      'workflow_create',
+      'workflow_update',
+      'workflow_run_get',
+      'workflow_trigger_list',
+    ])
+  })
+
+  it('keeps every device-local tool family away from Claude', () => {
+    const disabled = new Set(claudeDisabledToolNames(listTools()))
+    for (const name of [
+      'fs_read',
+      'fs_write',
+      'repository_read',
+      'memory_recall',
+      'os_screen_capture',
+      'os_read_clipboard',
+      'os_type_text',
+      'browser_dom_read',
+      'project_terminal_run',
+      'image_analyze',
+      'agent_dispatch',
+      'device_dispatch',
+      'workspace_chat_read',
+      'project_cloud_read_file',
+    ])
+      expect(disabled.has(name)).toBe(true)
+    expect(disabled.size + toolsForClaudeMain(listTools()).length).toBe(listTools().length)
+  })
+})
+
+describe('proxy body for Claude-led turns', () => {
+  const request = { messages: [{ role: 'user' as const, content: 'Hallo' }], projectId: 'p1' }
+
+  it('adds model profile and effort only when set, so existing packets keep their hash', async () => {
+    const plain = buildLaravelProxyBody(request, 'client-1', true)
+    expect(plain).not.toHaveProperty('main_model_profile')
+    expect(plain).not.toHaveProperty('effort')
+    const claude = buildLaravelProxyBody(
+      { ...request, taskType: 'chat.main', mainModelProfile: 'claude-opus-5-5', effort: 'medium' },
+      'client-1',
+      true
+    )
+    expect(claude).toMatchObject({ task_type: 'chat.main', main_model_profile: 'claude-opus-5-5', effort: 'medium' })
+    expect(await hashLaravelProxyBody(request, 'client-1')).not.toBe(
+      await hashLaravelProxyBody({ ...request, mainModelProfile: 'claude-opus-5-5' }, 'client-1')
+    )
+  })
+})
+
+describe('message route label', () => {
+  it('names Claude, the local specialist and keeps the existing labels', () => {
+    expect(messageRouteLabel({ inferenceTarget: 'local_llama_cpp', model: 'Orca' })).toBe('Lokal · Orca')
+    expect(messageRouteLabel({ inferenceTarget: 'laravel_proxy', model: 'x/y' })).toBe('Router · x/y')
+    expect(messageRouteLabel({})).toBe('')
+    expect(
+      messageRouteLabel({ inferenceTarget: 'laravel_proxy', model: 'claude-opus-5-5', useCase: 'main-claude' })
+    ).toBe('Claude · claude-opus-5-5')
+    expect(messageRouteLabel({ inferenceTarget: 'laravel_proxy', model: 'm', provider: 'Anthropic' })).toBe(
+      'Claude · m'
+    )
+    expect(messageRouteLabel({ inferenceTarget: 'local_llama_cpp', model: 'Orca', handoff: { state: 'taken' } })).toBe(
+      'Lokal · Spezial-Agent · Orca'
+    )
+    expect(messageRouteLabel({ inferenceTarget: 'laravel_proxy', handoff: { state: 'offered' } })).toBe('Router')
+  })
+})

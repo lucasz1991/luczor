@@ -326,7 +326,7 @@ export const mutations = {
     if (!chat) return false
     const next: AppTypes.ConversationSettings = { ...(chat.settings ?? {}) }
     let changed = false
-    for (const key of ['mode', 'routeMode', 'thinkingTier'] as const) {
+    for (const key of ['mode', 'routeMode', 'thinkingTier', 'claudeModel', 'localContinuation'] as const) {
       if (!(key in patch)) continue
       // eslint-disable-next-line security/detect-object-injection
       const value = patch[key]

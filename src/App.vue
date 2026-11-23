@@ -8,7 +8,21 @@ import { fitRequestContext } from '@/services/inference/contextBudget'
 import { loadPendingTaskCreates, replacePendingTaskCreates } from '@/services/agents/taskCreateRecoveryLedger'
 import Settings from './components/Settings.vue'
 import DeviceClusterPanel from './components/DeviceClusterPanel.vue'
-import { modelUsageSettings, type ChatRouteMode } from '@/services/inference/modelUsageSettings'
+import {
+  isClaudeRouteMode,
+  modelUsageSettings,
+  saveModelUsageSettings,
+  type ChatRouteMode,
+  type ClaudeRouteMode,
+} from '@/services/inference/modelUsageSettings'
+import {
+  claudeEffortForTier,
+  claudeMainPolicy,
+  resolveClaudeModel,
+  supportedThinkingTier,
+} from '@/services/inference/claudeMain'
+import { runClaudeLedTurn, type ClaudeTurnHandoff } from '@/services/agents/claudeTurn'
+import HandoffNotice from './components/ai/HandoffNotice.vue'
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import MemoryExplorerPage from '@/features/memory/MemoryExplorerPage.vue'
 import { hasLiveWork, liveWork, setModelPhase } from '@/services/memory/modelActivity'
@@ -150,6 +164,7 @@ import {
   shouldRequireToolCall,
   type AgentRunEvaluation,
   type RunAgentOptions,
+  type RunAgentResult,
 } from '@/services/agent'
 import { presentEnvelopeStream } from '@/services/envelope'
 import { resolveApproval, hasPendingApproval } from '@/services/approvals'
@@ -171,7 +186,7 @@ import { luczorMemory, getMemoryPrefs, type MemoryRecord } from '@/services/memo
 import { buildMemoryContextQuery, captureAutomaticChatMemory } from '@/services/memory/chatContext'
 import { MEMORY_PRIORITIES, memoryPriority } from '@/services/memory/memoryPriority'
 import { buildLocalPromptContextDetails, inferTaskType, type PromptContextDetails } from '@/services/contextController'
-import { LuczorApi } from '@/services/api/luczorApi'
+import { LuczorApi, getApiConfigSnapshot } from '@/services/api/luczorApi'
 import {
   cancelProjectSync,
   commitProjectSync,
@@ -312,15 +327,137 @@ function conversationSettings(conversationId: string): ConversationSettings {
 function writeConversationSettings(conversationId: string, patch: ConversationSettings) {
   if (mutations.updateConversationSettings(conversationId, patch)) scheduleSave(state)
 }
-/** Effective route for a chat: its own choice while external models are allowed, else local. */
+/** Claude modes need both the server release and a verified access for this account. */
+const claudeModesUsable = computed(() => claudeMainPolicy.value.allowed && modelUsageSettings.value.claude.enabled)
+/** The mode a chat shows: its own choice while that kind of model is allowed, else local. */
+function selectedRouteModeFor(conversationId: string): ChatRouteMode {
+  const requested = conversationSettings(conversationId).routeMode ?? modelUsageSettings.value.chatRouteMode
+  if (isClaudeRouteMode(requested)) return claudeModesUsable.value ? requested : 'local'
+  return modelUsageSettings.value.externalEnabled ? requested : 'local'
+}
+/** Effective route of the next turn. After a hand-over a Claude chat stays local until switched back. */
 function routeModeFor(conversationId: string): ChatRouteMode {
-  if (!modelUsageSettings.value.externalEnabled) return 'local'
-  return conversationSettings(conversationId).routeMode ?? modelUsageSettings.value.chatRouteMode
+  const selected = selectedRouteModeFor(conversationId)
+  return isClaudeRouteMode(selected) && conversationSettings(conversationId).localContinuation ? 'local' : selected
 }
 const chatRouteMode = computed<ChatRouteMode>({
-  get: () => routeModeFor(activeConversationId.value),
-  set: value => writeConversationSettings(activeConversationId.value, { routeMode: value }),
+  get: () => selectedRouteModeFor(activeConversationId.value),
+  // Choosing a mode is a deliberate decision and ends a local continuation.
+  set: value =>
+    writeConversationSettings(activeConversationId.value, { routeMode: value, localContinuation: undefined }),
 })
+const localContinuation = computed(
+  () =>
+    isClaudeRouteMode(selectedRouteModeFor(activeConversationId.value)) &&
+    conversationSettings(activeConversationId.value).localContinuation === true
+)
+function resumeClaude() {
+  writeConversationSettings(activeConversationId.value, { localContinuation: undefined })
+}
+/** Claude model of a chat: its own choice, then the last composer choice, then the server default. */
+function claudeModelFor(conversationId: string) {
+  return resolveClaudeModel(conversationSettings(conversationId).claudeModel, modelUsageSettings.value.claude.lastModel)
+}
+const claudeModel = computed<string | undefined>({
+  get: () => claudeModelFor(activeConversationId.value)?.id,
+  set: value => {
+    if (!value || !claudeMainPolicy.value.models.some(model => model.id === value)) return
+    writeConversationSettings(activeConversationId.value, { claudeModel: value })
+    const usage = modelUsageSettings.value
+    // New chats start with the combination chosen last, like the model picker of the Claude apps.
+    if (usage.claude.lastModel !== value)
+      void saveModelUsageSettings({ ...usage, claude: { ...usage.claude, lastModel: value } }).catch(() => undefined)
+  },
+})
+function localChatModelAvailable(): boolean {
+  return (
+    localInferenceCoordinator.status().mode === 'active' &&
+    localInferenceCoordinator
+      .modelAdmissions(undefined, 'chat')
+      .some(
+        model =>
+          model.admissible &&
+          (!modelUsageSettings.value.localModelId || model.modelReleaseId === modelUsageSettings.value.localModelId)
+      )
+  )
+}
+/** Label of the model that leads a non-Claude chat, shown in the composer. */
+const composerModelInfo = computed(() => {
+  if (routeModeFor(activeConversationId.value) === 'external') return 'Extern · Serverauswahl'
+  const status = localInferenceCoordinator.status()
+  const chosen = modelUsageSettings.value.localModelId
+  const model =
+    status.manifest?.models.find(item => item.id === chosen) ??
+    status.manifest?.models.find(item => item.enabled) ??
+    undefined
+  return model?.displayName ?? 'Lokales Modell'
+})
+/** A repeated request that the local specialist answers instead of Claude; consumed by the next send. */
+const pendingHandoffs = new Map<string, { reason: 'refusal' | 'manual'; category?: string }>()
+/** The user request an assistant message answered: the closest visible user message before it. */
+function requestBefore(message: Message): Message | undefined {
+  const conversationId = message.conversationId ?? message.meta.conversationId
+  if (!conversationId) return undefined
+  const transcript = mutations.getConversationMessages(message.projectId, conversationId)
+  const index = transcript.findIndex(item => item.id === message.id)
+  for (let position = index - 1; position >= 0; position--) {
+    const candidate = transcript.at(position)
+    if (candidate?.role === 'user' && candidate.visibility === 'visible') return candidate
+  }
+  return undefined
+}
+/** Repeat a request on the local specialist. Nothing of that turn is sent to a provider. */
+async function sendToLocalSpecialist(
+  request: Message,
+  handoff: { reason: 'refusal' | 'manual'; category?: string }
+): Promise<void> {
+  const conversationId = request.conversationId ?? request.meta.conversationId
+  if (!conversationId || chatRuns.hasLive(conversationId) || admittingConversations.value.has(conversationId)) return
+  pendingHandoffs.set(conversationId, handoff)
+  writeConversationSettings(conversationId, { localContinuation: true })
+  try {
+    await send(false, undefined, { text: request.content, projectId: request.projectId, conversationId })
+  } finally {
+    pendingHandoffs.delete(conversationId)
+  }
+}
+/** "Lokal bearbeiten" on an offered hand-over: the unanswered pair is replaced by the local turn. */
+async function acceptHandoff(notice: Message): Promise<void> {
+  const handoff = notice.meta.handoff
+  const request =
+    mutations.getProjectMessages(notice.projectId).find(item => item.id === handoff?.userMessageId) ??
+    requestBefore(notice)
+  if (!handoff || handoff.state !== 'offered' || !request) return
+  mutations.patchMessage(notice.projectId, notice.id, { visibility: 'hidden' })
+  mutations.patchMessage(request.projectId, request.id, { visibility: 'hidden' })
+  await sendToLocalSpecialist(request, { reason: 'refusal', category: handoff.category })
+}
+function declineHandoff(notice: Message): void {
+  if (notice.meta.handoff?.state !== 'offered') return
+  mutations.patchMessage(notice.projectId, notice.id, {
+    meta: { handoff: { ...notice.meta.handoff, state: 'declined' } },
+  })
+  scheduleSave(state)
+}
+/** Switch this chat to "Claude + lokal" and let the local specialist answer the open request. */
+async function switchModeAndAcceptHandoff(notice: Message): Promise<void> {
+  const conversationId = notice.conversationId ?? notice.meta.conversationId
+  if (!conversationId) return
+  writeConversationSettings(conversationId, { routeMode: 'claude_local' })
+  await acceptHandoff(notice)
+}
+/** "Lokal neu beantworten" under a Claude answer: for a reply that declines without the provider signal. */
+async function answerLocally(answer: Message): Promise<void> {
+  const request = requestBefore(answer)
+  if (request) await sendToLocalSpecialist(request, { reason: 'manual' })
+}
+/** The newest Claude answer of the open chat may be repeated locally; older turns stay untouched. */
+function canAnswerLocally(message: Message): boolean {
+  if (message.role !== 'assistant' || message.meta.inferenceTarget !== 'laravel_proxy' || message.meta.handoff)
+    return false
+  if (message.meta.isLoading || !isClaudeRouteMode(selectedRouteModeFor(activeConversationId.value))) return false
+  return messages.value.at(-1)?.id === message.id
+}
 type RunThinkingBudget = {
   projectId: string
   messageId: string
@@ -2136,6 +2273,10 @@ type CapturedChatTurn = {
   execution: ExecutionTicket
   thinking: Pick<RunAgentOptions, 'thinkingTier' | 'thinkingConfig'>
   routeMode: ChatRouteMode
+  /** Captured at admission for a Claude-led turn; later composer changes apply to the next turn. */
+  claude?: { mode: ClaudeRouteMode; modelProfile: string | null }
+  /** This turn repeats a request Claude did not answer; it runs on the local specialist. */
+  handoff?: { reason: 'refusal' | 'manual'; category?: string }
   expectedLocalModelId: string | null
   inputSource: ComposerInputSource
 }
@@ -2480,6 +2621,11 @@ async function send(
     turnMode
   )
   const prj = projects.value.find(project => project.id === pid)
+  const handoff = !resume && !goalInput ? pendingHandoffs.get(conversationId) : undefined
+  pendingHandoffs.delete(conversationId)
+  // Goal rounds, continuations and repeated hand-over requests always run on the local model.
+  const admittedRouteMode: ChatRouteMode = resume || handoff ? 'local' : routeModeFor(conversationId)
+  const claudeRouteMode = !goalInput && isClaudeRouteMode(admittedRouteMode) ? admittedRouteMode : undefined
   const captured: CapturedChatTurn = {
     readOnlyReview:
       recoveryReviewDraft.value?.conversationId === conversationId && recoveryReviewDraft.value?.text === text,
@@ -2496,7 +2642,11 @@ async function send(
     thinking: resume?.checkpoint.thinkingTier
       ? { thinkingTier: resume.checkpoint.thinkingTier, thinkingConfig: resume.checkpoint.thinkingConfig }
       : captureThinking(thinkingTierFor(conversationId)),
-    routeMode: !resume ? routeModeFor(conversationId) : 'local',
+    routeMode: claudeRouteMode ?? (isClaudeRouteMode(admittedRouteMode) ? 'local' : admittedRouteMode),
+    claude: claudeRouteMode
+      ? { mode: claudeRouteMode, modelProfile: claudeModelFor(conversationId)?.id ?? null }
+      : undefined,
+    handoff,
     expectedLocalModelId: modelUsageSettings.value.localModelId,
     inputSource: miniInput || !submission.consumesDraft ? 'keyboard' : consumeInputSource(),
   }
@@ -2635,7 +2785,11 @@ async function executeChatTurn(
     signal: AbortSignal.any([captured.execution.signal, handle.signal, ...(goalInput ? [goalInput.signal] : [])]),
   }
   const turnThinking = captured.thinking
-  const turnRouteMode = captured.routeMode
+  // A Claude-led turn is prepared exactly like a local-only turn, so a hand-over to the
+  // local specialist needs nothing rebuilt; the Claude run itself gets its own options.
+  const turnRouteMode: 'local' | 'auto' | 'external' = isClaudeRouteMode(captured.routeMode)
+    ? 'local'
+    : captured.routeMode
   const externalFallbackAllowed = turnRouteMode !== 'local'
   const turnTeamPreset = teamPresetForRouteMode(turnRouteMode)
   const taskType = inferTaskType(text)
@@ -2697,7 +2851,11 @@ async function executeChatTurn(
     await nextTick()
     executionGate.assert(turnExecution)
     startAssistantLoading(pid, assistant.id)
-    if (captured.routeMode !== 'external' && modelUsageSettings.value.localModelId !== captured.expectedLocalModelId) {
+    if (
+      captured.routeMode !== 'external' &&
+      !captured.claude &&
+      modelUsageSettings.value.localModelId !== captured.expectedLocalModelId
+    ) {
       await handle.interrupt(
         'Die Modellauswahl hat sich während der Warteschlange geändert. Auftrag ausdrücklich mit der gewünschten Auswahl fortsetzen.'
       )
@@ -2837,6 +2995,55 @@ async function executeChatTurn(
     executionGate.assert(turnExecution)
     turnExecution.signal.throwIfAborted()
     if (isVisible()) void playSfx('loading')
+    let turnHandoff: ClaudeTurnHandoff | undefined
+    const markTurnLocalOnly = () => {
+      // The request Claude did not answer stays on this device and out of every later provider packet.
+      if (captured.userMessageId)
+        mutations.patchMessage(pid, captured.userMessageId, { meta: { dataHandling: 'ephemeral' } })
+    }
+    /** Local turns run unchanged. A Claude-led turn gets its own gateway and, if declined, a hand-over. */
+    const runTurn = async (options: RunAgentOptions): Promise<RunAgentResult> => {
+      if (!captured.claude) return runAgent(options)
+      const model = claudeMainPolicy.value.models.find(item => item.id === captured.claude!.modelProfile)
+      if (!claudeModesUsable.value || !model)
+        throw new Error(
+          'Claude ist für diesen Auftrag nicht mehr verfügbar. Bitte den Zugang unter Einstellungen → Claude API prüfen oder den Modus im Eingabefeld wechseln.'
+        )
+      const outcome = await runClaudeLedTurn({
+        local: options,
+        externalBaseMessages,
+        plan: {
+          mode: captured.claude.mode,
+          modelProfile: model.id,
+          effort: claudeEffortForTier(supportedThinkingTier(model, turnThinking.thinkingTier ?? 'balanced')),
+        },
+        apiConfig: await getApiConfigSnapshot(),
+        localAvailable: localChatModelAvailable,
+        onLocalTakeover: () => {
+          markTurnLocalOnly()
+          progressiveSpeech.resetCurrent()
+          mutations.patchMessage(pid, assistant.id, {
+            content: '',
+            raw: '',
+            parsed: null,
+            meta: { question: '', summary: '', bullets: [], commentary: [] },
+          })
+          streamStarted = false
+          startAssistantLoading(pid, assistant.id)
+          writeConversationSettings(conversationId, { localContinuation: true })
+        },
+      })
+      turnHandoff = outcome.handoff
+      if (turnHandoff) {
+        markTurnLocalOnly()
+        void recordDebugEvent('info', 'claude_turn_declined', {
+          mode: captured.claude.mode,
+          outcome: turnHandoff.state,
+          category: turnHandoff.category ?? 'unspecified',
+        })
+      }
+      return outcome.result
+    }
     const {
       finalText,
       requestId,
@@ -2857,7 +3064,7 @@ async function executeChatTurn(
       goalReport,
       goalReviewVerified,
       progressEvidenceFingerprint,
-    } = await runAgent({
+    } = await runTurn({
       ...turnThinking,
       ephemeralContextUsed: turnRouteMode !== 'external' && localHistory.ephemeralDataUsed,
       contextDataPolicy:
@@ -3118,6 +3325,35 @@ async function executeChatTurn(
         },
       })
     }
+    // A turn Claude declined, or a request repeated for the local specialist, never returns to a provider.
+    const handoffMeta = turnHandoff
+      ? { reason: 'refusal' as const, category: turnHandoff.category, state: turnHandoff.state }
+      : captured.handoff
+        ? { ...captured.handoff, state: 'taken' as const }
+        : undefined
+    if (handoffMeta) {
+      if (captured.handoff) {
+        markTurnLocalOnly()
+        writeConversationSettings(conversationId, { localContinuation: true })
+      }
+      mutations.patchMessage(pid, assistant.id, {
+        ...(turnHandoff?.localFailure
+          ? { content: `Das lokale Modell konnte den Auftrag nicht übernehmen: ${turnHandoff.localFailure}` }
+          : {}),
+        meta: {
+          handoff: {
+            from: 'claude',
+            reason: handoffMeta.reason,
+            ...(handoffMeta.category ? { category: handoffMeta.category } : {}),
+            at: Date.now(),
+            state: handoffMeta.state,
+            userMessageId: captured.userMessageId,
+          },
+          serverSpeechAllowed: false,
+          dataHandling: 'ephemeral',
+        },
+      })
+    }
     if (requestId) {
       const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
       mutations.patchMessage(pid, assistant.id, {
@@ -3144,7 +3380,7 @@ async function executeChatTurn(
     if (isVisible()) setStatus('idle')
     if (isSilentLocalResponseFailure(interrupted?.code)) progressiveSpeech.cancel()
     else if (isVisible() && turnSpeechGeneration === speechGeneration) progressiveSpeech.completeAnswer()
-    if (!interrupted)
+    if (!interrupted && turnHandoff?.state !== 'offered')
       void rememberExchange(
         pid,
         conversationId,
@@ -4061,6 +4297,27 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
                 @stop="stopGenerating"
               />
               <AgentTeamResults v-if="m.meta.specialistOutcomes?.length" :outcomes="m.meta.specialistOutcomes" />
+              <HandoffNotice
+                v-if="m.meta.handoff"
+                :handoff="m.meta.handoff"
+                :local-available="localChatModelAvailable()"
+                :busy="conversationBusy"
+                :can-switch-mode="selectedRouteModeFor(activeConversationId) === 'claude'"
+                @accept="acceptHandoff(m)"
+                @decline="declineHandoff(m)"
+                @switch-mode="switchModeAndAcceptHandoff(m)"
+              />
+              <div v-if="canAnswerLocally(m)" class="ai-continuation">
+                <button
+                  class="ai-model-button"
+                  type="button"
+                  :disabled="conversationBusy || !localChatModelAvailable()"
+                  title="Dieselbe Anfrage vom lokalen Modell bearbeiten lassen. Diese Runde wird nicht an Claude gesendet."
+                  @click="answerLocally(m)"
+                >
+                  Lokal neu beantworten
+                </button>
+              </div>
               <div v-if="continuations[m.id]" class="ai-continuation">
                 <button
                   class="ai-model-button"
@@ -4174,6 +4431,11 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           v-model="input"
           v-model:thinking-tier="thinkingTier"
           v-model:route-mode="chatRouteMode"
+          v-model:claude-model="claudeModel"
+          :claude-available="claudeModesUsable"
+          :claude-models="claudeMainPolicy.models"
+          :model-info="composerModelInfo"
+          :local-continuation="localContinuation"
           :external-allowed="modelUsageSettings.externalEnabled"
           :mode="mode"
           :mode-title="modeTitle"
@@ -4195,6 +4457,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
           @context="showContext = !showContext"
           @command="handlePromptCommand"
           @update:mode="selectMode"
+          @resume-claude="resumeClaude"
         >
           <template #heading-start>
             <span v-if="parseResearchEntry(input)" class="ai-badge">Deep-Recherche · mit Quellen und Bericht</span>

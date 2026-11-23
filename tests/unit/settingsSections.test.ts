@@ -137,7 +137,13 @@ describe('settings section contracts', () => {
     expect(html).not.toContain('Modellnutzung speichern')
     expect(html).toContain('unten im Einstellungsfenster')
     // The route mode is the only team control left; there is no separate team picker.
-    expect(html).toMatch(/<option[^>]*value="auto"[^>]*selected/)
+    expect(html).toMatch(/<input[^>]*type="radio"[^>]*value="auto"[^>]*checked/)
+    expect(html.match(/<input[^>]*type="radio"[^>]* checked/g)).toHaveLength(1)
+    expect(html).toContain('role="radiogroup"')
+    // Without a Claude access both Claude modes stay locked and say where to set one up.
+    expect(html.match(/<input[^>]*type="radio"[^>]*value="claude(_local)?"[^>]* disabled/g)).toHaveLength(2)
+    expect(html).toContain('Kein Claude-Zugang eingerichtet')
+    expect(html).toContain('Modell und Denktiefe wählst du direkt im Eingabefeld des Chats.')
     expect(html).not.toContain('Agententeam')
     expect(html).toContain('local-tier-light')
     expect(emittedEvents(ChatSettingsSection)).toContain('update:modelUsage')

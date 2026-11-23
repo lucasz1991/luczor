@@ -50,7 +50,12 @@ let unmount: (() => void) | undefined
 beforeEach(() => {
   vi.clearAllMocks()
   vi.stubGlobal('window', { __TAURI_INTERNALS__: {} })
-  modelUsageSettings.value = { localModelId: 'large', externalEnabled: false, chatRouteMode: 'local' }
+  modelUsageSettings.value = {
+    localModelId: 'large',
+    externalEnabled: false,
+    chatRouteMode: 'local',
+    claude: { enabled: false, lastModel: null },
+  }
 })
 afterEach(() => {
   unmount?.()

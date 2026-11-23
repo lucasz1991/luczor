@@ -55,6 +55,8 @@ export type BootstrapResponse = {
     external_client_model_selection?: false
     local_routing_managed_by?: 'desktop_signed_policy'
     local_model_manifest_required?: true
+    /** Untrusted until parsed by `parseClaudeMainPolicy`; absent on older servers. */
+    main_model?: unknown
   }
   local_model_manifest?: {
     url: '/api/v1/local-model/manifest'
@@ -680,7 +682,8 @@ export async function requestWithConfig<T>(
       res.status,
       json?.message ?? `HTTP ${res.status}: ${text || res.statusText}`,
       correlationId,
-      json?.code
+      // Newer endpoints (provider keys, Claude routing) name the field `error_code`.
+      json?.code ?? json?.error_code
     )
   }
   return json as T

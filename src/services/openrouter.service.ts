@@ -52,6 +52,19 @@ function safeParseArgs(raw: string): Record<string, unknown> {
   }
 }
 
+/** Server marker for a provider policy stop; absent on every normal completion. */
+function readRefusal(payload: unknown): InferenceResult['refusal'] {
+  const raw = (payload as { luczor_refusal?: unknown } | null)?.luczor_refusal
+  if (!raw || typeof raw !== 'object') return undefined
+  const item = raw as { category?: unknown; phase?: unknown }
+  return {
+    ...(typeof item.category === 'string' && /^[a-z0-9_]{1,64}$/.test(item.category)
+      ? { category: item.category }
+      : {}),
+    phase: item.phase === 'mid_stream' ? 'mid_stream' : 'before_output',
+  }
+}
+
 function readStreamError(payload: unknown): string | null {
   if (!payload || typeof payload !== 'object') return null
 
@@ -186,6 +199,7 @@ export class OpenRouterService {
       rawToolCalls,
       finishReason,
       usage: readReportedTokenUsage(json?.usage),
+      refusal: readRefusal(json) ?? (finishReason === 'content_filter' ? { phase: 'before_output' } : undefined),
       ...readLuczorHeaders(res.headers),
     }
   }
@@ -227,6 +241,7 @@ export class OpenRouterService {
     let finishReason = 'stop'
     let sawTerminalMarker = false
     let usage: InferenceResult['usage']
+    let refusal: InferenceResult['refusal']
     const toolAcc: Array<{ id: string; name: string; args: string }> = []
 
     while (true) {
@@ -274,6 +289,7 @@ export class OpenRouterService {
 
         // Usage-only terminal frames deliberately have no choices/delta.
         usage = readReportedTokenUsage(json?.usage) ?? usage
+        refusal = readRefusal(json) ?? refusal
         const choice = json?.choices?.[0]
         const delta = choice?.delta
         if (choice?.finish_reason) {
@@ -335,6 +351,7 @@ export class OpenRouterService {
       rawArguments: tc.function.arguments,
     }))
 
-    return { content, toolCalls, rawToolCalls, finishReason, usage, ...readLuczorHeaders(res.headers) }
+    if (!refusal && finishReason === 'content_filter') refusal = { phase: content ? 'mid_stream' : 'before_output' }
+    return { content, toolCalls, rawToolCalls, finishReason, usage, refusal, ...readLuczorHeaders(res.headers) }
   }
 }
