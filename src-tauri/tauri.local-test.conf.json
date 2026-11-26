@@ -16,6 +16,7 @@
     "targets": ["nsis"],
     "linux": {
       "deb": {
+        "desktopTemplate": "linux/main.local-test.desktop.hbs",
         "files": {
           "/usr/share/de.luczor.desktop/uninstall.sh": null,
           "/usr/share/applications/de.luczor.desktop.uninstall.desktop": null,

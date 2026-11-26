@@ -168,6 +168,8 @@ const APP_COMMANDS: &[&str] = &[
     "project_mirror_stage_commit",
     "project_mirror_recover",
     "app_quit_commit",
+    "app_install_state",
+    "app_restart_after_update",
     "project_mirror_test_workspace",
     "project_mirror_scan",
     "project_mirror_scan_page",

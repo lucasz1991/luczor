@@ -1,0 +1,18 @@
+[Desktop Entry]
+Categories={{categories}}
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Comment[de]=Mit einem KI-Assistenten an Projekten arbeiten
+Exec={{exec}}
+StartupWMClass={{exec}}
+Icon={{icon}}
+Name={{name}}
+Terminal=false
+Type=Application
+Actions=uninstall;
+
+[Desktop Action uninstall]
+Name=Luczor deinstallieren
+Name[en]=Uninstall Luczor
+Exec=/bin/bash /usr/share/de.luczor.desktop/uninstall.sh --package luczor --desktop

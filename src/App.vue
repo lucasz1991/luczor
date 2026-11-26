@@ -140,6 +140,7 @@ import { controlLocalReasoning } from '@/services/inference/tauriLocalRuntime'
 import { useBackgroundPreparation } from '@/composables/useBackgroundPreparation'
 import { useLocalModelSwitch } from '@/composables/useLocalModelSwitch'
 import LocalModelSwitchAlert from '@/components/ai/LocalModelSwitchAlert.vue'
+import InstallStateNotice from '@/components/ai/InstallStateNotice.vue'
 import ResourceRecoveryDialog from '@/components/ai/ResourceRecoveryDialog.vue'
 import { localInferenceCoordinator } from '@/services/inference/coordinator'
 import { useIdleOptimization } from '@/composables/useIdleOptimization'
@@ -3917,6 +3918,7 @@ useCloudProjects(() => conversationBusy.value || Object.values(projectActivity.v
     :model-names="localModelSwitchNames"
     @retry="localModelSwitch.retry"
   />
+  <InstallStateNotice :busy="conversationBusy" />
   <DeviceClusterPanel :open="showDeviceCluster" :project-id="activeProjectId" @close="showDeviceCluster = false" />
   <PayloadApproval />
   <CloudProjectsPanel

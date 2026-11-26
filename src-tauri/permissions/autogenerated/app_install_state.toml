@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-app-install-state"
+description = "Enables the app_install_state command without any pre-configured scope."
+commands.allow = ["app_install_state"]
+
+[[permission]]
+identifier = "deny-app-install-state"
+description = "Denies the app_install_state command without any pre-configured scope."
+commands.deny = ["app_install_state"]

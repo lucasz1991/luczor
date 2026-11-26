@@ -59,6 +59,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_quit_commit,
+            commands::install_state::app_install_state,
+            commands::install_state::app_restart_after_update,
             commands::agent_shutdown::app_stop_agents,
             commands::execution::execution_gate_update,
             commands::execution::execution_scope_register,
@@ -264,6 +266,7 @@ pub fn run() {
                 WORKER_TICK_STOP.store(true, std::sync::atomic::Ordering::Release);
                 // The event loop is ending: never wait for WebView work here.
                 let _ = commands::agent_shutdown::stop_all(app, true, false);
+                commands::install_state::relaunch_if_requested();
             }
             _ => {}
         }
@@ -414,6 +417,7 @@ fn setup_worker_tick(app: tauri::AppHandle) {
     use tauri::Emitter;
     std::thread::spawn(move || {
         let mut ticks = 0_u8;
+        let mut install_state = commands::install_state::InstallState::Unchanged;
         while !WORKER_TICK_STOP.load(std::sync::atomic::Ordering::Acquire) {
             std::thread::sleep(std::time::Duration::from_secs(1));
             ticks += 1;
@@ -421,6 +425,10 @@ fn setup_worker_tick(app: tauri::AppHandle) {
                 ticks = 0;
                 if !WORKER_TICK_STOP.load(std::sync::atomic::Ordering::Acquire) {
                     let _ = app.emit_to("main", "luczor://worker-tick", ());
+                    if let Some(state) = commands::install_state::changed_state(&mut install_state)
+                    {
+                        let _ = app.emit_to("main", "luczor://install-state", state);
+                    }
                 }
             }
         }

@@ -64,8 +64,30 @@ base/good/bad plugins as mandatory dependencies, so installation through apt or
 a graphical package manager installs them automatically, including when recommended
 packages are disabled. Internet access or an existing local package cache is needed
 for missing dependencies. A raw `dpkg -i` does not download dependencies; use apt
-as shown above. These dependencies also apply when updating an existing installation
-with a newly built package. Existing binaries are not updated by source changes.
+as shown above. Existing binaries are not updated by source changes.
+
+### Updating an existing installation
+
+Install the newer `.deb` over the existing one with the same command, or open it
+with the graphical package installer:
+
+```sh
+sudo apt install ./Luczor_NEWVERSION_amd64.deb
+```
+
+No prior uninstall and no `--reinstall` is needed, provided the package version is
+higher than the installed one. The package manager keeps an installed build of an
+equal version, so every delivered build must be bumped (`pnpm bump <version>`) and
+the delivered commit tagged `v<version>`. `node scripts/check-release-version.cjs`
+and the package workflow reject a package version that is not above the highest
+`v*` tag. Chats, settings, models and the keyring are not touched by an update.
+
+Luczor may keep running during the update, also hidden in the tray. The running
+window then shows **Neue Luczor-Version installiert** within about ten seconds.
+**Jetzt neu starten** quits through the same path as the tray menu **Beenden**
+(running jobs are stopped and saved) and starts the installed version. **Später**
+keeps the previous version running until the next quit. Nothing is terminated by
+the package itself.
 
 ### Uninstalling on Debian/Ubuntu
 
@@ -73,8 +95,12 @@ Close Luczor through the tray menu **Beenden** first. Window-X only hides the ap
 removing a package does not close an already running process.
 
 New DEBs include **Luczor deinstallieren** in the applications menu (English:
-**Uninstall Luczor**). It opens a terminal, displays the exact package and asks
-for the normal administrator authorization and APT confirmation. A cancelled
+**Uninstall Luczor**) and as a right-click action on the Luczor launcher. It shows
+a confirmation dialog and then the system's graphical administrator prompt
+(polkit, `pkexec`); no terminal is involved. This needs `zenity` or `kdialog` and
+`pkexec`, which the package recommends and Ubuntu desktops ship. Without them the
+entry opens a terminal instead, displays the exact package and asks for `sudo`
+authorization and the APT confirmation. A cancelled
 confirmation, authorization failure or package-manager lock does not report a
 successful uninstall. No package locks are forcibly removed. AppStream metadata
 also identifies the app to compatible software managers; available GUI actions
@@ -120,10 +146,11 @@ the launcher. The helper removes through APT, never by deleting system files
 itself. It does not purge data or run `autoremove`.
 
 Chats, memories, settings, keyring entries, downloaded models and external
-project/model directories remain intact. If autostart was enabled, disable it
-in Luczor before uninstalling or remove the Luczor entry in the desktop's
-Startup Applications settings afterward. A personal autostart entry is separate
-from the package-owned application-menu launcher.
+project/model directories remain intact. After a confirmed removal the helper
+deletes the current user's autostart entry in `~/.config/autostart` if it starts
+exactly the removed program; entries of other users or other programs are left
+alone. A Luczor window that is still open shows **Luczor wurde deinstalliert**
+and keeps running until it is closed through the tray menu.
 
 An AppImage or a `pnpm tauri dev` checkout has no DEB installation to remove.
 The helper reports that the selected package is absent and leaves those files
@@ -131,10 +158,10 @@ alone. Stop the development process or portable app and manage its exact file
 through the file manager. Do not uninstall shared Node/Rust/system dependencies
 just to remove a development checkout.
 
-The package workflow now tests artifact identity, installation and removal,
-including preservation of synthetic user data. Its removal checker defaults to
-read-only artifact inspection; destructive verification requires an explicit
-disposable Linux CI mode. This is not a command to run against a personal
+The package workflow now tests artifact identity, installation over an older
+package, a repeated installation of the same version and removal, including
+preservation of synthetic user data. Its checker defaults to read-only artifact
+inspection; installation and removal require an explicit disposable Linux CI mode. This is not a command to run against a personal
 installation.
 
 References: [Ubuntu package management](https://documentation.ubuntu.com/server/how-to/software/package-management/)

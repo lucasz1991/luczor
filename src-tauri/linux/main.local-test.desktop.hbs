@@ -1,0 +1,18 @@
+[Desktop Entry]
+Categories={{categories}}
+{{#if comment}}
+Comment={{comment}}
+{{/if}}
+Comment[de]=Mit einem KI-Assistenten an Projekten arbeiten
+Exec={{exec}}
+StartupWMClass={{exec}}
+Icon={{icon}}
+Name={{name}}
+Terminal=false
+Type=Application
+Actions=uninstall;
+
+[Desktop Action uninstall]
+Name=Luczor Local Test deinstallieren
+Name[en]=Uninstall Luczor Local Test
+Exec=/bin/bash /usr/share/de.luczor.desktop.local-test/uninstall.sh --package luczor-local-test --desktop

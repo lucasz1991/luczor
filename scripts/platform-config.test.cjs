@@ -48,11 +48,25 @@ for (const [index, profile] of profiles.entries()) {
 
     const desktop = readText(`src-tauri/${files.get(launcher)}`)
     assert.match(desktop, /^Type=Application$/mu)
-    assert.match(desktop, /^Terminal=true$/mu)
+    assert.match(desktop, /^Terminal=false$/mu)
     assert.match(desktop, /^X-AppStream-Ignore=true$/mu)
     assert.ok(desktop.includes(`Name=${profile.productName} deinstallieren\n`))
     assert.ok(desktop.includes(`Exec=/bin/bash ${helper} --package ${profile.packageName} --desktop\n`))
     assert.ok(desktop.includes(`Icon=${profile.binary}\n`))
+    // The main launcher offers the same helper as a right-click action.
+    const template = (index ? local : linux).bundle.linux.deb.desktopTemplate
+    assert.equal(template, index ? 'linux/main.local-test.desktop.hbs' : 'linux/main.desktop.hbs')
+    const main = readText(`src-tauri/${template}`)
+    for (const line of ['Exec={{exec}}', 'Icon={{icon}}', 'Name={{name}}', 'Categories={{categories}}'])
+      assert.ok(main.includes(`${line}\n`), line)
+    assert.match(main, /^Actions=uninstall;$/mu)
+    assert.ok(
+      main.endsWith(
+        `[Desktop Action uninstall]\nName=${profile.productName} deinstallieren\n` +
+          `Name[en]=Uninstall ${profile.productName}\n` +
+          `Exec=/bin/bash ${helper} --package ${profile.packageName} --desktop\n`
+      )
+    )
     const xml = readText(`src-tauri/${files.get(metainfo)}`)
     assert.match(xml, /<component type="desktop-application">/u)
     assert.ok(xml.includes(`<id>${profile.identifier}</id>`))
@@ -141,4 +155,18 @@ test('all installers carry mandatory offline speech resources without requiring 
   assert.equal(windows.bundle?.resources, undefined)
   assert.equal(linux.bundle.resources, undefined)
   assert.equal(macos.bundle.resources, undefined)
+})
+
+test('Debian package metadata names the product and recommends the graphical uninstall tools', () => {
+  const bundle = readJson('src-tauri/tauri.linux.conf.json').bundle
+  assert.equal(bundle.publisher, 'Luczor')
+  assert.equal(bundle.category, 'Utility')
+  for (const text of [bundle.shortDescription, bundle.longDescription]) {
+    assert.ok(text && !/tauri app/iu.test(text))
+  }
+  assert.doesNotMatch(readText('src-tauri/Cargo.toml'), /authors = \["you"\]/u)
+  for (const tool of ['zenity | kdialog', 'pkexec | policykit-1']) assert.ok(bundle.linux.deb.recommends.includes(tool))
+  // Removal must work without them: the helper falls back to a terminal.
+  for (const tool of ['zenity', 'kdialog', 'pkexec', 'policykit-1'])
+    assert.ok(!bundle.linux.deb.depends.some(dependency => dependency.includes(tool)))
 })

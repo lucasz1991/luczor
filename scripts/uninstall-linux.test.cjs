@@ -57,7 +57,40 @@ if [[ "\${TEST_DECLINE:-0}" != 1 ]]; then
   mv "$TEST_DATABASE.next" "$TEST_DATABASE"
 fi`
   )
+  write(
+    'pkexec',
+    `printf 'pkexec\n' >> "$TEST_CALLS"
+if [[ "\${TEST_PKEXEC_ERROR:-0}" != 0 ]]; then exit "$TEST_PKEXEC_ERROR"; fi
+exec "$@"`
+  )
+  write(
+    'zenity',
+    `printf 'zenity %s\n' "$1" >> "$TEST_CALLS"
+if [[ "$1" == --question && "\${TEST_DIALOG_DECLINE:-0}" == 1 ]]; then exit 1; fi`
+  )
+  write('xdg-terminal-exec', `printf 'terminal %s\n' "\${*: -3}" >> "$TEST_CALLS"`)
+  const home = path.join(directory, 'home')
+  const autostart = path.join(home, '.config', 'autostart')
+  fs.mkdirSync(autostart, { recursive: true })
+  const entry = (name, exec) => {
+    const file = path.join(autostart, name)
+    fs.writeFileSync(
+      file,
+      `[Desktop Entry]
+Type=Application
+Name=x
+Exec=${exec}
+Terminal=false`
+    )
+    return file
+  }
+  const autostartFiles = {
+    production: entry('Luczor.desktop', '/usr/bin/tauri-app '),
+    localTest: entry('Luczor Local Test.desktop', '/usr/bin/luczor-local-test '),
+    foreign: entry('other.desktop', '/usr/bin/tauri-app-helper --start'),
+  }
   return {
+    autostartFiles,
     run(args = [], env = {}) {
       const result = spawnSync(
         bash,
@@ -79,6 +112,11 @@ fi`
             TEST_DATABASE: shellPath(database),
             TEST_CALLS: shellPath(calls),
             TEST_AFTER: shellPath(path.join(directory, 'after')),
+            HOME: shellPath(home),
+            XDG_CONFIG_HOME: '',
+            // Never open real dialogs or terminals on a developer desktop.
+            DISPLAY: '',
+            WAYLAND_DISPLAY: '',
             ...env,
           },
         }
@@ -108,7 +146,7 @@ test('removes exactly production through sudo and keeps the co-installed test pa
 })
 
 test('local-test removal is explicit and never removes production', context => {
-  const result = fixture(context).run(['--package', 'luczor-local-test', '--desktop'])
+  const result = fixture(context).run(['--package', 'luczor-local-test', '--terminal'])
   assert.equal(result.status, 0, result.stderr)
   assert.equal(result.database, 'luczor\tinstalled\n')
   assert.equal(result.calls, 'sudo\n--no-auto-remove\nremove\n--\nluczor-local-test\n')
@@ -185,4 +223,58 @@ test('refuses an unknown package state', context => {
   const result = fixture(context, { packages: 'luczor\tunexpected\n' }).run()
   assert.equal(result.status, 1)
   assert.equal(result.calls, '')
+})
+
+const session = { DISPLAY: ':99' }
+
+test('desktop launcher confirms in a dialog and removes through polkit without a terminal', context => {
+  const result = fixture(context).run(['--desktop'], session)
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.calls, 'zenity --question\npkexec\n--no-auto-remove\nremove\n-y\n--\nluczor\nzenity --info\n')
+  assert.equal(result.database, 'luczor-local-test\tinstalled\n')
+  assert.doesNotMatch(result.stdout, /Enter drücken/)
+})
+
+test('declining the dialog requests no privileges and changes nothing', context => {
+  const result = fixture(context).run(['--desktop'], { ...session, TEST_DIALOG_DECLINE: '1' })
+  assert.equal(result.status, 1)
+  assert.equal(result.calls, 'zenity --question\n')
+  assert.match(result.database, /luczor\tinstalled/)
+})
+
+for (const [variable, code] of [
+  ['TEST_PKEXEC_ERROR', 126],
+  ['TEST_APT_ERROR', 100],
+]) {
+  test(`graphical removal reports ${variable} in an error dialog instead of success`, context => {
+    const result = fixture(context).run(['--desktop'], { ...session, [variable]: String(code) })
+    assert.equal(result.status, code)
+    assert.match(result.calls, /zenity --error\n$/)
+    assert.doesNotMatch(result.calls, /zenity --info/)
+    assert.doesNotMatch(result.stdout, /Paket luczor ist entfernt/)
+  })
+}
+
+test('a launcher without dialog tools reopens the same package in a terminal', context => {
+  const result = fixture(context).run(['--package', 'luczor-local-test', '--desktop'])
+  assert.equal(result.calls, 'terminal --package luczor-local-test --terminal\n')
+  assert.equal(result.database, 'luczor\tinstalled\nluczor-local-test\tinstalled\n')
+})
+
+test('successful removal deletes only the autostart entry of exactly that program', context => {
+  const prepared = fixture(context)
+  const result = prepared.run()
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(fs.existsSync(prepared.autostartFiles.production), false)
+  assert.equal(fs.existsSync(prepared.autostartFiles.localTest), true)
+  assert.equal(fs.existsSync(prepared.autostartFiles.foreign), true)
+  assert.match(result.stdout, /Autostart-Eintrag entfernt/)
+})
+
+test('a declined or failed removal keeps the autostart entry', context => {
+  for (const env of [{ TEST_DECLINE: '1' }, { TEST_APT_ERROR: '100' }]) {
+    const prepared = fixture(context)
+    prepared.run([], env)
+    assert.equal(fs.existsSync(prepared.autostartFiles.production), true)
+  }
 })

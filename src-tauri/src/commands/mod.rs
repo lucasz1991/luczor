@@ -22,6 +22,7 @@ pub mod device_jobs;
 pub mod device_key;
 pub mod device_run_journal;
 pub mod execution;
+pub mod install_state;
 pub mod lan_peer;
 pub mod local_model;
 pub mod local_tasks;

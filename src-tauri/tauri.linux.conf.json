@@ -2,14 +2,20 @@
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
     "targets": ["deb"],
+    "publisher": "Luczor",
+    "homepage": "https://luczor.follow-flow.de",
+    "category": "Utility",
+    "shortDescription": "Work on projects with an AI assistant",
+    "longDescription": "Luczor brings project conversations, local models and tools into one desktop application. Review proposed actions, keep project context and manage ongoing tasks from your desktop.",
     "linux": {
       "deb": {
+        "desktopTemplate": "linux/main.desktop.hbs",
         "files": {
           "/usr/share/de.luczor.desktop/uninstall.sh": "../scripts/uninstall-linux.sh",
           "/usr/share/applications/de.luczor.desktop.uninstall.desktop": "linux/de.luczor.desktop.uninstall.desktop",
           "/usr/share/metainfo/de.luczor.desktop.metainfo.xml": "linux/de.luczor.desktop.metainfo.xml"
         },
-        "recommends": ["gnome-keyring", "xdg-desktop-portal"],
+        "recommends": ["gnome-keyring", "xdg-desktop-portal", "zenity | kdialog", "pkexec | policykit-1"],
         "depends": [
           "libgbm1",
           "libxdo3",

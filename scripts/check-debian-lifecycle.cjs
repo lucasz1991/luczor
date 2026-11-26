@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-require-imports -- Standalone Node CommonJS release script. */
-// Read-only by default. Package removal is opt-in and restricted to disposable CI.
+// Read-only by default. Package installation and removal are opt-in and restricted to disposable CI.
 const { execFileSync } = require('node:child_process')
 const crypto = require('node:crypto')
 const fs = require('node:fs')
@@ -7,6 +7,8 @@ const os = require('node:os')
 const path = require('node:path')
 
 const REMOVE_FLAG = '--remove-installed-package-on-disposable-system'
+const UPGRADE_FLAG = '--install-over-older-package-on-disposable-system'
+const OLDER_VERSION = '0.0.1'
 const PACKAGES = Object.freeze({
   luczor: {
     identifier: 'de.luczor.desktop',
@@ -92,6 +94,61 @@ function seedUserdata(identifier, home, env, io) {
   })
 }
 
+function installedVersion(packageName, run) {
+  const rows = run('dpkg-query', ['--show', '--showformat=${binary:Package}\t${db:Status-Status}\t${Version}\n'])
+    .trim()
+    .split('\n')
+    .map(row => row.split('\t'))
+    .filter(([name]) => name === packageName || name.startsWith(`${packageName}:`))
+  return rows.length === 1 && rows[0][1] === 'installed' ? rows[0][2] : null
+}
+
+// Installs a repacked copy with a lower version, then the real artifact over it
+// exactly as a user would: plain `apt-get install ./file.deb`, no --reinstall.
+function installOverOlder(artifact, file, { run, io, home, env, uid }) {
+  const apt = (args, timeout = 600000) =>
+    uid === 0 ? run('apt-get', args, { timeout }) : run('sudo', ['--non-interactive', 'apt-get', ...args], { timeout })
+  const install = target => apt(['install', '-y', '--no-install-recommends', target])
+  if (installedVersion(artifact.packageName, run) !== null)
+    throw new Error('The upgrade check requires a system without this package.')
+  const work = io.mkdtempSync(path.join(os.tmpdir(), 'luczor-upgrade-'))
+  const tree = path.join(work, 'tree')
+  const older = path.join(work, `${artifact.packageName}_${OLDER_VERSION}_${artifact.architecture}.deb`)
+  run('dpkg-deb', ['--raw-extract', file, tree], { timeout: 300000 })
+  const control = path.join(tree, 'DEBIAN', 'control')
+  const fields = io.readFileSync(control, 'utf8')
+  if (!/^Version: .+$/mu.test(fields)) throw new Error('Artifact control file has no Version field.')
+  io.writeFileSync(control, fields.replace(/^Version: .+$/mu, `Version: ${OLDER_VERSION}`))
+  run('dpkg-deb', ['--root-owner-group', '-Znone', '--build', tree, older], { timeout: 300000 })
+  install(older)
+  if (installedVersion(artifact.packageName, run) !== OLDER_VERSION)
+    throw new Error('The older package was not installed.')
+  const sentinels = seedUserdata(artifact.identifier, home, env, io)
+  install(file)
+  if (installedVersion(artifact.packageName, run) !== artifact.version)
+    throw new Error('Installing the artifact over an older package did not upgrade it.')
+  verifyInstalled(artifact, run, io)
+  // Informational: whether APT replaces files of an equal version without --reinstall.
+  const program = artifact.files[0]
+  const before = io.statSync(program).ino
+  install(file)
+  if (installedVersion(artifact.packageName, run) !== artifact.version)
+    throw new Error('Installing the same version again left the package in a broken state.')
+  const sameVersionReplaced = io.statSync(program).ino !== before
+  for (const sentinel of sentinels) {
+    if (io.readFileSync(sentinel.file, 'utf8') !== sentinel.content)
+      throw new Error(`User data changed during upgrade: ${sentinel.file}`)
+  }
+  io.rmSync(work, { recursive: true, force: true })
+  return {
+    packageName: artifact.packageName,
+    upgradedFrom: OLDER_VERSION,
+    upgradedTo: artifact.version,
+    sameVersionReplaced,
+    preservedFiles: sentinels.map(item => item.file),
+  }
+}
+
 function checkLifecycle(args, options = {}) {
   const env = options.env ?? process.env
   const platform = options.platform ?? process.platform
@@ -99,12 +156,22 @@ function checkLifecycle(args, options = {}) {
   const io = options.fs ?? fs
   const home = options.home ?? os.homedir()
   const remove = args.includes(REMOVE_FLAG)
-  const files = args.filter(argument => argument !== REMOVE_FLAG)
-  if (files.length !== 1 || files[0].startsWith('-') || args.filter(argument => argument === REMOVE_FLAG).length > 1)
-    throw new Error(`Usage: node scripts/check-debian-lifecycle.cjs artifact.deb [${REMOVE_FLAG}]`)
-  if (remove && (platform !== 'linux' || env.CI !== 'true'))
-    throw new Error('Package removal requires Linux, CI=true and the explicit disposable-system flag.')
+  const upgrade = args.includes(UPGRADE_FLAG)
+  const flags = args.filter(argument => argument === REMOVE_FLAG || argument === UPGRADE_FLAG)
+  const files = args.filter(argument => argument !== REMOVE_FLAG && argument !== UPGRADE_FLAG)
+  if (files.length !== 1 || files[0].startsWith('-') || flags.length > 1)
+    throw new Error(`Usage: node scripts/check-debian-lifecycle.cjs artifact.deb [${REMOVE_FLAG} | ${UPGRADE_FLAG}]`)
+  if (flags.length && (platform !== 'linux' || env.CI !== 'true'))
+    throw new Error('Package installation or removal requires Linux, CI=true and the explicit disposable-system flag.')
   const artifact = inspectArtifact(files[0], run)
+  if (upgrade)
+    return installOverOlder(artifact, path.resolve(files[0]), {
+      run,
+      io,
+      home,
+      env,
+      uid: options.uid ?? process.getuid?.(),
+    })
   if (!remove) return { packageName: artifact.packageName, removed: false, preservedFiles: [] }
   verifyInstalled(artifact, run, io)
   const sentinels = seedUserdata(artifact.identifier, home, env, io)
@@ -132,7 +199,7 @@ function checkLifecycle(args, options = {}) {
   return { packageName: artifact.packageName, removed: true, preservedFiles: sentinels.map(item => item.file) }
 }
 
-module.exports = { checkLifecycle, inspectArtifact, PACKAGES, REMOVE_FLAG }
+module.exports = { checkLifecycle, inspectArtifact, OLDER_VERSION, PACKAGES, REMOVE_FLAG, UPGRADE_FLAG }
 if (require.main === module) {
   try {
     console.log(JSON.stringify(checkLifecycle(process.argv.slice(2)), null, 2))

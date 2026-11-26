@@ -22,6 +22,11 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Delivered v* tags decide whether this build may replace an installed package.
+          fetch-depth: 0
+      - name: Package version rises above the last delivered build
+        run: node scripts/check-release-version.cjs
       - uses: pnpm/action-setup@v4
         with:
           version: 10.27.0
@@ -47,13 +52,13 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: node scripts/prepare-voice-runtime.mjs
       - run: node --test scripts/prepare-voice-runtime.test.mjs
-      - run: node --test scripts/tauri-launch.test.cjs scripts/check-debian-lifecycle.test.cjs scripts/uninstall-linux.test.cjs scripts/platform-config.test.cjs
+      - run: node --test scripts/tauri-launch.test.cjs scripts/check-debian-lifecycle.test.cjs scripts/uninstall-linux.test.cjs scripts/platform-config.test.cjs scripts/check-release-version.test.cjs
       - run: cargo test --manifest-path src-tauri/Cargo.toml --lib
       - name: Recognize German offline with the bundled CPU model
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib bundled_whisper_recognizes_german_offline -- --ignored --nocapture
       - name: Build native test package (not a signed production release)
         run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundle }}
-      - name: Verify Linux package install, multimedia and data-preserving removal
+      - name: Verify Linux package install over an older build, multimedia and data-preserving removal
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -64,7 +69,7 @@ jobs:
           node scripts/check-debian-dependencies.cjs "${packages[0]}"
           node scripts/check-debian-voice.mjs "${packages[0]}"
           node scripts/check-debian-lifecycle.cjs "${packages[0]}"
-          sudo apt-get install -y --no-install-recommends "./${packages[0]}"
+          node scripts/check-debian-lifecycle.cjs "${packages[0]}" --install-over-older-package-on-disposable-system
           gst-inspect-1.0 fakevideosink >/dev/null
           gst-inspect-1.0 webvttenc >/dev/null
           node scripts/check-debian-lifecycle.cjs "${packages[0]}" --remove-installed-package-on-disposable-system
