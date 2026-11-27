@@ -1,4 +1,5 @@
 import { shallowRef } from 'vue'
+import { modelUsageSettings, saveModelUsageSettings } from './modelUsageSettings'
 import { isThinkingTier, THINKING_TIERS, type ThinkingTier } from './thinking'
 
 /** One Claude model the server offers in the composer. The server owns label, order and visibility. */
@@ -18,6 +19,16 @@ export type ClaudeMainPolicy = Readonly<{
   keySources: readonly ClaudeKeySource[]
   defaultModel: string | null
   models: readonly ClaudeModelOption[]
+  /** The account's Claude setup as stored on the server; `null` when the server did not send one. */
+  access: ClaudeAccountSetup | null
+}>
+
+/** Per-account setup kept on the server so every device of the user starts configured. Never key material. */
+export type ClaudeAccountSetup = Readonly<{
+  connected: boolean
+  source: ClaudeKeySource | null
+  providerFallback: boolean
+  preferredModel: string | null
 }>
 
 export type ClaudeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -27,6 +38,7 @@ export const NO_CLAUDE_POLICY: ClaudeMainPolicy = Object.freeze({
   keySources: Object.freeze([]),
   defaultModel: null,
   models: Object.freeze([]),
+  access: null,
 })
 
 const MODEL_ID = /^[a-zA-Z0-9._-]{1,160}$/
@@ -69,13 +81,41 @@ export function parseClaudeMainPolicy(value: unknown): ClaudeMainPolicy {
   const keySources = (Array.isArray(raw.key_sources) ? raw.key_sources : []).filter(
     (source): source is ClaudeKeySource => source === 'user' || source === 'organization'
   )
+  const access = raw.access && typeof raw.access === 'object' ? (raw.access as Record<string, unknown>) : null
+  const accessSource = access?.source === 'user' || access?.source === 'organization' ? access.source : null
+  const preferred = text(access?.preferred_model, 160)
   const requestedDefault = text(raw.default_model, 160)
   return Object.freeze({
     allowed: raw.claude_modes_allowed === true && models.length > 0,
     keySources: Object.freeze([...new Set(keySources)]),
     defaultModel: models.some(model => model.id === requestedDefault) ? requestedDefault : (models[0]?.id ?? null),
     models: Object.freeze(models),
+    access: access
+      ? Object.freeze({
+          // A connection without a known source is not a usable access.
+          connected: access.connected === true && accessSource !== null,
+          source: accessSource,
+          providerFallback: access.provider_fallback === true,
+          // A model the server no longer offers is not a stored choice.
+          preferredModel: models.some(model => model.id === preferred) ? preferred : null,
+        })
+      : null,
   })
+}
+
+/**
+ * Mirror the server-held account setup into this device: whether a verified access exists and
+ * which model the user picked last on any device. A server without the block changes nothing.
+ * Returns whether the device settings were written.
+ */
+export async function adoptClaudeAccountSetup(policy: ClaudeMainPolicy): Promise<boolean> {
+  const setup = policy.access
+  if (!setup) return false
+  const current = modelUsageSettings.value
+  const lastModel = setup.preferredModel ?? current.claude.lastModel
+  if (current.claude.enabled === setup.connected && current.claude.lastModel === lastModel) return false
+  await saveModelUsageSettings({ ...current, claude: { enabled: setup.connected, lastModel } })
+  return true
 }
 
 export const claudeMainPolicy = shallowRef<ClaudeMainPolicy>(NO_CLAUDE_POLICY)
@@ -86,6 +126,8 @@ export function applyClaudeMainPolicy(bootstrap: { routing?: unknown } | null | 
   claudeMainPolicy.value = parseClaudeMainPolicy(
     routing && typeof routing === 'object' ? (routing as Record<string, unknown>).main_model : undefined
   )
+  // A second device of the same account becomes usable without opening the settings.
+  void adoptClaudeAccountSetup(claudeMainPolicy.value).catch(() => undefined)
 }
 
 /** Chat choice, then the last composer choice, then the server default. Unknown ids never reach the proxy. */

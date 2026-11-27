@@ -22,6 +22,7 @@ import {
   supportedThinkingTier,
 } from '@/services/inference/claudeMain'
 import { runClaudeLedTurn, type ClaudeTurnHandoff } from '@/services/agents/claudeTurn'
+import { setClaudePreferredModel } from '@/services/inference/claudeAccess'
 import HandoffNotice from './components/ai/HandoffNotice.vue'
 import SystemStatusPanel from './components/SystemStatusPanel.vue'
 import MemoryExplorerPage from '@/features/memory/MemoryExplorerPage.vue'
@@ -368,6 +369,8 @@ const claudeModel = computed<string | undefined>({
     // New chats start with the combination chosen last, like the model picker of the Claude apps.
     if (usage.claude.lastModel !== value)
       void saveModelUsageSettings({ ...usage, claude: { ...usage.claude, lastModel: value } }).catch(() => undefined)
+    // Kept with the account on the server; the user's other devices start with the same model.
+    void setClaudePreferredModel(value).catch(() => undefined)
   },
 })
 function localChatModelAvailable(): boolean {

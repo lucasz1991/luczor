@@ -53,6 +53,7 @@ declare module 'vue' {
     HeaderActionMenu: typeof import('./src/components/ai/HeaderActionMenu.vue')['default']
     IdleOptimizationSettings: typeof import('./src/components/IdleOptimizationSettings.vue')['default']
     InsightCards: typeof import('./src/components/ai/InsightCards.vue')['default']
+    InstallStateNotice: typeof import('./src/components/ai/InstallStateNotice.vue')['default']
     JarvisHud: typeof import('./src/components/JarvisHud.vue')['default']
     LoadingState: typeof import('./src/components/ai/LoadingState.vue')['default']
     LocalModelAnalysis: typeof import('./src/components/LocalModelAnalysis.vue')['default']

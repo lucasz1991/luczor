@@ -215,6 +215,12 @@ export async function setClaudeKeySource(source: ClaudeKeySource): Promise<Claud
   return statusAfter(await call('/source', { method: 'PUT', body: { source } }))
 }
 
+/** Store the composer's model choice with the account so the user's other devices start with it. */
+export async function setClaudePreferredModel(model: string): Promise<void> {
+  if (!/^[a-zA-Z0-9._-]{1,160}$/.test(model)) throw new ClaudeAccessError('unknown')
+  await call('/options', { method: 'PUT', body: { preferred_model: model } })
+}
+
 export async function setClaudeProviderFallback(value: boolean): Promise<ClaudeAccessStatus> {
   return statusAfter(await call('/options', { method: 'PUT', body: { provider_fallback: value === true } }))
 }

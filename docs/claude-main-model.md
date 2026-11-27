@@ -24,6 +24,12 @@ Beides wird je Chat im Eingabefeld gewählt (`ModelSelector.vue`). Die Modelllis
 
 Der Anthropic-Schlüssel wird unter Einstellungen → Claude API eingegeben, einmalig an den Luczor-Server übertragen und dort verschlüsselt gespeichert. Der Desktop speichert ihn nicht und zeigt nur die maskierte Form. Das Gerät braucht die Fähigkeit `provider.keys`.
 
+## Einrichtung je Konto, nicht je Gerät
+
+Die Claude-Einrichtung gehört zum Benutzerkonto und liegt auf dem Server: Schlüssel, Schlüsselquelle, die Option „Claude-Ausweichmodell“ und das zuletzt gewählte Modell. Der Server liefert sie bei jedem Gerätestart in `bootstrap.routing.main_model.access` mit (`connected`, `source`, `provider_fallback`, `preferred_model` – nie Schlüsselmaterial, auch nicht maskiert). Jedes Gerät übernimmt sie automatisch (`adoptClaudeAccountSetup` in `services/inference/claudeMain.ts`); ein zweites Gerät desselben Benutzers kann Claude damit sofort nutzen, ohne den Schlüssel erneut einzugeben. Wird der Schlüssel auf einem Gerät entfernt, verlassen die anderen Geräte beim nächsten Start den Claude-Modus.
+
+Gerätebezogen bleiben der Hauptmodus (Standard für neue Chats) und die Wahl je Chat, weil nicht jedes Gerät ein lokales Modell hat.
+
 ## Ablauf eines Claude-geführten Auftrags
 
 1. `App.vue` hält Modus und Modell bei der Annahme des Auftrags fest und bereitet ihn wie einen lokalen Auftrag vor.

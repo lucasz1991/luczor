@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   claudeEffortForTier,
   parseClaudeMainPolicy,
@@ -169,5 +169,49 @@ describe('history of a Claude-led chat', () => {
     expect(conversationHistoryForInference(transcript as never, 'external').messages.map(item => item.content)).toEqual(
       ['Frage 1']
     )
+  })
+})
+
+describe('account setup stored on the server', () => {
+  const withAccess = (access: unknown) => parseClaudeMainPolicy({ ...block, access })
+
+  it('reads the setup fail-closed and never trusts an unknown model or source', () => {
+    expect(parseClaudeMainPolicy(block).access).toBeNull()
+    expect(
+      withAccess({ connected: true, source: 'user', provider_fallback: true, preferred_model: 'claude-opus-5-5' })
+        .access
+    ).toEqual({ connected: true, source: 'user', providerFallback: true, preferredModel: 'claude-opus-5-5' })
+    expect(withAccess({ connected: true, source: 'someone', preferred_model: 'removed-model' }).access).toEqual({
+      connected: false,
+      source: null,
+      providerFallback: false,
+      preferredModel: null,
+    })
+    expect(withAccess({ connected: 'yes', source: 'organization' }).access?.connected).toBe(false)
+  })
+
+  it('lets a second device adopt access and model, and locks it again when the access is gone', async () => {
+    vi.stubGlobal('localStorage', { getItem: vi.fn(() => null), setItem: vi.fn() })
+    const settings = await import('@/services/inference/modelUsageSettings')
+    const { adoptClaudeAccountSetup } = await import('@/services/inference/claudeMain')
+    settings.modelUsageSettings.value = { ...settings.DEFAULT_MODEL_USAGE }
+
+    const connected = withAccess({ connected: true, source: 'user', preferred_model: 'claude-sonnet-5-5' })
+    expect(await adoptClaudeAccountSetup(connected)).toBe(true)
+    expect(settings.modelUsageSettings.value.claude).toEqual({ enabled: true, lastModel: 'claude-sonnet-5-5' })
+    // Nothing to write when the device already matches the account.
+    expect(await adoptClaudeAccountSetup(connected)).toBe(false)
+
+    await settings.saveModelUsageSettings({ ...settings.modelUsageSettings.value, chatRouteMode: 'claude_local' })
+    expect(settings.modelUsageSettings.value.chatRouteMode).toBe('claude_local')
+    // The key was removed on another device: this one keeps its model choice but leaves the Claude mode.
+    expect(await adoptClaudeAccountSetup(withAccess({ connected: false, source: null }))).toBe(true)
+    expect(settings.modelUsageSettings.value).toMatchObject({
+      chatRouteMode: 'local',
+      claude: { enabled: false, lastModel: 'claude-sonnet-5-5' },
+    })
+    // An older server sends no setup and must not change the device.
+    expect(await adoptClaudeAccountSetup(parseClaudeMainPolicy(block))).toBe(false)
+    vi.unstubAllGlobals()
   })
 })
