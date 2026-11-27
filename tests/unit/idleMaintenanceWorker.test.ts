@@ -729,6 +729,34 @@ describe('mounted persistent maintenance worker', () => {
       optimizer.stop()
     }
   )
+  it.each(['installed_model_unavailable', 'runtime_startup_ram_pressure', 'available_ram_below_minimum'])(
+    'keeps the job retries when the device cannot run the model (%s) and still backs off',
+    async reason => {
+      const testCase = setup()
+      testCase.deps.prepare = vi.fn(async () => {
+        throw new Error(reason)
+      })
+      const optimizer = testCase.create()
+      await run(optimizer)
+      // Not a wait label: the optimizer keeps its long error back-off instead of the short interval.
+      expect(optimizer.snapshot()).toMatchObject({ phase: 'cooldown', reason: 'failed' })
+      expect(fixture.journal!.jobs.some(job => job.status === 'retry')).toBe(true)
+      expect(fixture.journal!.jobs.every(job => job.attempts === 0)).toBe(true)
+      expect(fixture.journal!.jobs.some(job => job.status === 'blocked')).toBe(false)
+      expect(fixture.writes).toHaveLength(0)
+      optimizer.stop()
+    }
+  )
+  it('still counts runtime_start_failed, which reports a resident bound to another project', async () => {
+    const testCase = setup()
+    testCase.deps.prepare = vi.fn(async () => {
+      throw new Error('runtime_start_failed')
+    })
+    const optimizer = testCase.create()
+    await run(optimizer)
+    expect(fixture.journal!.jobs.some(job => job.status === 'retry' && job.attempts === 1)).toBe(true)
+    optimizer.stop()
+  })
 
   it('loads a missing local memory on request and binds and reviews all evidence before saving', async () => {
     const testCase = setup()

@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import { focusedTools, cleanLocalHistory } from '@/services/inference/focusedTools'
 import type { WireMessage } from '@/services/inference/types'
-import { holdRuntimeStatusPrefix, isRuntimeStatusEcho } from '@/services/inference/localResponseGuard'
+import {
+  holdRuntimeStatusPrefix,
+  isRuntimeStatusEcho,
+  withoutRuntimeStatusParagraphs,
+} from '@/services/inference/localResponseGuard'
 import { isTextToolOutput, textToolNames } from '@/services/inference/textToolGuard'
 
 const pool = [
@@ -267,7 +271,52 @@ describe('focused local tool context', () => {
       { role: 'user', content: 'so jetzt aber' },
       { role: 'assistant', content: mixed },
     ]
-    expect(cleanLocalHistory(messages)).toEqual([messages[0]])
+    // The diagnostic is removed; the model's own sentence before it stays in the history.
+    expect(cleanLocalHistory(messages)).toEqual([messages[0], { role: 'assistant', content: 'Ich prüfe das.' }])
+  })
+  it('keeps the partial work of an interrupted answer and drops only the host diagnostic and its notes', () => {
+    const interrupted = [
+      'Ich lese zuerst die Datei.',
+      'Die Datei enthält drei Fehler.',
+      'Die lokale Modellrunde 2 wurde vor dem Abschluss unterbrochen: Antwortgenerierung: Das Modell hat keinen gültigen, vollständig abgeschlossenen Werkzeugaufruf geliefert.',
+      'Diagnose: runtime_tool_contract_rejected; Abschluss: stop; Dauer: 3.0 s; öffentliche Zeichen: 10.',
+      'Tool fs_read wurde erfolgreich ausgeführt.\nErgebnis: {"ok":true}',
+      'Der bisherige Arbeitsfortschritt bleibt erhalten (1 Tool-Aufrufe erfolgreich, 0 fehlgeschlagen).',
+      'Du kannst direkt weiterarbeiten; Luczor liest dabei den aktuellen Zustand erneut ein und wiederholt bereits erfolgreiche Änderungen nicht.',
+    ].join('\n\n')
+    const messages: WireMessage[] = [
+      { role: 'user', content: 'Behebe die Fehler in index.php' },
+      { role: 'assistant', content: interrupted },
+      { role: 'user', content: 'weiter' },
+    ]
+    expect(cleanLocalHistory(messages)).toEqual([
+      messages[0],
+      {
+        role: 'assistant',
+        content:
+          'Ich lese zuerst die Datei.\n\nDie Datei enthält drei Fehler.\n\nTool fs_read wurde erfolgreich ausgeführt.\nErgebnis: {"ok":true}',
+      },
+      messages[2],
+    ])
+    // Without a status paragraph nothing is removed.
+    const note = 'Du kannst direkt weiterarbeiten; Luczor liest dabei den aktuellen Zustand erneut ein.'
+    expect(withoutRuntimeStatusParagraphs(note)).toBe(note)
+  })
+  it('removes a status paragraph but keeps fenced and quoted copies and the model’s own earlier text', () => {
+    const status = 'Die lokale Modellrunde 1 wurde vor dem Abschluss unterbrochen: HTTP 503'
+    const ownAnalysis = 'Diagnose: Der Fehler liegt im fehlenden Index der Tabelle orders.'
+    const fenced = `\x60\x60\x60text\n${status}\n\x60\x60\x60`
+    const quoted = `> ${status}`
+    const text = [
+      ownAnalysis,
+      'Beispiel:',
+      fenced,
+      quoted,
+      status,
+      'Diagnose: runtime_stream_failed; Abschluss: stop; Dauer: 1.0 s; öffentliche Zeichen: 3.',
+    ].join('\n\n')
+    // The model's own "Diagnose:" paragraph comes before the status and stays; the host note after it goes.
+    expect(withoutRuntimeStatusParagraphs(text)).toBe([ownAnalysis, 'Beispiel:', fenced, quoted].join('\n\n'))
   })
   it('recognizes XML function-call wrappers without converting arguments into actions', () => {
     const xml =

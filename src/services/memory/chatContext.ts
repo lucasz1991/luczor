@@ -3,6 +3,7 @@ import {
   containsSensitiveMemoryData,
   getMemoryPrefs,
   luczorMemory,
+  USER_STATED_REUSE_POLICY,
   type MemoryRecord,
   type RememberInput,
 } from './luczorMemory'
@@ -87,7 +88,8 @@ function usefulExcerpts(content: string, role: 'user' | 'assistant', excluded: C
       continue
     }
     const priority = USEFUL_FACT.test(text) ? 2 : role === 'user' ? 1 : 0
-    if (priority === 0 && text.length < 80 && !structured) {
+    // Assistant narration without a decision word or a concrete value is not a memory, however long.
+    if (priority === 0 && !structured) {
       excluded.push({
         start: paragraph.start,
         end: paragraph.start + paragraph.text.length,
@@ -173,6 +175,8 @@ export function planAutomaticChatCapture(
       source_end: excerpt.end,
       source_length: message.content.length,
       source_segment_id: message.segmentId,
+      // Only the user's own words can be recalled in other chats of the project before review.
+      ...(message.role === 'user' ? { reuse_policy: USER_STATED_REUSE_POLICY } : {}),
       reuse_scope:
         input.reuseScope ??
         (message.role === 'user' &&

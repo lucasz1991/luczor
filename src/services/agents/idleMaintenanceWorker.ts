@@ -1,6 +1,6 @@
 import { prepareInternalModelMessages } from '../assistantProfile'
 import { shallowRef } from 'vue'
-import { idleWaitReason } from '@/services/inference/idleRecovery'
+import { idleEnvironmentFailure, idleWaitReason } from '@/services/inference/idleRecovery'
 import type { Message, Project } from '@/state/types'
 import { executionGate } from '@/services/executionGate'
 import { luczorMemory } from '@/services/memory/luczorMemory'
@@ -870,7 +870,7 @@ export function createMaintenanceWorker(
         const epoch = recoveryEpoch
         const work = selected.get(job.key)
         const detail = lastFailureDetail
-        const deferred = !success && !!idleWaitReason(lastFailure)
+        const deferred = !success && (!!idleWaitReason(lastFailure) || idleEnvironmentFailure(lastFailure))
         const metadataOptOut =
           !success &&
           job.task === 'metadata' &&

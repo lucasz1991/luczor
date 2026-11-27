@@ -64,6 +64,76 @@ export function isRuntimeStatusEcho(text: string): boolean {
   return publicParagraphs(text).some(isStatusParagraph)
 }
 
+/** Lines the host appends after its own interruption notice (agent.ts); never model text there. */
+const interruptionNotes = [
+  /^diagnose: [a-z0-9_:]+; abschluss: /,
+  /^der bisherige arbeitsfortschritt bleibt erhalten \(/,
+  /^der fortsetzungsstand bleibt erhalten; /,
+  /^der vollständige auftrag und sein arbeitskontext sind zur fortsetzung gesichert\./,
+  /^der vollständige arbeitskontext bleibt lokal erhalten\./,
+  /^du kannst direkt weiterarbeiten; luczor liest dabei/,
+]
+
+/**
+ * History projection only: drop the application's status paragraphs and the notes that belong to
+ * them, but keep what the model had already said or done around them. Fenced and quoted text is
+ * never removed.
+ */
+export function withoutRuntimeStatusParagraphs(text: string): string {
+  const blocks: Array<{ lines: string[]; protected: boolean }> = []
+  let current: string[] = []
+  let fence = ''
+  const flush = (isProtected = false) => {
+    if (current.length) blocks.push({ lines: current, protected: isProtected })
+    current = []
+  }
+  for (const line of text.split('\n')) {
+    const marker = /^\s{0,3}(`{3,}|~{3,})/.exec(line)?.[1]
+    if (fence) {
+      current.push(line)
+      if (marker && marker[0] === fence[0] && marker.length >= fence.length) {
+        fence = ''
+        flush(true)
+      }
+      continue
+    }
+    if (marker) {
+      flush()
+      fence = marker
+      current.push(line)
+      continue
+    }
+    if (line.trimStart().startsWith('>')) {
+      flush()
+      current.push(line)
+      flush(true)
+      continue
+    }
+    if (!line.trim()) flush()
+    else current.push(line)
+  }
+  flush(!!fence)
+  const entries = blocks.map(block => ({
+    text: block.lines.join('\n'),
+    start: block.protected ? '' : normalizedStart(block.lines.join('\n').trimEnd()),
+  }))
+  if (!entries.some(entry => entry.start && isStatusParagraph(entry.start))) return text
+  // The host appends its notes after the status paragraph; earlier paragraphs are the model's
+  // commentary and stay, whatever they start with.
+  let afterStatus = false
+  return entries
+    .filter(({ start }) => {
+      if (!start) return true
+      if (isStatusParagraph(start)) {
+        afterStatus = true
+        return false
+      }
+      return !(afterStatus && interruptionNotes.some(note => note.test(start)))
+    })
+    .map(entry => entry.text)
+    .join('\n\n')
+}
+
 /** Hold only diagnostic-shaped beginnings, including split markers, until classified. */
 export function holdRuntimeStatusPrefix(text: string): boolean {
   return publicParagraphs(text).some(start =>

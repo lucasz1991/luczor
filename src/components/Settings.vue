@@ -122,6 +122,7 @@ type AppSettings = {
   memory_inject: boolean
   memory_inject_count: number
   memory_auto_remember: boolean
+  memory_use_user_statements: boolean
   use_server_proxy: boolean
 }
 
@@ -163,6 +164,7 @@ const DEFAULTS: AppSettings = {
   memory_inject: true,
   memory_inject_count: 5,
   memory_auto_remember: true,
+  memory_use_user_statements: true,
   use_server_proxy: true,
 }
 
@@ -299,6 +301,8 @@ async function ensureStoreLoaded() {
   if (typeof mCnt === 'number' && !Number.isNaN(mCnt)) settings.memory_inject_count = mCnt
   const mRem = await settingsStore.get<boolean>('memory_auto_remember')
   if (typeof mRem === 'boolean') settings.memory_auto_remember = mRem
+  const mStated = await settingsStore.get<boolean>('memory_use_user_statements')
+  if (typeof mStated === 'boolean') settings.memory_use_user_statements = mStated
   settings.use_server_proxy = true
 
   // One-way migration: local provider credentials and voice paths must not
@@ -426,6 +430,7 @@ async function persistAll() {
   await settingsStore.set('memory_inject', settings.memory_inject)
   await settingsStore.set('memory_inject_count', clamp(Math.round(settings.memory_inject_count), 0, 20))
   await settingsStore.set('memory_auto_remember', settings.memory_auto_remember)
+  await settingsStore.set('memory_use_user_statements', settings.memory_use_user_statements)
   settings.use_server_proxy = true
   await settingsStore.set('use_server_proxy', true)
 
@@ -920,6 +925,17 @@ function iconPath(kind: string) {
                       class="lz-switch"
                       :class="{ 'is-on': settings.memory_auto_remember }"
                       @click="settings.memory_auto_remember = !settings.memory_auto_remember"
+                    >
+                      <span />
+                    </button>
+                  </div>
+                  <div class="lz-row">
+                    <span class="lz-rowlabel">Eigene Vorlieben, Entscheidungen und Regeln ohne Bestätigung nutzen</span>
+                    <button
+                      type="button"
+                      class="lz-switch"
+                      :class="{ 'is-on': settings.memory_use_user_statements }"
+                      @click="settings.memory_use_user_statements = !settings.memory_use_user_statements"
                     >
                       <span />
                     </button>

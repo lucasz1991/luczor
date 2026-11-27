@@ -221,6 +221,8 @@ export type RunAgentOptions = {
   /** Locally retrieved private material: taints only a selected local route, never a clean external packet. */
   localOnlyContextUsed?: boolean
   contextDataPolicy?: SharedDataPolicy
+  /** Receives every policy this run reaches, so a turn that fails or is stopped can settle on it. */
+  onDataPolicy?: (policy: SharedDataPolicy) => void
   routingSettings?: Partial<HybridRoutingSettings>
   /** Separately assembled provider-safe packet plus packet-bound approval. */
   externalPackage?: ExternalTurnPackage
@@ -907,6 +909,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       : 'syncable'
   )
   if (dataPolicy !== 'syncable') ephemeralDataUsed = true
+  opts.onDataPolicy?.(dataPolicy)
   const operationIds = new Map(opts.continuation?.operationIds ?? [])
   const successfulOperations = new Set(opts.continuation?.progressEvidence?.receipts ?? [])
   let progressEvidenceFingerprint = opts.continuation?.progressEvidence?.fingerprint
@@ -1371,6 +1374,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         if (outcomes.some(outcome => ['local', 'device'].includes(outcome.target))) {
           ephemeralDataUsed = true
           dataPolicy = 'ephemeral'
+          opts.onDataPolicy?.(dataPolicy)
         }
         messages.push({
           role: 'user',
@@ -1728,6 +1732,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
       if (outcomes.some(outcome => ['local', 'device'].includes(outcome.target))) {
         ephemeralDataUsed = true
         dataPolicy = 'ephemeral'
+        opts.onDataPolicy?.(dataPolicy)
       }
       messages.push({
         role: 'user',
@@ -2579,6 +2584,7 @@ async function runAgentWithResources(opts: RunAgentOptions, cleanup: Array<() =>
         ephemeralDataUsed = true
       }
       dataPolicy = strictestDataPolicy(dataPolicy, toolRetentionPolicy(tool, selectedTool === getTool(call.name)))
+      opts.onDataPolicy?.(dataPolicy)
       if (guardedConversationCreate && conversationCreateOperation) {
         deletePendingCreate(conversationCreateOperation.externalId, 'conversation')
         if (pendingConversationKeyToReplace && pendingConversationKeyToReplace !== guardedConversationCreate.key)

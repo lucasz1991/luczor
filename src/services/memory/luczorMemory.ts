@@ -12,7 +12,7 @@ import { trackMemoryUsage, type MemoryUsageOrigin } from './usage'
 import { recordMemoryLinks } from './modelActivity'
 import { getMemoryServerCapabilities } from './memoryServerCapabilities'
 import { safeDisjointMetadataMerge } from './metadataConflictMerge'
-import { canReuseMemory, type CaptureCoverage, type CaptureDescriptor } from './memoryPolicy'
+import { canReuseMemory, memoryReuse, type CaptureCoverage, type CaptureDescriptor } from './memoryPolicy'
 import {
   emptyMemorySyncState,
   memorySyncIdentityKey,
@@ -161,6 +161,11 @@ export type RecallQuery = {
   sessionId?: string
   userId?: string
   limit?: number
+  /**
+   * Device-local prompt context only: also return the user's own stated candidates. Never set
+   * for tool results, which a Claude-led run forwards to the provider.
+   */
+  includeUserStated?: boolean
 }
 
 export type SessionCandidateQuery = RecallQuery & {
@@ -501,6 +506,81 @@ function isProviderSafeMemoryRecord(record: MemoryRecord): boolean {
   )
 }
 
+/** Stamped on user excerpts captured from now on; older candidates never gain this reuse in bulk. */
+export const USER_STATED_REUSE_POLICY = 'user-stated-v1'
+const USER_STATED_KINDS: readonly string[] = ['preference', 'decision', 'rule']
+/**
+ * Explicit standing wording at capture time. The capture-time kind is only a keyword hint ("Bitte
+ * prüfe, warum der Build immer fehlschlägt" reads as a rule), so the wording must OPEN a clause:
+ * "Wie besprochen: ab sofort …" counts, "Ich weiß nicht, ob wir ab sofort …" does not. Without
+ * such wording a statement waits for the idle classifier or the user before it counts.
+ */
+const STATEMENT_OPENER =
+  /^(?:ab jetzt|ab sofort|von jetzt an|von nun an|künftig|zukünftig|in zukunft|ich bevorzuge|ich präferiere|(?:bitte )?merke? dir|bitte merken|from now on|going forward|i prefer|i['’]d prefer|i would prefer|we['’]ve decided|we decided|we have decided|remember (?:that|to))(?=$|[^\p{L}\p{N}_])/iu
+const STATEMENT_DECISION =
+  /^(?:ich|wir) (?:habe|haben)(?: uns| mich)? (.{0,80}?)(?:entschieden|beschlossen|festgelegt|geeinigt)(?=$|[^\p{L}\p{N}_])/iu
+const STATEMENT_PROJECT_RULE =
+  /(?:^|[^\p{L}\p{N}_])in diesem projekt (?:bitte )?(?:immer|nie|niemals|stets|grundsätzlich|ausschließlich)(?=$|[^\p{L}\p{N}_])/iu
+const STATEMENT_NEGATION = /(?:^|[^\p{L}\p{N}_])(?:nicht|nie|niemals|kein\p{L}*|not|never)(?=$|[^\p{L}\p{N}_])/iu
+const STATEMENT_INDIRECT = /(?:^|[^\p{L}\p{N}_])(?:ob|warum|wieso|weshalb|whether)(?=$|[^\p{L}\p{N}_])/iu
+/** Quoted text, questions without a question mark (W-word or inverted verb first). */
+const NOT_A_STATEMENT_CLAUSE =
+  /^(?:[>"'„“‚‘»«]|(?:wie|was|warum|wieso|weshalb|wann|wo|wer|welche[mnrs]?|ob|what|how|why|when|where|which|who|whether)(?=$|[^\p{L}\p{N}_])|(?:haben|hast|habt|hat|sollen|soll|sollten|können|kann|kannst|müssen|muss|ist|sind|gibt|werden|wird|have|has|had|did|do|does|should|shall|can|could|would|will|is|are) (?:wir|du|ihr|ich|es|man|we|you|i|it|they)(?=$|[^\p{L}\p{N}_]))/iu
+/** A request NOT to remember ("Merk dir das bitte nicht", "don't remember that"). */
+const NEGATED_MEMORY_REQUEST =
+  /(?:^|[^\p{L}\p{N}_])(?:(?:merke? dir|merken|remember)(?: (?:das|dies|es|that|this|it))?(?: (?:bitte|aber|lieber|besser|please))* (?:nicht|not)(?! to(?=$|[^\p{L}\p{N}_]))(?=$|[^\p{L}\p{N}_])|(?:nicht|don't|don’t|dont|do not|never) (?:merken|remember))/iu
+
+/** Whether the user's own text states a preference, decision or rule in explicit standing wording. */
+export function statesStandingRule(content: string): boolean {
+  const text = content.replace(/\s+/gu, ' ').trim()
+  if (!text || text.endsWith('?') || NEGATED_MEMORY_REQUEST.test(text)) return false
+  return text
+    .split(/[.;:!?,]/u)
+    .map(clause => clause.trim())
+    .some(clause => {
+      if (!clause || NOT_A_STATEMENT_CLAUSE.test(clause)) return false
+      if (STATEMENT_OPENER.test(clause)) return true
+      const decision = STATEMENT_DECISION.exec(clause)
+      if (decision) return !STATEMENT_NEGATION.test(decision[1] ?? '')
+      return STATEMENT_PROJECT_RULE.test(clause) && !STATEMENT_INDIRECT.test(clause)
+    })
+}
+
+/**
+ * A preference, decision or rule the user wrote in a project chat. Device-local recall may use it
+ * before review so it is remembered in the project's other chats. Nothing is changed on the record:
+ * it stays a private, unconfirmed candidate the user can still accept or dismiss, and provider-safe
+ * recall never sees candidates at all.
+ */
+export function isUserStatedMemory(record: MemoryRecord): boolean {
+  // Field checks first: recall evaluates this for every candidate of the project on each turn.
+  if (
+    record.status !== 'candidate' ||
+    record.provenance?.reuse_policy !== USER_STATED_REUSE_POLICY ||
+    record.provenance?.capture_policy !== 'chat-excerpts-v1' ||
+    record.source !== 'user' ||
+    record.writeIntent !== 'automatic' ||
+    record.sensitivity !== 'normal' ||
+    record.visibility !== 'private' ||
+    record.retention === 'session' ||
+    record.expiresAt ||
+    record.featureKey ||
+    record.serverId ||
+    record.serverVersionId ||
+    record.synced ||
+    record.content.trim().endsWith('?') ||
+    record.tags.some(tag => ['checkpoint', 'maintenance-derived', 'idle-optimization'].includes(tag)) ||
+    memoryReuse(record) !== 'project'
+  )
+    return false
+  const metadata = memoryMetadataOf(record)
+  if (metadata?.evidence.status !== 'user_stated' || metadata.kind === 'hypothesis') return false
+  const classified = metadata.classification.origin !== 'capture' && USER_STATED_KINDS.includes(metadata.kind)
+  return (
+    (classified || statesStandingRule(record.content)) && !containsSensitiveMemoryData(memoryRecordDlpPayload(record))
+  )
+}
+
 function isExplicitMemory(content: string): boolean {
   const normalized = normalizeForPolicy(content)
   const words = new Set(normalized.split(' '))
@@ -723,10 +803,12 @@ class OfflineMemoryStore {
         (state.maintenance && Object.hasOwn(state.maintenance, principalId)
           ? (Reflect.get(state.maintenance, principalId) as MaintenanceJournal)
           : undefined) ?? emptyMaintenanceJournal(),
+      // A record the commit would reject as sensitive is never planned: no model pass, no blocked job.
       records: state.records.filter(
         record =>
           record.principalId === principalId &&
-          (maintenanceEligible(record, Date.now(), true) || metadataMaintenanceEligible(record, Date.now()))
+          (maintenanceEligible(record, Date.now(), true) || metadataMaintenanceEligible(record, Date.now())) &&
+          !containsSensitiveMemoryData(memoryRecordDlpPayload(record))
       ),
     }
   }
@@ -893,14 +975,23 @@ class OfflineMemoryStore {
     )
   }
 
-  async recall(context: MemoryContext, query: string, limit: number, includePrivate = false): Promise<MemoryRecord[]> {
+  async recall(
+    context: MemoryContext,
+    query: string,
+    limit: number,
+    includePrivate = false,
+    /** Device-local recall only: the user's own stated candidates count before review. */
+    includeUserStated = false
+  ): Promise<MemoryRecord[]> {
     const state = await this.load()
     const now = Date.now()
     const terms = queryTerms(query)
     return state.records
       .filter(
         record =>
-          record.principalId === context.principalId && record.dataset === context.dataset && record.status === 'active'
+          record.principalId === context.principalId &&
+          record.dataset === context.dataset &&
+          (record.status === 'active' || (includePrivate && includeUserStated && isUserStatedMemory(record)))
       )
       .filter(
         record =>
@@ -2843,7 +2934,15 @@ export class LuczorMemoryService {
     const snapshot = await this.operationSnapshot()
     const context = this.context(query.scope ?? 'project', query, snapshot.principalId)
     const limit = Number.isFinite(query.limit) ? Math.max(1, Math.min(20, Math.floor(query.limit!))) : 6
-    const records = await this.offline.recall(context, query.query, limit, true)
+    // Over-fetch like shared recall: a repeated statement exists once per message and only the
+    // fusion below collapses equal text, so copies must not use up the requested slots.
+    const records = await this.offline.recall(
+      context,
+      query.query,
+      limit * 2,
+      true,
+      query.includeUserStated === true && (await memoryUseUserStatements())
+    )
     const current = await getVerifiedAccountSnapshot()
     if ((current?.principalId ?? 'device-local') !== snapshot.principalId) {
       markFailed()
@@ -3353,6 +3452,15 @@ export async function getMemoryPrefs(): Promise<{
   }
 }
 
+/** On unless switched off: device-local recall may use the user's own statements before review. */
+export async function memoryUseUserStatements(): Promise<boolean> {
+  try {
+    return (await (await Store.load(SETTINGS_FILE)).get<boolean>('memory_use_user_statements')) ?? true
+  } catch {
+    return true
+  }
+}
+
 export async function memoryUseServer(): Promise<boolean> {
   try {
     const store = await Store.load(SETTINGS_FILE)
@@ -3566,7 +3674,11 @@ function fuseMemories(local: MemoryRecord[], server: MemoryRecord[], query: stri
 function memoryRank(record: MemoryRecord, terms: string[]): number {
   const lexical = lexicalRecallScore(record, terms)
   const semantic = record.source === 'cognee_revalidated' ? (record.retrievalScore ?? 0.5) : 0
-  return Math.max(lexical, semantic) * 0.6 + record.importance * 0.2 + record.confidence * 0.2
+  // A candidate's importance is only score()'s length/keyword guess. It must neither let an older
+  // statement outrank its later correction nor an unreviewed statement outrank a reviewed memory,
+  // so it counts as zero: at equal relevance every reviewed record ranks first.
+  const importance = record.status === 'candidate' ? 0 : record.importance
+  return Math.max(lexical, semantic) * 0.6 + importance * 0.2 + record.confidence * 0.2
 }
 
 /** Interest only breaks an existing rank tie; it cannot outweigh relevance or importance. */
@@ -3576,6 +3688,10 @@ function compareRankedMemories(
 ): number {
   return (
     right.rank - left.rank ||
+    // Between two unreviewed statements the newer one wins (createdAt: annotation bumps updatedAt).
+    (left.record.status === 'candidate' && right.record.status === 'candidate'
+      ? right.record.createdAt - left.record.createdAt
+      : 0) ||
     (memoryMetadataOf(right.record)?.interest ?? 0) - (memoryMetadataOf(left.record)?.interest ?? 0) ||
     right.record.updatedAt - left.record.updatedAt
   )

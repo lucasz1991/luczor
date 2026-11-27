@@ -4,6 +4,7 @@ import { memoryRevision } from '@/services/memory/maintenance'
 import type { ProjectWorkspaceBinding } from '@/services/projectWorkspace'
 import type { Project } from '@/state/types'
 import { canAccessCloudProject } from '@/services/cloudProjectAccess'
+import { statedMemoryContent } from '@/services/memory/memoryPolicy'
 import {
   assemblePromptContext,
   type AssemblePromptContextOptions,
@@ -27,7 +28,8 @@ export type ProjectStartContextDependencies = {
 }
 
 const defaultDependencies: ProjectStartContextDependencies = {
-  recall: query => luczorMemory.recallLocal(query),
+  // Private records, including the user's own stated candidates, become local-only fragments.
+  recall: query => luczorMemory.recallLocal({ ...query, includeUserStated: true }),
 }
 
 function staleness(record: MemoryRecord): string {
@@ -38,20 +40,27 @@ function staleness(record: MemoryRecord): string {
 }
 
 function memoryFragment(record: MemoryRecord, index: number): PromptFragment {
+  // An unreviewed statement has no reviewed importance (only a length/keyword guess). Recall
+  // returns the newer of two statements first, and that order decides here: a later correction
+  // must not be placed after the longer rule it replaces.
+  const candidate = record.status === 'candidate'
+  // Below every reviewed record: a reviewed memory always ranks first.
+  const importance = candidate ? 0 : record.importance
+  const score = importance * 0.6 + record.confidence * 0.4
   return {
     id: `memory-${record.scope}-${record.id || index}`,
     source: 'memory',
     trust: 'untrusted_data',
     scope: record.scope === 'user' ? 'user' : 'project',
     egress: record.visibility === 'private' || record.scope === 'private' ? 'local_only' : 'allowed',
-    content: record.content,
-    priority: Math.round((record.importance * 0.6 + record.confidence * 0.4) * 100),
+    content: candidate ? statedMemoryContent(record) : record.content,
+    priority: Math.round(score * 100) - (candidate ? Math.min(index, 10) : 0),
     provenance: {
       recordId: record.id,
       revision: memoryRevision(record),
       type: record.type,
       staleness: staleness(record),
-      score: record.importance * 0.6 + record.confidence * 0.4,
+      score,
       source: record.source,
       confidence: record.confidence,
       writeIntent: record.writeIntent,

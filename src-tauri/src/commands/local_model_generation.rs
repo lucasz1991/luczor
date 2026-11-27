@@ -1,43 +1,38 @@
 //! Generation safeguards, shared by every desktop platform. Never interpret
 //! answer text as an executable tool call, or change a signed context allowance.
 use serde_json::{json, Value};
+use std::io::Read;
 
 pub(super) const REPETITION: &str = "Local generation interrupted after repeated output.";
 pub(super) const TOOL_CONTRACT: &str = "Local generation returned an invalid tool completion.";
 
-/// b10809's Qwen2.5 auto-parser can accept plain JSON as public content and
-/// wander before the first required XML tool marker. For the locally verified
-/// Qwen 3B and WhiteRabbitNeo 7B artifacts, start a REQUIRED call at the template's boundary. The
-/// runtime still produces/validates structured tool_calls; no reply is parsed
-/// or executed here. Auto/none, other artifacts and other runtimes stay intact.
-pub(super) fn apply_required_tool_prefix(
-    body: &mut Value,
-    artifact_hash: Option<&str>,
-    props: &Value,
-) {
-    if !matches!(
-        artifact_hash,
-        Some(
-            "d5c108dfbdac44c738e45a84d5624716cfb8522d1410f46a7108167ee4bd0cac"
-                | "b19da8c6aacffdedc7bcd6b7f7d7d4db900f7d5c49f5473de18bb58111b432e5"
-        )
-    ) || props["build_info"].as_str() != Some("b10809-5266f24da")
+/// b10809's chat parser accepts plain prose or JSON as public content and can
+/// wander before the first required XML tool marker. Measured on this runtime
+/// with long conversations, the stage 2 and 3 models answered every forced call
+/// with prose (up to the 4096-character guard or the output limit); started at
+/// the template's call boundary they produced a valid call every time. So every
+/// template with the ChatML `<tool_call>` format starts a REQUIRED call there.
+/// The runtime still produces/validates structured tool_calls; no reply is
+/// parsed or executed here. Auto/none, other templates and other runtimes stay
+/// intact. Returns whether the request was changed.
+pub(super) fn apply_required_tool_prefix(body: &mut Value, props: &Value) -> bool {
+    if props["build_info"].as_str() != Some("b10809-5266f24da")
         || body["tool_choice"].as_str() != Some("required")
-        || !body["tools"]
+        || body["tools"]
             .as_array()
-            .is_some_and(|tools| !tools.is_empty())
+            .is_none_or(|tools| tools.is_empty())
     {
-        return;
+        return false;
     }
     let template = props["chat_template"].as_str().unwrap_or_default();
     if !template.contains("<tool_call>")
         || !template.contains("</tool_call>")
         || !template.contains("<|im_start|>")
     {
-        return;
+        return false;
     }
     let Some(messages) = body["messages"].as_array_mut() else {
-        return;
+        return false;
     };
     if !messages
         .iter()
@@ -47,24 +42,230 @@ pub(super) fn apply_required_tool_prefix(
         .find(|m| m["role"].as_str() != Some("system"))
         .is_some_and(|m| matches!(m["role"].as_str(), Some("user" | "tool")))
     {
-        return;
+        return false;
     }
     messages.push(json!({"role":"assistant", "content":"<tool_call>\n"}));
     body["continue_final_message"] = json!(true);
     body["add_generation_prompt"] = json!(false);
     body["parallel_tool_calls"] = json!(false);
-    // The parser's parallel=false grammar still permits repetitions on this
-    // build. End at the first completed call; full JSON/name validation remains
-    // mandatory before dispatch. The marker is never shown in the chat.
-    body["stop"] = json!(["</tool_call>"]);
+    // JSON layout: the parser's parallel=false grammar still permits repetitions
+    // on this build, so end at the first completed call. A raw line feed cannot
+    // occur inside a JSON string, so "\n</tool_call>" only matches after the call
+    // object closed; the literal text inside an argument (a file that documents
+    // tool calls) stays intact. The XML `<function=…>` layout carries raw
+    // parameter values and is parsed only with its closing tags, so it gets no
+    // stop; the runtime ends that call itself. Full validation before dispatch
+    // remains mandatory. The marker is never shown in the chat.
+    if !template.contains("<function=") {
+        body["stop"] = json!(["\n</tool_call>"]);
+    }
+    true
+}
+
+/// ChatML turns plus the Qwen2.5 tool section (`<tool_call>` / `<tool_response>`).
+pub(super) const CHATML_TOOL_TEMPLATE: &str = include_str!("local_model_chatml_tools.jinja");
+/// Changes the prompt layout, so it is part of the slot-cache identity.
+pub(super) const CHATML_TOOL_TEMPLATE_ID: &str = "chatml-tools-v1";
+
+/// Some ChatML models (Dolphin 3.0) embed a template that renders only message
+/// text: tool definitions, calls and results never reach the model and b10809
+/// does not fill the gap, so no structured call can ever be produced. Such a
+/// model is started with the same ChatML turns plus the tool section above.
+/// Templates that already describe tools are never replaced.
+pub(super) fn needs_chatml_tool_template(embedded: &str) -> bool {
+    embedded.contains("<|im_start|>")
+        && embedded.contains("<|im_end|>")
+        && !embedded.contains("tools")
+        && !embedded.contains("tool_call")
+}
+
+/// Bounded read of `tokenizer.chat_template` from the verified GGUF header.
+/// Any unexpected structure returns None, which keeps the embedded template.
+pub(super) fn gguf_chat_template(reader: &mut impl Read) -> Option<String> {
+    const MAX_STRING: u64 = 1 << 20;
+    fn number<const N: usize>(r: &mut impl Read) -> Option<[u8; N]> {
+        let mut bytes = [0; N];
+        r.read_exact(&mut bytes).ok()?;
+        Some(bytes)
+    }
+    fn string(r: &mut impl Read) -> Option<String> {
+        let len = u64::from_le_bytes(number(r)?);
+        if len > MAX_STRING {
+            return None;
+        }
+        let mut value = vec![0; len as usize];
+        r.read_exact(&mut value).ok()?;
+        String::from_utf8(value).ok()
+    }
+    fn discard(r: &mut impl Read, len: u64) -> Option<()> {
+        (std::io::copy(&mut r.take(len), &mut std::io::sink()).ok()? == len).then_some(())
+    }
+    fn fixed(kind: u32) -> Option<u64> {
+        match kind {
+            0 | 1 | 7 => Some(1),
+            2 | 3 => Some(2),
+            4..=6 => Some(4),
+            10..=12 => Some(8),
+            _ => None,
+        }
+    }
+    fn skip(r: &mut impl Read, kind: u32, depth: u8) -> Option<()> {
+        if let Some(bytes) = fixed(kind) {
+            return discard(r, bytes);
+        }
+        match kind {
+            8 => {
+                let len = u64::from_le_bytes(number(r)?);
+                if len > MAX_STRING {
+                    return None;
+                }
+                discard(r, len)
+            }
+            9 if depth < 4 => {
+                let item = u32::from_le_bytes(number(r)?);
+                let count = u64::from_le_bytes(number(r)?);
+                if count > 4_000_000 {
+                    return None;
+                }
+                if let Some(bytes) = fixed(item) {
+                    return discard(r, bytes.checked_mul(count)?);
+                }
+                for _ in 0..count {
+                    skip(r, item, depth + 1)?;
+                }
+                Some(())
+            }
+            _ => None,
+        }
+    }
+    if number::<4>(reader)? != *b"GGUF" || !matches!(u32::from_le_bytes(number(reader)?), 2 | 3) {
+        return None;
+    }
+    let _tensors = u64::from_le_bytes(number(reader)?);
+    let count = u64::from_le_bytes(number(reader)?);
+    if count > 100_000 {
+        return None;
+    }
+    for _ in 0..count {
+        let key = string(reader)?;
+        let kind = u32::from_le_bytes(number(reader)?);
+        if key == "tokenizer.chat_template" && kind == 8 {
+            return string(reader);
+        }
+        skip(reader, kind, 0)?;
+    }
+    None
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::*;
+
+    fn gguf(entries: &[(&str, u32, Vec<u8>)]) -> Vec<u8> {
+        let mut bytes = b"GGUF".to_vec();
+        bytes.extend(3u32.to_le_bytes());
+        bytes.extend(0u64.to_le_bytes());
+        bytes.extend((entries.len() as u64).to_le_bytes());
+        for (key, kind, value) in entries {
+            bytes.extend((key.len() as u64).to_le_bytes());
+            bytes.extend(key.as_bytes());
+            bytes.extend(kind.to_le_bytes());
+            bytes.extend(value);
+        }
+        bytes
+    }
+    fn text(value: &str) -> Vec<u8> {
+        let mut bytes = (value.len() as u64).to_le_bytes().to_vec();
+        bytes.extend(value.as_bytes());
+        bytes
+    }
+    const DOLPHIN: &str = "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}";
+
+    #[test]
+    fn reads_the_template_after_string_and_numeric_arrays() {
+        let mut tokens = 8u32.to_le_bytes().to_vec(); // array item type: string
+        tokens.extend(3u64.to_le_bytes());
+        for token in ["a", "<|im_start|>", "b"] {
+            tokens.extend(text(token));
+        }
+        let mut types = 5u32.to_le_bytes().to_vec(); // array item type: i32
+        types.extend(3u64.to_le_bytes());
+        types.extend([0u8; 12]);
+        let bytes = gguf(&[
+            ("general.architecture", 8, text("llama")),
+            ("llama.context_length", 4, 131072u32.to_le_bytes().to_vec()),
+            ("tokenizer.ggml.tokens", 9, tokens),
+            ("tokenizer.ggml.token_type", 9, types),
+            ("tokenizer.chat_template", 8, text(DOLPHIN)),
+        ]);
+        assert_eq!(
+            gguf_chat_template(&mut bytes.as_slice()).as_deref(),
+            Some(DOLPHIN)
+        );
+    }
+
+    #[test]
+    fn malformed_or_missing_metadata_keeps_the_embedded_template() {
+        assert_eq!(gguf_chat_template(&mut b"GGML".as_slice()), None);
+        let bytes = gguf(&[("general.architecture", 8, text("llama"))]);
+        assert_eq!(gguf_chat_template(&mut bytes.as_slice()), None);
+        let truncated = gguf(&[("tokenizer.chat_template", 8, text(DOLPHIN))]);
+        assert_eq!(
+            gguf_chat_template(&mut &truncated[..truncated.len() - 4]),
+            None
+        );
+        let unknown_kind = gguf(&[
+            ("odd", 99, vec![]),
+            ("tokenizer.chat_template", 8, text(DOLPHIN)),
+        ]);
+        assert_eq!(gguf_chat_template(&mut unknown_kind.as_slice()), None);
+    }
+
+    /// Manual check against installed model files:
+    /// `LUCZOR_GGUF_TEMPLATE_PROBE="<needs override>.gguf;<keeps template>.gguf" cargo test -- --ignored`
+    #[test]
+    #[ignore]
+    fn probe_installed_model_templates() {
+        let probe = std::env::var("LUCZOR_GGUF_TEMPLATE_PROBE").expect("probe paths");
+        let paths: Vec<&str> = probe.split(';').collect();
+        let decision = |path: &str| {
+            let file = std::fs::File::open(path).expect("model file");
+            let template =
+                gguf_chat_template(&mut std::io::BufReader::new(file.take(64 * 1024 * 1024)))
+                    .expect("embedded template");
+            needs_chatml_tool_template(&template)
+        };
+        assert!(
+            decision(paths[0]),
+            "{} should get the tool template",
+            paths[0]
+        );
+        assert!(!decision(paths[1]), "{} should keep its template", paths[1]);
+    }
+
+    #[test]
+    fn only_chatml_templates_without_any_tool_support_are_replaced() {
+        assert!(needs_chatml_tool_template(DOLPHIN));
+        // Qwen-style templates already describe tools; Llama/Mistral layouts are not ChatML.
+        assert!(!needs_chatml_tool_template(
+            "{%- if tools %}<|im_start|>system <tool_call></tool_call><|im_end|>{%- endif %}"
+        ));
+        assert!(!needs_chatml_tool_template(
+            "<|start_header_id|>{{ message['role'] }}<|end_header_id|>"
+        ));
+        assert!(!needs_chatml_tool_template(""));
+        // The bundled replacement itself renders tools and is never replaced again.
+        assert!(!needs_chatml_tool_template(CHATML_TOOL_TEMPLATE));
+        assert!(
+            CHATML_TOOL_TEMPLATE.contains("<tool_call>")
+                && CHATML_TOOL_TEMPLATE.contains("<|im_start|>")
+        );
+    }
 }
 
 #[cfg(test)]
 mod prefix_tests {
     use super::*;
-    const HASH: &str = "d5c108dfbdac44c738e45a84d5624716cfb8522d1410f46a7108167ee4bd0cac";
-    const WHITE_RABBIT_HASH: &str =
-        "b19da8c6aacffdedc7bcd6b7f7d7d4db900f7d5c49f5473de18bb58111b432e5";
     fn props() -> Value {
         json!({"build_info":"b10809-5266f24da","chat_template":"<|im_start|> <tool_call> </tool_call>"})
     }
@@ -75,7 +276,7 @@ mod prefix_tests {
     fn prefix_is_scoped_idempotent_and_preserves_tools_arguments_and_limits() {
         let mut body = request();
         let original = body.clone();
-        apply_required_tool_prefix(&mut body, Some(HASH), &props());
+        assert!(apply_required_tool_prefix(&mut body, &props()));
         assert_eq!(
             body["messages"][2],
             json!({"role":"assistant","content":"<tool_call>\n"})
@@ -84,42 +285,62 @@ mod prefix_tests {
         assert_eq!(body["messages"][1], original["messages"][1]);
         assert_eq!(body["tools"], original["tools"]);
         assert_eq!(body["max_tokens"], original["max_tokens"]);
-        assert_eq!(body["stop"], json!(["</tool_call>"]));
+        // Only after the call object closed; an argument may contain "</tool_call>".
+        assert_eq!(body["stop"], json!(["\n</tool_call>"]));
         let first = body.clone();
-        apply_required_tool_prefix(&mut body, Some(HASH), &props());
+        assert!(!apply_required_tool_prefix(&mut body, &props()));
         assert_eq!(body, first);
     }
     #[test]
-    fn ordinary_answers_unknown_models_runtimes_and_templates_are_unchanged() {
+    fn every_chatml_tool_template_is_covered_including_thinking_and_replaced_templates() {
+        for template in [
+            // Qwen3 (stage 3, 5): JSON calls, tool section and thinking block.
+            "{%- if tools %}<|im_start|>system <tools></tools> <tool_call></tool_call>{%- endif %}<think></think>",
+            // The bundled ChatML tool template a stage 2 model is started with.
+            CHATML_TOOL_TEMPLATE,
+        ] {
+            let mut body = request();
+            let metadata = json!({"build_info":"b10809-5266f24da","chat_template":template});
+            assert!(apply_required_tool_prefix(&mut body, &metadata));
+            assert_eq!(body["messages"][2]["content"], "<tool_call>\n");
+            assert_eq!(body["stop"], json!(["\n</tool_call>"]));
+        }
+    }
+    #[test]
+    fn xml_function_layout_gets_the_prefix_without_a_stop() {
+        // Stage 4 (Qwen3.8 27B): raw parameter values, parsed only with the closing tags.
+        let mut body = request();
+        let metadata = json!({"build_info":"b10809-5266f24da","chat_template":"<|im_start|> <tool_call>\n<function=name>\n<parameter=a>\n</parameter>\n</function>\n</tool_call> <think></think>"});
+        assert!(apply_required_tool_prefix(&mut body, &metadata));
+        assert_eq!(body["messages"][2]["content"], "<tool_call>\n");
+        assert_eq!(body["parallel_tool_calls"], false);
+        assert!(body.get("stop").is_none());
+    }
+    #[test]
+    fn ordinary_answers_unknown_runtimes_and_templates_are_unchanged() {
         for choice in ["auto", "none"] {
             let mut body = request();
             body["tool_choice"] = json!(choice);
             let before = body.clone();
-            apply_required_tool_prefix(&mut body, Some(HASH), &props());
+            assert!(!apply_required_tool_prefix(&mut body, &props()));
             assert_eq!(body, before);
         }
-        for (hash, metadata) in [
-            (None, props()),
-            (Some("other-model"), props()),
-            (Some(HASH), Value::Null),
-            (
-                Some(HASH),
-                json!({"build_info":"future","chat_template":"<|im_start|> <tool_call> </tool_call>"}),
-            ),
-            (
-                Some(HASH),
-                json!({"build_info":"b10809-5266f24da","chat_template":"different"}),
-            ),
+        for metadata in [
+            Value::Null,
+            json!({"build_info":"future","chat_template":"<|im_start|> <tool_call> </tool_call>"}),
+            json!({"build_info":"b10809-5266f24da","chat_template":"different"}),
+            // Llama 3 / other layouts keep the runtime's own required handling.
+            json!({"build_info":"b10809-5266f24da","chat_template":"<|start_header_id|> <tool_call> </tool_call>"}),
         ] {
             let mut body = request();
             let before = body.clone();
-            apply_required_tool_prefix(&mut body, hash, &metadata);
+            assert!(!apply_required_tool_prefix(&mut body, &metadata));
             assert_eq!(body, before);
         }
         let mut body = request();
         body["tools"] = json!([]);
         let before = body.clone();
-        apply_required_tool_prefix(&mut body, Some(HASH), &props());
+        assert!(!apply_required_tool_prefix(&mut body, &props()));
         assert_eq!(body, before);
     }
 
@@ -133,19 +354,19 @@ mod prefix_tests {
                 json!({"role":"system","content":"Keep the existing permissions."}),
             ]);
             let original = body["messages"].as_array().unwrap().clone();
-            apply_required_tool_prefix(&mut body, Some(HASH), &props());
+            assert!(apply_required_tool_prefix(&mut body, &props()));
             let messages = body["messages"].as_array().unwrap();
             assert_eq!(&messages[..original.len()], original.as_slice());
             assert_eq!(messages.len(), original.len() + 1);
             assert_eq!(body["continue_final_message"], true);
             let once = body.clone();
-            apply_required_tool_prefix(&mut body, Some(HASH), &props());
+            assert!(!apply_required_tool_prefix(&mut body, &props()));
             assert_eq!(body, once);
         }
     }
 
     #[test]
-    fn verified_white_rabbit_uses_required_repair_but_does_not_force_optional_tools() {
+    fn required_repair_does_not_force_optional_tools() {
         for choice in ["required", "auto", "none"] {
             let mut body = request();
             body["tool_choice"] = json!(choice);
@@ -153,18 +374,20 @@ mod prefix_tests {
                 json!({"role":"system","content":"Repair format without repeating completed actions."}),
             );
             let before = body.clone();
-            apply_required_tool_prefix(&mut body, Some(WHITE_RABBIT_HASH), &props());
+            let changed = apply_required_tool_prefix(&mut body, &props());
             if choice != "required" {
+                assert!(!changed);
                 assert_eq!(body, before);
                 continue;
             }
+            assert!(changed);
             assert_eq!(body["messages"][3]["content"], "<tool_call>\n");
             assert_eq!(body["tools"], before["tools"]);
             assert_eq!(body["max_tokens"], before["max_tokens"]);
             assert_eq!(body["tool_choice"], "required");
-            assert_eq!(body["stop"], json!(["</tool_call>"]));
+            assert_eq!(body["stop"], json!(["\n</tool_call>"]));
             let once = body.clone();
-            apply_required_tool_prefix(&mut body, Some(WHITE_RABBIT_HASH), &props());
+            assert!(!apply_required_tool_prefix(&mut body, &props()));
             assert_eq!(body, once);
         }
     }
@@ -185,7 +408,7 @@ mod prefix_tests {
                 .unwrap()
                 .push(json!({"role":"system","content":"Correction instruction"}));
             let before = body.clone();
-            apply_required_tool_prefix(&mut body, Some(HASH), &props());
+            assert!(!apply_required_tool_prefix(&mut body, &props()));
             assert_eq!(body, before);
         }
     }

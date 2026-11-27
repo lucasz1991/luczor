@@ -1,6 +1,10 @@
 import type { ToolDef } from '@/services/tools/types'
 import type { WireMessage } from './types'
-import { isRuntimeStatusEcho, explicitlyQuotesRuntimeStatus } from './localResponseGuard'
+import {
+  isRuntimeStatusEcho,
+  explicitlyQuotesRuntimeStatus,
+  withoutRuntimeStatusParagraphs,
+} from './localResponseGuard'
 import { allowsTextToolExample, isTextToolOutput, holdProtocolPrefix } from './textToolGuard'
 import { searchToolCatalog, toolCategoryMap, type ToolDescriptor } from '@/services/tools/discovery'
 import { topToolUsage, type ToolUsage } from '@/services/tools/usage'
@@ -358,15 +362,19 @@ export function cleanLocalHistory(messages: WireMessage[]): WireMessage[] {
   const continuation =
     'Prüfe zuerst ausschließlich lesend den aktuellen Zustand des unterbrochenen Auftrags. Wiederhole keine Schreibaktionen. Berichte, was bereits nachweisbar erledigt ist und was noch fehlt.\n\nUrsprünglicher Auftrag:\n'
   return messages
-    .filter(message => {
+    .flatMap(message => {
       if (message.role === 'user') precedingUser = message.content
-      if (message.role !== 'assistant' || message.tool_calls?.length) return true
-      if (isRuntimeStatusEcho(message.content) && !explicitlyQuotesRuntimeStatus(precedingUser)) return false
-      return !(
-        holdProtocolPrefix(message.content) &&
-        isTextToolOutput(message.content) &&
-        !allowsTextToolExample(precedingUser)
-      )
+      if (message.role !== 'assistant' || message.tool_calls?.length) return [message]
+      // An interrupted answer keeps its partial text and visible progress for the next turn;
+      // only the application's own diagnostic is removed. Dropping the whole answer made the
+      // model start the same work again.
+      const content =
+        isRuntimeStatusEcho(message.content) && !explicitlyQuotesRuntimeStatus(precedingUser)
+          ? withoutRuntimeStatusParagraphs(message.content).trim()
+          : message.content
+      if (!content.trim()) return []
+      if (holdProtocolPrefix(content) && isTextToolOutput(content) && !allowsTextToolExample(precedingUser)) return []
+      return [content === message.content ? message : { ...message, content }]
     })
     .map(message => {
       if (message.role !== 'user' || !message.content.startsWith(continuation)) return message

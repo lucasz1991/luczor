@@ -129,6 +129,16 @@ impl Plan {
             explicit_answer_only: maximum.is_some_and(|tokens| tokens <= profile.answer),
         })
     }
+    /// A forced call that starts at the template's call boundary: the template closes any thinking
+    /// block before it, so the request neither asks for nor waits on a thinking phase. The output
+    /// ceiling stays, so a large call keeps the whole budget.
+    pub fn without_reasoning(&self) -> Self {
+        Self {
+            enabled: false,
+            live: false,
+            ..self.clone()
+        }
+    }
     fn answer(&self, output: u32) -> u32 {
         let full_profile = self
             .profile

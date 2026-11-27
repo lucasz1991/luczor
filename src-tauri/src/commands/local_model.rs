@@ -3710,12 +3710,25 @@ fn start_runtime_attempt(
         settings.state.applied_revision,
     )?;
     let port = reserve_loopback_port()?;
+    // A ChatML model whose embedded template cannot render tools starts with the bundled
+    // tool-capable ChatML template (see generation_safety). Only the verified, retained model
+    // file is read; any unreadable header keeps the embedded template.
+    let tool_template = artifacts
+        .model_guard
+        .try_clone()
+        .ok()
+        .and_then(|mut file| {
+            file.seek(SeekFrom::Start(0)).ok()?;
+            generation_safety::gguf_chat_template(&mut BufReader::new(file.take(64 * 1024 * 1024)))
+        })
+        .is_some_and(|embedded| generation_safety::needs_chatml_tool_template(&embedded));
     let slot_cache_namespace = sha256_bytes(
         serde_json::to_string(&json!({
             "schema": 2,
             "model": model.artifact.as_ref().map(|artifact| &artifact.sha256),
             "runtime": model.runtime.as_ref().map(|runtime| &runtime.sha256),
             "template": model.chat_template_hash,
+            "template_override": tool_template.then_some(generation_safety::CHATML_TOOL_TEMPLATE_ID),
             "context": context,
             "acceleration": plan.identity_arguments(),
             "resources": resource_plan.arguments(),
@@ -3734,6 +3747,18 @@ fn start_runtime_attempt(
     require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)?;
     cleanup_stale_runtime_keys_once(&key_dir)?;
     require_runtime_operation_checkpoint(operation_id, catalog_binding, cancel)?;
+    let tool_template_file = if tool_template {
+        // Constant, non-secret content: rewriting it on every start keeps it current.
+        let path = key_dir.join(format!(
+            "{}.jinja",
+            generation_safety::CHATML_TOOL_TEMPLATE_ID
+        ));
+        fs::write(&path, generation_safety::CHATML_TOOL_TEMPLATE)
+            .map_err(|_| "Local chat template could not be prepared.")?;
+        Some(path)
+    } else {
+        None
+    };
     let api_key_file = key_dir.join(format!("{}.key", Uuid::new_v4()));
     write_private_file(&api_key_file, api_key.as_bytes())?;
     // Only set up when the runtime binary advertises support: lets a scope's KV cache
@@ -3770,6 +3795,10 @@ fn start_runtime_attempt(
         "--ctx-size",
         &context.to_string(),
     ]);
+    if let Some(path) = &tool_template_file {
+        // Must follow --jinja: only then does the runtime accept a custom Jinja template.
+        command.args(["--chat-template-file", path.to_string_lossy().as_ref()]);
+    }
     if let Some(dir) = &slot_cache_dir {
         command.args(["--slot-save-path", dir.to_string_lossy().as_ref()]);
     }
@@ -4253,11 +4282,12 @@ fn stream_completion_with_diagnostics(
         &mut body,
         model.artifact.as_ref().map(|a| a.sha256.as_str()),
     );
-    generation_safety::apply_required_tool_prefix(
-        &mut body,
-        model.artifact.as_ref().map(|a| a.sha256.as_str()),
-        &props,
-    );
+    // A forced call now starts inside the call; the template closes any thinking block first.
+    let plan = if generation_safety::apply_required_tool_prefix(&mut body, &props) {
+        plan.without_reasoning()
+    } else {
+        plan
+    };
     let tokenizer_client = local_http_client(Duration::from_secs(15), Duration::from_secs(15))?;
     let started = Instant::now();
     let mut measured_input = 0;

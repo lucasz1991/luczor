@@ -14,6 +14,7 @@ import {
 import { getVerifiedAccountSnapshot, type VerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import { luczorMemory, type MemoryRecord } from '@/services/memory/luczorMemory'
 import { sessionCandidateFragments } from '@/services/memory/chatContext'
+import { statedMemoryContent } from '@/services/memory/memoryPolicy'
 import { preparedContextFragments } from '@/services/memory/preparedContext'
 import { memoryRevision } from '@/services/memory/maintenance'
 import type { MemoryUsageOrigin } from '@/services/memory/usage'
@@ -51,7 +52,14 @@ export type PromptContextDetails = {
   taskType: string
   repositoryApprovalRequired?: boolean
   repositoryDiagnostics?: RepositoryRetrievalDiagnostics
-  memoryDiagnostics?: { enabled: boolean; active: number; conversationExcerpts: number; contextual: boolean }
+  memoryDiagnostics?: {
+    enabled: boolean
+    active: number
+    /** The user's own unconfirmed preferences/decisions/rules recalled as memory. */
+    statements?: number
+    conversationExcerpts: number
+    contextual: boolean
+  }
 }
 
 function selectLocalMemories(
@@ -125,6 +133,8 @@ export async function buildLocalPromptContextDetails(
             query: memoryQuery,
             limit: memoryLimit,
             origin,
+            // These records become local-only fragments; the external packet never contains them.
+            includeUserStated: true,
           })
           .catch(() => []),
         luczorMemory
@@ -172,7 +182,18 @@ export async function buildLocalPromptContextDetails(
   )
     throw new Error('Konto während des lokalen Kontextabrufs geändert.')
   const memories = selectLocalMemories(groups, memoryLimit)
-  const recollections = options.conversationId ? sessionCandidateFragments(candidates, options.conversationId) : []
+  // A statement already recalled as memory is not repeated as an unconfirmed excerpt, also when
+  // the user repeated it in another message (a separate record with the same text).
+  const recalledText = (record: MemoryRecord) => record.content.trim().replace(/\s+/gu, ' ').toLocaleLowerCase()
+  const recalledIds = new Set(memories.map(record => record.id))
+  const recalledContents = new Set(memories.map(recalledText))
+  const recollections = options.conversationId
+    ? sessionCandidateFragments(
+        candidates.filter(record => !recalledIds.has(record.id) && !recalledContents.has(recalledText(record))),
+        options.conversationId
+      )
+    : []
+  const statements = memories.filter(record => record.status === 'candidate').length
   return {
     fragments: [
       ...prepared,
@@ -195,7 +216,7 @@ export async function buildLocalPromptContextDetails(
         scope: record.scope === 'user' ? ('user' as const) : ('project' as const),
         egress: 'local_only' as const,
         priority: 96,
-        content: record.content,
+        content: record.status === 'candidate' ? statedMemoryContent(record) : record.content,
         provenance: {
           recordId: record.id,
           revision: memoryRevision(record),
@@ -223,7 +244,8 @@ export async function buildLocalPromptContextDetails(
     repositoryDiagnostics: repository?.diagnostics,
     memoryDiagnostics: {
       enabled: includeMemory,
-      active: memories.length,
+      active: memories.length - statements,
+      ...(statements ? { statements } : {}),
       conversationExcerpts: recollections.length,
       contextual: memoryQuery !== query,
     },

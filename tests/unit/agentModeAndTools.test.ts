@@ -363,6 +363,27 @@ describe('agent mode and tool reliability', () => {
       expect(result.workingContext?.dataPolicy).toBe(target === 'local_llama_cpp' ? 'local_only' : 'syncable')
     }
   )
+  it('reports every reached data policy, so a turn that fails later can settle on it', async () => {
+    const reported: string[] = []
+    mocks.streamChatWithTools.mockRejectedValueOnce(new Error('transport lost'))
+    await expect(
+      runAgent({
+        projectId: 'project-2',
+        mode: 'observe',
+        toolAccess: 'none',
+        baseMessages: [{ role: 'user', content: 'Question' }],
+        contextDataPolicy: 'local_only',
+        onDataPolicy: policy => reported.push(policy),
+        inferenceGateway: {
+          id: 'fixture',
+          target: 'local_llama_cpp',
+          streamChatWithTools: mocks.streamChatWithTools,
+        },
+      })
+    ).rejects.toThrow('transport lost')
+    // Reported before the request, so the caller knows it even though no checkpoint was written.
+    expect(reported).toEqual(['local_only'])
+  })
   it('keeps exact context at side-effect checkpoints and on completed answers, bound to the conversation', async () => {
     const objective = 'Requirement\n'.repeat(1000) + 'Never modify protected.ts'
     const saved: import('@/services/agents/chatCheckpoint').AgentCheckpoint[] = []
@@ -2519,9 +2540,11 @@ describe('agent mode and tool reliability', () => {
     })
     expect(plain.interrupted).toBeUndefined()
     expect(plain.finalText).toBe('Offen ist noch die Prüfung.')
-    expect(
-      mocks.streamChatWithTools.mock.calls.map(call => (call[0] as InferenceRequest).toolChoice)
-    ).toEqual(['required', 'auto', 'none'])
+    expect(mocks.streamChatWithTools.mock.calls.map(call => (call[0] as InferenceRequest).toolChoice)).toEqual([
+      'required',
+      'auto',
+      'none',
+    ])
     expect(mocks.execute).not.toHaveBeenCalled()
 
     // Only a third invalid completion in the same round ends in the resumable checkpoint.

@@ -78,8 +78,12 @@ export function fragmentTitle(fragment: PromptFragment): string {
   }
   if (known[fragment.id]) return known[fragment.id]!
   if (fragment.id.startsWith('session-memory-candidate:')) return 'Unbestätigter Auszug dieses Chats'
-  if (fragment.id.startsWith('query-memory-')) return 'Passende aktive Erinnerung'
+  // Locally an automatic capture is always still a candidate: the user's own unconfirmed statement.
+  const unconfirmed = fragment.provenance?.writeIntent === 'automatic'
+  if (fragment.id.startsWith('query-memory-'))
+    return unconfirmed ? 'Eigene unbestätigte Vorgabe' : 'Passende aktive Erinnerung'
   if (fragment.id.startsWith('memory-')) {
+    if (unconfirmed) return 'Eigene unbestätigte Vorgabe'
     const type = fragment.provenance?.type
     return type ? `Erinnerung · ${type}` : 'Erinnerung'
   }

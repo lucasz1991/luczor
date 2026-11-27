@@ -78,6 +78,33 @@ describe('automatic conversational memory capture', () => {
     expect(records.every(record => record.writeIntent === 'automatic' && record.source === 'assistant')).toBe(true)
   })
 
+  it('does not turn assistant narration into memory, however long, but keeps its results and concrete values', () => {
+    const narration =
+      'Zuerst schaue ich mir die Struktur der Anwendung genauer an und überlege dann in Ruhe, welche Stelle ich mir als Nächstes ansehe.'
+    expect(narration.length).toBeGreaterThan(80)
+    const records = planAutomaticChatCapture(
+      capture(
+        [narration, 'Der Dienst lauscht jetzt auf Port 8443.', 'Die Ursache war ein fehlender Index.'].join('\n\n'),
+        'assistant'
+      )
+    )
+    expect(records.map(record => record.content).sort()).toEqual([
+      'Der Dienst lauscht jetzt auf Port 8443.',
+      'Die Ursache war ein fehlender Index.',
+    ])
+    // The same sentence from the user is their own statement and stays a candidate.
+    expect(planAutomaticChatCapture(capture(narration)).map(record => record.content)).toEqual([narration])
+  })
+
+  it('marks only the user’s own excerpts for reuse before review', () => {
+    const text = 'Ich bevorzuge Laravel für dieses Projekt.'
+    expect(planAutomaticChatCapture(capture(text))[0]?.provenance).toMatchObject({
+      capture_policy: 'chat-excerpts-v1',
+      reuse_policy: 'user-stated-v1',
+    })
+    expect(planAutomaticChatCapture(capture(text, 'assistant'))[0]?.provenance).not.toHaveProperty('reuse_policy')
+  })
+
   it('bounds facts atomically and keeps a concrete late decision ahead of low value introductory prose', () => {
     const input = capture(
       [

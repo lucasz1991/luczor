@@ -115,7 +115,13 @@ import { planContext, recordSubmittedContext } from '@/services/contextPlanner'
 import { runCoordinator } from '@/services/runs/runCoordinator'
 import { checkpointMessageRetention } from '@/services/runs/checkpointMessageRetention'
 import type { ArchivedRun, RunArchiveScope } from '@/services/runs/runArchive'
-import { canPersistData, strictestDataPolicy } from '@/services/runs/dataPolicy'
+import {
+  canPersistData,
+  inheritedMessageDataPolicy,
+  strictestDataPolicy,
+  unfinishedTurnDataPolicy,
+  type SharedDataPolicy,
+} from '@/services/runs/dataPolicy'
 import { getVerifiedAccountSnapshot } from '@/services/accountPrincipal'
 import ContextCards from './components/ai/ContextCards.vue'
 import RecommendationCard from './components/ai/RecommendationCard.vue'
@@ -2828,6 +2834,12 @@ async function executeChatTurn(
   let latestPublicCheckpoint = ''
   let latestPublicCheckpointSegment: string | undefined
   let archiveScope: RunArchiveScope | undefined
+  // The strictest policy this turn is known to have reached (context, every policy the run reports,
+  // archived checkpoints). The message starts as `ephemeral` only until the run ends; a failed or
+  // stopped turn settles on this value instead, never on anything weaker than the run reached.
+  let turnDataPolicy: SharedDataPolicy | undefined
+  // Set once the success path stored the run's own final classification; a later error keeps it.
+  let turnSettled = false
 
   const retainMemoryCheckpoint = (content: string, final = false, segmentId?: string) => {
     if (!checkpointMemoryPrincipal || !content.trim()) return
@@ -2868,10 +2880,21 @@ async function executeChatTurn(
       )
     }
     const conversationMessages = mutations.getConversationMessages(pid, conversationId)
-    const fullHistory = conversationMessages.slice(
-      0,
-      conversationMessages.findIndex(message => message.id === captured.userMessageId) + 1
-    )
+    const boundary = conversationMessages.findIndex(message => message.id === captured.userMessageId)
+    // An answer is stamped when its run starts, so the answer of a run that waited in the queue sorts
+    // after a request admitted meanwhile. Put each such answer back behind its own request; requests
+    // admitted later and this turn's own placeholder stay out.
+    const laterAnswers = conversationMessages
+      .slice(boundary + 1)
+      .filter(message => message.role === 'assistant' && message.id !== assistant.id)
+    const fullHistory = conversationMessages
+      .slice(0, boundary + 1)
+      .flatMap(message => [
+        message,
+        ...(message.role === 'user' && message.meta.runId
+          ? laterAnswers.filter(answer => answer.meta.runId === message.meta.runId)
+          : []),
+      ])
     // Device-local answers remain available to the next local request. External
     // requests get their own projection and never inherit that private history.
     const historyOptions = {
@@ -3060,6 +3083,21 @@ async function executeChatTurn(
       }
       return outcome.result
     }
+    // An earlier answer that stayed on this device keeps the next one local, not volatile.
+    const contextDataPolicy =
+      turnRouteMode === 'external'
+        ? 'syncable'
+        : strictestDataPolicy(
+            ...fullHistory
+              .filter(message => message.visibility === 'visible' && !message.meta.isLoading)
+              .map(message => inheritedMessageDataPolicy(message.meta)),
+            contextFragments.some(
+              fragment => fragment.egress !== 'allowed' && packages.local.selected.some(item => item.id === fragment.id)
+            )
+              ? 'local_only'
+              : 'syncable'
+          )
+    turnDataPolicy = contextDataPolicy
     const {
       finalText,
       requestId,
@@ -3083,24 +3121,10 @@ async function executeChatTurn(
     } = await runTurn({
       ...turnThinking,
       ephemeralContextUsed: turnRouteMode !== 'external' && localHistory.ephemeralDataUsed,
-      contextDataPolicy:
-        turnRouteMode === 'external'
-          ? 'syncable'
-          : strictestDataPolicy(
-              ...fullHistory
-                .filter(message => message.visibility === 'visible' && !message.meta.isLoading)
-                .map(
-                  message =>
-                    message.meta.retentionPolicy ??
-                    (message.meta.dataHandling === 'ephemeral' ? 'ephemeral' : 'syncable')
-                ),
-              contextFragments.some(
-                fragment =>
-                  fragment.egress !== 'allowed' && packages.local.selected.some(item => item.id === fragment.id)
-              )
-                ? 'local_only'
-                : 'syncable'
-            ),
+      contextDataPolicy,
+      onDataPolicy: policy => {
+        turnDataPolicy = strictestDataPolicy(turnDataPolicy ?? 'syncable', policy)
+      },
       localOnlyContextUsed: contextFragments.some(
         fragment =>
           fragment.egress === 'local_only' && packages.local.selected.some(selected => selected.id === fragment.id)
@@ -3210,7 +3234,9 @@ async function executeChatTurn(
         if (turnExecution.signal.aborted || checkpoint.principalScopeId !== principalScopeId) return
         const reference = await runCoordinator.capture({ ...archiveScope!, messageId: assistant.id, checkpoint })
         await assertArchiveAccess()
-        mutations.patchMessage(pid, assistant.id, { meta: checkpointMessageRetention(reference) })
+        const retention = checkpointMessageRetention(reference)
+        mutations.patchMessage(pid, assistant.id, { meta: retention })
+        turnDataPolicy = strictestDataPolicy(turnDataPolicy ?? 'syncable', retention.retentionPolicy ?? 'syncable')
         continuations.value = { ...continuations.value, [assistant.id]: reference }
         if (resume?.reference) await runCoordinator.setState(resume.reference.scope, 'completed')
         await replacePendingTaskCreates(
@@ -3336,10 +3362,12 @@ async function executeChatTurn(
           specialistOutcomes: ephemeralDataUsed ? undefined : specialistOutcomes,
           serverSpeechAllowed: !ephemeralDataUsed,
           dataHandling: ephemeralDataUsed ? 'ephemeral' : 'syncable',
+          // Without a run policy the flag only says "not for a provider": keep the answer on this device.
           retentionPolicy:
-            (continuation ?? workingContext)?.dataPolicy ?? (ephemeralDataUsed ? 'ephemeral' : 'syncable'),
+            (continuation ?? workingContext)?.dataPolicy ?? (ephemeralDataUsed ? 'local_only' : 'syncable'),
         },
       })
+      turnSettled = true
     }
     // A turn Claude declined, or a request repeated for the local specialist, never returns to a provider.
     const handoffMeta = turnHandoff
@@ -3404,7 +3432,7 @@ async function executeChatTurn(
         assistant.id,
         checkpointMemoryPrincipal,
         turnExecution,
-        canPersistData((continuation ?? workingContext)?.dataPolicy ?? (ephemeralDataUsed ? 'ephemeral' : 'syncable'))
+        canPersistData((continuation ?? workingContext)?.dataPolicy ?? (ephemeralDataUsed ? 'local_only' : 'syncable'))
       )
     if (goalInput) {
       if (interrupted)
@@ -3456,6 +3484,10 @@ async function executeChatTurn(
 
     const current = mutations.getProjectMessages(pid).find(m => m.id === assistant.id)
     const currentContent = safeTrim(current?.content)
+    // Settle the provisional classification: the visible text stays on this device and no longer
+    // turns every later answer of this chat into unsaved content.
+    const retentionPolicy =
+      (turnSettled ? current?.meta.retentionPolicy : undefined) ?? unfinishedTurnDataPolicy(turnDataPolicy)
 
     if (turnExecution.signal.aborted) {
       finishChatActivity(chatActivities.value[assistant.id]!, 'canceled')
@@ -3465,7 +3497,7 @@ async function executeChatTurn(
       })
       mutations.patchMessage(pid, assistant.id, {
         content: currentContent || interruptionMessage(turnExecution.signal),
-        meta: { ...(current?.meta ?? {}), isLoading: false } as any,
+        meta: { ...(current?.meta ?? {}), isLoading: false, retentionPolicy } as any,
       })
       throw turnExecution.signal.reason ?? new DOMException('Auftrag unterbrochen.', 'AbortError')
     }
@@ -3479,7 +3511,7 @@ async function executeChatTurn(
       content: [currentContent, `[Fehler] ${transportInterruption?.message ?? e?.message ?? String(e)}`]
         .filter(Boolean)
         .join('\n\n'),
-      meta: { ...(current?.meta ?? {}), isLoading: false } as any,
+      meta: { ...(current?.meta ?? {}), isLoading: false, retentionPolicy } as any,
     })
     throw e
   } finally {

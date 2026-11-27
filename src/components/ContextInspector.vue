@@ -135,7 +135,10 @@ const repositoryStatus = computed(() => {
         </p>
         <p v-if="snapshot.retrieval.memoryDiagnostics">
           <template v-if="snapshot.retrieval.memoryDiagnostics.enabled">
-            {{ snapshot.retrieval.memoryDiagnostics.active }} aktive Erinnerungen und
+            {{ snapshot.retrieval.memoryDiagnostics.active }} aktive Erinnerungen,
+            <template v-if="snapshot.retrieval.memoryDiagnostics.statements"
+              >{{ snapshot.retrieval.memoryDiagnostics.statements }} eigene unbestätigte Vorgaben aus dem Projekt und
+            </template>
             {{ snapshot.retrieval.memoryDiagnostics.conversationExcerpts }} unbestätigte Auszüge dieses Chats gefunden.
           </template>
           <template v-else>Automatischer Gedächtniskontext ist ausgeschaltet.</template>

@@ -61,6 +61,8 @@ export function createGoalReportTool(
     mutating: false,
     requiresApproval: false,
     dataHandling: 'ephemeral',
+    // Host-owned status receipt: stays on this device, but the answer it belongs to is kept.
+    retentionPolicy: 'local_only',
     scope: 'app',
     risk: 'low',
     effects: ['read'],
@@ -108,6 +110,7 @@ export function createGoalReadResultTool(tracking: GoalTracking): ToolDef | unde
     mutating: false,
     requiresApproval: false,
     dataHandling: 'ephemeral',
+    retentionPolicy: 'local_only',
     effects: ['read'],
     scope: 'app',
     risk: 'low',

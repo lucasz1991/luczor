@@ -35,6 +35,20 @@ export function canReuseMemory(
   )
 }
 
+/**
+ * Prompt content for the user's own statement that is still a candidate. Fragments reach the model
+ * without provenance, so the text itself says that it is unconfirmed and when it was stated: two
+ * statements can contradict each other, and only the date tells which one is newer.
+ */
+export function statedMemoryContent(record: Pick<MemoryRecord, 'content' | 'createdAt'>): string {
+  return JSON.stringify({
+    notice:
+      'Vom Nutzer selbst in einem Chat dieses Projekts formulierte Vorgabe, noch nicht ausdrücklich bestätigt. Bei Widerspruch gilt die neuere Vorgabe.',
+    statedAt: new Date(record.createdAt).toISOString().slice(0, 10),
+    content: record.content,
+  })
+}
+
 export function memoryCanPrepareProjectContext(record: MemoryRecord): boolean {
   return memoryReuse(record) !== 'conversation' && canReuseMemory(record, { allowProjectHints: true })
 }
